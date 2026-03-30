@@ -955,6 +955,28 @@ pub struct DiscordWebHookConfig {
     /// Optional display name.
     #[serde(rename = "User", default)]
     pub user: Option<String>,
+    /// Maximum number of retry attempts after the initial POST fails.
+    ///
+    /// Defaults to 3.  Set to 0 to disable retries entirely.  Each retry is
+    /// preceded by an exponential backoff delay: `RetryBaseDelaySecs * 4^n`
+    /// (n = 0 for the first retry).
+    #[serde(rename = "MaxRetries", default = "default_max_retries")]
+    pub max_retries: u32,
+    /// Base delay in seconds for the first retry.
+    ///
+    /// Each subsequent retry multiplies the previous delay by 4.
+    /// Defaults to 1 second (giving delays of 1 s, 4 s, 16 s with the
+    /// default `MaxRetries = 3`).
+    #[serde(rename = "RetryBaseDelaySecs", default = "default_retry_base_delay_secs")]
+    pub retry_base_delay_secs: u64,
+}
+
+fn default_max_retries() -> u32 {
+    3
+}
+
+fn default_retry_base_delay_secs() -> u64 {
+    1
 }
 
 fn deserialize_one_or_many<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
@@ -1173,6 +1195,81 @@ mod tests {
             Some("https://discord.com/api/webhooks/000000000000000000/test-token")
         );
         assert_eq!(webhook.as_ref().and_then(|discord| discord.user.as_deref()), Some("Havoc"));
+    }
+
+    #[test]
+    fn webhook_retry_defaults_when_omitted() {
+        let profile = Profile::parse(WEBHOOK_PROFILE).expect("profile should parse");
+        let discord =
+            profile.webhook.and_then(|w| w.discord).expect("discord config should be present");
+        assert_eq!(discord.max_retries, 3, "default MaxRetries should be 3");
+        assert_eq!(discord.retry_base_delay_secs, 1, "default RetryBaseDelaySecs should be 1");
+    }
+
+    #[test]
+    fn webhook_retry_parses_explicit_values() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "operator" {
+                Password = "password1234"
+              }
+            }
+
+            WebHook {
+              Discord {
+                Url = "https://discord.com/api/webhooks/123/token"
+                MaxRetries = 5
+                RetryBaseDelaySecs = 2
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile with explicit retry settings should parse");
+
+        let discord =
+            profile.webhook.and_then(|w| w.discord).expect("discord config should be present");
+        assert_eq!(discord.max_retries, 5);
+        assert_eq!(discord.retry_base_delay_secs, 2);
+    }
+
+    #[test]
+    fn webhook_retry_zero_disables_retries() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "operator" {
+                Password = "password1234"
+              }
+            }
+
+            WebHook {
+              Discord {
+                Url = "https://discord.com/api/webhooks/123/token"
+                MaxRetries = 0
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile with MaxRetries=0 should parse");
+
+        let discord =
+            profile.webhook.and_then(|w| w.discord).expect("discord config should be present");
+        assert_eq!(discord.max_retries, 0, "MaxRetries=0 should be preserved");
     }
 
     #[test]

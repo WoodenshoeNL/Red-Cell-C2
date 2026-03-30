@@ -27,9 +27,12 @@ const DISCORD_WEBHOOK_TIMEOUT: Duration = Duration::from_secs(5);
 /// than allowing unbounded task accumulation under a slow/unavailable endpoint.
 const MAX_CONCURRENT_DELIVERIES: usize = 256;
 
-/// Backoff delays for webhook retries: 1 s, 2 s, 4 s (up to 3 retries).
+/// Default per-attempt backoff delays when no profile override is set.
+///
+/// Pattern: `base * 4^n` with `base = 1 s`.  Gives 1 s → 4 s → 16 s for three
+/// retries (four total delivery attempts including the initial one).
 const RETRY_DELAYS: [Duration; 3] =
-    [Duration::from_secs(1), Duration::from_secs(2), Duration::from_secs(4)];
+    [Duration::from_secs(1), Duration::from_secs(4), Duration::from_secs(16)];
 
 /// Best-effort outbound webhook dispatcher for audit events.
 #[derive(Debug, Clone)]
@@ -84,11 +87,18 @@ impl AuditWebhookNotifier {
                 },
             );
 
+        let retry_delays = profile
+            .webhook
+            .as_ref()
+            .and_then(|w| w.discord.as_ref())
+            .map(|d| build_retry_delays(d.max_retries, d.retry_base_delay_secs))
+            .unwrap_or_else(|| Arc::from(RETRY_DELAYS.as_slice()));
+
         Self {
             discord,
             delivery_state: Arc::new(DeliveryState::default()),
             discord_failure_count: Arc::new(AtomicU64::new(0)),
-            retry_delays: Arc::from(RETRY_DELAYS.as_slice()),
+            retry_delays,
             delivery_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_DELIVERIES)),
         }
     }
@@ -191,8 +201,13 @@ impl AuditWebhookNotifier {
                     Err(e) => e,
                 };
 
-                // Retry with exponential backoff.
+                // Retry with exponential backoff — transient errors only.
+                // Non-transient errors (4xx client errors other than 429) are
+                // permanent config/auth failures; retrying them is pointless.
                 for &delay in retry_delays.iter() {
+                    if !is_transient_webhook_error(&last_err) {
+                        break;
+                    }
                     tokio::time::sleep(delay).await;
                     match discord.send(&record).await {
                         Ok(()) => {
@@ -310,6 +325,33 @@ impl DiscordWebhook {
             Ok(())
         } else {
             Err(WebhookError::UnexpectedStatus(response.status()))
+        }
+    }
+}
+
+/// Build an exponential backoff delay sequence for webhook retries.
+///
+/// Returns a slice of `max_retries` durations: `[base * 4^0, base * 4^1, …]`.
+/// When `max_retries` is 0 the returned slice is empty (retries disabled).
+/// Uses saturating arithmetic so large values do not overflow.
+fn build_retry_delays(max_retries: u32, base_secs: u64) -> Arc<[Duration]> {
+    let delays: Vec<Duration> = (0..max_retries)
+        .map(|i| Duration::from_secs(base_secs.saturating_mul(4u64.saturating_pow(i))))
+        .collect();
+    Arc::from(delays.as_slice())
+}
+
+/// Returns `true` when a webhook error is considered transient and worth retrying.
+///
+/// Network-level errors (connection refused, timeout) are always transient.
+/// HTTP 429 (rate-limited) and 5xx (server error) are transient.
+/// Other 4xx responses indicate a permanent configuration or auth failure and
+/// must not be retried.
+fn is_transient_webhook_error(err: &WebhookError) -> bool {
+    match err {
+        WebhookError::Request(_) => true,
+        WebhookError::UnexpectedStatus(status) => {
+            status.as_u16() == 429 || status.is_server_error()
         }
     }
 }
@@ -1748,5 +1790,254 @@ mod tests {
         .await
         .expect("shutdown should complete after all guards are dropped");
         assert!(drained, "shutdown must return true after all guards are dropped");
+    }
+
+    // ── build_retry_delays unit tests ─────────────────────────────────────────
+
+    #[test]
+    fn build_retry_delays_produces_exponential_sequence() {
+        let delays = super::build_retry_delays(3, 1);
+        assert_eq!(
+            delays.as_ref(),
+            &[Duration::from_secs(1), Duration::from_secs(4), Duration::from_secs(16)],
+            "base=1, retries=3 should yield 1s/4s/16s"
+        );
+    }
+
+    #[test]
+    fn build_retry_delays_zero_retries_is_empty() {
+        let delays = super::build_retry_delays(0, 1);
+        assert!(delays.is_empty(), "MaxRetries=0 must produce an empty delay slice");
+    }
+
+    #[test]
+    fn build_retry_delays_custom_base() {
+        let delays = super::build_retry_delays(3, 2);
+        assert_eq!(
+            delays.as_ref(),
+            &[Duration::from_secs(2), Duration::from_secs(8), Duration::from_secs(32)],
+            "base=2, retries=3 should yield 2s/8s/32s"
+        );
+    }
+
+    // ── is_transient_webhook_error unit tests ────────────────────────────────
+
+    /// Verify status-code transience classification.
+    ///
+    /// `reqwest::Error` (the `Request` variant) cannot be easily constructed in
+    /// unit tests without spawning an async runtime.  Transport-level transience
+    /// is covered by the async integration tests
+    /// (`detached_delivery_increments_failure_count_on_connection_refused` and
+    /// `detached_retries_exhaust_on_connection_refused_before_incrementing_failure`).
+    #[test]
+    fn transient_status_code_classification() {
+        use reqwest::StatusCode;
+
+        // Transient statuses — retries must fire.
+        assert!(super::is_transient_webhook_error(&WebhookError::UnexpectedStatus(
+            StatusCode::TOO_MANY_REQUESTS
+        )));
+        assert!(super::is_transient_webhook_error(&WebhookError::UnexpectedStatus(
+            StatusCode::INTERNAL_SERVER_ERROR
+        )));
+        assert!(super::is_transient_webhook_error(&WebhookError::UnexpectedStatus(
+            StatusCode::SERVICE_UNAVAILABLE
+        )));
+        assert!(super::is_transient_webhook_error(&WebhookError::UnexpectedStatus(
+            StatusCode::BAD_GATEWAY
+        )));
+
+        // Permanent statuses — retries must NOT fire.
+        assert!(
+            !super::is_transient_webhook_error(&WebhookError::UnexpectedStatus(
+                StatusCode::BAD_REQUEST
+            )),
+            "400 Bad Request is not transient"
+        );
+        assert!(
+            !super::is_transient_webhook_error(&WebhookError::UnexpectedStatus(
+                StatusCode::UNAUTHORIZED
+            )),
+            "401 Unauthorized is not transient"
+        );
+        assert!(
+            !super::is_transient_webhook_error(&WebhookError::UnexpectedStatus(
+                StatusCode::FORBIDDEN
+            )),
+            "403 Forbidden is not transient"
+        );
+        assert!(
+            !super::is_transient_webhook_error(&WebhookError::UnexpectedStatus(
+                StatusCode::NOT_FOUND
+            )),
+            "404 Not Found is not transient"
+        );
+    }
+
+    // ── configurable retry integration tests ─────────────────────────────────
+
+    /// Profile `MaxRetries = 2` must produce exactly 2 retry delays and therefore
+    /// a total of 3 delivery attempts (1 initial + 2 retries).
+    #[tokio::test]
+    async fn profile_max_retries_limits_attempts() {
+        use std::sync::atomic::AtomicUsize;
+
+        let (request_count, server_addr, server) = {
+            let count = Arc::new(AtomicUsize::new(0));
+            let count2 = count.clone();
+            let app = Router::new().route(
+                "/",
+                post(move |Json(_): Json<Value>| {
+                    let count = count2.clone();
+                    async move {
+                        count.fetch_add(1, Ordering::Relaxed);
+                        (HttpStatusCode::INTERNAL_SERVER_ERROR, Json(json!({"ok": false})))
+                    }
+                }),
+            );
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("should bind");
+            let addr = listener.local_addr().expect("should resolve");
+            let srv = tokio::spawn(async move {
+                axum::serve(listener, app).await.expect("server should not fail");
+            });
+            (count, addr, srv)
+        };
+
+        let profile = Profile::parse(&format!(
+            r#"
+            Teamserver {{
+              Host = "127.0.0.1"
+              Port = 40056
+            }}
+
+            Operators {{
+              user "operator" {{
+                Password = "password1234"
+              }}
+            }}
+
+            WebHook {{
+              Discord {{
+                Url = "http://{server_addr}/"
+                MaxRetries = 2
+                RetryBaseDelaySecs = 0
+              }}
+            }}
+
+            Demon {{}}
+            "#
+        ))
+        .expect("profile should parse");
+
+        // Override retry_delays so zero-delay entries come from build_retry_delays(2, 0)
+        // which gives [0s, 0s].  Use from_profile which already reads MaxRetries=2.
+        let notifier = AuditWebhookNotifier::from_profile(&profile);
+
+        notifier.notify_audit_record_detached(sample_record(200));
+        assert!(notifier.shutdown(Duration::from_secs(5)).await, "shutdown should drain");
+
+        // 1 initial + 2 retries = 3 total attempts.
+        assert_eq!(
+            request_count.load(Ordering::Relaxed),
+            3,
+            "MaxRetries=2 should produce 3 total attempts (1 initial + 2 retries)"
+        );
+        assert_eq!(notifier.discord_failure_count(), 1, "all attempts exhausted → 1 failure");
+
+        server.abort();
+    }
+
+    /// A permanent 4xx response (400 Bad Request) must not trigger retries —
+    /// only the initial attempt should reach the server.
+    #[tokio::test]
+    async fn non_transient_4xx_error_is_not_retried() {
+        use std::sync::atomic::AtomicUsize;
+
+        let (request_count, server_addr, server) = {
+            let count = Arc::new(AtomicUsize::new(0));
+            let count2 = count.clone();
+            let app = Router::new().route(
+                "/",
+                post(move |Json(_): Json<Value>| {
+                    let count = count2.clone();
+                    async move {
+                        count.fetch_add(1, Ordering::Relaxed);
+                        (HttpStatusCode::BAD_REQUEST, Json(json!({"ok": false})))
+                    }
+                }),
+            );
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("should bind");
+            let addr = listener.local_addr().expect("should resolve");
+            let srv = tokio::spawn(async move {
+                axum::serve(listener, app).await.expect("server should not fail");
+            });
+            (count, addr, srv)
+        };
+
+        // Three zero-delay retries configured — but 400 is non-transient, so none fire.
+        let notifier = AuditWebhookNotifier {
+            retry_delays: Arc::from([Duration::ZERO, Duration::ZERO, Duration::ZERO].as_slice()),
+            ..AuditWebhookNotifier::from_profile(&discord_profile(server_addr))
+        };
+
+        notifier.notify_audit_record_detached(sample_record(201));
+        assert!(notifier.shutdown(Duration::from_secs(5)).await, "shutdown should drain");
+
+        assert_eq!(
+            request_count.load(Ordering::Relaxed),
+            1,
+            "400 Bad Request must not be retried — only 1 request should reach the server"
+        );
+        assert_eq!(notifier.discord_failure_count(), 1, "permanent failure should be recorded");
+
+        server.abort();
+    }
+
+    /// 429 Too Many Requests is transient and must be retried.
+    #[tokio::test]
+    async fn rate_limit_429_is_retried() {
+        // Server fails the first request with 429, then succeeds.
+        let (request_count, server_addr, server) = {
+            use std::sync::atomic::AtomicUsize;
+            let count = Arc::new(AtomicUsize::new(0));
+            let count2 = count.clone();
+            let app = Router::new().route(
+                "/",
+                post(move |Json(_): Json<Value>| {
+                    let count = count2.clone();
+                    async move {
+                        let n = count.fetch_add(1, Ordering::Relaxed);
+                        if n == 0 {
+                            (HttpStatusCode::TOO_MANY_REQUESTS, Json(json!({"ok": false})))
+                        } else {
+                            (HttpStatusCode::OK, Json(json!({"ok": true})))
+                        }
+                    }
+                }),
+            );
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("should bind");
+            let addr = listener.local_addr().expect("should resolve");
+            let srv = tokio::spawn(async move {
+                axum::serve(listener, app).await.expect("server should not fail");
+            });
+            (count, addr, srv)
+        };
+
+        let notifier = AuditWebhookNotifier {
+            retry_delays: Arc::from([Duration::ZERO, Duration::ZERO, Duration::ZERO].as_slice()),
+            ..AuditWebhookNotifier::from_profile(&discord_profile(server_addr))
+        };
+
+        notifier.notify_audit_record_detached(sample_record(202));
+        assert!(notifier.shutdown(Duration::from_secs(5)).await, "shutdown should drain");
+
+        assert_eq!(
+            request_count.load(Ordering::Relaxed),
+            2,
+            "429 must be retried: 1 initial 429 + 1 successful retry = 2 requests"
+        );
+        assert_eq!(notifier.discord_failure_count(), 0, "retry succeeded so no permanent failure");
+
+        server.abort();
     }
 }

@@ -60,6 +60,16 @@ The original Havoc source lives at `./src/Havoc` and serves as the reference imp
 
 ## Getting Started
 
+## CI Policy
+
+This repository does not use GitHub Actions or any other hosted CI.
+Builds, tests, linting, and end-to-end validation must run on the VM where the
+repo is checked out.
+
+Use the local dev/QA/arch loops and the VM-hosted test harness for validation.
+If a GitHub Actions workflow or other external CI config is added, remove it
+instead of extending it.
+
 ### First time on a new machine
 
 ```bash

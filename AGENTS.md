@@ -24,6 +24,15 @@ compatibility is maintained.
 2. **Clone the repo** (or `git pull` if already cloned) — `br` auto-imports issues from `.beads/issues.jsonl` on first use.
 3. **Verify**: `br ready` should show available work.
 
+## CI Policy
+
+Do not use GitHub Actions for this repository.
+
+- Do not add or keep files under `.github/workflows/`.
+- Do not rely on any hosted CI system for builds, tests, linting, or reviews.
+- Run all validation on the VM where this repo is checked out.
+- Use the local agent loops and the VM-hosted automated/manual test flows instead.
+
 ## Architecture Decisions
 
 | Concern | Decision |

@@ -4280,3 +4280,13 @@ Build: skipped (no Rust source changes in range)
 | Cursor | 0 | 0 | No activity in range. |
 
 Build: skipped (no Rust source changes in range)
+
+### QA Review — 2026-03-30 — ecd93412..9c9d1df3
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | Only commit in range is arch-review scorecard/issues update (no dev work). |
+| Codex | 0 | 0 | No activity in range. |
+| Cursor | 0 | 0 | No activity in range. |
+
+Build: skipped (no Rust source changes in range)

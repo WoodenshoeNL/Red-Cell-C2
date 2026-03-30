@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 989 | 231 | 31 |
-| Bugs filed against | 124 | 36 | 9 |
+| Tasks closed | 994 | 231 | 31 |
+| Bugs filed against | 125 | 36 | 9 |
 | Bug rate (bugs/task) | 0.13 | 0.16 | 0.29 |
 | Quality score | 87% | 84% | 71% |
 
-*Bug rates: Claude 124/989=0.13, Codex 36/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 125/994=0.13, Codex 36/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -31,7 +31,7 @@ Each loop run updates the running totals and appends a review entry.
 | Test infrastructure / flakiness | 25 | 1 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
-| Correctness / pagination | 53 | 8 | 1 |
+| Correctness / pagination | 54 | 8 | 1 |
 | Workflow / close-hygiene | 22 | 0 | 0 |
 | Code reuse / duplication | 8 | 0 | 0 |
 
@@ -4452,3 +4452,13 @@ Security posture: strong — no new security vulnerabilities. Webhook hardening 
 | Cursor | 0 | 0 | No activity in range. |
 
 Build: cargo check passed; cargo clippy passed (0 warnings); cargo nextest/test — 2179+ tests, 0 failures
+
+### QA Review — 2026-03-30 19:25 — 7164bddb..71f6b8e7
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 5 | 1 | Closed: red-cell-c2-pjnbv, red-cell-c2-c4k98, red-cell-c2-oapq9, red-cell-c2-kdu1q, red-cell-c2-bfckz. Filed: red-cell-c2-dtwow (Archon scenario misparses documented extension config). |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: skipped (no Rust source changes in range; `python3 automatic-test/test.py --unit` passed)

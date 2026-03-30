@@ -315,6 +315,46 @@ impl AgentRegistry {
         Ok(())
     }
 
+    /// Update an existing agent's full metadata on re-registration (same `agent_id`, fresh
+    /// `DEMON_INIT` payload).  Resets the CTR block offset to 0 and persists all new runtime
+    /// fields to SQLite.  Preserves the original `first_call_in` and the operator `note`.
+    #[instrument(skip(self, agent, listener_name), fields(agent_id = format_args!("0x{:08X}", agent.agent_id), listener_name = %listener_name, legacy_ctr))]
+    pub async fn reregister_full(
+        &self,
+        mut agent: AgentRecord,
+        listener_name: &str,
+        legacy_ctr: bool,
+    ) -> Result<(), TeamserverError> {
+        let entry = self
+            .entry(agent.agent_id)
+            .await
+            .ok_or(TeamserverError::AgentNotFound { agent_id: agent.agent_id })?;
+
+        // Preserve the original first-seen timestamp and the operator's note.
+        {
+            let old = entry.info.read().await;
+            agent.first_call_in = old.first_call_in.clone();
+            agent.note = old.note.clone();
+        }
+
+        // Persist first so that a DB failure leaves in-memory state untouched.
+        self.repository.reregister_full(&agent, listener_name, legacy_ctr).await?;
+
+        let mut info = entry.info.write().await;
+        *info = agent;
+        drop(info);
+
+        let mut stored_listener_name = entry.listener_name.write().await;
+        *stored_listener_name = listener_name.to_owned();
+        drop(stored_listener_name);
+
+        // Reset CTR block offset to 0 — the re-registering agent starts a fresh session.
+        *entry.ctr_block_offset.lock().await = 0;
+        entry.legacy_ctr.store(legacy_ctr, Ordering::Relaxed);
+
+        Ok(())
+    }
+
     /// Fetch a cloned snapshot of an agent by identifier.
     #[instrument(skip(self), fields(agent_id = format_args!("0x{:08X}", agent_id)))]
     pub async fn get(&self, agent_id: u32) -> Option<AgentRecord> {
@@ -1465,6 +1505,91 @@ mod tests {
             duplicate,
             Err(TeamserverError::DuplicateAgent { agent_id: 0x1000_0002 })
         ));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reregister_full_updates_metadata_and_resets_ctr() -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let agent = sample_agent(0xBEEF_0001);
+
+        registry.insert_with_listener(agent.clone(), "http-primary").await?;
+        registry.set_ctr_offset(agent.agent_id, 42).await?;
+
+        let mut updated = sample_agent(0xBEEF_0001);
+        updated.external_ip = "203.0.113.99".to_owned();
+        updated.hostname = "new-wkstn".to_owned();
+        updated.active = true;
+        updated.reason = String::new();
+
+        registry.reregister_full(updated.clone(), "smb-pivot", false).await?;
+
+        let stored = registry.get(agent.agent_id).await.expect("agent should be present");
+        assert_eq!(stored.external_ip, "203.0.113.99");
+        assert_eq!(stored.hostname, "new-wkstn");
+        assert!(stored.active);
+        // CTR offset reset to 0.
+        assert_eq!(registry.ctr_offset(agent.agent_id).await?, 0);
+        // Listener updated.
+        assert_eq!(registry.listener_name(agent.agent_id).await.as_deref(), Some("smb-pivot"));
+
+        // DB also updated.
+        let persisted = database
+            .agents()
+            .get_persisted(agent.agent_id)
+            .await?
+            .expect("persisted record should exist");
+        assert_eq!(persisted.info.external_ip, "203.0.113.99");
+        assert_eq!(persisted.ctr_block_offset, 0);
+        assert_eq!(persisted.legacy_ctr, false);
+        assert_eq!(persisted.listener_name, "smb-pivot");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reregister_full_preserves_first_call_in_and_note() -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let agent = sample_agent(0xBEEF_0002);
+
+        registry.insert(agent.clone()).await?;
+        registry.set_note(agent.agent_id, "do not lose this target").await?;
+        let original_first_call_in =
+            registry.get(agent.agent_id).await.unwrap().first_call_in.clone();
+
+        let mut updated = sample_agent(0xBEEF_0002);
+        updated.first_call_in = "2099-01-01T00:00:00Z".to_owned(); // should be ignored
+        updated.note = String::new(); // should be ignored
+
+        registry.reregister_full(updated, "http-new", false).await?;
+
+        let stored = registry.get(agent.agent_id).await.expect("agent should be present");
+        assert_eq!(stored.first_call_in, original_first_call_in);
+        assert_eq!(stored.note, "do not lose this target");
+
+        // DB should also preserve these fields.
+        let persisted = database
+            .agents()
+            .get_persisted(agent.agent_id)
+            .await?
+            .expect("persisted record should exist");
+        assert_eq!(persisted.info.first_call_in, original_first_call_in);
+        assert_eq!(persisted.info.note, "do not lose this target");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reregister_full_returns_error_for_unknown_agent() -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let agent = sample_agent(0xBEEF_0099);
+
+        let result = registry.reregister_full(agent.clone(), "http-main", false).await;
+        assert!(matches!(result, Err(TeamserverError::AgentNotFound { agent_id: 0xBEEF_0099 })));
 
         Ok(())
     }

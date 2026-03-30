@@ -11,7 +11,7 @@ use red_cell_common::{AgentEncryptionInfo, AgentRecord};
 use thiserror::Error;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
-use tracing::warn;
+use tracing::{info, warn};
 use zeroize::Zeroizing;
 
 use crate::dispatch::util::{
@@ -64,6 +64,12 @@ pub struct ParsedDemonInit {
 pub enum ParsedDemonPacket {
     /// First-time registration with metadata and session key material.
     Init(Box<ParsedDemonInit>),
+    /// Re-registration from an already-known agent (same agent_id, fresh metadata).
+    ///
+    /// Occurs when a Demon agent restarts after a crash or kill-date reset and sends a
+    /// full `DEMON_INIT` with the same `agent_id`.  The existing DB record is updated
+    /// in-place rather than creating a duplicate row.
+    ReInit(Box<ParsedDemonInit>),
     /// Reconnect probe from an already-registered agent.
     Reconnect {
         /// Outer transport header.
@@ -228,14 +234,40 @@ impl DemonPacketParser {
             }
 
             if self.registry.get(envelope.header.agent_id).await.is_some() {
-                warn!(
+                // Agent already registered: parse the fresh metadata and update the
+                // existing record in-place instead of failing.  This handles the case
+                // where a Demon agent restarts after a crash or kill-date reset and
+                // sends a full DEMON_INIT with the same agent_id.
+                let (agent, legacy_ctr) = parse_init_agent(
+                    envelope.header.agent_id,
+                    remaining,
+                    &external_ip,
+                    now,
+                    self.init_secret.as_deref(),
+                )?;
+
+                if legacy_ctr && !self.allow_legacy_ctr {
+                    warn!(
+                        agent_id = format_args!("0x{:08X}", envelope.header.agent_id),
+                        listener_name,
+                        "rejecting DEMON_INIT re-registration: agent negotiated legacy CTR \
+                         mode and AllowLegacyCtr is not enabled"
+                    );
+                    return Err(DemonParserError::LegacyCtrNotAllowed);
+                }
+
+                info!(
                     agent_id = format_args!("0x{:08X}", envelope.header.agent_id),
                     listener_name,
-                    "rejecting duplicate full DEMON_INIT for an already-registered agent"
+                    "DEMON_INIT re-registration: updating existing agent record (CTR reset to 0)"
                 );
-                return Err(DemonParserError::InvalidInit(
-                    "agent is already registered; reconnect probe required",
-                ));
+                self.registry.reregister_full(agent.clone(), listener_name, legacy_ctr).await?;
+
+                return Ok(ParsedDemonPacket::ReInit(Box::new(ParsedDemonInit {
+                    header: envelope.header,
+                    request_id,
+                    agent,
+                })));
             }
 
             let (agent, legacy_ctr) = parse_init_agent(
@@ -1039,7 +1071,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn parse_rejects_duplicate_full_init_without_mutating_registered_agent() {
+    async fn parse_reinit_updates_existing_agent_and_returns_reinit_packet() {
         let registry = test_registry().await;
         let parser = legacy_parser(registry.clone());
         let agent_id = 0x1111_2222;
@@ -1051,30 +1083,99 @@ mod tests {
             .await
             .expect("initial init should succeed");
 
-        let stored_before = registry.get(agent_id).await.expect("agent should be registered");
-        let listener_before =
-            registry.listener_name(agent_id).await.expect("listener should exist");
-        let ctr_before = registry.ctr_offset(agent_id).await.expect("ctr offset should exist");
+        let first_call_in_before =
+            registry.get(agent_id).await.expect("agent should be registered").first_call_in;
 
-        let duplicate_packet = build_init_packet(agent_id, test_key(0x99), test_iv(0x55));
-        let error = parser
-            .parse_for_listener(&duplicate_packet, "198.51.100.99", "smb-secondary")
+        // Advance the stored CTR offset so we can verify it resets on re-init.
+        registry.set_ctr_offset(agent_id, 99).await.expect("set ctr offset should succeed");
+
+        // Agent restarts: sends a fresh DEMON_INIT with new keys from a new IP via a new listener.
+        let reinit_packet = build_init_packet(agent_id, test_key(0x99), test_iv(0x55));
+        let parsed = parser
+            .parse_for_listener(&reinit_packet, "198.51.100.99", "smb-secondary")
             .await
-            .expect_err("duplicate full init must be rejected");
+            .expect("re-registration must succeed");
 
-        assert!(matches!(
-            error,
-            DemonParserError::InvalidInit("agent is already registered; reconnect probe required")
-        ));
-        assert_eq!(registry.get(agent_id).await, Some(stored_before));
-        assert_eq!(
-            registry.listener_name(agent_id).await.as_deref(),
-            Some(listener_before.as_str())
+        let ParsedDemonPacket::ReInit(reinit) = parsed else {
+            panic!("expected ReInit packet, got {parsed:?}");
+        };
+
+        // Agent record reflects the fresh metadata from the second DEMON_INIT.
+        assert_eq!(reinit.agent.agent_id, agent_id);
+        assert_eq!(reinit.agent.external_ip, "198.51.100.99");
+
+        // Verify the registry is updated.
+        let stored = registry.get(agent_id).await.expect("agent should still be registered");
+        assert_eq!(stored.external_ip, "198.51.100.99");
+        assert!(stored.active, "re-registered agent must be active");
+
+        // first_call_in is preserved from the original registration.
+        assert_eq!(stored.first_call_in, first_call_in_before);
+
+        // CTR offset is reset to 0 for the fresh session.
+        assert_eq!(registry.ctr_offset(agent_id).await.expect("ctr offset"), 0);
+
+        // Listener is updated to the new one.
+        assert_eq!(registry.listener_name(agent_id).await.as_deref(), Some("smb-secondary"));
+    }
+
+    #[tokio::test]
+    async fn parse_reinit_preserves_operator_note() {
+        let registry = test_registry().await;
+        let parser = legacy_parser(registry.clone());
+        let agent_id = 0x3344_5566;
+        let init_packet = build_init_packet(agent_id, test_key(0x10), test_iv(0x20));
+        parser
+            .parse_for_listener(&init_packet, "10.0.0.1", "http-main")
+            .await
+            .expect("initial init should succeed");
+
+        registry
+            .set_note(agent_id, "important target — do not lose")
+            .await
+            .expect("set_note should succeed");
+
+        let reinit_packet = build_init_packet(agent_id, test_key(0x11), test_iv(0x21));
+        parser
+            .parse_for_listener(&reinit_packet, "10.0.0.2", "http-main")
+            .await
+            .expect("re-registration should succeed");
+
+        let stored = registry.get(agent_id).await.expect("agent should be registered");
+        assert_eq!(stored.note, "important target — do not lose");
+    }
+
+    #[tokio::test]
+    async fn parse_reinit_reactivates_dead_agent() {
+        let registry = test_registry().await;
+        let parser = legacy_parser(registry.clone());
+        let agent_id = 0xDEAD_0001;
+        let init_packet = build_init_packet(agent_id, test_key(0x30), test_iv(0x40));
+        parser
+            .parse_for_listener(&init_packet, "10.10.10.10", "http-main")
+            .await
+            .expect("initial init should succeed");
+
+        // Mark the agent dead (simulates a kill-date trigger or operator kill).
+        registry.mark_dead(agent_id, "kill-date expired").await.expect("mark_dead should succeed");
+        let stored = registry.get(agent_id).await.expect("agent should still be in registry");
+        assert!(!stored.active, "agent should be dead before re-registration");
+
+        // Agent restarts and sends a fresh DEMON_INIT.
+        let reinit_packet = build_init_packet(agent_id, test_key(0x31), test_iv(0x41));
+        let parsed = parser
+            .parse_for_listener(&reinit_packet, "10.10.10.11", "http-main")
+            .await
+            .expect("re-registration of dead agent should succeed");
+
+        assert!(
+            matches!(parsed, ParsedDemonPacket::ReInit(_)),
+            "expected ReInit packet, got {parsed:?}"
         );
-        assert_eq!(
-            registry.ctr_offset(agent_id).await.expect("ctr offset should exist"),
-            ctr_before
-        );
+
+        let stored = registry.get(agent_id).await.expect("agent should be in registry");
+        assert!(stored.active, "re-registered agent must be active again");
+        assert_eq!(stored.reason, "", "reason must be cleared on re-registration");
     }
 
     #[tokio::test]

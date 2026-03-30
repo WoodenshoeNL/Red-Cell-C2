@@ -342,6 +342,64 @@ impl AgentRepository {
         Ok(())
     }
 
+    /// Update an existing agent row on re-registration, resetting the CTR block offset
+    /// to 0 and refreshing all runtime metadata.  Preserves the original `first_call_in`
+    /// and the operator-authored `note`.
+    pub async fn reregister_full(
+        &self,
+        agent: &AgentRecord,
+        listener_name: &str,
+        legacy_ctr: bool,
+    ) -> Result<(), TeamserverError> {
+        let result = sqlx::query(
+            r#"
+            UPDATE ts_agents SET
+                active = 1, reason = '', ctr_block_offset = 0, legacy_ctr = ?,
+                aes_key = ?, aes_iv = ?, hostname = ?, username = ?, domain_name = ?,
+                external_ip = ?, internal_ip = ?, process_name = ?, process_path = ?,
+                base_address = ?, process_pid = ?, process_tid = ?, process_ppid = ?,
+                process_arch = ?, elevated = ?, os_version = ?, os_build = ?, os_arch = ?,
+                listener_name = ?, sleep_delay = ?, sleep_jitter = ?, kill_date = ?,
+                working_hours = ?, last_call_in = ?
+            WHERE agent_id = ?
+            "#,
+        )
+        .bind(bool_to_i64(legacy_ctr))
+        .bind(BASE64_STANDARD.encode(&*agent.encryption.aes_key))
+        .bind(BASE64_STANDARD.encode(&*agent.encryption.aes_iv))
+        .bind(&agent.hostname)
+        .bind(&agent.username)
+        .bind(&agent.domain_name)
+        .bind(&agent.external_ip)
+        .bind(&agent.internal_ip)
+        .bind(&agent.process_name)
+        .bind(&agent.process_path)
+        .bind(i64_from_u64("base_address", agent.base_address)?)
+        .bind(i64::from(agent.process_pid))
+        .bind(i64::from(agent.process_tid))
+        .bind(i64::from(agent.process_ppid))
+        .bind(&agent.process_arch)
+        .bind(bool_to_i64(agent.elevated))
+        .bind(&agent.os_version)
+        .bind(i64::from(agent.os_build))
+        .bind(&agent.os_arch)
+        .bind(listener_name)
+        .bind(i64::from(agent.sleep_delay))
+        .bind(i64::from(agent.sleep_jitter))
+        .bind(agent.kill_date)
+        .bind(agent.working_hours.map(i64::from))
+        .bind(&agent.last_call_in)
+        .bind(i64::from(agent.agent_id))
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(TeamserverError::AgentNotFound { agent_id: agent.agent_id });
+        }
+
+        Ok(())
+    }
+
     /// Fetch a single agent by identifier.
     pub async fn get(&self, agent_id: u32) -> Result<Option<AgentRecord>, TeamserverError> {
         let row = sqlx::query_as::<_, AgentRow>("SELECT * FROM ts_agents WHERE agent_id = ?")

@@ -1561,6 +1561,66 @@ async fn process_demon_transport(
                 http_disposition: DemonHttpDisposition::Ok,
             })
         }
+        Ok(ParsedDemonPacket::ReInit(init)) => {
+            let response =
+                build_init_ack(registry, init.agent.agent_id).await.map_err(|error| {
+                    ListenerManagerError::InvalidConfig {
+                        message: format!(
+                            "failed to build demon init ack for re-registration: {error}"
+                        ),
+                    }
+                })?;
+
+            let pivots = registry.pivots(init.agent.agent_id).await;
+            events.broadcast(agent_new_event(
+                listener_name,
+                init.header.magic,
+                &init.agent,
+                &pivots,
+            ));
+            let agent_id = init.agent.agent_id;
+            let external_ip_for_audit = external_ip.clone();
+            let listener_name_for_audit = listener_name.to_owned();
+            if let Err(error) = record_operator_action(
+                database,
+                "teamserver",
+                "agent.reregistered",
+                "agent",
+                Some(format!("{agent_id:08X}")),
+                audit_details(
+                    AuditResultStatus::Success,
+                    Some(agent_id),
+                    Some("reregistered"),
+                    Some(parameter_object([
+                        ("listener", serde_json::Value::String(listener_name_for_audit)),
+                        ("external_ip", serde_json::Value::String(external_ip_for_audit)),
+                    ])),
+                ),
+            )
+            .await
+            {
+                warn!(
+                    listener = listener_name,
+                    agent_id = format_args!("{agent_id:08X}"),
+                    %error,
+                    "failed to persist agent.reregistered audit entry"
+                );
+            }
+            if let Ok(Some(plugins)) = PluginRuntime::current() {
+                if let Err(error) = plugins.emit_agent_registered(agent_id).await {
+                    tracing::warn!(
+                        agent_id = format_args!("{agent_id:08X}"),
+                        %error,
+                        "failed to emit python agent_registered event for re-registration"
+                    );
+                }
+            }
+            Ok(ProcessedDemonResponse {
+                agent_id,
+                payload: response,
+                http_disposition: DemonHttpDisposition::Ok,
+            })
+        }
         Ok(ParsedDemonPacket::Reconnect { header, .. }) => {
             let (payload, http_disposition) = if registry.get(header.agent_id).await.is_some() {
                 build_reconnect_ack(registry, header.agent_id)

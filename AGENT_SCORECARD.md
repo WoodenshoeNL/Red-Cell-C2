@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 994 | 231 | 31 |
-| Bugs filed against | 126 | 36 | 9 |
+| Tasks closed | 995 | 231 | 31 |
+| Bugs filed against | 128 | 36 | 9 |
 | Bug rate (bugs/task) | 0.13 | 0.16 | 0.29 |
 | Quality score | 87% | 84% | 71% |
 
-*Bug rates: Claude 126/994=0.13, Codex 36/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 128/995=0.13, Codex 36/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -24,11 +24,11 @@ Each loop run updates the running totals and appends a review entry.
 | Missing tests / stale tests | 53 | 14 | 5 |
 | Clippy warnings | 7 | 0 | 1 |
 | Protocol errors | 19 | 27 | 3 |
-| Security issues | 49 | 39 | 0 |
+| Security issues | 50 | 39 | 0 |
 | Architecture drift | 19 | 23 | 0 |
 | Memory / resource leaks | 9 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 9 | 0 |
-| Test infrastructure / flakiness | 25 | 1 | 0 |
+| Test infrastructure / flakiness | 26 | 1 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
 | Correctness / pagination | 54 | 8 | 1 |
@@ -4472,6 +4472,16 @@ Build: skipped (no Rust source changes in range; `python3 automatic-test/test.py
 | Cursor | 0 | 0 | No activity in range. |
 
 Build: skipped (no committed Rust source changes in range)
+
+### QA Review — 2026-03-30 22:34 — d4719d6d..ab3af200
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 2 | Closed: red-cell-c2-drg5j. Filed: red-cell-c2-pofpz (shipped profiles still opt into insecure legacy CTR), red-cell-c2-7crlt (Phantom default nextest filesystem e2e failure). Existing open bug red-cell-c2-apkr0 still reproduces on pivot dispatch tests in the same range. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: failed — `cargo check --workspace` passed, `cargo clippy --workspace -- -D warnings` passed, and `cargo nextest run --workspace` failed in the clean review worktree (`phantom::e2e_integration::scenario_4_filesystem_dir_and_cat`; pivot dispatch failures from `red-cell-c2-apkr0` also reproduced on rerun)
 
 ### QA Review — 2026-03-30 21:36 — 9b82421c..d4719d6d
 

@@ -9,26 +9,26 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 998 | 231 | 31 |
-| Bugs filed against | 128 | 36 | 9 |
+| Tasks closed | 1003 | 231 | 31 |
+| Bugs filed against | 130 | 36 | 9 |
 | Bug rate (bugs/task) | 0.13 | 0.16 | 0.29 |
 | Quality score | 87% | 84% | 71% |
 
-*Bug rates: Claude 128/998=0.13, Codex 36/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 130/1003=0.13, Codex 36/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 8 | 0 | 0 |
-| Missing tests / stale tests | 53 | 14 | 5 |
+| Missing tests / stale tests | 54 | 14 | 5 |
 | Clippy warnings | 7 | 0 | 1 |
 | Protocol errors | 19 | 27 | 3 |
 | Security issues | 50 | 39 | 0 |
 | Architecture drift | 19 | 23 | 0 |
 | Memory / resource leaks | 9 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 9 | 0 |
-| Test infrastructure / flakiness | 26 | 1 | 0 |
+| Test infrastructure / flakiness | 27 | 1 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
 | Correctness / pagination | 54 | 8 | 1 |
@@ -4512,3 +4512,13 @@ Build: skipped (no committed Rust source changes in range)
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: failed — `cargo check --workspace` passed, `cargo clippy --workspace -- -D warnings` passed, and `cargo nextest run --workspace` still fails on the pre-existing pivot legacy-CTR regressions already tracked in `red-cell-c2-apkr0`
+
+### QA Review — 2026-03-31 00:15 — 1b78b0a6..8923da2d
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 5 | 2 | Closed: red-cell-c2-3jtyk, red-cell-c2-onjy9, red-cell-c2-l2anr, red-cell-c2-01bzb, red-cell-c2-0rw3l. Filed: red-cell-c2-taysc (smoke test now hard-requires mingw/nasm), red-cell-c2-3dgc7 (six payload_builder tests removed from default workspace coverage). |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: failed — `cargo check --workspace` passed, `cargo clippy --workspace -- -D warnings` passed, `python3 -m unittest discover -s automatic-test/tests` passed, and `cargo nextest run --workspace` failed only on the pre-existing pivot legacy-CTR regressions already tracked in `red-cell-c2-apkr0`

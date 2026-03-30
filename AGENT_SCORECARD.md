@@ -10,11 +10,11 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 967 | 231 | 31 |
-| Bugs filed against | 116 | 36 | 9 |
+| Bugs filed against | 119 | 36 | 9 |
 | Bug rate (bugs/task) | 0.12 | 0.16 | 0.29 |
 | Quality score | 88% | 84% | 71% |
 
-*Bug rates: Claude 116/967=0.12, Codex 36/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 119/967=0.12, Codex 36/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -23,15 +23,15 @@ Each loop run updates the running totals and appends a review entry.
 | unwrap / expect in production | 8 | 0 | 0 |
 | Missing tests / stale tests | 52 | 14 | 5 |
 | Clippy warnings | 7 | 0 | 1 |
-| Protocol errors | 17 | 27 | 3 |
+| Protocol errors | 18 | 27 | 3 |
 | Security issues | 49 | 39 | 0 |
 | Architecture drift | 19 | 23 | 0 |
 | Memory / resource leaks | 9 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 9 | 0 |
-| Test infrastructure / flakiness | 23 | 1 | 0 |
+| Test infrastructure / flakiness | 24 | 1 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
-| Correctness / pagination | 49 | 8 | 1 |
+| Correctness / pagination | 50 | 8 | 1 |
 | Workflow / close-hygiene | 22 | 0 | 0 |
 | Code reuse / duplication | 8 | 0 | 0 |
 
@@ -4384,3 +4384,17 @@ Build: cargo check passed (0 errors); no new Rust changes
 | Cursor | 0 | 0 | No activity in range. |
 
 Build: cargo check passed (3.72s); no new Rust changes
+
+### Arch Review — 2026-03-30 02:30
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 2 | correctness (1), test flakiness (1) | Kerberos callback typo "Rewnew time" at kerberos.rs:195 (filed red-cell-c2-opmwh, P4). Payload builder test from_profile_with_repo_root_resolves_toolchain_and_havoc_assets fails in full suite due to blocking subprocess spawns under concurrent load (filed red-cell-c2-3jtyk, P3). |
+| Codex | 1 | protocol errors (1) | Specter dispatch() catch-all arm returns DispatchResult::Ignore for unimplemented commands — operator tasks hang indefinitely with no feedback to operator (filed red-cell-c2-ybtir, P2). |
+| Cursor | 0 | — | No new issues found |
+
+Overall codebase health: on track
+Biggest blindspot: Specter silently drops all unimplemented operator commands (the `_` arm in dispatch.rs returns Ignore). Operator sends a task, sees no callback and no error — the job stays pending forever. Phantom handles this correctly with an error callback; Specter needs the same pattern.
+Build: cargo check passed; cargo clippy passed (0 warnings); cargo test --workspace ran 2179 tests, 1 intermittent failure (payload_builder full-suite race, consistent with oomd VM pressure)
+Issues filed: red-cell-c2-ybtir (Codex, protocol error P2, Specter silent ignore), red-cell-c2-opmwh (Claude, correctness P4, kerberos typo), red-cell-c2-3jtyk (Claude, test flakiness P3, payload_builder full-suite failure)
+Security posture: strong — no new security vulnerabilities. Webhook hardening (zvj3t) remains open P1. All crypto, auth, rate-limiting, and bounded-allocation patterns verified intact. Constant-time token lookup, Argon2id, Zeroizing on all key material confirmed.

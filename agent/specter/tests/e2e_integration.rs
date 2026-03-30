@@ -296,6 +296,21 @@ fn be_utf16(data: &[u8], offset: usize) -> (String, usize) {
     (String::from_utf16_lossy(&utf16), next)
 }
 
+fn le_u32(data: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes(data[offset..offset + 4].try_into().expect("le_u32"))
+}
+
+fn le_bytes(data: &[u8], offset: usize) -> (&[u8], usize) {
+    let len = le_u32(data, offset) as usize;
+    (&data[offset + 4..offset + 4 + len], offset + 4 + len)
+}
+
+fn le_utf16(data: &[u8], offset: usize) -> (String, usize) {
+    let (raw, next) = le_bytes(data, offset);
+    let utf16: Vec<u16> = raw.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    (String::from_utf16_lossy(&utf16), next)
+}
+
 // ---------------------------------------------------------------------------
 // Verify the init packet structure (standalone helper)
 // ---------------------------------------------------------------------------
@@ -656,22 +671,22 @@ async fn scenario_5_process_list_contains_own_pid() {
     assert_eq!(cb.command_id, u32::from(DemonCommand::CommandProcList));
     assert_eq!(cb.request_id, 300);
 
-    // Response payload: process_ui_flag(4) + repeated entries.
+    // Response payload (LE): process_ui_flag(4) + repeated entries.
     // Each entry: utf16le(name) + pid(4) + is_wow64(4) + ppid(4) +
     //             session_id(4) + num_threads(4) + utf16le(user).
-    let _process_ui = be_u32(&cb.payload, 0);
+    let _process_ui = le_u32(&cb.payload, 0);
     let our_pid = std::process::id();
     let mut offset = 4;
     let mut found_self = false;
 
     while offset < cb.payload.len() {
-        let (_name, next) = be_utf16(&cb.payload, offset);
-        let pid = be_u32(&cb.payload, next);
-        let _is_wow64 = be_u32(&cb.payload, next + 4);
-        let _ppid = be_u32(&cb.payload, next + 8);
-        let _session = be_u32(&cb.payload, next + 12);
-        let _threads = be_u32(&cb.payload, next + 16);
-        let (_user, after_user) = be_utf16(&cb.payload, next + 20);
+        let (_name, next) = le_utf16(&cb.payload, offset);
+        let pid = le_u32(&cb.payload, next);
+        let _is_wow64 = le_u32(&cb.payload, next + 4);
+        let _ppid = le_u32(&cb.payload, next + 8);
+        let _session = le_u32(&cb.payload, next + 12);
+        let _threads = le_u32(&cb.payload, next + 16);
+        let (_user, after_user) = le_utf16(&cb.payload, next + 20);
         offset = after_user;
 
         if pid == our_pid {
@@ -716,8 +731,8 @@ async fn scenario_6_process_grep_empty_needle_matches_own_pid() {
     assert_eq!(cb.command_id, u32::from(DemonCommand::CommandProc));
     assert_eq!(cb.request_id, 400);
 
-    // Payload: subcommand(4) + repeated [utf16(name) + pid(4) + ppid(4) + utf16(user) + arch(4)].
-    let subcmd = be_u32(&cb.payload, 0);
+    // Payload (LE): subcommand(4) + repeated [utf16(name) + pid(4) + ppid(4) + utf16(user) + arch(4)].
+    let subcmd = le_u32(&cb.payload, 0);
     assert_eq!(subcmd, u32::from(DemonProcessCommand::Grep));
 
     let our_pid = std::process::id();
@@ -725,11 +740,11 @@ async fn scenario_6_process_grep_empty_needle_matches_own_pid() {
     let mut found_self = false;
 
     while offset < cb.payload.len() {
-        let (_name, next) = be_utf16(&cb.payload, offset);
-        let pid = be_u32(&cb.payload, next);
-        let _ppid = be_u32(&cb.payload, next + 4);
-        let (_user, next2) = be_utf16(&cb.payload, next + 8);
-        let _arch = be_u32(&cb.payload, next2);
+        let (_name, next) = le_utf16(&cb.payload, offset);
+        let pid = le_u32(&cb.payload, next);
+        let _ppid = le_u32(&cb.payload, next + 4);
+        let (_user, next2) = le_utf16(&cb.payload, next + 8);
+        let _arch = le_u32(&cb.payload, next2);
         offset = next2 + 4;
 
         if pid == our_pid {

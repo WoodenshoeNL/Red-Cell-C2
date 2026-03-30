@@ -208,6 +208,14 @@ const IV_H: [u8; AGENT_IV_LENGTH] = [
     0x61, 0x72, 0x83, 0x94, 0xA5, 0xB6, 0xC7, 0xD8, 0xE9, 0xFA, 0x0B, 0x1C, 0x2D, 0x3E, 0x4F, 0x60,
 ];
 
+const KEY_I: [u8; AGENT_KEY_LENGTH] = [
+    0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7A, 0x7B, 0x7C, 0x7D, 0x7E, 0x7F,
+    0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8A, 0x8B, 0x8C, 0x8D, 0x8E, 0x8F,
+];
+const IV_I: [u8; AGENT_IV_LENGTH] = [
+    0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9A, 0x9B, 0x9C, 0x9D, 0x9E, 0x9F,
+];
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 /// A `CommandProcPpidSpoof` callback must broadcast an `AgentResponse` with
@@ -1054,5 +1062,81 @@ async fn proc_memory_callback_broadcasts_memory_rows() -> Result<(), Box<dyn std
 
     socket.close(None).await?;
     server.listeners.stop("proc-memory-test").await?;
+    Ok(())
+}
+
+/// Verify that the Specter-compatible LE payload format for `CommandProcList`
+/// is parsed correctly by the teamserver.
+///
+/// Specter (after the byte-order fix in red-cell-c2-w8bcm) encodes process
+/// callbacks in little-endian, matching the `CallbackParser` used here.
+/// This test encodes a payload the same way `handle_proc_list` now does and
+/// confirms the teamserver produces the correct `ProcessListRows` output.
+#[tokio::test]
+async fn specter_process_list_le_payload_parses_correctly() -> Result<(), Box<dyn std::error::Error>>
+{
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    common::login(&mut socket).await?;
+
+    server
+        .listeners
+        .create(common::http_listener_config("specter-proc-list-le-test", listener_port))
+        .await?;
+    drop(listener_guard);
+    server.listeners.start("specter-proc-list-le-test").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xCC01_000F_u32;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, KEY_I, IV_I).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)), "expected AgentNew");
+
+    // Build payload in the Specter LE format (matches what handle_proc_list emits after fix):
+    // from_pm=0, one entry: svchost.exe pid=4321 wow64=0 ppid=1 session=0 threads=5 user="NT AUTHORITY\\SYSTEM"
+    let payload =
+        process_list_payload(0, &[("svchost.exe", 4321, 0, 1, 0, 5, "NT AUTHORITY\\SYSTEM")]);
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            KEY_I,
+            IV_I,
+            ctr_offset,
+            u32::from(DemonCommand::CommandProcList),
+            0x0F,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse, got {event:?}");
+    };
+    assert_eq!(msg.info.demon_id, format!("{agent_id:08X}"));
+
+    let rows = msg
+        .info
+        .extra
+        .get("ProcessListRows")
+        .and_then(|v| v.as_array())
+        .expect("response must contain ProcessListRows");
+    assert_eq!(rows.len(), 1, "one process row expected");
+    assert_eq!(rows[0].get("Name").and_then(|v| v.as_str()), Some("svchost.exe"));
+    assert_eq!(
+        rows[0].get("PID").and_then(|v| v.as_u64()),
+        Some(4321),
+        "PID must not be byte-swapped"
+    );
+
+    socket.close(None).await?;
+    server.listeners.stop("specter-proc-list-le-test").await?;
     Ok(())
 }

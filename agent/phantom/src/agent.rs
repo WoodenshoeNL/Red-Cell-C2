@@ -69,6 +69,13 @@ impl PhantomAgent {
         self.agent_id
     }
 
+    /// Return the current shared monotonic CTR block offset.
+    #[must_use]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn ctr_offset(&self) -> u64 {
+        self.ctr_offset
+    }
+
     /// Collect Linux host metadata for `DEMON_INIT`.
     pub fn collect_metadata(&self) -> AgentMetadata {
         let (os_major, os_minor, os_build) = kernel_version();

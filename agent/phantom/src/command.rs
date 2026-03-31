@@ -296,6 +296,12 @@ impl PhantomState {
         self.kill_date = kill_date;
     }
 
+    /// Set or clear the dynamic working-hours bitmask.
+    #[cfg(test)]
+    pub(crate) fn set_working_hours(&mut self, working_hours: Option<i32>) {
+        self.working_hours = working_hours;
+    }
+
     /// Queue a `CommandKillDate` callback to notify the teamserver that
     /// the kill date has been reached.
     pub(crate) fn queue_kill_date_callback(&mut self) {
@@ -4772,7 +4778,7 @@ mod tests {
         assert_eq!(*request_id, 42);
         assert_eq!(*file_size, 14);
         assert!(!file_path.is_empty());
-        assert!(*file_id != 0 || *file_id == 0); // random, just ensure it exists
+        let _ = *file_id; // random value, just ensure the field exists
 
         assert_eq!(state.downloads.len(), 1);
         assert_eq!(state.downloads[0].total_size, 14);
@@ -5220,7 +5226,7 @@ mod tests {
         let payload = config_payload(154, &0_i64.to_le_bytes());
         let package = DemonPackage::new(DemonCommand::CommandConfig, 11, payload);
         let mut state = PhantomState::default();
-        state.kill_date = Some(1_700_000_000);
+        state.set_kill_date(Some(1_700_000_000));
 
         execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
 
@@ -5230,7 +5236,7 @@ mod tests {
     #[tokio::test]
     async fn config_working_hours_sets_state_and_echoes_back() {
         // Enable flag (bit 22) + start 09:00 (9<<17 | 0<<11) + end 17:00 (17<<6 | 0<<0)
-        let hours: i32 = (1 << 22) | (9 << 17) | (0 << 11) | (17 << 6) | 0;
+        let hours: i32 = (1 << 22) | (9 << 17) | (17 << 6);
         let payload = config_payload(155, &hours.to_le_bytes());
         let package = DemonPackage::new(DemonCommand::CommandConfig, 12, payload);
         let mut state = PhantomState::default();
@@ -5258,7 +5264,7 @@ mod tests {
         let payload = config_payload(155, &0_i32.to_le_bytes());
         let package = DemonPackage::new(DemonCommand::CommandConfig, 13, payload);
         let mut state = PhantomState::default();
-        state.working_hours = Some(12345);
+        state.set_working_hours(Some(12345));
 
         execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
 

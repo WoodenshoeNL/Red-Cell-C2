@@ -3778,7 +3778,6 @@ mod tests {
     use std::io;
     use std::net::TcpListener as StdTcpListener;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-    use std::sync::atomic::{AtomicU16, Ordering};
     use std::time::Duration;
     use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -6383,29 +6382,17 @@ mod tests {
     /// Return a port that is free on 127.0.0.1 and is unique across all concurrent callers
     /// within this test binary.
     ///
-    /// The old bind-to-0 / drop / return approach has a TOCTOU race: two parallel tests
-    /// can receive the same OS-assigned port before either has bound its listener, causing
-    /// intermittent "address already in use" failures.  We fix this by combining an
-    /// atomic counter (so every caller gets a *distinct* candidate) with a quick
-    /// bind-and-drop verification (so we skip ports already held by external processes).
+    /// Binds to port 0 so the OS kernel assigns an ephemeral port. This is safe
+    /// across nextest process boundaries because the kernel's ephemeral allocator
+    /// avoids handing out the same port to concurrent callers. The socket is
+    /// dropped after reading the assigned port — callers that start real
+    /// listeners should use [`create_and_start_http`] which retries on
+    /// `EADDRINUSE` to cover the brief TOCTOU window.
     fn available_port() -> Result<u16, Box<dyn std::error::Error>> {
-        // Start well below the typical ephemeral range (32768+) so we don't collide
-        // with OS-assigned ports from bind-to-0 calls elsewhere.
-        static NEXT_PORT: AtomicU16 = AtomicU16::new(19000);
-        loop {
-            let candidate = NEXT_PORT.fetch_add(1, Ordering::Relaxed);
-            if candidate < 1024 {
-                // Wrapped around the u16 space — should never happen in practice.
-                return Err("test port counter wrapped around u16::MAX".into());
-            }
-            // Verify the candidate is actually free; drop immediately.
-            // Because every concurrent caller gets a *different* candidate from the
-            // atomic counter, only external-process conflicts remain, which are rare.
-            if StdTcpListener::bind(format!("127.0.0.1:{candidate}")).is_ok() {
-                return Ok(candidate);
-            }
-            // Port was occupied by an external process — skip to the next candidate.
-        }
+        let listener = StdTcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
+        drop(listener);
+        Ok(port)
     }
 
     /// Create and start an HTTP listener, retrying with a fresh port when the

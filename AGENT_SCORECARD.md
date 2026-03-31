@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1022 | 231 | 31 |
-| Bugs filed against | 136 | 36 | 9 |
+| Tasks closed | 1025 | 231 | 31 |
+| Bugs filed against | 138 | 36 | 9 |
 | Bug rate (bugs/task) | 0.13 | 0.16 | 0.29 |
 | Quality score | 87% | 84% | 71% |
 
-*Bug rates: Claude 136/1022=0.13, Codex 36/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 138/1025=0.13, Codex 36/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -23,7 +23,7 @@ Each loop run updates the running totals and appends a review entry.
 | unwrap / expect in production | 9 | 0 | 0 |
 | Missing tests / stale tests | 55 | 14 | 5 |
 | Clippy warnings | 7 | 0 | 1 |
-| Protocol errors | 21 | 27 | 3 |
+| Protocol errors | 23 | 27 | 3 |
 | Security issues | 50 | 39 | 0 |
 | Architecture drift | 19 | 23 | 0 |
 | Memory / resource leaks | 10 | 11 | 1 |
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-31 11:56 — 458c4542..882116cb
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 3 | 2 | Closed: red-cell-c2-0r1dy, red-cell-c2-57b85, red-cell-c2-wgwdi. Filed: red-cell-c2-a1f8q (threaded BOF callbacks drop request IDs) and red-cell-c2-eia4n (job-died callbacks use wrong job semantics and request ID 0). |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: failed — `cargo check --workspace` passed, `cargo clippy --workspace -- -D warnings` passed, and `cargo nextest run --workspace` failed on `listeners::tests::http_listener_rate_limits_demon_init_per_source_ip` due to `127.0.0.1:19001` already in use; this remains covered by open issue `red-cell-c2-jmkgg`
 
 ### QA Review — 2026-03-31 10:38 — 1be119c6..297e90eb
 

@@ -5954,13 +5954,13 @@ mod tests {
         assert_eq!(ack_id, child_id, "ack agent_id must match the child");
         assert!(!ack_payload.is_empty(), "ack payload must not be empty");
 
-        // Re-registration must emit an AgentNew event.
+        // Re-registration must emit an AgentReregistered event.
         let reinit_event = tokio::time::timeout(Duration::from_millis(500), event_receiver.recv())
             .await
-            .expect("AgentNew must arrive within timeout");
+            .expect("AgentReregistered must arrive within timeout");
         assert!(
-            matches!(reinit_event, Some(OperatorMessage::AgentNew(_))),
-            "re-registration must broadcast AgentNew"
+            matches!(reinit_event, Some(OperatorMessage::AgentReregistered(_))),
+            "re-registration must broadcast AgentReregistered"
         );
 
         // The child's listener_name must now reflect the SMB listener.

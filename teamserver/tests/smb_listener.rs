@@ -437,11 +437,11 @@ async fn smb_listener_reinit_updates_key_material() -> Result<(), Box<dyn std::e
     let decrypted_reinit_ack = decrypt_agent_data(&key, &iv, &reinit_ack_payload)?;
     assert_eq!(decrypted_reinit_ack.as_slice(), &agent_id.to_le_bytes());
 
-    // Re-registration emits a second AgentNew event.
+    // Re-registration emits an AgentReregistered event (not AgentNew).
     let reinit_event = timeout(Duration::from_secs(5), event_receiver.recv()).await?;
     assert!(
-        matches!(reinit_event, Some(OperatorMessage::AgentNew(_))),
-        "re-registration must emit a second AgentNew event"
+        matches!(reinit_event, Some(OperatorMessage::AgentReregistered(_))),
+        "re-registration must emit an AgentReregistered event"
     );
 
     // Key material must remain unchanged.

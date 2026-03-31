@@ -1102,6 +1102,7 @@ async fn listener_with_past_kill_date_rejects_demon_init() -> Result<(), Box<dyn
 #[tokio::test]
 async fn listener_with_future_kill_date_accepts_demon_init()
 -> Result<(), Box<dyn std::error::Error>> {
+    use red_cell::demon::INIT_EXT_MONOTONIC_CTR;
     use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH};
 
     let manager = test_manager().await?;
@@ -1131,7 +1132,8 @@ async fn listener_with_future_kill_date_accepts_demon_init()
         0xB0, 0xC3, 0xD6, 0xE9, 0xFC, 0x0F, 0x22, 0x35, 0x48, 0x5B, 0x6E, 0x81, 0x94, 0xA7, 0xBA,
         0xCD,
     ];
-    let body = common::valid_demon_init_body(agent_id, key, iv);
+    let body =
+        common::valid_demon_init_body_with_ext_flags(agent_id, key, iv, INIT_EXT_MONOTONIC_CTR);
     let resp = client.post(format!("http://127.0.0.1:{port}/")).body(body).send().await?;
 
     assert_eq!(
@@ -1152,6 +1154,7 @@ async fn listener_with_future_kill_date_accepts_demon_init()
 #[tokio::test]
 async fn listener_working_hours_does_not_gate_server_side() -> Result<(), Box<dyn std::error::Error>>
 {
+    use red_cell::demon::INIT_EXT_MONOTONIC_CTR;
     use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH};
 
     let manager = test_manager().await?;
@@ -1185,7 +1188,8 @@ async fn listener_working_hours_does_not_gate_server_side() -> Result<(), Box<dy
         0xB0, 0xC3, 0xD6, 0xE9, 0xFC, 0x0F, 0x22, 0x35, 0x48, 0x5B, 0x6E, 0x81, 0x94, 0xA7, 0xBA,
         0xCD,
     ];
-    let body = common::valid_demon_init_body(agent_id, key, iv);
+    let body =
+        common::valid_demon_init_body_with_ext_flags(agent_id, key, iv, INIT_EXT_MONOTONIC_CTR);
     let resp = client.post(format!("http://127.0.0.1:{port}/")).body(body).send().await?;
 
     assert_eq!(

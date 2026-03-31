@@ -9,19 +9,19 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1030 | 231 | 31 |
-| Bugs filed against | 139 | 36 | 9 |
-| Bug rate (bugs/task) | 0.13 | 0.16 | 0.29 |
-| Quality score | 87% | 84% | 71% |
+| Tasks closed | 1035 | 231 | 31 |
+| Bugs filed against | 140 | 36 | 9 |
+| Bug rate (bugs/task) | 0.14 | 0.16 | 0.29 |
+| Quality score | 86% | 84% | 71% |
 
-*Bug rates: Claude 139/1030=0.13, Codex 36/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 140/1035=0.14, Codex 36/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 9 | 0 | 0 |
-| Missing tests / stale tests | 56 | 14 | 5 |
+| Missing tests / stale tests | 57 | 14 | 5 |
 | Clippy warnings | 7 | 0 | 1 |
 | Protocol errors | 23 | 27 | 3 |
 | Security issues | 50 | 39 | 0 |
@@ -4677,3 +4677,13 @@ Biggest blindspot: Specter agent lacks runtime configuration (CLI/env-var parsin
 Build: cargo check passed, cargo clippy passed (zero warnings), nextest failed on 1/2330 tests run (active_agent_survives_liveness_sweep_that_kills_stale_peer — 404 race, filed as red-cell-c2-6a1tb). The pre-existing smb_listener_reinit_updates_pivot_agent_registration failure (red-cell-c2-b7bhv) is addressed by the uncommitted dirty-tree fix.
 
 Security posture: strong. AES-256-CTR with per-agent monotonic CTR offsets, HKDF session key derivation, constant-time token/API-key comparisons, Argon2id password hashing with OWASP parameters, zeroize on drop for key material, rate limiting on DEMON_INIT and login attempts, RBAC enforcement on all API/WebSocket endpoints. No key material leaked to logs (custom Debug impls redact secrets). No unwrap/expect in production code.
+
+### QA Review — 2026-03-31 14:15 — b148507..eca419b
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 5 | 1 | Closed: red-cell-c2-031h0, red-cell-c2-d07ac, red-cell-c2-b7bhv, red-cell-c2-6a1tb, red-cell-c2-xqysi. Filed: red-cell-c2-r8x9g (pivot_dispatch tests still fail — inner init uses legacy CTR, incomplete fix from apkr0). |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: failed — `cargo check` passed, `cargo clippy -- -D warnings` passed, `cargo test --workspace` failed on 3 pivot_dispatch tests (pivot_connect_new_child_agent_registered_and_announced, pivot_disconnect_failure_broadcasts_error_without_modifying_registry, pivot_disconnect_removes_link_and_marks_child_dead). All other 4724+ tests passed. Root cause: pivot_connect_success_payload() still uses legacy init body without INIT_EXT_MONOTONIC_CTR flag for child agents. Filed as red-cell-c2-r8x9g.

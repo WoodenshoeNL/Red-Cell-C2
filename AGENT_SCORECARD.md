@@ -9,19 +9,19 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1028 | 231 | 31 |
-| Bugs filed against | 138 | 36 | 9 |
+| Tasks closed | 1030 | 231 | 31 |
+| Bugs filed against | 139 | 36 | 9 |
 | Bug rate (bugs/task) | 0.13 | 0.16 | 0.29 |
 | Quality score | 87% | 84% | 71% |
 
-*Bug rates: Claude 138/1028=0.13, Codex 36/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 139/1030=0.13, Codex 36/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 9 | 0 | 0 |
-| Missing tests / stale tests | 55 | 14 | 5 |
+| Missing tests / stale tests | 56 | 14 | 5 |
 | Clippy warnings | 7 | 0 | 1 |
 | Protocol errors | 23 | 27 | 3 |
 | Security issues | 50 | 39 | 0 |
@@ -4652,3 +4652,13 @@ Build: skipped (no committed Rust source changes in range)
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: failed — `cargo check --workspace` passed, `cargo clippy --workspace -- -D warnings` passed, and `cargo nextest run --workspace` failed on the pre-existing listener fixed-port collision class already tracked in `red-cell-c2-jmkgg`
+
+### QA Review — 2026-03-31 13:15 — 63d7670f..b1485072
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 1 | Closed: red-cell-c2-nh28n and red-cell-c2-jmkgg. Reviewed the listener test port-allocation fix in `teamserver/src/listeners.rs`; filed red-cell-c2-b7bhv because `smb_listener_reinit_updates_pivot_agent_registration` still expects `AgentNew` after the `AgentReregistered` protocol switch. The claim commit `b1485072` is mechanical only and remains in progress as `red-cell-c2-031h0`. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: failed — `cargo check --workspace` passed, `cargo clippy --workspace -- -D warnings` passed, and `cargo nextest run --workspace` failed on `listeners::tests::smb_listener_reinit_updates_pivot_agent_registration`; filed `red-cell-c2-b7bhv` for the stale `AgentNew` assertion in `teamserver/src/listeners.rs:5957-5963`

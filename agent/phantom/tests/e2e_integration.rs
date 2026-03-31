@@ -272,22 +272,22 @@ fn write_http_ok(stream: &mut std::net::TcpStream, body: &[u8]) {
 }
 
 // ---------------------------------------------------------------------------
-// Response payload decoder helpers (BE encoding used in callback payloads)
+// Response payload decoder helpers (LE encoding used in callback payloads)
 // ---------------------------------------------------------------------------
 
-/// Read a BE u32 at the given offset.
+/// Read a LE u32 at the given offset.
 fn be_u32(data: &[u8], offset: usize) -> u32 {
-    u32::from_be_bytes(data[offset..offset + 4].try_into().expect("be_u32"))
+    u32::from_le_bytes(data[offset..offset + 4].try_into().expect("le_u32"))
 }
 
-/// Read a BE-length-prefixed byte slice at the given offset, returning
+/// Read a LE-length-prefixed byte slice at the given offset, returning
 /// (bytes, next_offset).
 fn be_bytes(data: &[u8], offset: usize) -> (&[u8], usize) {
     let len = be_u32(data, offset) as usize;
     (&data[offset + 4..offset + 4 + len], offset + 4 + len)
 }
 
-/// Decode a BE-length-prefixed UTF-16LE string at the given offset.
+/// Decode a LE-length-prefixed UTF-16LE string at the given offset.
 fn be_utf16(data: &[u8], offset: usize) -> (String, usize) {
     let (raw, next) = be_bytes(data, offset);
     let utf16: Vec<u16> = raw.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
@@ -719,8 +719,8 @@ async fn scenario_7_exit_clean_shutdown() {
     let (cmd_id, req_id, payload) = &callbacks[0];
     assert_eq!(*cmd_id, u32::from(DemonCommand::CommandExit));
     assert_eq!(*req_id, 500);
-    // Exit payload is the exit method (BE u32).
-    let exit_method = u32::from_be_bytes(payload[0..4].try_into().expect("exit method"));
+    // Exit payload is the exit method (LE u32).
+    let exit_method = u32::from_le_bytes(payload[0..4].try_into().expect("exit method"));
     assert_eq!(exit_method, 1);
 
     server.join().expect("server thread");

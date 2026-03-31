@@ -76,6 +76,13 @@ impl PhantomAgent {
         self.ctr_offset
     }
 
+    /// Return the current configured sleep delay in milliseconds.
+    #[must_use]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn sleep_delay_ms(&self) -> u32 {
+        self.config.sleep_delay_ms
+    }
+
     /// Collect Linux host metadata for `DEMON_INIT`.
     pub fn collect_metadata(&self) -> AgentMetadata {
         let (os_major, os_minor, os_build) = kernel_version();

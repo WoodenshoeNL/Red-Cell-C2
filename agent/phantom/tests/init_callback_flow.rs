@@ -160,6 +160,18 @@ async fn phantom_agent_init_and_checkin_stay_ctr_synchronised()
     // CTR must advance further after processing the tasking.
     assert!(agent.ctr_offset() > ctr_before_task, "CTR must advance after checkin with task");
 
+    // The server-side job queue must be empty: the task was actually fetched and consumed.
+    let remaining = harness.server.agent_registry.queued_jobs(agent.agent_id()).await?;
+    assert!(remaining.is_empty(), "job queue must be empty after checkin processed the task");
+
+    // The CommandSleep payload (0x0A 0x00 0x00 0x00 = 10 ms LE i32) must have been executed
+    // — i.e. config.sleep_delay_ms updated — which confirms execute() was actually called.
+    assert_eq!(
+        agent.sleep_delay_ms(),
+        10,
+        "sleep_delay_ms must be updated to 10 after executing the CommandSleep task"
+    );
+
     harness.shutdown().await?;
     Ok(())
 }

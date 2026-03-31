@@ -2024,12 +2024,12 @@ fn pivot_write_raw(stream: &mut UnixStream, data: &[u8]) -> Result<(), std::io::
     result
 }
 
-/// Encode bytes into the big-endian length-prefixed format (like `encode_bytes`
+/// Encode bytes into the little-endian length-prefixed format (like `encode_bytes`
 /// but infallible for pivot use where the caller already holds valid data).
 fn encode_bytes_result(value: &[u8]) -> Vec<u8> {
     let len = value.len() as u32;
     let mut out = Vec::with_capacity(4 + value.len());
-    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(&len.to_le_bytes());
     out.extend_from_slice(value);
     out
 }
@@ -3697,11 +3697,11 @@ fn encode_fs_copy_move(
 }
 
 fn encode_u32(value: u32) -> Vec<u8> {
-    value.to_be_bytes().to_vec()
+    value.to_le_bytes().to_vec()
 }
 
 fn encode_u64(value: u64) -> Vec<u8> {
-    value.to_be_bytes().to_vec()
+    value.to_le_bytes().to_vec()
 }
 
 fn encode_bool(value: bool) -> Vec<u8> {
@@ -3712,7 +3712,7 @@ fn encode_bytes(value: &[u8]) -> Result<Vec<u8>, PhantomError> {
     let len = u32::try_from(value.len())
         .map_err(|_| PhantomError::InvalidResponse("socket payload too large"))?;
     let mut out = Vec::with_capacity(4 + value.len());
-    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(&len.to_le_bytes());
     out.extend_from_slice(value);
     Ok(out)
 }
@@ -4039,14 +4039,14 @@ mod tests {
 
     fn read_u32(payload: &[u8], offset: &mut usize) -> u32 {
         let end = *offset + 4;
-        let value = u32::from_be_bytes(payload[*offset..end].try_into().expect("u32"));
+        let value = u32::from_le_bytes(payload[*offset..end].try_into().expect("u32"));
         *offset = end;
         value
     }
 
     fn read_u64(payload: &[u8], offset: &mut usize) -> u64 {
         let end = *offset + 8;
-        let value = u64::from_be_bytes(payload[*offset..end].try_into().expect("u64"));
+        let value = u64::from_le_bytes(payload[*offset..end].try_into().expect("u64"));
         *offset = end;
         value
     }

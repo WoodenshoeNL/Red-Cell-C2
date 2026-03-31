@@ -71,21 +71,12 @@ impl MockCrypto {
         (envelope.to_bytes(), blocks)
     }
 
-    /// Decrypt and advance CTR, returning raw plaintext from the envelope.
-    fn decrypt_envelope(&mut self, body: &[u8]) -> Vec<u8> {
-        let envelope = DemonEnvelope::from_bytes(body).expect("parse envelope");
-        assert_eq!(envelope.header.agent_id, self.agent_id);
-        let plaintext =
-            decrypt_agent_data_at_offset(&self.key, &self.iv, self.ctr_offset, &envelope.payload)
-                .expect("decrypt envelope");
-        self.ctr_offset += ctr_blocks_for_len(envelope.payload.len());
-        plaintext
-    }
-
-    /// Decrypt a COMMAND_CHECKIN packet (DemonMessage, LE encoding).
-    fn decrypt_checkin(&mut self, body: &[u8]) -> DemonMessage {
-        let plaintext = self.decrypt_envelope(body);
-        DemonMessage::from_bytes(&plaintext).expect("parse checkin DemonMessage")
+    /// Decrypt a COMMAND_CHECKIN packet (callback format: clear command_id +
+    /// request_id, encrypted payload).
+    fn decrypt_checkin(&mut self, body: &[u8]) -> (u32, u32, Vec<u8>) {
+        let (cmd, req, payload) = self.decrypt_callback(body);
+        assert_eq!(cmd, u32::from(DemonCommand::CommandCheckin), "expected CommandCheckin");
+        (cmd, req, payload)
     }
 
     /// Decrypt a callback packet.
@@ -375,11 +366,9 @@ impl TestHarness {
         let exit = self.agent.checkin().await.expect("checkin");
         assert!(!exit, "unexpected exit during empty checkin");
 
-        // Read and verify the checkin packet (DemonMessage, LE).
+        // Read and verify the checkin packet (callback format).
         let checkin_body = self.request_rx.recv().expect("recv checkin body");
-        let message = self.crypto.decrypt_checkin(&checkin_body);
-        assert_eq!(message.packages.len(), 1);
-        assert_eq!(message.packages[0].command().expect("command"), DemonCommand::CommandCheckin);
+        self.crypto.decrypt_checkin(&checkin_body);
     }
 
     /// Queue a tasking response with the given packages, have the agent check
@@ -404,10 +393,10 @@ impl TestHarness {
         // the checkin will consume so we can encrypt the tasking at the right
         // offset.
         //
-        // Checkin payload: DemonMessage with 1 package (CommandCheckin, no payload).
-        // Serialized = 4 (count) + 4 (command_id) + 4 (request_id) + 4 (payload_len) = 16 bytes.
-        // ctr_blocks_for_len(16) = 1.
-        let checkin_blocks = ctr_blocks_for_len(16);
+        // Checkin uses callback format: command_id(4) + request_id(4) are clear,
+        // only payload_len(4) is encrypted (empty payload).
+        // ctr_blocks_for_len(4) = 1.
+        let checkin_blocks = ctr_blocks_for_len(4);
         let tasking_offset = self.crypto.ctr_offset + checkin_blocks;
         let (tasking, tasking_blocks) = self.crypto.encrypt_tasking_at(tasking_offset, packages);
         self.response_tx.send(tasking).expect("queue tasking response");
@@ -419,12 +408,10 @@ impl TestHarness {
 
         let exit = self.agent.checkin().await.expect("checkin with tasks");
 
-        // Read the checkin packet first (DemonMessage, LE).
+        // Read the checkin packet first (callback format).
         // This advances ctr_offset by checkin_blocks.
         let checkin_body = self.request_rx.recv().expect("recv checkin body");
-        let message = self.crypto.decrypt_checkin(&checkin_body);
-        assert_eq!(message.packages.len(), 1);
-        assert_eq!(message.packages[0].command().expect("command"), DemonCommand::CommandCheckin);
+        self.crypto.decrypt_checkin(&checkin_body);
 
         // Advance past the tasking blocks (server sent, agent decrypted).
         self.crypto.ctr_offset += tasking_blocks;
@@ -695,8 +682,8 @@ async fn scenario_7_exit_clean_shutdown() {
 
     let task = DemonPackage::new(DemonCommand::CommandExit, 500, build_exit_payload(1));
 
-    // Predict the offset after the checkin is decrypted (16-byte DemonMessage = 1 block).
-    let checkin_blocks = ctr_blocks_for_len(16);
+    // Predict the offset after the checkin is decrypted (4-byte encrypted payload_len = 1 block).
+    let checkin_blocks = ctr_blocks_for_len(4);
     let tasking_offset = harness.crypto.ctr_offset + checkin_blocks;
     let (tasking, tasking_blocks) = harness.crypto.encrypt_tasking_at(tasking_offset, vec![task]);
     harness.response_tx.send(tasking).expect("queue tasking");
@@ -706,11 +693,9 @@ async fn scenario_7_exit_clean_shutdown() {
     let exit = harness.agent.checkin().await.expect("checkin with exit");
     assert!(exit, "checkin should signal exit");
 
-    // Read the checkin packet (DemonMessage, LE).
+    // Read the checkin packet (callback format).
     let checkin_body = harness.request_rx.recv().expect("recv checkin");
-    let message = harness.crypto.decrypt_checkin(&checkin_body);
-    assert_eq!(message.packages.len(), 1);
-    assert_eq!(message.packages[0].command().expect("command"), DemonCommand::CommandCheckin);
+    harness.crypto.decrypt_checkin(&checkin_body);
 
     // Advance past the tasking blocks (server sent, agent decrypted).
     harness.crypto.ctr_offset += tasking_blocks;

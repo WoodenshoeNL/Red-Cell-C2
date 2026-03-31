@@ -113,18 +113,14 @@ impl PhantomAgent {
         self.state.poll().await?;
         self.flush_pending_callbacks().await?;
 
-        let payload = red_cell_common::demon::DemonMessage::new(vec![
-            red_cell_common::demon::DemonPackage::new(DemonCommand::CommandCheckin, 0, Vec::new()),
-        ])
-        .to_bytes()?;
-        let encrypted = red_cell_common::crypto::encrypt_agent_data_at_offset(
-            &self.session_crypto.key,
-            &self.session_crypto.iv,
+        let packet = build_callback_packet(
+            self.agent_id,
+            &self.session_crypto,
             self.ctr_offset,
-            &payload,
+            u32::from(DemonCommand::CommandCheckin),
+            0,
+            &[],
         )?;
-        let packet = red_cell_common::demon::DemonEnvelope::new(self.agent_id, encrypted.clone())?
-            .to_bytes();
 
         let response = self.transport.send(&packet).await?;
         self.ctr_offset += callback_ctr_blocks(0);
@@ -617,15 +613,17 @@ mod tests {
 
         let checkin_packet = request_rx.recv_timeout(std::time::Duration::from_secs(1))?;
         let envelope = DemonEnvelope::from_bytes(&checkin_packet)?;
+        // command_id and request_id are in the clear.
+        assert_eq!(&envelope.payload[..4], &u32::from(DemonCommand::CommandCheckin).to_be_bytes());
+        assert_eq!(&envelope.payload[4..8], &0_u32.to_be_bytes());
+        // Remaining bytes are encrypted: payload_len(4) + payload (empty for checkin).
         let decrypted = decrypt_agent_data_at_offset(
             &agent.session_crypto.key,
             &agent.session_crypto.iv,
             checkin_encrypt_offset,
-            &envelope.payload,
+            &envelope.payload[8..],
         )?;
-        let message = DemonMessage::from_bytes(&decrypted)?;
-        assert_eq!(message.packages.len(), 1);
-        assert_eq!(message.packages[0].command()?, DemonCommand::CommandCheckin);
+        assert_eq!(&decrypted[..4], &0_u32.to_be_bytes());
         let expected_final_offset = after_tasking_recv + callback_ctr_blocks(4);
         assert_eq!(agent.ctr_offset, expected_final_offset);
 
@@ -691,15 +689,17 @@ mod tests {
 
         let checkin_packet = request_rx.recv_timeout(std::time::Duration::from_secs(1))?;
         let envelope = DemonEnvelope::from_bytes(&checkin_packet)?;
+        // command_id and request_id are in the clear.
+        assert_eq!(&envelope.payload[..4], &u32::from(DemonCommand::CommandCheckin).to_be_bytes());
+        assert_eq!(&envelope.payload[4..8], &0_u32.to_be_bytes());
+        // Remaining bytes are encrypted: payload_len(4) only (empty checkin payload).
         let decrypted = decrypt_agent_data_at_offset(
             &agent.session_crypto.key,
             &agent.session_crypto.iv,
             1, // checkin encrypted at ctr_offset=1 (after init ack)
-            &envelope.payload,
+            &envelope.payload[8..],
         )?;
-        let message = DemonMessage::from_bytes(&decrypted)?;
-        assert_eq!(message.packages.len(), 1);
-        assert_eq!(message.packages[0].command()?, DemonCommand::CommandCheckin);
+        assert_eq!(&decrypted[..4], &0_u32.to_be_bytes());
 
         let exit_callback_packet = request_rx.recv_timeout(std::time::Duration::from_secs(1))?;
         assert!(!exit_callback_packet.is_empty());

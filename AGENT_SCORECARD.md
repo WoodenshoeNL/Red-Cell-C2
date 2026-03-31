@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1049 | 231 | 31 |
-| Bugs filed against | 147 | 36 | 9 |
+| Tasks closed | 1051 | 231 | 31 |
+| Bugs filed against | 149 | 36 | 9 |
 | Bug rate (bugs/task) | 0.14 | 0.16 | 0.29 |
 | Quality score | 86% | 84% | 71% |
 
-*Bug rates: Claude 147/1049=0.14, Codex 36/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 149/1051=0.14, Codex 36/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -22,7 +22,7 @@ Each loop run updates the running totals and appends a review entry.
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 9 | 0 | 0 |
 | Missing tests / stale tests | 59 | 15 | 5 |
-| Clippy warnings | 7 | 0 | 1 |
+| Clippy warnings | 9 | 0 | 1 |
 | Protocol errors | 25 | 31 | 3 |
 | Security issues | 53 | 39 | 0 |
 | Architecture drift | 19 | 23 | 0 |
@@ -4819,3 +4819,13 @@ Overall codebase health: moderate — protocol correctness, crypto, and auth are
 Biggest blindspot: Phantom was written with a Specter-like checkin/get-job split in mind but the server-side protocol was never updated to return tasks on checkin — Phantom shipped with zero task-reception capability and no test to catch it
 
 Build: `cargo check --workspace` clean, `cargo clippy -- -D warnings` 0 warnings. nextest run incomplete due to runner timeout on assembly_dispatch tests (pre-existing).
+
+### QA Review — 2026-04-01 — eda707db..365728b1
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude (Ubuntu-C2-dev01-claude) | 2 | 2 | Closed red-cell-c2-dxcw9 (AMSI/ETW bypass via VirtualProtect, bypass.rs), red-cell-c2-h9yjh (Cronos-style sleep obfuscation, sleep_obf.rs). In-progress work for red-cell-c2-33eqp has two clippy violations: red-cell-c2-asaz5 (syscall.rs unused OnceLock import), red-cell-c2-gv4ez (spoof.rs unsafe_code lint violations). |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check --workspace` clean. `cargo nextest run --workspace` 4746/4746 passed. `cargo clippy --workspace -- -D warnings` FAILS — 11 errors in uncommitted spoof.rs and syscall.rs (in-progress work for red-cell-c2-33eqp).

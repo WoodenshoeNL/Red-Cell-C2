@@ -32,10 +32,8 @@ struct MockCrypto {
     agent_id: u32,
     key: Vec<u8>,
     iv: Vec<u8>,
-    /// CTR block offset for data we *send* to the agent (agent's recv side).
-    send_ctr_offset: u64,
-    /// CTR block offset for data we *receive* from the agent (agent's send side).
-    recv_ctr_offset: u64,
+    /// Shared monotonic CTR block offset, mirroring the teamserver's single offset.
+    ctr_offset: u64,
 }
 
 impl MockCrypto {
@@ -47,46 +45,40 @@ impl MockCrypto {
         let key = envelope.payload[8..8 + AGENT_KEY_LENGTH].to_vec();
         let iv =
             envelope.payload[8 + AGENT_KEY_LENGTH..8 + AGENT_KEY_LENGTH + AGENT_IV_LENGTH].to_vec();
-        Self { agent_id, key, iv, send_ctr_offset: 0, recv_ctr_offset: 0 }
+        Self { agent_id, key, iv, ctr_offset: 0 }
     }
 
     /// Build the encrypted init acknowledgement.
     fn build_init_ack(&mut self) -> Vec<u8> {
         let ack = encrypt_agent_data(&self.key, &self.iv, &self.agent_id.to_le_bytes())
             .expect("encrypt init ack");
-        self.send_ctr_offset = ctr_blocks_for_len(ack.len());
+        self.ctr_offset = ctr_blocks_for_len(ack.len());
         ack
     }
 
-    /// Encrypt a tasking response (DemonMessage wrapped in DemonEnvelope).
-    fn encrypt_tasking(&mut self, packages: Vec<DemonPackage>) -> Vec<u8> {
+    /// Encrypt a tasking response at a specific CTR offset (does not advance internal state).
+    fn encrypt_tasking_at(&self, offset: u64, packages: Vec<DemonPackage>) -> (Vec<u8>, u64) {
         if packages.is_empty() {
-            return Vec::new();
+            return (Vec::new(), 0);
         }
         let message = DemonMessage::new(packages);
         let plaintext = message.to_bytes().expect("encode tasking message");
-        let encrypted =
-            encrypt_agent_data_at_offset(&self.key, &self.iv, self.send_ctr_offset, &plaintext)
-                .expect("encrypt tasking");
+        let encrypted = encrypt_agent_data_at_offset(&self.key, &self.iv, offset, &plaintext)
+            .expect("encrypt tasking");
+        let blocks = ctr_blocks_for_len(encrypted.len());
         let envelope =
-            DemonEnvelope::new(self.agent_id, encrypted.clone()).expect("build tasking envelope");
-        let bytes = envelope.to_bytes();
-        self.send_ctr_offset += ctr_blocks_for_len(encrypted.len());
-        bytes
+            DemonEnvelope::new(self.agent_id, encrypted).expect("build tasking envelope");
+        (envelope.to_bytes(), blocks)
     }
 
     /// Decrypt and advance CTR, returning raw plaintext from the envelope.
     fn decrypt_envelope(&mut self, body: &[u8]) -> Vec<u8> {
         let envelope = DemonEnvelope::from_bytes(body).expect("parse envelope");
         assert_eq!(envelope.header.agent_id, self.agent_id);
-        let plaintext = decrypt_agent_data_at_offset(
-            &self.key,
-            &self.iv,
-            self.recv_ctr_offset,
-            &envelope.payload,
-        )
-        .expect("decrypt envelope");
-        self.recv_ctr_offset += ctr_blocks_for_len(envelope.payload.len());
+        let plaintext =
+            decrypt_agent_data_at_offset(&self.key, &self.iv, self.ctr_offset, &envelope.payload)
+                .expect("decrypt envelope");
+        self.ctr_offset += ctr_blocks_for_len(envelope.payload.len());
         plaintext
     }
 
@@ -112,9 +104,9 @@ impl MockCrypto {
         // Decrypt the remainder: payload_len(4) | payload.
         let encrypted = &envelope.payload[8..];
         let plaintext =
-            decrypt_agent_data_at_offset(&self.key, &self.iv, self.recv_ctr_offset, encrypted)
+            decrypt_agent_data_at_offset(&self.key, &self.iv, self.ctr_offset, encrypted)
                 .expect("decrypt callback payload");
-        self.recv_ctr_offset += ctr_blocks_for_len(encrypted.len());
+        self.ctr_offset += ctr_blocks_for_len(encrypted.len());
 
         let payload_len =
             u32::from_be_bytes(plaintext[0..4].try_into().expect("payload_len bytes")) as usize;
@@ -334,13 +326,12 @@ impl TestHarness {
 
             // Send crypto state to test via a side channel encoded in a request.
             // Actually, we need to send crypto state back. Let's encode it.
-            // Simpler: serialize agent_id + key + iv + send_ctr_offset.
+            // Simpler: serialize agent_id + key + iv + ctr_offset.
             let mut crypto_state = Vec::new();
             crypto_state.extend_from_slice(&crypto.agent_id.to_le_bytes());
             crypto_state.extend_from_slice(&crypto.key);
             crypto_state.extend_from_slice(&crypto.iv);
-            crypto_state.extend_from_slice(&crypto.send_ctr_offset.to_le_bytes());
-            crypto_state.extend_from_slice(&crypto.recv_ctr_offset.to_le_bytes());
+            crypto_state.extend_from_slice(&crypto.ctr_offset.to_le_bytes());
             init_tx.send(crypto_state).expect("send crypto state");
 
             // --- Remaining connections: channel-driven ---
@@ -364,19 +355,14 @@ impl TestHarness {
         let key = crypto_state[4..4 + AGENT_KEY_LENGTH].to_vec();
         let iv =
             crypto_state[4 + AGENT_KEY_LENGTH..4 + AGENT_KEY_LENGTH + AGENT_IV_LENGTH].to_vec();
-        let send_offset_start = 4 + AGENT_KEY_LENGTH + AGENT_IV_LENGTH;
-        let send_ctr_offset = u64::from_le_bytes(
-            crypto_state[send_offset_start..send_offset_start + 8]
+        let ctr_offset_start = 4 + AGENT_KEY_LENGTH + AGENT_IV_LENGTH;
+        let ctr_offset = u64::from_le_bytes(
+            crypto_state[ctr_offset_start..ctr_offset_start + 8]
                 .try_into()
-                .expect("send_ctr bytes"),
-        );
-        let recv_ctr_offset = u64::from_le_bytes(
-            crypto_state[send_offset_start + 8..send_offset_start + 16]
-                .try_into()
-                .expect("recv_ctr bytes"),
+                .expect("ctr_offset bytes"),
         );
 
-        let crypto = MockCrypto { agent_id, key, iv, send_ctr_offset, recv_ctr_offset };
+        let crypto = MockCrypto { agent_id, key, iv, ctr_offset };
 
         (Self { agent, crypto, request_rx, response_tx }, server)
     }
@@ -398,13 +384,32 @@ impl TestHarness {
 
     /// Queue a tasking response with the given packages, have the agent check
     /// in, and return the collected callback bodies.
+    ///
+    /// The shared CTR offset advances in request/response order:
+    ///   1. Agent sends checkin → server decrypts (advances offset)
+    ///   2. Server sends tasking → agent decrypts (advances offset)
+    ///   3. Agent sends callbacks → server decrypts (advances offset)
+    ///
+    /// Since the response must be pre-queued before the checkin arrives, we
+    /// predict the tasking encryption offset by peeking ahead past the checkin
+    /// decryption blocks.
     async fn do_checkin_with_tasks(
         &mut self,
         packages: Vec<DemonPackage>,
         expected_callbacks: usize,
     ) -> Vec<(u32, u32, Vec<u8>)> {
-        // Queue the tasking response.
-        let tasking = self.crypto.encrypt_tasking(packages);
+        // The agent will send a checkin encrypted at its current ctr_offset.
+        // The server (mock) decrypts it first, then the tasking is decrypted
+        // by the agent at the next offset. We need to predict how many blocks
+        // the checkin will consume so we can encrypt the tasking at the right
+        // offset.
+        //
+        // Checkin payload: DemonMessage with 1 package (CommandCheckin, no payload).
+        // Serialized = 4 (count) + 4 (command_id) + 4 (request_id) + 4 (payload_len) = 16 bytes.
+        // ctr_blocks_for_len(16) = 1.
+        let checkin_blocks = ctr_blocks_for_len(16);
+        let tasking_offset = self.crypto.ctr_offset + checkin_blocks;
+        let (tasking, tasking_blocks) = self.crypto.encrypt_tasking_at(tasking_offset, packages);
         self.response_tx.send(tasking).expect("queue tasking response");
 
         // Queue empty responses for each expected callback.
@@ -415,10 +420,14 @@ impl TestHarness {
         let exit = self.agent.checkin().await.expect("checkin with tasks");
 
         // Read the checkin packet first (DemonMessage, LE).
+        // This advances ctr_offset by checkin_blocks.
         let checkin_body = self.request_rx.recv().expect("recv checkin body");
         let message = self.crypto.decrypt_checkin(&checkin_body);
         assert_eq!(message.packages.len(), 1);
         assert_eq!(message.packages[0].command().expect("command"), DemonCommand::CommandCheckin);
+
+        // Advance past the tasking blocks (server sent, agent decrypted).
+        self.crypto.ctr_offset += tasking_blocks;
 
         // Read all callback packets.
         let mut callbacks = Vec::new();
@@ -686,8 +695,10 @@ async fn scenario_7_exit_clean_shutdown() {
 
     let task = DemonPackage::new(DemonCommand::CommandExit, 500, build_exit_payload(1));
 
-    // Queue the tasking response.
-    let tasking = harness.crypto.encrypt_tasking(vec![task]);
+    // Predict the offset after the checkin is decrypted (16-byte DemonMessage = 1 block).
+    let checkin_blocks = ctr_blocks_for_len(16);
+    let tasking_offset = harness.crypto.ctr_offset + checkin_blocks;
+    let (tasking, tasking_blocks) = harness.crypto.encrypt_tasking_at(tasking_offset, vec![task]);
     harness.response_tx.send(tasking).expect("queue tasking");
     // Queue empty response for exit callback.
     harness.response_tx.send(Vec::new()).expect("queue callback ack");
@@ -700,6 +711,9 @@ async fn scenario_7_exit_clean_shutdown() {
     let message = harness.crypto.decrypt_checkin(&checkin_body);
     assert_eq!(message.packages.len(), 1);
     assert_eq!(message.packages[0].command().expect("command"), DemonCommand::CommandCheckin);
+
+    // Advance past the tasking blocks (server sent, agent decrypted).
+    harness.crypto.ctr_offset += tasking_blocks;
 
     // Read the exit callback.
     let exit_body = harness.request_rx.recv().expect("recv exit callback");

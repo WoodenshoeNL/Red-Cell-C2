@@ -18,7 +18,7 @@ async fn main() -> anyhow::Result<()> {
 
     info!("specter agent starting");
 
-    let config = SpecterConfig::default();
+    let config = SpecterConfig::from_sources(std::env::args_os(), std::env::vars_os())?;
     let mut agent = SpecterAgent::new(config)?;
 
     info!(agent_id = format_args!("0x{:08X}", agent.agent_id()), "agent ready");

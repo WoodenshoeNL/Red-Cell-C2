@@ -26,4 +26,8 @@ pub enum SpecterError {
     /// The agent configuration is invalid.
     #[error("invalid configuration: {0}")]
     InvalidConfig(&'static str),
+
+    /// A command-line argument or environment variable was invalid.
+    #[error("argument error: {0}")]
+    Argument(String),
 }

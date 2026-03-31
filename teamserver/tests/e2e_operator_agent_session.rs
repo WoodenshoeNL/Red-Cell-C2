@@ -30,7 +30,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
 #[tokio::test]
 async fn operator_session_listener_and_mock_demon_round_trip()
 -> Result<(), Box<dyn std::error::Error>> {
-    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let server = common::spawn_test_server(common::legacy_ctr_test_profile()).await?;
 
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     assert_ne!(listener_port, server.addr.port());
@@ -218,7 +218,7 @@ async fn operator_session_listener_and_mock_demon_round_trip()
 #[tokio::test]
 async fn reconnect_probe_does_not_duplicate_agent_new_and_resumes_callbacks()
 -> Result<(), Box<dyn std::error::Error>> {
-    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let server = common::spawn_test_server(common::legacy_ctr_test_profile()).await?;
 
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
@@ -473,7 +473,9 @@ fn two_operator_profile() -> Profile {
           }
         }
 
-        Demon {}
+        Demon {
+          AllowLegacyCtr = true
+        }
         "#,
     )
     .expect("two-operator profile should parse")
@@ -483,7 +485,7 @@ fn two_operator_profile() -> Profile {
 #[tokio::test]
 async fn operator_session_smb_listener_and_mock_demon_round_trip()
 -> Result<(), Box<dyn std::error::Error>> {
-    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let server = common::spawn_test_server(common::legacy_ctr_test_profile()).await?;
 
     let pipe_name = unique_pipe_name("operator-round-trip");
     let listener_name = "edge-smb";
@@ -652,7 +654,7 @@ async fn operator_session_smb_listener_and_mock_demon_round_trip()
 #[tokio::test]
 async fn operator_session_dns_listener_and_mock_demon_round_trip()
 -> Result<(), Box<dyn std::error::Error>> {
-    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let server = common::spawn_test_server(common::legacy_ctr_test_profile()).await?;
 
     let dns_port = free_udp_port();
     let dns_domain = "c2.example.com";

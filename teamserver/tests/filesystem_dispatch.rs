@@ -466,7 +466,10 @@ async fn getpwd_callback_broadcasts_current_directory() -> Result<(), Box<dyn st
 #[tokio::test]
 async fn download_flow_emits_progress_loot_and_complete_events()
 -> Result<(), Box<dyn std::error::Error>> {
-    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    // This test sends 3 sequential callbacks (start/chunk/close) for the same agent.
+    // Use the legacy CTR profile to avoid tracking monotonic offsets across multiple
+    // callback-response cycles, which is orthogonal to the download-flow logic under test.
+    let server = common::spawn_test_server(common::legacy_ctr_test_profile()).await?;
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
@@ -482,7 +485,8 @@ async fn download_flow_emits_progress_loot_and_complete_events()
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xDD01_0005_u32;
-    let ctr_offset = common::register_agent(&client, listener_port, agent_id, KEY_E, IV_E).await?;
+    let ctr_offset =
+        common::register_legacy_agent(&client, listener_port, agent_id, KEY_E, IV_E).await?;
 
     let agent_new = common::read_operator_message(&mut socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)), "expected AgentNew");

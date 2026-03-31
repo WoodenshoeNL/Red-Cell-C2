@@ -7,6 +7,7 @@
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
+use red_cell::demon::INIT_EXT_MONOTONIC_CTR;
 use red_cell::{
     AgentRegistry, ApiRuntime, AuditWebhookNotifier, AuthService, Database, EventBus,
     ListenerManager, LoginRateLimiter, OperatorConnectionManager, PayloadBuilderService,
@@ -16,8 +17,8 @@ use red_cell_common::HttpListenerConfig;
 use red_cell_common::OperatorInfo;
 use red_cell_common::config::Profile;
 use red_cell_common::crypto::{
-    AGENT_IV_LENGTH, AGENT_KEY_LENGTH, encrypt_agent_data, encrypt_agent_data_at_offset,
-    hash_password_sha3,
+    AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len, encrypt_agent_data,
+    encrypt_agent_data_at_offset, hash_password_sha3,
 };
 use red_cell_common::demon::{DemonCommand, DemonEnvelope};
 use red_cell_common::operator::{EventCode, LoginInfo, Message, MessageHead, OperatorMessage};
@@ -412,13 +413,41 @@ pub fn http_listener_config(name: &str, port: u16) -> red_cell_common::ListenerC
     })
 }
 
-/// Register a fresh agent via `DEMON_INIT` and return the AES-CTR block offset
-/// to use for subsequent callback packets.
+/// Register a fresh agent via `DEMON_INIT` with the `INIT_EXT_MONOTONIC_CTR`
+/// extension flag and return the AES-CTR block offset to use for subsequent
+/// callback packets.
 ///
-/// DEMON_INIT always registers agents in legacy CTR mode, where every packet is
-/// encrypted/decrypted starting at CTR block 0.  The returned offset is therefore
-/// always 0.
+/// This mirrors the production-secure path: the server registers the agent
+/// with `legacy_ctr = false` and the CTR offset advances monotonically.
+/// The init ACK is a 4-byte agent-id (1 AES block), so the returned offset
+/// is always 1.
+///
+/// Tests that need legacy CTR behavior should use [`register_legacy_agent`]
+/// with a [`legacy_ctr_test_profile`] server instead.
 pub async fn register_agent(
+    client: &reqwest::Client,
+    listener_port: u16,
+    agent_id: u32,
+    key: [u8; AGENT_KEY_LENGTH],
+    iv: [u8; AGENT_IV_LENGTH],
+) -> Result<u64, Box<dyn std::error::Error>> {
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(valid_demon_init_body_with_ext_flags(agent_id, key, iv, INIT_EXT_MONOTONIC_CTR))
+        .send()
+        .await?
+        .error_for_status()?;
+    // Monotonic CTR: the init ACK is 4 bytes (1 AES block), so the next
+    // callback must be encrypted at offset 1.
+    Ok(ctr_blocks_for_len(4))
+}
+
+/// Register a fresh agent via legacy `DEMON_INIT` (no extension flags) and
+/// return CTR offset 0.
+///
+/// Use this only with a server spawned from [`legacy_ctr_test_profile`] —
+/// a production-default server will reject the legacy init.
+pub async fn register_legacy_agent(
     client: &reqwest::Client,
     listener_port: u16,
     agent_id: u32,
@@ -436,9 +465,36 @@ pub async fn register_agent(
 }
 
 /// Build a standard test [`Profile`] with a single `operator`/`password1234`
-/// user.  Most integration tests that do not need a custom profile can reuse
-/// this directly.
+/// user.  Uses the production-default `AllowLegacyCtr = false` setting so
+/// that tests exercise the secure path by default.
+///
+/// Tests that intentionally cover legacy-CTR Demon agents should use
+/// [`legacy_ctr_test_profile`] instead.
 pub fn default_test_profile() -> Profile {
+    Profile::parse(
+        r#"
+        Teamserver {
+          Host = "127.0.0.1"
+          Port = 0
+        }
+
+        Operators {
+          user "operator" {
+            Password = "password1234"
+            Role = "Operator"
+          }
+        }
+
+        Demon {}
+        "#,
+    )
+    .expect("default test profile should parse")
+}
+
+/// Build a test [`Profile`] identical to [`default_test_profile`] but with
+/// `AllowLegacyCtr = true`.  Use this **only** for tests that intentionally
+/// exercise legacy Demon agents that do not set `INIT_EXT_MONOTONIC_CTR`.
+pub fn legacy_ctr_test_profile() -> Profile {
     Profile::parse(
         r#"
         Teamserver {
@@ -458,7 +514,7 @@ pub fn default_test_profile() -> Profile {
         }
         "#,
     )
-    .expect("default test profile should parse")
+    .expect("legacy CTR test profile should parse")
 }
 
 /// Append `value` to `buffer` as a BE-length-prefixed byte slice.

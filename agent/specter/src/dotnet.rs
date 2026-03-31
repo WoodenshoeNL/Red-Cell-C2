@@ -706,7 +706,9 @@ mod clr {
         // Store oleaut32 API in session so Drop can call SafeArrayDestroy.
         session.ole = Some(ole);
         // Reborrow after move:
-        let ole = session.ole.as_ref().expect("just assigned");
+        let Some(ref ole) = session.ole else {
+            return fail_result("oleaut32 API missing after assignment");
+        };
 
         // ── 7. Create named pipe for stdout capture ─────────────────────
 

@@ -28,7 +28,7 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 19 | 23 | 0 |
 | Memory / resource leaks | 10 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 9 | 0 |
-| Test infrastructure / flakiness | 27 | 1 | 0 |
+| Test infrastructure / flakiness | 28 | 1 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
 | Correctness / pagination | 55 | 8 | 1 |
@@ -4662,3 +4662,18 @@ Build: failed — `cargo check --workspace` passed, `cargo clippy --workspace --
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: failed — `cargo check --workspace` passed, `cargo clippy --workspace -- -D warnings` passed, and `cargo nextest run --workspace` failed on `listeners::tests::smb_listener_reinit_updates_pivot_agent_registration`; filed `red-cell-c2-b7bhv` for the stale `AgentNew` assertion in `teamserver/src/listeners.rs:5957-5963`
+
+### Arch Review — 2026-03-31 14:30
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 1 | test flakiness | red-cell-c2-6a1tb: flaky liveness timeout test — 404 on callback POST due to missing wait-for-listener guard. Introduced by Claude Opus in commit 755012a0. |
+| Codex | 0 | — | No attributable findings this review. |
+| Cursor | 0 | — | No attributable findings this review. |
+
+Overall codebase health: on track
+Biggest blindspot: Specter agent lacks runtime configuration (CLI/env-var parsing) — filed as task red-cell-c2-xqysi.
+
+Build: cargo check passed, cargo clippy passed (zero warnings), nextest failed on 1/2330 tests run (active_agent_survives_liveness_sweep_that_kills_stale_peer — 404 race, filed as red-cell-c2-6a1tb). The pre-existing smb_listener_reinit_updates_pivot_agent_registration failure (red-cell-c2-b7bhv) is addressed by the uncommitted dirty-tree fix.
+
+Security posture: strong. AES-256-CTR with per-agent monotonic CTR offsets, HKDF session key derivation, constant-time token/API-key comparisons, Argon2id password hashing with OWASP parameters, zeroize on drop for key material, rate limiting on DEMON_INIT and login attempts, RBAC enforcement on all API/WebSocket endpoints. No key material leaked to logs (custom Debug impls redact secrets). No unwrap/expect in production code.

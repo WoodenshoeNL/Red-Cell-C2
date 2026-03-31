@@ -8,6 +8,8 @@
 #define SLEEPOBF_EKKO    0x1
 #define SLEEPOBF_ZILEAN  0x2
 #define SLEEPOBF_FOLIAGE 0x3
+/* ARC-03: Cronos-style timer-callback obfuscation (no suspended threads) */
+#define SLEEPOBF_CRONOS  0x4
 
 #define SLEEPOBF_BYPASS_NONE 0
 #define SLEEPOBF_BYPASS_JMPRAX 0x1

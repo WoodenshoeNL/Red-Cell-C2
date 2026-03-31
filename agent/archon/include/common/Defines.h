@@ -86,6 +86,9 @@
 #define H_FUNC_NTDUPLICATETOKEN                      0x8e160b23
 #define H_FUNC_NTALERTRESUMETHREAD                   0x5ba11e28
 #define H_FUNC_NTTESTALERT                           0x858a32df
+#define H_FUNC_NTCREATETIMER                         0x29db92bc
+#define H_FUNC_NTSETTIMER                            0xcc904834
+#define H_FUNC_NTCANCELTIMER                         0x63b61f6e
 #define H_FUNC_RTLALLOCATEHEAP                       0x3be94c5a
 #define H_FUNC_RTLREALLOCATEHEAP                     0xaf740371
 #define H_FUNC_RTLFREEHEAP                           0x73a9e4d7

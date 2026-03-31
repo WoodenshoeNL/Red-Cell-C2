@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1015 | 231 | 31 |
+| Tasks closed | 1018 | 231 | 31 |
 | Bugs filed against | 135 | 36 | 9 |
 | Bug rate (bugs/task) | 0.13 | 0.16 | 0.29 |
 | Quality score | 87% | 84% | 71% |
 
-*Bug rates: Claude 135/1015=0.13, Codex 36/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 135/1018=0.13, Codex 36/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-31 10:38 — 1be119c6..297e90eb
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 3 | 0 | Closed: red-cell-c2-j27pm, red-cell-c2-7crlt, red-cell-c2-taysc. No new Claude bugs filed this run; confirmed existing open regressions red-cell-c2-5zo42 (re-registration still emits `AgentNew`) and red-cell-c2-3dgc7 (payload-builder coverage regression). |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: failed — `cargo check --workspace` passed, `cargo clippy --workspace -- -D warnings` passed, and `cargo nextest run --workspace` failed on two HTTP listener tests colliding on `127.0.0.1:19000`; filed red-cell-c2-jmkgg against Michel for the untracked fixed-port allocator regression
 
 ### QA Review — 2026-03-31 01:00 — 8923da2d..adcc1683
 

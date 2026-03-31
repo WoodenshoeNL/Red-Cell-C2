@@ -314,18 +314,6 @@ mod tests {
         // If result is None, dirs::config_dir() is unavailable — nothing to assert.
     }
 
-    // Mutex to serialize tests that share the platform config file.  These
-    // tests write to (and restore) the real config path, so they must not run
-    // concurrently with each other.
-    static CONFIG_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Returns the resolved config file path used by the public API, replicating
-    /// the private `config_file_path()` logic so tests can set up/tear down the
-    /// file without going through the production helpers.
-    fn resolved_config_path() -> Option<std::path::PathBuf> {
-        dirs::config_dir().map(|d| d.join(APP_DIR_NAME).join(CONFIG_FILE_NAME))
-    }
-
     #[test]
     fn load_from_returns_default_for_binary_garbage() {
         let dir = tempfile::tempdir()
@@ -569,27 +557,11 @@ mod tests {
     /// host environment.
     #[test]
     fn public_save_does_not_panic() {
-        let _guard = CONFIG_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-
-        let config_path = resolved_config_path();
-        let backup = config_path.as_deref().and_then(|p| fs::read(p).ok());
-
         let config = LocalConfig {
             server_url: Some("wss://10.0.0.1:40056/havoc/".to_owned()),
             ..LocalConfig::default()
         };
-        config.save(); // must not panic regardless of whether a config dir exists
-
-        // Restore if we wrote anything.
-        if let Some(path) = &config_path {
-            match backup {
-                Some(data) => {
-                    let _ = fs::write(path, data);
-                }
-                None => {
-                    let _ = fs::remove_file(path);
-                }
-            }
-        }
+        // Must not panic — silent failure on any I/O error is the documented contract.
+        config.save();
     }
 }

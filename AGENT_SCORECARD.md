@@ -10,20 +10,20 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 1051 | 231 | 31 |
-| Bugs filed against | 149 | 36 | 9 |
+| Bugs filed against | 152 | 36 | 9 |
 | Bug rate (bugs/task) | 0.14 | 0.16 | 0.29 |
 | Quality score | 86% | 84% | 71% |
 
-*Bug rates: Claude 149/1051=0.14, Codex 36/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 152/1051=0.14, Codex 36/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 9 | 0 | 0 |
-| Missing tests / stale tests | 59 | 15 | 5 |
+| Missing tests / stale tests | 60 | 15 | 5 |
 | Clippy warnings | 9 | 0 | 1 |
-| Protocol errors | 25 | 31 | 3 |
+| Protocol errors | 26 | 31 | 3 |
 | Security issues | 53 | 39 | 0 |
 | Architecture drift | 19 | 23 | 0 |
 | Memory / resource leaks | 10 | 11 | 1 |
@@ -32,7 +32,7 @@ Each loop run updates the running totals and appends a review entry.
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
 | Correctness / pagination | 55 | 8 | 1 |
-| Workflow / close-hygiene | 23 | 0 | 0 |
+| Workflow / close-hygiene | 24 | 0 | 0 |
 | Code reuse / duplication | 8 | 0 | 0 |
 
 ---
@@ -4829,3 +4829,14 @@ Build: `cargo check --workspace` clean, `cargo clippy -- -D warnings` 0 warnings
 | Cursor | 0 | 0 | No activity. |
 
 Build: `cargo check --workspace` clean. `cargo nextest run --workspace` 4746/4746 passed. `cargo clippy --workspace -- -D warnings` FAILS — 11 errors in uncommitted spoof.rs and syscall.rs (in-progress work for red-cell-c2-33eqp).
+
+### QA Review — 2026-04-01 — 422686b4..eafc2cdc
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Ubuntu-C2-dev01-claude | 0 | 3 | red-cell-c2-7dl85 in_progress: monotonic-CTR impl is done in working tree but NOT committed. Filed red-cell-c2-p7prk (P1 workflow: uncommitted work stranded), red-cell-c2-ucr8y (P2 protocol: PackageTransmitAll missing DEMON_INITIALIZE guard), red-cell-c2-43u14 (P2 missing tests: AdvanceIvByBlocks has no unit tests). |
+| Claude | 0 | 0 | No other activity. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: cargo check passed, clippy 0 warnings (committed code only). nextest 2227/2229 pass — 2 webhook test failures are parallel-interference flakiness (pass in isolation; same class as red-cell-c2-8s5hl). Archon changes (4 files) are uncommitted and not yet buildable via CI.

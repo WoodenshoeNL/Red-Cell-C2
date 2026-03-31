@@ -38,6 +38,9 @@ Get a full structural picture before reading any code. Use your Glob and Grep to
 directly — do not shell out to `find` or `grep` for these.
 
 - Glob `teamserver/**/*.rs`, `common/**/*.rs`, `client/**/*.rs` to list all source files
+- Glob `agent/specter/src/**/*.rs`, `agent/phantom/src/**/*.rs`, `agent/archon/src/**/*.rs` to list agent implant sources
+- Glob `agent/demon/src/**/*.{c,h}` to list Demon C sources
+- Glob `automatic-test/**/*.py` to list the test harness
 - Glob `**/Cargo.toml` to find crate roots
 - For each `.rs` file, note its path; mentally flag files whose names suggest they are
   security-sensitive (`crypto`, `auth`, `session`, `key`, `handshake`, `protocol`,
@@ -62,10 +65,18 @@ tool for each file — do NOT cat everything in one shell loop.
 **Tier 2 — read in full if they exist:**
 - All remaining `teamserver/src/*.rs` files (handlers, routers, listeners)
 - All `teamserver/tests/*.rs` integration tests
+- `agent/specter/src/*.rs` — Specter implant (Rust agent)
+- `agent/phantom/src/*.rs` — Phantom implant (Rust agent)
+- `agent/phantom/tests/*.rs` — Phantom integration tests
+- `agent/archon/src/*.rs` — Archon implant (if present)
 
 **Tier 3 — skim (read first 60 lines, then full read only if something looks wrong):**
 - `client/src/` files
 - `client-cli/src/` files
+- `agent/demon/src/` — Demon C implant (scan for obvious issues like buffer overflows, missing bounds checks)
+- `automatic-test/*.py` — test harness scripts (smoke-test.py, test.py)
+- `automatic-test/lib/` — test harness library modules
+- `automatic-test/scenarios/` — test scenarios
 
 Work through tier 1 before tier 2. Do not load all files simultaneously — read one,
 note findings, then continue. If a file is very large (>500 lines), read it in chunks

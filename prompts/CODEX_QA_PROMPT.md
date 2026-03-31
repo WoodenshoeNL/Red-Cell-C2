@@ -95,7 +95,7 @@ For each file changed, which agent's commit last touched it?
 
 ## Step 4 — Check Build Health
 
-If any Rust source files exist under `teamserver/`, `client/`, or `common/`:
+If any Rust source files exist under `teamserver/`, `client/`, `common/`, or `agent/`:
 
 **Step 4a — type check first (abort if this fails):**
 
@@ -150,7 +150,7 @@ Architecture compliance:
 - Database must use SQLite via sqlx
 - Config parsing must use HCL/YAOTL
 - Rust edition must be 2024
-- Workspace structure: `./teamserver`, `./client`, `./common` at repo root
+- Workspace structure: `./teamserver`, `./client`, `./common`, `./agent/*` at repo root
 
 Code quality:
 - No `unwrap()` or `expect()` in production paths

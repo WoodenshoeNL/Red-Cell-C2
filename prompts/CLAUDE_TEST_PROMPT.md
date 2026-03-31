@@ -48,11 +48,17 @@ cat .beads/test_scan_index 2>/dev/null || echo "0"
 ### 2b — Get the full sorted file list
 
 ```bash
-find teamserver common client -name '*.rs' 2>/dev/null | sort
+find teamserver common client agent/specter agent/phantom agent/archon -name '*.rs' 2>/dev/null | sort
+```
+
+Also list Python test harness files:
+
+```bash
+find automatic-test -name '*.py' 2>/dev/null | sort
 ```
 
 If none of those directories exist yet, there is nothing to review. Skip to Step 7
-and report "no Rust source files found".
+and report "no source files found".
 
 ### 2c — Compute your batch using Python
 
@@ -74,7 +80,7 @@ files = sorted([
     f for root, dirs, fnames in os.walk(".")
     for f in fnames
     if f.endswith(".rs")
-    and any(root.startswith("./" + d) for d in ["teamserver", "common", "client"])
+    and any(root.startswith("./" + d) for d in ["teamserver", "common", "client", "agent/specter", "agent/phantom", "agent/archon"])
 ])
 
 if not files:
@@ -205,7 +211,7 @@ For any code that parses or serializes the Demon binary protocol:
 
 ### 4g — Integration test coverage
 
-- Are there integration tests in `teamserver/tests/` that cover end-to-end flows?
+- Are there integration tests in `teamserver/tests/`, `agent/phantom/tests/` that cover end-to-end flows?
 - Is the agent checkin sequence (DEMON_INIT → COMMAND_CHECKIN → COMMAND_GET_JOB)
   tested end-to-end, or only in isolation?
 - Is the listener lifecycle (start → accept → stop → restart) covered?

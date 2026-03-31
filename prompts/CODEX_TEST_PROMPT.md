@@ -59,7 +59,7 @@ files = sorted([
     for root, dirs, fnames in os.walk(".")
     for fname in fnames
     if fname.endswith(".rs")
-    and any(root.startswith("./" + d) for d in ["teamserver", "common", "client"])
+    and any(root.startswith("./" + d) for d in ["teamserver", "common", "client", "agent/specter", "agent/phantom", "agent/archon"])
     # Skip test files themselves — we are looking for source files
     and "tests/" not in root
     and not fname.startswith("test_")
@@ -115,10 +115,10 @@ Before diving into individual files, get a high-level picture:
 
 ```bash
 # List all test functions across the codebase (shows what IS tested)
-grep -rn '#\[test\]\|#\[tokio::test\]' teamserver common client 2>/dev/null | grep -v '.beads' | wc -l
+grep -rn '#\[test\]\|#\[tokio::test\]' teamserver common client agent/specter agent/phantom agent/archon 2>/dev/null | grep -v '.beads' | wc -l
 
 # List all integration test files
-find teamserver common client -path '*/tests/*.rs' 2>/dev/null | sort
+find teamserver common client agent/specter agent/phantom agent/archon -path '*/tests/*.rs' 2>/dev/null | sort
 
 # Run test list (names only, no execution) — if workspace compiles
 cargo test --workspace -- --list 2>/dev/null | grep '::' | head -50 || echo "cargo test list not available"
@@ -147,7 +147,7 @@ Search for test calls to each function:
 grep -A 200 '#\[cfg(test)\]' <file> 2>/dev/null | grep -E 'fn test_|#\[test\]|#\[tokio::test\]'
 
 # External integration tests
-grep -rn '<function_name>' teamserver/tests common/tests client/tests 2>/dev/null
+grep -rn '<function_name>' teamserver/tests common/tests client/tests agent/specter/tests agent/phantom/tests 2>/dev/null
 ```
 
 Build a simple table per file:

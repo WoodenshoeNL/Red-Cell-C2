@@ -37,6 +37,7 @@ set( COMMON_SOURCE
         src/core/Runtime.c
         src/core/HwBpEngine.c
         src/core/HwBpExceptions.c
+        src/core/AmsiEtwBypass.c
         src/core/CoffeeLdr.c
         src/core/ObjectApi.c
 )

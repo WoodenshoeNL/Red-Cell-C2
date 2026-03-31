@@ -6,7 +6,8 @@
 
 mod common;
 
-use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH};
+use red_cell::demon::INIT_EXT_MONOTONIC_CTR;
+use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len};
 use red_cell_common::demon::{DemonCommand, DemonEnvelope, DemonPivotCommand};
 use red_cell_common::operator::OperatorMessage;
 use serde_json::Value;
@@ -23,7 +24,12 @@ fn pivot_connect_success_payload(
     child_key: [u8; AGENT_KEY_LENGTH],
     child_iv: [u8; AGENT_IV_LENGTH],
 ) -> Vec<u8> {
-    let inner = common::valid_demon_init_body(child_agent_id, child_key, child_iv);
+    let inner = common::valid_demon_init_body_with_ext_flags(
+        child_agent_id,
+        child_key,
+        child_iv,
+        INIT_EXT_MONOTONIC_CTR,
+    );
     let mut payload = Vec::new();
     payload.extend_from_slice(&u32::from(DemonPivotCommand::SmbConnect).to_le_bytes());
     payload.extend_from_slice(&1_u32.to_le_bytes()); // success = 1
@@ -499,8 +505,8 @@ async fn pivot_disconnect_removes_link_and_marks_child_dead()
     assert_eq!(pivots_before.parent, Some(h.parent_agent_id), "child must be linked to parent");
 
     // -- Step 2: disconnect the child via SmbDisconnect --
-    // Legacy CTR mode: offset stays at 0 regardless of prior traffic.
-    let next_ctr_offset = 0;
+    // Monotonic CTR: advance past the connect callback's encrypted payload.
+    let next_ctr_offset = h.parent_ctr_offset + ctr_blocks_for_len(4 + connect_payload.len());
 
     let disconnect_payload = pivot_disconnect_success_payload(child_agent_id);
 
@@ -601,8 +607,8 @@ async fn pivot_disconnect_failure_broadcasts_error_without_modifying_registry()
     let _connect_resp = common::read_operator_message(&mut h.socket).await?;
 
     // -- Send SmbDisconnect with success=0 --
-    // Legacy CTR mode: offset stays at 0 regardless of prior traffic.
-    let next_ctr_offset = 0;
+    // Monotonic CTR: advance past the connect callback's encrypted payload.
+    let next_ctr_offset = h.parent_ctr_offset + ctr_blocks_for_len(4 + connect_payload.len());
 
     let disconnect_payload = pivot_disconnect_failure_payload(child_agent_id);
 

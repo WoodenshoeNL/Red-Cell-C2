@@ -10,11 +10,11 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 1047 | 231 | 31 |
-| Bugs filed against | 145 | 36 | 9 |
+| Bugs filed against | 146 | 36 | 9 |
 | Bug rate (bugs/task) | 0.14 | 0.16 | 0.29 |
 | Quality score | 86% | 84% | 71% |
 
-*Bug rates: Claude 145/1047=0.14, Codex 36/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 146/1047=0.14, Codex 36/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -28,7 +28,7 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 19 | 23 | 0 |
 | Memory / resource leaks | 10 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 9 | 0 |
-| Test infrastructure / flakiness | 31 | 1 | 0 |
+| Test infrastructure / flakiness | 32 | 1 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
 | Correctness / pagination | 55 | 8 | 1 |
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-31 20:45 — 4a5bef8c..ce4923d2
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 1 | No task closes in range. Uncommitted WIP on red-cell-c2-0q1px broke e2e integration tests (filed red-cell-c2-e9un2). |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: passed (cargo check + clippy clean). Tests: 5 e2e scenarios FAIL due to uncommitted two-step get_job protocol changes not updating TestHarness helpers.
 
 ### QA Review — 2026-03-31 20:30 — 6bdd76ab..4a5bef8c
 

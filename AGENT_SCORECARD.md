@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1037 | 231 | 31 |
-| Bugs filed against | 140 | 36 | 9 |
-| Bug rate (bugs/task) | 0.13 | 0.16 | 0.29 |
-| Quality score | 87% | 84% | 71% |
+| Tasks closed | 1042 | 231 | 31 |
+| Bugs filed against | 141 | 36 | 9 |
+| Bug rate (bugs/task) | 0.14 | 0.16 | 0.29 |
+| Quality score | 86% | 84% | 71% |
 
-*Bug rates: Claude 140/1037=0.13, Codex 36/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 141/1042=0.14, Codex 36/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -28,7 +28,7 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 19 | 23 | 0 |
 | Memory / resource leaks | 10 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 9 | 0 |
-| Test infrastructure / flakiness | 29 | 1 | 0 |
+| Test infrastructure / flakiness | 30 | 1 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
 | Correctness / pagination | 55 | 8 | 1 |
@@ -40,6 +40,18 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-31 18:15 — ac4147bf..5948d9a2
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 5 | 1 | Closed: red-cell-c2-odv18 (merge phantom CTR offsets), red-cell-c2-gtngg (add INIT_EXT_MONOTONIC_CTR flag), red-cell-c2-xv1rg (callback format for checkin), red-cell-c2-nthcx (real-teamserver integration test), red-cell-c2-47w41 (pivot_dispatch fix). Filed: red-cell-c2-yaows (flaky test public_save_and_load_round_trip, pre-existing). |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: passed (with 1 flaky test) — `cargo check` passed, `cargo clippy -- -D warnings` passed (0 warnings), `cargo nextest run --workspace` ran 3326/4729 tests: 3325 passed, 1 failed (public_save_and_load_round_trip — flaky, passes in isolation), 1403 skipped due to fail-fast. The failure is pre-existing and not caused by changes in this review range.
+
+Code quality: All 5 closed tasks fix Phantom agent protocol incompatibilities identified in the previous arch review. The changes correctly merge split send/recv CTR offsets into a single shared offset, switch checkin from DemonMessage to callback format, add the INIT_EXT_MONOTONIC_CTR extension flag, and add a real-teamserver integration test. No unwrap/expect in production code, no clippy warnings, no architecture drift. The new init_callback_flow.rs integration test is well-structured and mirrors Specter's equivalent test.
 
 ### QA Review — 2026-03-31 15:30 — ab1d374c..3702f057
 

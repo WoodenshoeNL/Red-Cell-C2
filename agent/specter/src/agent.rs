@@ -450,7 +450,7 @@ impl SpecterAgent {
                 let mut payload = Vec::with_capacity(4 + cb.payload.len());
                 payload.extend_from_slice(&cb.callback_type.to_le_bytes());
                 payload.extend_from_slice(&cb.payload);
-                Response { command_id: cmd_id, request_id: 0, payload }
+                Response { command_id: cmd_id, request_id: cb.request_id, payload }
             })
             .collect()
     }

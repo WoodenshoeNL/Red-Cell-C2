@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1035 | 231 | 31 |
+| Tasks closed | 1037 | 231 | 31 |
 | Bugs filed against | 140 | 36 | 9 |
-| Bug rate (bugs/task) | 0.14 | 0.16 | 0.29 |
-| Quality score | 86% | 84% | 71% |
+| Bug rate (bugs/task) | 0.13 | 0.16 | 0.29 |
+| Quality score | 87% | 84% | 71% |
 
-*Bug rates: Claude 140/1035=0.14, Codex 36/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 140/1037=0.13, Codex 36/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -4710,3 +4710,13 @@ Security posture: strong. AES-256-CTR with per-agent monotonic CTR offsets, HKDF
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: failed — `cargo check` passed, `cargo clippy -- -D warnings` passed, `cargo test --workspace` failed on 3 pivot_dispatch tests (pivot_connect_new_child_agent_registered_and_announced, pivot_disconnect_failure_broadcasts_error_without_modifying_registry, pivot_disconnect_removes_link_and_marks_child_dead). All other 4724+ tests passed. Root cause: pivot_connect_success_payload() still uses legacy init body without INIT_EXT_MONOTONIC_CTR flag for child agents. Filed as red-cell-c2-r8x9g.
+
+### QA Review — 2026-03-31 17:15 — 3702f057..ac4147bf
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 0 | Closed: red-cell-c2-r8x9g (pivot_dispatch monotonic CTR fix), red-cell-c2-qkvt6 (phantom callback command_id/request_id in clear). Currently working on red-cell-c2-odv18 (CTR offset merge). |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: partially broken — `cargo check --workspace` passed, but `cargo test` fails to compile due to pre-existing stale `recv_ctr_offset`/`send_ctr_offset` references in phantom agent.rs test code (5 locations). This is tracked by in-progress issue red-cell-c2-odv18. No new bugs filed — all changes in range are clean.

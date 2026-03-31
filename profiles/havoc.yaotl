@@ -35,7 +35,7 @@ Demon {
     # builds that do not negotiate INIT_EXT_MONOTONIC_CTR.  Legacy CTR mode resets
     # the AES-CTR keystream to offset 0 every packet (two-time-pad risk).
     # Default: false (rejects legacy-mode agents).
-    AllowLegacyCtr = true
+    AllowLegacyCtr = false
 
     Injection {
         Spawn64 = "C:\\Windows\\System32\\notepad.exe"

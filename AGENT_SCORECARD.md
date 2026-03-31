@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1046 | 231 | 31 |
+| Tasks closed | 1047 | 231 | 31 |
 | Bugs filed against | 142 | 36 | 9 |
 | Bug rate (bugs/task) | 0.14 | 0.16 | 0.29 |
 | Quality score | 86% | 84% | 71% |
 
-*Bug rates: Claude 142/1046=0.14, Codex 36/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 142/1047=0.14, Codex 36/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-31 20:15 — 460c131b..3426047f
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 0 | Closed: red-cell-c2-lpc04 (workflow/close-hygiene bug — verified fix commit 6e78825d was present and pushed). |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: passed — `cargo check` clean, `cargo clippy -- -D warnings` 0 warnings. `red-cell-common` 343 tests all pass. Integration tests in other crates time out (pre-existing infrastructure issue, not code regressions). No code changes this period — admin/issue-hygiene only.
 
 ### QA Review — 2026-03-31 19:56 — 5948d9a2..c54c2528
 

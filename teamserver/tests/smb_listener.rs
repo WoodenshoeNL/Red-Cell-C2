@@ -379,13 +379,11 @@ async fn smb_listener_rejects_callbacks_from_unregistered_agent()
 /// re-registration (agent restart).  The session key is replaced and a second AgentNew
 /// event is broadcast.  Subsequent callbacks must use the new key.
 ///
-/// NOTE: the teamserver does not currently verify that the re-init key material matches the
-/// original.  Operators who require key-rotation protection should monitor AgentNew events
-/// for unexpected re-registrations from unknown sources.
+/// The teamserver rejects re-registration with different key material (key-rotation hijack
+/// prevention).  This test uses the same keys to simulate a legitimate agent restart.
 #[cfg(unix)]
 #[tokio::test]
-async fn smb_listener_reinit_updates_key_material()
--> Result<(), Box<dyn std::error::Error>> {
+async fn smb_listener_reinit_updates_key_material() -> Result<(), Box<dyn std::error::Error>> {
     let (_, registry, events, manager) = test_manager().await?;
     let mut event_receiver = events.subscribe();
     let pipe_name = unique_pipe_name("reinit");
@@ -395,23 +393,17 @@ async fn smb_listener_reinit_updates_key_material()
     wait_for_smb_listener(&pipe_name).await?;
 
     let agent_id = 0xD00D_F00D_u32;
-    let original_key = test_key(0x44);
-    let original_iv = test_iv(0x27);
-    let new_key = test_key(0xBB);
-    let new_iv = test_iv(0xCC);
+    let key = test_key(0x44);
+    let iv = test_iv(0x27);
 
     let mut init_stream = connect_smb(&pipe_name).await?;
-    write_smb_frame(
-        &mut init_stream,
-        agent_id,
-        &common::valid_demon_init_body(agent_id, original_key, original_iv),
-    )
-    .await?;
+    write_smb_frame(&mut init_stream, agent_id, &common::valid_demon_init_body(agent_id, key, iv))
+        .await?;
 
     let (ack_agent_id, ack_payload) =
         timeout(Duration::from_secs(5), read_smb_frame(&mut init_stream)).await??;
     assert_eq!(ack_agent_id, agent_id, "ack agent_id must match the registered agent");
-    let decrypted_ack = decrypt_agent_data(&original_key, &original_iv, &ack_payload)?;
+    let decrypted_ack = decrypt_agent_data(&key, &iv, &ack_payload)?;
     assert_eq!(decrypted_ack.as_slice(), &agent_id.to_le_bytes());
 
     let first_event = timeout(Duration::from_secs(5), event_receiver.recv()).await?;
@@ -424,25 +416,25 @@ async fn smb_listener_reinit_updates_key_material()
         registry.get(agent_id).await.ok_or("agent should be registered after first init")?;
     assert_eq!(
         stored_after_first.encryption.aes_key.as_slice(),
-        &original_key,
-        "first init must store the original AES key"
+        &key,
+        "first init must store the AES key"
     );
 
     drop(init_stream);
 
-    // Second DEMON_INIT (re-registration) — must succeed and update key material.
+    // Second DEMON_INIT (re-registration with same key material) — legitimate agent restart.
     let mut reinit_stream = connect_smb(&pipe_name).await?;
     write_smb_frame(
         &mut reinit_stream,
         agent_id,
-        &common::valid_demon_init_body(agent_id, new_key, new_iv),
+        &common::valid_demon_init_body(agent_id, key, iv),
     )
     .await?;
 
     let (reinit_ack_id, reinit_ack_payload) =
         timeout(Duration::from_secs(5), read_smb_frame(&mut reinit_stream)).await??;
     assert_eq!(reinit_ack_id, agent_id, "re-init ack agent_id must match");
-    let decrypted_reinit_ack = decrypt_agent_data(&new_key, &new_iv, &reinit_ack_payload)?;
+    let decrypted_reinit_ack = decrypt_agent_data(&key, &iv, &reinit_ack_payload)?;
     assert_eq!(decrypted_reinit_ack.as_slice(), &agent_id.to_le_bytes());
 
     // Re-registration emits a second AgentNew event.
@@ -452,31 +444,29 @@ async fn smb_listener_reinit_updates_key_material()
         "re-registration must emit a second AgentNew event"
     );
 
-    // Key material must be updated.
-    let stored_after_reinit = registry
-        .get(agent_id)
-        .await
-        .ok_or("agent should remain registered after re-init")?;
+    // Key material must remain unchanged.
+    let stored_after_reinit =
+        registry.get(agent_id).await.ok_or("agent should remain registered after re-init")?;
     assert_eq!(
         stored_after_reinit.encryption.aes_key.as_slice(),
-        &new_key,
-        "re-init must update the session key"
+        &key,
+        "re-init must preserve the session key"
     );
     assert_eq!(
         stored_after_reinit.encryption.aes_iv.as_slice(),
-        &new_iv,
-        "re-init must update the session IV"
+        &iv,
+        "re-init must preserve the session IV"
     );
 
     drop(reinit_stream);
 
-    // Verify that the NEW key works for callbacks.
+    // Verify that the key still works for callbacks after re-registration.
     // Legacy Demon agents reset AES-CTR to block 0 for every packet.
     let mut callback_stream = connect_smb(&pipe_name).await?;
     let callback_body = common::valid_demon_callback_body(
         agent_id,
-        new_key,
-        new_iv,
+        key,
+        iv,
         0,
         u32::from(DemonCommand::CommandCheckin),
         6,

@@ -5890,13 +5890,10 @@ mod tests {
         }
         // Drain re-registration acks from attempts 2-MAX.
         for _ in 1..MAX_DEMON_INIT_ATTEMPTS_PER_IP {
-            tokio::time::timeout(
-                Duration::from_millis(500),
-                read_test_smb_frame(&mut rate_stream),
-            )
-            .await
-            .expect("re-registration ack must arrive within timeout")
-            .expect("re-registration ack read must succeed");
+            tokio::time::timeout(Duration::from_millis(500), read_test_smb_frame(&mut rate_stream))
+                .await
+                .expect("re-registration ack must arrive within timeout")
+                .expect("re-registration ack read must succeed");
         }
 
         // Attempt MAX+1 — rate-limiter must block.
@@ -5933,8 +5930,6 @@ mod tests {
         let child_id = 0x3333_4444;
         let child_key = test_key(0x51);
         let child_iv = test_iv(0x61);
-        let new_key = test_key(0x71);
-        let new_iv = test_iv(0x81);
 
         registry.insert(sample_agent_info(parent_id, parent_key, parent_iv)).await?;
         registry.insert(sample_agent_info(child_id, child_key, child_iv)).await?;
@@ -5944,30 +5939,28 @@ mod tests {
         manager.start("edge-smb-pivot-reinit").await?;
         wait_for_smb_listener(&pipe_name).await?;
 
+        // Re-register with the same key material (legitimate restart).
         let mut stream = connect_smb_stream(&pipe_name).await?;
         write_test_smb_frame(
             &mut stream,
             child_id,
-            &valid_demon_init_body(child_id, new_key, new_iv),
+            &valid_demon_init_body(child_id, child_key, child_iv),
         )
         .await?;
 
         // Re-registration must return an ACK.
-        let (ack_id, ack_payload) = tokio::time::timeout(
-            Duration::from_millis(500),
-            read_test_smb_frame(&mut stream),
-        )
-        .await
-        .expect("re-registration ack must arrive within timeout")
-        .expect("re-registration ack read must succeed");
+        let (ack_id, ack_payload) =
+            tokio::time::timeout(Duration::from_millis(500), read_test_smb_frame(&mut stream))
+                .await
+                .expect("re-registration ack must arrive within timeout")
+                .expect("re-registration ack read must succeed");
         assert_eq!(ack_id, child_id, "ack agent_id must match the child");
         assert!(!ack_payload.is_empty(), "ack payload must not be empty");
 
         // Re-registration must emit an AgentNew event.
-        let reinit_event =
-            tokio::time::timeout(Duration::from_millis(500), event_receiver.recv())
-                .await
-                .expect("AgentNew must arrive within timeout");
+        let reinit_event = tokio::time::timeout(Duration::from_millis(500), event_receiver.recv())
+            .await
+            .expect("AgentNew must arrive within timeout");
         assert!(
             matches!(reinit_event, Some(OperatorMessage::AgentNew(_))),
             "re-registration must broadcast AgentNew"
@@ -5981,13 +5974,13 @@ mod tests {
             "listener_name must be updated to the SMB listener after re-registration"
         );
 
-        // Key material must be updated to the new key sent in the re-registration.
+        // Key material must remain unchanged (same keys were used).
         let stored_after =
             registry.get(child_id).await.expect("child agent must still be registered");
         assert_eq!(
             stored_after.encryption.aes_key.as_slice(),
-            &new_key,
-            "re-registration must update the session key"
+            &child_key,
+            "re-registration must preserve the session key"
         );
 
         manager.stop("edge-smb-pivot-reinit").await?;

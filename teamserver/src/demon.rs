@@ -8,6 +8,7 @@ use red_cell_common::crypto::{
 };
 use red_cell_common::demon::{DemonCommand, DemonEnvelope, DemonHeader, DemonProtocolError};
 use red_cell_common::{AgentEncryptionInfo, AgentRecord};
+use subtle::ConstantTimeEq;
 use thiserror::Error;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -121,6 +122,20 @@ pub enum DemonParserError {
          set AllowLegacyCtr = true in the Demon block to accept insecure sessions"
     )]
     LegacyCtrNotAllowed,
+    /// A `DEMON_INIT` re-registration was rejected because the supplied key material
+    /// does not match the session keys on file for this agent.
+    ///
+    /// This prevents an attacker who knows a valid `agent_id` from injecting arbitrary
+    /// key material to hijack an existing session.  A legitimate agent restart will
+    /// present the same compiled-in (or HKDF-derived) key material.
+    #[error(
+        "DEMON_INIT re-registration rejected for agent 0x{agent_id:08X}: \
+         key material does not match the existing session — possible key-rotation hijack"
+    )]
+    KeyMismatchOnReInit {
+        /// The agent identifier that attempted the re-registration.
+        agent_id: u32,
+    },
 }
 
 /// Parser for incoming Demon transport packets backed by the teamserver agent registry.
@@ -233,7 +248,7 @@ impl DemonPacketParser {
                 return Ok(ParsedDemonPacket::Reconnect { header: envelope.header, request_id });
             }
 
-            if self.registry.get(envelope.header.agent_id).await.is_some() {
+            if let Some(existing) = self.registry.get(envelope.header.agent_id).await {
                 // Agent already registered: parse the fresh metadata and update the
                 // existing record in-place instead of failing.  This handles the case
                 // where a Demon agent restarts after a crash or kill-date reset and
@@ -245,6 +260,24 @@ impl DemonPacketParser {
                     now,
                     self.init_secret.as_deref(),
                 )?;
+
+                // Guard against key-rotation hijack: the incoming key material must
+                // match the session keys already on file.  A legitimate agent restart
+                // presents the same compiled-in (or HKDF-derived) credentials; an
+                // attacker who only knows the agent_id cannot forge them.
+                let keys_match = existing.encryption.aes_key.ct_eq(&agent.encryption.aes_key)
+                    & existing.encryption.aes_iv.ct_eq(&agent.encryption.aes_iv);
+                if keys_match.unwrap_u8() == 0 {
+                    warn!(
+                        agent_id = format_args!("0x{:08X}", envelope.header.agent_id),
+                        listener_name,
+                        "rejecting DEMON_INIT re-registration: key material does not match \
+                         existing session — possible key-rotation hijack attempt"
+                    );
+                    return Err(DemonParserError::KeyMismatchOnReInit {
+                        agent_id: envelope.header.agent_id,
+                    });
+                }
 
                 if legacy_ctr && !self.allow_legacy_ctr {
                     warn!(
@@ -1089,8 +1122,9 @@ mod tests {
         // Advance the stored CTR offset so we can verify it resets on re-init.
         registry.set_ctr_offset(agent_id, 99).await.expect("set ctr offset should succeed");
 
-        // Agent restarts: sends a fresh DEMON_INIT with new keys from a new IP via a new listener.
-        let reinit_packet = build_init_packet(agent_id, test_key(0x99), test_iv(0x55));
+        // Agent restarts: sends a fresh DEMON_INIT with the same keys from a new IP
+        // via a new listener.  Key material must match for re-registration to succeed.
+        let reinit_packet = build_init_packet(agent_id, first_key, first_iv);
         let parsed = parser
             .parse_for_listener(&reinit_packet, "198.51.100.99", "smb-secondary")
             .await
@@ -1124,7 +1158,9 @@ mod tests {
         let registry = test_registry().await;
         let parser = legacy_parser(registry.clone());
         let agent_id = 0x3344_5566;
-        let init_packet = build_init_packet(agent_id, test_key(0x10), test_iv(0x20));
+        let key = test_key(0x10);
+        let iv = test_iv(0x20);
+        let init_packet = build_init_packet(agent_id, key, iv);
         parser
             .parse_for_listener(&init_packet, "10.0.0.1", "http-main")
             .await
@@ -1135,7 +1171,7 @@ mod tests {
             .await
             .expect("set_note should succeed");
 
-        let reinit_packet = build_init_packet(agent_id, test_key(0x11), test_iv(0x21));
+        let reinit_packet = build_init_packet(agent_id, key, iv);
         parser
             .parse_for_listener(&reinit_packet, "10.0.0.2", "http-main")
             .await
@@ -1150,7 +1186,9 @@ mod tests {
         let registry = test_registry().await;
         let parser = legacy_parser(registry.clone());
         let agent_id = 0xDEAD_0001;
-        let init_packet = build_init_packet(agent_id, test_key(0x30), test_iv(0x40));
+        let key = test_key(0x30);
+        let iv = test_iv(0x40);
+        let init_packet = build_init_packet(agent_id, key, iv);
         parser
             .parse_for_listener(&init_packet, "10.10.10.10", "http-main")
             .await
@@ -1161,8 +1199,8 @@ mod tests {
         let stored = registry.get(agent_id).await.expect("agent should still be in registry");
         assert!(!stored.active, "agent should be dead before re-registration");
 
-        // Agent restarts and sends a fresh DEMON_INIT.
-        let reinit_packet = build_init_packet(agent_id, test_key(0x31), test_iv(0x41));
+        // Agent restarts and sends a fresh DEMON_INIT with the same key material.
+        let reinit_packet = build_init_packet(agent_id, key, iv);
         let parsed = parser
             .parse_for_listener(&reinit_packet, "10.10.10.11", "http-main")
             .await
@@ -1176,6 +1214,64 @@ mod tests {
         let stored = registry.get(agent_id).await.expect("agent should be in registry");
         assert!(stored.active, "re-registered agent must be active again");
         assert_eq!(stored.reason, "", "reason must be cleared on re-registration");
+    }
+
+    #[tokio::test]
+    async fn parse_reinit_rejects_mismatched_key_material() {
+        let registry = test_registry().await;
+        let parser = legacy_parser(registry.clone());
+        let agent_id = 0xBEEF_0001;
+        let init_packet = build_init_packet(agent_id, test_key(0xAA), test_iv(0xBB));
+        parser
+            .parse_for_listener(&init_packet, "10.0.0.1", "http-main")
+            .await
+            .expect("initial init should succeed");
+
+        // An attacker who knows the agent_id tries to re-register with different keys.
+        let hijack_packet = build_init_packet(agent_id, test_key(0xCC), test_iv(0xDD));
+        let err = parser
+            .parse_for_listener(&hijack_packet, "10.0.0.99", "http-main")
+            .await
+            .expect_err("re-registration with different keys must fail");
+
+        assert!(
+            matches!(err, DemonParserError::KeyMismatchOnReInit { agent_id: id } if id == agent_id),
+            "expected KeyMismatchOnReInit, got {err:?}"
+        );
+
+        // Verify the original agent record is untouched.
+        let stored = registry.get(agent_id).await.expect("agent should still be registered");
+        assert_eq!(stored.external_ip, "10.0.0.1", "original IP must be preserved");
+        assert_eq!(
+            stored.encryption.aes_key.as_slice(),
+            test_key(0xAA).as_slice(),
+            "original AES key must be preserved"
+        );
+    }
+
+    #[tokio::test]
+    async fn parse_reinit_rejects_mismatched_iv_only() {
+        let registry = test_registry().await;
+        let parser = legacy_parser(registry.clone());
+        let agent_id = 0xBEEF_0002;
+        let key = test_key(0xAA);
+        let init_packet = build_init_packet(agent_id, key, test_iv(0xBB));
+        parser
+            .parse_for_listener(&init_packet, "10.0.0.1", "http-main")
+            .await
+            .expect("initial init should succeed");
+
+        // Same key but different IV — still a mismatch.
+        let hijack_packet = build_init_packet(agent_id, key, test_iv(0xCC));
+        let err = parser
+            .parse_for_listener(&hijack_packet, "10.0.0.99", "http-main")
+            .await
+            .expect_err("re-registration with different IV must fail");
+
+        assert!(
+            matches!(err, DemonParserError::KeyMismatchOnReInit { agent_id: id } if id == agent_id),
+            "expected KeyMismatchOnReInit, got {err:?}"
+        );
     }
 
     #[tokio::test]

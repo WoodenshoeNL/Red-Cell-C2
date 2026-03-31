@@ -456,9 +456,8 @@ async fn dns_listener_pipeline_rejects_callbacks_from_unregistered_agent()
 /// re-registration (agent restart after crash or kill-date reset).  The session key is
 /// replaced and the DNS listener returns "ack".
 ///
-/// NOTE: the teamserver does not currently verify that the re-init key material matches the
-/// original.  Operators who require key-rotation protection should track agent restarts via
-/// the `AgentNew` event and alert on unexpected re-registrations from unknown IPs.
+/// The teamserver rejects re-registration with different key material (key-rotation hijack
+/// prevention).  This test uses the same keys to simulate a legitimate agent restart.
 #[tokio::test]
 async fn dns_listener_pipeline_reinit_updates_key_material()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -473,58 +472,49 @@ async fn dns_listener_pipeline_reinit_updates_key_material()
     let port = free_udp_port();
     let domain = "c2.example.com";
     let agent_id = 0xDEAD_C0DE_u32;
-    let original_key: [u8; AGENT_KEY_LENGTH] = [
+    let key: [u8; AGENT_KEY_LENGTH] = [
         0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x4F,
         0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5A, 0x5B, 0x5C, 0x5D, 0x5E,
         0x5F, 0x60,
     ];
-    let original_iv: [u8; AGENT_IV_LENGTH] = [
+    let iv: [u8; AGENT_IV_LENGTH] = [
         0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF,
         0x00,
-    ];
-    let new_key: [u8; AGENT_KEY_LENGTH] = [
-        0xBB, 0xAA, 0x99, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x00, 0xFF, 0xEE, 0xDD,
-        0xCC, 0xBB, 0xAA, 0x99, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x00, 0xFF, 0xEE,
-        0xDD, 0xCC,
-    ];
-    let new_iv: [u8; AGENT_IV_LENGTH] = [
-        0xCC, 0xBB, 0xAA, 0x99, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x00, 0xFF, 0xEE,
-        0xDD,
     ];
 
     manager.create(dns_listener("dns-reinit", port, domain)).await?;
     manager.start("dns-reinit").await?;
     let client = wait_for_dns_listener(port).await?;
 
-    // First init — must succeed and register the original key.
-    let init_body = common::valid_demon_init_body(agent_id, original_key, original_iv);
+    // First init — must succeed and register the key.
+    let init_body = common::valid_demon_init_body(agent_id, key, iv);
     let result = dns_upload_demon_packet(&client, agent_id, &init_body, domain, 0x6000).await?;
     assert_eq!(result, "ack", "first DEMON_INIT must succeed");
 
     let stored = registry.get(agent_id).await.ok_or("agent should be registered")?;
-    assert_eq!(stored.encryption.aes_key.as_slice(), &original_key);
+    assert_eq!(stored.encryption.aes_key.as_slice(), &key);
 
     // Drain first AgentNew event.
     let event = timeout(Duration::from_secs(5), event_receiver.recv()).await?;
     assert!(matches!(event, Some(OperatorMessage::AgentNew(_))));
 
-    // Second init (same agent_id, new key) — treated as re-registration, must succeed.
-    let reinit_body = common::valid_demon_init_body(agent_id, new_key, new_iv);
+    // Second init (same agent_id, same key) — legitimate agent restart re-registration.
+    let reinit_body = common::valid_demon_init_body(agent_id, key, iv);
     let reinit_result =
         dns_upload_demon_packet(&client, agent_id, &reinit_body, domain, 0x7000).await?;
     assert_eq!(reinit_result, "ack", "re-registration DEMON_INIT must be accepted");
 
-    // Key must be updated to the new material.
+    // Key must remain unchanged.
     let stored_after = registry.get(agent_id).await.ok_or("agent should remain registered")?;
     assert_eq!(
         stored_after.encryption.aes_key.as_slice(),
-        &new_key,
-        "re-init must update the session key to the new material"
+        &key,
+        "re-init must preserve the session key"
     );
     assert_eq!(
         stored_after.encryption.aes_iv.as_slice(),
-        &new_iv,
-        "re-init must update the session IV to the new material"
+        &iv,
+        "re-init must preserve the session IV"
     );
 
     // Still exactly one active entry.

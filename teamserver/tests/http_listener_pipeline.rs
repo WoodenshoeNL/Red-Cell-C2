@@ -404,9 +404,8 @@ async fn http_listener_pipeline_ignores_forwarded_for_from_untrusted_peer()
 /// (agent restart after crash or kill-date reset).  The session key is replaced and the
 /// teamserver returns a fresh init ACK.
 ///
-/// NOTE: the teamserver does not currently verify that the re-init key material matches the
-/// original.  Operators who require key-rotation protection should track agent restarts via
-/// the `AgentNew` event and alert on unexpected re-registrations from unknown IPs.
+/// The teamserver rejects re-registration with different key material (key-rotation hijack
+/// prevention).  This test uses the same keys to simulate a legitimate agent restart.
 #[tokio::test]
 async fn http_listener_pipeline_reinit_updates_key_material()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -418,23 +417,14 @@ async fn http_listener_pipeline_reinit_updates_key_material()
         .with_demon_allow_legacy_ctr(true);
     let (port, guard) = common::available_port()?;
     let agent_id = 0xDEAD_C0DE;
-    let original_key: [u8; AGENT_KEY_LENGTH] = [
+    let key: [u8; AGENT_KEY_LENGTH] = [
         0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x4F,
         0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5A, 0x5B, 0x5C, 0x5D, 0x5E,
         0x5F, 0x60,
     ];
-    let original_iv: [u8; AGENT_IV_LENGTH] = [
+    let iv: [u8; AGENT_IV_LENGTH] = [
         0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F, 0x30, 0x31, 0x32,
         0x33,
-    ];
-    let new_key: [u8; AGENT_KEY_LENGTH] = [
-        0xBB, 0xBC, 0xBD, 0xBE, 0xBF, 0xC0, 0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9,
-        0xCA, 0xCB, 0xCC, 0xCD, 0xCE, 0xCF, 0xD0, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8,
-        0xD9, 0xDA,
-    ];
-    let new_iv: [u8; AGENT_IV_LENGTH] = [
-        0xCC, 0xCD, 0xCE, 0xCF, 0xD0, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8, 0xD9, 0xDA,
-        0xDB,
     ];
 
     manager.create(http_listener("edge-http-reinit", port)).await?;
@@ -444,38 +434,38 @@ async fn http_listener_pipeline_reinit_updates_key_material()
 
     let client = Client::new();
 
-    // First INIT — must succeed and register the original key.
+    // First INIT — must succeed and register the key.
     client
         .post(format!("http://127.0.0.1:{port}/"))
-        .body(common::valid_demon_init_body(agent_id, original_key, original_iv))
+        .body(common::valid_demon_init_body(agent_id, key, iv))
         .send()
         .await?
         .error_for_status()?;
 
     let stored_after_first =
         registry.get(agent_id).await.ok_or("agent should be registered after first init")?;
-    assert_eq!(stored_after_first.encryption.aes_key.as_slice(), &original_key);
+    assert_eq!(stored_after_first.encryption.aes_key.as_slice(), &key);
 
-    // Second INIT (same agent_id, new key material) — treated as re-registration (agent restart).
+    // Second INIT (same agent_id, same key material) — legitimate agent restart.
     client
         .post(format!("http://127.0.0.1:{port}/"))
-        .body(common::valid_demon_init_body(agent_id, new_key, new_iv))
+        .body(common::valid_demon_init_body(agent_id, key, iv))
         .send()
         .await?
         .error_for_status()?;
 
-    // Key must be updated to the new material.
+    // Key must remain unchanged.
     let stored_after_reinit =
         registry.get(agent_id).await.ok_or("agent should still be registered after re-init")?;
     assert_eq!(
         stored_after_reinit.encryption.aes_key.as_slice(),
-        &new_key,
-        "re-init must update the session key to the new material"
+        &key,
+        "re-init must preserve the session key"
     );
     assert_eq!(
         stored_after_reinit.encryption.aes_iv.as_slice(),
-        &new_iv,
-        "re-init must update the session IV to the new material"
+        &iv,
+        "re-init must preserve the session IV"
     );
 
     // Still exactly one active entry.

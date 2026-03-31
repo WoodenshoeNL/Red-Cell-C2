@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1047 | 231 | 31 |
-| Bugs filed against | 146 | 36 | 9 |
+| Tasks closed | 1049 | 231 | 31 |
+| Bugs filed against | 147 | 36 | 9 |
 | Bug rate (bugs/task) | 0.14 | 0.16 | 0.29 |
 | Quality score | 86% | 84% | 71% |
 
-*Bug rates: Claude 146/1047=0.14, Codex 36/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 147/1049=0.14, Codex 36/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -23,7 +23,7 @@ Each loop run updates the running totals and appends a review entry.
 | unwrap / expect in production | 9 | 0 | 0 |
 | Missing tests / stale tests | 59 | 15 | 5 |
 | Clippy warnings | 7 | 0 | 1 |
-| Protocol errors | 24 | 31 | 3 |
+| Protocol errors | 25 | 31 | 3 |
 | Security issues | 53 | 39 | 0 |
 | Architecture drift | 19 | 23 | 0 |
 | Memory / resource leaks | 10 | 11 | 1 |
@@ -40,6 +40,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-31 21:12 — 145b7c36..eda707db
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 1 | Closed red-cell-c2-0q1px (fix: add CommandGetJob to Phantom checkin loop). Filed+closed red-cell-c2-ygdoh (init_callback_flow HTTP 404 — BE/LE encoding bug; fixed same cycle). Closed red-cell-c2-e9un2 (e2e mock tests now passing). |
+| Ubuntu-C2-dev01-claude | 1 | 0 | Closed red-cell-c2-otopv: found BE→LE encoding root cause, fixed commit 20d3680a (126/126 tests pass). Claimed red-cell-c2-h9yjh. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: cargo check clean, clippy clean (0 warnings). Tests: 126/126 pass after LE encoding fix (commit 20d3680a).
 
 ### QA Review — 2026-03-31 20:45 — 4a5bef8c..ce4923d2
 

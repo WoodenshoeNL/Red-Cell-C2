@@ -757,7 +757,7 @@ fn deserialize_optional_zeroizing_string<'de, D: Deserializer<'de>>(
 }
 
 /// Demon build-time defaults and injection settings.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Deserialize)]
 pub struct DemonConfig {
     /// Beacon sleep interval.
     #[serde(rename = "Sleep", default)]
@@ -827,6 +827,27 @@ pub struct DemonConfig {
     /// HCL profile key: `AllowLegacyCtr` (boolean, default `false`).
     #[serde(rename = "AllowLegacyCtr", default)]
     pub allow_legacy_ctr: bool,
+}
+
+impl fmt::Debug for DemonConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DemonConfig")
+            .field("sleep", &self.sleep)
+            .field("jitter", &self.jitter)
+            .field("indirect_syscall", &self.indirect_syscall)
+            .field("stack_duplication", &self.stack_duplication)
+            .field("sleep_technique", &self.sleep_technique)
+            .field("proxy_loading", &self.proxy_loading)
+            .field("amsi_etw_patching", &self.amsi_etw_patching)
+            .field("injection", &self.injection)
+            .field("dotnet_name_pipe", &self.dotnet_name_pipe)
+            .field("binary", &self.binary)
+            .field("init_secret", &self.init_secret.as_ref().map(|_| "[redacted]"))
+            .field("trust_x_forwarded_for", &self.trust_x_forwarded_for)
+            .field("trusted_proxy_peers", &self.trusted_proxy_peers)
+            .field("allow_legacy_ctr", &self.allow_legacy_ctr)
+            .finish()
+    }
 }
 
 /// Spawn-to process defaults for injection.
@@ -3123,5 +3144,44 @@ mod tests {
         assert!(debug.contains("value: \"[redacted]\""));
         assert!(debug.contains("role: Admin"));
         assert!(!debug.contains("rc2-api-key-secret"));
+    }
+
+    fn demon_config_with_secret(secret: Option<&str>) -> DemonConfig {
+        DemonConfig {
+            sleep: None,
+            jitter: None,
+            indirect_syscall: false,
+            stack_duplication: false,
+            sleep_technique: None,
+            proxy_loading: None,
+            amsi_etw_patching: None,
+            injection: None,
+            dotnet_name_pipe: None,
+            binary: None,
+            init_secret: secret.map(|s| Zeroizing::new(s.to_owned())),
+            trust_x_forwarded_for: false,
+            trusted_proxy_peers: vec![],
+            allow_legacy_ctr: false,
+        }
+    }
+
+    #[test]
+    fn demon_config_debug_redacts_init_secret() {
+        let config = demon_config_with_secret(Some("hkdf-super-secret"));
+
+        let debug = format!("{config:?}");
+
+        assert!(debug.contains("DemonConfig"));
+        assert!(debug.contains("init_secret: Some(\"[redacted]\")"));
+        assert!(!debug.contains("hkdf-super-secret"));
+    }
+
+    #[test]
+    fn demon_config_debug_none_init_secret() {
+        let config = demon_config_with_secret(None);
+
+        let debug = format!("{config:?}");
+
+        assert!(debug.contains("init_secret: None"));
     }
 }

@@ -408,6 +408,16 @@ impl PayloadBuilderService {
         profile: &Profile,
         repo_root: &Path,
     ) -> Result<Self, PayloadBuildError> {
+        Self::from_profile_with_repo_root_impl(profile, repo_root, run_version_command)
+    }
+
+    /// Inner constructor that accepts a custom version-output function so that
+    /// tests can avoid subprocess spawns entirely.
+    fn from_profile_with_repo_root_impl(
+        profile: &Profile,
+        repo_root: &Path,
+        version_output_fn: fn(&Path) -> Result<String, PayloadBuildError>,
+    ) -> Result<Self, PayloadBuildError> {
         let build = profile.teamserver.build.as_ref();
 
         let compiler_x64 = resolve_executable(
@@ -415,23 +425,36 @@ impl PayloadBuilderService {
             "x86_64-w64-mingw32-gcc",
             Some(repo_root),
         )?;
-        let compiler_x64_version =
-            verify_tool_version(&compiler_x64, parse_gcc_version, &GCC_MIN_VERSION)?;
+        let compiler_x64_version = verify_tool_version_with(
+            &compiler_x64,
+            parse_gcc_version,
+            &GCC_MIN_VERSION,
+            version_output_fn,
+        )?;
 
         let compiler_x86 = resolve_executable(
             build.and_then(|config| config.compiler86.as_deref()),
             "i686-w64-mingw32-gcc",
             Some(repo_root),
         )?;
-        let compiler_x86_version =
-            verify_tool_version(&compiler_x86, parse_gcc_version, &GCC_MIN_VERSION)?;
+        let compiler_x86_version = verify_tool_version_with(
+            &compiler_x86,
+            parse_gcc_version,
+            &GCC_MIN_VERSION,
+            version_output_fn,
+        )?;
 
         let nasm = resolve_executable(
             build.and_then(|config| config.nasm.as_deref()),
             "nasm",
             Some(repo_root),
         )?;
-        let nasm_version = verify_tool_version(&nasm, parse_nasm_version, &NASM_MIN_VERSION)?;
+        let nasm_version = verify_tool_version_with(
+            &nasm,
+            parse_nasm_version,
+            &NASM_MIN_VERSION,
+            version_output_fn,
+        )?;
 
         tracing::info!(
             compiler_x64 = %compiler_x64.display(),
@@ -1160,18 +1183,25 @@ fn parse_nasm_version(output: &str, path: &Path) -> Result<ToolchainVersion, Pay
     Ok(ToolchainVersion { major, minor, patch, raw: token.to_owned() })
 }
 
-/// Run `path --version`, parse with `parse_fn`, and enforce `requirement`.
-fn verify_tool_version(
-    path: &Path,
-    parse_fn: fn(&str, &Path) -> Result<ToolchainVersion, PayloadBuildError>,
-    requirement: &VersionRequirement,
-) -> Result<ToolchainVersion, PayloadBuildError> {
+/// Obtain `--version` output by spawning the tool binary.
+fn run_version_command(path: &Path) -> Result<String, PayloadBuildError> {
     let output = std::process::Command::new(path).arg("--version").output().map_err(|err| {
         PayloadBuildError::ToolchainUnavailable {
             message: format!("failed to run `{} --version`: {err}", path.display()),
         }
     })?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Run `path --version` (or obtain the version string via `output_fn`),
+/// parse with `parse_fn`, and enforce `requirement`.
+fn verify_tool_version_with(
+    path: &Path,
+    parse_fn: fn(&str, &Path) -> Result<ToolchainVersion, PayloadBuildError>,
+    requirement: &VersionRequirement,
+    output_fn: fn(&Path) -> Result<String, PayloadBuildError>,
+) -> Result<ToolchainVersion, PayloadBuildError> {
+    let stdout = output_fn(path)?;
     let version = parse_fn(&stdout, path)?;
     if requirement.is_satisfied_by(&version) {
         Ok(version)
@@ -2150,11 +2180,7 @@ mod tests {
     use serde_json::json;
     use zeroize::Zeroizing;
 
-    // Spawns fake shell scripts via verify_tool_version; flaky under parallel
-    // test-suite load (high process-spawn contention, systemd-oomd pressure on
-    // this dev VM).  Run explicitly with `cargo test -- --include-ignored`.
     #[test]
-    #[ignore]
     fn from_profile_resolves_workspace_root_and_toolchain() -> Result<(), Box<dyn std::error::Error>>
     {
         let temp = TempDir::new()?;
@@ -2164,7 +2190,11 @@ mod tests {
         let profile = constructor_test_profile(&compiler_x64, &compiler_x86, &nasm);
         let repo_root = workspace_root()?;
 
-        let service = PayloadBuilderService::from_profile(&profile)?;
+        let service = PayloadBuilderService::from_profile_with_repo_root_impl(
+            &profile,
+            &repo_root,
+            read_fake_script_output,
+        )?;
 
         assert_eq!(service.inner.toolchain.compiler_x64, compiler_x64.canonicalize()?);
         assert_eq!(service.inner.toolchain.compiler_x86, compiler_x86.canonicalize()?);
@@ -2184,11 +2214,7 @@ mod tests {
         Ok(())
     }
 
-    // Spawns fake shell scripts via verify_tool_version; flaky under parallel
-    // test-suite load (high process-spawn contention, systemd-oomd pressure on
-    // this dev VM).  Run explicitly with `cargo test -- --include-ignored`.
     #[test]
-    #[ignore]
     fn from_profile_with_repo_root_resolves_toolchain_and_havoc_assets()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = TempDir::new()?;
@@ -2198,7 +2224,11 @@ mod tests {
         create_payload_assets(temp.path())?;
         let profile = constructor_test_profile(&compiler_x64, &compiler_x86, &nasm);
 
-        let service = PayloadBuilderService::from_profile_with_repo_root(&profile, temp.path())?;
+        let service = PayloadBuilderService::from_profile_with_repo_root_impl(
+            &profile,
+            temp.path(),
+            read_fake_script_output,
+        )?;
 
         assert_eq!(service.inner.toolchain.compiler_x64, compiler_x64.canonicalize()?);
         assert_eq!(service.inner.toolchain.compiler_x86, compiler_x86.canonicalize()?);
@@ -2257,11 +2287,7 @@ mod tests {
         Ok(())
     }
 
-    // Spawns fake shell scripts via verify_tool_version; flaky under parallel
-    // test-suite load (high process-spawn contention, systemd-oomd pressure on
-    // this dev VM).  Run explicitly with `cargo test -- --include-ignored`.
     #[test]
-    #[ignore]
     fn from_profile_with_repo_root_resolves_relative_toolchain_paths_against_repo_root()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = TempDir::new()?;
@@ -2279,7 +2305,11 @@ mod tests {
             Path::new("data/nasm/bin/nasm"),
         );
 
-        let service = PayloadBuilderService::from_profile_with_repo_root(&profile, temp.path())?;
+        let service = PayloadBuilderService::from_profile_with_repo_root_impl(
+            &profile,
+            temp.path(),
+            read_fake_script_output,
+        )?;
 
         assert_eq!(service.inner.toolchain.compiler_x64, compiler_x64.canonicalize()?);
         assert_eq!(service.inner.toolchain.compiler_x86, compiler_x86.canonicalize()?);
@@ -2312,11 +2342,7 @@ mod tests {
         Ok(())
     }
 
-    // Spawns fake shell scripts via verify_tool_version; flaky under parallel
-    // test-suite load (high process-spawn contention, systemd-oomd pressure on
-    // this dev VM).  Run explicitly with `cargo test -- --include-ignored`.
     #[test]
-    #[ignore]
     fn from_profile_rejects_missing_payload_assets() -> Result<(), Box<dyn std::error::Error>> {
         let temp = TempDir::new()?;
         let compiler_x64 = write_fake_gcc(&temp.path().join("bin/x64-gcc"))?;
@@ -2326,8 +2352,12 @@ mod tests {
         std::fs::remove_file(temp.path().join("src/Havoc/payloads/Shellcode.x86.bin"))?;
         let profile = constructor_test_profile(&compiler_x64, &compiler_x86, &nasm);
 
-        let error = PayloadBuilderService::from_profile_with_repo_root(&profile, temp.path())
-            .expect_err("missing asset should be rejected");
+        let error = PayloadBuilderService::from_profile_with_repo_root_impl(
+            &profile,
+            temp.path(),
+            read_fake_script_output,
+        )
+        .expect_err("missing asset should be rejected");
 
         assert!(matches!(
             error,
@@ -2338,11 +2368,7 @@ mod tests {
         Ok(())
     }
 
-    // Spawns fake shell scripts via verify_tool_version; flaky under parallel
-    // test-suite load (high process-spawn contention, systemd-oomd pressure on
-    // this dev VM).  Run explicitly with `cargo test -- --include-ignored`.
     #[test]
-    #[ignore]
     fn from_profile_rejects_outdated_gcc() -> Result<(), Box<dyn std::error::Error>> {
         let temp = TempDir::new()?;
         let compiler_x64 = write_fake_executable_with_output(
@@ -2354,8 +2380,12 @@ mod tests {
         create_payload_assets(temp.path())?;
         let profile = constructor_test_profile(&compiler_x64, &compiler_x86, &nasm);
 
-        let error = PayloadBuilderService::from_profile_with_repo_root(&profile, temp.path())
-            .expect_err("outdated gcc should be rejected");
+        let error = PayloadBuilderService::from_profile_with_repo_root_impl(
+            &profile,
+            temp.path(),
+            read_fake_script_output,
+        )
+        .expect_err("outdated gcc should be rejected");
 
         assert!(matches!(
             error,
@@ -2366,11 +2396,7 @@ mod tests {
         Ok(())
     }
 
-    // Spawns fake shell scripts via verify_tool_version; flaky under parallel
-    // test-suite load (high process-spawn contention, systemd-oomd pressure on
-    // this dev VM).  Run explicitly with `cargo test -- --include-ignored`.
     #[test]
-    #[ignore]
     fn from_profile_rejects_outdated_nasm() -> Result<(), Box<dyn std::error::Error>> {
         let temp = TempDir::new()?;
         let compiler_x64 = write_fake_gcc(&temp.path().join("bin/x64-gcc"))?;
@@ -2382,8 +2408,12 @@ mod tests {
         create_payload_assets(temp.path())?;
         let profile = constructor_test_profile(&compiler_x64, &compiler_x86, &nasm);
 
-        let error = PayloadBuilderService::from_profile_with_repo_root(&profile, temp.path())
-            .expect_err("outdated nasm should be rejected");
+        let error = PayloadBuilderService::from_profile_with_repo_root_impl(
+            &profile,
+            temp.path(),
+            read_fake_script_output,
+        )
+        .expect_err("outdated nasm should be rejected");
 
         assert!(matches!(
             error,
@@ -3262,6 +3292,34 @@ mod tests {
     /// Write a fake NASM that reports version 2.16.01.
     fn write_fake_nasm(path: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
         write_fake_executable_with_output(path, "NASM version 2.16.01 compiled on Jan  1 2023")
+    }
+
+    /// Read the version output embedded in a fake shell script created by
+    /// [`write_fake_executable_with_output`] without spawning a subprocess.
+    ///
+    /// The script format is:
+    /// ```text
+    /// #!/bin/sh
+    /// printf '%s\n' '<output>'
+    /// exit 0
+    /// ```
+    fn read_fake_script_output(path: &Path) -> Result<String, PayloadBuildError> {
+        let content = std::fs::read_to_string(path).map_err(|err| {
+            PayloadBuildError::ToolchainUnavailable {
+                message: format!("failed to read fake script `{}`: {err}", path.display()),
+            }
+        })?;
+        // The script format is: printf '%s\n' '<output>'
+        // Skip the first two single-quoted segments (format string) and extract
+        // the second quoted string which contains the actual version output.
+        let err = || PayloadBuildError::ToolchainUnavailable {
+            message: format!("no quoted output in fake script `{}`", path.display()),
+        };
+        let first_quote = content.find('\'').ok_or_else(err)? + 1;
+        let after_format = content[first_quote..].find('\'').ok_or_else(err)? + first_quote + 1;
+        let value_start = content[after_format..].find('\'').ok_or_else(err)? + after_format + 1;
+        let value_end = content[value_start..].find('\'').ok_or_else(err)? + value_start;
+        Ok(content[value_start..value_end].to_owned())
     }
 
     #[test]

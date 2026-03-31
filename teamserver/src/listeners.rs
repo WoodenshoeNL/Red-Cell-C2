@@ -5680,7 +5680,6 @@ mod tests {
             ListenerManager::new(database.clone(), registry.clone(), events.clone(), sockets, None)
                 .with_demon_allow_legacy_ctr(true);
         let mut event_receiver = events.subscribe();
-        let port = available_port()?;
         let key = test_key(0x71);
         let iv = test_iv(0x37);
         // A different key/IV that the agent embeds in its CHECKIN — must be rejected.
@@ -5690,8 +5689,7 @@ mod tests {
 
         registry.insert(sample_agent_info(agent_id, key, iv)).await?;
 
-        manager.create(http_listener("edge-http-checkin", port)).await?;
-        manager.start("edge-http-checkin").await?;
+        let port = create_and_start_http(&manager, "edge-http-checkin").await?;
         wait_for_listener(port, false).await?;
 
         let checkin_payload =
@@ -6408,6 +6406,39 @@ mod tests {
             }
             // Port was occupied by an external process — skip to the next candidate.
         }
+    }
+
+    /// Create and start an HTTP listener, retrying with a fresh port when the
+    /// initial candidate was stolen between `available_port()` and the actual
+    /// `TcpListener::bind` inside the listener runtime (TOCTOU race).
+    async fn create_and_start_http(
+        manager: &ListenerManager,
+        name: &str,
+    ) -> Result<u16, Box<dyn std::error::Error>> {
+        const MAX_ATTEMPTS: usize = 5;
+        for attempt in 0..MAX_ATTEMPTS {
+            let port = available_port()?;
+            manager.create(http_listener(name, port)).await?;
+            match manager.start(name).await {
+                Ok(_) => return Ok(port),
+                Err(ListenerManagerError::StartFailed { ref message, .. })
+                    if message.contains("Address already in use")
+                        || message.contains("os error 98") =>
+                {
+                    // Port was stolen — delete the listener and retry.
+                    tracing::debug!(
+                        %name,
+                        %port,
+                        %attempt,
+                        "port conflict during start, retrying with a new port"
+                    );
+                    manager.delete(name).await?;
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(format!("failed to start listener `{name}` after {MAX_ATTEMPTS} port attempts").into())
     }
 
     async fn wait_for_listener_status(

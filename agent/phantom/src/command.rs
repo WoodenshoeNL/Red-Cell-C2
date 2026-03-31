@@ -3591,11 +3591,24 @@ fn collect_directory_listings(
     let mut pending = vec![target.to_path_buf()];
     while let Some(root) = pending.pop() {
         let mut entries = Vec::new();
-        let read_dir = fs::read_dir(&root).map_err(|error| io_error(&root, error))?;
+        let read_dir = match fs::read_dir(&root) {
+            Ok(read_dir) => read_dir,
+            // Directory vanished between being queued and being read (TOCTOU).
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(io_error(&root, error)),
+        };
         for entry in read_dir {
-            let entry = entry.map_err(|error| io_error(&root, error))?;
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(io_error(&root, error)),
+            };
             let path = entry.path();
-            let metadata = entry.metadata().map_err(|error| io_error(&path, error))?;
+            let metadata = match entry.metadata() {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(io_error(&path, error)),
+            };
             if metadata.is_dir() && subdirs {
                 pending.push(path.clone());
             }

@@ -21,14 +21,14 @@ Each loop run updates the running totals and appends a review entry.
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 9 | 0 | 0 |
-| Missing tests / stale tests | 57 | 14 | 5 |
+| Missing tests / stale tests | 57 | 15 | 5 |
 | Clippy warnings | 7 | 0 | 1 |
-| Protocol errors | 23 | 27 | 3 |
+| Protocol errors | 23 | 31 | 3 |
 | Security issues | 50 | 39 | 0 |
 | Architecture drift | 19 | 23 | 0 |
 | Memory / resource leaks | 10 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 9 | 0 |
-| Test infrastructure / flakiness | 28 | 1 | 0 |
+| Test infrastructure / flakiness | 29 | 1 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
 | Correctness / pagination | 55 | 8 | 1 |
@@ -40,6 +40,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-31 14:30
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 1 | test infra/flakiness | pivot_dispatch tests failing (HTTP 404) — red-cell-c2-47w41 |
+| Codex | 5 | protocol errors (4), missing tests (1) | Phantom agent is fully incompatible with the teamserver: callback format, CTR offset model, and missing INIT_EXT_MONOTONIC_CTR flag. Mock test masks the issue. red-cell-c2-qkvt6, red-cell-c2-odv18, red-cell-c2-gtngg, red-cell-c2-xv1rg, red-cell-c2-nthcx |
+| Cursor | 0 | — | No findings this review |
+
+Overall codebase health: on track — teamserver, common, client, client-cli, and Specter are solid
+Biggest blindspot: Phantom agent has never been tested against the real teamserver; its entire protocol implementation is incompatible
 
 ### QA Review — 2026-03-31 11:56 — 458c4542..882116cb
 

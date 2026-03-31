@@ -314,6 +314,18 @@ mod tests {
         // If result is None, dirs::config_dir() is unavailable — nothing to assert.
     }
 
+    // Mutex to serialize tests that share the platform config file.  These
+    // tests write to (and restore) the real config path, so they must not run
+    // concurrently with each other.
+    static CONFIG_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Returns the resolved config file path used by the public API, replicating
+    /// the private `config_file_path()` logic so tests can set up/tear down the
+    /// file without going through the production helpers.
+    fn resolved_config_path() -> Option<std::path::PathBuf> {
+        dirs::config_dir().map(|d| d.join(APP_DIR_NAME).join(CONFIG_FILE_NAME))
+    }
+
     #[test]
     fn load_from_returns_default_for_binary_garbage() {
         let dir = tempfile::tempdir()

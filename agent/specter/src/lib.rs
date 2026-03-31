@@ -12,6 +12,7 @@ pub mod kerberos;
 pub mod pivot;
 pub mod platform;
 pub mod protocol;
+pub mod sleep_obf;
 pub mod socket;
 pub mod token;
 pub mod transport;

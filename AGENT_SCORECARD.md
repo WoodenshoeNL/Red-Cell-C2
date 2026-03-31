@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1025 | 231 | 31 |
+| Tasks closed | 1028 | 231 | 31 |
 | Bugs filed against | 138 | 36 | 9 |
 | Bug rate (bugs/task) | 0.13 | 0.16 | 0.29 |
 | Quality score | 87% | 84% | 71% |
 
-*Bug rates: Claude 138/1025=0.13, Codex 36/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 138/1028=0.13, Codex 36/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -4642,3 +4642,13 @@ Build: skipped (no committed Rust source changes in range)
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: skipped (no committed Rust source changes in range)
+
+### QA Review — 2026-03-31 12:35 — 882116cb..63d7670f
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 3 | 0 | Closed: red-cell-c2-kxh7u, red-cell-c2-a1f8q, red-cell-c2-eia4n. Reviewed Specter request-ID propagation fixes and the teamserver legacy-CTR test-profile hardening follow-up; no new attributable defects found. The late claim commit `63d7670f` is mechanical only and remains in progress as `red-cell-c2-nh28n`. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: failed — `cargo check --workspace` passed, `cargo clippy --workspace -- -D warnings` passed, and `cargo nextest run --workspace` failed on the pre-existing listener fixed-port collision class already tracked in `red-cell-c2-jmkgg`

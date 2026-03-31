@@ -3687,7 +3687,7 @@ fn handle_inline_execute(
             request_id,
         ) {
             Some(handle) => {
-                let job_id = job_store.add(JOB_TYPE_THREAD, handle);
+                let job_id = job_store.add(JOB_TYPE_THREAD, handle, request_id);
                 info!(job_id, function = %function_name, "BOF thread started and registered");
                 mem_files.remove(&bof_file_id);
                 mem_files.remove(&params_file_id);
@@ -7640,8 +7640,8 @@ mod tests {
     #[test]
     fn job_list_with_jobs_includes_all_entries() {
         let mut store = JobStore::new();
-        store.add(crate::job::JOB_TYPE_THREAD, 0);
-        store.add(crate::job::JOB_TYPE_PROCESS, 0);
+        store.add(crate::job::JOB_TYPE_THREAD, 0, 0);
+        store.add(crate::job::JOB_TYPE_PROCESS, 0, 0);
 
         let payload = 1u32.to_le_bytes().to_vec();
         let result = handle_job(&payload, &mut store);
@@ -7671,7 +7671,7 @@ mod tests {
     #[test]
     fn job_kill_existing_returns_success() {
         let mut store = JobStore::new();
-        let id = store.add(crate::job::JOB_TYPE_THREAD, 0);
+        let id = store.add(crate::job::JOB_TYPE_THREAD, 0, 0);
         let mut payload = Vec::new();
         payload.extend_from_slice(&4u32.to_le_bytes()); // KillRemove = 4
         payload.extend_from_slice(&id.to_le_bytes());

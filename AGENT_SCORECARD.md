@@ -4765,3 +4765,13 @@ Overall codebase health: drifting
 Biggest blindspot: transport hardening claims in the Rust agents are not backed by adversarial TLS tests, so a pinning regression shipped while the code and comments both said pinning was enforced
 
 Build: `cargo check --workspace` passed, `cargo test --workspace` failed during compilation in `client/src/local_config.rs` (missing `CONFIG_MUTEX` and `resolved_config_path` in test code), and `cargo clippy --workspace -- -D warnings` passed.
+
+### QA Review — 2026-03-31 — 3426047..6bdd76ab
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | No new commits since last review. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: skipped — no source changes in review range.

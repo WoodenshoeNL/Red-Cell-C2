@@ -10,18 +10,18 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 1015 | 231 | 31 |
-| Bugs filed against | 134 | 36 | 9 |
+| Bugs filed against | 135 | 36 | 9 |
 | Bug rate (bugs/task) | 0.13 | 0.16 | 0.29 |
 | Quality score | 87% | 84% | 71% |
 
-*Bug rates: Claude 134/1015=0.13, Codex 36/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 135/1015=0.13, Codex 36/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 8 | 0 | 0 |
-| Missing tests / stale tests | 54 | 14 | 5 |
+| Missing tests / stale tests | 55 | 14 | 5 |
 | Clippy warnings | 7 | 0 | 1 |
 | Protocol errors | 21 | 27 | 3 |
 | Security issues | 50 | 39 | 0 |
@@ -4562,3 +4562,13 @@ Build: failed — `cargo check --workspace` passed, `cargo clippy --workspace --
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: failed — `cargo check --workspace` passed and `cargo clippy --workspace -- -D warnings` passed, but `cargo nextest run --workspace` failed before test execution because the review VM ran out of disk space (`No space left on device`, `/` had 29M available)
+
+### QA Review — 2026-03-31 04:20 — f8b627bb..58b5541d
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 1 | No committed dev activity in range; only prior QA bookkeeping commit was reviewed. Filed red-cell-c2-kxh7u against Claude's current uncommitted `red-cell-c2-nh28n` work because `teamserver/tests/common/mod.rs` changes `default_test_profile()` to opt into `Demon.AllowLegacyCtr = true`, masking the production-default hardening path across much of the teamserver test suite. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: failed — `cargo check --workspace` passed, `cargo clippy --workspace -- -D warnings` passed, and `cargo nextest run --workspace` failed on the pre-existing Phantom filesystem e2e issue already tracked as `red-cell-c2-7crlt`; targeted validation for the active teamserver work (`cargo test -p red-cell --test monotonic_ctr_checkin`, `cargo test -p red-cell --test http_listener_pipeline http_listener_pipeline_reinit_updates_key_material`, and `cargo test -p red-cell --test dns_listener_pipeline dns_listener_pipeline_reinit_updates_key_material`) all passed

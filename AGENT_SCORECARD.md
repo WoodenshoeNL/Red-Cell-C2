@@ -41,6 +41,18 @@ Each loop run updates the running totals and appends a review entry.
 
 <!-- QA and arch loops append entries below this line -->
 
+### QA Review — 2026-03-31 15:30 — ab1d374c..3702f057
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | Only housekeeping commits (QA checkpoint + arch review scorecard). No dev work in range. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: failed — `cargo check` passed, `cargo clippy` passed (0 warnings), `cargo nextest run` failed on 2 pivot_dispatch tests (HTTP 404) — covered by open P1 issue red-cell-c2-r8x9g (in_progress, fix stashed locally). 2738/2740 tests passed before fail-fast stopped the run.
+
+Stash note: uncommitted work in git stash fixes red-cell-c2-r8x9g (pivot_dispatch CTR update + arch prompt improvements). This work should be committed by the dev agent.
+
 ### Arch Review — 2026-03-31 14:30
 
 | Agent | Findings | Categories | Notes |

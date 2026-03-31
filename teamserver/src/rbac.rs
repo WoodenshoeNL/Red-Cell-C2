@@ -244,6 +244,7 @@ fn required_permission(message: &OperatorMessage) -> Result<Permission, Authoriz
         | OperatorMessage::InitConnectionProfile(_)
         | OperatorMessage::ListenerError(_)
         | OperatorMessage::AgentNew(_)
+        | OperatorMessage::AgentReregistered(_)
         | OperatorMessage::AgentResponse(_)
         | OperatorMessage::AgentUpdate(_)
         | OperatorMessage::ChatListener(_)

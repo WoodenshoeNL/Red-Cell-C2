@@ -673,6 +673,17 @@ impl AppState {
                 events.push(AppEvent::AgentCheckin(agent_id));
                 self.upsert_agent(agent_summary_from_message(&message.info));
             }
+            OperatorMessage::AgentReregistered(message) => {
+                let agent_id = normalize_agent_id(&message.info.name_id);
+                self.push_event(
+                    EventKind::Agent,
+                    "teamserver",
+                    message.head.timestamp,
+                    format!("Agent {} re-registered", agent_id),
+                );
+                events.push(AppEvent::AgentCheckin(agent_id));
+                self.upsert_agent(agent_summary_from_message(&message.info));
+            }
             OperatorMessage::AgentRemove(message) => {
                 if let Some(agent_id) = flat_info_string(&message.info, &["AgentID", "DemonID"]) {
                     self.agents.retain(|agent| agent.name_id != normalize_agent_id(&agent_id));
@@ -2341,6 +2352,108 @@ mod tests {
         );
         assert_eq!(new_events, vec![AppEvent::AgentCheckin("ABCD1234".to_owned())]);
         assert_eq!(update_events, vec![AppEvent::AgentCheckin("ABCD1234".to_owned())]);
+    }
+
+    #[test]
+    fn agent_reregistered_logs_reregistered_not_new() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+
+        // First register the agent via AgentNew.
+        state.apply_operator_message(OperatorMessage::AgentNew(Box::new(Message {
+            head: head(EventCode::Session),
+            info: OperatorAgentInfo {
+                active: "true".to_owned(),
+                background_check: false,
+                domain_name: "LAB".to_owned(),
+                elevated: true,
+                internal_ip: "10.0.0.10".to_owned(),
+                external_ip: "203.0.113.10".to_owned(),
+                first_call_in: "10/03/2026 11:59:00".to_owned(),
+                last_call_in: "10/03/2026 12:00:00".to_owned(),
+                hostname: "wkstn-1".to_owned(),
+                listener: "http".to_owned(),
+                magic_value: "deadbeef".to_owned(),
+                name_id: "abcd1234".to_owned(),
+                os_arch: "x64".to_owned(),
+                os_build: "19045".to_owned(),
+                os_version: "Windows 11".to_owned(),
+                pivots: AgentPivotsInfo::default(),
+                port_fwds: Vec::new(),
+                process_arch: "x64".to_owned(),
+                process_name: "explorer.exe".to_owned(),
+                process_pid: "1234".to_owned(),
+                process_ppid: "1111".to_owned(),
+                process_path: "C:\\Windows\\explorer.exe".to_owned(),
+                reason: "manual".to_owned(),
+                note: String::new(),
+                sleep_delay: serde_json::Value::from(5),
+                sleep_jitter: serde_json::Value::from(10),
+                kill_date: serde_json::Value::Null,
+                working_hours: serde_json::Value::Null,
+                socks_cli: Vec::new(),
+                socks_cli_mtx: None,
+                socks_svr: Vec::new(),
+                tasked_once: false,
+                username: "operator".to_owned(),
+                pivot_parent: String::new(),
+            },
+        })));
+
+        // Now re-register via AgentReregistered.
+        let events =
+            state.apply_operator_message(OperatorMessage::AgentReregistered(Box::new(Message {
+                head: head(EventCode::Session),
+                info: OperatorAgentInfo {
+                    active: "true".to_owned(),
+                    background_check: false,
+                    domain_name: "LAB".to_owned(),
+                    elevated: true,
+                    internal_ip: "10.0.0.10".to_owned(),
+                    external_ip: "203.0.113.10".to_owned(),
+                    first_call_in: "10/03/2026 11:59:00".to_owned(),
+                    last_call_in: "10/03/2026 12:05:00".to_owned(),
+                    hostname: "wkstn-1".to_owned(),
+                    listener: "http".to_owned(),
+                    magic_value: "deadbeef".to_owned(),
+                    name_id: "abcd1234".to_owned(),
+                    os_arch: "x64".to_owned(),
+                    os_build: "19045".to_owned(),
+                    os_version: "Windows 11".to_owned(),
+                    pivots: AgentPivotsInfo::default(),
+                    port_fwds: Vec::new(),
+                    process_arch: "x64".to_owned(),
+                    process_name: "explorer.exe".to_owned(),
+                    process_pid: "1234".to_owned(),
+                    process_ppid: "1111".to_owned(),
+                    process_path: "C:\\Windows\\explorer.exe".to_owned(),
+                    reason: "manual".to_owned(),
+                    note: String::new(),
+                    sleep_delay: serde_json::Value::from(5),
+                    sleep_jitter: serde_json::Value::from(10),
+                    kill_date: serde_json::Value::Null,
+                    working_hours: serde_json::Value::Null,
+                    socks_cli: Vec::new(),
+                    socks_cli_mtx: None,
+                    socks_svr: Vec::new(),
+                    tasked_once: false,
+                    username: "operator".to_owned(),
+                    pivot_parent: String::new(),
+                },
+            })));
+
+        // Must emit AgentCheckin and not duplicate the agent.
+        assert_eq!(events, vec![AppEvent::AgentCheckin("ABCD1234".to_owned())]);
+        assert_eq!(state.agents.len(), 1, "re-registration must not duplicate the agent");
+
+        // The event log must say "re-registered", not "checked in (new)".
+        let rereg_events: Vec<_> = state
+            .event_log
+            .entries
+            .iter()
+            .filter(|e| e.message.contains("re-registered"))
+            .collect();
+        assert_eq!(rereg_events.len(), 1, "expected exactly one re-registered event");
+        assert!(!rereg_events[0].message.contains("(new)"), "re-registration must not say 'new'");
     }
 
     #[test]

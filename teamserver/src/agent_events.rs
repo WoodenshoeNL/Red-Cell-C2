@@ -26,6 +26,24 @@ pub(crate) fn agent_new_event(
     }))
 }
 
+/// Builds an operator event for an agent re-registration (existing session reconnecting).
+pub(crate) fn agent_reregistered_event(
+    listener_name: &str,
+    magic_value: u32,
+    agent: &AgentRecord,
+    pivots: &PivotInfo,
+) -> OperatorMessage {
+    OperatorMessage::AgentReregistered(Box::new(Message {
+        head: MessageHead {
+            event: EventCode::Session,
+            user: "teamserver".to_owned(),
+            timestamp: agent.last_call_in.clone(),
+            one_time: "true".to_owned(),
+        },
+        info: operator_agent_info(listener_name, magic_value, agent, pivots),
+    }))
+}
+
 pub(crate) fn agent_mark_event(agent: &AgentRecord) -> OperatorMessage {
     let marked = if agent.active { "Alive" } else { "Dead" };
     OperatorMessage::AgentUpdate(Message {
@@ -88,7 +106,7 @@ pub(crate) fn operator_agent_info(
 
 #[cfg(test)]
 mod tests {
-    use super::{agent_mark_event, agent_new_event, operator_agent_info};
+    use super::{agent_mark_event, agent_new_event, agent_reregistered_event, operator_agent_info};
     use crate::PivotInfo;
     use red_cell_common::operator::OperatorMessage;
     use red_cell_common::{AgentEncryptionInfo, AgentRecord};
@@ -177,6 +195,29 @@ mod tests {
         assert_eq!(message.info.name_id, "11121314");
         assert_eq!(message.info.pivots.parent.as_deref(), Some("01020304"));
         assert_eq!(message.info.pivot_parent, "01020304");
+    }
+
+    #[test]
+    fn agent_reregistered_event_uses_reregistered_variant() {
+        let agent = sample_agent(0x1112_1314);
+        let pivots = PivotInfo { parent: Some(0x0102_0304), children: vec![] };
+
+        let event = agent_reregistered_event("http-main", 0x1234_5678, &agent, &pivots);
+
+        let OperatorMessage::AgentReregistered(message) = event else {
+            panic!("expected AgentReregistered event");
+        };
+        assert_eq!(message.head.timestamp, agent.last_call_in);
+        assert_eq!(
+            message.head.event,
+            red_cell_common::operator::EventCode::Session,
+            "agent_reregistered_event must use EventCode::Session"
+        );
+        assert_eq!(message.head.user, "teamserver");
+        assert_eq!(message.head.one_time, "true");
+        assert_eq!(message.info.listener, "http-main");
+        assert_eq!(message.info.name_id, "11121314");
+        assert_eq!(message.info.pivots.parent.as_deref(), Some("01020304"));
     }
 
     #[test]

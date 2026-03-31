@@ -146,6 +146,7 @@ numeric_code! {
         AgentTask = 0x3,
         AgentResponse = 0x4,
         AgentUpdate = 0x5,
+        AgentReregistered = 0x6,
     }
 }
 
@@ -592,6 +593,7 @@ pub enum OperatorMessage {
     AgentTask(Message<AgentTaskInfo>),
     AgentResponse(Message<AgentResponseInfo>),
     AgentUpdate(Message<AgentUpdateInfo>),
+    AgentReregistered(Box<Message<AgentInfo>>),
     ServiceAgentRegister(Message<ServiceAgentRegistrationInfo>),
     ServiceListenerRegister(Message<ServiceListenerRegistrationInfo>),
     TeamserverLog(Message<TeamserverLogInfo>),
@@ -631,7 +633,8 @@ impl OperatorMessage {
             | Self::AgentRemove(_)
             | Self::AgentTask(_)
             | Self::AgentResponse(_)
-            | Self::AgentUpdate(_) => EventCode::Session,
+            | Self::AgentUpdate(_)
+            | Self::AgentReregistered(_) => EventCode::Session,
             Self::ServiceAgentRegister(_) | Self::ServiceListenerRegister(_) => EventCode::Service,
             Self::TeamserverLog(_) | Self::TeamserverProfile(_) => EventCode::Teamserver,
         }
@@ -877,6 +880,12 @@ impl Serialize for OperatorMessage {
                 SessionCode::AgentUpdate.as_u32(),
                 &message.info,
             ),
+            Self::AgentReregistered(message) => serialize_message(
+                serializer,
+                &message.head,
+                SessionCode::AgentReregistered.as_u32(),
+                &message.info,
+            ),
             Self::ServiceAgentRegister(message) => serialize_message(
                 serializer,
                 &message.head,
@@ -1006,6 +1015,9 @@ impl<'de> Deserialize<'de> for OperatorMessage {
             }
             (EventCode::Session, x) if x == SessionCode::AgentUpdate.as_u32() => {
                 Ok(Self::AgentUpdate(Message { head, info: parse_info(info)? }))
+            }
+            (EventCode::Session, x) if x == SessionCode::AgentReregistered.as_u32() => {
+                Ok(Self::AgentReregistered(Box::new(Message { head, info: parse_info(info)? })))
             }
             (EventCode::Service, x) if x == ServiceCode::RegisterAgent.as_u32() => {
                 Ok(Self::ServiceAgentRegister(Message { head, info: parse_info(info)? }))
@@ -1189,6 +1201,66 @@ mod tests {
 
         let encoded = serde_json::to_value(&message)?;
         assert!(encoded.pointer("/Body/Info/Encryption").is_none());
+
+        let decoded: OperatorMessage = serde_json::from_value(encoded)?;
+        assert_eq!(decoded, message);
+        Ok(())
+    }
+
+    #[test]
+    fn agent_reregistered_round_trips() -> Result<(), Box<dyn std::error::Error>> {
+        let message = OperatorMessage::AgentReregistered(Box::new(Message {
+            head: MessageHead {
+                event: EventCode::Session,
+                user: String::new(),
+                timestamp: "09/03/2026 19:05:00".to_string(),
+                one_time: "true".to_string(),
+            },
+            info: AgentInfo {
+                active: "true".to_string(),
+                background_check: false,
+                domain_name: "LAB".to_string(),
+                elevated: true,
+                internal_ip: "10.0.0.10".to_string(),
+                external_ip: "203.0.113.10".to_string(),
+                first_call_in: "09/03/2026 19:04:00".to_string(),
+                last_call_in: "09/03/2026 19:05:00".to_string(),
+                hostname: "wkstn-1".to_string(),
+                listener: "null".to_string(),
+                magic_value: "deadbeef".to_string(),
+                name_id: "ABCD1234".to_string(),
+                os_arch: "x64".to_string(),
+                os_build: "19045".to_string(),
+                os_version: "Windows 10".to_string(),
+                pivots: AgentPivotsInfo { parent: None, links: Vec::new() },
+                port_fwds: Vec::new(),
+                process_arch: "x64".to_string(),
+                process_name: "explorer.exe".to_string(),
+                process_pid: "1234".to_string(),
+                process_ppid: "1000".to_string(),
+                process_path: "C:\\Windows\\explorer.exe".to_string(),
+                reason: "manual".to_string(),
+                note: String::new(),
+                sleep_delay: json!(5),
+                sleep_jitter: json!(10),
+                kill_date: Value::Null,
+                working_hours: Value::Null,
+                socks_cli: Vec::new(),
+                socks_cli_mtx: None,
+                socks_svr: Vec::new(),
+                tasked_once: false,
+                username: "operator".to_string(),
+                pivot_parent: String::new(),
+            },
+        }));
+
+        let encoded = serde_json::to_value(&message)?;
+        let sub_event = encoded.pointer("/Body/SubEvent").and_then(|v| v.as_u64());
+        assert_eq!(
+            sub_event,
+            Some(SessionCode::AgentReregistered.as_u32() as u64),
+            "AgentReregistered must serialize with SubEvent 0x6"
+        );
 
         let decoded: OperatorMessage = serde_json::from_value(encoded)?;
         assert_eq!(decoded, message);
@@ -1960,6 +2032,7 @@ mod tests {
             (SessionCode::AgentTask, 0x3),
             (SessionCode::AgentResponse, 0x4),
             (SessionCode::AgentUpdate, 0x5),
+            (SessionCode::AgentReregistered, 0x6),
         ];
         for (variant, expected) in cases {
             assert_eq!(variant.as_u32(), expected, "SessionCode::{variant:?} wire value");

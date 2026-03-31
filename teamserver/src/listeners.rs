@@ -50,7 +50,7 @@ use crate::{
     DemonPacketParser, DemonParserError, ListenerRepository, ListenerStatus, ParsedDemonPacket,
     PersistedListener, PersistedListenerState, PluginRuntime, ShutdownController,
     SocketRelayManager, TeamserverError,
-    agent_events::agent_new_event,
+    agent_events::{agent_new_event, agent_reregistered_event},
     audit_details, build_init_ack, build_reconnect_ack,
     dispatch::DownloadTracker,
     events::EventBus,
@@ -1572,7 +1572,7 @@ async fn process_demon_transport(
                 })?;
 
             let pivots = registry.pivots(init.agent.agent_id).await;
-            events.broadcast(agent_new_event(
+            events.broadcast(agent_reregistered_event(
                 listener_name,
                 init.header.magic,
                 &init.agent,

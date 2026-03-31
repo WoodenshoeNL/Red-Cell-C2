@@ -314,7 +314,6 @@ mod tests {
         // If result is None, dirs::config_dir() is unavailable — nothing to assert.
     }
 
-
     #[test]
     fn load_from_returns_default_for_binary_garbage() {
         let dir = tempfile::tempdir()

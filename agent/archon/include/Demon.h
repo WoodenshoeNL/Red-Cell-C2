@@ -152,8 +152,13 @@ typedef struct
 
         /* communication AES keys */
         struct {
-            PBYTE Key;
-            PBYTE IV;
+            PBYTE  Key;
+            PBYTE  IV;
+            /* Global monotonic AES-CTR block offset.  Starts at 0 after
+             * DEMON_INITIALIZE and advances by ceil(len/16) after every
+             * successfully transmitted non-INIT packet, keeping the agent
+             * in sync with the teamserver's monotonic CTR tracking. */
+            UINT64 CtrBlockOffset;
         } AES;
 
     } Config ;

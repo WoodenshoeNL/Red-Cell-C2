@@ -37,6 +37,12 @@
 #define BEACON_OUTPUT                   94
 #define DEMON_INITIALIZE                99
 
+/* Extension flags appended after the standard DEMON_INITIALIZE metadata fields.
+ * These are optional — legacy Demon agents omit them.  The teamserver reads a
+ * trailing u32 (big-endian) when at least 4 bytes remain after the fixed fields.
+ * Must match INIT_EXT_MONOTONIC_CTR in teamserver/src/demon.rs. */
+#define DEMON_INITIALIZE_EXT_MONOTONIC_CTR  0x00000001u
+
 #define DEMON_COMMAND_INLINE_EXECUTE_EXCEPTION        1
 #define DEMON_COMMAND_INLINE_EXECUTE_SYMBOL_NOT_FOUND 2
 #define DEMON_COMMAND_INLINE_EXECUTE_RAN_OK           3

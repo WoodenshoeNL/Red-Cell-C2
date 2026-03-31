@@ -35,7 +35,8 @@ async fn spawn_service_server(
         events.clone(),
         sockets.clone(),
         None,
-    );
+    )
+    .with_demon_allow_legacy_ctr(true);
     let webhooks = AuditWebhookNotifier::from_profile(&profile);
     let bridge = ServiceBridge::new(ServiceConfig {
         endpoint: service_endpoint.to_owned(),

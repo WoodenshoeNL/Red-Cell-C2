@@ -43,7 +43,8 @@ async fn test_manager()
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
     let manager =
-        ListenerManager::new(database.clone(), registry.clone(), events.clone(), sockets, None);
+        ListenerManager::new(database.clone(), registry.clone(), events.clone(), sockets, None)
+            .with_demon_allow_legacy_ctr(true);
     Ok((database, registry, events, manager))
 }
 
@@ -374,24 +375,30 @@ async fn smb_listener_rejects_callbacks_from_unregistered_agent()
 }
 
 /// A duplicate full DEMON_INIT over SMB must not overwrite the original AES key/IV,
-/// and must not emit a second registration event.
+/// A second DEMON_INIT via SMB for an already-registered agent is treated as a
+/// re-registration (agent restart).  The session key is replaced and a second AgentNew
+/// event is broadcast.  Subsequent callbacks must use the new key.
+///
+/// NOTE: the teamserver does not currently verify that the re-init key material matches the
+/// original.  Operators who require key-rotation protection should monitor AgentNew events
+/// for unexpected re-registrations from unknown sources.
 #[cfg(unix)]
 #[tokio::test]
-async fn smb_listener_rejects_duplicate_init_preserves_original_key()
+async fn smb_listener_reinit_updates_key_material()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_, registry, events, manager) = test_manager().await?;
     let mut event_receiver = events.subscribe();
-    let pipe_name = unique_pipe_name("duplicate-init");
+    let pipe_name = unique_pipe_name("reinit");
 
-    manager.create(smb_config("smb-test-duplicate-init", &pipe_name)).await?;
-    manager.start("smb-test-duplicate-init").await?;
+    manager.create(smb_config("smb-test-reinit", &pipe_name)).await?;
+    manager.start("smb-test-reinit").await?;
     wait_for_smb_listener(&pipe_name).await?;
 
     let agent_id = 0xD00D_F00D_u32;
     let original_key = test_key(0x44);
     let original_iv = test_iv(0x27);
-    let hijack_key = test_key(0xBB);
-    let hijack_iv = test_iv(0xCC);
+    let new_key = test_key(0xBB);
+    let new_iv = test_iv(0xCC);
 
     let mut init_stream = connect_smb(&pipe_name).await?;
     write_smb_frame(
@@ -407,8 +414,8 @@ async fn smb_listener_rejects_duplicate_init_preserves_original_key()
     let decrypted_ack = decrypt_agent_data(&original_key, &original_iv, &ack_payload)?;
     assert_eq!(decrypted_ack.as_slice(), &agent_id.to_le_bytes());
 
-    let registration_event = timeout(Duration::from_secs(5), event_receiver.recv()).await?;
-    let Some(OperatorMessage::AgentNew(message)) = registration_event else {
+    let first_event = timeout(Duration::from_secs(5), event_receiver.recv()).await?;
+    let Some(OperatorMessage::AgentNew(message)) = first_event else {
         panic!("expected AgentNew event");
     };
     assert_eq!(message.info.name_id, format!("{agent_id:08X}"));
@@ -420,55 +427,56 @@ async fn smb_listener_rejects_duplicate_init_preserves_original_key()
         &original_key,
         "first init must store the original AES key"
     );
-    assert_eq!(
-        stored_after_first.encryption.aes_iv.as_slice(),
-        &original_iv,
-        "first init must store the original AES IV"
-    );
 
     drop(init_stream);
 
-    let mut duplicate_stream = connect_smb(&pipe_name).await?;
+    // Second DEMON_INIT (re-registration) — must succeed and update key material.
+    let mut reinit_stream = connect_smb(&pipe_name).await?;
     write_smb_frame(
-        &mut duplicate_stream,
+        &mut reinit_stream,
         agent_id,
-        &common::valid_demon_init_body(agent_id, hijack_key, hijack_iv),
+        &common::valid_demon_init_body(agent_id, new_key, new_iv),
     )
     .await?;
 
+    let (reinit_ack_id, reinit_ack_payload) =
+        timeout(Duration::from_secs(5), read_smb_frame(&mut reinit_stream)).await??;
+    assert_eq!(reinit_ack_id, agent_id, "re-init ack agent_id must match");
+    let decrypted_reinit_ack = decrypt_agent_data(&new_key, &new_iv, &reinit_ack_payload)?;
+    assert_eq!(decrypted_reinit_ack.as_slice(), &agent_id.to_le_bytes());
+
+    // Re-registration emits a second AgentNew event.
+    let reinit_event = timeout(Duration::from_secs(5), event_receiver.recv()).await?;
     assert!(
-        timeout(Duration::from_millis(250), read_smb_frame(&mut duplicate_stream)).await.is_err(),
-        "duplicate SMB init must not return an ACK"
-    );
-    assert!(
-        timeout(Duration::from_millis(250), event_receiver.recv()).await.is_err(),
-        "duplicate SMB init must not emit a second AgentNew event"
+        matches!(reinit_event, Some(OperatorMessage::AgentNew(_))),
+        "re-registration must emit a second AgentNew event"
     );
 
-    let stored_after_duplicate = registry
+    // Key material must be updated.
+    let stored_after_reinit = registry
         .get(agent_id)
         .await
-        .ok_or("agent should remain registered after duplicate init")?;
+        .ok_or("agent should remain registered after re-init")?;
     assert_eq!(
-        stored_after_duplicate.encryption.aes_key.as_slice(),
-        &original_key,
-        "duplicate init must not overwrite the original AES key"
+        stored_after_reinit.encryption.aes_key.as_slice(),
+        &new_key,
+        "re-init must update the session key"
     );
     assert_eq!(
-        stored_after_duplicate.encryption.aes_iv.as_slice(),
-        &original_iv,
-        "duplicate init must not overwrite the original AES IV"
+        stored_after_reinit.encryption.aes_iv.as_slice(),
+        &new_iv,
+        "re-init must update the session IV"
     );
 
-    drop(duplicate_stream);
+    drop(reinit_stream);
 
-    // Verify that the original key still works for callbacks.
+    // Verify that the NEW key works for callbacks.
     // Legacy Demon agents reset AES-CTR to block 0 for every packet.
     let mut callback_stream = connect_smb(&pipe_name).await?;
     let callback_body = common::valid_demon_callback_body(
         agent_id,
-        original_key,
-        original_iv,
+        new_key,
+        new_iv,
         0,
         u32::from(DemonCommand::CommandCheckin),
         6,
@@ -482,7 +490,7 @@ async fn smb_listener_rejects_duplicate_init_preserves_original_key()
     };
     assert_eq!(message.info.agent_id, format!("{agent_id:08X}"));
 
-    manager.stop("smb-test-duplicate-init").await?;
+    manager.stop("smb-test-reinit").await?;
     Ok(())
 }
 

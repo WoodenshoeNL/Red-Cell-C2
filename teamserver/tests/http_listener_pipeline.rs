@@ -20,7 +20,8 @@ async fn http_listener_pipeline_registers_agent_and_broadcasts_checkin()
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let manager = ListenerManager::new(database, registry.clone(), events.clone(), sockets, None);
+    let manager = ListenerManager::new(database, registry.clone(), events.clone(), sockets, None)
+        .with_demon_allow_legacy_ctr(true);
     let mut event_receiver = events.subscribe();
     let (port, guard) = common::available_port()?;
     let key: [u8; AGENT_KEY_LENGTH] = [
@@ -104,7 +105,8 @@ async fn http_listener_pipeline_rejects_plaintext_zero_key_init()
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None)
+        .with_demon_allow_legacy_ctr(true);
     let (port, guard) = common::available_port()?;
     let agent_id = 0x1357_9BDF;
 
@@ -134,7 +136,8 @@ async fn http_listener_pipeline_rejects_callbacks_from_unregistered_agent()
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None)
+        .with_demon_allow_legacy_ctr(true);
     let (port, guard) = common::available_port()?;
     let key: [u8; AGENT_KEY_LENGTH] = [
         0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F,
@@ -197,7 +200,8 @@ async fn http_listener_pipeline_attributes_real_ip_from_trusted_redirector()
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None)
+        .with_demon_allow_legacy_ctr(true);
     let (port, guard) = common::available_port()?;
     let agent_id = 0xABCD_1234;
 
@@ -246,7 +250,8 @@ async fn http_listener_pipeline_ignores_real_ip_from_untrusted_redirector()
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None)
+        .with_demon_allow_legacy_ctr(true);
     let (port, guard) = common::available_port()?;
     let agent_id = 0xABCD_5678;
 
@@ -295,7 +300,8 @@ async fn http_listener_pipeline_ignores_forwarded_for_when_not_behind_redirector
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None)
+        .with_demon_allow_legacy_ctr(true);
     let (port, guard) = common::available_port()?;
     let agent_id = 0xF0F0_A0D1_u32;
 
@@ -344,7 +350,8 @@ async fn http_listener_pipeline_ignores_forwarded_for_from_untrusted_peer()
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None)
+        .with_demon_allow_legacy_ctr(true);
     let (port, guard) = common::available_port()?;
     let agent_id = 0xF0F0_B0D2_u32;
 
@@ -393,14 +400,22 @@ async fn http_listener_pipeline_ignores_forwarded_for_from_untrusted_peer()
     Ok(())
 }
 
+/// A second DEMON_INIT for an already-registered `agent_id` is treated as a re-registration
+/// (agent restart after crash or kill-date reset).  The session key is replaced and the
+/// teamserver returns a fresh init ACK.
+///
+/// NOTE: the teamserver does not currently verify that the re-init key material matches the
+/// original.  Operators who require key-rotation protection should track agent restarts via
+/// the `AgentNew` event and alert on unexpected re-registrations from unknown IPs.
 #[tokio::test]
-async fn http_listener_pipeline_rejects_duplicate_init_preserves_original_key()
+async fn http_listener_pipeline_reinit_updates_key_material()
 -> Result<(), Box<dyn std::error::Error>> {
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None)
+        .with_demon_allow_legacy_ctr(true);
     let (port, guard) = common::available_port()?;
     let agent_id = 0xDEAD_C0DE;
     let original_key: [u8; AGENT_KEY_LENGTH] = [
@@ -412,24 +427,24 @@ async fn http_listener_pipeline_rejects_duplicate_init_preserves_original_key()
         0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F, 0x30, 0x31, 0x32,
         0x33,
     ];
-    let hijack_key: [u8; AGENT_KEY_LENGTH] = [
+    let new_key: [u8; AGENT_KEY_LENGTH] = [
         0xBB, 0xBC, 0xBD, 0xBE, 0xBF, 0xC0, 0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9,
         0xCA, 0xCB, 0xCC, 0xCD, 0xCE, 0xCF, 0xD0, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8,
         0xD9, 0xDA,
     ];
-    let hijack_iv: [u8; AGENT_IV_LENGTH] = [
+    let new_iv: [u8; AGENT_IV_LENGTH] = [
         0xCC, 0xCD, 0xCE, 0xCF, 0xD0, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8, 0xD9, 0xDA,
         0xDB,
     ];
 
-    manager.create(http_listener("edge-http-dup-init", port)).await?;
+    manager.create(http_listener("edge-http-reinit", port)).await?;
     drop(guard);
-    manager.start("edge-http-dup-init").await?;
+    manager.start("edge-http-reinit").await?;
     common::wait_for_listener(port).await?;
 
     let client = Client::new();
 
-    // First INIT — must succeed.
+    // First INIT — must succeed and register the original key.
     client
         .post(format!("http://127.0.0.1:{port}/"))
         .body(common::valid_demon_init_body(agent_id, original_key, original_iv))
@@ -441,41 +456,34 @@ async fn http_listener_pipeline_rejects_duplicate_init_preserves_original_key()
         registry.get(agent_id).await.ok_or("agent should be registered after first init")?;
     assert_eq!(stored_after_first.encryption.aes_key.as_slice(), &original_key);
 
-    // Second INIT with the same agent_id but attacker-controlled key material — must be rejected.
-    let replay_response = client
+    // Second INIT (same agent_id, new key material) — treated as re-registration (agent restart).
+    client
         .post(format!("http://127.0.0.1:{port}/"))
-        .body(common::valid_demon_init_body(agent_id, hijack_key, hijack_iv))
+        .body(common::valid_demon_init_body(agent_id, new_key, new_iv))
         .send()
-        .await?;
+        .await?
+        .error_for_status()?;
 
+    // Key must be updated to the new material.
+    let stored_after_reinit =
+        registry.get(agent_id).await.ok_or("agent should still be registered after re-init")?;
     assert_eq!(
-        replay_response.status(),
-        reqwest::StatusCode::NOT_FOUND,
-        "duplicate DemonInit must be rejected with 404"
-    );
-
-    // The original key must still be in place — the hijack attempt must not overwrite it.
-    let stored_after_replay = registry
-        .get(agent_id)
-        .await
-        .ok_or("agent should still be registered after rejected replay")?;
-    assert_eq!(
-        stored_after_replay.encryption.aes_key.as_slice(),
-        &original_key,
-        "original AES key must not be overwritten by a duplicate init"
+        stored_after_reinit.encryption.aes_key.as_slice(),
+        &new_key,
+        "re-init must update the session key to the new material"
     );
     assert_eq!(
-        stored_after_replay.encryption.aes_iv.as_slice(),
-        &original_iv,
-        "original AES IV must not be overwritten by a duplicate init"
+        stored_after_reinit.encryption.aes_iv.as_slice(),
+        &new_iv,
+        "re-init must update the session IV to the new material"
     );
 
-    // No duplicate registration: exactly one active entry must exist.
+    // Still exactly one active entry.
     let active = registry.list_active().await;
-    assert_eq!(active.len(), 1, "duplicate DemonInit must not create a second registry entry");
+    assert_eq!(active.len(), 1, "re-init must not create a second registry entry");
     assert_eq!(active[0].agent_id, agent_id);
 
-    manager.stop("edge-http-dup-init").await?;
+    manager.stop("edge-http-reinit").await?;
     Ok(())
 }
 
@@ -486,7 +494,8 @@ async fn http_listener_rejects_malformed_and_truncated_bodies()
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None)
+        .with_demon_allow_legacy_ctr(true);
     let (port, guard) = common::available_port()?;
 
     manager.create(http_listener("edge-http-malformed", port)).await?;
@@ -579,7 +588,8 @@ async fn http_listener_rejects_oversized_body() -> Result<(), Box<dyn std::error
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None)
+        .with_demon_allow_legacy_ctr(true);
     let (port, guard) = common::available_port()?;
 
     manager.create(http_listener("edge-http-oversized", port)).await?;
@@ -653,7 +663,8 @@ async fn http_listener_pipeline_reconnect_probe_after_registration()
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None)
+        .with_demon_allow_legacy_ctr(true);
     let (port, guard) = common::available_port()?;
     let key: [u8; AGENT_KEY_LENGTH] = [
         0x01, 0x03, 0x05, 0x07, 0x09, 0x0B, 0x0D, 0x0F, 0x11, 0x13, 0x15, 0x17, 0x19, 0x1B, 0x1D,
@@ -733,7 +744,8 @@ async fn http_listener_pipeline_concurrent_multi_agent_init()
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let manager = ListenerManager::new(database, registry.clone(), events.clone(), sockets, None);
+    let manager = ListenerManager::new(database, registry.clone(), events.clone(), sockets, None)
+        .with_demon_allow_legacy_ctr(true);
     let mut event_receiver = events.subscribe();
     let (port, guard) = common::available_port()?;
 

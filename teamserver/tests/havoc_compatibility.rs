@@ -43,7 +43,8 @@ async fn red_cell_packets_match_havoc_at_offset_zero_and_advance_afterward()
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None)
+        .with_demon_allow_legacy_ctr(true);
     let (port, guard) = common::available_port()?;
     let agent_id = 0x1234_5678;
     let key: [u8; AGENT_KEY_LENGTH] = [
@@ -190,7 +191,8 @@ async fn demon_info_and_reconnect_match_havoc_after_non_zero_ctr_advance()
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None)
+        .with_demon_allow_legacy_ctr(true);
     let (port, guard) = common::available_port()?;
     let agent_id = 0x2468_ACED;
     let key: [u8; AGENT_KEY_LENGTH] = [
@@ -738,7 +740,8 @@ async fn dns_listener_init_ack_matches_havoc_aes_ctr_at_offset_zero()
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None)
+        .with_demon_allow_legacy_ctr(true);
 
     let port = free_udp_port();
     let domain = "c2.compat.test";

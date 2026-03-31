@@ -582,7 +582,8 @@ async fn restore_running_restarts_persisted_running_listeners()
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let manager = ListenerManager::new(database.clone(), registry, events, sockets, None);
+        let manager = ListenerManager::new(database.clone(), registry, events, sockets, None)
+            .with_demon_allow_legacy_ctr(true);
         manager.create(http_config("lc-restore", port)).await?;
         // Force the DB state to Running without starting the actual runtime task.
         manager.repository().set_state("lc-restore", ListenerStatus::Running, None).await?;
@@ -595,7 +596,8 @@ async fn restore_running_restarts_persisted_running_listeners()
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let restored = ListenerManager::new(database, registry, events, sockets, None);
+    let restored = ListenerManager::new(database, registry, events, sockets, None)
+        .with_demon_allow_legacy_ctr(true);
 
     // Release the port reservation so restore_running() can bind it.
     drop(guard);
@@ -626,7 +628,8 @@ async fn restore_running_with_port_in_use_transitions_to_error_state()
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let manager = ListenerManager::new(database.clone(), registry, events, sockets, None);
+        let manager = ListenerManager::new(database.clone(), registry, events, sockets, None)
+            .with_demon_allow_legacy_ctr(true);
         manager.create(http_config("lc-restore-err", port)).await?;
         manager.repository().set_state("lc-restore-err", ListenerStatus::Running, None).await?;
     }
@@ -636,7 +639,8 @@ async fn restore_running_with_port_in_use_transitions_to_error_state()
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let restored = ListenerManager::new(database, registry, events, sockets, None);
+    let restored = ListenerManager::new(database, registry, events, sockets, None)
+        .with_demon_allow_legacy_ctr(true);
 
     let result = restored.restore_running().await;
     assert!(result.is_err(), "restore_running must propagate the bind failure");
@@ -674,7 +678,8 @@ async fn restore_running_failure_halts_before_remaining_listeners()
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let manager = ListenerManager::new(database.clone(), registry, events, sockets, None);
+        let manager = ListenerManager::new(database.clone(), registry, events, sockets, None)
+            .with_demon_allow_legacy_ctr(true);
         manager.create(http_config("lc-restore-aa-fail", port_fail)).await?;
         manager.create(http_config("lc-restore-bb-ok", port_ok)).await?;
         manager.repository().set_state("lc-restore-aa-fail", ListenerStatus::Running, None).await?;
@@ -688,7 +693,8 @@ async fn restore_running_failure_halts_before_remaining_listeners()
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let restored = ListenerManager::new(database, registry, events, sockets, None);
+    let restored = ListenerManager::new(database, registry, events, sockets, None)
+        .with_demon_allow_legacy_ctr(true);
 
     let result = restored.restore_running().await;
     assert!(result.is_err(), "restore_running must return an error when a listener cannot rebind");
@@ -1365,7 +1371,8 @@ async fn restore_running_restarts_persisted_dns_listener() -> Result<(), Box<dyn
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let manager = ListenerManager::new(database.clone(), registry, events, sockets, None);
+        let manager = ListenerManager::new(database.clone(), registry, events, sockets, None)
+            .with_demon_allow_legacy_ctr(true);
         manager.create(dns_config("lc-dns-restore", port)).await?;
         manager.repository().set_state("lc-dns-restore", ListenerStatus::Running, None).await?;
         let summary = manager.summary("lc-dns-restore").await?;
@@ -1377,7 +1384,8 @@ async fn restore_running_restarts_persisted_dns_listener() -> Result<(), Box<dyn
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let restored = ListenerManager::new(database, registry, events, sockets, None);
+    let restored = ListenerManager::new(database, registry, events, sockets, None)
+        .with_demon_allow_legacy_ctr(true);
 
     // Release the port reservation so restore_running() can bind it.
     drop(guard);
@@ -1413,7 +1421,8 @@ async fn restore_running_restarts_persisted_smb_listener() -> Result<(), Box<dyn
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let manager = ListenerManager::new(database.clone(), registry, events, sockets, None);
+        let manager = ListenerManager::new(database.clone(), registry, events, sockets, None)
+            .with_demon_allow_legacy_ctr(true);
         manager.create(smb_config("lc-smb-restore", &pipe)).await?;
         manager.repository().set_state("lc-smb-restore", ListenerStatus::Running, None).await?;
     }
@@ -1422,7 +1431,8 @@ async fn restore_running_restarts_persisted_smb_listener() -> Result<(), Box<dyn
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let restored = ListenerManager::new(database, registry, events, sockets, None);
+    let restored = ListenerManager::new(database, registry, events, sockets, None)
+        .with_demon_allow_legacy_ctr(true);
 
     restored.restore_running().await?;
 
@@ -1505,7 +1515,8 @@ async fn restore_running_restarts_persisted_external_listener()
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let manager = ListenerManager::new(database.clone(), registry, events, sockets, None);
+        let manager = ListenerManager::new(database.clone(), registry, events, sockets, None)
+            .with_demon_allow_legacy_ctr(true);
         manager.create(external_config("lc-ext-restore", "/bridge-restore")).await?;
         manager.repository().set_state("lc-ext-restore", ListenerStatus::Running, None).await?;
         let summary = manager.summary("lc-ext-restore").await?;
@@ -1519,7 +1530,8 @@ async fn restore_running_restarts_persisted_external_listener()
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let restored = ListenerManager::new(database, registry, events, sockets, None);
+    let restored = ListenerManager::new(database, registry, events, sockets, None)
+        .with_demon_allow_legacy_ctr(true);
 
     restored.restore_running().await?;
 

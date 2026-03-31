@@ -5877,7 +5877,9 @@ mod tests {
         assert!(!r_resp.is_empty());
         assert!(registry.get(repeated_agent_id).await.is_some());
 
-        // Attempts 2 through MAX — each consumes a rate-limit token; no responses.
+        // Attempts 2 through MAX — each consumes a rate-limit token.  Re-registration
+        // is now accepted (not silently dropped), so each attempt produces an ack that
+        // must be drained before we check the rate-limited attempt.
         for _ in 1..MAX_DEMON_INIT_ATTEMPTS_PER_IP {
             write_test_smb_frame(
                 &mut rate_stream,
@@ -5886,8 +5888,16 @@ mod tests {
             )
             .await?;
         }
-        // Give the listener time to process the duplicate frames.
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Drain re-registration acks from attempts 2-MAX.
+        for _ in 1..MAX_DEMON_INIT_ATTEMPTS_PER_IP {
+            tokio::time::timeout(
+                Duration::from_millis(500),
+                read_test_smb_frame(&mut rate_stream),
+            )
+            .await
+            .expect("re-registration ack must arrive within timeout")
+            .expect("re-registration ack read must succeed");
+        }
 
         // Attempt MAX+1 — rate-limiter must block.
         write_test_smb_frame(
@@ -5906,7 +5916,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn smb_listener_rejects_duplicate_full_init_for_registered_pivot_agent()
+    async fn smb_listener_reinit_updates_pivot_agent_registration()
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::connect_in_memory().await?;
         let registry = AgentRegistry::new(database.clone());
@@ -5916,48 +5926,71 @@ mod tests {
             ListenerManager::new(database.clone(), registry.clone(), events.clone(), sockets, None)
                 .with_demon_allow_legacy_ctr(true);
         let mut event_receiver = events.subscribe();
-        let pipe_name = unique_smb_pipe_name("pivot-init");
+        let pipe_name = unique_smb_pipe_name("pivot-reinit");
         let parent_id = 0x1111_2222;
         let parent_key = test_key(0x31);
         let parent_iv = test_iv(0x41);
         let child_id = 0x3333_4444;
         let child_key = test_key(0x51);
         let child_iv = test_iv(0x61);
+        let new_key = test_key(0x71);
+        let new_iv = test_iv(0x81);
 
         registry.insert(sample_agent_info(parent_id, parent_key, parent_iv)).await?;
         registry.insert(sample_agent_info(child_id, child_key, child_iv)).await?;
         registry.add_link(parent_id, child_id).await?;
-        let stored_before = registry.get(child_id).await.expect("child agent should exist");
-        let listener_before = registry.listener_name(child_id).await;
-        let ctr_before = registry.ctr_offset(child_id).await?;
 
-        manager.create(smb_listener("edge-smb-pivot-init", &pipe_name)).await?;
-        manager.start("edge-smb-pivot-init").await?;
+        manager.create(smb_listener("edge-smb-pivot-reinit", &pipe_name)).await?;
+        manager.start("edge-smb-pivot-reinit").await?;
         wait_for_smb_listener(&pipe_name).await?;
 
         let mut stream = connect_smb_stream(&pipe_name).await?;
         write_test_smb_frame(
             &mut stream,
             child_id,
-            &valid_demon_init_body(child_id, child_key, child_iv),
+            &valid_demon_init_body(child_id, new_key, new_iv),
         )
         .await?;
 
-        assert!(
-            tokio::time::timeout(Duration::from_millis(250), read_test_smb_frame(&mut stream))
-                .await
-                .is_err(),
-            "duplicate full init must not return an SMB ACK"
-        );
-        assert!(
-            tokio::time::timeout(Duration::from_millis(250), event_receiver.recv()).await.is_err(),
-            "duplicate full init must not broadcast AgentNew"
-        );
-        assert_eq!(registry.get(child_id).await, Some(stored_before));
-        assert_eq!(registry.listener_name(child_id).await, listener_before);
-        assert_eq!(registry.ctr_offset(child_id).await?, ctr_before);
+        // Re-registration must return an ACK.
+        let (ack_id, ack_payload) = tokio::time::timeout(
+            Duration::from_millis(500),
+            read_test_smb_frame(&mut stream),
+        )
+        .await
+        .expect("re-registration ack must arrive within timeout")
+        .expect("re-registration ack read must succeed");
+        assert_eq!(ack_id, child_id, "ack agent_id must match the child");
+        assert!(!ack_payload.is_empty(), "ack payload must not be empty");
 
-        manager.stop("edge-smb-pivot-init").await?;
+        // Re-registration must emit an AgentNew event.
+        let reinit_event =
+            tokio::time::timeout(Duration::from_millis(500), event_receiver.recv())
+                .await
+                .expect("AgentNew must arrive within timeout");
+        assert!(
+            matches!(reinit_event, Some(OperatorMessage::AgentNew(_))),
+            "re-registration must broadcast AgentNew"
+        );
+
+        // The child's listener_name must now reflect the SMB listener.
+        let listener_after = registry.listener_name(child_id).await;
+        assert_eq!(
+            listener_after.as_deref(),
+            Some("edge-smb-pivot-reinit"),
+            "listener_name must be updated to the SMB listener after re-registration"
+        );
+
+        // Key material must be updated to the new key sent in the re-registration.
+        let stored_after =
+            registry.get(child_id).await.expect("child agent must still be registered");
+        assert_eq!(
+            stored_after.encryption.aes_key.as_slice(),
+            &new_key,
+            "re-registration must update the session key"
+        );
+
+        manager.stop("edge-smb-pivot-reinit").await?;
         Ok(())
     }
 

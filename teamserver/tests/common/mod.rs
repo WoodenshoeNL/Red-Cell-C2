@@ -63,7 +63,8 @@ pub async fn spawn_test_server(profile: Profile) -> Result<TestServer, Box<dyn s
         events.clone(),
         sockets.clone(),
         None,
-    );
+    )
+    .with_demon_allow_legacy_ctr(profile.demon.allow_legacy_ctr);
     let webhooks = AuditWebhookNotifier::from_profile(&profile);
     let rate_limiter = LoginRateLimiter::new();
     let state = TeamserverState {
@@ -452,7 +453,9 @@ pub fn default_test_profile() -> Profile {
           }
         }
 
-        Demon {}
+        Demon {
+          AllowLegacyCtr = true
+        }
         "#,
     )
     .expect("default test profile should parse")

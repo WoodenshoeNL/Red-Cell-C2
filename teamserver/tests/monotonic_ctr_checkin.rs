@@ -38,12 +38,47 @@ fn monotonic_test_profile() -> red_cell_common::config::Profile {
     .expect("test profile should parse")
 }
 
+/// Profile that opts into legacy-CTR acceptance; used only by the legacy-CTR integration test.
+fn legacy_ctr_test_profile() -> red_cell_common::config::Profile {
+    red_cell_common::config::Profile::parse(
+        r#"
+        Teamserver {
+          Host = "127.0.0.1"
+          Port = 0
+        }
+
+        Operators {
+          user "operator" {
+            Password = "password1234"
+            Role = "Operator"
+          }
+        }
+
+        Demon {
+          AllowLegacyCtr = true
+        }
+        "#,
+    )
+    .expect("test profile should parse")
+}
+
 /// Spawn a test server with an HTTP listener and a connected operator WebSocket.
+///
+/// Uses the monotonic-CTR profile (default, `AllowLegacyCtr = false`).
 async fn spawn_server(
     listener_name: &str,
 ) -> Result<(common::TestServer, u16, reqwest::Client, common::WsClient), Box<dyn std::error::Error>>
 {
-    let server = common::spawn_test_server(monotonic_test_profile()).await?;
+    spawn_server_with_profile(listener_name, monotonic_test_profile()).await
+}
+
+/// Spawn a test server using an explicit profile.
+async fn spawn_server_with_profile(
+    listener_name: &str,
+    profile: red_cell_common::config::Profile,
+) -> Result<(common::TestServer, u16, reqwest::Client, common::WsClient), Box<dyn std::error::Error>>
+{
+    let server = common::spawn_test_server(profile).await?;
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
@@ -280,7 +315,8 @@ async fn monotonic_ctr_init_and_sequential_callbacks() -> Result<(), Box<dyn std
 /// ensures that the legacy path is unaffected by the monotonic CTR feature.
 #[tokio::test]
 async fn legacy_ctr_init_callbacks_all_at_offset_zero() -> Result<(), Box<dyn std::error::Error>> {
-    let (server, listener_port, client, mut socket) = spawn_server("legacy-ctr-http").await?;
+    let (server, listener_port, client, mut socket) =
+        spawn_server_with_profile("legacy-ctr-http", legacy_ctr_test_profile()).await?;
 
     let agent_id: u32 = 0xDE_AD_BE_EF;
     let key: [u8; AGENT_KEY_LENGTH] = [

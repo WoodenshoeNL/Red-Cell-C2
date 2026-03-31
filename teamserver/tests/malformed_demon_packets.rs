@@ -184,7 +184,8 @@ async fn setup_http_listener(
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None)
+        .with_demon_allow_legacy_ctr(true);
     let (port, guard) = common::available_port()?;
 
     manager.create(http_listener(name, port)).await?;
@@ -336,7 +337,8 @@ async fn setup_dns_listener(
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None)
+        .with_demon_allow_legacy_ctr(true);
     let port = free_udp_port();
 
     manager.create(dns_listener(name, port, domain)).await?;
@@ -430,7 +432,8 @@ async fn setup_smb_listener(
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None)
+        .with_demon_allow_legacy_ctr(true);
     let pipe_name = unique_pipe_name(pipe_suffix);
 
     manager.create(smb_config(name, &pipe_name)).await?;

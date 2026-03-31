@@ -309,7 +309,8 @@ async fn dns_listener_pipeline_registers_agent_and_broadcasts_checkin()
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let manager = ListenerManager::new(database, registry.clone(), events.clone(), sockets, None);
+    let manager = ListenerManager::new(database, registry.clone(), events.clone(), sockets, None)
+        .with_demon_allow_legacy_ctr(true);
     let mut event_receiver = events.subscribe();
 
     let port = free_udp_port();
@@ -404,7 +405,8 @@ async fn dns_listener_pipeline_rejects_callbacks_from_unregistered_agent()
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let manager = ListenerManager::new(database, registry.clone(), events.clone(), sockets, None);
+    let manager = ListenerManager::new(database, registry.clone(), events.clone(), sockets, None)
+        .with_demon_allow_legacy_ctr(true);
 
     let port = free_udp_port();
     let domain = "c2.example.com";
@@ -450,15 +452,22 @@ async fn dns_listener_pipeline_rejects_callbacks_from_unregistered_agent()
     Ok(())
 }
 
-/// A duplicate DEMON_INIT via DNS must not overwrite the original AES key.
+/// A second DEMON_INIT via DNS for an already-registered `agent_id` is treated as a
+/// re-registration (agent restart after crash or kill-date reset).  The session key is
+/// replaced and the DNS listener returns "ack".
+///
+/// NOTE: the teamserver does not currently verify that the re-init key material matches the
+/// original.  Operators who require key-rotation protection should track agent restarts via
+/// the `AgentNew` event and alert on unexpected re-registrations from unknown IPs.
 #[tokio::test]
-async fn dns_listener_pipeline_rejects_duplicate_init_preserves_original_key()
+async fn dns_listener_pipeline_reinit_updates_key_material()
 -> Result<(), Box<dyn std::error::Error>> {
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let manager = ListenerManager::new(database, registry.clone(), events.clone(), sockets, None);
+    let manager = ListenerManager::new(database, registry.clone(), events.clone(), sockets, None)
+        .with_demon_allow_legacy_ctr(true);
     let mut event_receiver = events.subscribe();
 
     let port = free_udp_port();
@@ -473,21 +482,21 @@ async fn dns_listener_pipeline_rejects_duplicate_init_preserves_original_key()
         0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF,
         0x00,
     ];
-    let hijack_key: [u8; AGENT_KEY_LENGTH] = [
+    let new_key: [u8; AGENT_KEY_LENGTH] = [
         0xBB, 0xAA, 0x99, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x00, 0xFF, 0xEE, 0xDD,
         0xCC, 0xBB, 0xAA, 0x99, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x00, 0xFF, 0xEE,
         0xDD, 0xCC,
     ];
-    let hijack_iv: [u8; AGENT_IV_LENGTH] = [
+    let new_iv: [u8; AGENT_IV_LENGTH] = [
         0xCC, 0xBB, 0xAA, 0x99, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x00, 0xFF, 0xEE,
         0xDD,
     ];
 
-    manager.create(dns_listener("dns-dup-init", port, domain)).await?;
-    manager.start("dns-dup-init").await?;
+    manager.create(dns_listener("dns-reinit", port, domain)).await?;
+    manager.start("dns-reinit").await?;
     let client = wait_for_dns_listener(port).await?;
 
-    // First init — must succeed.
+    // First init — must succeed and register the original key.
     let init_body = common::valid_demon_init_body(agent_id, original_key, original_iv);
     let result = dns_upload_demon_packet(&client, agent_id, &init_body, domain, 0x6000).await?;
     assert_eq!(result, "ack", "first DEMON_INIT must succeed");
@@ -495,34 +504,34 @@ async fn dns_listener_pipeline_rejects_duplicate_init_preserves_original_key()
     let stored = registry.get(agent_id).await.ok_or("agent should be registered")?;
     assert_eq!(stored.encryption.aes_key.as_slice(), &original_key);
 
-    // Drain AgentNew event.
+    // Drain first AgentNew event.
     let event = timeout(Duration::from_secs(5), event_receiver.recv()).await?;
     assert!(matches!(event, Some(OperatorMessage::AgentNew(_))));
 
-    // Second init with hijack key — must be rejected.
-    let hijack_body = common::valid_demon_init_body(agent_id, hijack_key, hijack_iv);
-    let hijack_result =
-        dns_upload_demon_packet(&client, agent_id, &hijack_body, domain, 0x7000).await?;
-    assert_eq!(hijack_result, "err", "duplicate DEMON_INIT must be rejected");
+    // Second init (same agent_id, new key) — treated as re-registration, must succeed.
+    let reinit_body = common::valid_demon_init_body(agent_id, new_key, new_iv);
+    let reinit_result =
+        dns_upload_demon_packet(&client, agent_id, &reinit_body, domain, 0x7000).await?;
+    assert_eq!(reinit_result, "ack", "re-registration DEMON_INIT must be accepted");
 
-    // Original key must still be intact.
+    // Key must be updated to the new material.
     let stored_after = registry.get(agent_id).await.ok_or("agent should remain registered")?;
     assert_eq!(
         stored_after.encryption.aes_key.as_slice(),
-        &original_key,
-        "original AES key must not be overwritten by duplicate init"
+        &new_key,
+        "re-init must update the session key to the new material"
     );
     assert_eq!(
         stored_after.encryption.aes_iv.as_slice(),
-        &original_iv,
-        "original AES IV must not be overwritten by duplicate init"
+        &new_iv,
+        "re-init must update the session IV to the new material"
     );
 
-    // Only one agent in the registry.
+    // Still exactly one active entry.
     let active = registry.list_active().await;
-    assert_eq!(active.len(), 1, "duplicate init must not create a second agent entry");
+    assert_eq!(active.len(), 1, "re-init must not create a second agent entry");
 
-    manager.stop("dns-dup-init").await?;
+    manager.stop("dns-reinit").await?;
     Ok(())
 }
 
@@ -534,7 +543,8 @@ async fn dns_listener_pipeline_download_returns_wait_for_unknown_agent()
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None)
+        .with_demon_allow_legacy_ctr(true);
 
     let port = free_udp_port();
     let domain = "c2.example.com";
@@ -574,7 +584,8 @@ async fn setup_dns_test(
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None)
+        .with_demon_allow_legacy_ctr(true);
 
     let port = free_udp_port();
     let domain = "c2.example.com";
@@ -823,7 +834,8 @@ async fn dns_listener_concurrent_multi_agent_sessions_are_isolated()
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let manager = ListenerManager::new(database, registry.clone(), events.clone(), sockets, None);
+    let manager = ListenerManager::new(database, registry.clone(), events.clone(), sockets, None)
+        .with_demon_allow_legacy_ctr(true);
     let mut event_receiver = events.subscribe();
 
     let port = free_udp_port();
@@ -1015,7 +1027,8 @@ async fn dns_listener_pipeline_download_returns_wait_for_registered_agent_with_n
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let manager = ListenerManager::new(database, registry.clone(), events.clone(), sockets, None);
+    let manager = ListenerManager::new(database, registry.clone(), events.clone(), sockets, None)
+        .with_demon_allow_legacy_ctr(true);
     let mut event_receiver = events.subscribe();
 
     let port = free_udp_port();
@@ -1079,7 +1092,8 @@ async fn dns_listener_pipeline_registered_agent_downloads_task_after_enqueue()
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let manager = ListenerManager::new(database, registry.clone(), events.clone(), sockets, None);
+    let manager = ListenerManager::new(database, registry.clone(), events.clone(), sockets, None)
+        .with_demon_allow_legacy_ctr(true);
     let mut event_receiver = events.subscribe();
 
     let port = free_udp_port();
@@ -1182,7 +1196,8 @@ async fn dns_task_delivery_happy_path_decrypts_correctly() -> Result<(), Box<dyn
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let manager = ListenerManager::new(database, registry.clone(), events.clone(), sockets, None);
+    let manager = ListenerManager::new(database, registry.clone(), events.clone(), sockets, None)
+        .with_demon_allow_legacy_ctr(true);
     let mut event_receiver = events.subscribe();
 
     let port = free_udp_port();
@@ -1281,7 +1296,8 @@ async fn dns_task_delivery_multi_chunk() -> Result<(), Box<dyn std::error::Error
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let manager = ListenerManager::new(database, registry.clone(), events.clone(), sockets, None);
+    let manager = ListenerManager::new(database, registry.clone(), events.clone(), sockets, None)
+        .with_demon_allow_legacy_ctr(true);
     let mut event_receiver = events.subscribe();
 
     let port = free_udp_port();
@@ -1386,7 +1402,8 @@ async fn dns_listener_out_of_order_upload_reassembles_correctly()
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let manager = ListenerManager::new(database, registry.clone(), events.clone(), sockets, None);
+    let manager = ListenerManager::new(database, registry.clone(), events.clone(), sockets, None)
+        .with_demon_allow_legacy_ctr(true);
     let mut event_receiver = events.subscribe();
 
     let port = free_udp_port();
@@ -1473,7 +1490,8 @@ async fn dns_listener_duplicate_chunk_retransmission_is_idempotent()
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let manager = ListenerManager::new(database, registry.clone(), events.clone(), sockets, None);
+    let manager = ListenerManager::new(database, registry.clone(), events.clone(), sockets, None)
+        .with_demon_allow_legacy_ctr(true);
     let mut event_receiver = events.subscribe();
 
     let port = free_udp_port();

@@ -153,7 +153,8 @@ async fn start_server()
         events.clone(),
         sockets.clone(),
         None,
-    );
+    )
+    .with_demon_allow_legacy_ctr(true);
     let state = TeamserverState {
         profile: profile.clone(),
         database: database.clone(),

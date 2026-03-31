@@ -32,7 +32,8 @@ async fn spawn_server_with_fallback() -> Result<common::TestServer, Box<dyn std:
         events.clone(),
         sockets.clone(),
         None,
-    );
+    )
+    .with_demon_allow_legacy_ctr(true);
     let webhooks = AuditWebhookNotifier::from_profile(&profile);
     let state = TeamserverState {
         profile: profile.clone(),

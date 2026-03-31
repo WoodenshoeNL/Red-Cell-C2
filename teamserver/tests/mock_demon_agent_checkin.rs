@@ -27,7 +27,9 @@ fn demon_test_profile() -> Profile {
           }
         }
 
-        Demon {}
+        Demon {
+          AllowLegacyCtr = true
+        }
         "#,
     )
     .expect("test profile should parse")

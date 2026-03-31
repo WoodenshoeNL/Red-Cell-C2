@@ -9,18 +9,18 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1018 | 231 | 31 |
-| Bugs filed against | 135 | 36 | 9 |
+| Tasks closed | 1022 | 231 | 31 |
+| Bugs filed against | 136 | 36 | 9 |
 | Bug rate (bugs/task) | 0.13 | 0.16 | 0.29 |
 | Quality score | 87% | 84% | 71% |
 
-*Bug rates: Claude 135/1018=0.13, Codex 36/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 136/1022=0.13, Codex 36/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
-| unwrap / expect in production | 8 | 0 | 0 |
+| unwrap / expect in production | 9 | 0 | 0 |
 | Missing tests / stale tests | 55 | 14 | 5 |
 | Clippy warnings | 7 | 0 | 1 |
 | Protocol errors | 21 | 27 | 3 |
@@ -4492,6 +4492,16 @@ Build: skipped (no Rust source changes in range; `python3 automatic-test/test.py
 | Cursor | 0 | 0 | No activity in range. |
 
 Build: skipped (no committed Rust source changes in range)
+
+### QA Review — 2026-03-31 11:19 — 297e90eb..458c4542
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 4 | 1 | Closed: red-cell-c2-3dgc7, red-cell-c2-w7qca, red-cell-c2-5zo42, red-cell-c2-q31ri. Filed: red-cell-c2-031h0 for a new `expect()` in the Specter CLR hosting path. The late claim commit `458c4542` was mechanical only and did not change reviewed code. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: failed — `cargo check --workspace` passed, `cargo clippy --workspace -- -D warnings` passed, and `cargo nextest run --workspace` failed only on the pre-existing listener port-collision flake already tracked as `red-cell-c2-jmkgg`
 
 ### QA Review — 2026-03-31 07:11 — 52ee236e..1be119c6
 

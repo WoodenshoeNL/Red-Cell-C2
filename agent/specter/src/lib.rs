@@ -15,6 +15,8 @@ pub mod platform;
 pub mod protocol;
 pub mod sleep_obf;
 pub mod socket;
+pub mod spoof;
+pub mod syscall;
 pub mod token;
 pub mod transport;
 

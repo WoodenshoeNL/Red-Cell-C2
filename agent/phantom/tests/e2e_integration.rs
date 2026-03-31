@@ -56,26 +56,50 @@ impl MockCrypto {
         ack
     }
 
-    /// Encrypt a tasking response at a specific CTR offset (does not advance internal state).
-    fn encrypt_tasking_at(&self, offset: u64, packages: Vec<DemonPackage>) -> (Vec<u8>, u64) {
+    /// Build the raw [`DemonMessage`] bytes returned by `handle_get_job`.
+    ///
+    /// Each package payload is individually encrypted at successive monotonic
+    /// CTR offsets, mirroring what the teamserver's `encrypt_for_agent` does.
+    /// `self.ctr_offset` is advanced past each encrypted payload.
+    fn build_get_job_response(&mut self, packages: Vec<DemonPackage>) -> Vec<u8> {
         if packages.is_empty() {
-            return (Vec::new(), 0);
+            return Vec::new();
         }
-        let message = DemonMessage::new(packages);
-        let plaintext = message.to_bytes().expect("encode tasking message");
-        let encrypted = encrypt_agent_data_at_offset(&self.key, &self.iv, offset, &plaintext)
-            .expect("encrypt tasking");
-        let blocks = ctr_blocks_for_len(encrypted.len());
-        let envelope =
-            DemonEnvelope::new(self.agent_id, encrypted).expect("build tasking envelope");
-        (envelope.to_bytes(), blocks)
+        let mut enc_packages = Vec::with_capacity(packages.len());
+        for package in packages {
+            let encrypted_payload = if package.payload.is_empty() {
+                Vec::new()
+            } else {
+                let enc = encrypt_agent_data_at_offset(
+                    &self.key,
+                    &self.iv,
+                    self.ctr_offset,
+                    &package.payload,
+                )
+                .expect("encrypt job payload");
+                self.ctr_offset += ctr_blocks_for_len(enc.len());
+                enc
+            };
+            enc_packages.push(DemonPackage {
+                command_id: package.command_id,
+                request_id: package.request_id,
+                payload: encrypted_payload,
+            });
+        }
+        DemonMessage::new(enc_packages).to_bytes().expect("serialize get_job response")
     }
 
-    /// Decrypt a COMMAND_CHECKIN packet (callback format: clear command_id +
-    /// request_id, encrypted payload).
+    /// Decrypt a COMMAND_CHECKIN packet.
     fn decrypt_checkin(&mut self, body: &[u8]) -> (u32, u32, Vec<u8>) {
         let (cmd, req, payload) = self.decrypt_callback(body);
         assert_eq!(cmd, u32::from(DemonCommand::CommandCheckin), "expected CommandCheckin");
+        (cmd, req, payload)
+    }
+
+    /// Decrypt a COMMAND_GET_JOB packet.
+    fn decrypt_get_job(&mut self, body: &[u8]) -> (u32, u32, Vec<u8>) {
+        let (cmd, req, payload) = self.decrypt_callback(body);
+        assert_eq!(cmd, u32::from(DemonCommand::CommandGetJob), "expected CommandGetJob");
         (cmd, req, payload)
     }
 
@@ -358,73 +382,82 @@ impl TestHarness {
         (Self { agent, crypto, request_rx, response_tx }, server)
     }
 
-    /// Send an empty tasking response (no tasks), have the agent check in, and
-    /// verify the checkin packet is valid.
+    /// Send empty responses for a checkin+get_job cycle (no tasks), verify packets.
+    ///
+    /// The new protocol requires two HTTP requests per checkin iteration:
+    ///   1. `CommandCheckin` heartbeat → server returns empty
+    ///   2. `CommandGetJob` fetch     → server returns empty (no queued tasks)
     async fn do_empty_checkin(&mut self) {
-        // Queue empty response (no tasks).
-        self.response_tx.send(Vec::new()).expect("queue empty response");
+        // Queue empty responses for both checkin and get_job.
+        self.response_tx.send(Vec::new()).expect("queue empty checkin response");
+        self.response_tx.send(Vec::new()).expect("queue empty get_job response");
+
         let exit = self.agent.checkin().await.expect("checkin");
         assert!(!exit, "unexpected exit during empty checkin");
 
-        // Read and verify the checkin packet (callback format).
+        // Verify checkin packet.
         let checkin_body = self.request_rx.recv().expect("recv checkin body");
         self.crypto.decrypt_checkin(&checkin_body);
+
+        // Verify get_job packet.
+        let get_job_body = self.request_rx.recv().expect("recv get_job body");
+        self.crypto.decrypt_get_job(&get_job_body);
     }
 
-    /// Queue a tasking response with the given packages, have the agent check
-    /// in, and return the collected callback bodies.
+    /// Queue a tasking response via `CommandGetJob`, have the agent check in, and
+    /// return the collected callback bodies.
     ///
     /// The shared CTR offset advances in request/response order:
-    ///   1. Agent sends checkin → server decrypts (advances offset)
-    ///   2. Server sends tasking → agent decrypts (advances offset)
-    ///   3. Agent sends callbacks → server decrypts (advances offset)
-    ///
-    /// Since the response must be pre-queued before the checkin arrives, we
-    /// predict the tasking encryption offset by peeking ahead past the checkin
-    /// decryption blocks.
+    ///   1. Agent sends checkin   → server decrypts (advances offset by 1 block)
+    ///   2. Server replies empty  → no CTR advance
+    ///   3. Agent sends get_job   → server decrypts (advances offset by 1 block)
+    ///   4. Server sends tasks    → agent decrypts per-payload (advances offset)
+    ///   5. Agent sends callbacks → server decrypts (advances offset per callback)
     async fn do_checkin_with_tasks(
         &mut self,
         packages: Vec<DemonPackage>,
         expected_callbacks: usize,
     ) -> Vec<(u32, u32, Vec<u8>)> {
-        // The agent will send a checkin encrypted at its current ctr_offset.
-        // The server (mock) decrypts it first, then the tasking is decrypted
-        // by the agent at the next offset. We need to predict how many blocks
-        // the checkin will consume so we can encrypt the tasking at the right
-        // offset.
-        //
-        // Checkin uses callback format: command_id(4) + request_id(4) are clear,
-        // only payload_len(4) is encrypted (empty payload).
-        // ctr_blocks_for_len(4) = 1.
-        let checkin_blocks = ctr_blocks_for_len(4);
-        let tasking_offset = self.crypto.ctr_offset + checkin_blocks;
-        let (tasking, tasking_blocks) = self.crypto.encrypt_tasking_at(tasking_offset, packages);
-        self.response_tx.send(tasking).expect("queue tasking response");
+        // Predict the offset at which task payloads will be encrypted.
+        // checkin decrypt: 4 bytes encrypted = 1 block.
+        // get_job decrypt: 4 bytes encrypted = 1 block.
+        let inbound_blocks = ctr_blocks_for_len(4) + ctr_blocks_for_len(4); // 2
+        let task_encrypt_start = self.crypto.ctr_offset + inbound_blocks;
 
-        // Queue empty responses for each expected callback.
+        // Build the raw DemonMessage get_job response at the predicted offset.
+        // `build_get_job_response` advances ctr_offset past the task payloads.
+        let saved_offset = self.crypto.ctr_offset;
+        self.crypto.ctr_offset = task_encrypt_start;
+        let get_job_response = self.crypto.build_get_job_response(packages);
+        let offset_after_tasks = self.crypto.ctr_offset;
+        // Restore — the actual advance happens later when we decrypt packets.
+        self.crypto.ctr_offset = saved_offset;
+
+        // Queue responses: empty for checkin, task message for get_job, empty for callbacks.
+        self.response_tx.send(Vec::new()).expect("queue empty checkin response");
+        self.response_tx.send(get_job_response).expect("queue get_job response");
         for _ in 0..expected_callbacks {
             self.response_tx.send(Vec::new()).expect("queue callback ack");
         }
 
-        let exit = self.agent.checkin().await.expect("checkin with tasks");
+        let _exit = self.agent.checkin().await.expect("checkin with tasks");
 
-        // Read the checkin packet first (callback format).
-        // This advances ctr_offset by checkin_blocks.
+        // Decrypt checkin (advances ctr_offset by 1).
         let checkin_body = self.request_rx.recv().expect("recv checkin body");
         self.crypto.decrypt_checkin(&checkin_body);
 
-        // Advance past the tasking blocks (server sent, agent decrypted).
-        self.crypto.ctr_offset += tasking_blocks;
+        // Decrypt get_job (advances ctr_offset by 1).
+        let get_job_body = self.request_rx.recv().expect("recv get_job body");
+        self.crypto.decrypt_get_job(&get_job_body);
 
-        // Read all callback packets.
+        // Jump past the task payload blocks the agent decrypted from the response.
+        self.crypto.ctr_offset = offset_after_tasks;
+
+        // Read and decrypt all callback packets.
         let mut callbacks = Vec::new();
         for _ in 0..expected_callbacks {
             let body = self.request_rx.recv().expect("recv callback body");
             callbacks.push(self.crypto.decrypt_callback(&body));
-        }
-
-        if exit {
-            // Don't assert !exit here — caller decides.
         }
 
         callbacks
@@ -500,8 +533,8 @@ async fn scenario_1_init_handshake_registers_agent_with_metadata() {
 
 #[tokio::test]
 async fn scenario_2_checkin_loop_three_successful_checkins() {
-    // 3 empty checkins = 3 connections.
-    let (mut harness, server) = TestHarness::new(3).await;
+    // 3 empty checkins × 2 requests each (checkin + get_job) = 6 connections.
+    let (mut harness, server) = TestHarness::new(6).await;
 
     for i in 0..3 {
         harness.do_empty_checkin().await;
@@ -517,8 +550,8 @@ async fn scenario_2_checkin_loop_three_successful_checkins() {
 
 #[tokio::test]
 async fn scenario_3_shell_command_echo() {
-    // 1 checkin + 2 callbacks (Structured proc_create + Output).
-    let (mut harness, server) = TestHarness::new(3).await;
+    // checkin (2 req: checkin + get_job) + 2 callbacks = 4 connections.
+    let (mut harness, server) = TestHarness::new(4).await;
 
     let task = DemonPackage::new(
         DemonCommand::CommandProc,
@@ -550,8 +583,8 @@ async fn scenario_3_shell_command_echo() {
 
 #[tokio::test]
 async fn scenario_4_filesystem_dir_and_cat() {
-    // 1 checkin + 2 callbacks (one per task).
-    let (mut harness, server) = TestHarness::new(3).await;
+    // checkin (2 req: checkin + get_job) + 2 callbacks = 4 connections.
+    let (mut harness, server) = TestHarness::new(4).await;
 
     let dir_task = DemonPackage::new(DemonCommand::CommandFs, 200, build_fs_dir_payload("/tmp"));
     let cat_task =
@@ -598,8 +631,8 @@ async fn scenario_4_filesystem_dir_and_cat() {
 
 #[tokio::test]
 async fn scenario_5_process_list_contains_own_pid() {
-    // 1 checkin + 1 callback.
-    let (mut harness, server) = TestHarness::new(2).await;
+    // checkin (2 req: checkin + get_job) + 1 callback = 3 connections.
+    let (mut harness, server) = TestHarness::new(3).await;
 
     // Use empty needle to match all processes.
     let task = DemonPackage::new(DemonCommand::CommandProc, 300, build_proc_grep_payload(""));
@@ -646,8 +679,8 @@ async fn scenario_5_process_list_contains_own_pid() {
 
 #[tokio::test]
 async fn scenario_6_network_sessions() {
-    // 1 checkin + 1 callback.
-    let (mut harness, server) = TestHarness::new(2).await;
+    // checkin (2 req: checkin + get_job) + 1 callback = 3 connections.
+    let (mut harness, server) = TestHarness::new(3).await;
 
     let task = DemonPackage::new(DemonCommand::CommandNet, 400, build_net_sessions_payload());
     let callbacks = harness.do_checkin_with_tasks(vec![task], 1).await;
@@ -677,34 +710,15 @@ async fn scenario_6_network_sessions() {
 
 #[tokio::test]
 async fn scenario_7_exit_clean_shutdown() {
-    // 1 checkin + 1 callback (exit callback).
-    let (mut harness, server) = TestHarness::new(2).await;
+    // checkin (2 req: checkin + get_job) + 1 exit callback = 3 connections.
+    let (mut harness, server) = TestHarness::new(3).await;
 
     let task = DemonPackage::new(DemonCommand::CommandExit, 500, build_exit_payload(1));
+    let callbacks = harness.do_checkin_with_tasks(vec![task], 1).await;
 
-    // Predict the offset after the checkin is decrypted (4-byte encrypted payload_len = 1 block).
-    let checkin_blocks = ctr_blocks_for_len(4);
-    let tasking_offset = harness.crypto.ctr_offset + checkin_blocks;
-    let (tasking, tasking_blocks) = harness.crypto.encrypt_tasking_at(tasking_offset, vec![task]);
-    harness.response_tx.send(tasking).expect("queue tasking");
-    // Queue empty response for exit callback.
-    harness.response_tx.send(Vec::new()).expect("queue callback ack");
-
-    let exit = harness.agent.checkin().await.expect("checkin with exit");
-    assert!(exit, "checkin should signal exit");
-
-    // Read the checkin packet (callback format).
-    let checkin_body = harness.request_rx.recv().expect("recv checkin");
-    harness.crypto.decrypt_checkin(&checkin_body);
-
-    // Advance past the tasking blocks (server sent, agent decrypted).
-    harness.crypto.ctr_offset += tasking_blocks;
-
-    // Read the exit callback.
-    let exit_body = harness.request_rx.recv().expect("recv exit callback");
-    let (cmd_id, req_id, payload) = harness.crypto.decrypt_callback(&exit_body);
-    assert_eq!(cmd_id, u32::from(DemonCommand::CommandExit));
-    assert_eq!(req_id, 500);
+    let (cmd_id, req_id, payload) = &callbacks[0];
+    assert_eq!(*cmd_id, u32::from(DemonCommand::CommandExit));
+    assert_eq!(*req_id, 500);
     // Exit payload is the exit method (BE u32).
     let exit_method = u32::from_be_bytes(payload[0..4].try_into().expect("exit method"));
     assert_eq!(exit_method, 1);

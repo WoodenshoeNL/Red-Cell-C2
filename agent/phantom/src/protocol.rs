@@ -123,6 +123,41 @@ pub fn parse_init_ack(
     Ok(ctr_blocks_for_len(response_body.len()))
 }
 
+/// Parse and decrypt a `CommandGetJob` response.
+///
+/// The teamserver returns a raw [`DemonMessage`] byte stream where each
+/// package's payload is individually encrypted at successive monotonic CTR
+/// offsets.  This differs from [`parse_tasking_response`], which decrypts
+/// the entire message body as a single blob inside a [`DemonEnvelope`].
+///
+/// Returns the decrypted packages and the updated CTR offset after consuming
+/// all per-package ciphertexts.
+pub fn parse_job_response(
+    crypto: &AgentCryptoMaterial,
+    ctr_offset: u64,
+    response_body: &[u8],
+) -> Result<(Vec<DemonPackage>, u64), PhantomError> {
+    if response_body.is_empty() {
+        return Ok((Vec::new(), ctr_offset));
+    }
+
+    let message = DemonMessage::from_bytes(response_body)?;
+    let mut packages = Vec::with_capacity(message.packages.len());
+    let mut offset = ctr_offset;
+
+    for mut package in message.packages {
+        if !package.payload.is_empty() {
+            let ciphertext_len = package.payload.len();
+            package.payload =
+                decrypt_agent_data_at_offset(&crypto.key, &crypto.iv, offset, &package.payload)?;
+            offset += ctr_blocks_for_len(ciphertext_len);
+        }
+        packages.push(package);
+    }
+
+    Ok((packages, offset))
+}
+
 /// Decrypt a tasking response body into packages.
 pub fn parse_tasking_response(
     agent_id: u32,
@@ -324,8 +359,8 @@ mod tests {
     use std::path::Path;
 
     use red_cell_common::crypto::{
-        decrypt_agent_data, decrypt_agent_data_at_offset, encrypt_agent_data,
-        generate_agent_crypto_material,
+        ctr_blocks_for_len, decrypt_agent_data, decrypt_agent_data_at_offset, encrypt_agent_data,
+        encrypt_agent_data_at_offset, generate_agent_crypto_material,
     };
     use red_cell_common::demon::{DEMON_MAGIC_VALUE, DemonCallback, DemonCommand};
 
@@ -405,6 +440,84 @@ mod tests {
             decrypt_agent_data(&crypto.key, &crypto.iv, &envelope.payload[8..]).expect("decrypt");
         let payload_len = u32::from_be_bytes(plaintext[..4].try_into().expect("len")) as usize;
         assert_eq!(payload_len, 4 + "hello".len()); // length-prefixed bytes
+    }
+
+    #[test]
+    fn parse_job_response_returns_empty_for_empty_body() {
+        let crypto = generate_agent_crypto_material().expect("crypto");
+        let (packages, offset) = super::parse_job_response(&crypto, 7, &[]).expect("parse");
+        assert!(packages.is_empty());
+        assert_eq!(offset, 7, "CTR offset must not advance on empty body");
+    }
+
+    #[test]
+    fn parse_job_response_decrypts_per_package_payloads() {
+        let crypto = generate_agent_crypto_material().expect("crypto");
+        let start_offset: u64 = 5;
+
+        let plain1 = vec![0xAA, 0xBB, 0xCC, 0xDD];
+        let plain2 = vec![0x11, 0x22];
+
+        let enc1 = red_cell_common::crypto::encrypt_agent_data_at_offset(
+            &crypto.key,
+            &crypto.iv,
+            start_offset,
+            &plain1,
+        )
+        .expect("enc1");
+        let enc2 = red_cell_common::crypto::encrypt_agent_data_at_offset(
+            &crypto.key,
+            &crypto.iv,
+            start_offset + ctr_blocks_for_len(enc1.len()),
+            &plain2,
+        )
+        .expect("enc2");
+
+        let packages = vec![
+            red_cell_common::demon::DemonPackage {
+                command_id: 0x0001,
+                request_id: 10,
+                payload: enc1.clone(),
+            },
+            red_cell_common::demon::DemonPackage {
+                command_id: 0x0002,
+                request_id: 20,
+                payload: enc2.clone(),
+            },
+        ];
+        let message =
+            red_cell_common::demon::DemonMessage::new(packages).to_bytes().expect("serialize");
+
+        let (decrypted, next_offset) =
+            super::parse_job_response(&crypto, start_offset, &message).expect("parse");
+        assert_eq!(decrypted.len(), 2);
+        assert_eq!(decrypted[0].command_id, 0x0001);
+        assert_eq!(decrypted[0].request_id, 10);
+        assert_eq!(decrypted[0].payload, plain1);
+        assert_eq!(decrypted[1].command_id, 0x0002);
+        assert_eq!(decrypted[1].request_id, 20);
+        assert_eq!(decrypted[1].payload, plain2);
+        assert_eq!(
+            next_offset,
+            start_offset + ctr_blocks_for_len(enc1.len()) + ctr_blocks_for_len(enc2.len())
+        );
+    }
+
+    #[test]
+    fn parse_job_response_passes_through_empty_package_payloads() {
+        let crypto = generate_agent_crypto_material().expect("crypto");
+        let packages = vec![red_cell_common::demon::DemonPackage::new(
+            DemonCommand::CommandNoJob,
+            1,
+            Vec::new(),
+        )];
+        let message =
+            red_cell_common::demon::DemonMessage::new(packages).to_bytes().expect("serialize");
+
+        let (decrypted, offset) = super::parse_job_response(&crypto, 3, &message).expect("parse");
+        assert_eq!(decrypted.len(), 1);
+        assert!(decrypted[0].payload.is_empty());
+        assert_eq!(offset, 3, "empty payload must not advance CTR");
     }
 
     #[test]

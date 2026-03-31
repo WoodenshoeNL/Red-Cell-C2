@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1042 | 231 | 31 |
-| Bugs filed against | 141 | 36 | 9 |
+| Tasks closed | 1046 | 231 | 31 |
+| Bugs filed against | 142 | 36 | 9 |
 | Bug rate (bugs/task) | 0.14 | 0.16 | 0.29 |
 | Quality score | 86% | 84% | 71% |
 
-*Bug rates: Claude 141/1042=0.14, Codex 36/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 142/1046=0.14, Codex 36/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -32,7 +32,7 @@ Each loop run updates the running totals and appends a review entry.
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
 | Correctness / pagination | 55 | 8 | 1 |
-| Workflow / close-hygiene | 22 | 0 | 0 |
+| Workflow / close-hygiene | 23 | 0 | 0 |
 | Code reuse / duplication | 8 | 0 | 0 |
 
 ---
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-31 19:56 — 5948d9a2..c54c2528
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 4 | 1 | Closed: red-cell-c2-fsj4g (DemonConfig Debug init_secret redaction), red-cell-c2-yaows (flaky test fix), red-cell-c2-4pyap (Phantom CA trust bypass), red-cell-c2-517qn (Specter CA trust bypass). Filed: red-cell-c2-lpc04 (u7cr9 closed without committing code, workflow/close-hygiene). |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: passed — `cargo check` clean, `cargo clippy -- -D warnings` 0 warnings. `cargo nextest run --workspace` ran 2368/4731 tests before hitting runner timeout: 2360 passed, 8 SIGTERM'd (assembly_dispatch integration tests, pre-existing slow-test infrastructure issue — not code failures). Remaining 2363 tests not run due to signal.
 
 ### QA Review — 2026-03-31 18:15 — ac4147bf..5948d9a2
 

@@ -21,10 +21,10 @@ Each loop run updates the running totals and appends a review entry.
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 9 | 0 | 0 |
-| Missing tests / stale tests | 57 | 15 | 5 |
+| Missing tests / stale tests | 58 | 15 | 5 |
 | Clippy warnings | 7 | 0 | 1 |
 | Protocol errors | 23 | 31 | 3 |
-| Security issues | 50 | 39 | 0 |
+| Security issues | 53 | 39 | 0 |
 | Architecture drift | 19 | 23 | 0 |
 | Memory / resource leaks | 10 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 9 | 0 |
@@ -4732,3 +4732,16 @@ Build: failed — `cargo check` passed, `cargo clippy -- -D warnings` passed, `c
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: partially broken — `cargo check --workspace` passed, but `cargo test` fails to compile due to pre-existing stale `recv_ctr_offset`/`send_ctr_offset` references in phantom agent.rs test code (5 locations). This is tracked by in-progress issue red-cell-c2-odv18. No new bugs filed — all changes in range are clean.
+
+### Arch Review — 2026-03-31 19:10
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 4 | security issues (3), missing tests / stale tests (1) | red-cell-c2-517qn (Specter pinned_cert_pem still trusts public CAs), red-cell-c2-4pyap (Phantom pinned_cert_pem still trusts public CAs), red-cell-c2-fsj4g (DemonConfig Debug leaks InitSecret), red-cell-c2-u7cr9 (client local_config test compile break). |
+| Codex | 0 | — | No attributable findings this review. |
+| Cursor | 0 | — | No attributable findings this review. |
+
+Overall codebase health: drifting
+Biggest blindspot: transport hardening claims in the Rust agents are not backed by adversarial TLS tests, so a pinning regression shipped while the code and comments both said pinning was enforced
+
+Build: `cargo check --workspace` passed, `cargo test --workspace` failed during compilation in `client/src/local_config.rs` (missing `CONFIG_MUTEX` and `resolved_config_path` in test code), and `cargo clippy --workspace -- -D warnings` passed.

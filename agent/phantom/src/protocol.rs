@@ -12,6 +12,13 @@ use red_cell_common::demon::{
 
 use crate::error::PhantomError;
 
+/// Extension flag requesting monotonic CTR mode from the teamserver.
+///
+/// When set in the init metadata, the teamserver tracks per-agent CTR offsets
+/// instead of resetting to 0 on every message.  Must match the teamserver's
+/// `INIT_EXT_MONOTONIC_CTR` constant.
+const INIT_EXT_MONOTONIC_CTR: u32 = 1 << 0;
+
 /// Host metadata sent in the initial `DEMON_INIT` registration.
 #[derive(Debug, Clone)]
 pub struct AgentMetadata {
@@ -273,6 +280,9 @@ fn serialize_init_metadata(
     buf.extend_from_slice(&metadata.kill_date.to_be_bytes());
     buf.extend_from_slice(&metadata.working_hours.to_be_bytes());
 
+    // Extension: request monotonic CTR mode, matching Specter's implementation.
+    buf.extend_from_slice(&INIT_EXT_MONOTONIC_CTR.to_be_bytes());
+
     Ok(buf)
 }
 
@@ -357,6 +367,27 @@ mod tests {
         let packet = build_init_packet(0x4142_4344, &crypto, &metadata()).expect("packet");
         assert_eq!(&packet[4..8], &DEMON_MAGIC_VALUE.to_be_bytes());
         assert_eq!(&packet[8..12], &0x4142_4344_u32.to_be_bytes());
+    }
+
+    #[test]
+    fn init_packet_contains_monotonic_ctr_extension_flag() {
+        let crypto = generate_agent_crypto_material().expect("crypto");
+        let agent_id = 0x4142_4344_u32;
+        let packet = build_init_packet(agent_id, &crypto, &metadata()).expect("packet");
+        let envelope = red_cell_common::demon::DemonEnvelope::from_bytes(&packet).expect("env");
+
+        // Skip: command_id(4) + padding(4) + key(32) + iv(16) = 56 bytes of cleartext header.
+        let encrypted = &envelope.payload[56..];
+        let plaintext = decrypt_agent_data(&crypto.key, &crypto.iv, encrypted).expect("decrypt");
+
+        // The last 4 bytes of the decrypted init metadata must be the extension flag.
+        let tail = &plaintext[plaintext.len() - 4..];
+        let ext_flags = u32::from_be_bytes(tail.try_into().expect("4 bytes"));
+        assert_eq!(
+            ext_flags & super::INIT_EXT_MONOTONIC_CTR,
+            super::INIT_EXT_MONOTONIC_CTR,
+            "init packet must include INIT_EXT_MONOTONIC_CTR extension flag"
+        );
     }
 
     #[test]

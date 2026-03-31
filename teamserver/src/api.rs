@@ -2520,6 +2520,8 @@ async fn update_listener(
     Json(config): Json<ListenerConfig>,
 ) -> Result<Json<ListenerSummary>, ListenerManagerError> {
     let parameters = serde_json::to_value(&config).ok();
+    // Snapshot the current config so we can detect no-op updates later.
+    let old_config = state.listeners.summary(&name).await.ok().map(|s| s.config);
     if config.name() != name {
         let error = ListenerManagerError::InvalidConfig {
             message: "path name must match listener configuration name".to_owned(),
@@ -2569,28 +2571,32 @@ async fn update_listener(
             return Err(error);
         }
     };
-    // Invalidate any cached payload builds that embed the old listener config.
-    // Errors are non-fatal: log and continue so the update itself still succeeds.
-    match state
-        .database
-        .payload_builds()
-        .invalidate_done_builds_for_listener(&summary.name, &now_rfc3339())
-        .await
-    {
-        Ok(0) => {}
-        Ok(count) => {
-            tracing::info!(
-                listener = %summary.name,
-                invalidated = count,
-                "invalidated stale payload build records after listener config change"
-            );
-        }
-        Err(err) => {
-            tracing::warn!(
-                listener = %summary.name,
-                error = %err,
-                "failed to invalidate payload build records after listener config change"
-            );
+    // Only invalidate cached payload builds when the listener config actually changed.
+    // An identical PUT (same config resubmitted) must not mark valid payloads as stale.
+    let config_changed = old_config.as_ref() != Some(&summary.config);
+    if config_changed {
+        // Errors are non-fatal: log and continue so the update itself still succeeds.
+        match state
+            .database
+            .payload_builds()
+            .invalidate_done_builds_for_listener(&summary.name, &now_rfc3339())
+            .await
+        {
+            Ok(0) => {}
+            Ok(count) => {
+                tracing::info!(
+                    listener = %summary.name,
+                    invalidated = count,
+                    "invalidated stale payload build records after listener config change"
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    listener = %summary.name,
+                    error = %err,
+                    "failed to invalidate payload build records after listener config change"
+                );
+            }
         }
     }
 
@@ -9626,6 +9632,71 @@ mod tests {
             .expect("db query")
             .expect("record should exist");
         assert_eq!(fetched.status, "stale", "done build should be stale after listener update");
+    }
+
+    #[tokio::test]
+    async fn identical_listener_put_preserves_done_payload_builds() {
+        let database = Database::connect_in_memory().await.expect("database");
+
+        // Seed a "done" payload build for the listener we will update.
+        let done_record = crate::PayloadBuildRecord {
+            id: "inv-noop-a".to_owned(),
+            status: "done".to_owned(),
+            name: "demon.x64.exe".to_owned(),
+            arch: "x64".to_owned(),
+            format: "exe".to_owned(),
+            listener: "noop-smb".to_owned(),
+            sleep_secs: None,
+            artifact: Some(vec![0xDE, 0xAD]),
+            size_bytes: Some(2),
+            error: None,
+            created_at: "2026-03-31T10:00:00Z".to_owned(),
+            updated_at: "2026-03-31T10:00:00Z".to_owned(),
+        };
+        database.payload_builds().create(&done_record).await.expect("create build record");
+
+        let (app, _, _) = test_router_with_database(
+            database.clone(),
+            Some((60, "rest-admin", "secret-admin", OperatorRole::Admin)),
+        )
+        .await;
+
+        // Create the listener.
+        let _ = app
+            .clone()
+            .oneshot(create_listener_request(
+                &smb_listener_json("noop-smb", "same-pipe"),
+                "secret-admin",
+            ))
+            .await
+            .expect("create listener response");
+
+        // PUT the exact same config (no change).
+        let update_response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/listeners/noop-smb")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(smb_listener_json("noop-smb", "same-pipe")))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(update_response.status(), StatusCode::OK);
+
+        // The "done" build must still be "done" — not stale.
+        let fetched = database
+            .payload_builds()
+            .get("inv-noop-a")
+            .await
+            .expect("db query")
+            .expect("record should exist");
+        assert_eq!(
+            fetched.status, "done",
+            "done build must remain done after identical listener PUT"
+        );
     }
 
     // ── RBAC: analyst can read payloads but not build ───────────────────

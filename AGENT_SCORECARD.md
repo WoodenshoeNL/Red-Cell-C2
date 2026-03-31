@@ -10,25 +10,25 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 1047 | 231 | 31 |
-| Bugs filed against | 142 | 36 | 9 |
+| Bugs filed against | 145 | 36 | 9 |
 | Bug rate (bugs/task) | 0.14 | 0.16 | 0.29 |
 | Quality score | 86% | 84% | 71% |
 
-*Bug rates: Claude 142/1047=0.14, Codex 36/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 145/1047=0.14, Codex 36/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 9 | 0 | 0 |
-| Missing tests / stale tests | 58 | 15 | 5 |
+| Missing tests / stale tests | 59 | 15 | 5 |
 | Clippy warnings | 7 | 0 | 1 |
-| Protocol errors | 23 | 31 | 3 |
+| Protocol errors | 24 | 31 | 3 |
 | Security issues | 53 | 39 | 0 |
 | Architecture drift | 19 | 23 | 0 |
 | Memory / resource leaks | 10 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 9 | 0 |
-| Test infrastructure / flakiness | 30 | 1 | 0 |
+| Test infrastructure / flakiness | 31 | 1 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
 | Correctness / pagination | 55 | 8 | 1 |
@@ -4785,3 +4785,16 @@ Build: `cargo check --workspace` passed, `cargo test --workspace` failed during 
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: skipped — no source changes in review range.
+
+### Arch Review — 2026-03-31 — 4a5bef8c (HEAD)
+
+| Agent | Bugs filed | Violation types | Issues |
+|-------|----------:|-----------------|--------|
+| Claude | 3 | protocol errors (1), missing/stale tests (1), test infrastructure/flakiness (1) | red-cell-c2-0q1px (Phantom checkin never calls CommandGetJob — agent is functionally deaf), red-cell-c2-otopv (init_callback_flow test false-positive CTR assertion), red-cell-c2-8s5hl (recurring flaky rate-limiter lockout test) |
+| Codex | 0 | — | No attributable findings this review. |
+| Cursor | 0 | — | No attributable findings this review. |
+
+Overall codebase health: moderate — protocol correctness, crypto, and auth are strong; functional gap in Phantom agent (cannot receive tasks) is the critical finding
+Biggest blindspot: Phantom was written with a Specter-like checkin/get-job split in mind but the server-side protocol was never updated to return tasks on checkin — Phantom shipped with zero task-reception capability and no test to catch it
+
+Build: `cargo check --workspace` clean, `cargo clippy -- -D warnings` 0 warnings. nextest run incomplete due to runner timeout on assembly_dispatch tests (pre-existing).

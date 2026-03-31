@@ -5,50 +5,108 @@ before deploying Red Cell C2 in a production engagement.
 
 ---
 
-## AES-256-CTR keystream reuse (two-time-pad)
+## AES-256-CTR keystream reuse (two-time-pad) — Demon/Archon legacy mode
 
-**Severity:** High — passive traffic analysis can recover plaintext.
+**Severity:** High when `AllowLegacyCtr = true` and no TLS — passive traffic analysis
+can recover plaintext.  No risk for Specter/Phantom agents, which use monotonic CTR.
 
-### What happens
+### Background: two CTR modes in Red Cell
 
-The Havoc Demon binary protocol assigns each agent a fixed AES-256 session key and a
-fixed 16-byte IV at registration time.  Both the teamserver and the Demon reset the
-AES-CTR counter to **zero at the start of every message** rather than maintaining a
-running counter across the session.
+Red Cell supports two AES-CTR operating modes, selected per-agent at registration time:
+
+| Mode | Agents | Behaviour | Risk |
+|---|---|---|---|
+| **Monotonic CTR** (default) | Specter, Phantom | Block offset advances across the session; each packet consumes a distinct portion of the keystream | None — keystream never reused |
+| **Legacy CTR** (opt-in) | Demon, Archon | Block offset resets to 0 for every packet — matches unmodified Havoc Demon behaviour | Two-time-pad: keystream identical for every packet |
+
+The teamserver defaults to monotonic CTR.  Legacy mode is only activated when an agent
+does not send the `INIT_EXT_MONOTONIC_CTR` extension flag during `DEMON_INIT`, **and**
+the operator has set `AllowLegacyCtr = true` in the profile.
+
+### What happens in legacy mode
+
+Unmodified Havoc Demon calls `AesInit(key, IV)` at the start of every
+`PackageTransmitNow` / `PackageTransmitAll` call (`agent/demon/src/core/Package.c:257`,
+`:390`), resetting the AES-CTR stream to block 0.  The teamserver mirrors this by
+skipping the CTR offset advance for any agent registered with `legacy_ctr = true`.
 
 Because the counter and IV are the same for every message under the same session, the
-AES keystream is **identical for every message**.
+AES keystream is **identical for every packet**.
 
 ### Why this is dangerous
 
-If an adversary records two ciphertexts `C1` and `C2` produced by the same agent:
+If an adversary records two ciphertexts `C1` and `C2` from the same agent:
 
 ```
 C1 ⊕ C2  =  (P1 ⊕ K)  ⊕  (P2 ⊕ K)  =  P1 ⊕ P2
 ```
 
-This is the *two-time-pad* (or *many-time-pad*) attack.  If either plaintext is
-partially known — for example, a predictable command header or a crafted response to
-a known tasking — the adversary can recover portions of all other plaintexts encrypted
-in that session.
+This is the *two-time-pad* attack.  Because the Demon wire format is public (fixed
+20-byte unencrypted header: size, `0xDEADBEEF` magic, agent ID, command ID, request
+ID), an adversary can crib-drag to recover complete plaintext from as few as two
+captured packets.
 
-### Why it is preserved
+### Enabling Demon/Archon compatibility
 
-This behaviour is inherited from Havoc and is kept **intentionally** so that Red Cell
-can operate unmodified Demon implants.  Changing the per-message counter offset would
-break wire compatibility with all existing Demon binaries.
+To accept unmodified Demon or Archon agents, set `AllowLegacyCtr = true` in the
+`Demon` block of your profile:
+
+```hcl
+Demon {
+    Sleep  = 2
+    Jitter = 15
+    AllowLegacyCtr = true   # accept Demon/Archon agents; see operator-security.md
+    ...
+}
+```
+
+When this flag is `false` (the default), any `DEMON_INIT` that does not negotiate
+monotonic CTR is rejected with a `LegacyCtrNotAllowed` error logged at `WARN` level.
+
+### Risk assessment by deployment context
+
+| Context | Risk level | Recommendation |
+|---|---|---|
+| Lab / isolated test environment | **None** | Enable freely; no real adversary capturing traffic |
+| Production engagement over TLS | **Low** | Two-time-pad requires breaking TLS first; acceptable with awareness |
+| Production engagement without TLS | **High** | Do not use Demon; use Specter (monotonic CTR) instead |
+| TLS inspection appliance in-path | **High** | Treat as no-TLS; inner CTR packets are exposed to the inspecting device |
+
+### Additional risks in legacy mode
+
+**Replay attacks.** Without CTR advancement the server cannot detect a replayed packet
+at the crypto layer.  The rate-limiter and protocol-level request IDs provide partial
+protection, but a captured `GET_JOB` callback could be replayed.
+
+**Blast radius is per-agent.** Each Demon payload is compiled with its own key+IV pair.
+Recovering one agent's traffic does not expose other agents' sessions.
 
 ### Mitigations
 
-| Scenario | Recommended action |
-|---|---|
-| Unmodified Demon implants (Havoc compatibility required) | Accept the limitation; rotate agent sessions frequently; keep engagement duration short so an adversary has fewer ciphertexts to correlate. |
-| Custom implants (no Havoc compatibility needed) | Use `encrypt_agent_data_at_offset` with a monotonically increasing `block_offset` derived from the total bytes sent in the session.  Track this counter in agent state (`AgentCryptoMaterial` or session context). |
-| New transports | Use an AEAD scheme (e.g. AES-256-GCM) instead of raw CTR.  AEAD provides confidentiality **and** ciphertext integrity, which CTR alone does not. |
+1. **Use TLS.** Configure `Tls` in the profile and provide a valid certificate.  TLS
+   wraps the entire HTTP exchange; the inner CTR reuse is only exploitable if the
+   adversary can first decrypt the TLS layer.
+
+2. **Dedicated listener for Demon.** Create a separate HTTP listener with
+   `AllowLegacyCtr = true` for Demon/Archon agents, and a separate listener without
+   the flag for Specter/Phantom agents.  This limits the flag's scope to the endpoints
+   that actually need it.
+
+3. **Short sessions, frequent rotation.** Fewer packets means fewer ciphertexts for an
+   adversary to correlate.  Prefer Specter for long-running implants.
+
+4. **Prefer Specter over Demon for new Windows deployments.** Specter implements the
+   full Demon command set and negotiates monotonic CTR automatically.  Demon should be
+   reserved for environments where deploying a Rust binary is not viable.
 
 ### Relevant code
 
+- `agent/demon/src/core/Package.c:257,390` — per-packet `AesInit` calls (CTR reset).
+- `teamserver/src/demon.rs:31` — `INIT_EXT_MONOTONIC_CTR` extension flag definition.
+- `teamserver/src/agents.rs:638-644` — `advance_ctr_for_agent` no-ops in legacy mode.
+- `teamserver/src/agents.rs:261-303` — security warning and insert logic for legacy CTR.
 - `common/src/crypto.rs` — `encrypt_agent_data`, `decrypt_agent_data` and their
   `_at_offset` variants.
 - `common::crypto::ctr_blocks_for_len` — helper for computing the block-offset
   increment after encrypting a message of a given length.
+- `common/src/config.rs` — `DemonConfig::allow_legacy_ctr` profile field.

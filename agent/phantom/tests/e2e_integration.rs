@@ -96,15 +96,29 @@ impl MockCrypto {
         DemonMessage::from_bytes(&plaintext).expect("parse checkin DemonMessage")
     }
 
-    /// Decrypt a callback packet (BE header: command_id, request_id, payload_len, payload).
+    /// Decrypt a callback packet.
+    ///
+    /// Wire format: `command_id(4, clear) | request_id(4, clear) | encrypted(payload_len(4) | payload)`.
     fn decrypt_callback(&mut self, body: &[u8]) -> (u32, u32, Vec<u8>) {
-        let plaintext = self.decrypt_envelope(body);
+        let envelope = DemonEnvelope::from_bytes(body).expect("parse envelope");
+        assert_eq!(envelope.header.agent_id, self.agent_id);
 
-        let command_id = u32::from_be_bytes(plaintext[0..4].try_into().expect("command_id bytes"));
-        let request_id = u32::from_be_bytes(plaintext[4..8].try_into().expect("request_id bytes"));
+        // command_id and request_id are in the clear.
+        let command_id =
+            u32::from_be_bytes(envelope.payload[0..4].try_into().expect("command_id bytes"));
+        let request_id =
+            u32::from_be_bytes(envelope.payload[4..8].try_into().expect("request_id bytes"));
+
+        // Decrypt the remainder: payload_len(4) | payload.
+        let encrypted = &envelope.payload[8..];
+        let plaintext =
+            decrypt_agent_data_at_offset(&self.key, &self.iv, self.recv_ctr_offset, encrypted)
+                .expect("decrypt callback payload");
+        self.recv_ctr_offset += ctr_blocks_for_len(encrypted.len());
+
         let payload_len =
-            u32::from_be_bytes(plaintext[8..12].try_into().expect("payload_len bytes")) as usize;
-        let payload = plaintext[12..12 + payload_len].to_vec();
+            u32::from_be_bytes(plaintext[0..4].try_into().expect("payload_len bytes")) as usize;
+        let payload = plaintext[4..4 + payload_len].to_vec();
 
         (command_id, request_id, payload)
     }

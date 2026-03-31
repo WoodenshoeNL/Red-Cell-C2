@@ -209,9 +209,12 @@ pub fn build_exit_packet(
 }
 
 /// Return the number of CTR blocks consumed by a callback payload body.
+///
+/// Only `payload_len(4) | payload` is encrypted; `command_id` and `request_id`
+/// are transmitted in the clear.
 #[must_use]
 pub fn callback_ctr_blocks(callback_payload_len: usize) -> u64 {
-    ctr_blocks_for_len(12 + callback_payload_len)
+    ctr_blocks_for_len(4 + callback_payload_len)
 }
 
 pub(crate) fn build_callback_packet(
@@ -222,9 +225,9 @@ pub(crate) fn build_callback_packet(
     request_id: u32,
     callback_payload: &[u8],
 ) -> Result<Vec<u8>, PhantomError> {
-    let mut plaintext = Vec::with_capacity(12 + callback_payload.len());
-    plaintext.extend_from_slice(&command_id.to_be_bytes());
-    plaintext.extend_from_slice(&request_id.to_be_bytes());
+    // Only payload_len + payload are encrypted; command_id and request_id
+    // remain in the clear so the teamserver can read them before decryption.
+    let mut plaintext = Vec::with_capacity(4 + callback_payload.len());
     let payload_len = u32::try_from(callback_payload.len())
         .map_err(|_| PhantomError::InvalidResponse("callback payload too large"))?;
     plaintext.extend_from_slice(&payload_len.to_be_bytes());
@@ -232,7 +235,13 @@ pub(crate) fn build_callback_packet(
 
     let encrypted =
         encrypt_agent_data_at_offset(&crypto.key, &crypto.iv, send_ctr_offset, &plaintext)?;
-    let envelope = DemonEnvelope::new(agent_id, encrypted)?;
+
+    let mut body = Vec::with_capacity(8 + encrypted.len());
+    body.extend_from_slice(&command_id.to_be_bytes());
+    body.extend_from_slice(&request_id.to_be_bytes());
+    body.extend_from_slice(&encrypted);
+
+    let envelope = DemonEnvelope::new(agent_id, body)?;
     Ok(envelope.to_bytes())
 }
 
@@ -356,11 +365,16 @@ mod tests {
         let crypto = generate_agent_crypto_material().expect("crypto");
         let packet = build_output_packet(7, &crypto, 0, 99, "hello").expect("packet");
         let envelope = red_cell_common::demon::DemonEnvelope::from_bytes(&packet).expect("env");
-        let plaintext =
-            decrypt_agent_data(&crypto.key, &crypto.iv, &envelope.payload).expect("decrypt");
 
-        assert_eq!(&plaintext[..4], &u32::from(DemonCommand::CommandOutput).to_be_bytes());
-        assert_eq!(&plaintext[4..8], &99_u32.to_be_bytes());
+        // command_id and request_id are in the clear.
+        assert_eq!(&envelope.payload[..4], &u32::from(DemonCommand::CommandOutput).to_be_bytes());
+        assert_eq!(&envelope.payload[4..8], &99_u32.to_be_bytes());
+
+        // Remainder is encrypted payload_len + payload.
+        let plaintext =
+            decrypt_agent_data(&crypto.key, &crypto.iv, &envelope.payload[8..]).expect("decrypt");
+        let payload_len = u32::from_be_bytes(plaintext[..4].try_into().expect("len")) as usize;
+        assert_eq!(payload_len, 4 + "hello".len()); // length-prefixed bytes
     }
 
     #[test]
@@ -413,15 +427,19 @@ mod tests {
         let crypto = generate_agent_crypto_material().expect("crypto");
         let packet = build_error_packet(7, &crypto, 0, 99, "boom").expect("packet");
         let envelope = red_cell_common::demon::DemonEnvelope::from_bytes(&packet).expect("env");
-        let plaintext = decrypt_agent_data_at_offset(&crypto.key, &crypto.iv, 0, &envelope.payload)
-            .expect("decrypt");
 
-        assert_eq!(&plaintext[..4], &u32::from(DemonCommand::CommandError).to_be_bytes());
-        assert_eq!(&plaintext[4..8], &99_u32.to_be_bytes());
-        assert_eq!(&plaintext[8..12], &12_u32.to_be_bytes());
-        assert_eq!(&plaintext[12..16], &u32::from(DemonCallback::ErrorMessage).to_be_bytes());
-        assert_eq!(&plaintext[16..20], &4_u32.to_be_bytes());
-        assert_eq!(&plaintext[20..24], b"boom");
+        // command_id and request_id are in the clear.
+        assert_eq!(&envelope.payload[..4], &u32::from(DemonCommand::CommandError).to_be_bytes());
+        assert_eq!(&envelope.payload[4..8], &99_u32.to_be_bytes());
+
+        // Remainder is encrypted: payload_len(4) + callback_type(4) + len_prefixed("boom").
+        let plaintext =
+            decrypt_agent_data_at_offset(&crypto.key, &crypto.iv, 0, &envelope.payload[8..])
+                .expect("decrypt");
+        assert_eq!(&plaintext[..4], &12_u32.to_be_bytes());
+        assert_eq!(&plaintext[4..8], &u32::from(DemonCallback::ErrorMessage).to_be_bytes());
+        assert_eq!(&plaintext[8..12], &4_u32.to_be_bytes());
+        assert_eq!(&plaintext[12..16], b"boom");
     }
 
     #[test]
@@ -429,13 +447,17 @@ mod tests {
         let crypto = generate_agent_crypto_material().expect("crypto");
         let packet = build_exit_packet(7, &crypto, 0, 99, 3).expect("packet");
         let envelope = red_cell_common::demon::DemonEnvelope::from_bytes(&packet).expect("env");
-        let plaintext = decrypt_agent_data_at_offset(&crypto.key, &crypto.iv, 0, &envelope.payload)
-            .expect("decrypt");
 
-        assert_eq!(&plaintext[..4], &u32::from(DemonCommand::CommandExit).to_be_bytes());
-        assert_eq!(&plaintext[4..8], &99_u32.to_be_bytes());
-        assert_eq!(&plaintext[8..12], &4_u32.to_be_bytes());
-        assert_eq!(&plaintext[12..16], &3_u32.to_be_bytes());
+        // command_id and request_id are in the clear.
+        assert_eq!(&envelope.payload[..4], &u32::from(DemonCommand::CommandExit).to_be_bytes());
+        assert_eq!(&envelope.payload[4..8], &99_u32.to_be_bytes());
+
+        // Remainder is encrypted: payload_len(4) + exit_method(4).
+        let plaintext =
+            decrypt_agent_data_at_offset(&crypto.key, &crypto.iv, 0, &envelope.payload[8..])
+                .expect("decrypt");
+        assert_eq!(&plaintext[..4], &4_u32.to_be_bytes());
+        assert_eq!(&plaintext[4..8], &3_u32.to_be_bytes());
     }
 
     #[test]

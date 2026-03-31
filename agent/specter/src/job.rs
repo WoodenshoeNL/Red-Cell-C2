@@ -154,6 +154,73 @@ impl JobStore {
         true
     }
 
+    /// Poll all running jobs for natural exit.
+    ///
+    /// On Windows, calls `GetExitCodeThread` / `GetExitCodeProcess` for each
+    /// running job.  Jobs whose thread or process has exited are marked
+    /// [`JOB_STATE_DEAD`] and their handles are closed.
+    ///
+    /// Returns the list of job IDs that transitioned to dead during this call,
+    /// so the caller can send `DEMON_COMMAND_JOB_DIED` notifications for
+    /// tracked processes.
+    pub fn poll(&mut self) -> Vec<u32> {
+        #[allow(unused_mut)]
+        let mut newly_dead = Vec::new();
+
+        for job in self.jobs.values_mut() {
+            if job.state != JOB_STATE_RUNNING {
+                continue;
+            }
+
+            #[cfg(windows)]
+            {
+                let exited = match job.job_type {
+                    JOB_TYPE_THREAD => {
+                        let mut exit_code: u32 = 0;
+                        // SAFETY: calling Win32 GetExitCodeThread on a valid thread handle.
+                        let ok = unsafe {
+                            windows_sys::Win32::System::Threading::GetExitCodeThread(
+                                job.handle,
+                                &mut exit_code,
+                            )
+                        };
+                        // STILL_ACTIVE == 259 (STATUS_PENDING)
+                        ok != 0 && exit_code != 259
+                    }
+                    JOB_TYPE_PROCESS | JOB_TYPE_TRACK_PROCESS => {
+                        let mut exit_code: u32 = 0;
+                        // SAFETY: calling Win32 GetExitCodeProcess on a valid process handle.
+                        let ok = unsafe {
+                            windows_sys::Win32::System::Threading::GetExitCodeProcess(
+                                job.handle,
+                                &mut exit_code,
+                            )
+                        };
+                        ok != 0 && exit_code != 259
+                    }
+                    _ => false,
+                };
+
+                if exited {
+                    job.state = JOB_STATE_DEAD;
+                    // SAFETY: closing the now-dead handle.
+                    unsafe {
+                        windows_sys::Win32::Foundation::CloseHandle(job.handle);
+                    };
+                    job.handle = 0;
+                    newly_dead.push(job.job_id);
+                }
+            }
+
+            // On non-Windows the handle is a dummy u64 — no OS polling is
+            // possible, so running jobs stay running until explicitly killed.
+            #[cfg(not(windows))]
+            let _ = job;
+        }
+
+        newly_dead
+    }
+
     /// Remove jobs whose state is [`JOB_STATE_DEAD`].
     pub fn reap_dead(&mut self) {
         self.jobs.retain(|_, j| j.state != JOB_STATE_DEAD);
@@ -251,5 +318,42 @@ mod tests {
         let mut store = JobStore::new();
         let id = store.add(JOB_TYPE_THREAD, 0);
         assert!(!store.resume(id));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn poll_on_non_windows_returns_empty() {
+        let mut store = JobStore::new();
+        store.add(JOB_TYPE_THREAD, 0);
+        store.add(JOB_TYPE_PROCESS, 0);
+        let dead = store.poll();
+        assert!(dead.is_empty(), "non-Windows poll should not mark anything dead");
+        // All jobs should still be running.
+        assert_eq!(store.list().filter(|j| j.state == JOB_STATE_RUNNING).count(), 2);
+    }
+
+    #[test]
+    fn poll_skips_already_dead_and_suspended_jobs() {
+        let mut store = JobStore::new();
+        let id1 = store.add(JOB_TYPE_THREAD, 0);
+        let id2 = store.add(JOB_TYPE_PROCESS, 0);
+        // Manually mark as dead and suspended.
+        store.jobs.get_mut(&id1).map(|j| j.state = JOB_STATE_DEAD);
+        store.jobs.get_mut(&id2).map(|j| j.state = JOB_STATE_SUSPENDED);
+        let dead = store.poll();
+        assert!(dead.is_empty());
+    }
+
+    #[test]
+    fn poll_then_reap_clears_dead_jobs() {
+        let mut store = JobStore::new();
+        store.add(JOB_TYPE_THREAD, 0);
+        let id2 = store.add(JOB_TYPE_PROCESS, 0);
+        // Simulate a job that died (manually set state as poll would on Windows).
+        store.jobs.get_mut(&id2).map(|j| j.state = JOB_STATE_DEAD);
+        store.reap_dead();
+        assert_eq!(store.list().count(), 1);
+        // Remaining job should still be running.
+        assert!(store.list().all(|j| j.state == JOB_STATE_RUNNING));
     }
 }

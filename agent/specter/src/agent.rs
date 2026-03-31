@@ -363,6 +363,30 @@ impl SpecterAgent {
                     );
                 }
             }
+
+            // Poll tracked jobs for natural exit (mirrors Havoc's
+            // JobCheckList).  Dead jobs get their handles closed and are
+            // reaped so CommandJob/List reflects reality.
+            let dead_job_ids = self.job_store.poll();
+            let job_cmd_id = u32::from(DemonCommand::CommandJob);
+            for job_id in &dead_job_ids {
+                // Notify the teamserver that a tracked job has died, matching
+                // Havoc's DEMON_COMMAND_JOB_DIED sub-command (5).
+                let mut payload = Vec::with_capacity(8);
+                payload.extend_from_slice(
+                    &u32::from(red_cell_common::demon::DemonJobCommand::Died).to_le_bytes(),
+                );
+                payload.extend_from_slice(&job_id.to_le_bytes());
+                if let Err(e) = self.send_callback_raw(job_cmd_id, 0, &payload).await {
+                    warn!(
+                        agent_id = format_args!("0x{:08X}", self.agent_id),
+                        job_id,
+                        error = %e,
+                        "failed to send job-died notification"
+                    );
+                }
+            }
+            self.job_store.reap_dead();
         }
     }
 

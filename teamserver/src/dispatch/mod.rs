@@ -1984,6 +1984,59 @@ mod tests {
             .to_bytes()
     }
 
+    /// Build a DEMON_INIT envelope with the `INIT_EXT_MONOTONIC_CTR` extension flag set.
+    ///
+    /// Use this variant in tests that exercise pivot paths (or any code path that runs
+    /// the production default `allow_legacy_ctr = false` dispatcher), so the CTR-mode
+    /// gate is satisfied and the test exercises its intended code path rather than
+    /// hitting the legacy-CTR rejection early.
+    fn valid_demon_init_body_monotonic(
+        agent_id: u32,
+        key: [u8; AGENT_KEY_LENGTH],
+        iv: [u8; AGENT_IV_LENGTH],
+    ) -> Vec<u8> {
+        let mut metadata = Vec::new();
+        metadata.extend_from_slice(&agent_id.to_be_bytes());
+        add_length_prefixed_bytes(&mut metadata, b"wkstn-01");
+        add_length_prefixed_bytes(&mut metadata, b"operator");
+        add_length_prefixed_bytes(&mut metadata, b"lab");
+        add_length_prefixed_bytes(&mut metadata, b"10.0.0.25");
+        add_length_prefixed_utf16(&mut metadata, "C:\\Windows\\explorer.exe");
+        metadata.extend_from_slice(&1337_u32.to_be_bytes());
+        metadata.extend_from_slice(&7331_u32.to_be_bytes());
+        metadata.extend_from_slice(&512_u32.to_be_bytes());
+        metadata.extend_from_slice(&2_u32.to_be_bytes());
+        metadata.extend_from_slice(&1_u32.to_be_bytes());
+        metadata.extend_from_slice(&0x1000_u64.to_be_bytes());
+        metadata.extend_from_slice(&10_u32.to_be_bytes());
+        metadata.extend_from_slice(&0_u32.to_be_bytes());
+        metadata.extend_from_slice(&1_u32.to_be_bytes());
+        metadata.extend_from_slice(&0_u32.to_be_bytes());
+        metadata.extend_from_slice(&22000_u32.to_be_bytes());
+        metadata.extend_from_slice(&9_u32.to_be_bytes());
+        metadata.extend_from_slice(&10_u32.to_be_bytes());
+        metadata.extend_from_slice(&25_u32.to_be_bytes());
+        metadata.extend_from_slice(&0_u64.to_be_bytes());
+        metadata.extend_from_slice(&0_u32.to_be_bytes());
+        // Extension flags: request monotonic (non-legacy) AES-CTR mode.
+        metadata.extend_from_slice(&crate::demon::INIT_EXT_MONOTONIC_CTR.to_be_bytes());
+
+        let encrypted = red_cell_common::crypto::encrypt_agent_data(&key, &iv, &metadata)
+            .expect("metadata encryption should succeed");
+        let payload = [
+            u32::from(DemonCommand::DemonInit).to_be_bytes().as_slice(),
+            7_u32.to_be_bytes().as_slice(),
+            key.as_slice(),
+            iv.as_slice(),
+            encrypted.as_slice(),
+        ]
+        .concat();
+
+        red_cell_common::demon::DemonEnvelope::new(agent_id, payload)
+            .unwrap_or_else(|error| panic!("failed to build demon init body (monotonic): {error}"))
+            .to_bytes()
+    }
+
     fn pivot_connect_payload(inner: &[u8]) -> Vec<u8> {
         let mut payload = Vec::new();
         payload.extend_from_slice(&u32::from(DemonPivotCommand::SmbConnect).to_le_bytes());
@@ -2238,7 +2291,9 @@ mod tests {
                 parent_id,
                 u32::from(DemonCommand::CommandPivot),
                 17,
-                &pivot_connect_payload(&valid_demon_init_body(child_id, child_key, child_iv)),
+                &pivot_connect_payload(&valid_demon_init_body_monotonic(
+                    child_id, child_key, child_iv,
+                )),
             )
             .await?;
 
@@ -2294,7 +2349,9 @@ mod tests {
                 parent_id,
                 u32::from(DemonCommand::CommandPivot),
                 42,
-                &pivot_connect_payload(&valid_demon_init_body(child_id, child_key, child_iv)),
+                &pivot_connect_payload(&valid_demon_init_body_monotonic(
+                    child_id, child_key, child_iv,
+                )),
             )
             .await?;
 
@@ -9989,7 +10046,9 @@ mod tests {
 
         // Build an init body (not callback) for an unregistered child agent —
         // this is the wrong message type for a pivot command inner payload.
-        let init_envelope = valid_demon_init_body(child_id, child_key, child_iv);
+        // Use the monotonic-CTR variant so the CTR-mode gate passes and the
+        // parser reaches the "expected callback, got init" rejection.
+        let init_envelope = valid_demon_init_body_monotonic(child_id, child_key, child_iv);
         let payload = pivot_command_payload(&init_envelope);
 
         let result = dispatcher

@@ -26,8 +26,6 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
-import shutil
-import subprocess
 import sys
 import time
 import tomllib
@@ -36,7 +34,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from lib.cli import CliConfig, CliError, status, login, \
-    listener_list, listener_create, listener_start, listener_stop, listener_delete
+    listener_create, listener_start, listener_stop, listener_delete
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -50,44 +48,6 @@ def _fail(msg: str) -> None:
 
 
 # ── Checks ───────────────────────────────────────────────────────────────────
-
-_REQUIRED_TOOLS = [
-    ("x86_64-w64-mingw32-gcc", ["x86_64-w64-mingw32-gcc", "--version"]),
-    ("nasm",                   ["nasm", "--version"]),
-]
-
-
-def check_toolchain(_cfg: CliConfig) -> bool:
-    """Verify that payload-build toolchain tools are present on the host."""
-    all_ok = True
-    for name, cmd in _REQUIRED_TOOLS:
-        if shutil.which(cmd[0]) is None:
-            _fail(
-                f"toolchain tool not found: {name!r}\n"
-                f"       Install it (e.g. 'apt install {_install_hint(name)}') "
-                f"before running payload scenarios."
-            )
-            all_ok = False
-            continue
-        try:
-            subprocess.run(cmd, check=True, capture_output=True)
-            _pass(f"toolchain: {name} present")
-        except subprocess.CalledProcessError as exc:
-            _fail(
-                f"toolchain tool '{name}' returned non-zero: {exc.returncode}\n"
-                f"       {exc.stderr.decode(errors='replace').strip()}"
-            )
-            all_ok = False
-    return all_ok
-
-
-def _install_hint(tool_name: str) -> str:
-    hints = {
-        "x86_64-w64-mingw32-gcc": "mingw-w64",
-        "nasm": "nasm",
-    }
-    return hints.get(tool_name, tool_name)
-
 
 def check_server_reachable(cfg: CliConfig) -> bool:
     try:
@@ -190,7 +150,6 @@ def main() -> None:
     print()
 
     checks = [
-        ("Toolchain",              check_toolchain),
         ("Server reachable",       check_server_reachable),
         ("Authentication",         check_auth),
         ("Listener lifecycle",     check_listener_lifecycle),

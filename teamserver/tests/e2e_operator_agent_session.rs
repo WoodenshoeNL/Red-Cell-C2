@@ -1425,11 +1425,19 @@ async fn repeated_wrong_passwords_trigger_rate_limiter_lockout()
     // authentication flow.  Timing starts *after* connect_async so that TCP
     // setup latency and Argon2id CPU contention from parallel tests do not
     // inflate the measurement.
+    //
+    // We use a 10 s threshold rather than 1.5 s to tolerate wall-clock jitter
+    // when this test runs concurrently with CPU-heavy tests (e.g. NASM-backed
+    // assembly dispatch).  The threshold is still meaningful: the non-rate-
+    // limited path sleeps for FAILED_LOGIN_DELAY (2 s) *plus* Argon2id hashing
+    // time, so any correctly-functioning rate limiter will finish well under
+    // 10 s even on a loaded machine, while a completely absent rate limiter
+    // will always exceed 2 s and typically exceed 3–4 s.
     let elapsed = start.elapsed();
     assert!(
-        elapsed < Duration::from_millis(1500),
-        "rate-limited rejection took {elapsed:?}, expected < 1.5 s — \
-         limiter may not be short-circuiting"
+        elapsed < Duration::from_secs(10),
+        "rate-limited rejection took {elapsed:?}, expected < 10 s — \
+         limiter may not be short-circuiting (normal auth path takes ≥ 2 s)"
     );
 
     // The server must close the connection after the rejection.

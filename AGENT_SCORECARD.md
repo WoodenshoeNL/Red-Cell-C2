@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1082 | 231 | 31 |
+| Tasks closed | 1085 | 231 | 31 |
 | Bugs filed against | 164 | 37 | 9 |
 | Bug rate (bugs/task) | 0.15 | 0.16 | 0.29 |
 | Quality score | 85% | 84% | 71% |
 
-*Bug rates: Claude 164/1082=0.1516→0.15, Codex 37/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 164/1085=0.1512→0.15, Codex 37/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -4977,3 +4977,13 @@ Notes: In-progress work for red-cell-c2-ktqqp (phantom persistence) has uncommit
 | Cursor | 0 | 0 | No activity. |
 
 Build: `cargo check --workspace` ✅. `cargo clippy --workspace -- -D warnings` ✅ (0 warnings). `cargo nextest run --workspace` ❌ — 1 failure: `python::tests::runtime_dispatches_loot_captured_callbacks` returns `Some("")` instead of expected credential string. Filed red-cell-c2-ts5pc (P3 flakiness: race between file truncation and write in Python test helper). Not attributable to current review — no changes to client/src/python.rs in this range; likely GIL/timing regression.
+
+### QA Review — 2026-04-01 15:18 — d84dad6e..c38b872f
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude (Ubuntu-C2-dev01-claude) | 3 | 0 | Closed: red-cell-c2-37udb, red-cell-c2-17bgh, red-cell-c2-vmh2o. Reviewed the associated fixes in `automatic-test`, `client-cli`, and `agent/specter`; no attributable regressions found. |
+| Codex | 0 | 0 | One QA maintenance commit (`c81bea62`) only; no reviewed product-code changes in this range. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check --workspace` passed. `cargo nextest run --workspace` passed all 4850 tests. `cargo clippy --workspace -- -D warnings` passed with 0 warnings. `br list --status=in_progress` was empty; `br list --status=open` and `br ready` showed only the existing open bug backlog, with no close-hygiene mismatch in the reviewed range.

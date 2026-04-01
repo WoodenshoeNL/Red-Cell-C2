@@ -21,17 +21,17 @@ Each loop run updates the running totals and appends a review entry.
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 9 | 0 | 0 |
-| Missing tests / stale tests | 62 | 15 | 5 |
+| Missing tests / stale tests | 64 | 16 | 5 |
 | Clippy warnings | 9 | 0 | 1 |
 | Protocol errors | 27 | 31 | 3 |
 | Security issues | 54 | 39 | 0 |
-| Architecture drift | 19 | 23 | 0 |
+| Architecture drift | 19 | 24 | 0 |
 | Memory / resource leaks | 10 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 9 | 0 |
 | Test infrastructure / flakiness | 34 | 2 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
-| Correctness / pagination | 58 | 8 | 1 |
+| Correctness / pagination | 60 | 8 | 1 |
 | Workflow / close-hygiene | 26 | 0 | 0 |
 | Code reuse / duplication | 9 | 0 | 0 |
 
@@ -40,6 +40,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-04-01 12:45
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 2 | correctness / pagination (2), missing tests (2) | `client-cli` uses `job_id` as the `/agents/{id}/output?since=` cursor even though the server expects a numeric output-entry id, and `log tail --follow` replays records because the server-side `since` filter is inclusive. Filed: red-cell-c2-2myjl, red-cell-c2-4v0g4 |
+| Codex | 1 | architecture drift (1), missing tests (1) | `client-cli log tail --follow --output json` emits bare records instead of the documented `{\"ok\":true,\"data\":...}` envelope, with no contract test covering the streaming path. Filed: red-cell-c2-1nngn |
+| Cursor | 0 | — | No findings this review |
+
+Overall codebase health: on track
+Biggest blindspot: machine-facing CLI streaming paths are still under-tested, so cursor semantics and JSON contract drift can ship even while the workspace passes 4,829 tests cleanly
 
 ### QA Review — 2026-04-01 — 173bbace..06d1210f
 

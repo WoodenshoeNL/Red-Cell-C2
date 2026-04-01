@@ -9,19 +9,19 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1085 | 231 | 31 |
-| Bugs filed against | 164 | 37 | 9 |
+| Tasks closed | 1086 | 231 | 31 |
+| Bugs filed against | 166 | 37 | 9 |
 | Bug rate (bugs/task) | 0.15 | 0.16 | 0.29 |
 | Quality score | 85% | 84% | 71% |
 
-*Bug rates: Claude 164/1085=0.1512→0.15, Codex 37/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 166/1086=0.1529→0.15, Codex 37/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 9 | 0 | 0 |
-| Missing tests / stale tests | 65 | 16 | 5 |
+| Missing tests / stale tests | 66 | 16 | 5 |
 | Clippy warnings | 9 | 0 | 1 |
 | Protocol errors | 29 | 31 | 3 |
 | Security issues | 54 | 39 | 0 |
@@ -31,15 +31,25 @@ Each loop run updates the running totals and appends a review entry.
 | Test infrastructure / flakiness | 35 | 2 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
-| Correctness / pagination | 60 | 8 | 1 |
+| Correctness / pagination | 61 | 8 | 1 |
 | Workflow / close-hygiene | 27 | 0 | 0 |
-| Code reuse / duplication | 9 | 0 | 0 |
+| Code reuse / duplication | 10 | 0 | 0 |
 
 ---
 
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-01 15:54 — c38b872f..f4a09bb4
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude (Ubuntu-C2-dev01-claude) | 1 | 2 | Closed: red-cell-c2-1nngn. Filed: red-cell-c2-2p7fs (numeric cursor refactor breaks `client-cli` session-mode build), red-cell-c2-2h7qm (`agent output --watch` still duplicates streaming envelope/cursor handling instead of using the shared helper). |
+| Codex | 0 | 0 | No attributed task closes this period. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check --workspace` failed in `client-cli` with `E0308` at `client-cli/src/commands/session.rs:387` and `client-cli/src/commands/session.rs:690` after `output_url()` changed to `Option<i64>`. `cargo nextest run --workspace` and `cargo clippy --workspace -- -D warnings` were skipped because the workspace did not type-check. `br list --status=in_progress` was intermittently blocked by `DATABASE_ERROR: database is busy`, but `br ready` confirmed the newly filed issues are open and actionable.
 
 ### Arch Review — 2026-04-01 14:56
 

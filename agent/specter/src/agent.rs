@@ -22,7 +22,7 @@ use crate::protocol::{
 };
 use crate::socket::SocketState;
 use crate::token::TokenVault;
-use crate::transport::HttpTransport;
+use crate::transport::FallbackTransport;
 
 /// Running state of a Specter agent session.
 #[derive(Debug)]
@@ -31,7 +31,7 @@ pub struct SpecterAgent {
     raw_crypto: AgentCryptoMaterial,
     session_crypto: AgentCryptoMaterial,
     config: SpecterConfig,
-    transport: HttpTransport,
+    transport: FallbackTransport,
     /// Shared monotonic CTR block offset, mirroring the server's single offset.
     ///
     /// Both encrypt (send) and decrypt (recv) operations use and advance this
@@ -68,7 +68,7 @@ impl SpecterAgent {
             }
             None => raw_crypto.clone(),
         };
-        let transport = HttpTransport::new(&config)?;
+        let transport = FallbackTransport::new(&config)?;
 
         info!(
             agent_id = format_args!("0x{agent_id:08X}"),

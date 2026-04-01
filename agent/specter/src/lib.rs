@@ -5,6 +5,7 @@ pub mod bypass;
 pub mod coffeeldr;
 pub mod config;
 pub mod dispatch;
+pub mod doh_transport;
 pub mod dotnet;
 pub mod download;
 pub mod error;

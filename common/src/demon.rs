@@ -16,14 +16,14 @@ macro_rules! protocol_enum {
     (
         $(#[$meta:meta])*
         $vis:vis enum $name:ident {
-            $($variant:ident = $value:expr,)+
+            $( $(#[$var_meta:meta])* $variant:ident = $value:expr, )+
         }
     ) => {
         $(#[$meta])*
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
         #[repr(u32)]
         $vis enum $name {
-            $($variant = $value,)+
+            $( $(#[$var_meta])* $variant = $value, )+
         }
 
         impl From<$name> for u32 {

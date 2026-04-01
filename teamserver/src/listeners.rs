@@ -76,6 +76,7 @@ const EXTRA_KEY_PATH: &str = "Key";
 const EXTRA_RESPONSE_BODY: &str = "ResponseBody";
 const EXTRA_KILL_DATE: &str = "KillDate";
 const EXTRA_WORKING_HOURS: &str = "WorkingHours";
+const EXTRA_JA3_RANDOMIZE: &str = "Ja3Randomize";
 
 #[derive(Clone, Debug, Default)]
 struct DemonInitRateLimiter {
@@ -261,6 +262,12 @@ impl ListenerSummary {
                         .and_then(|proxy| proxy.password.as_deref().map(String::from));
                 }
                 info.secure = Some(config.secure.to_string());
+                if let Some(ja3) = config.ja3_randomize {
+                    info.extra.insert(
+                        EXTRA_JA3_RANDOMIZE.to_owned(),
+                        serde_json::Value::String(ja3.to_string()),
+                    );
+                }
                 info.response_headers = config.response.as_ref().and_then(|response| {
                     (!response.headers.is_empty()).then(|| response.headers.join(", "))
                 });
@@ -1205,7 +1212,7 @@ pub fn listener_config_from_operator(
             cert: tls_config_from_operator(info),
             response: http_response_from_operator(info),
             proxy: proxy_from_operator(info)?,
-            ja3_randomize: None,
+            ja3_randomize: parse_optional_extra_bool(info, EXTRA_JA3_RANDOMIZE)?,
         })),
         Ok(ListenerProtocol::Smb) => Ok(ListenerConfig::from(SmbListenerConfig {
             name: name.to_owned(),
@@ -1376,7 +1383,7 @@ fn profile_listener_configs(
                 .map(|cert| red_cell_common::ListenerTlsConfig { cert: cert.cert, key: cert.key }),
             response: config.response.map(Into::into),
             proxy: config.proxy.map(Into::into),
-            ja3_randomize: None,
+            ja3_randomize: config.ja3_randomize,
         }));
     }
     for config in profile.listeners.smb.iter().cloned() {
@@ -3680,6 +3687,16 @@ fn parse_extra_bool(
     field: &'static str,
 ) -> Result<bool, ListenerManagerError> {
     parse_bool(field, extra_value_as_str(info, field))
+}
+
+fn parse_optional_extra_bool(
+    info: &ListenerInfo,
+    field: &'static str,
+) -> Result<Option<bool>, ListenerManagerError> {
+    match extra_value_as_str(info, field) {
+        None => Ok(None),
+        Some(value) => parse_bool(field, Some(value)).map(Some),
+    }
 }
 
 fn insert_optional_extra_string(
@@ -9403,5 +9420,190 @@ mod tests {
 
         manager.stop("edge-no-secret").await?;
         Ok(())
+    }
+
+    // ── ja3_randomize wiring tests ───────────────────────────────────────────
+
+    /// `listener_config_from_operator` honours an explicit `Ja3Randomize = false` in the
+    /// operator extra map.
+    #[test]
+    fn listener_config_from_operator_wires_ja3_randomize_false() -> Result<(), ListenerManagerError>
+    {
+        let info = ListenerInfo {
+            name: Some("edge".to_owned()),
+            protocol: Some("Http".to_owned()),
+            host_bind: Some("0.0.0.0".to_owned()),
+            host_rotation: Some("round-robin".to_owned()),
+            port_bind: Some("443".to_owned()),
+            secure: Some("true".to_owned()),
+            extra: [("Ja3Randomize".to_owned(), serde_json::Value::String("false".to_owned()))]
+                .into_iter()
+                .collect(),
+            ..ListenerInfo::default()
+        };
+
+        let config = listener_config_from_operator(&info)?;
+        match config {
+            ListenerConfig::Http(http) => {
+                assert_eq!(http.ja3_randomize, Some(false), "ja3_randomize should be Some(false)");
+            }
+            other => panic!("expected Http config, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    /// `listener_config_from_operator` honours an explicit `Ja3Randomize = true`.
+    #[test]
+    fn listener_config_from_operator_wires_ja3_randomize_true() -> Result<(), ListenerManagerError>
+    {
+        let info = ListenerInfo {
+            name: Some("edge".to_owned()),
+            protocol: Some("Http".to_owned()),
+            host_bind: Some("0.0.0.0".to_owned()),
+            host_rotation: Some("round-robin".to_owned()),
+            port_bind: Some("80".to_owned()),
+            secure: Some("false".to_owned()),
+            extra: [("Ja3Randomize".to_owned(), serde_json::Value::String("true".to_owned()))]
+                .into_iter()
+                .collect(),
+            ..ListenerInfo::default()
+        };
+
+        let config = listener_config_from_operator(&info)?;
+        match config {
+            ListenerConfig::Http(http) => {
+                assert_eq!(http.ja3_randomize, Some(true), "ja3_randomize should be Some(true)");
+            }
+            other => panic!("expected Http config, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    /// When `Ja3Randomize` is absent from the operator message the field is `None`, which
+    /// lets the payload builder apply its default (enabled for HTTPS, disabled for HTTP).
+    #[test]
+    fn listener_config_from_operator_ja3_randomize_absent_yields_none()
+    -> Result<(), ListenerManagerError> {
+        let info = ListenerInfo {
+            name: Some("edge".to_owned()),
+            protocol: Some("Http".to_owned()),
+            host_bind: Some("0.0.0.0".to_owned()),
+            host_rotation: Some("round-robin".to_owned()),
+            port_bind: Some("443".to_owned()),
+            secure: Some("true".to_owned()),
+            ..ListenerInfo::default()
+        };
+
+        let config = listener_config_from_operator(&info)?;
+        match config {
+            ListenerConfig::Http(http) => {
+                assert!(http.ja3_randomize.is_none(), "absent Ja3Randomize should yield None");
+            }
+            other => panic!("expected Http config, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    /// An invalid value for `Ja3Randomize` in the operator message must be rejected.
+    #[test]
+    fn listener_config_from_operator_rejects_invalid_ja3_randomize() {
+        let info = ListenerInfo {
+            name: Some("edge".to_owned()),
+            protocol: Some("Http".to_owned()),
+            host_bind: Some("0.0.0.0".to_owned()),
+            host_rotation: Some("round-robin".to_owned()),
+            port_bind: Some("443".to_owned()),
+            secure: Some("true".to_owned()),
+            extra: [("Ja3Randomize".to_owned(), serde_json::Value::String("yes".to_owned()))]
+                .into_iter()
+                .collect(),
+            ..ListenerInfo::default()
+        };
+
+        let err =
+            listener_config_from_operator(&info).expect_err("invalid Ja3Randomize should fail");
+        assert!(
+            err.to_string().contains("Ja3Randomize"),
+            "error should mention the field name: {err}"
+        );
+    }
+
+    /// `profile_listener_configs` wires `Ja3Randomize = false` from the HCL profile.
+    #[test]
+    fn profile_listener_configs_wires_ja3_randomize_false() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+            Listeners {
+              Http {
+                Name         = "edge"
+                Hosts        = ["listener.local"]
+                HostBind     = "127.0.0.1"
+                HostRotation = "round-robin"
+                PortBind     = 443
+                Secure       = true
+                Ja3Randomize = false
+              }
+            }
+            Demon {
+              TrustXForwardedFor = false
+            }
+            "#,
+        )
+        .expect("profile should parse");
+
+        let listeners = profile_listener_configs(&profile).expect("configs should be valid");
+        assert_eq!(listeners.len(), 1);
+        let ListenerConfig::Http(config) = &listeners[0] else {
+            panic!("expected http listener");
+        };
+        assert_eq!(config.ja3_randomize, Some(false));
+    }
+
+    /// When `Ja3Randomize` is omitted from the HCL profile the field is `None`.
+    #[test]
+    fn profile_listener_configs_ja3_randomize_absent_yields_none() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+            Listeners {
+              Http {
+                Name         = "edge"
+                Hosts        = ["listener.local"]
+                HostBind     = "127.0.0.1"
+                HostRotation = "round-robin"
+                PortBind     = 443
+                Secure       = true
+              }
+            }
+            Demon {
+              TrustXForwardedFor = false
+            }
+            "#,
+        )
+        .expect("profile should parse");
+
+        let listeners = profile_listener_configs(&profile).expect("configs should be valid");
+        assert_eq!(listeners.len(), 1);
+        let ListenerConfig::Http(config) = &listeners[0] else {
+            panic!("expected http listener");
+        };
+        assert!(config.ja3_randomize.is_none());
     }
 }

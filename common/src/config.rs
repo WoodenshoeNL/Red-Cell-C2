@@ -604,6 +604,11 @@ pub struct ProfileHttpListenerConfig {
     /// Optional upstream proxy settings.
     #[serde(rename = "Proxy", default)]
     pub proxy: Option<HclHttpListenerProxyConfig>,
+    /// Whether to randomize the TLS JA3 fingerprint.
+    ///
+    /// Defaults to `true` for HTTPS listeners when absent.
+    #[serde(rename = "Ja3Randomize", default)]
+    pub ja3_randomize: Option<bool>,
 }
 
 /// SMB pivot listener configuration.

@@ -136,10 +136,13 @@ impl TextRender for DownloadResult {
 pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: PayloadCommands) -> i32 {
     match action {
         PayloadCommands::List => match list(client).await {
-            Ok(data) => {
-                print_success(fmt, &data);
-                EXIT_SUCCESS
-            }
+            Ok(data) => match print_success(fmt, &data) {
+                Ok(()) => EXIT_SUCCESS,
+                Err(e) => {
+                    print_error(&e);
+                    e.exit_code()
+                }
+            },
             Err(e) => {
                 print_error(&e);
                 e.exit_code()
@@ -149,14 +152,20 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: PayloadCommands
         PayloadCommands::Build { listener, arch, format, sleep: sleep_secs, wait } => {
             match build(client, &listener, &arch, &format, sleep_secs, wait).await {
                 Ok(outcome) => match outcome {
-                    BuildOutcome::Submitted(job) => {
-                        print_success(fmt, &job);
-                        EXIT_SUCCESS
-                    }
-                    BuildOutcome::Completed(done) => {
-                        print_success(fmt, &done);
-                        EXIT_SUCCESS
-                    }
+                    BuildOutcome::Submitted(job) => match print_success(fmt, &job) {
+                        Ok(()) => EXIT_SUCCESS,
+                        Err(e) => {
+                            print_error(&e);
+                            e.exit_code()
+                        }
+                    },
+                    BuildOutcome::Completed(done) => match print_success(fmt, &done) {
+                        Ok(()) => EXIT_SUCCESS,
+                        Err(e) => {
+                            print_error(&e);
+                            e.exit_code()
+                        }
+                    },
                 },
                 Err(e) => {
                     print_error(&e);
@@ -166,10 +175,13 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: PayloadCommands
         }
 
         PayloadCommands::Download { id, dst } => match download(client, &id, &dst).await {
-            Ok(result) => {
-                print_success(fmt, &result);
-                EXIT_SUCCESS
-            }
+            Ok(result) => match print_success(fmt, &result) {
+                Ok(()) => EXIT_SUCCESS,
+                Err(e) => {
+                    print_error(&e);
+                    e.exit_code()
+                }
+            },
             Err(e) => {
                 print_error(&e);
                 e.exit_code()

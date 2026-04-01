@@ -712,10 +712,13 @@ async fn dispatch(cli: Cli) -> i32 {
 
     match command {
         Commands::Status => match commands::status::run(&api_client).await {
-            Ok(data) => {
-                output::print_success(&fmt, &data);
-                EXIT_SUCCESS
-            }
+            Ok(data) => match output::print_success(&fmt, &data) {
+                Ok(()) => EXIT_SUCCESS,
+                Err(e) => {
+                    output::print_error(&e);
+                    e.exit_code()
+                }
+            },
             Err(e) => {
                 output::print_error(&e);
                 e.exit_code()

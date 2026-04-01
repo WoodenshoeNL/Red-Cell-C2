@@ -102,10 +102,13 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AuditCommands) 
             )
             .await
             {
-                Ok(data) => {
-                    print_success(fmt, &data);
-                    EXIT_SUCCESS
-                }
+                Ok(data) => match print_success(fmt, &data) {
+                    Ok(()) => EXIT_SUCCESS,
+                    Err(e) => {
+                        print_error(&e);
+                        e.exit_code()
+                    }
+                },
                 Err(e) => {
                     print_error(&e);
                     e.exit_code()
@@ -118,10 +121,13 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AuditCommands) 
                 tail_follow(client, fmt).await
             } else {
                 match list(client, TAIL_LIMIT, None, None, None, None).await {
-                    Ok(data) => {
-                        print_success(fmt, &data);
-                        EXIT_SUCCESS
-                    }
+                    Ok(data) => match print_success(fmt, &data) {
+                        Ok(()) => EXIT_SUCCESS,
+                        Err(e) => {
+                            print_error(&e);
+                            e.exit_code()
+                        }
+                    },
                     Err(e) => {
                         print_error(&e);
                         e.exit_code()

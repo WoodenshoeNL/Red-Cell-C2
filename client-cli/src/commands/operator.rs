@@ -126,10 +126,13 @@ impl TextRender for SetRoleResult {
 pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: OperatorCommands) -> i32 {
     match action {
         OperatorCommands::List => match list(client).await {
-            Ok(data) => {
-                print_success(fmt, &data);
-                EXIT_SUCCESS
-            }
+            Ok(data) => match print_success(fmt, &data) {
+                Ok(()) => EXIT_SUCCESS,
+                Err(e) => {
+                    print_error(&e);
+                    e.exit_code()
+                }
+            },
             Err(e) => {
                 print_error(&e);
                 e.exit_code()
@@ -138,10 +141,13 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: OperatorCommand
 
         OperatorCommands::Create { username, password, role } => {
             match create(client, &username, &password, &role).await {
-                Ok(result) => {
-                    print_success(fmt, &result);
-                    EXIT_SUCCESS
-                }
+                Ok(result) => match print_success(fmt, &result) {
+                    Ok(()) => EXIT_SUCCESS,
+                    Err(e) => {
+                        print_error(&e);
+                        e.exit_code()
+                    }
+                },
                 Err(e) => {
                     print_error(&e);
                     e.exit_code()
@@ -150,10 +156,13 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: OperatorCommand
         }
 
         OperatorCommands::Delete { username } => match delete(client, &username).await {
-            Ok(result) => {
-                print_success(fmt, &result);
-                EXIT_SUCCESS
-            }
+            Ok(result) => match print_success(fmt, &result) {
+                Ok(()) => EXIT_SUCCESS,
+                Err(e) => {
+                    print_error(&e);
+                    e.exit_code()
+                }
+            },
             Err(e) => {
                 print_error(&e);
                 e.exit_code()
@@ -162,10 +171,13 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: OperatorCommand
 
         OperatorCommands::SetRole { username, role } => {
             match set_role(client, &username, &role).await {
-                Ok(result) => {
-                    print_success(fmt, &result);
-                    EXIT_SUCCESS
-                }
+                Ok(result) => match print_success(fmt, &result) {
+                    Ok(()) => EXIT_SUCCESS,
+                    Err(e) => {
+                        print_error(&e);
+                        e.exit_code()
+                    }
+                },
                 Err(e) => {
                     print_error(&e);
                     e.exit_code()

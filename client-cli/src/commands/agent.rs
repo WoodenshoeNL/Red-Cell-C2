@@ -339,10 +339,13 @@ impl TextRender for TransferResult {
 pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) -> i32 {
     match action {
         AgentCommands::List => match list(client).await {
-            Ok(data) => {
-                print_success(fmt, &data);
-                EXIT_SUCCESS
-            }
+            Ok(data) => match print_success(fmt, &data) {
+                Ok(()) => EXIT_SUCCESS,
+                Err(e) => {
+                    print_error(&e);
+                    e.exit_code()
+                }
+            },
             Err(e) => {
                 print_error(&e);
                 e.exit_code()
@@ -350,10 +353,13 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) 
         },
 
         AgentCommands::Show { id } => match show(client, &id).await {
-            Ok(data) => {
-                print_success(fmt, &data);
-                EXIT_SUCCESS
-            }
+            Ok(data) => match print_success(fmt, &data) {
+                Ok(()) => EXIT_SUCCESS,
+                Err(e) => {
+                    print_error(&e);
+                    e.exit_code()
+                }
+            },
             Err(e) => {
                 print_error(&e);
                 e.exit_code()
@@ -364,10 +370,13 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) 
             let timeout_secs = timeout.unwrap_or(DEFAULT_WAIT_TIMEOUT_SECS);
             if wait {
                 match exec_wait(client, &id, &cmd, timeout_secs).await {
-                    Ok(data) => {
-                        print_success(fmt, &data);
-                        EXIT_SUCCESS
-                    }
+                    Ok(data) => match print_success(fmt, &data) {
+                        Ok(()) => EXIT_SUCCESS,
+                        Err(e) => {
+                            print_error(&e);
+                            e.exit_code()
+                        }
+                    },
                     Err(e) => {
                         print_error(&e);
                         e.exit_code()
@@ -375,10 +384,13 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) 
                 }
             } else {
                 match exec_submit(client, &id, &cmd).await {
-                    Ok(data) => {
-                        print_success(fmt, &data);
-                        EXIT_SUCCESS
-                    }
+                    Ok(data) => match print_success(fmt, &data) {
+                        Ok(()) => EXIT_SUCCESS,
+                        Err(e) => {
+                            print_error(&e);
+                            e.exit_code()
+                        }
+                    },
                     Err(e) => {
                         print_error(&e);
                         e.exit_code()
@@ -392,10 +404,13 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) 
                 watch_output(client, fmt, &id, since).await
             } else {
                 match fetch_output(client, &id, since).await {
-                    Ok(data) => {
-                        print_success(fmt, &data);
-                        EXIT_SUCCESS
-                    }
+                    Ok(data) => match print_success(fmt, &data) {
+                        Ok(()) => EXIT_SUCCESS,
+                        Err(e) => {
+                            print_error(&e);
+                            e.exit_code()
+                        }
+                    },
                     Err(e) => {
                         print_error(&e);
                         e.exit_code()
@@ -405,10 +420,13 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) 
         }
 
         AgentCommands::Kill { id, wait } => match kill(client, &id, wait).await {
-            Ok(data) => {
-                print_success(fmt, &data);
-                EXIT_SUCCESS
-            }
+            Ok(data) => match print_success(fmt, &data) {
+                Ok(()) => EXIT_SUCCESS,
+                Err(e) => {
+                    print_error(&e);
+                    e.exit_code()
+                }
+            },
             Err(e) => {
                 print_error(&e);
                 e.exit_code()
@@ -416,10 +434,13 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) 
         },
 
         AgentCommands::Upload { id, src, dst } => match upload(client, &id, &src, &dst).await {
-            Ok(data) => {
-                print_success(fmt, &data);
-                EXIT_SUCCESS
-            }
+            Ok(data) => match print_success(fmt, &data) {
+                Ok(()) => EXIT_SUCCESS,
+                Err(e) => {
+                    print_error(&e);
+                    e.exit_code()
+                }
+            },
             Err(e) => {
                 print_error(&e);
                 e.exit_code()
@@ -427,10 +448,13 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) 
         },
 
         AgentCommands::Download { id, src, dst } => match download(client, &id, &src, &dst).await {
-            Ok(data) => {
-                print_success(fmt, &data);
-                EXIT_SUCCESS
-            }
+            Ok(data) => match print_success(fmt, &data) {
+                Ok(()) => EXIT_SUCCESS,
+                Err(e) => {
+                    print_error(&e);
+                    e.exit_code()
+                }
+            },
             Err(e) => {
                 print_error(&e);
                 e.exit_code()

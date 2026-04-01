@@ -81,6 +81,10 @@ pub enum CliError {
     #[allow(dead_code)]
     Unsupported(String),
 
+    /// The CLI could not serialize a response envelope to JSON.
+    #[error("serialize failed: {0}")]
+    SerializeFailed(String),
+
     /// Any other error not covered above.
     #[error("{0}")]
     General(String),
@@ -98,6 +102,7 @@ impl CliError {
             CliError::InvalidArgs(_) => EXIT_GENERAL,
             CliError::ServerError(_) => EXIT_GENERAL,
             CliError::Unsupported(_) => EXIT_GENERAL,
+            CliError::SerializeFailed(_) => EXIT_GENERAL,
             CliError::Config(crate::config::ConfigError::MissingToken) => EXIT_AUTH_FAILURE,
             CliError::Config(_) => EXIT_GENERAL,
             CliError::General(_) => EXIT_GENERAL,
@@ -115,6 +120,7 @@ impl CliError {
             CliError::InvalidArgs(_) => ERROR_CODE_INVALID_ARGS,
             CliError::ServerError(_) => ERROR_CODE_SERVER_ERROR,
             CliError::Unsupported(_) => ERROR_CODE_UNSUPPORTED,
+            CliError::SerializeFailed(_) => ERROR_CODE_SERIALIZE_FAILED,
             CliError::Config(crate::config::ConfigError::MissingToken) => ERROR_CODE_AUTH_FAILURE,
             CliError::Config(_) => ERROR_CODE_GENERAL,
             CliError::General(_) => ERROR_CODE_GENERAL,
@@ -173,6 +179,13 @@ mod tests {
         let err = CliError::Unsupported("agent output not available via REST".to_owned());
         assert_eq!(err.exit_code(), EXIT_GENERAL);
         assert_eq!(err.error_code(), ERROR_CODE_UNSUPPORTED);
+    }
+
+    #[test]
+    fn serialize_failed_exits_general_with_serialize_failed_error_code() {
+        let err = CliError::SerializeFailed("boom".to_owned());
+        assert_eq!(err.exit_code(), EXIT_GENERAL);
+        assert_eq!(err.error_code(), ERROR_CODE_SERIALIZE_FAILED);
     }
 
     #[test]

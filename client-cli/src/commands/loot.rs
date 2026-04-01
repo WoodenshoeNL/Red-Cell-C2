@@ -118,10 +118,13 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: LootCommands) -
             )
             .await
             {
-                Ok(data) => {
-                    print_success(fmt, &data);
-                    EXIT_SUCCESS
-                }
+                Ok(data) => match print_success(fmt, &data) {
+                    Ok(()) => EXIT_SUCCESS,
+                    Err(e) => {
+                        print_error(&e);
+                        e.exit_code()
+                    }
+                },
                 Err(e) => {
                     print_error(&e);
                     e.exit_code()
@@ -130,10 +133,13 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: LootCommands) -
         }
 
         LootCommands::Download { id, out } => match download(client, id, &out).await {
-            Ok(bytes) => {
-                print_success(fmt, &LootDownloadResult { id, saved: out, bytes });
-                EXIT_SUCCESS
-            }
+            Ok(bytes) => match print_success(fmt, &LootDownloadResult { id, saved: out, bytes }) {
+                Ok(()) => EXIT_SUCCESS,
+                Err(e) => {
+                    print_error(&e);
+                    e.exit_code()
+                }
+            },
             Err(e) => {
                 print_error(&e);
                 e.exit_code()

@@ -142,10 +142,13 @@ impl TextRender for ListenerDeleted {
 pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: ListenerCommands) -> i32 {
     match action {
         ListenerCommands::List => match list(client).await {
-            Ok(data) => {
-                print_success(fmt, &data);
-                EXIT_SUCCESS
-            }
+            Ok(data) => match print_success(fmt, &data) {
+                Ok(()) => EXIT_SUCCESS,
+                Err(e) => {
+                    print_error(&e);
+                    e.exit_code()
+                }
+            },
             Err(e) => {
                 print_error(&e);
                 e.exit_code()
@@ -153,10 +156,13 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: ListenerCommand
         },
 
         ListenerCommands::Show { name } => match show(client, &name).await {
-            Ok(data) => {
-                print_success(fmt, &data);
-                EXIT_SUCCESS
-            }
+            Ok(data) => match print_success(fmt, &data) {
+                Ok(()) => EXIT_SUCCESS,
+                Err(e) => {
+                    print_error(&e);
+                    e.exit_code()
+                }
+            },
             Err(e) => {
                 print_error(&e);
                 e.exit_code()
@@ -188,10 +194,13 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: ListenerCommand
             )
             .await
             {
-                Ok(data) => {
-                    print_success(fmt, &data);
-                    EXIT_SUCCESS
-                }
+                Ok(data) => match print_success(fmt, &data) {
+                    Ok(()) => EXIT_SUCCESS,
+                    Err(e) => {
+                        print_error(&e);
+                        e.exit_code()
+                    }
+                },
                 Err(e) => {
                     print_error(&e);
                     e.exit_code()
@@ -200,10 +209,13 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: ListenerCommand
         }
 
         ListenerCommands::Start { name } => match start(client, &name).await {
-            Ok(data) => {
-                print_success(fmt, &data);
-                EXIT_SUCCESS
-            }
+            Ok(data) => match print_success(fmt, &data) {
+                Ok(()) => EXIT_SUCCESS,
+                Err(e) => {
+                    print_error(&e);
+                    e.exit_code()
+                }
+            },
             Err(e) => {
                 print_error(&e);
                 e.exit_code()
@@ -211,10 +223,13 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: ListenerCommand
         },
 
         ListenerCommands::Stop { name } => match stop(client, &name).await {
-            Ok(data) => {
-                print_success(fmt, &data);
-                EXIT_SUCCESS
-            }
+            Ok(data) => match print_success(fmt, &data) {
+                Ok(()) => EXIT_SUCCESS,
+                Err(e) => {
+                    print_error(&e);
+                    e.exit_code()
+                }
+            },
             Err(e) => {
                 print_error(&e);
                 e.exit_code()
@@ -222,10 +237,13 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: ListenerCommand
         },
 
         ListenerCommands::Delete { name } => match delete(client, &name).await {
-            Ok(data) => {
-                print_success(fmt, &data);
-                EXIT_SUCCESS
-            }
+            Ok(data) => match print_success(fmt, &data) {
+                Ok(()) => EXIT_SUCCESS,
+                Err(e) => {
+                    print_error(&e);
+                    e.exit_code()
+                }
+            },
             Err(e) => {
                 print_error(&e);
                 e.exit_code()

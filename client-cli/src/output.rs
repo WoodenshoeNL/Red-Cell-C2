@@ -55,6 +55,12 @@ pub enum OutputFormat {
     Text,
 }
 
+#[derive(Serialize)]
+struct SuccessEnvelope<'a, T> {
+    ok: bool,
+    data: &'a T,
+}
+
 // ── rendering traits ──────────────────────────────────────────────────────────
 
 /// A type that can render itself as human-readable text for `--output text`.
@@ -98,8 +104,11 @@ impl<T: TextRow> TextRender for Vec<T> {
 ///
 /// Stdout and stderr are never mixed; no prose is written to stdout in JSON
 /// mode.
-pub fn print_success<T: Serialize + TextRender>(format: &OutputFormat, payload: &T) {
-    write_success(&mut std::io::stdout(), format, payload);
+pub fn print_success<T: Serialize + TextRender>(
+    format: &OutputFormat,
+    payload: &T,
+) -> Result<(), CliError> {
+    write_success(&mut std::io::stdout(), format, payload)
 }
 
 /// Write an error envelope to **stderr**.
@@ -134,23 +143,21 @@ fn write_success<T: Serialize + TextRender, W: std::io::Write>(
     out: &mut W,
     format: &OutputFormat,
     payload: &T,
-) {
+) -> Result<(), CliError> {
     match format {
         OutputFormat::Json => {
-            let envelope = serde_json::json!({"ok": true, "data": payload});
-            match serde_json::to_string_pretty(&envelope) {
-                Ok(s) => {
-                    let _ = writeln!(out, "{s}");
-                }
-                Err(_) => {
-                    let _ = writeln!(out, r#"{{"ok":true}}"#);
-                }
-            }
+            let envelope = SuccessEnvelope { ok: true, data: payload };
+            let serialized = serde_json::to_string_pretty(&envelope).map_err(|e| {
+                CliError::SerializeFailed(format!("failed to serialize response: {e}"))
+            })?;
+            let _ = writeln!(out, "{serialized}");
         }
         OutputFormat::Text => {
             let _ = writeln!(out, "{}", payload.render_text());
         }
     }
+
+    Ok(())
 }
 
 fn write_error<W: std::io::Write>(out: &mut W, err: &CliError) {
@@ -178,7 +185,7 @@ pub(crate) fn write_stream_entry<T: Serialize, W: std::io::Write, E: std::io::Wr
 ) {
     match format {
         OutputFormat::Json => {
-            let envelope = serde_json::json!({"ok": true, "data": entry});
+            let envelope = SuccessEnvelope { ok: true, data: entry };
             match serde_json::to_string(&envelope) {
                 Ok(s) => {
                     let _ = writeln!(out, "{s}");
@@ -391,7 +398,7 @@ mod tests {
     fn write_success_json_mode_emits_ok_envelope() {
         let payload = FakePayload { value: "hello".to_owned() };
         let mut buf = Vec::new();
-        write_success(&mut buf, &OutputFormat::Json, &payload);
+        write_success(&mut buf, &OutputFormat::Json, &payload).expect("success");
 
         let output = String::from_utf8(buf).expect("utf-8");
         let v: serde_json::Value =
@@ -404,10 +411,38 @@ mod tests {
     fn write_success_text_mode_invokes_render_text() {
         let payload = FakePayload { value: "world".to_owned() };
         let mut buf = Vec::new();
-        write_success(&mut buf, &OutputFormat::Text, &payload);
+        write_success(&mut buf, &OutputFormat::Text, &payload).expect("success");
 
         let output = String::from_utf8(buf).expect("utf-8");
         assert!(output.contains("rendered=world"), "expected render_text output, got: {output:?}");
+    }
+
+    struct BrokenPayload;
+
+    impl serde::Serialize for BrokenPayload {
+        fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            Err(serde::ser::Error::custom("boom"))
+        }
+    }
+
+    impl TextRender for BrokenPayload {
+        fn render_text(&self) -> String {
+            "broken".to_owned()
+        }
+    }
+
+    #[test]
+    fn write_success_json_mode_returns_error_on_serialization_failure() {
+        let payload = BrokenPayload;
+        let mut buf = Vec::new();
+        let err = write_success(&mut buf, &OutputFormat::Json, &payload).expect_err("failure");
+
+        assert!(buf.is_empty(), "serialization failure must not fabricate stdout output");
+        assert_eq!(err.error_code(), ERROR_CODE_SERIALIZE_FAILED);
+        assert!(err.to_string().contains("failed to serialize response"));
     }
 
     #[test]
@@ -483,5 +518,22 @@ mod tests {
             assert_eq!(v["ok"], true);
             assert_eq!(v["data"]["i"], i as u64);
         }
+    }
+
+    #[test]
+    fn write_stream_entry_json_mode_serialization_failure_emits_structured_stderr() {
+        let payload = BrokenPayload;
+        let mut out = Vec::new();
+        let mut err_out = Vec::new();
+        write_stream_entry(&mut out, &mut err_out, &OutputFormat::Json, &payload, "ignored");
+
+        assert!(out.is_empty(), "failed stream serialization must not emit stdout");
+        let err = String::from_utf8(err_out).expect("utf-8");
+        let v: serde_json::Value = serde_json::from_str(err.trim()).expect("stderr is valid JSON");
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["error"], ERROR_CODE_SERIALIZE_FAILED);
+        assert!(
+            v["message"].as_str().unwrap_or_default().contains("failed to serialize stream entry")
+        );
     }
 }

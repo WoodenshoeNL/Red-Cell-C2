@@ -8,6 +8,7 @@ are needed. Both Linux and Windows targets are accessed via SSH
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 import time
 from dataclasses import dataclass
@@ -113,12 +114,34 @@ def ensure_work_dir(target: TargetConfig) -> None:
         run_remote(target, f"mkdir -p {target.work_dir}")
 
 
+def _quote_posix(path: str) -> str:
+    """Shell-quote a path for a POSIX shell (bash/sh)."""
+    return shlex.quote(path)
+
+
+def _quote_powershell(path: str) -> str:
+    """Quote a path for PowerShell using single-quote style.
+
+    Single quotes in PowerShell are literal-string delimiters; an embedded
+    single quote is escaped by doubling it ('' → ').
+    """
+    return "'" + path.replace("'", "''") + "'"
+
+
 def execute_background(target: TargetConfig, command: str) -> None:
-    """Run a command on the target in the background (fire-and-forget)."""
-    bg_cmd = f"nohup {command} </dev/null >/dev/null 2>&1 &"
-    # On Windows use start /b instead
+    """Run a command on the target in the background (fire-and-forget).
+
+    The command path is quoted before interpolation so that paths containing
+    spaces or other shell-significant characters are handled correctly on both
+    Linux (POSIX sh quoting via :func:`shlex.quote`) and Windows (PowerShell
+    single-quote escaping).
+    """
     if target.work_dir.startswith("C:\\") or "\\" in target.work_dir:
-        bg_cmd = f'powershell -Command "Start-Process -FilePath {command} -WindowStyle Hidden"'
+        quoted = _quote_powershell(command)
+        bg_cmd = f'powershell -Command "Start-Process -FilePath {quoted} -WindowStyle Hidden"'
+    else:
+        quoted = _quote_posix(command)
+        bg_cmd = f"nohup {quoted} </dev/null >/dev/null 2>&1 &"
     subprocess.Popen(
         _ssh_args(target) + [bg_cmd],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

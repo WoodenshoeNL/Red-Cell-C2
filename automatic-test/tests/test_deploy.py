@@ -11,7 +11,7 @@ from pathlib import Path
 # Make lib/ importable when running from the automatic-test directory or repo root.
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from lib.deploy import TargetConfig, _ssh_args, _scp_args
+from lib.deploy import TargetConfig, _quote_posix, _quote_powershell, _scp_args, _ssh_args
 
 
 def _make_target(**kwargs) -> TargetConfig:
@@ -124,6 +124,72 @@ class TestScpArgs(unittest.TestCase):
         args = _scp_args(self.target)
         joined = " ".join(args)
         self.assertNotIn(f"{self.target.user}@{self.target.host}", joined)
+
+
+class TestQuotePosix(unittest.TestCase):
+    """Tests for _quote_posix — POSIX sh quoting used in background execution."""
+
+    def test_simple_path_unchanged(self) -> None:
+        result = _quote_posix("/tmp/agent.bin")
+        # shlex.quote wraps safe paths in single quotes or leaves them as-is
+        self.assertIn("/tmp/agent.bin", result)
+
+    def test_path_with_spaces_is_quoted(self) -> None:
+        result = _quote_posix("/home/user/my dir/agent.bin")
+        # The result must be a single token that the shell treats as one argument
+        self.assertTrue(
+            result.startswith("'") or result.startswith('"'),
+            f"Expected quoted path, got: {result!r}",
+        )
+        self.assertIn("my dir", result)
+
+    def test_path_with_special_chars(self) -> None:
+        """Paths with $, &, ;, | etc. must be quoted so the shell does not interpret them."""
+        path = "/tmp/evil$path&agent.bin"
+        result = _quote_posix(path)
+        # After unquoting, the original path must be recoverable
+        import shlex
+        self.assertEqual(shlex.split(result)[0], path)
+
+    def test_plain_path_reconstructs(self) -> None:
+        import shlex
+        path = "/opt/rc-test/agent-abc123.bin"
+        self.assertEqual(shlex.split(_quote_posix(path))[0], path)
+
+    def test_path_with_spaces_reconstructs(self) -> None:
+        import shlex
+        path = "/home/test user/work dir/agent.bin"
+        self.assertEqual(shlex.split(_quote_posix(path))[0], path)
+
+
+class TestQuotePowerShell(unittest.TestCase):
+    """Tests for _quote_powershell — PowerShell single-quote escaping."""
+
+    def test_simple_path_is_single_quoted(self) -> None:
+        result = _quote_powershell("C:\\Temp\\agent.exe")
+        self.assertEqual(result, "'C:\\Temp\\agent.exe'")
+
+    def test_path_with_spaces(self) -> None:
+        result = _quote_powershell("C:\\Program Files\\agent.exe")
+        self.assertEqual(result, "'C:\\Program Files\\agent.exe'")
+
+    def test_embedded_single_quote_is_doubled(self) -> None:
+        """A single quote inside the path must be escaped as '' for PowerShell."""
+        result = _quote_powershell("C:\\it's here\\agent.exe")
+        self.assertEqual(result, "'C:\\it''s here\\agent.exe'")
+
+    def test_multiple_embedded_single_quotes(self) -> None:
+        result = _quote_powershell("C:\\a'b'c\\agent.exe")
+        self.assertEqual(result, "'C:\\a''b''c\\agent.exe'")
+
+    def test_plain_path_roundtrip_token(self) -> None:
+        """Quoted path must begin and end with a single quote."""
+        path = "C:\\Temp\\rc-test\\agent-abc123.exe"
+        result = _quote_powershell(path)
+        self.assertTrue(result.startswith("'") and result.endswith("'"))
+
+    def test_empty_path(self) -> None:
+        self.assertEqual(_quote_powershell(""), "''")
 
 
 if __name__ == "__main__":

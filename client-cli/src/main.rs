@@ -842,6 +842,27 @@ mod tests {
         assert!(log_list_help.contains("Examples:"), "log list help missing Examples");
     }
 
+    #[test]
+    fn agent_output_help_describes_numeric_since_cursor() {
+        let mut cmd = Cli::command();
+        let help = cmd
+            .find_subcommand_mut("agent")
+            .expect("agent subcommand")
+            .find_subcommand_mut("output")
+            .expect("agent output subcommand")
+            .render_long_help()
+            .to_string();
+
+        assert!(
+            help.contains("numeric output entry ID"),
+            "agent output help must describe --since as a numeric output entry ID"
+        );
+        assert!(
+            help.contains("--since 42"),
+            "agent output help must show a numeric --since example"
+        );
+    }
+
     // ── help subcommand parsing ───────────────────────────────────────────────
 
     #[test]

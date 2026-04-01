@@ -22,8 +22,10 @@ use tracing::instrument;
 
 use crate::AgentCommands;
 use crate::client::ApiClient;
-use crate::error::{CliError, ERROR_CODE_SERIALIZE_FAILED, EXIT_SUCCESS};
-use crate::output::{OutputFormat, TextRender, TextRow, print_error, print_success};
+use crate::error::{CliError, EXIT_SUCCESS};
+use crate::output::{
+    OutputFormat, TextRender, TextRow, print_error, print_stream_entry, print_success,
+};
 
 /// Default polling timeout for `--wait` operations, in seconds.
 const DEFAULT_WAIT_TIMEOUT_SECS: u64 = 60;
@@ -615,14 +617,9 @@ async fn fetch_output(
 /// # Examples
 /// ```text
 /// red-cell-cli agent output abc123 --watch
-/// red-cell-cli agent output abc123 --watch --since job_xyz
+/// red-cell-cli agent output abc123 --watch --since 42
 /// ```
-async fn watch_output(
-    client: &ApiClient,
-    fmt: &OutputFormat,
-    id: &str,
-    since: Option<i64>,
-) -> i32 {
+async fn watch_output(client: &ApiClient, fmt: &OutputFormat, id: &str, since: Option<i64>) -> i32 {
     let mut cursor: Option<i64> = since;
     // Create the ctrl_c future once and pin it so we can reuse the same OS-level
     // signal listener across all loop iterations. Creating a new ctrl_c() future
@@ -648,27 +645,7 @@ async fn watch_output(
                 for entry in &entries {
                     // Advance the numeric cursor so next poll only fetches newer entries.
                     cursor = Some(entry.entry_id);
-                    match fmt {
-                        OutputFormat::Json => {
-                            let line = serde_json::json!({"ok": true, "data": entry});
-                            match serde_json::to_string(&line) {
-                                Ok(s) => println!("{s}"),
-                                Err(e) => eprintln!(
-                                    "{}",
-                                    serde_json::json!({
-                                        "ok": false,
-                                        "error": ERROR_CODE_SERIALIZE_FAILED,
-                                        "message": format!("failed to serialize output entry: {e}"),
-                                    })
-                                ),
-                            }
-                        }
-                        OutputFormat::Text => {
-                            let code =
-                                entry.exit_code.map_or_else(|| "?".to_owned(), |c| c.to_string());
-                            println!("[{}  exit {}]  {}", entry.job_id, code, entry.output);
-                        }
-                    }
+                    print_output_stream_entry(fmt, entry);
                 }
             }
         }
@@ -681,6 +658,15 @@ async fn watch_output(
             }
         }
     }
+}
+
+fn print_output_stream_entry(fmt: &OutputFormat, entry: &OutputEntry) {
+    print_stream_entry(fmt, entry, &render_output_stream_line(entry));
+}
+
+fn render_output_stream_line(entry: &OutputEntry) -> String {
+    let code = entry.exit_code.map_or_else(|| "?".to_owned(), |c| c.to_string());
+    format!("[{}  exit {}]  {}", entry.job_id, code, entry.output)
 }
 
 /// `agent kill <id> [--wait]` — send terminate command to an agent.
@@ -835,6 +821,7 @@ fn agent_detail_from_raw(r: RawAgent) -> AgentDetail {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     // ── AgentSummary ──────────────────────────────────────────────────────────
 
@@ -1340,10 +1327,141 @@ mod tests {
     async fn fetch_output_with_since_cursor_returns_error_when_unreachable() {
         let cfg = mock_cfg("http://127.0.0.1:1");
         let client = crate::client::ApiClient::new(&cfg).expect("build client");
-        let result = fetch_output(&client, "agent1", Some("cursor-job")).await;
+        let result = fetch_output(&client, "agent1", Some(42)).await;
         assert!(
             matches!(result, Err(crate::error::CliError::ServerUnreachable(_))),
             "fetch_output with cursor must return ServerUnreachable; got: {result:?}"
+        );
+    }
+
+    /// `exec_wait` must advance the incremental polling cursor with the
+    /// numeric output entry id, not a string task id from the payload.
+    #[tokio::test]
+    async fn exec_wait_polls_output_with_numeric_entry_cursor() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+        #[derive(Clone)]
+        struct PollResponder {
+            output_queries: Arc<Mutex<Vec<Option<String>>>>,
+        }
+
+        impl Respond for PollResponder {
+            fn respond(&self, request: &Request) -> ResponseTemplate {
+                match (request.method.as_str(), request.url.path()) {
+                    ("POST", "/api/v1/agents/agent1/task") => ResponseTemplate::new(202)
+                        .set_body_json(serde_json::json!({
+                            "agent_id": "AGENT1",
+                            "task_id": "submitted_task",
+                            "queued_jobs": 1
+                        }))
+                        .insert_header("content-type", "application/json"),
+                    ("GET", "/api/v1/agents/agent1/output") => {
+                        let query = request.url.query().map(ToOwned::to_owned);
+                        self.output_queries
+                            .lock()
+                            .expect("lock output_queries")
+                            .push(query.clone());
+
+                        match query.as_deref() {
+                            None => ResponseTemplate::new(200)
+                                .set_body_json(serde_json::json!({
+                                    "total": 1,
+                                    "entries": [{
+                                        "id": 42,
+                                        "task_id": "other_task",
+                                        "command_id": 21,
+                                        "request_id": 1,
+                                        "response_type": "output",
+                                        "message": "",
+                                        "output": "unrelated output",
+                                        "command_line": "hostname",
+                                        "operator": null,
+                                        "received_at": "2026-04-01T00:00:00Z"
+                                    }]
+                                }))
+                                .insert_header("content-type", "application/json"),
+                            Some("since=42") => ResponseTemplate::new(200)
+                                .set_body_json(serde_json::json!({
+                                    "total": 1,
+                                    "entries": [{
+                                        "id": 43,
+                                        "task_id": "submitted_task",
+                                        "command_id": 21,
+                                        "request_id": 2,
+                                        "response_type": "output",
+                                        "message": "",
+                                        "output": "DOMAIN\\\\user",
+                                        "command_line": "whoami",
+                                        "operator": null,
+                                        "received_at": "2026-04-01T00:00:01Z"
+                                    }]
+                                }))
+                                .insert_header("content-type", "application/json"),
+                            Some(other) => ResponseTemplate::new(400)
+                                .set_body_string(format!("unexpected query: {other}")),
+                        }
+                    }
+                    _ => ResponseTemplate::new(404),
+                }
+            }
+        }
+
+        let server = MockServer::start().await;
+        let output_queries = Arc::new(Mutex::new(Vec::new()));
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/agents/agent1/task"))
+            .respond_with(PollResponder { output_queries: Arc::clone(&output_queries) })
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/agents/agent1/output"))
+            .respond_with(PollResponder { output_queries: Arc::clone(&output_queries) })
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let client = crate::client::ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
+        let result = exec_wait(&client, "agent1", "whoami", 5).await.expect("exec_wait succeeds");
+
+        assert_eq!(result.job_id, "submitted_task");
+        assert_eq!(result.output, "DOMAIN\\\\user");
+
+        let queries = output_queries.lock().expect("lock output_queries").clone();
+        assert_eq!(queries, vec![None, Some("since=42".to_owned())]);
+    }
+
+    #[test]
+    fn render_output_stream_line_uses_unknown_marker_without_exit_code() {
+        let entry = OutputEntry {
+            entry_id: 7,
+            job_id: "job_abc".to_owned(),
+            command: Some("whoami".to_owned()),
+            output: "DOMAIN\\user".to_owned(),
+            exit_code: None,
+            created_at: "2026-04-01T00:00:00Z".to_owned(),
+        };
+
+        assert_eq!(render_output_stream_line(&entry), "[job_abc  exit ?]  DOMAIN\\user");
+    }
+
+    #[test]
+    fn render_output_stream_line_includes_numeric_exit_code() {
+        let entry = OutputEntry {
+            entry_id: 8,
+            job_id: "job_def".to_owned(),
+            command: Some("id".to_owned()),
+            output: "uid=1000(user) gid=1000(user)".to_owned(),
+            exit_code: Some(0),
+            created_at: "2026-04-01T00:00:01Z".to_owned(),
+        };
+
+        assert_eq!(
+            render_output_stream_line(&entry),
+            "[job_def  exit 0]  uid=1000(user) gid=1000(user)"
         );
     }
 

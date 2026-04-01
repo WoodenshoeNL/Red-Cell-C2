@@ -12,8 +12,8 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use red_cell::{
     AgentRegistry, AgentResponseRecord, ApiRuntime, AuditWebhookNotifier, AuthService, Database,
-    EventBus, ListenerManager, LoginRateLimiter, OperatorConnectionManager,
-    PayloadBuilderService, ShutdownController, SocketRelayManager, TeamserverState, build_router,
+    EventBus, ListenerManager, LoginRateLimiter, OperatorConnectionManager, PayloadBuilderService,
+    ShutdownController, SocketRelayManager, TeamserverState, build_router,
 };
 use red_cell_common::config::Profile;
 use red_cell_common::{AgentEncryptionInfo, AgentRecord};
@@ -502,14 +502,9 @@ async fn get_agent_output_since_cursor_returns_only_newer_entries() {
     let _second_id = repo.create(&record_b).await.expect("insert second record");
 
     // Fetch all entries — should return both.
-    let all_response = call(
-        state.clone(),
-        "GET",
-        &format!("/api/v1/agents/{AGENT_ID_HEX}/output"),
-        API_KEY,
-        None,
-    )
-    .await;
+    let all_response =
+        call(state.clone(), "GET", &format!("/api/v1/agents/{AGENT_ID_HEX}/output"), API_KEY, None)
+            .await;
     assert_eq!(all_response.status(), StatusCode::OK);
     let all_json = read_json(all_response).await;
     let all_entries = all_json["entries"].as_array().expect("entries must be an array");
@@ -534,11 +529,7 @@ async fn get_agent_output_since_cursor_returns_only_newer_entries() {
     assert_eq!(paged_response.status(), StatusCode::OK);
     let paged_json = read_json(paged_response).await;
     let paged_entries = paged_json["entries"].as_array().expect("entries must be an array");
-    assert_eq!(
-        paged_entries.len(),
-        1,
-        "only entries after the cursor must be returned"
-    );
+    assert_eq!(paged_entries.len(), 1, "only entries after the cursor must be returned");
     assert_eq!(
         paged_entries[0]["output"], "second output",
         "the entry after the cursor must be the second record"

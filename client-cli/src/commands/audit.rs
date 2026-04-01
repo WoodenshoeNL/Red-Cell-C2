@@ -8,6 +8,7 @@
 //! | `log tail` | `GET /api/v1/audit?limit=20` | last 20 entries |
 //! | `log tail --follow` | poll `GET /api/v1/audit?since=<ts>` | stream JSON lines |
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -189,18 +190,17 @@ async fn tail_follow(client: &ApiClient, fmt: &OutputFormat) -> i32 {
         _ = tokio::signal::ctrl_c() => return EXIT_SUCCESS,
     };
 
-    let mut cursor: Option<String> = match initial_result {
+    let mut cursor = match initial_result {
         Err(e) => {
             print_error(&e);
             return e.exit_code();
         }
         Ok(entries) => {
             // Print existing entries the same way as a plain `log tail`.
-            let latest_ts = entries.first().map(|e| e.ts.clone());
             for entry in &entries {
                 print_entry_line(fmt, entry);
             }
-            latest_ts
+            FollowCursor::from_printed_entries(&entries)
         }
     };
 
@@ -213,7 +213,7 @@ async fn tail_follow(client: &ApiClient, fmt: &OutputFormat) -> i32 {
         }
 
         let poll_result = tokio::select! {
-            result = list(client, 100, cursor.as_deref(), None, None, None) => result,
+            result = list(client, 100, cursor.since(), None, None, None) => result,
             _ = tokio::signal::ctrl_c() => return EXIT_SUCCESS,
         };
 
@@ -223,9 +223,8 @@ async fn tail_follow(client: &ApiClient, fmt: &OutputFormat) -> i32 {
                 return e.exit_code();
             }
             Ok(entries) => {
-                for entry in &entries {
+                for entry in cursor.drain_new_entries(&entries) {
                     print_entry_line(fmt, entry);
-                    cursor = Some(entry.ts.clone());
                 }
             }
         }
@@ -248,6 +247,89 @@ fn print_entry_line(fmt: &OutputFormat, entry: &AuditEntry) {
         entry.result_status,
     );
     print_stream_entry(fmt, entry, &text_line);
+}
+
+/// Follow-mode state for the inclusive `since` cursor exposed by the server.
+///
+/// The teamserver returns entries with `occurred_at >= since`, so the CLI
+/// keeps the last seen timestamp plus fingerprints for entries already printed
+/// from that timestamp bucket. This prevents re-emitting the tail record while
+/// still allowing genuinely new records at the current cursor timestamp.
+#[derive(Debug, Default)]
+struct FollowCursor {
+    since: Option<String>,
+    seen_at_cursor: HashSet<String>,
+}
+
+impl FollowCursor {
+    fn from_printed_entries(entries: &[AuditEntry]) -> Self {
+        let Some(latest_ts) = entries.first().map(|entry| entry.ts.clone()) else {
+            return Self::default();
+        };
+
+        let seen_at_cursor = entries
+            .iter()
+            .take_while(|entry| entry.ts == latest_ts)
+            .map(follow_entry_key)
+            .collect();
+
+        Self { since: Some(latest_ts), seen_at_cursor }
+    }
+
+    fn since(&self) -> Option<&str> {
+        self.since.as_deref()
+    }
+
+    fn drain_new_entries<'a>(&mut self, entries: &'a [AuditEntry]) -> Vec<&'a AuditEntry> {
+        let mut fresh = Vec::new();
+
+        for entry in entries {
+            if self.is_new_entry(entry) {
+                fresh.push(entry);
+            }
+        }
+
+        self.observe_emitted_entries(&fresh);
+        fresh
+    }
+
+    fn is_new_entry(&self, entry: &AuditEntry) -> bool {
+        match self.since.as_deref() {
+            None => true,
+            Some(cursor) if entry.ts.as_str() > cursor => true,
+            Some(cursor) if entry.ts.as_str() == cursor => {
+                !self.seen_at_cursor.contains(&follow_entry_key(entry))
+            }
+            Some(_) => false,
+        }
+    }
+
+    fn observe_emitted_entries(&mut self, entries: &[&AuditEntry]) {
+        let Some(latest_ts) = entries.first().map(|entry| entry.ts.clone()) else {
+            return;
+        };
+
+        if self.since.as_deref() != Some(latest_ts.as_str()) {
+            self.since = Some(latest_ts.clone());
+            self.seen_at_cursor.clear();
+        }
+
+        for entry in entries.iter().take_while(|entry| entry.ts == latest_ts) {
+            self.seen_at_cursor.insert(follow_entry_key(entry));
+        }
+    }
+}
+
+fn follow_entry_key(entry: &AuditEntry) -> String {
+    format!(
+        "{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}",
+        entry.ts,
+        entry.operator,
+        entry.action,
+        entry.agent_id.as_deref().unwrap_or(""),
+        entry.detail.as_deref().unwrap_or(""),
+        entry.result_status,
+    )
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -523,6 +605,17 @@ mod tests {
         }
     }
 
+    fn sample_entry_with(ts: &str, operator: &str, detail: &str) -> AuditEntry {
+        AuditEntry {
+            ts: ts.to_owned(),
+            operator: operator.to_owned(),
+            action: "agent.task".to_owned(),
+            agent_id: Some("abc123".to_owned()),
+            detail: Some(detail.to_owned()),
+            result_status: "success".to_owned(),
+        }
+    }
+
     #[test]
     fn entry_line_json_mode_emits_ok_true_envelope() {
         let entry = sample_entry();
@@ -599,6 +692,68 @@ mod tests {
         assert!(line.contains("abc123"), "should contain agent_id");
         assert!(line.contains("whoami"), "should contain detail");
         assert!(line.contains("success"), "should contain result_status");
+    }
+
+    // ── follow cursor ────────────────────────────────────────────────────────
+
+    #[test]
+    fn follow_cursor_initialises_with_latest_timestamp_bucket() {
+        let entries = vec![
+            sample_entry_with("2026-03-21T12:00:01Z", "alice", "whoami"),
+            sample_entry_with("2026-03-21T12:00:01Z", "bob", "hostname"),
+            sample_entry_with("2026-03-21T12:00:00Z", "carol", "pwd"),
+        ];
+
+        let cursor = FollowCursor::from_printed_entries(&entries);
+
+        assert_eq!(cursor.since(), Some("2026-03-21T12:00:01Z"));
+        assert_eq!(cursor.seen_at_cursor.len(), 2);
+        assert!(cursor.seen_at_cursor.contains(&follow_entry_key(&entries[0])));
+        assert!(cursor.seen_at_cursor.contains(&follow_entry_key(&entries[1])));
+    }
+
+    #[test]
+    fn follow_cursor_deduplicates_inclusive_since_bucket() {
+        let initial = vec![
+            sample_entry_with("2026-03-21T12:00:01Z", "alice", "whoami"),
+            sample_entry_with("2026-03-21T12:00:01Z", "bob", "hostname"),
+            sample_entry_with("2026-03-21T12:00:00Z", "carol", "pwd"),
+        ];
+        let mut cursor = FollowCursor::from_printed_entries(&initial);
+        let poll = vec![
+            sample_entry_with("2026-03-21T12:00:02Z", "dave", "id"),
+            sample_entry_with("2026-03-21T12:00:01Z", "erin", "ipconfig"),
+            sample_entry_with("2026-03-21T12:00:01Z", "alice", "whoami"),
+            sample_entry_with("2026-03-21T12:00:01Z", "bob", "hostname"),
+        ];
+
+        let fresh = cursor.drain_new_entries(&poll);
+
+        assert_eq!(fresh.len(), 2);
+        assert_eq!(fresh[0].detail.as_deref(), Some("id"));
+        assert_eq!(fresh[1].detail.as_deref(), Some("ipconfig"));
+        assert_eq!(cursor.since(), Some("2026-03-21T12:00:02Z"));
+        assert_eq!(cursor.seen_at_cursor.len(), 1);
+        assert!(cursor.seen_at_cursor.contains(&follow_entry_key(&poll[0])));
+    }
+
+    #[test]
+    fn follow_cursor_steady_state_poll_emits_nothing_and_keeps_cursor() {
+        let initial = vec![
+            sample_entry_with("2026-03-21T12:00:01Z", "alice", "whoami"),
+            sample_entry_with("2026-03-21T12:00:01Z", "bob", "hostname"),
+        ];
+        let mut cursor = FollowCursor::from_printed_entries(&initial);
+        let duplicate_poll = vec![
+            sample_entry_with("2026-03-21T12:00:01Z", "alice", "whoami"),
+            sample_entry_with("2026-03-21T12:00:01Z", "bob", "hostname"),
+        ];
+
+        let fresh = cursor.drain_new_entries(&duplicate_poll);
+
+        assert!(fresh.is_empty());
+        assert_eq!(cursor.since(), Some("2026-03-21T12:00:01Z"));
+        assert_eq!(cursor.seen_at_cursor.len(), 2);
     }
 
     // ── percent_encode ────────────────────────────────────────────────────────

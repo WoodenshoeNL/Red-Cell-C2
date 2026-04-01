@@ -149,8 +149,11 @@ typedef struct
 
         struct
         {
-            DWORD Technique;
-            PVOID SpoofAddr;
+            DWORD  Technique;
+            PVOID  SpoofAddr;
+            /* ARC-05: module-stomping victim DLL name (WCHAR, e.g. L"WINMM.DLL").
+             * NULL means auto-select from the PEB InLoadOrderModuleList. */
+            LPWSTR StompDll;
         } Inject;
 
         /* communication AES keys */

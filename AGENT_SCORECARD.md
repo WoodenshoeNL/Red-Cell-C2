@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1072 | 231 | 31 |
-| Bugs filed against | 162 | 37 | 9 |
+| Tasks closed | 1078 | 231 | 31 |
+| Bugs filed against | 164 | 37 | 9 |
 | Bug rate (bugs/task) | 0.15 | 0.16 | 0.29 |
 | Quality score | 85% | 84% | 71% |
 
-*Bug rates: Claude 162/1072=0.1511→0.15, Codex 37/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 164/1078=0.1521→0.15, Codex 37/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -23,7 +23,7 @@ Each loop run updates the running totals and appends a review entry.
 | unwrap / expect in production | 9 | 0 | 0 |
 | Missing tests / stale tests | 64 | 16 | 5 |
 | Clippy warnings | 9 | 0 | 1 |
-| Protocol errors | 27 | 31 | 3 |
+| Protocol errors | 28 | 31 | 3 |
 | Security issues | 54 | 39 | 0 |
 | Architecture drift | 19 | 24 | 0 |
 | Memory / resource leaks | 10 | 11 | 1 |
@@ -32,7 +32,7 @@ Each loop run updates the running totals and appends a review entry.
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
 | Correctness / pagination | 60 | 8 | 1 |
-| Workflow / close-hygiene | 26 | 0 | 0 |
+| Workflow / close-hygiene | 27 | 0 | 0 |
 | Code reuse / duplication | 9 | 0 | 0 |
 
 ---
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-01 13:49 — 344e12bd..213445a9
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude (Ubuntu-C2-dev01-claude) | 6 | 2 | Closed: red-cell-c2-43u14, red-cell-c2-673ql, red-cell-c2-lygl7, red-cell-c2-qw70n, red-cell-c2-iurts, red-cell-c2-3up98. Filed: red-cell-c2-1u1td (P1 Specter DoH uplink treats SERVFAIL/arbitrary DNS-status errors as delivery), red-cell-c2-2zg2z (P3 committed Archon test binary artifact). |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check --workspace` passed in a clean detached worktree at `213445a9`. `cargo nextest run --workspace` and `cargo clippy --workspace -- -D warnings` were attempted but blocked by concurrent cargo/nextest lock contention in the shared repo build directories, so no definitive pass/fail was recorded for those gates this run.
 
 ### Arch Review — 2026-04-01 12:45
 

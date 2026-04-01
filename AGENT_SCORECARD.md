@@ -10,11 +10,11 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 1063 | 231 | 31 |
-| Bugs filed against | 159 | 37 | 9 |
+| Bugs filed against | 160 | 37 | 9 |
 | Bug rate (bugs/task) | 0.15 | 0.16 | 0.29 |
 | Quality score | 85% | 84% | 71% |
 
-*Bug rates: Claude 159/1063=0.1496→0.15, Codex 37/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 160/1063=0.1505→0.15, Codex 37/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -31,7 +31,7 @@ Each loop run updates the running totals and appends a review entry.
 | Test infrastructure / flakiness | 33 | 2 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
-| Correctness / pagination | 56 | 8 | 1 |
+| Correctness / pagination | 57 | 8 | 1 |
 | Workflow / close-hygiene | 26 | 0 | 0 |
 | Code reuse / duplication | 9 | 0 | 0 |
 
@@ -50,6 +50,16 @@ Each loop run updates the running totals and appends a review entry.
 | Cursor | 0 | 0 | No activity. |
 
 Build: cargo check clean, clippy clean (0 warnings). nextest FAILED — teamserver tests/common/mod.rs:393 and tests/listener_lifecycle.rs:46,867 missing `ja3_randomize` field.
+
+### QA Review — 2026-04-01 09:30 — 06d1210f..b126512
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude (Ubuntu-C2-dev01-claude) | 0 | 1 | ARC-06 still uncommitted (red-cell-c2-3up98 remains open). Filed: red-cell-c2-s0hdz (P3 — ja3_randomize not wired through profile/operator interface, field always None). |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: cargo check ✅, clippy ✅ (0 warnings), nextest ❌ — 1 flake: `repeated_wrong_passwords_trigger_rate_limiter_lockout` fails under concurrent load (`Close(None)` instead of `InitConnectionError`), passes in isolation (67s). Pre-existing, tracked by red-cell-c2-lygl7. Working tree has 292 lines of uncommitted ARC-06 changes; these fix the prior red-cell-c2-j02y5 compile break.
 
 ### QA Review — 2026-04-01 — efa58322..d2755960
 

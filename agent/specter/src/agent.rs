@@ -172,15 +172,15 @@ impl SpecterAgent {
 
     /// Check whether the configured kill date has been reached.
     ///
-    /// The kill date is stored as a Windows FILETIME value (100-nanosecond
-    /// intervals since January 1, 1601 UTC) — the same format used by the
-    /// Havoc Demon agent and the Go teamserver's `EpochTimeToSystemTime`.
+    /// The kill date is stored as a Unix timestamp (seconds since
+    /// January 1, 1970 UTC), matching the format emitted by the teamserver's
+    /// payload builder and normalised by `common::domain::validate_kill_date`.
     /// Returns `true` when the current time meets or exceeds the deadline.
     fn reached_kill_date(&self) -> bool {
         let Some(kill_date) = self.config.kill_date else {
             return false;
         };
-        let now = current_filetime();
+        let now = current_unix_secs();
         now >= kill_date
     }
 
@@ -544,22 +544,9 @@ impl SpecterAgent {
     }
 }
 
-/// Windows FILETIME epoch offset: January 1, 1970 expressed as 100-nanosecond
-/// intervals since January 1, 1601 UTC.
-const UNIX_TIME_START: i64 = 0x019D_B1DE_D53E_8000;
-
-/// Number of 100-nanosecond intervals per second.
-const TICKS_PER_SECOND: i64 = 10_000_000;
-
-/// Return the current UTC time as a Windows FILETIME value (100-nanosecond
-/// intervals since January 1, 1601).
-///
-/// This mirrors the Havoc Demon's `GetSystemFileTime()` and the Go
-/// teamserver's `EpochTimeToSystemTime()`.
-fn current_filetime() -> i64 {
-    let unix_secs =
-        SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
-    unix_secs.saturating_mul(TICKS_PER_SECOND).saturating_add(UNIX_TIME_START)
+/// Return the current UTC time as a Unix timestamp (seconds since 1970-01-01).
+fn current_unix_secs() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
 /// Get the hostname of the current machine via platform-native API.
@@ -807,11 +794,10 @@ mod tests {
     // ── Kill-date tests ─────────────────────────────────────────────────────
 
     #[test]
-    fn current_filetime_returns_reasonable_value() {
-        let ft = current_filetime();
-        // Must be after 2020-01-01 in FILETIME ticks.
-        let year_2020_ft: i64 = 132_224_352_000_000_000;
-        assert!(ft > year_2020_ft, "filetime {ft} should be after 2020");
+    fn current_unix_secs_returns_reasonable_value() {
+        let ts = current_unix_secs();
+        // Must be after 2020-01-01 (Unix timestamp 1577836800).
+        assert!(ts > 1_577_836_800, "unix timestamp {ts} should be after 2020");
     }
 
     #[test]
@@ -823,36 +809,27 @@ mod tests {
 
     #[test]
     fn reached_kill_date_false_when_future() {
-        // Set kill date far in the future (year ~2100).
-        let future_ft: i64 = 160_000_000_000_000_000;
-        let config = SpecterConfig { kill_date: Some(future_ft), ..Default::default() };
+        // Set kill date far in the future (year ~2100, Unix timestamp 4102444800).
+        let future_ts: i64 = 4_102_444_800;
+        let config = SpecterConfig { kill_date: Some(future_ts), ..Default::default() };
         let agent = SpecterAgent::new(config).expect("agent");
         assert!(!agent.reached_kill_date());
     }
 
     #[test]
     fn reached_kill_date_true_when_past() {
-        // Set kill date to a past time (year 2020).
-        let past_ft: i64 = 132_224_352_000_000_000;
-        let config = SpecterConfig { kill_date: Some(past_ft), ..Default::default() };
+        // Set kill date to a past time (2020-01-01, Unix timestamp 1577836800).
+        let past_ts: i64 = 1_577_836_800;
+        let config = SpecterConfig { kill_date: Some(past_ts), ..Default::default() };
         let agent = SpecterAgent::new(config).expect("agent");
         assert!(agent.reached_kill_date());
     }
 
     #[test]
-    fn reached_kill_date_true_when_zero_timestamp() {
-        // Zero stored as None, so should not trigger.
+    fn reached_kill_date_false_when_none_not_zero() {
+        // None means no kill date configured — should never trigger.
         let config = SpecterConfig { kill_date: None, ..Default::default() };
         let agent = SpecterAgent::new(config).expect("agent");
         assert!(!agent.reached_kill_date());
-    }
-
-    #[test]
-    fn filetime_conversion_matches_havoc_epoch() {
-        // Verify our constants match the Havoc Go teamserver:
-        // EpochTimeToSystemTime(0) should return UNIX_TIME_START.
-        let ft_at_unix_epoch =
-            0_i64.saturating_mul(TICKS_PER_SECOND).saturating_add(UNIX_TIME_START);
-        assert_eq!(ft_at_unix_epoch, 0x019D_B1DE_D53E_8000);
     }
 }

@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1086 | 234 | 31 |
+| Tasks closed | 1086 | 238 | 31 |
 | Bugs filed against | 166 | 37 | 9 |
 | Bug rate (bugs/task) | 0.15 | 0.16 | 0.29 |
 | Quality score | 85% | 84% | 71% |
 
-*Bug rates: Claude 166/1086=0.1529→0.15, Codex 37/234=0.1581→0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 166/1086=0.1529→0.15, Codex 37/238=0.1555→0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-01 18:10 — ac6da996..7a213093
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | No attributed task closes or committed regressions in this range. |
+| Codex | 4 | 0 | Closed: red-cell-c2-2p7fs, red-cell-c2-2myjl, red-cell-c2-2h7qm, red-cell-c2-2w859. Reviewed the `client-cli` numeric output cursor follow-up, shared stream-envelope refactor, and `SERIALIZE_FAILED` output handling changes in `client-cli/src/commands/agent.rs`, `client-cli/src/commands/session.rs`, `client-cli/src/main.rs`, `client-cli/src/output.rs`, and the related contract tests; no new attributable regressions found. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: passed — `cargo check --workspace` passed on reviewed tip, `cargo nextest run --workspace` passed all 4869 tests on the immediately preceding reviewed `origin/main` tip before the final `red-cell-c2-2w859` close/claim metadata landed, and `cargo clippy --workspace -- -D warnings` passed with 0 warnings.
 
 ### Arch Review — 2026-04-01 15:10
 

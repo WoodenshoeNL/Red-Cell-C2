@@ -28,10 +28,10 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 19 | 23 | 0 |
 | Memory / resource leaks | 10 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 9 | 0 |
-| Test infrastructure / flakiness | 33 | 2 | 0 |
+| Test infrastructure / flakiness | 34 | 2 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
-| Correctness / pagination | 57 | 8 | 1 |
+| Correctness / pagination | 58 | 8 | 1 |
 | Workflow / close-hygiene | 26 | 0 | 0 |
 | Code reuse / duplication | 9 | 0 | 0 |
 
@@ -50,6 +50,17 @@ Each loop run updates the running totals and appends a review entry.
 | Cursor | 0 | 0 | No activity. |
 
 Build: cargo check clean, clippy clean (0 warnings). nextest FAILED — teamserver tests/common/mod.rs:393 and tests/listener_lifecycle.rs:46,867 missing `ja3_randomize` field.
+
+### Arch Review — 2026-04-01 10:30
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 2 | correctness (1), test infra/flakiness (1) | `client-cli` lets config override an explicit `--timeout 30`; autotest background launch helper does not quote remote payload paths for Linux or Windows targets. Filed: red-cell-c2-17bgh, red-cell-c2-37udb |
+| Codex | 0 | — | No findings this review |
+| Cursor | 0 | — | No findings this review |
+
+Overall codebase health: on track
+Biggest blindspot: machine-facing contracts are still being "documented" around edge-case breakage instead of enforced, which lets agent automation and E2E harnesses silently drift from the intended CLI/runtime behavior
 
 ### QA Review — 2026-04-01 09:30 — 06d1210f..b126512
 

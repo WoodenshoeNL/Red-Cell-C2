@@ -23,6 +23,7 @@ unwrap_used = "deny"
 [dependencies]
 anyhow = "1"
 libc = "0.2"
+png = "0.18"
 rand = "0.9"
 red-cell-common = { path = "../../common" }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
@@ -31,6 +32,7 @@ tokio = { version = "1", features = ["macros", "net", "process", "rt-multi-threa
 time = { version = "0.3", features = ["local-offset"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+x11-dl = "2"
 
 [dev-dependencies]
 axum = { version = "0.8.8", features = ["ws"] }

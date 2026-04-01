@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1060 | 231 | 31 |
-| Bugs filed against | 156 | 37 | 9 |
+| Tasks closed | 1063 | 231 | 31 |
+| Bugs filed against | 157 | 37 | 9 |
 | Bug rate (bugs/task) | 0.15 | 0.16 | 0.29 |
 | Quality score | 85% | 84% | 71% |
 
-*Bug rates: Claude 156/1060=0.147→0.15, Codex 37/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 157/1063=0.1477→0.15, Codex 37/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -33,13 +33,23 @@ Each loop run updates the running totals and appends a review entry.
 | Availability / timeout regressions | 2 | 5 | 0 |
 | Correctness / pagination | 56 | 8 | 1 |
 | Workflow / close-hygiene | 25 | 0 | 0 |
-| Code reuse / duplication | 8 | 0 | 0 |
+| Code reuse / duplication | 9 | 0 | 0 |
 
 ---
 
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-01 — efa58322..d2755960
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude (Ubuntu-C2-dev01-claude) | 3 | 1 | Closed: red-cell-c2-92qnt (ARC-04 heap encryption), red-cell-c2-vy724 (Specter multi-worker heap-enc guard), red-cell-c2-rnson (teamserver audit test hardcoded date). Filed: red-cell-c2-iurts (duplicate H_FUNC_RTLRANDOMEX define — pre-existing from dev02-claude, now tracked). |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: cargo check clean, clippy clean (0 warnings), nextest 4802/4802 passed.
 
 ### QA Review — 2026-03-31 21:12 — 145b7c36..eda707db
 

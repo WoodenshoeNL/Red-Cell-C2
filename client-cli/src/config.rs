@@ -201,28 +201,18 @@ fn tighten_permissions(path: &Path) {
 /// `cli_server` and `cli_token` already incorporate both CLI flags and
 /// environment variables because clap handles both via `#[arg(env = "…")]`.
 ///
-/// `cli_timeout` is the value from `--timeout` (or its default of 30).
+/// `cli_timeout` is `Some(secs)` when the user explicitly passed `--timeout`,
+/// or `None` when the flag was omitted.  An explicit value always wins over the
+/// config file; when absent the config file's `timeout` is used, falling back
+/// to the built-in default of 30 seconds.
 ///
 /// `ca_cert` and `cert_fingerprint` come from `--ca-cert` / `--cert-fingerprint`.
 /// When both are supplied `cert_fingerprint` wins.  Neither is read from config
 /// files — they are CLI-only for security-sensitive TLS decisions.
-///
-/// ## Known limitation — timeout sentinel
-///
-/// Because clap always produces a concrete `u64` value (defaulting to `30`),
-/// there is no way to distinguish "user explicitly passed `--timeout 30`" from
-/// "user did not pass `--timeout` at all".  When `cli_timeout` arrives as `30`
-/// **and** a config file is loaded (because `server` or `token` was absent
-/// from the CLI), the file's `timeout` field silently wins.
-///
-/// Concretely: if your config file contains `timeout = 60` and you run
-/// `red-cell-cli --timeout 30 --server …`, the resulting timeout will be `60`,
-/// not `30`.  This is a documented trade-off; a future refactor could accept
-/// `Option<u64>` to carry the "was explicitly set" signal from the caller.
 pub fn resolve(
     cli_server: Option<String>,
     cli_token: Option<String>,
-    cli_timeout: u64,
+    cli_timeout: Option<u64>,
     ca_cert: Option<PathBuf>,
     cert_fingerprint: Option<String>,
 ) -> Result<ResolvedConfig, ConfigError> {
@@ -248,15 +238,10 @@ pub fn resolve(
         .or_else(|| file_config.as_ref().and_then(|c| c.token.clone()))
         .ok_or(ConfigError::MissingToken)?;
 
-    // Timeout: file value overrides the default (30 s) but the CLI flag wins
-    // over everything.  Because clap always gives us a value (default = 30)
-    // we cannot distinguish "user passed --timeout" from "default applied", so
-    // we use the file value only when cli_timeout is still at the default (30).
-    let timeout = if cli_timeout != 30 {
-        cli_timeout
-    } else {
-        file_config.as_ref().and_then(|c| c.timeout).unwrap_or(cli_timeout)
-    };
+    // Timeout: explicit CLI flag always wins; when absent, fall back to the
+    // config file value, then to the built-in default of 30 seconds.
+    let timeout =
+        cli_timeout.or_else(|| file_config.as_ref().and_then(|c| c.timeout)).unwrap_or(30);
 
     // TLS mode: fingerprint wins over CA cert; both are CLI-only (not in file configs).
     let tls_mode = match (ca_cert, cert_fingerprint) {
@@ -355,17 +340,17 @@ timeout = 60
     #[test]
     fn resolve_uses_cli_values_directly() {
         let cfg =
-            resolve(Some("https://ts:40056".to_owned()), Some("tok".to_owned()), 30, None, None)
+            resolve(Some("https://ts:40056".to_owned()), Some("tok".to_owned()), None, None, None)
                 .unwrap();
         assert_eq!(cfg.server, "https://ts:40056");
         assert_eq!(cfg.token, "tok");
-        assert_eq!(cfg.timeout, 30);
+        assert_eq!(cfg.timeout, 30, "default timeout is 30 when no flag and no file");
     }
 
     #[test]
     fn resolve_strips_trailing_slash_from_server() {
         let cfg =
-            resolve(Some("https://ts:40056/".to_owned()), Some("tok".to_owned()), 30, None, None)
+            resolve(Some("https://ts:40056/".to_owned()), Some("tok".to_owned()), None, None, None)
                 .unwrap();
         assert_eq!(cfg.server, "https://ts:40056");
     }
@@ -376,7 +361,7 @@ timeout = 60
         let _guard = CWD_LOCK.lock().unwrap();
         let original = std::env::current_dir().unwrap();
         std::env::set_current_dir(tmp.path()).unwrap();
-        let err = resolve(None, Some("tok".to_owned()), 30, None, None);
+        let err = resolve(None, Some("tok".to_owned()), None, None, None);
         std::env::set_current_dir(&original).unwrap();
         assert!(matches!(err, Err(ConfigError::MissingServer)));
     }
@@ -387,16 +372,21 @@ timeout = 60
         let _guard = CWD_LOCK.lock().unwrap();
         let original = std::env::current_dir().unwrap();
         std::env::set_current_dir(tmp.path()).unwrap();
-        let err = resolve(Some("https://ts:40056".to_owned()), None, 30, None, None);
+        let err = resolve(Some("https://ts:40056".to_owned()), None, None, None, None);
         std::env::set_current_dir(&original).unwrap();
         assert!(matches!(err, Err(ConfigError::MissingToken)));
     }
 
     #[test]
     fn resolve_uses_explicit_timeout_over_file() {
-        let cfg =
-            resolve(Some("https://ts:40056".to_owned()), Some("tok".to_owned()), 45, None, None)
-                .unwrap();
+        let cfg = resolve(
+            Some("https://ts:40056".to_owned()),
+            Some("tok".to_owned()),
+            Some(45),
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(cfg.timeout, 45);
     }
 
@@ -419,7 +409,7 @@ timeout = 90
         let _guard = CWD_LOCK.lock().unwrap();
         let original = std::env::current_dir().unwrap();
         std::env::set_current_dir(tmp.path()).unwrap();
-        let result = resolve(None, None, 30, None, None);
+        let result = resolve(None, None, None, None, None);
         std::env::set_current_dir(&original).unwrap();
 
         let cfg = result.expect("resolve should succeed with file config");
@@ -428,15 +418,10 @@ timeout = 90
         assert_eq!(cfg.timeout, 90, "file timeout should override default 30");
     }
 
-    /// Documents the timeout-sentinel limitation: when `cli_timeout` is `30`
-    /// (the clap default) and the config file is loaded (because `server` is
-    /// absent from the CLI), the file's `timeout` value wins — even if the
-    /// user explicitly passed `--timeout 30`.
-    ///
-    /// This test pins the *current* behaviour so that any future change to the
-    /// resolution logic triggers a deliberate, visible test failure.
+    /// When `--timeout` is omitted (`None`), the config file's `timeout` wins
+    /// over the built-in default.
     #[test]
-    fn resolve_file_timeout_wins_when_cli_timeout_equals_default_sentinel() {
+    fn resolve_file_timeout_wins_when_timeout_flag_omitted() {
         let tmp = TempDir::new().unwrap();
         write_config(
             tmp.path(),
@@ -450,16 +435,37 @@ timeout = 60
         let original = std::env::current_dir().unwrap();
         std::env::set_current_dir(tmp.path()).unwrap();
         // token provided on CLI; server absent → file is loaded.
-        // cli_timeout = 30 is the default sentinel, so the file's 60 wins.
-        let result = resolve(None, Some("tok".to_owned()), 30, None, None);
+        // cli_timeout = None (flag omitted), so the file's 60 wins.
+        let result = resolve(None, Some("tok".to_owned()), None, None, None);
         std::env::set_current_dir(&original).unwrap();
 
         let cfg = result.expect("resolve should succeed");
-        assert_eq!(
-            cfg.timeout, 60,
-            "file timeout (60) must win when cli_timeout equals the default sentinel (30); \
-             see resolve() doc comment for the known-limitation explanation"
+        assert_eq!(cfg.timeout, 60, "file timeout (60) must win when --timeout is omitted");
+    }
+
+    /// Explicit `--timeout 30` must win over a config file that specifies a
+    /// different timeout — this was the bug that the sentinel approach could not
+    /// distinguish.
+    #[test]
+    fn resolve_explicit_timeout_30_wins_over_file_timeout() {
+        let tmp = TempDir::new().unwrap();
+        write_config(
+            tmp.path(),
+            r#"
+server  = "https://file-ts:40056"
+timeout = 60
+"#,
         );
+
+        let _guard = CWD_LOCK.lock().unwrap();
+        let original = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+        // Explicit --timeout 30 must beat file's 60.
+        let result = resolve(None, Some("tok".to_owned()), Some(30), None, None);
+        std::env::set_current_dir(&original).unwrap();
+
+        let cfg = result.expect("resolve should succeed");
+        assert_eq!(cfg.timeout, 30, "explicit --timeout 30 must win over file timeout (60)");
     }
 
     // ── write_config_file ──────────────────────────────────────────────────
@@ -544,7 +550,7 @@ token  = "file-tok"
         let _guard = CWD_LOCK.lock().unwrap();
         let original = std::env::current_dir().unwrap();
         std::env::set_current_dir(tmp.path()).unwrap();
-        let result = resolve(Some("https://cli-ts:9999".to_owned()), None, 30, None, None);
+        let result = resolve(Some("https://cli-ts:9999".to_owned()), None, None, None, None);
         std::env::set_current_dir(&original).unwrap();
 
         let cfg = result.expect("resolve should succeed with partial override");

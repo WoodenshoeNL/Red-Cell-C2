@@ -54,9 +54,9 @@ pub struct Cli {
     #[arg(long, short = 'o', global = true, default_value = "json")]
     pub output: OutputFormat,
 
-    /// Request timeout in seconds
-    #[arg(long, global = true, default_value = "30")]
-    pub timeout: u64,
+    /// Request timeout in seconds (default: 30)
+    #[arg(long, global = true)]
+    pub timeout: Option<u64>,
 
     /// Path to a custom CA certificate (PEM) used to verify the teamserver's
     /// TLS certificate.  Built-in root CAs are disabled; only this CA is
@@ -982,13 +982,13 @@ mod tests {
     fn timeout_flag_is_captured() {
         let cli = Cli::try_parse_from(["red-cell-cli", "--timeout", "60"])
             .expect("--timeout flag must parse");
-        assert_eq!(cli.timeout, 60);
+        assert_eq!(cli.timeout, Some(60));
     }
 
     #[test]
-    fn default_timeout_is_30() {
+    fn default_timeout_is_none_when_omitted() {
         let cli = Cli::try_parse_from(["red-cell-cli"]).expect("bare invocation must parse");
-        assert_eq!(cli.timeout, 30, "default --timeout must be 30");
+        assert!(cli.timeout.is_none(), "omitting --timeout must yield None, not a sentinel");
     }
 
     #[test]
@@ -1006,7 +1006,7 @@ mod tests {
         .expect("combined global flags with subcommand must parse");
         assert_eq!(cli.server.as_deref(), Some("https://ts:40056"));
         assert_eq!(cli.token.as_deref(), Some("tok"));
-        assert_eq!(cli.timeout, 120);
+        assert_eq!(cli.timeout, Some(120));
         assert!(matches!(cli.command, Some(Commands::Status)));
     }
 

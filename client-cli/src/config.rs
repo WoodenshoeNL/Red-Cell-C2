@@ -216,8 +216,11 @@ pub fn resolve(
     ca_cert: Option<PathBuf>,
     cert_fingerprint: Option<String>,
 ) -> Result<ResolvedConfig, ConfigError> {
-    // Only pay the I/O cost of loading files when something is missing.
-    let need_file = cli_server.is_none() || cli_token.is_none();
+    // Pay the I/O cost of loading files when any value that can come from the
+    // config file is absent from the CLI/env.  Timeout is included so that
+    // `--server X --token Y` (no `--timeout`) still picks up `timeout` from
+    // the config file instead of silently falling back to the 30 s default.
+    let need_file = cli_server.is_none() || cli_token.is_none() || cli_timeout.is_none();
 
     let file_config: Option<FileConfig> = if need_file {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -466,6 +469,42 @@ timeout = 60
 
         let cfg = result.expect("resolve should succeed");
         assert_eq!(cfg.timeout, 30, "explicit --timeout 30 must win over file timeout (60)");
+    }
+
+    /// Regression test: `--server` and `--token` both provided via CLI but
+    /// `--timeout` omitted.  The config file's `timeout` must still be used
+    /// rather than the built-in 30-second default.
+    #[test]
+    fn resolve_cli_server_and_token_file_timeout_used_when_flag_omitted() {
+        let tmp = TempDir::new().unwrap();
+        write_config(
+            tmp.path(),
+            r#"
+timeout = 120
+"#,
+        );
+
+        let _guard = CWD_LOCK.lock().unwrap();
+        let original = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+        // Both auth values come from the CLI — historically this prevented the
+        // config file from being loaded, causing timeout to always be 30.
+        let result = resolve(
+            Some("https://cli-ts:9999".to_owned()),
+            Some("cli-tok".to_owned()),
+            None, // --timeout omitted
+            None,
+            None,
+        );
+        std::env::set_current_dir(&original).unwrap();
+
+        let cfg = result.expect("resolve should succeed");
+        assert_eq!(cfg.server, "https://cli-ts:9999");
+        assert_eq!(cfg.token, "cli-tok");
+        assert_eq!(
+            cfg.timeout, 120,
+            "file timeout (120) must win when --timeout is omitted, even when --server and --token are both supplied"
+        );
     }
 
     // ── write_config_file ──────────────────────────────────────────────────

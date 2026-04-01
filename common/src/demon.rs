@@ -131,6 +131,7 @@ protocol_enum! {
         CommandKerberos = 2550,
         CommandMemFile = 2560,
         CommandPackageDropped = 2570,
+        CommandPersist = 3000,
     }
 }
 
@@ -373,6 +374,26 @@ protocol_enum! {
         Failed = 1,
         InvalidParam = 2,
         ProcessArchMismatch = 3,
+    }
+}
+
+protocol_enum! {
+    /// Phantom-specific persistence method selectors.
+    ///
+    /// Interpreted only by the Phantom Linux agent; Demon/Archon return a
+    /// not-supported error for `CommandPersist`.
+    pub enum PhantomPersistMethod {
+        Cron = 1,
+        SystemdUser = 2,
+        ShellRc = 3,
+    }
+}
+
+protocol_enum! {
+    /// Operation selector for `CommandPersist` payloads (install or remove).
+    pub enum PhantomPersistOp {
+        Install = 0,
+        Remove = 1,
     }
 }
 

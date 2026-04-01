@@ -131,6 +131,7 @@ protocol_enum! {
         CommandKerberos = 2550,
         CommandMemFile = 2560,
         CommandPackageDropped = 2570,
+        CommandHarvest = 2580,
         CommandPersist = 3000,
     }
 }

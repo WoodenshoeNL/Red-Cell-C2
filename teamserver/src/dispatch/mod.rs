@@ -25,6 +25,7 @@ use crate::{
 mod assembly;
 mod checkin;
 mod filesystem;
+mod harvest;
 mod kerberos;
 mod network;
 mod output;
@@ -677,6 +678,32 @@ impl CommandDispatcher {
                 let plugins = screenshot_plugins.clone();
                 Box::pin(async move {
                     screenshot::handle_screenshot_callback(
+                        &registry,
+                        &database,
+                        &events,
+                        plugins.as_ref(),
+                        agent_id,
+                        request_id,
+                        &payload,
+                    )
+                    .await
+                })
+            },
+        );
+
+        let harvest_database = database.clone();
+        let harvest_events = events.clone();
+        let harvest_registry = registry.clone();
+        let harvest_plugins = plugins.clone();
+        self.register_handler(
+            u32::from(DemonCommand::CommandHarvest),
+            move |agent_id, request_id, payload| {
+                let registry = harvest_registry.clone();
+                let database = harvest_database.clone();
+                let events = harvest_events.clone();
+                let plugins = harvest_plugins.clone();
+                Box::pin(async move {
+                    harvest::handle_harvest_callback(
                         &registry,
                         &database,
                         &events,

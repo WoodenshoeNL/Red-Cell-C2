@@ -21,14 +21,14 @@ Each loop run updates the running totals and appends a review entry.
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 9 | 0 | 0 |
-| Missing tests / stale tests | 64 | 16 | 5 |
+| Missing tests / stale tests | 65 | 16 | 5 |
 | Clippy warnings | 9 | 0 | 1 |
-| Protocol errors | 28 | 31 | 3 |
+| Protocol errors | 29 | 31 | 3 |
 | Security issues | 54 | 39 | 0 |
-| Architecture drift | 19 | 24 | 0 |
+| Architecture drift | 21 | 24 | 0 |
 | Memory / resource leaks | 10 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 9 | 0 |
-| Test infrastructure / flakiness | 34 | 2 | 0 |
+| Test infrastructure / flakiness | 35 | 2 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
 | Correctness / pagination | 60 | 8 | 1 |
@@ -40,6 +40,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-04-01 14:56
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 2 | protocol errors (1), architecture drift (2), missing tests (1), test infrastructure / flakiness (1) | Specter treats kill dates as FILETIME even though shared config/payload paths use Unix timestamps, so future kill dates can trigger immediate self-termination. The automated harness feeds `red-cell-cli` a `wss://` server URL and operator password while the CLI wrapper actually expects an HTTPS REST base URL plus API key. Filed: red-cell-c2-vmh2o, red-cell-c2-1elym |
+| Codex | 0 | — | No findings this review |
+| Cursor | 0 | — | No findings this review |
+
+Overall codebase health: on track
+Biggest blindspot: cross-component contract drift is still slipping through when agent/runtime semantics or machine-facing harness assumptions diverge from the shared `common` and CLI contracts
 
 ### QA Review — 2026-04-01 14:34 — 213445a9..d84dad6e
 

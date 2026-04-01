@@ -96,7 +96,6 @@
 #define H_FUNC_RTLWALKHEAP                           0x182bae64
 #define H_FUNC_RTLEXITUSERPROCESS                    0x57c72f
 #define H_FUNC_RTLRANDOMEX                           0x7f1224f5
-#define H_FUNC_RTLRANDOMEX                           0x7f1224f5
 #define H_FUNC_RTLNTSTATUSTODOSERROR                 0x39d7c890
 #define H_FUNC_RTLGETVERSION                         0xdde5cdd
 #define H_FUNC_RTLADDVECTOREDEXCEPTIONHANDLER        0x2df06c89

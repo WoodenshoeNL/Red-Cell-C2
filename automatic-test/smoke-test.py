@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from lib.cli import CliConfig, CliError, status, login, \
     listener_create, listener_start, listener_stop, listener_delete
+from lib.config import make_cli_config
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -138,11 +139,7 @@ def main() -> None:
     with open(config_path, "rb") as f:
         env = tomllib.load(f)
 
-    cfg = CliConfig(
-        server=env["server"]["url"],
-        token=env["operator"]["password"],
-        timeout=env.get("timeouts", {}).get("command_output", 30),
-    )
+    cfg = make_cli_config(env)
 
     print()
     print("Red Cell C2 — smoke test")

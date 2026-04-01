@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from lib import ScenarioSkipped
 from lib.cli import CliConfig
+from lib.config import make_cli_config
 from lib.deploy import TargetConfig
 
 
@@ -53,14 +54,6 @@ def load_targets(path: Path) -> dict:
         return {}
     with open(path, "rb") as f:
         return tomllib.load(f)
-
-
-def make_cli_config(env: dict) -> CliConfig:
-    return CliConfig(
-        server=env["server"]["url"],
-        token=env["operator"]["password"],  # resolved to a real token at runtime
-        timeout=env.get("timeouts", {}).get("command_output", 30),
-    )
 
 
 def make_target(cfg: dict) -> TargetConfig:

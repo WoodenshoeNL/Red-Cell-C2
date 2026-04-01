@@ -4650,6 +4650,15 @@ mod tests {
 
     use std::net::Ipv4Addr;
 
+    /// Serialise tests that mutate the `HOME` environment variable.
+    ///
+    /// `std::env::set_var` is not thread-safe; multiple `#[tokio::test]` test
+    /// functions run on separate OS threads even though each one uses a
+    /// single-threaded Tokio executor.  Any test that writes `HOME` must hold
+    /// this lock for its entire duration to prevent other tests from seeing a
+    /// stale or foreign home directory.
+    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     use red_cell_common::demon::{
         DemonCallback, DemonCommand, DemonFilesystemCommand, DemonNetCommand, DemonPackage,
         DemonProcessCommand, DemonSocketCommand, DemonTransferCommand,
@@ -6865,8 +6874,10 @@ mod tests {
 
         let tmp = TempDir::new().expect("tempdir");
         let home = tmp.path().to_str().expect("valid path").to_owned();
-        // SAFETY: single-threaded test environment
-
+        // Hold the HOME_LOCK for the entire test body so that parallel tests
+        // cannot overwrite HOME while this test is running.
+        let _home_guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: mutation is serialised by HOME_LOCK above.
         unsafe {
             std::env::set_var("HOME", &home);
         }
@@ -6904,8 +6915,8 @@ mod tests {
 
         let tmp = TempDir::new().expect("tempdir");
         let home = tmp.path().to_str().expect("valid path").to_owned();
-        // SAFETY: single-threaded test environment
-
+        let _home_guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: mutation is serialised by HOME_LOCK above.
         unsafe {
             std::env::set_var("HOME", &home);
         }
@@ -6947,8 +6958,8 @@ mod tests {
 
         let tmp = TempDir::new().expect("tempdir");
         let home = tmp.path().to_str().expect("valid path").to_owned();
-        // SAFETY: single-threaded test environment
-
+        let _home_guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: mutation is serialised by HOME_LOCK above.
         unsafe {
             std::env::set_var("HOME", &home);
         }
@@ -6986,8 +6997,8 @@ mod tests {
         use tempfile::TempDir;
 
         let tmp = TempDir::new().expect("tempdir");
-        // SAFETY: single-threaded test environment
-
+        let _home_guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: mutation is serialised by HOME_LOCK above.
         unsafe {
             std::env::set_var("HOME", tmp.path().to_str().expect("valid path"));
         }

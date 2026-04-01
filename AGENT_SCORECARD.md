@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1090 | 247 | 31 |
+| Tasks closed | 1093 | 247 | 31 |
 | Bugs filed against | 167 | 38 | 9 |
 | Bug rate (bugs/task) | 0.15 | 0.15 | 0.29 |
 | Quality score | 85% | 85% | 71% |
 
-*Bug rates: Claude 167/1090=0.1532→0.15, Codex 38/247=0.1538→0.15, Cursor 9/31=0.29*
+*Bug rates: Claude 167/1093=0.1528→0.15, Codex 38/247=0.1538→0.15, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -5048,3 +5048,13 @@ Build: `cargo check --workspace` failed in the current worktree with `E0308` at 
 | Cursor | 0 | 0 | No activity. |
 
 Build: `cargo check --workspace` passed on `fd42a036`. `python3 -m unittest discover -s automatic-test/tests` passed all 62 tests. `cargo nextest run --workspace` was started against the reviewed tip and reached 3056/4879 passing tests with no failures observed before I stopped it to avoid leaving a long background job running after the QA push. `cargo clippy --workspace -- -D warnings` passed. `br list --status=in_progress` / `br list --status=open` were intermittently blocked by `DATABASE_ERROR: database is busy`, so issue-state review fell back to `br ready` plus direct issue inspection.
+
+### QA Review — 2026-04-01 — fd42a036..1a1fac7b
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 3 | 0 | Closed: red-cell-c2-sgdn8 (client-cli config timeout fallback), red-cell-c2-2g4vu (phantom persist_shell_rc test mutex serialisation), red-cell-c2-1za5j (specter PowerShell profile persist update). All three fixes are targeted, well-tested, and clean. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check --workspace` passed. `cargo clippy --workspace -- -D warnings` 0 warnings. Targeted tests for all three changed modules passed: phantom persist_shell_rc (6/6 ok), specter persist_powershell (5/5 ok), client-cli config resolve regression (1/1 ok). No new bugs filed.

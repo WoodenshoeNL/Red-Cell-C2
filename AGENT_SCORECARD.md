@@ -5007,3 +5007,13 @@ Build: `cargo check --workspace` ✅. `cargo clippy --workspace -- -D warnings` 
 | Cursor | 0 | 0 | No activity. |
 
 Build: `cargo check --workspace` passed. `cargo nextest run --workspace` passed all 4850 tests. `cargo clippy --workspace -- -D warnings` passed with 0 warnings. `br list --status=in_progress` was empty; `br list --status=open` and `br ready` showed only the existing open bug backlog, with no close-hygiene mismatch in the reviewed range.
+
+### QA Review — 2026-04-01 17:05 — aaa527d9..ac6da996
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | No attributed task closes or commits in this review range. |
+| Codex | 0 | 0 | Three bookkeeping commits only: reopened the existing `client-cli` bugs, advanced the prior QA checkpoint, and claimed red-cell-c2-2p7fs. No product-code changes were committed in range. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check --workspace` failed in the current worktree with `E0308` at `client-cli/src/commands/session.rs:387` and `client-cli/src/commands/session.rs:690` because `output_url()` now takes `Option<i64>` while session mode still passes `Option<&str>`. This breakage is already tracked by open bug `red-cell-c2-2p7fs`, so no duplicate issue was filed. `cargo nextest run --workspace` and `cargo clippy --workspace -- -D warnings` were skipped because the workspace did not type-check. `br list --status=in_progress` / `br list --status=open` were blocked by `DATABASE_ERROR: database is busy`, but `br ready` confirmed the existing `client-cli` bugs remain open and actionable.

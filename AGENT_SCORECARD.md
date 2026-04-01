@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1051 | 231 | 31 |
-| Bugs filed against | 152 | 36 | 9 |
-| Bug rate (bugs/task) | 0.14 | 0.16 | 0.29 |
-| Quality score | 86% | 84% | 71% |
+| Tasks closed | 1055 | 231 | 31 |
+| Bugs filed against | 153 | 37 | 9 |
+| Bug rate (bugs/task) | 0.15 | 0.16 | 0.29 |
+| Quality score | 85% | 84% | 71% |
 
-*Bug rates: Claude 152/1051=0.14, Codex 36/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 153/1055=0.145→0.15, Codex 37/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -28,11 +28,11 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 19 | 23 | 0 |
 | Memory / resource leaks | 10 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 9 | 0 |
-| Test infrastructure / flakiness | 32 | 1 | 0 |
+| Test infrastructure / flakiness | 32 | 2 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
 | Correctness / pagination | 55 | 8 | 1 |
-| Workflow / close-hygiene | 24 | 0 | 0 |
+| Workflow / close-hygiene | 25 | 0 | 0 |
 | Code reuse / duplication | 8 | 0 | 0 |
 
 ---
@@ -4840,3 +4840,13 @@ Build: `cargo check --workspace` clean. `cargo nextest run --workspace` 4746/474
 | Cursor | 0 | 0 | No activity. |
 
 Build: cargo check passed, clippy 0 warnings (committed code only). nextest 2227/2229 pass — 2 webhook test failures are parallel-interference flakiness (pass in isolation; same class as red-cell-c2-8s5hl). Archon changes (4 files) are uncommitted and not yet buildable via CI.
+
+### QA Review — 2026-04-01 02:00 — eafc2cdc..d3f43fb
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude (Ubuntu-C2-dev01-claude) | 4 | 1 | Closed red-cell-c2-7dl85 (AES-CTR fix), red-cell-c2-y1yva (ARC-01 AMSI/ETW bypass), red-cell-c2-42lee (ARC-03 Cronos sleep obfuscation), red-cell-c2-x0brn (phantom shellcode injection). Filed red-cell-c2-673ql (P2 workflow: committed fix for p7prk but didn't close the issue, blocking 43u14 and ucr8y). QA closed red-cell-c2-p7prk manually. |
+| Codex | 0 | 1 | Filed red-cell-c2-rnson (P1 bug: audit_endpoint_filters_by_operator_and_time_window uses hardcoded 2026-03 date range, fails from 2026-04-01 onward; introduced in commit 3b1c63a7). |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check --workspace` clean. `cargo clippy --workspace -- -D warnings` 0 errors/warnings. `cargo nextest run` 1 failure: red-cell-c2-rnson (audit date range test, teamserver only). All 296 tests that completed before cancellation passed. Archon C/ASM code not buildable on this host (mingw not in PATH); C code review only.

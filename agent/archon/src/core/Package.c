@@ -459,8 +459,11 @@ BOOL PackageTransmitAll(
         PUTS_DONT_SEND("TransportSend failed!")
     }
 
-    /* Advance the global CTR block offset after a successful send. */
-    if ( Success ) {
+    /* Advance the global CTR block offset after a successful send.
+     * Skip for DEMON_INITIALIZE: the teamserver always decrypts INIT at block 0
+     * and registers the agent with ctr_block_offset = 0, consistent with
+     * the guard in PackageTransmitNow. */
+    if ( Success && Package->CommandID != DEMON_INITIALIZE ) {
         Instance->Config.AES.CtrBlockOffset +=
             ( (SIZE_T)( Package->Length - Padding ) + AES_BLOCKLEN - 1 ) / AES_BLOCKLEN;
     }

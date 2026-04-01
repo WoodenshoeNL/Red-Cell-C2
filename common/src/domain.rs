@@ -221,6 +221,11 @@ pub struct HttpListenerConfig {
     /// Upstream proxy settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<HttpListenerProxyConfig>,
+    /// Whether to randomize the TLS JA3/JA3S fingerprint on each HTTPS
+    /// connection (Archon ARC-06).  When `None` the payload builder defaults
+    /// to `true` for HTTPS listeners and `false` for plain HTTP.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ja3_randomize: Option<bool>,
 }
 
 /// Shared SMB listener configuration.
@@ -795,6 +800,7 @@ mod tests {
                 username: Some("user".to_string()),
                 password: Some(Zeroizing::new("pass".to_string())),
             }),
+            ja3_randomize: None,
         });
 
         assert_eq!(config.name(), "edge");

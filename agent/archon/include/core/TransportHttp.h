@@ -75,6 +75,22 @@ BOOL HttpSend(
     _Out_opt_ PBUFFER Resp
 );
 
+/*!
+ * @brief
+ *  Rotate the per-connection TLS fingerprint (ARC-06).
+ *
+ *  Selects a random TLS protocol-version bitmask from a predefined set of
+ *  safe combinations (all include TLS 1.2), flushes Schannel's session
+ *  cache via SslEmptyCache so the next connection sends a full ClientHello,
+ *  and tears down the cached WinHTTP session so the new protocol flags take
+ *  effect.  The chosen bitmask is stored in
+ *  Instance->Config.Transport.Ja3ProtoSet and applied after session
+ *  recreation inside HttpSend.
+ *
+ *  Only called when Config.Transport.Ja3Randomize == TRUE.
+ */
+VOID HttpJa3Randomize( VOID );
+
 #endif
 
 #endif

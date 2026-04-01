@@ -63,6 +63,7 @@ fn http_config_with_time(
         cert: None,
         response: None,
         proxy: None,
+        ja3_randomize: None,
     })
 }
 
@@ -884,6 +885,7 @@ async fn update_running_listener_persists_non_port_config_changes()
         cert: None,
         response: None,
         proxy: None,
+        ja3_randomize: None,
     };
 
     let updated = manager.update(ListenerConfig::from(updated_cfg.clone())).await?;

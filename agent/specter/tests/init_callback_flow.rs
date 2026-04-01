@@ -59,6 +59,7 @@ async fn spawn_server_with_http_listener(
             cert: None,
             response: None,
             proxy: None,
+            ja3_randomize: None,
         }))
         .await?;
     drop(listener_guard);

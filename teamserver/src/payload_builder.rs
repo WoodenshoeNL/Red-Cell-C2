@@ -1415,6 +1415,11 @@ fn pack_http_listener(
         _ => add_u32(out, 0),
     }
 
+    // ARC-06: JA3/JA3S fingerprint randomization flag.
+    // Defaults to true for HTTPS listeners (the only transport where JA3
+    // fingerprinting is relevant), false for plain HTTP.
+    add_u32(out, if config.ja3_randomize.unwrap_or(config.secure) { 1 } else { 0 });
+
     Ok(())
 }
 
@@ -2666,6 +2671,7 @@ mod tests {
                 username: Some("neo".to_owned()),
                 password: Some(Zeroizing::new("trinity".to_owned())),
             }),
+            ja3_randomize: None,
         }));
 
         let bytes = pack_config(&listener, &config)?;
@@ -2700,6 +2706,7 @@ mod tests {
         assert_eq!(read_wstring(&mut cursor)?, "http://proxy.local:8080");
         assert_eq!(read_wstring(&mut cursor)?, "neo");
         assert_eq!(read_wstring(&mut cursor)?, "trinity");
+        assert_eq!(read_u32(&mut cursor)?, 1); // ja3_randomize: true (secure=true, ja3_randomize=None → defaults to true)
         assert!(cursor.is_empty());
         Ok(())
     }
@@ -2779,6 +2786,7 @@ mod tests {
             cert: None,
             response: None,
             proxy: None,
+            ja3_randomize: None,
         }));
 
         let bytes = pack_config(&listener, &config)?;
@@ -2808,7 +2816,8 @@ mod tests {
         assert_eq!(read_wstring(&mut cursor)?, "Content-type: */*");
         assert_eq!(read_u32(&mut cursor)?, 1);
         assert_eq!(read_wstring(&mut cursor)?, "/");
-        assert_eq!(read_u32(&mut cursor)?, 0);
+        assert_eq!(read_u32(&mut cursor)?, 0); // proxy disabled
+        assert_eq!(read_u32(&mut cursor)?, 1); // ja3_randomize: true (secure=true, ja3_randomize=None → defaults to true)
         assert!(cursor.is_empty());
         Ok(())
     }
@@ -2881,6 +2890,7 @@ mod tests {
             cert: None,
             response: None,
             proxy: None,
+            ja3_randomize: None,
         }))
     }
 
@@ -2950,6 +2960,113 @@ mod tests {
         let bytes_explicit =
             pack_config(&http_listener_with_method(Some("POST")), &minimal_config_json())?;
         assert_eq!(bytes_default, bytes_explicit);
+        Ok(())
+    }
+
+    /// Helper: build a minimal HTTPS listener with an optional `ja3_randomize` override.
+    fn https_listener_with_ja3(ja3_randomize: Option<bool>) -> ListenerConfig {
+        ListenerConfig::Http(Box::new(HttpListenerConfig {
+            name: "https".to_owned(),
+            kill_date: None,
+            working_hours: None,
+            hosts: vec!["localhost:443".to_owned()],
+            host_bind: "0.0.0.0".to_owned(),
+            host_rotation: "round-robin".to_owned(),
+            port_bind: 443,
+            port_conn: None,
+            method: None,
+            behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
+            user_agent: None,
+            headers: Vec::new(),
+            uris: Vec::new(),
+            host_header: None,
+            secure: true,
+            cert: None,
+            response: None,
+            proxy: None,
+            ja3_randomize,
+        }))
+    }
+
+    #[test]
+    fn pack_config_ja3_randomize_defaults_to_true_for_https()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // When ja3_randomize is None and the listener is HTTPS, the emitted flag must be 1.
+        let bytes_none = pack_config(&https_listener_with_ja3(None), &minimal_config_json())?;
+        let bytes_true = pack_config(&https_listener_with_ja3(Some(true)), &minimal_config_json())?;
+        assert_eq!(
+            bytes_none, bytes_true,
+            "None should produce the same bytes as Some(true) for HTTPS"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pack_config_ja3_randomize_explicit_false_disables_for_https()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // An explicit Some(false) must override the HTTPS default and emit 0.
+        let bytes_false =
+            pack_config(&https_listener_with_ja3(Some(false)), &minimal_config_json())?;
+        let bytes_true = pack_config(&https_listener_with_ja3(Some(true)), &minimal_config_json())?;
+        assert_ne!(
+            bytes_false, bytes_true,
+            "Some(false) and Some(true) should produce different bytes"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pack_config_ja3_randomize_defaults_to_false_for_plain_http()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // For a plain HTTP (non-TLS) listener, ja3_randomize=None should emit 0.
+        let http_none = ListenerConfig::Http(Box::new(HttpListenerConfig {
+            name: "http".to_owned(),
+            kill_date: None,
+            working_hours: None,
+            hosts: vec!["localhost:80".to_owned()],
+            host_bind: "0.0.0.0".to_owned(),
+            host_rotation: "round-robin".to_owned(),
+            port_bind: 80,
+            port_conn: None,
+            method: None,
+            behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
+            user_agent: None,
+            headers: Vec::new(),
+            uris: Vec::new(),
+            host_header: None,
+            secure: false,
+            cert: None,
+            response: None,
+            proxy: None,
+            ja3_randomize: None,
+        }));
+        let http_false = ListenerConfig::Http(Box::new(HttpListenerConfig {
+            name: "http".to_owned(),
+            kill_date: None,
+            working_hours: None,
+            hosts: vec!["localhost:80".to_owned()],
+            host_bind: "0.0.0.0".to_owned(),
+            host_rotation: "round-robin".to_owned(),
+            port_bind: 80,
+            port_conn: None,
+            method: None,
+            behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
+            user_agent: None,
+            headers: Vec::new(),
+            uris: Vec::new(),
+            host_header: None,
+            secure: false,
+            cert: None,
+            response: None,
+            proxy: None,
+            ja3_randomize: Some(false),
+        }));
+        let bytes_none = pack_config(&http_none, &minimal_config_json())?;
+        let bytes_false = pack_config(&http_false, &minimal_config_json())?;
+        assert_eq!(bytes_none, bytes_false, "None on plain HTTP should equal Some(false)");
         Ok(())
     }
 
@@ -3390,6 +3507,7 @@ mod tests {
             cert: None,
             response: None,
             proxy: None,
+            ja3_randomize: None,
         }));
 
         let error = service
@@ -3437,6 +3555,7 @@ mod tests {
             cert: None,
             response: None,
             proxy: None,
+            ja3_randomize: None,
         }));
 
         let error = service
@@ -3481,6 +3600,7 @@ mod tests {
             cert: None,
             response: None,
             proxy: None,
+            ja3_randomize: None,
         }));
 
         let error = service
@@ -3527,6 +3647,7 @@ mod tests {
             cert: None,
             response: None,
             proxy: None,
+            ja3_randomize: None,
         }));
 
         let error = service
@@ -3651,6 +3772,7 @@ mod tests {
             cert: None,
             response: None,
             proxy: None,
+            ja3_randomize: None,
         }));
 
         let mut messages = Vec::new();
@@ -3791,6 +3913,7 @@ mod tests {
             cert: None,
             response: None,
             proxy: None,
+            ja3_randomize: None,
         }));
 
         let artifact = service.build_payload(&listener, &request, |_| {}).await?;
@@ -4082,6 +4205,7 @@ mod tests {
             cert: None,
             response: None,
             proxy: None,
+            ja3_randomize: None,
         }));
 
         Ok((service, listener, request))
@@ -4745,6 +4869,7 @@ mod tests {
             cert: None,
             response: None,
             proxy: None,
+            ja3_randomize: None,
         }));
 
         let defines = build_stager_defines(&listener)?;
@@ -4791,6 +4916,7 @@ mod tests {
             cert: None,
             response: None,
             proxy: None,
+            ja3_randomize: None,
         }));
 
         let defines = build_stager_defines(&listener)?;
@@ -4821,6 +4947,7 @@ mod tests {
             cert: None,
             response: None,
             proxy: None,
+            ja3_randomize: None,
         }));
 
         let defines = build_stager_defines(&listener)?;
@@ -4884,6 +5011,7 @@ mod tests {
             cert: None,
             response: None,
             proxy: None,
+            ja3_randomize: None,
         }));
 
         let err = service
@@ -5053,6 +5181,7 @@ mod tests {
             cert: None,
             response: None,
             proxy: None,
+            ja3_randomize: None,
         }));
 
         let request = BuildPayloadRequestInfo {
@@ -5219,6 +5348,7 @@ mod tests {
             cert: None,
             response: None,
             proxy: None,
+            ja3_randomize: None,
         }));
 
         let request = BuildPayloadRequestInfo {
@@ -6112,6 +6242,7 @@ mod tests {
             cert: None,
             response: None,
             proxy: None,
+            ja3_randomize: None,
         }));
 
         let bytes = stager_cache_bytes(&listener)?;
@@ -6163,6 +6294,7 @@ mod tests {
                 cert: None,
                 response: None,
                 proxy: None,
+                ja3_randomize: None,
             }))
         };
 

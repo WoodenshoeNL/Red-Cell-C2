@@ -1619,6 +1619,7 @@ fn http_listener_config(port: u16) -> ListenerConfig {
         cert: None,
         response: None,
         proxy: None,
+        ja3_randomize: None,
     })
 }
 

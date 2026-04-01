@@ -291,6 +291,8 @@
 #define H_FUNC_AMSISCANBUFFER                        0xbab3d02e
 #define H_FUNC_GLOBALFREE                            0x47886698
 #define H_FUNC_SWPRINTF_S                            0x481aa3d4
+/* ARC-06: schannel.dll TLS session cache flush */
+#define H_FUNC_SSLEMPTYCACHE                         0xaaaa657a
 
 
 // Beacon API

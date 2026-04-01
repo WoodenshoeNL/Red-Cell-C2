@@ -110,6 +110,10 @@ typedef struct
                 LPWSTR Username; /* TODO: Instead of using LPWSTR use BUFFER (to have the size of the string too) */
                 LPWSTR Password; /* TODO: Instead of using LPWSTR use BUFFER (to have the size of the string too) */
             } Proxy;
+
+            /* ARC-06: per-connection JA3/JA3S TLS fingerprint randomization */
+            BOOL  Ja3Randomize; /* TRUE = rotate TLS cipher/version set on each connection */
+            DWORD Ja3ProtoSet;  /* active WINHTTP_FLAG_SECURE_PROTOCOL_* bitmask (set at runtime) */
 #endif
 
 #ifdef TRANSPORT_SMB

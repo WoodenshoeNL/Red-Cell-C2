@@ -97,6 +97,7 @@ fn sample_listener() -> ListenerConfig {
             username: Some("proxy".to_owned()),
             password: Some(Zeroizing::new("secret".to_owned())),
         }),
+        ja3_randomize: None,
     })
 }
 

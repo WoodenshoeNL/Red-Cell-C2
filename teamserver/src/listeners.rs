@@ -1205,6 +1205,7 @@ pub fn listener_config_from_operator(
             cert: tls_config_from_operator(info),
             response: http_response_from_operator(info),
             proxy: proxy_from_operator(info)?,
+            ja3_randomize: None,
         })),
         Ok(ListenerProtocol::Smb) => Ok(ListenerConfig::from(SmbListenerConfig {
             name: name.to_owned(),
@@ -1375,6 +1376,7 @@ fn profile_listener_configs(
                 .map(|cert| red_cell_common::ListenerTlsConfig { cert: cert.cert, key: cert.key }),
             response: config.response.map(Into::into),
             proxy: config.proxy.map(Into::into),
+            ja3_randomize: None,
         }));
     }
     for config in profile.listeners.smb.iter().cloned() {
@@ -3862,6 +3864,7 @@ mod tests {
             cert: None,
             response: None,
             proxy: None,
+            ja3_randomize: None,
         })
     }
 
@@ -3890,6 +3893,7 @@ mod tests {
             cert: None,
             response: None,
             proxy: None,
+            ja3_randomize: None,
         })
     }
 
@@ -4902,6 +4906,7 @@ mod tests {
                 body: Some("decoy".to_owned()),
             }),
             proxy: None,
+            ja3_randomize: None,
         });
 
         manager.create(config).await?;
@@ -4972,6 +4977,7 @@ mod tests {
                 body: Some("tls".to_owned()),
             }),
             proxy: None,
+            ja3_randomize: None,
         });
 
         manager.create(config).await?;
@@ -5356,6 +5362,7 @@ mod tests {
                 body: Some("decoy".to_owned()),
             }),
             proxy: None,
+            ja3_randomize: None,
         });
 
         registry.insert(sample_agent_info(agent_id, key, iv)).await?;
@@ -6144,6 +6151,7 @@ mod tests {
                 username: Some("user".to_owned()),
                 password: Some(Zeroizing::new("pass".to_owned())),
             }),
+            ja3_randomize: None,
         });
         let summary = ListenerSummary {
             name: "edge".to_owned(),
@@ -6192,6 +6200,7 @@ mod tests {
                     username: Some("user".to_owned()),
                     password: Some(Zeroizing::new("pass".to_owned())),
                 }),
+                ja3_randomize: None,
             }),
         };
 
@@ -8175,6 +8184,7 @@ mod tests {
             cert: None,
             response: None,
             proxy: None,
+            ja3_randomize: None,
         });
         assert_eq!(operator_protocol_name(&https), "Https");
 

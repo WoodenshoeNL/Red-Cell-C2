@@ -410,6 +410,7 @@ pub fn http_listener_config(name: &str, port: u16) -> red_cell_common::ListenerC
         cert: None,
         response: None,
         proxy: None,
+        ja3_randomize: None,
     })
 }
 

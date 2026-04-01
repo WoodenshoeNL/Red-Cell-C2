@@ -41,6 +41,7 @@ fn crate_root_exports_round_trip_listener_config() -> Result<(), Box<dyn std::er
             username: Some("operator".to_string()),
             password: Some(Zeroizing::new("secret".to_string())),
         }),
+        ja3_randomize: None,
     });
 
     let encoded = serde_json::to_value(&original)?;
@@ -91,6 +92,7 @@ fn crate_root_exports_compile_without_private_module_paths() {
         cert: None,
         response: None,
         proxy: None,
+        ja3_randomize: None,
     };
 
     let listener = uses_public_api(config);

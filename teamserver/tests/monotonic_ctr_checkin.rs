@@ -108,6 +108,7 @@ async fn spawn_server_with_profile(
             cert: None,
             response: None,
             proxy: None,
+            ja3_randomize: None,
         }))
         .await?;
     drop(listener_guard);

@@ -1468,6 +1468,7 @@ mod tests {
             cert: None,
             response: None,
             proxy: None,
+            ja3_randomize: None,
         })
     }
 

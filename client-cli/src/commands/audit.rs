@@ -16,8 +16,8 @@ use tracing::instrument;
 
 use crate::AuditCommands;
 use crate::client::ApiClient;
-use crate::error::{CliError, ERROR_CODE_SERIALIZE_FAILED, EXIT_SUCCESS};
-use crate::output::{OutputFormat, TextRow, print_error, print_success};
+use crate::error::{CliError, EXIT_SUCCESS};
+use crate::output::{OutputFormat, TextRow, print_error, print_stream_entry, print_success};
 
 /// Number of entries fetched by `log tail` (without --follow).
 const TAIL_LIMIT: u32 = 20;
@@ -232,40 +232,22 @@ async fn tail_follow(client: &ApiClient, fmt: &OutputFormat) -> i32 {
     }
 }
 
-/// Write a single audit entry to stdout as a JSON line (JSON mode) or a
-/// formatted text line (text mode).
+/// Write a single audit entry to stdout.
+///
+/// In JSON mode emits `{"ok": true, "data": <entry>}` — the same envelope as
+/// every other command — so that streaming output is consistent with bulk
+/// responses.  In text mode emits a human-readable one-line summary.
 fn print_entry_line(fmt: &OutputFormat, entry: &AuditEntry) {
-    match fmt {
-        OutputFormat::Json => {
-            let line = serde_json::json!({
-                "ts":           entry.ts,
-                "operator":     entry.operator,
-                "action":       entry.action,
-                "agent_id":     entry.agent_id,
-                "detail":       entry.detail,
-                "result_status": entry.result_status,
-            });
-            match serde_json::to_string(&line) {
-                Ok(s) => println!("{s}"),
-                Err(e) => eprintln!(
-                    "{}",
-                    serde_json::json!({
-                        "ok": false,
-                        "error": ERROR_CODE_SERIALIZE_FAILED,
-                        "message": format!("failed to serialize audit entry: {e}"),
-                    })
-                ),
-            }
-        }
-        OutputFormat::Text => {
-            let agent = entry.agent_id.as_deref().unwrap_or("-");
-            let detail = entry.detail.as_deref().unwrap_or("");
-            println!(
-                "[{}]  {:20}  {:16}  agent={}  {}  [{}]",
-                entry.ts, entry.operator, entry.action, agent, detail, entry.result_status
-            );
-        }
-    }
+    let text_line = format!(
+        "[{}]  {:20}  {:16}  agent={}  {}  [{}]",
+        entry.ts,
+        entry.operator,
+        entry.action,
+        entry.agent_id.as_deref().unwrap_or("-"),
+        entry.detail.as_deref().unwrap_or(""),
+        entry.result_status,
+    );
+    print_stream_entry(fmt, entry, &text_line);
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -521,6 +503,102 @@ mod tests {
     fn vec_audit_entry_empty_renders_none() {
         let entries: Vec<AuditEntry> = vec![];
         assert_eq!(entries.render_text(), "(none)");
+    }
+
+    // ── print_entry_line JSON envelope contract ───────────────────────────────
+    //
+    // `print_entry_line` delegates to `output::print_stream_entry` which writes
+    // to real stdout.  We test the envelope contract via the internal
+    // `write_stream_entry` helper (which accepts any `io::Write`) to avoid
+    // stdout-capture gymnastics.
+
+    fn sample_entry() -> AuditEntry {
+        AuditEntry {
+            ts: "2026-03-21T12:00:00Z".to_owned(),
+            operator: "alice".to_owned(),
+            action: "agent.task".to_owned(),
+            agent_id: Some("abc123".to_owned()),
+            detail: Some("whoami".to_owned()),
+            result_status: "success".to_owned(),
+        }
+    }
+
+    #[test]
+    fn entry_line_json_mode_emits_ok_true_envelope() {
+        let entry = sample_entry();
+        let text = "[...] alice  agent.task  agent=abc123  whoami  [success]".to_owned();
+        let mut out = Vec::new();
+        let mut err_out = Vec::new();
+        crate::output::write_stream_entry(
+            &mut out,
+            &mut err_out,
+            &OutputFormat::Json,
+            &entry,
+            &text,
+        );
+
+        let line = String::from_utf8(out).expect("utf-8");
+        let v: serde_json::Value = serde_json::from_str(line.trim()).expect("single JSON line");
+        assert_eq!(v["ok"], true, "ok must be true");
+        assert_eq!(v["data"]["ts"], "2026-03-21T12:00:00Z");
+        assert_eq!(v["data"]["operator"], "alice");
+        assert_eq!(v["data"]["action"], "agent.task");
+        assert_eq!(v["data"]["agent_id"], "abc123");
+        assert_eq!(v["data"]["detail"], "whoami");
+        assert_eq!(v["data"]["result_status"], "success");
+        assert!(err_out.is_empty());
+    }
+
+    #[test]
+    fn entry_line_json_mode_data_has_no_bare_fields_at_root() {
+        // Verify no audit fields leak into the root of the envelope.
+        let entry = sample_entry();
+        let mut out = Vec::new();
+        let mut err_out = Vec::new();
+        crate::output::write_stream_entry(
+            &mut out,
+            &mut err_out,
+            &OutputFormat::Json,
+            &entry,
+            "ignored",
+        );
+
+        let line = String::from_utf8(out).expect("utf-8");
+        let v: serde_json::Value = serde_json::from_str(line.trim()).expect("valid JSON");
+        // Root must only have "ok" and "data".
+        let obj = v.as_object().expect("root is object");
+        let keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        assert!(keys.contains(&"ok"), "root must have 'ok'");
+        assert!(keys.contains(&"data"), "root must have 'data'");
+        assert!(!keys.contains(&"ts"), "'ts' must not appear at root level");
+        assert!(!keys.contains(&"operator"), "'operator' must not appear at root level");
+    }
+
+    #[test]
+    fn entry_line_text_mode_contains_key_fields() {
+        let entry = sample_entry();
+        let agent = entry.agent_id.as_deref().unwrap_or("-");
+        let detail = entry.detail.as_deref().unwrap_or("");
+        let text_line = format!(
+            "[{}]  {:20}  {:16}  agent={}  {}  [{}]",
+            entry.ts, entry.operator, entry.action, agent, detail, entry.result_status,
+        );
+        let mut out = Vec::new();
+        let mut err_out = Vec::new();
+        crate::output::write_stream_entry(
+            &mut out,
+            &mut err_out,
+            &OutputFormat::Text,
+            &entry,
+            &text_line,
+        );
+
+        let line = String::from_utf8(out).expect("utf-8");
+        assert!(line.contains("alice"), "should contain operator");
+        assert!(line.contains("agent.task"), "should contain action");
+        assert!(line.contains("abc123"), "should contain agent_id");
+        assert!(line.contains("whoami"), "should contain detail");
+        assert!(line.contains("success"), "should contain result_status");
     }
 
     // ── percent_encode ────────────────────────────────────────────────────────

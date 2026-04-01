@@ -8,12 +8,26 @@
 //! {"ok": true, "data": <command-specific payload>}
 //! ```
 //!
+//! # Streaming JSON mode (`log tail --follow`)
+//!
+//! Streaming commands emit one compact JSON line per record (NDJSON).  Each
+//! line uses the same envelope as regular responses so that machine consumers
+//! need no special-casing:
+//!
+//! ```json
+//! {"ok":true,"data":<entry-object>}
+//! {"ok":true,"data":<entry-object>}
+//! ```
+//!
+//! Serialisation failures in streaming mode write an error line to **stderr**
+//! (same envelope as all other errors) and do not abort the stream.
+//!
 //! # Text mode (`--output text`)
 //!
 //! Types that implement [`TextRender`] control their own human-readable
 //! representation.  List types use the [`TextRow`] blanket impl which builds
-//! a [`comfy_table::Table`].  Error format on stderr is always JSON regardless
-//! of mode.
+//! a [`comfy_table::Table`].  Streaming commands emit one text line per record.
+//! Error format on stderr is always JSON regardless of mode.
 //!
 //! # Error output
 //!
@@ -28,7 +42,7 @@
 use comfy_table::{Cell, ContentArrangement, Table};
 use serde::Serialize;
 
-use crate::error::CliError;
+use crate::error::{CliError, ERROR_CODE_SERIALIZE_FAILED};
 
 // ── output format ─────────────────────────────────────────────────────────────
 
@@ -100,6 +114,20 @@ pub fn print_error(err: &CliError) {
     write_error(&mut std::io::stderr(), err);
 }
 
+/// Write a single streaming entry to stdout.
+///
+/// Used by long-running commands such as `log tail --follow` where one record
+/// is emitted per server poll cycle rather than a single bulk response.
+///
+/// * **JSON mode** — emits a compact `{"ok": true, "data": <entry>}` line so
+///   that streaming output uses the same envelope as every other command.
+///   Serialisation failures are written as an error line to **stderr** and the
+///   stream continues.
+/// * **Text mode** — emits `text_line` verbatim followed by a newline.
+pub fn print_stream_entry<T: Serialize>(format: &OutputFormat, entry: &T, text_line: &str) {
+    write_stream_entry(&mut std::io::stdout(), &mut std::io::stderr(), format, entry, text_line);
+}
+
 // ── internal write helpers (accept any `Write` for testability) ───────────────
 
 fn write_success<T: Serialize + TextRender, W: std::io::Write>(
@@ -137,6 +165,40 @@ fn write_error<W: std::io::Write>(out: &mut W, err: &CliError) {
         }
         Err(_) => {
             let _ = writeln!(out, r#"{{"ok":false,"error":"ERROR","message":"unknown error"}}"#);
+        }
+    }
+}
+
+pub(crate) fn write_stream_entry<T: Serialize, W: std::io::Write, E: std::io::Write>(
+    out: &mut W,
+    err_out: &mut E,
+    format: &OutputFormat,
+    entry: &T,
+    text_line: &str,
+) {
+    match format {
+        OutputFormat::Json => {
+            let envelope = serde_json::json!({"ok": true, "data": entry});
+            match serde_json::to_string(&envelope) {
+                Ok(s) => {
+                    let _ = writeln!(out, "{s}");
+                }
+                Err(e) => {
+                    let err_envelope = serde_json::json!({
+                        "ok": false,
+                        "error": ERROR_CODE_SERIALIZE_FAILED,
+                        "message": format!("failed to serialize stream entry: {e}"),
+                    });
+                    // Best-effort: if this serialisation also fails we have no
+                    // further recourse.
+                    if let Ok(s) = serde_json::to_string(&err_envelope) {
+                        let _ = writeln!(err_out, "{s}");
+                    }
+                }
+            }
+        }
+        OutputFormat::Text => {
+            let _ = writeln!(out, "{text_line}");
         }
     }
 }
@@ -361,5 +423,65 @@ mod tests {
         assert_eq!(v["error"], "NOT_FOUND");
         let msg = v["message"].as_str().unwrap_or("");
         assert!(msg.contains("agent-abc"), "message should include entity name");
+    }
+
+    // ── write_stream_entry ────────────────────────────────────────────────────
+
+    #[test]
+    fn write_stream_entry_json_mode_wraps_entry_in_ok_envelope() {
+        let payload = FakePayload { value: "stream-item".to_owned() };
+        let mut out = Vec::new();
+        let mut err_out = Vec::new();
+        write_stream_entry(&mut out, &mut err_out, &OutputFormat::Json, &payload, "ignored");
+
+        let line = String::from_utf8(out).expect("utf-8");
+        let v: serde_json::Value =
+            serde_json::from_str(line.trim()).expect("single compact JSON line");
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["data"]["value"], "stream-item");
+        assert!(err_out.is_empty(), "no errors expected");
+    }
+
+    #[test]
+    fn write_stream_entry_json_mode_emits_compact_json_not_pretty() {
+        let payload = FakePayload { value: "compact".to_owned() };
+        let mut out = Vec::new();
+        let mut err_out = Vec::new();
+        write_stream_entry(&mut out, &mut err_out, &OutputFormat::Json, &payload, "ignored");
+
+        let line = String::from_utf8(out).expect("utf-8").trim().to_owned();
+        // Compact serialisation has no embedded newlines.
+        assert!(!line.contains('\n'), "stream entry must be a single line: {line:?}");
+    }
+
+    #[test]
+    fn write_stream_entry_text_mode_emits_text_line_verbatim() {
+        let payload = FakePayload { value: "irrelevant".to_owned() };
+        let mut out = Vec::new();
+        let mut err_out = Vec::new();
+        write_stream_entry(&mut out, &mut err_out, &OutputFormat::Text, &payload, "my text line");
+
+        let line = String::from_utf8(out).expect("utf-8");
+        assert_eq!(line.trim(), "my text line");
+        assert!(err_out.is_empty(), "no errors expected");
+    }
+
+    #[test]
+    fn write_stream_entry_json_mode_multiple_calls_each_emit_one_line() {
+        let mut out = Vec::new();
+        let mut err_out = Vec::new();
+        for i in 0..3u32 {
+            let payload = serde_json::json!({"i": i});
+            write_stream_entry(&mut out, &mut err_out, &OutputFormat::Json, &payload, "");
+        }
+
+        let output = String::from_utf8(out).expect("utf-8");
+        let lines: Vec<&str> = output.lines().collect();
+        assert_eq!(lines.len(), 3, "one line per entry");
+        for (i, line) in lines.iter().enumerate() {
+            let v: serde_json::Value = serde_json::from_str(line).expect("valid JSON per line");
+            assert_eq!(v["ok"], true);
+            assert_eq!(v["data"]["i"], i as u64);
+        }
     }
 }

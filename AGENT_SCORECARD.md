@@ -9,28 +9,28 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1086 | 238 | 31 |
-| Bugs filed against | 166 | 37 | 9 |
-| Bug rate (bugs/task) | 0.15 | 0.16 | 0.29 |
-| Quality score | 85% | 84% | 71% |
+| Tasks closed | 1090 | 247 | 31 |
+| Bugs filed against | 167 | 38 | 9 |
+| Bug rate (bugs/task) | 0.15 | 0.15 | 0.29 |
+| Quality score | 85% | 85% | 71% |
 
-*Bug rates: Claude 166/1086=0.1529→0.15, Codex 37/238=0.1555→0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 167/1090=0.1532→0.15, Codex 38/247=0.1538→0.15, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 9 | 0 | 0 |
-| Missing tests / stale tests | 66 | 16 | 5 |
+| Missing tests / stale tests | 67 | 17 | 5 |
 | Clippy warnings | 9 | 0 | 1 |
-| Protocol errors | 29 | 31 | 3 |
+| Protocol errors | 29 | 32 | 3 |
 | Security issues | 54 | 39 | 0 |
 | Architecture drift | 21 | 24 | 0 |
 | Memory / resource leaks | 10 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 9 | 0 |
 | Test infrastructure / flakiness | 35 | 2 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
-| Availability / timeout regressions | 2 | 5 | 0 |
+| Availability / timeout regressions | 3 | 5 | 0 |
 | Correctness / pagination | 61 | 8 | 1 |
 | Workflow / close-hygiene | 27 | 0 | 0 |
 | Code reuse / duplication | 10 | 0 | 0 |
@@ -5038,3 +5038,13 @@ Build: `cargo check --workspace` passed. `cargo nextest run --workspace` passed 
 | Cursor | 0 | 0 | No activity. |
 
 Build: `cargo check --workspace` failed in the current worktree with `E0308` at `client-cli/src/commands/session.rs:387` and `client-cli/src/commands/session.rs:690` because `output_url()` now takes `Option<i64>` while session mode still passes `Option<&str>`. This breakage is already tracked by open bug `red-cell-c2-2p7fs`, so no duplicate issue was filed. `cargo nextest run --workspace` and `cargo clippy --workspace -- -D warnings` were skipped because the workspace did not type-check. `br list --status=in_progress` / `br list --status=open` were blocked by `DATABASE_ERROR: database is busy`, but `br ready` confirmed the existing `client-cli` bugs remain open and actionable.
+
+### QA Review — 2026-04-01 18:55 — d76c5c82..fd42a036
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 4 | 1 | Closed: red-cell-c2-37udb, red-cell-c2-17bgh, red-cell-c2-vmh2o, red-cell-c2-1nngn. Filed: red-cell-c2-sgdn8 (`client-cli/src/config.rs` skips config-file timeout fallback whenever `--server` and `--token` are present, reintroducing the timeout precedence bug). |
+| Codex | 9 | 1 | Closed: red-cell-c2-4v0g4, red-cell-c2-2zg2z, red-cell-c2-1elym, red-cell-c2-2p7fs, red-cell-c2-2myjl, red-cell-c2-2h7qm, red-cell-c2-2w859, red-cell-c2-2r7b3, red-cell-c2-1fldz. Filed: red-cell-c2-1za5j (`agent/specter/src/dispatch.rs` treats any existing PowerShell-profile persist block as idempotent and cannot update the stored command on reinstall). |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check --workspace` passed on `fd42a036`. `python3 -m unittest discover -s automatic-test/tests` passed all 62 tests. `cargo nextest run --workspace` was still in progress at review close with 2775/4879 tests reported passing and no failures observed yet. `cargo clippy --workspace -- -D warnings` was not started because the long-running `nextest` job still held the workspace artifact lock. `br list --status=in_progress` / `br list --status=open` were intermittently blocked by `DATABASE_ERROR: database is busy`, so issue-state review fell back to `br ready` plus direct issue inspection.

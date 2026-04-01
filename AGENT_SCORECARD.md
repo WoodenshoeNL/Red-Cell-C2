@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1055 | 231 | 31 |
-| Bugs filed against | 153 | 37 | 9 |
+| Tasks closed | 1058 | 231 | 31 |
+| Bugs filed against | 154 | 37 | 9 |
 | Bug rate (bugs/task) | 0.15 | 0.16 | 0.29 |
 | Quality score | 85% | 84% | 71% |
 
-*Bug rates: Claude 153/1055=0.145→0.15, Codex 37/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 154/1058=0.146→0.15, Codex 37/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -28,7 +28,7 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 19 | 23 | 0 |
 | Memory / resource leaks | 10 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 9 | 0 |
-| Test infrastructure / flakiness | 32 | 2 | 0 |
+| Test infrastructure / flakiness | 33 | 2 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
 | Correctness / pagination | 55 | 8 | 1 |
@@ -4850,3 +4850,15 @@ Build: cargo check passed, clippy 0 warnings (committed code only). nextest 2227
 | Cursor | 0 | 0 | No activity. |
 
 Build: `cargo check --workspace` clean. `cargo clippy --workspace -- -D warnings` 0 errors/warnings. `cargo nextest run` 1 failure: red-cell-c2-rnson (audit date range test, teamserver only). All 296 tests that completed before cancellation passed. Archon C/ASM code not buildable on this host (mingw not in PATH); C code review only.
+
+### QA Review — 2026-04-01 — f32a8230..d7dace27
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude (Ubuntu-C2-dev01-claude) | 3 | 1 | Closed: red-cell-c2-5la4k (Specter NetComputer+NetDcList via NetServerEnum Win32), red-cell-c2-0e36f (AGENT.md docs update to ~95%), red-cell-c2-8s5hl (rate-limiter flaky test — raised threshold to 10 s). Filed red-cell-c2-lygl7 (P3 test quality: elapsed < 10 s assertion is dead code — outer timeout fires first, making assertion unreachable when rate limiter is absent; comment claiming "still meaningful" is misleading). |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check --workspace` clean. `cargo clippy --workspace -- -D warnings` 0 warnings. `cargo nextest run` 1 pre-existing failure: red-cell-c2-rnson (audit date filter hardcoded to March 2026 — already tracked). All other tests pass. Specter Windows cross-compile not buildable on this host (mingw-w64 not in PATH) — normal for this VM.
+
+NetComputer/NetDcList implementation quality: solid. Correct `#[cfg(windows)]` guards, proper `NetApiBufferFree` lifecycle, pagination loop handles `ERROR_MORE_DATA`, SAFETY comments are accurate, tests cover both happy path and missing-domain-returns-Ignore.

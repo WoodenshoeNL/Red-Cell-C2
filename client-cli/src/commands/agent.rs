@@ -645,7 +645,7 @@ async fn watch_output(client: &ApiClient, fmt: &OutputFormat, id: &str, since: O
                 for entry in &entries {
                     // Advance the numeric cursor so next poll only fetches newer entries.
                     cursor = Some(entry.entry_id);
-                    print_output_stream_entry(fmt, entry);
+                    print_stream_entry(fmt, entry, &render_output_stream_line(entry));
                 }
             }
         }
@@ -658,10 +658,6 @@ async fn watch_output(client: &ApiClient, fmt: &OutputFormat, id: &str, since: O
             }
         }
     }
-}
-
-fn print_output_stream_entry(fmt: &OutputFormat, entry: &OutputEntry) {
-    print_stream_entry(fmt, entry, &render_output_stream_line(entry));
 }
 
 fn render_output_stream_line(entry: &OutputEntry) -> String {
@@ -1463,6 +1459,73 @@ mod tests {
             render_output_stream_line(&entry),
             "[job_def  exit 0]  uid=1000(user) gid=1000(user)"
         );
+    }
+
+    #[test]
+    fn output_stream_entry_json_mode_emits_shared_ok_true_envelope() {
+        let entry = OutputEntry {
+            entry_id: 42,
+            job_id: "job_xyz".to_owned(),
+            command: Some("whoami".to_owned()),
+            output: "DOMAIN\\user".to_owned(),
+            exit_code: Some(0),
+            created_at: "2026-04-01T00:00:02Z".to_owned(),
+        };
+        let text_line = render_output_stream_line(&entry);
+        let mut out = Vec::new();
+        let mut err_out = Vec::new();
+
+        crate::output::write_stream_entry(
+            &mut out,
+            &mut err_out,
+            &OutputFormat::Json,
+            &entry,
+            &text_line,
+        );
+
+        let line = String::from_utf8(out).expect("utf-8");
+        let v: serde_json::Value = serde_json::from_str(line.trim()).expect("single JSON line");
+        assert_eq!(v["ok"], true, "ok must be true");
+        assert_eq!(v["data"]["entry_id"], 42);
+        assert_eq!(v["data"]["job_id"], "job_xyz");
+        assert_eq!(v["data"]["command"], "whoami");
+        assert_eq!(v["data"]["output"], "DOMAIN\\user");
+        assert_eq!(v["data"]["exit_code"], 0);
+        assert!(err_out.is_empty());
+
+        let obj = v.as_object().expect("root is object");
+        let keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        assert!(keys.contains(&"ok"), "root must have 'ok'");
+        assert!(keys.contains(&"data"), "root must have 'data'");
+        assert!(!keys.contains(&"entry_id"), "'entry_id' must not appear at root level");
+        assert!(!keys.contains(&"job_id"), "'job_id' must not appear at root level");
+    }
+
+    #[test]
+    fn output_stream_entry_text_mode_uses_rendered_line_verbatim() {
+        let entry = OutputEntry {
+            entry_id: 43,
+            job_id: "job_abc".to_owned(),
+            command: Some("hostname".to_owned()),
+            output: "ubuntu-host".to_owned(),
+            exit_code: None,
+            created_at: "2026-04-01T00:00:03Z".to_owned(),
+        };
+        let text_line = render_output_stream_line(&entry);
+        let mut out = Vec::new();
+        let mut err_out = Vec::new();
+
+        crate::output::write_stream_entry(
+            &mut out,
+            &mut err_out,
+            &OutputFormat::Text,
+            &entry,
+            &text_line,
+        );
+
+        let line = String::from_utf8(out).expect("utf-8");
+        assert_eq!(line.trim_end(), text_line);
+        assert!(err_out.is_empty());
     }
 
     /// `watch_output` exits immediately with a non-zero code because the first

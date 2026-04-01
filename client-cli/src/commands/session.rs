@@ -79,6 +79,18 @@ const POLL_INTERVAL: Duration = Duration::from_millis(1_000);
 /// Polling interval for build wait loops.
 const BUILD_POLL_INTERVAL: Duration = Duration::from_millis(2_000);
 
+/// Session-mode `since` value.
+///
+/// `agent.output` uses a numeric output-entry cursor, while `log.list` uses an
+/// RFC 3339 timestamp. Session mode accepts either shape and validates it per
+/// command.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+enum SessionSince {
+    Cursor(i64),
+    Timestamp(String),
+}
+
 // ── inbound message shape ─────────────────────────────────────────────────────
 
 /// A single command message read from stdin.
@@ -101,10 +113,10 @@ struct SessionCmd {
     /// Timeout in seconds for `*wait=true` commands.
     #[serde(default)]
     timeout: Option<u64>,
-    /// Only return output newer than this job ID (`agent.output`) or ISO-8601
-    /// timestamp (`log.list`).
+    /// Only return output newer than this numeric entry cursor
+    /// (`agent.output`) or ISO-8601 timestamp (`log.list`).
     #[serde(default)]
-    since: Option<String>,
+    since: Option<SessionSince>,
     /// Listener name for `listener.show/start/stop/delete`.
     #[serde(default)]
     name: Option<String>,
@@ -248,6 +260,30 @@ struct RawAuditPage {
     items: Vec<RawAuditRecord>,
 }
 
+impl SessionCmd {
+    /// Resolve the numeric output cursor used by `agent.output`.
+    fn output_since(&self) -> Result<Option<i64>, CliError> {
+        match self.since.as_ref() {
+            None => Ok(None),
+            Some(SessionSince::Cursor(cursor)) => Ok(Some(*cursor)),
+            Some(SessionSince::Timestamp(_)) => {
+                Err(CliError::InvalidArgs("agent.output requires numeric \"since\"".to_owned()))
+            }
+        }
+    }
+
+    /// Resolve the timestamp cursor used by `log.list`.
+    fn log_since(&self) -> Result<Option<&str>, CliError> {
+        match self.since.as_ref() {
+            None => Ok(None),
+            Some(SessionSince::Timestamp(ts)) => Ok(Some(ts.as_str())),
+            Some(SessionSince::Cursor(_)) => Err(CliError::InvalidArgs(
+                "log.list requires string \"since\" timestamp".to_owned(),
+            )),
+        }
+    }
+}
+
 // ── entry point ───────────────────────────────────────────────────────────────
 
 /// Run the session loop.
@@ -384,7 +420,7 @@ async fn dispatch(
 
         "agent.output" => {
             let id = agent_id(msg, default_agent)?;
-            let page: OutputPage = client.get(&output_url(id, msg.since.as_deref())).await?;
+            let page: OutputPage = client.get(&output_url(id, msg.output_since()?)).await?;
             let entries: Vec<serde_json::Value> = page
                 .entries
                 .into_iter()
@@ -619,7 +655,7 @@ async fn dispatch(
             log_list(
                 client,
                 limit,
-                msg.since.as_deref(),
+                msg.log_since()?,
                 msg.operator.as_deref(),
                 msg.id.as_deref(),
                 msg.action.as_deref(),
@@ -675,7 +711,7 @@ async fn exec(
 
     // Poll the output endpoint for the task's result.
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
-    let mut cursor: Option<String> = None;
+    let mut cursor: Option<i64> = None;
 
     loop {
         if Instant::now() >= deadline {
@@ -687,10 +723,10 @@ async fn exec(
 
         sleep(POLL_INTERVAL).await;
 
-        let page: OutputPage = client.get(&output_url(agent_id, cursor.as_deref())).await?;
+        let page: OutputPage = client.get(&output_url(agent_id, cursor)).await?;
 
         for entry in &page.entries {
-            cursor = Some(entry.id.to_string());
+            cursor = Some(entry.id);
             if entry.task_id.as_deref() == Some(resp.task_id.as_str()) {
                 let output = if entry.output.is_empty() { &entry.message } else { &entry.output };
                 return Ok(serde_json::json!({
@@ -978,9 +1014,20 @@ mod tests {
 
     #[test]
     fn agent_output_with_since_deserialises() {
-        let json = r#"{"cmd":"agent.output","id":"abc","since":"job_xyz"}"#;
+        let json = r#"{"cmd":"agent.output","id":"abc","since":42}"#;
         let msg: SessionCmd = serde_json::from_str(json).expect("parse agent.output");
-        assert_eq!(msg.since.as_deref(), Some("job_xyz"));
+        assert_eq!(msg.since, Some(SessionSince::Cursor(42)));
+    }
+
+    #[test]
+    fn agent_output_with_string_since_is_rejected() {
+        let msg: SessionCmd =
+            serde_json::from_str(r#"{"cmd":"agent.output","id":"abc","since":"job_xyz"}"#)
+                .expect("parse agent.output");
+        assert!(
+            matches!(msg.output_since(), Err(CliError::InvalidArgs(_))),
+            "string output cursor must be rejected"
+        );
     }
 
     #[test]
@@ -1029,8 +1076,18 @@ mod tests {
         assert_eq!(msg.operator.as_deref(), Some("alice"));
         assert_eq!(msg.action.as_deref(), Some("agent.exec"));
         assert_eq!(msg.id.as_deref(), Some("agent1"));
-        assert_eq!(msg.since.as_deref(), Some("2026-01-01T00:00:00Z"));
+        assert_eq!(msg.since, Some(SessionSince::Timestamp("2026-01-01T00:00:00Z".to_owned())));
         assert_eq!(msg.limit, Some(25));
+    }
+
+    #[test]
+    fn log_list_with_numeric_since_is_rejected() {
+        let msg: SessionCmd =
+            serde_json::from_str(r#"{"cmd":"log.list","since":42}"#).expect("parse log.list");
+        assert!(
+            matches!(msg.log_since(), Err(CliError::InvalidArgs(_))),
+            "numeric audit cursor must be rejected"
+        );
     }
 
     #[test]
@@ -1291,7 +1348,7 @@ mod tests {
         };
         let client = ApiClient::new(&cfg).expect("build client");
         let msg: SessionCmd =
-            serde_json::from_str(r#"{"cmd":"agent.output","id":"agent1","since":"job_xyz"}"#)
+            serde_json::from_str(r#"{"cmd":"agent.output","id":"agent1","since":42}"#)
                 .expect("parse");
         let result = dispatch(&client, &msg, None).await;
         assert!(

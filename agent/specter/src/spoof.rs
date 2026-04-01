@@ -326,6 +326,7 @@ mod imp {
 ///
 /// On non-Windows builds this is a no-op returning `0`.
 #[cfg(all(windows, target_arch = "x86_64"))]
+#[allow(unsafe_code)]
 pub unsafe fn spoof_call_4(
     gadget_addr: u64,
     target_fn: *const std::ffi::c_void,
@@ -339,8 +340,19 @@ pub unsafe fn spoof_call_4(
 
 /// Spoofed 6-argument function call.
 ///
+/// Calls `target_fn(a, b, c, d, e, f)` via the stack-spoof trampoline so that
+/// the call appears to originate from `gadget_addr` (a `jmp [rbx]` instruction
+/// inside a legitimate module).
+///
+/// # Safety
+///
+/// - `gadget_addr` must point to a `jmp [rbx]` instruction in a mapped module.
+/// - `target_fn` must be a valid function pointer accepting 6 `usize` arguments.
+/// - The caller is responsible for ensuring correct argument types.
+///
 /// On non-Windows builds this is a no-op returning `0`.
 #[cfg(all(windows, target_arch = "x86_64"))]
+#[allow(unsafe_code)]
 pub unsafe fn spoof_call_6(
     gadget_addr: u64,
     target_fn: *const std::ffi::c_void,

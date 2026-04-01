@@ -49,7 +49,7 @@ Each loop run updates the running totals and appends a review entry.
 | Codex | 4 | 0 | Closed: red-cell-c2-2p7fs, red-cell-c2-2myjl, red-cell-c2-2h7qm, red-cell-c2-2w859. Reviewed the `client-cli` numeric output cursor follow-up, shared stream-envelope refactor, and `SERIALIZE_FAILED` output handling changes in `client-cli/src/commands/agent.rs`, `client-cli/src/commands/session.rs`, `client-cli/src/main.rs`, `client-cli/src/output.rs`, and the related contract tests; no new attributable regressions found. |
 | Cursor | 0 | 0 | No activity. |
 
-Build: passed — `cargo check --workspace` passed on reviewed tip, `cargo nextest run --workspace` passed all 4869 tests on the immediately preceding reviewed `origin/main` tip before the final `red-cell-c2-2w859` close/claim metadata landed, and `cargo clippy --workspace -- -D warnings` passed with 0 warnings.
+Build: passed with one caveat — `cargo check --workspace` and `cargo clippy --workspace -- -D warnings` both passed on reviewed tip `7a213093`, and the most recent full `cargo nextest run --workspace` pass in this QA cycle passed all 4869 tests on `316d3a29` before the later `red-cell-c2-2w859` `client-cli` serialization fix landed. That follow-up diff was manually reviewed and type-checked clean.
 
 ### Arch Review — 2026-04-01 15:10
 

@@ -10,18 +10,18 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 1063 | 231 | 31 |
-| Bugs filed against | 157 | 37 | 9 |
+| Bugs filed against | 159 | 37 | 9 |
 | Bug rate (bugs/task) | 0.15 | 0.16 | 0.29 |
 | Quality score | 85% | 84% | 71% |
 
-*Bug rates: Claude 157/1063=0.1477→0.15, Codex 37/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 159/1063=0.1496→0.15, Codex 37/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 9 | 0 | 0 |
-| Missing tests / stale tests | 60 | 15 | 5 |
+| Missing tests / stale tests | 61 | 15 | 5 |
 | Clippy warnings | 9 | 0 | 1 |
 | Protocol errors | 26 | 31 | 3 |
 | Security issues | 54 | 39 | 0 |
@@ -32,7 +32,7 @@ Each loop run updates the running totals and appends a review entry.
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
 | Correctness / pagination | 56 | 8 | 1 |
-| Workflow / close-hygiene | 25 | 0 | 0 |
+| Workflow / close-hygiene | 26 | 0 | 0 |
 | Code reuse / duplication | 9 | 0 | 0 |
 
 ---
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-01 — 173bbace..06d1210f
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude (Ubuntu-C2-dev01-claude) | 0 | 2 | ARC-06 work left uncommitted across QA boundary. Filed: red-cell-c2-j02y5 (test build broken — missing ja3_randomize field in two test helpers, P1), red-cell-c2-3up98 (workflow violation — 279 lines uncommitted, P2). |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: cargo check clean, clippy clean (0 warnings). nextest FAILED — teamserver tests/common/mod.rs:393 and tests/listener_lifecycle.rs:46,867 missing `ja3_randomize` field.
 
 ### QA Review — 2026-04-01 — efa58322..d2755960
 

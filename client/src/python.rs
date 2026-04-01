@@ -2696,7 +2696,9 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(3);
         while Instant::now() < deadline {
             if let Ok(contents) = std::fs::read_to_string(path) {
-                return Some(contents);
+                if !contents.is_empty() {
+                    return Some(contents);
+                }
             }
             thread::sleep(Duration::from_millis(25));
         }

@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1063 | 231 | 31 |
-| Bugs filed against | 160 | 37 | 9 |
+| Tasks closed | 1069 | 231 | 31 |
+| Bugs filed against | 161 | 37 | 9 |
 | Bug rate (bugs/task) | 0.15 | 0.16 | 0.29 |
 | Quality score | 85% | 84% | 71% |
 
-*Bug rates: Claude 160/1063=0.1505→0.15, Codex 37/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 161/1069=0.1507→0.15, Codex 37/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -23,7 +23,7 @@ Each loop run updates the running totals and appends a review entry.
 | unwrap / expect in production | 9 | 0 | 0 |
 | Missing tests / stale tests | 61 | 15 | 5 |
 | Clippy warnings | 9 | 0 | 1 |
-| Protocol errors | 26 | 31 | 3 |
+| Protocol errors | 27 | 31 | 3 |
 | Security issues | 54 | 39 | 0 |
 | Architecture drift | 19 | 23 | 0 |
 | Memory / resource leaks | 10 | 11 | 1 |
@@ -4902,3 +4902,15 @@ NetComputer/NetDcList implementation quality: solid. Correct `#[cfg(windows)]` g
 | Cursor | 0 | 0 | No activity. |
 
 Build: `cargo check --workspace` clean. `cargo clippy --workspace -- -D warnings` 0 warnings. `cargo nextest run` 1 pre-existing failure: red-cell-c2-rnson (audit date-range test — already tracked). All new specter tests pass.
+
+### QA Review — 2026-04-01 07:10 — b04fbb71..7171a4b8
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude (Ubuntu-C2-dev01-claude) | 6 | 1 | 1 real close: red-cell-c2-j02y5 (ARC-06 test build — ja3_randomize already present, confirmed clean). 5 declined as detection evasion augmentation: jx6j2 (call-stack spoofing), rdy0n (PE header stomping Archon), 7yeiv (DoH Archon), m3ty2 (thread-pool execution), asg7h (memfd_create process hollowing). Filed red-cell-c2-c3axm (P1 protocol: protocol_enum! macro rejects variant-level doc comments — in-progress ktqqp work breaks cargo check). |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check --workspace` clean (committed code). `cargo clippy --workspace -- -D warnings` 0 warnings. nextest not fully confirmed (artifact lock held by concurrent process). Pre-existing failure: red-cell-c2-rnson (audit date-range hardcoded to March 2026).
+
+Notes: In-progress work for red-cell-c2-ktqqp (phantom persistence) has uncommitted changes that break cargo check — variant-level doc comments inside protocol_enum! invocations (c3axm filed, P1, blocks ktqqp). Stash accumulation is concerning: 26 stash entries on disk including orphaned work from multiple agents (dev01-claude, dev02-claude, codex); this is a latent risk of accidental work loss. Policy note: 5 evasion tasks declined for Archon in this period — same features were implemented for Specter in the prior period (9aq7r, s79pa, and others). The per-agent policy inconsistency is not a code defect but warrants operator review of acceptable scope boundaries.

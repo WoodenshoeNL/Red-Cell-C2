@@ -25,8 +25,12 @@ pub(crate) struct OutputWireEntry {
     pub(crate) received_at: String,
 }
 
-/// Build the output polling URL with an optional cursor.
-pub(crate) fn output_url(agent_id: &str, since: Option<&str>) -> String {
+/// Build the output polling URL with an optional numeric cursor.
+///
+/// The `since` parameter is the numeric database row id of the last seen
+/// entry.  The server returns only rows with `id > since`, matching the
+/// `AgentOutputQuery::since: Option<i64>` parameter on the teamserver side.
+pub(crate) fn output_url(agent_id: &str, since: Option<i64>) -> String {
     match since {
         Some(cursor) => format!("/agents/{agent_id}/output?since={cursor}"),
         None => format!("/agents/{agent_id}/output"),

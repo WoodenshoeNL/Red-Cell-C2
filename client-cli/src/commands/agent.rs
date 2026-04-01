@@ -262,6 +262,11 @@ impl TextRender for ExecResult {
 /// Single output entry returned by `agent output`.
 #[derive(Debug, Clone, Serialize)]
 pub struct OutputEntry {
+    /// Numeric database row id — used as the polling cursor for incremental
+    /// fetches (`?since=<entry_id>`).  Matches the `id` field in the server's
+    /// `AgentOutputEntry` and the `AgentOutputQuery::since: Option<i64>`
+    /// parameter.
+    pub entry_id: i64,
     pub job_id: String,
     pub command: Option<String>,
     pub output: String,
@@ -382,9 +387,9 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) 
 
         AgentCommands::Output { id, watch, since } => {
             if watch {
-                watch_output(client, fmt, &id, since.as_deref()).await
+                watch_output(client, fmt, &id, since).await
             } else {
-                match fetch_output(client, &id, since.as_deref()).await {
+                match fetch_output(client, &id, since).await {
                     Ok(data) => {
                         print_success(fmt, &data);
                         EXIT_SUCCESS
@@ -543,8 +548,9 @@ async fn exec_wait(
     let submitted = exec_submit(client, id, cmd).await?;
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
 
-    // Use cursor "0" to start from the beginning — we filter by task_id client-side.
-    let mut cursor: Option<String> = None;
+    // Start with no cursor — the server returns all entries; we advance the
+    // cursor by numeric entry_id so subsequent polls only fetch newer rows.
+    let mut cursor: Option<i64> = None;
 
     loop {
         if Instant::now() >= deadline {
@@ -556,10 +562,10 @@ async fn exec_wait(
 
         sleep(POLL_INTERVAL).await;
 
-        let entries = fetch_output(client, id, cursor.as_deref()).await?;
+        let entries = fetch_output(client, id, cursor).await?;
         for entry in &entries {
-            // Update cursor so next poll is incremental.
-            cursor = Some(entry.job_id.clone());
+            // Advance the numeric cursor so next poll is incremental.
+            cursor = Some(entry.entry_id);
             if entry.job_id == submitted.job_id {
                 return Ok(ExecResult {
                     job_id: entry.job_id.clone(),
@@ -584,7 +590,7 @@ async fn exec_wait(
 async fn fetch_output(
     client: &ApiClient,
     id: &str,
-    since: Option<&str>,
+    since: Option<i64>,
 ) -> Result<Vec<OutputEntry>, CliError> {
     let path = output_url(id, since);
     let page: OutputPage = client.get(&path).await?;
@@ -592,6 +598,7 @@ async fn fetch_output(
         .entries
         .into_iter()
         .map(|e| OutputEntry {
+            entry_id: e.id,
             job_id: e.task_id.unwrap_or_else(|| e.id.to_string()),
             command: e.command_line,
             output: if e.output.is_empty() { e.message } else { e.output },
@@ -614,9 +621,9 @@ async fn watch_output(
     client: &ApiClient,
     fmt: &OutputFormat,
     id: &str,
-    since: Option<&str>,
+    since: Option<i64>,
 ) -> i32 {
-    let mut cursor: Option<String> = since.map(ToOwned::to_owned);
+    let mut cursor: Option<i64> = since;
     // Create the ctrl_c future once and pin it so we can reuse the same OS-level
     // signal listener across all loop iterations. Creating a new ctrl_c() future
     // on every iteration registers a new listener each time; after ~64 iterations
@@ -626,7 +633,7 @@ async fn watch_output(
 
     loop {
         let poll_result = tokio::select! {
-            result = fetch_output(client, id, cursor.as_deref()) => result,
+            result = fetch_output(client, id, cursor) => result,
             _ = &mut ctrl_c => {
                 return EXIT_SUCCESS;
             }
@@ -639,8 +646,8 @@ async fn watch_output(
             }
             Ok(entries) => {
                 for entry in &entries {
-                    // Update cursor so next poll only fetches newer entries.
-                    cursor = Some(entry.job_id.clone());
+                    // Advance the numeric cursor so next poll only fetches newer entries.
+                    cursor = Some(entry.entry_id);
                     match fmt {
                         OutputFormat::Json => {
                             let line = serde_json::json!({"ok": true, "data": entry});
@@ -972,6 +979,7 @@ mod tests {
     #[test]
     fn output_entry_text_row_headers_match_row_length() {
         let e = OutputEntry {
+            entry_id: 1,
             job_id: "j".to_owned(),
             command: None,
             output: "out".to_owned(),
@@ -985,6 +993,7 @@ mod tests {
     fn output_entry_row_79_chars_not_truncated() {
         let output: String = "x".repeat(79);
         let e = OutputEntry {
+            entry_id: 1,
             job_id: "j".to_owned(),
             command: None,
             output: output.clone(),
@@ -1000,6 +1009,7 @@ mod tests {
     fn output_entry_row_80_chars_not_truncated() {
         let output: String = "x".repeat(80);
         let e = OutputEntry {
+            entry_id: 1,
             job_id: "j".to_owned(),
             command: None,
             output: output.clone(),
@@ -1015,6 +1025,7 @@ mod tests {
     fn output_entry_row_81_chars_truncated_to_80() {
         let output: String = "x".repeat(81);
         let e = OutputEntry {
+            entry_id: 1,
             job_id: "j".to_owned(),
             command: None,
             output,
@@ -1032,6 +1043,7 @@ mod tests {
         // 81 such chars should be truncated to 80 chars (not 80 bytes).
         let output: String = "é".repeat(81);
         let e = OutputEntry {
+            entry_id: 1,
             job_id: "j".to_owned(),
             command: None,
             output,

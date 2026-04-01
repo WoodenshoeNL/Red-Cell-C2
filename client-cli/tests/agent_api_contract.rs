@@ -11,9 +11,9 @@ use std::net::SocketAddr;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use red_cell::{
-    AgentRegistry, ApiRuntime, AuditWebhookNotifier, AuthService, Database, EventBus,
-    ListenerManager, LoginRateLimiter, OperatorConnectionManager, PayloadBuilderService,
-    ShutdownController, SocketRelayManager, TeamserverState, build_router,
+    AgentRegistry, AgentResponseRecord, ApiRuntime, AuditWebhookNotifier, AuthService, Database,
+    EventBus, ListenerManager, LoginRateLimiter, OperatorConnectionManager,
+    PayloadBuilderService, ShutdownController, SocketRelayManager, TeamserverState, build_router,
 };
 use red_cell_common::config::Profile;
 use red_cell_common::{AgentEncryptionInfo, AgentRecord};
@@ -451,5 +451,96 @@ async fn get_agent_by_id_returns_404_for_unknown_agent() {
         response.status(),
         StatusCode::NOT_FOUND,
         "GET /agents/{{id}} must return 404 for an unknown agent"
+    );
+}
+
+// ── Incremental polling contract (since cursor) ───────────────────────────────
+
+/// `GET /api/v1/agents/{id}/output?since=<id>` returns only entries whose
+/// numeric database row id is strictly greater than the cursor value.
+///
+/// This test pins the contract that `agent exec --wait` and `agent output
+/// --watch` rely on: the CLI advances its cursor using `entry.entry_id` (the
+/// numeric DB row id), and the server filters with `id > since`.  A non-numeric
+/// job/task id must never be sent as the `since` parameter.
+#[tokio::test]
+async fn get_agent_output_since_cursor_returns_only_newer_entries() {
+    let (state, registry) = build_test_state().await;
+    registry.insert(sample_agent(AGENT_ID_U32)).await.expect("insert agent");
+
+    // Insert two output records directly into the database.
+    let repo = state.database.agent_responses();
+    let record_a = AgentResponseRecord {
+        id: None,
+        agent_id: AGENT_ID_U32,
+        command_id: 21,
+        request_id: 1,
+        response_type: "output".to_owned(),
+        message: String::new(),
+        output: "first output".to_owned(),
+        command_line: Some("whoami".to_owned()),
+        task_id: Some("task_abc".to_owned()), // non-numeric task id
+        operator: None,
+        received_at: "2026-04-01T00:00:00Z".to_owned(),
+        extra: None,
+    };
+    let record_b = AgentResponseRecord {
+        id: None,
+        agent_id: AGENT_ID_U32,
+        command_id: 21,
+        request_id: 2,
+        response_type: "output".to_owned(),
+        message: String::new(),
+        output: "second output".to_owned(),
+        command_line: Some("id".to_owned()),
+        task_id: Some("task_def".to_owned()),
+        operator: None,
+        received_at: "2026-04-01T00:00:01Z".to_owned(),
+        extra: None,
+    };
+    let first_id = repo.create(&record_a).await.expect("insert first record");
+    let _second_id = repo.create(&record_b).await.expect("insert second record");
+
+    // Fetch all entries — should return both.
+    let all_response = call(
+        state.clone(),
+        "GET",
+        &format!("/api/v1/agents/{AGENT_ID_HEX}/output"),
+        API_KEY,
+        None,
+    )
+    .await;
+    assert_eq!(all_response.status(), StatusCode::OK);
+    let all_json = read_json(all_response).await;
+    let all_entries = all_json["entries"].as_array().expect("entries must be an array");
+    assert_eq!(all_entries.len(), 2, "both records must be returned without a cursor");
+
+    // Confirm the first entry carries a non-numeric task_id (the problematic
+    // case from the bug report).
+    assert_eq!(all_entries[0]["task_id"], "task_abc", "first entry task_id is non-numeric");
+    // The numeric `id` field is what the CLI must use as the cursor.
+    let cursor = all_entries[0]["id"].as_i64().expect("id must be a number");
+    assert_eq!(cursor, first_id, "entry id must match the database row id");
+
+    // Fetch with since=<first_entry_id> — should return only the second entry.
+    let paged_response = call(
+        state,
+        "GET",
+        &format!("/api/v1/agents/{AGENT_ID_HEX}/output?since={cursor}"),
+        API_KEY,
+        None,
+    )
+    .await;
+    assert_eq!(paged_response.status(), StatusCode::OK);
+    let paged_json = read_json(paged_response).await;
+    let paged_entries = paged_json["entries"].as_array().expect("entries must be an array");
+    assert_eq!(
+        paged_entries.len(),
+        1,
+        "only entries after the cursor must be returned"
+    );
+    assert_eq!(
+        paged_entries[0]["output"], "second output",
+        "the entry after the cursor must be the second record"
     );
 }

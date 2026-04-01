@@ -243,7 +243,7 @@ pub enum AgentCommands {
     /// Examples:
     ///   red-cell-cli agent output abc123
     ///   red-cell-cli agent output abc123 --watch
-    ///   red-cell-cli agent output abc123 --since job_xyz --watch
+    ///   red-cell-cli agent output abc123 --since 42 --watch
     #[command(verbatim_doc_comment)]
     Output {
         /// Agent ID
@@ -251,9 +251,9 @@ pub enum AgentCommands {
         /// Stream new output as it arrives (prints JSON lines until Ctrl-C)
         #[arg(long)]
         watch: bool,
-        /// Only fetch output newer than this job ID
+        /// Only fetch output newer than this numeric output entry ID
         #[arg(long)]
-        since: Option<String>,
+        since: Option<i64>,
     },
 
     /// Terminate an agent.

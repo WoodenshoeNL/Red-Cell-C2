@@ -4740,10 +4740,19 @@ mod tests {
             .await
             .expect("response");
 
+        let now = time::OffsetDateTime::now_utc();
+        let since = (now - time::Duration::hours(1))
+            .format(&time::format_description::well_known::Rfc3339)
+            .expect("format since");
+        let until = (now + time::Duration::hours(1))
+            .format(&time::format_description::well_known::Rfc3339)
+            .expect("format until");
+        let uri = format!("/audit?operator=rest-admin&since={since}&until={until}");
+
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/audit?operator=rest-admin&since=2026-03-01T00:00:00Z&until=2026-03-31T23:59:59Z")
+                    .uri(uri.as_str())
                     .header(API_KEY_HEADER, "secret-admin")
                     .body(Body::empty())
                     .expect("request"),

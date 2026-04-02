@@ -28,7 +28,7 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 22 | 25 | 0 |
 | Memory / resource leaks | 10 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 9 | 0 |
-| Test infrastructure / flakiness | 38 | 2 | 0 |
+| Test infrastructure / flakiness | 41 | 2 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 3 | 5 | 0 |
 | Correctness / pagination | 63 | 8 | 1 |
@@ -40,6 +40,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-04-02 15:50
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 3 | test infrastructure / flakiness (3) | `automatic-test/test.py:72-89` only runs the payload-toolchain pre-flight for scenario 03 even though scenarios 04/05/17 also build payloads, so configured runs fail late with less actionable errors (`red-cell-c2-y4k02`). `automatic-test/scenarios/15_agent_dns_dns_agent_checkin.py:102-110` and `automatic-test/scenarios/16_agent_smb_smb_agent_checkin.py:106-114` still downgrade configured payload-build failures into `ScenarioSkipped`, hiding DNS/SMB regressions after the rest of the harness was tightened (`red-cell-c2-yslnt`). Multiple scenarios still use `tempfile.mktemp()` for payload and loot paths, making parallel runs racy and unsafe on shared runners (`red-cell-c2-kpzq2`). Existing open issue `red-cell-c2-0sghn` already covers the broader agent-selection regression introduced by the same payload-helper migration and is not double-counted here. |
+| Codex | 0 | — | No findings this review |
+| Cursor | 0 | — | No findings this review |
+
+Overall codebase health: on track
+Biggest blindspot: the automated harness still has weak negative-path enforcement around payload generation, so scenario-specific regressions can be reported as skips or missed pre-flight failures instead of hard failures
 
 ### QA Review — 2026-04-02 14:11 — 8023dccd..3b4a2d84
 

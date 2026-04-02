@@ -136,6 +136,8 @@ typedef struct
             ULONG DownloadChunkSize;
             /* ARC-04: encrypt sentinel-tagged heap blocks during sleep */
             BOOL  HeapEnc;
+            /* ARC-05: stomp own DLL PE headers with a decoy after init */
+            BOOL  ModuleStomp;
             /* Process-wide in-memory bypass state (ARC-01) */
             BOOL  AmsiPatched;
             BOOL  EtwPatched;

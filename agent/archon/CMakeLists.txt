@@ -46,6 +46,7 @@ set( INJECT_SOURCE
         src/inject/Inject.c
         src/inject/InjectUtil.c
         src/inject/Stomp.c
+        src/inject/ModuleStomp.c
 )
 
 set( CRYPT_SOURCE

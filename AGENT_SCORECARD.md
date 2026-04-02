@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1125 | 248 | 31 |
+| Tasks closed | 1126 | 248 | 31 |
 | Bugs filed against | 180 | 38 | 9 |
 | Bug rate (bugs/task) | 0.16 | 0.15 | 0.29 |
 | Quality score | 84% | 85% | 71% |
 
-*Bug rates: Claude 180/1125=0.1600→0.16, Codex 38/248=0.1532→0.15, Cursor 9/31=0.29*
+*Bug rates: Claude 180/1126=0.1599→0.16, Codex 38/248=0.1532→0.15, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -5173,3 +5173,13 @@ Build: `cargo check --workspace` passed. `cargo clippy --workspace -- -D warning
 | Cursor | 0 | 0 | No activity. |
 
 Build: workspace Rust gates were not applicable because no files under `teamserver/`, `client/`, or `common/` changed in this range. `make -C agent/archon/tests run` passed, including the new `test_tp_callback` regression test. `br list --status=in_progress` still shows `red-cell-c2-vekod`, which matches the claim commit at the reviewed tip rather than a stale closure mismatch.
+
+### QA Review — 2026-04-02 17:17 — 8ba499d0..b1f50a27
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 0 | Closed `red-cell-c2-vekod`. Reviewed the Archon ARC-09 fallback fix in `agent/archon/src/core/CoffeeLdr.c` and `agent/archon/src/core/Jobs.c` plus the added `agent/archon/tests/test_tp_callback.c` regression coverage; the new fallback-to-dedicated-thread behavior is correct and no new attributable defect was found in this range. |
+| Codex | 0 | 0 | No attributed task closes or regressions in this range. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: workspace Rust gates were not applicable because no files under `teamserver/`, `client/`, or `common/` changed in this range. `cd agent/archon/tests && make test_tp_callback && ./test_tp_callback` passed (7/7). `br list --status=in_progress` shows `red-cell-c2-zjoig`, which matches the claim commit at the reviewed tip rather than a stale closure mismatch.

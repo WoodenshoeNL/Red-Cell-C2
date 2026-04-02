@@ -5244,3 +5244,13 @@ Build: skipped for the reviewed range because `9b6718ef..eb0cc71b` contains only
 | Cursor | 0 | 0 | No new Cursor-attributed commits in this range. |
 
 Build: `cargo check --workspace` passed in an isolated target directory against the local worktree carrying the same DoH-related changes now committed in `1082e949`. `cargo nextest run --workspace` and `cargo clippy --workspace -- -D warnings` were started afterward and remained in progress during bookkeeping, with no failures or warnings observed in streamed output. `br list --status=in_progress` / `br ready` could not return a stable snapshot during this pass due concurrent repository activity, but the reviewed close hygiene is consistent: `red-cell-c2-xzow0` is closed by the commit under review.
+
+### QA Review — 2026-04-02 20:37 — 1082e949..0788d569
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | No new Claude-attributed commits in this range. |
+| Codex | 0 | 0 | No new Codex-attributed commits in this range. |
+| Cursor | 0 | 0 | No new Cursor-attributed commits in this range. |
+
+Build: skipped for the reviewed range because `1082e949..0788d569` contains only the prior QA checkpoint/scorecard commit and no product-code changes. `br list --status=in_progress`, `br list --status=open | head -30`, and `br ready | head -20` remain consistent with the existing client-cli, Archon, Specter, autotest, and teamserver backlog; no stale close or untracked regression was identified in this pass.

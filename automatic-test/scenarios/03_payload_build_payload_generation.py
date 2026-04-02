@@ -69,7 +69,7 @@ def run(ctx):
 
     # Create a temporary HTTP listener that the payloads will point back to.
     # Use a high-numbered port that doesn't require elevated privileges.
-    listener_port = 19080
+    listener_port = ctx.env.get("listeners", {}).get("payload_build_port", 19080)
     listener_create(cli, listener_name, "http", port=listener_port)
 
     try:

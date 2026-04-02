@@ -101,7 +101,8 @@ def run(ctx):
         # ── Step 4: Viewer token → listener create (denied, exit code 3) ──────
         print("  [viewer] listener create → should be denied (exit code 3)")
         try:
-            listener_create(viewer_cfg, f"rbac-probe-{uid}", "http", port=19099)
+            rbac_viewer_port = ctx.env.get("listeners", {}).get("rbac_viewer_port", 19099)
+            listener_create(viewer_cfg, f"rbac-probe-{uid}", "http", port=rbac_viewer_port)
             raise AssertionError(
                 "viewer-role token was NOT rejected for 'listener create' — RBAC broken"
             )
@@ -152,7 +153,8 @@ def run(ctx):
 
         # ── Step 8: Admin token → listener create (allowed) ───────────────────
         print(f"  [admin] listener create {admin_test_listener!r} → should be allowed")
-        listener_create(cli, admin_test_listener, "http", port=19098)
+        rbac_admin_port = ctx.env.get("listeners", {}).get("rbac_admin_port", 19098)
+        listener_create(cli, admin_test_listener, "http", port=rbac_admin_port)
         admin_listener_created = True
         print("  [admin] listener create allowed ✓")
 

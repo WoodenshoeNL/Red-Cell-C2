@@ -514,17 +514,6 @@ static BOOL DoHTxtQuery(
         goto LEAVE;
     }
 
-    /* Ignore TLS cert errors (DoH providers have valid certs, but this
-     * handles edge cases with corporate MITM proxies). */
-    {
-        DWORD SecFlags = SECURITY_FLAG_IGNORE_UNKNOWN_CA        |
-                         SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
-                         SECURITY_FLAG_IGNORE_CERT_CN_INVALID   |
-                         SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
-        Instance->Win32.WinHttpSetOption( hRequest, WINHTTP_OPTION_SECURITY_FLAGS,
-                                          &SecFlags, sizeof( DWORD ) );
-    }
-
     /* Add Accept header for DoH JSON API */
     Instance->Win32.WinHttpAddRequestHeaders(
         hRequest,

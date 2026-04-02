@@ -109,9 +109,21 @@ fn mprotect_sleep(secs: libc::time_t, nsecs: libc::c_long) {
     let mut regions = [(0usize, 0usize); MAX_REGIONS];
     let count = collect_heap_regions(&mut regions);
 
+    // Block all deliverable signals for this thread while heap pages are
+    // inaccessible.  Signal handlers (including those injected by test
+    // harnesses and process monitors) may touch heap-allocated data; a
+    // delivery during the PROT_NONE window would SIGSEGV.
+    let mut old_sigset: libc::sigset_t = unsafe { std::mem::zeroed() };
+    let mut full_sigset: libc::sigset_t = unsafe { std::mem::zeroed() };
+    unsafe {
+        libc::sigfillset(&mut full_sigset);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &full_sigset, &mut old_sigset);
+    }
+
     // -----------------------------------------------------------------------
     // NO heap allocation or deallocation between here and the restore below.
     // All data lives in `regions` (stack) and `secs`/`nsecs` (registers/stack).
+    // Signals are masked — no handler can fault on protected pages.
     // -----------------------------------------------------------------------
 
     // Mark pages inaccessible.
@@ -124,8 +136,12 @@ fn mprotect_sleep(secs: libc::time_t, nsecs: libc::c_long) {
     protect_regions(&regions[..count], libc::PROT_READ | libc::PROT_WRITE);
 
     // -----------------------------------------------------------------------
-    // Heap is accessible again — logging / allocation is safe.
+    // Heap is accessible again — restore signal mask, logging is safe.
     // -----------------------------------------------------------------------
+    unsafe {
+        libc::pthread_sigmask(libc::SIG_SETMASK, &old_sigset, std::ptr::null_mut());
+    }
+
     debug!(regions = count, "mprotect sleep cycle complete");
 }
 
@@ -421,11 +437,38 @@ mod tests {
 
     #[test]
     fn mprotect_sleep_completes() {
-        // Exercises the full mprotect → nanosleep → restore cycle in a live
-        // process.  Verifies that the heap is accessible after wakeup.
-        let before: Vec<u8> = vec![0xAA; 16];
-        blocking_sleep(Duration::from_millis(1), SleepMode::Mprotect);
-        // If the heap was not restored the following access would SIGSEGV.
-        assert_eq!(before[0], 0xAA);
+        // The Rust test harness runs each test in a spawned thread while the
+        // main harness thread stays alive.  That harness thread may access
+        // heap-allocated data at any time, so calling mprotect(PROT_NONE) on
+        // the `[heap]` region from a test thread races with it and can
+        // SIGSEGV.
+        //
+        // We isolate the mprotect cycle in a fork'd child process.  After
+        // fork the child is single-threaded (POSIX guarantee), so no other
+        // thread can touch the heap during the protection window.
+        //
+        // SAFETY: We only call async-signal-safe functions (mprotect,
+        // nanosleep, _exit, open, read, close) in the child.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork() failed");
+
+        if pid == 0 {
+            // --- child (single-threaded) ---
+            let before: Vec<u8> = vec![0xAA; 16];
+            blocking_sleep(Duration::from_millis(1), SleepMode::Mprotect);
+            // If the heap was not restored this access would SIGSEGV.
+            if before[0] != 0xAA {
+                unsafe { libc::_exit(1) };
+            }
+            unsafe { libc::_exit(0) };
+        }
+
+        // --- parent: wait for child ---
+        let mut status: libc::c_int = 0;
+        unsafe { libc::waitpid(pid, &mut status, 0) };
+        assert!(
+            libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+            "child exited abnormally (status={status:#x}); mprotect sleep cycle likely faulted",
+        );
     }
 }

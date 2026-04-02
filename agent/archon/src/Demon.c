@@ -677,10 +677,9 @@ VOID DemonConfig()
     Instance->Config.Implant.DownloadChunkSize  = 0xfc00; /* 63k, needs to be less than PIPE_BUFFER_MAX */
 #endif
 
-    /* ARC-04: heap encryption during sleep — default ON.
-     * When the teamserver gains HeapEnc profile-key support it will be
-     * appended to the config blob and parsed here instead of hardcoded. */
-    Instance->Config.Implant.HeapEnc = TRUE;
+    /* ARC-04: heap encryption during sleep.
+     * Controlled by the HeapEnc profile key (default: TRUE). */
+    Instance->Config.Implant.HeapEnc = ParserGetInt32( &Parser );
 
     /* ARC-05: module stomping for injected DLL payload — default ON.
      * Overwrites Archon's own PE headers with a decoy DLL's headers

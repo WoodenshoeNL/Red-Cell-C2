@@ -761,6 +761,11 @@ fn deserialize_optional_zeroizing_string<'de, D: Deserializer<'de>>(
     Ok(opt.map(Zeroizing::new))
 }
 
+/// Serde default-value helper that returns `true`.
+fn default_true() -> bool {
+    true
+}
+
 /// Demon build-time defaults and injection settings.
 #[derive(Clone, PartialEq, Eq, Deserialize)]
 pub struct DemonConfig {
@@ -819,6 +824,16 @@ pub struct DemonConfig {
     /// Explicit redirector peers or networks allowed to supply forwarded client IP headers.
     #[serde(rename = "TrustedProxyPeers", default, deserialize_with = "deserialize_one_or_many")]
     pub trusted_proxy_peers: Vec<String>,
+    /// Enable heap encryption during sleep (ARC-04).
+    ///
+    /// When `true` (the default), the Archon agent encrypts all agent-owned
+    /// heap allocations before entering the sleep obfuscation routine and
+    /// decrypts them on wake.  This prevents memory scanners from finding
+    /// cleartext strings or structures while the agent is idle.
+    ///
+    /// HCL profile key: `HeapEnc` (boolean, default `true`).
+    #[serde(rename = "HeapEnc", default = "default_true")]
+    pub heap_enc: bool,
     /// Opt in to accepting legacy-CTR Demon/Archon sessions.
     ///
     /// Legacy CTR mode resets the AES-CTR keystream to block offset 0 for every packet,
@@ -853,6 +868,7 @@ impl fmt::Debug for DemonConfig {
             .field("init_secret", &self.init_secret.as_ref().map(|_| "[redacted]"))
             .field("trust_x_forwarded_for", &self.trust_x_forwarded_for)
             .field("trusted_proxy_peers", &self.trusted_proxy_peers)
+            .field("heap_enc", &self.heap_enc)
             .field("allow_legacy_ctr", &self.allow_legacy_ctr)
             .finish()
     }
@@ -3169,6 +3185,7 @@ mod tests {
             init_secret: secret.map(|s| Zeroizing::new(s.to_owned())),
             trust_x_forwarded_for: false,
             trusted_proxy_peers: vec![],
+            heap_enc: true,
             allow_legacy_ctr: false,
         }
     }

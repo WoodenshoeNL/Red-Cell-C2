@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1124 | 248 | 31 |
+| Tasks closed | 1125 | 248 | 31 |
 | Bugs filed against | 180 | 38 | 9 |
 | Bug rate (bugs/task) | 0.16 | 0.15 | 0.29 |
 | Quality score | 84% | 85% | 71% |
 
-*Bug rates: Claude 180/1124=0.1601→0.16, Codex 38/248=0.1532→0.15, Cursor 9/31=0.29*
+*Bug rates: Claude 180/1125=0.1600→0.16, Codex 38/248=0.1532→0.15, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -5163,3 +5163,13 @@ Build: `cargo check --workspace` passed. `cargo clippy --workspace -- -D warning
 | Cursor | 0 | 0 | No activity. |
 
 Build: `cargo check --workspace` passed. `cargo clippy --workspace -- -D warnings` passed. `cargo nextest run --workspace` was started and remained in progress during bookkeeping, so no definitive pass/fail was recorded for the test suite this cycle. `br list --status=in_progress` shows `red-cell-c2-7o4tr`, and `br ready` also exposes the duplicate open issue `red-cell-c2-vekod` for the same Archon ARC-09 thread-pool callback defect.
+
+### QA Review — 2026-04-02 16:43 — 068ea90c..8ba499d0
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 0 | Closed `red-cell-c2-7o4tr`. Reviewed the committed Archon ARC-09 follow-up in `agent/archon/src/core/CoffeeLdr.c` plus the new `agent/archon/tests/test_tp_callback.c` regression coverage; the dedicated-thread/thread-pool split is correct and no new attributable defect was found in this range. |
+| Codex | 0 | 0 | No attributed task closes or regressions in this range. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: workspace Rust gates were not applicable because no files under `teamserver/`, `client/`, or `common/` changed in this range. `make -C agent/archon/tests run` passed, including the new `test_tp_callback` regression test. `br list --status=in_progress` still shows `red-cell-c2-vekod`, which matches the claim commit at the reviewed tip rather than a stale closure mismatch.

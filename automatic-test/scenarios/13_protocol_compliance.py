@@ -478,8 +478,6 @@ def _run_wrong_endian_check(cli, base_url: str) -> int:
 
     Returns the agent_id so the caller can clean it up.
     """
-    from lib.cli import agent_show
-
     agent_id = int.from_bytes(os.urandom(4), "big")
     while agent_id == 0:
         agent_id = int.from_bytes(os.urandom(4), "big")
@@ -493,22 +491,18 @@ def _run_wrong_endian_check(cli, base_url: str) -> int:
     _check("BE-encoded DEMON_INIT accepted (HTTP 200)", status == 200, f"got HTTP {status}")
     _check("BE-encoded DEMON_INIT ACK non-empty", len(body) > 0, "empty response body")
 
-    # The server registered the agent — query it and verify the path is garbled.
+    # The server registered the agent — wait for it to appear and verify the path is garbled.
     agent_id_hex = f"{agent_id:08X}"
-    try:
-        info = agent_show(cli, agent_id_hex)
-        stored_path = info.get("data", {}).get("process_path", "")
-        # The correct path is "C:\probe\agent.exe".  With BE→LE byte swap every
-        # code-unit is wrong, so the stored path must NOT contain the original.
-        _check(
-            "BE process_path is garbled (not readable as original)",
-            "probe" not in stored_path.lower(),
-            f"stored path {stored_path!r} unexpectedly contains original text",
-        )
-    except Exception as exc:
-        # If agent_show fails (agent not found, etc.) that's also acceptable —
-        # the key point is the endianness mismatch produces wrong data.
-        print(f"    [info] could not query agent (non-fatal): {exc}")
+    from lib.cli import wait_for_agent_id
+    info = wait_for_agent_id(cli, agent_id_hex, timeout=10)
+    stored_path = info.get("process_path", "")
+    # The correct path is "C:\probe\agent.exe".  With BE→LE byte swap every
+    # code-unit is wrong, so the stored path must NOT contain the original.
+    _check(
+        "BE process_path is garbled (not readable as original)",
+        "probe" not in stored_path.lower(),
+        f"stored path {stored_path!r} unexpectedly contains original text",
+    )
 
     return agent_id
 

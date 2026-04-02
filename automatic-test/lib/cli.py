@@ -177,6 +177,38 @@ def agent_show(cfg: CliConfig, agent_id: str) -> dict:
     return _run(cfg, "agent", "show", agent_id)
 
 
+def wait_for_agent_id(
+    cfg: CliConfig,
+    agent_id_hex: str,
+    timeout: float = 10.0,
+    interval: float = 0.5,
+) -> dict:
+    """Poll ``agent list`` until the agent with ``agent_id_hex`` appears.
+
+    Returns the result of ``agent show`` for that agent.
+    Raises ``TimeoutError`` if the agent does not appear within ``timeout`` seconds.
+
+    ``agent_id_hex`` is matched case-insensitively so callers can pass either
+    upper- or lower-case hex strings.
+    """
+    import time as _time
+
+    needle = agent_id_hex.upper()
+    deadline = _time.monotonic() + timeout
+    while _time.monotonic() < deadline:
+        try:
+            agents = agent_list(cfg)
+            for entry in agents:
+                if str(entry.get("id", "")).upper() == needle:
+                    return agent_show(cfg, agent_id_hex)
+        except CliError:
+            pass
+        _time.sleep(interval)
+    raise TimeoutError(
+        f"Agent {agent_id_hex} did not appear in agent list within {timeout:.0f}s"
+    )
+
+
 def agent_exec(cfg: CliConfig, agent_id: str, cmd: str,
                wait: bool = True, timeout: int | None = None) -> dict:
     args = ["agent", "exec", agent_id, "--cmd", cmd]

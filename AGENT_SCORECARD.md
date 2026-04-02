@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1132 | 248 | 33 |
+| Tasks closed | 1133 | 248 | 33 |
 | Bugs filed against | 182 | 38 | 9 |
 | Bug rate (bugs/task) | 0.16 | 0.15 | 0.27 |
 | Quality score | 84% | 85% | 73% |
 
-*Bug rates: Claude 182/1132=0.1608→0.16, Codex 38/248=0.1532→0.15, Cursor 9/33=0.2727→0.27*
+*Bug rates: Claude 182/1133=0.1606→0.16, Codex 38/248=0.1532→0.15, Cursor 9/33=0.2727→0.27*
 
 ## Violation Breakdown
 
@@ -5224,3 +5224,23 @@ Build: `cargo check --workspace` passed. `cargo clippy --workspace -- -D warning
 | Cursor | 1 | 0 | Closed `red-cell-c2-ddng2` via `test(teamserver): cover HeapEnc false in pack_config and profile merge`. Reviewed the new `teamserver/src/payload_builder.rs` tests; they correctly assert explicit `HeapEnc=false` packing and profile-default propagation, with no attributable defect found. |
 
 Build: `cargo check --workspace` passed in an isolated `CARGO_HOME`/`CARGO_TARGET_DIR`. `cargo nextest run --workspace` was started in the same isolated build and remained in the compile phase during bookkeeping, with no failures observed in streamed output. Workspace Rust gates were triggered this cycle because `teamserver/src/payload_builder.rs` changed on `origin/main`. Targeted Archon verification also passed: `make -C agent/archon/tests test_heap_enc test_pe_header_erase && ./agent/archon/tests/test_heap_enc && ./agent/archon/tests/test_pe_header_erase`. `br list --status=in_progress` shows `red-cell-c2-xzow0`, which matches the new claim in this range rather than a stale closure mismatch.
+
+### QA Review — 2026-04-02 20:20 — 9b6718ef..eb0cc71b
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | No new Claude-attributed commits in this range. |
+| Codex | 0 | 0 | No new Codex-attributed commits in this range. |
+| Cursor | 0 | 0 | No new Cursor-attributed commits in this range. |
+
+Build: skipped for the reviewed range because `9b6718ef..eb0cc71b` contains only the prior QA checkpoint/scorecard commit and no product-code changes. Separately, repo-wide validation on the local descendant worktree completed `cargo check --workspace` successfully in an isolated target directory; `cargo nextest run --workspace` and `cargo clippy --workspace -- -D warnings` were started afterward and remained in progress during this bookkeeping pass, with no failures or warnings observed in streamed output.
+
+### QA Review — 2026-04-02 20:25 — eb0cc71b..1082e949
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 0 | Closed `red-cell-c2-xzow0`. Reviewed the Archon ARC-08 DoH fallback activation change across `agent/archon/src/Demon.c`, `common`, and `teamserver/src/payload_builder.rs`; the parser, packed trailing fields, `TRANSPORT_DOH` define emission, and regression tests all line up with the bug report and introduced no new attributable defect. |
+| Codex | 0 | 0 | No new Codex-attributed commits in this range. |
+| Cursor | 0 | 0 | No new Cursor-attributed commits in this range. |
+
+Build: `cargo check --workspace` passed in an isolated target directory against the local worktree carrying the same DoH-related changes now committed in `1082e949`. `cargo nextest run --workspace` and `cargo clippy --workspace -- -D warnings` were started afterward and remained in progress during bookkeeping, with no failures or warnings observed in streamed output. `br list --status=in_progress` / `br ready` could not return a stable snapshot during this pass due concurrent repository activity, but the reviewed close hygiene is consistent: `red-cell-c2-xzow0` is closed by the commit under review.

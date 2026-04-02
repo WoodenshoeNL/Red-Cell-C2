@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1114 | 248 | 31 |
-| Bugs filed against | 177 | 38 | 9 |
+| Tasks closed | 1119 | 248 | 31 |
+| Bugs filed against | 178 | 38 | 9 |
 | Bug rate (bugs/task) | 0.16 | 0.15 | 0.29 |
 | Quality score | 84% | 85% | 71% |
 
-*Bug rates: Claude 177/1114=0.1589→0.16, Codex 38/248=0.1532→0.15, Cursor 9/31=0.29*
+*Bug rates: Claude 178/1119=0.1591→0.16, Codex 38/248=0.1532→0.15, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -28,7 +28,7 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 22 | 25 | 0 |
 | Memory / resource leaks | 10 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 9 | 0 |
-| Test infrastructure / flakiness | 36 | 2 | 0 |
+| Test infrastructure / flakiness | 37 | 2 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 3 | 5 | 0 |
 | Correctness / pagination | 63 | 8 | 1 |
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-02 14:11 — 8023dccd..3b4a2d84
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 5 | 1 | Closed: `red-cell-c2-dhg3z`, `red-cell-c2-p96ii`, `red-cell-c2-7x03c`, `red-cell-c2-d5i3j`, `red-cell-c2-miiwk`. Reviewed the Archon DoH TLS-hardening fix, Phantom `mprotect` sleep-obfuscation follow-up, and the autotest payload-build migration. Filed `red-cell-c2-0sghn` because `automatic-test/lib/cli.py:116-155` removed agent selection while scenarios such as `automatic-test/scenarios/04_agent_linux_linux_agent_checkin.py:85-91` still claim to validate Phantom/Specter/Archon payloads even though `teamserver/src/api.rs:3450-3457` still hardcodes `agent_type = "Demon"`, creating false-positive agent E2E coverage. |
+| Codex | 0 | 0 | No attributed task closes or regressions in this range. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check --workspace` was attempted twice. The shared `target/` build directory was locked by other long-running cargo/nextest jobs in the repo, so QA restarted the type-check with `CARGO_TARGET_DIR=target-qa-review`; compilation was still in progress with no observed errors when the checkpoint update was prepared. `cargo nextest run --workspace` and `cargo clippy --workspace -- -D warnings` were not started in this pass because the isolated type-check had not yet completed. `br list --status=in_progress` still shows `red-cell-c2-ip470`, and `br ready` remains consistent with the open `client-cli`/`teamserver` payload-build capability gaps (`red-cell-c2-e3vca`, `red-cell-c2-ribpc`) that make the new autotest regression actionable.
 
 ### QA Review — 2026-04-02 13:35 — 284c5162..8023dccd
 

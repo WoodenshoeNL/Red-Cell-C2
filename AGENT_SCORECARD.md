@@ -5068,3 +5068,16 @@ Build: `cargo check --workspace` passed on `fd42a036`. `python3 -m unittest disc
 | Cursor | 0 | 0 | No activity. |
 
 Build: `cargo check --workspace` passed. `cargo clippy --workspace -- -D warnings` 0 warnings. Targeted tests for all three changed modules passed: phantom persist_shell_rc (6/6 ok), specter persist_powershell (5/5 ok), client-cli config resolve regression (1/1 ok). No new bugs filed.
+
+### Arch Review — 2026-04-02 11:30
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 0 | — | No new Claude-attributed findings this review. |
+| Codex | 0 | — | No new Codex-attributed findings this review. |
+| Cursor | 0 | — | No new Cursor-attributed findings this review. |
+
+Overall codebase health: drifting
+Biggest blindspot: the automated harness has drifted away from the shipped `red-cell-cli` and current Demon wire contract, so several “end-to-end” payload and protocol scenarios are now testing dead interfaces instead of the live surface
+
+Notes: filed three new Michel/autotest issues outside the scored agent pool: red-cell-c2-p96ii, red-cell-c2-dhg3z, red-cell-c2-ip470. `cargo check --workspace` passed. `cargo clippy --workspace -- -D warnings` passed. `cargo nextest run --workspace` was still in progress during the scorecard update after clearing more than 2,400 tests with no observed failures; one compile-time warning was emitted in `phantom` test code for an unused import.

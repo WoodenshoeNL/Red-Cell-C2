@@ -239,12 +239,16 @@ def _wait_for_two_agents(cli, pre_existing_ids: set, timeout: int) -> list[dict]
 def _wait_for_agents_disconnected(
     cli, agent_ids: list[str], timeout: int = 30
 ) -> None:
-    """Poll until all specified agents show as inactive/disconnected."""
+    """Poll until all specified agents report ``status == "dead"``."""
     from lib.wait import poll
 
     def _all_dead():
         from lib.cli import agent_list
-        alive = {a["id"] for a in agent_list(cli) if a.get("active", True)}
+        alive = {
+            a["id"]
+            for a in agent_list(cli)
+            if a.get("status", "alive") != "dead"
+        }
         return [aid for aid in agent_ids if aid not in alive]
 
     dead = poll(

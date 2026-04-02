@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1130 | 248 | 32 |
+| Tasks closed | 1132 | 248 | 33 |
 | Bugs filed against | 182 | 38 | 9 |
-| Bug rate (bugs/task) | 0.16 | 0.15 | 0.28 |
-| Quality score | 84% | 85% | 72% |
+| Bug rate (bugs/task) | 0.16 | 0.15 | 0.27 |
+| Quality score | 84% | 85% | 73% |
 
-*Bug rates: Claude 182/1130=0.1611→0.16, Codex 38/248=0.1532→0.15, Cursor 9/32=0.2812→0.28*
+*Bug rates: Claude 182/1132=0.1608→0.16, Codex 38/248=0.1532→0.15, Cursor 9/33=0.2727→0.27*
 
 ## Violation Breakdown
 
@@ -5214,3 +5214,13 @@ Build: workspace Rust gates were not applicable because no files under `teamserv
 | Cursor | 0 | 0 | No activity. |
 
 Build: `cargo check --workspace` passed. `cargo clippy --workspace -- -D warnings` passed. `cargo nextest run --workspace` failed while compiling `red-cell` tests on `8e466058` because `teamserver/src/payload_builder.rs` still has nine `DemonConfig` initializers missing the new `heap_enc` field (`E0063` at lines 4439, 5590, 5862, 6165, 6197, 6230, 6419, 6448, and 6478). `br list --status=in_progress` shows current Claude-owned issues and `br ready` remains consistent with the open Archon/client-cli/autotest backlog.
+
+### QA Review — 2026-04-02 19:14 — 778e0d25..9b6718ef
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 0 | Closed `red-cell-c2-dm7ie` and `red-cell-c2-t09by`. Reviewed the Archon ARC-07 protection-restore fix in `agent/archon/src/core/Runtime.c` and the cleanup of tracked `agent/archon/tests` build artifacts; both changes are correct, and `agent/archon/tests/.gitignore` already covers the removed binaries. |
+| Codex | 0 | 0 | No attributed task closes or regressions in this range. |
+| Cursor | 1 | 0 | Closed `red-cell-c2-ddng2` via `test(teamserver): cover HeapEnc false in pack_config and profile merge`. Reviewed the new `teamserver/src/payload_builder.rs` tests; they correctly assert explicit `HeapEnc=false` packing and profile-default propagation, with no attributable defect found. |
+
+Build: `cargo check --workspace` passed in an isolated `CARGO_HOME`/`CARGO_TARGET_DIR`. `cargo nextest run --workspace` was started in the same isolated build and remained in the compile phase during bookkeeping, with no failures observed in streamed output. Workspace Rust gates were triggered this cycle because `teamserver/src/payload_builder.rs` changed on `origin/main`. Targeted Archon verification also passed: `make -C agent/archon/tests test_heap_enc test_pe_header_erase && ./agent/archon/tests/test_heap_enc && ./agent/archon/tests/test_pe_header_erase`. `br list --status=in_progress` shows `red-cell-c2-xzow0`, which matches the new claim in this range rather than a stale closure mismatch.

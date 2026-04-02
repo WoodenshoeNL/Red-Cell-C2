@@ -25,6 +25,19 @@ Service {
     Password = "service-password"
 }
 
+Api {
+    RateLimitPerMinute = 120
+
+    key "test-operator" {
+        Value = "changeme-api-key"
+    }
+
+    key "test-analyst" {
+        Value = "changeme-analyst-key"
+        Role  = "Analyst"
+    }
+}
+
 Demon {
     Sleep = 2
     Jitter = 15

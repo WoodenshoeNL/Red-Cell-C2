@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1133 | 248 | 33 |
+| Tasks closed | 1134 | 248 | 33 |
 | Bugs filed against | 182 | 38 | 9 |
 | Bug rate (bugs/task) | 0.16 | 0.15 | 0.27 |
 | Quality score | 84% | 85% | 73% |
 
-*Bug rates: Claude 182/1133=0.1606→0.16, Codex 38/248=0.1532→0.15, Cursor 9/33=0.2727→0.27*
+*Bug rates: Claude 182/1134=0.1605→0.16, Codex 38/248=0.1532→0.15, Cursor 9/33=0.2727→0.27*
 
 ## Violation Breakdown
 
@@ -5284,3 +5284,13 @@ Build: the reviewed range contains only the prior QA checkpoint/scorecard commit
 | Cursor | 0 | 0 | No new Cursor-attributed commits in this range. |
 
 Build: skipped for the reviewed range because `3778b2c9..0618c208` contains only the prior QA checkpoint/scorecard commit and no product-code changes. `br list --status=in_progress`, `br list --status=open | head -30`, and `br ready | head -20` remain consistent with the current backlog; no stale close mismatch or untracked regression was identified in this pass.
+
+### QA Review — 2026-04-02 23:09 — 0618c208..d34250bd
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 0 | Closed `red-cell-c2-a13rf` via `fix(client): surface local config save failures to callers`. Reviewed `client/src/local_config.rs`, `client/src/main.rs`, and `client/tests/login_persistence.rs`; the change now propagates local-config persistence errors to the caller and logs them in the GUI, with no new attributable regression identified in the committed diff. |
+| Codex | 0 | 0 | No attributed task closes or new regressions in this range. |
+| Cursor | 0 | 0 | No attributed task closes or new regressions in this range. |
+
+Build: `cargo check --workspace` passed in a clean detached worktree at `d34250bd`. `cargo nextest run --workspace` and `CARGO_TARGET_DIR=$(mktemp -d /tmp/red-cell-qa-clippy-XXXXXX) cargo clippy --workspace -- -D warnings` were started in the same review worktree and remained in progress at bookkeeping time, with no failures observed in streamed output. In this detached clone, `br list --status=in_progress`, `br list --status=open | head -30`, and `br ready | head -20` hung; QA fell back to `.beads/issues.jsonl`, which shows `red-cell-c2-nkdoq` and `red-cell-c2-tyj0m` still in progress and no stale closure mismatch for `red-cell-c2-a13rf`.

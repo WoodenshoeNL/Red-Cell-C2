@@ -21,11 +21,11 @@ Each loop run updates the running totals and appends a review entry.
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 9 | 0 | 0 |
-| Missing tests / stale tests | 69 | 18 | 5 |
+| Missing tests / stale tests | 70 | 18 | 5 |
 | Clippy warnings | 9 | 0 | 1 |
 | Protocol errors | 29 | 32 | 3 |
 | Security issues | 57 | 39 | 0 |
-| Architecture drift | 22 | 25 | 0 |
+| Architecture drift | 23 | 25 | 0 |
 | Memory / resource leaks | 11 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 9 | 0 |
 | Test infrastructure / flakiness | 41 | 2 | 0 |
@@ -40,6 +40,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-04-02 18:01
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 2 | missing tests / stale tests (1), architecture drift (1) | Filed `red-cell-c2-lnnh6` because `teamserver/src/payload_builder.rs:4439`, `:5590`, `:6165`, `:6197`, `:6230`, `:6419`, `:6448`, and `:6478` still instantiate `DemonConfig` without the required `heap_enc` field, so `cargo nextest run --workspace` fails at compile time even though `cargo check --workspace` passes. Filed `red-cell-c2-lxpdw` because `client-cli/src/commands/session.rs:3-6` and `:397-620` implement session mode as an HTTP `ApiClient` loop and omit the documented `status` command, diverging from the AGENTS.md requirement for a single WebSocket-backed session that mirrors the CLI surface. |
+| Codex | 0 | — | No new Codex-attributed findings this review. |
+| Cursor | 0 | — | No new Cursor-attributed findings this review. |
+
+Overall codebase health: on track
+Biggest blindspot: machine-facing contract drift is still slipping through in `client-cli`, while stale test helpers in `teamserver` can silently break the validated workspace gates after shared config changes.
 
 ### Arch Review — 2026-04-02 15:50
 

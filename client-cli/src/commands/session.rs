@@ -168,6 +168,9 @@ struct SessionCmd {
     /// Payload format for `payload.build`: `"exe"`, `"dll"`, or `"bin"`.
     #[serde(default)]
     format: Option<String>,
+    /// Agent type for `payload.build` (e.g. `"demon"`, `"phantom"`).
+    #[serde(default)]
+    agent: Option<String>,
     /// Sleep interval in seconds to bake into the payload (`payload.build`).
     #[serde(default)]
     sleep: Option<u64>,
@@ -634,9 +637,11 @@ async fn dispatch(
                 CliError::InvalidArgs("payload.build requires a \"format\" field".to_owned())
             })?;
             super::payload::validate_format(format)?;
+            let agent = msg.agent.as_deref().unwrap_or("demon");
             let wait = msg.wait.unwrap_or(false);
             let timeout_secs = msg.timeout.unwrap_or(DEFAULT_BUILD_TIMEOUT_SECS);
-            payload_build(client, listener, arch, format, msg.sleep, wait, timeout_secs).await
+            payload_build(client, listener, arch, format, agent, msg.sleep, wait, timeout_secs)
+                .await
         }
 
         "payload.download" => {
@@ -822,6 +827,7 @@ async fn payload_build(
     listener: &str,
     arch: &str,
     format: &str,
+    agent: &str,
     sleep_secs: Option<u64>,
     wait: bool,
     timeout_secs: u64,
@@ -830,6 +836,7 @@ async fn payload_build(
         "listener": listener,
         "arch": arch,
         "format": format,
+        "agent": agent,
     });
     if let Some(s) = sleep_secs {
         body["sleep"] = serde_json::json!(s);

@@ -421,6 +421,7 @@ pub enum PayloadCommands {
     /// Examples:
     ///   red-cell-cli payload build --listener http1 --arch x86_64 --format exe
     ///   red-cell-cli payload build --listener dns1  --arch aarch64 --format bin --sleep 5 --wait
+    ///   red-cell-cli payload build --listener http1 --arch x86_64 --format bin --agent phantom
     #[command(verbatim_doc_comment)]
     Build {
         /// Listener name the payload connects back to
@@ -432,6 +433,9 @@ pub enum PayloadCommands {
         /// Output format (exe, dll, bin)
         #[arg(long)]
         format: String,
+        /// Agent type to build (demon, archon, phantom, specter)
+        #[arg(long, default_value = "demon")]
+        agent: String,
         /// Agent sleep interval in seconds
         #[arg(long)]
         sleep: Option<u64>,
@@ -1052,5 +1056,53 @@ mod tests {
     fn non_numeric_timeout_returns_error() {
         let result = Cli::try_parse_from(["red-cell-cli", "--timeout", "notanumber"]);
         assert!(result.is_err(), "non-numeric --timeout must return an error");
+    }
+
+    // ── payload build --agent flag ───────────────────────────────────────────
+
+    #[test]
+    fn payload_build_agent_defaults_to_demon() {
+        let cli = Cli::try_parse_from([
+            "red-cell-cli",
+            "payload",
+            "build",
+            "--listener",
+            "http1",
+            "--arch",
+            "x64",
+            "--format",
+            "exe",
+        ])
+        .expect("payload build must parse without --agent");
+        match cli.command {
+            Some(Commands::Payload { action: PayloadCommands::Build { agent, .. } }) => {
+                assert_eq!(agent, "demon", "--agent must default to 'demon'")
+            }
+            other => panic!("expected Payload::Build, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn payload_build_agent_flag_is_captured() {
+        let cli = Cli::try_parse_from([
+            "red-cell-cli",
+            "payload",
+            "build",
+            "--listener",
+            "http1",
+            "--arch",
+            "x64",
+            "--format",
+            "bin",
+            "--agent",
+            "phantom",
+        ])
+        .expect("payload build --agent phantom must parse");
+        match cli.command {
+            Some(Commands::Payload { action: PayloadCommands::Build { agent, .. } }) => {
+                assert_eq!(agent, "phantom")
+            }
+            other => panic!("expected Payload::Build, got {other:?}"),
+        }
     }
 }

@@ -149,8 +149,8 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: PayloadCommands
             }
         },
 
-        PayloadCommands::Build { listener, arch, format, sleep: sleep_secs, wait } => {
-            match build(client, &listener, &arch, &format, sleep_secs, wait).await {
+        PayloadCommands::Build { listener, arch, format, agent, sleep: sleep_secs, wait } => {
+            match build(client, &listener, &arch, &format, &agent, sleep_secs, wait).await {
                 Ok(outcome) => match outcome {
                     BuildOutcome::Submitted(job) => match print_success(fmt, &job) {
                         Ok(()) => EXIT_SUCCESS,
@@ -194,6 +194,7 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: PayloadCommands
 
 /// Outcome of a build command — either submitted (no `--wait`) or completed
 /// (`--wait` used and the build finished successfully).
+#[derive(Debug)]
 enum BuildOutcome {
     Submitted(BuildJobSubmitted),
     Completed(BuildCompleted),
@@ -233,6 +234,7 @@ async fn list(client: &ApiClient) -> Result<Vec<PayloadRow>, CliError> {
 /// ```text
 /// red-cell-cli payload build --listener http1 --arch x86_64 --format exe
 /// red-cell-cli payload build --listener http1 --arch x86_64 --format exe --wait
+/// red-cell-cli payload build --listener http1 --arch x86_64 --format bin --agent phantom
 /// ```
 #[instrument(skip(client))]
 async fn build(
@@ -240,6 +242,7 @@ async fn build(
     listener: &str,
     arch: &str,
     format: &str,
+    agent: &str,
     sleep_secs: Option<u64>,
     wait: bool,
 ) -> Result<BuildOutcome, CliError> {
@@ -249,6 +252,7 @@ async fn build(
         "listener": listener,
         "arch": arch,
         "format": format,
+        "agent": agent,
     });
 
     if let Some(s) = sleep_secs {
@@ -465,6 +469,76 @@ mod tests {
         assert_eq!(row.id, "id1");
         assert_eq!(row.format, "dll");
         assert_eq!(row.arch, "x86_64");
+    }
+
+    // ── build sends agent field ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn build_sends_agent_field_in_request_body() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/payloads/build"))
+            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
+                "job_id": "test-job-1"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let cfg = crate::config::ResolvedConfig {
+            server: server.uri(),
+            token: "tok".to_owned(),
+            timeout: 5,
+            tls_mode: crate::config::TlsMode::SystemRoots,
+        };
+        let client = crate::client::ApiClient::new(&cfg).expect("client");
+
+        let result = build(&client, "http1", "x64", "exe", "phantom", None, false).await;
+        assert!(result.is_ok(), "build must succeed: {result:?}");
+
+        // Verify the request body contained the agent field.
+        let requests = server.received_requests().await.expect("requests");
+        assert_eq!(requests.len(), 1);
+        let body: serde_json::Value =
+            serde_json::from_slice(&requests[0].body).expect("parse body");
+        assert_eq!(body["agent"], "phantom", "request body must include agent field");
+        assert_eq!(body["listener"], "http1");
+        assert_eq!(body["arch"], "x64");
+        assert_eq!(body["format"], "exe");
+    }
+
+    #[tokio::test]
+    async fn build_sends_default_demon_agent() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/payloads/build"))
+            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
+                "job_id": "test-job-2"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let cfg = crate::config::ResolvedConfig {
+            server: server.uri(),
+            token: "tok".to_owned(),
+            timeout: 5,
+            tls_mode: crate::config::TlsMode::SystemRoots,
+        };
+        let client = crate::client::ApiClient::new(&cfg).expect("client");
+
+        let _ = build(&client, "http1", "x64", "exe", "demon", None, false).await;
+
+        let requests = server.received_requests().await.expect("requests");
+        let body: serde_json::Value =
+            serde_json::from_slice(&requests[0].body).expect("parse body");
+        assert_eq!(body["agent"], "demon", "default agent must be 'demon'");
     }
 
     // ── format validation ─────────────────────────────────────────────────────

@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1130 | 248 | 31 |
+| Tasks closed | 1130 | 248 | 32 |
 | Bugs filed against | 182 | 38 | 9 |
-| Bug rate (bugs/task) | 0.16 | 0.15 | 0.29 |
-| Quality score | 84% | 85% | 71% |
+| Bug rate (bugs/task) | 0.16 | 0.15 | 0.28 |
+| Quality score | 84% | 85% | 72% |
 
-*Bug rates: Claude 182/1130=0.1611→0.16, Codex 38/248=0.1532→0.15, Cursor 9/31=0.29*
+*Bug rates: Claude 182/1130=0.1611→0.16, Codex 38/248=0.1532→0.15, Cursor 9/32=0.2812→0.28*
 
 ## Violation Breakdown
 
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-02 18:34 — ec59f09f..778e0d25
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | No attributed task closes or new regressions in this range. |
+| Codex | 0 | 0 | No attributed task closes or new regressions in this range. |
+| Cursor | 1 | 0 | Closed `red-cell-c2-m7kqs` via `fix(teamserver): add heap_enc to DemonConfig test fixtures`. Reviewed `teamserver/src/payload_builder.rs`; the change correctly restores the missing `heap_enc` field in the affected test fixtures and introduces no new attributable defect. |
+
+Build: `cargo check --workspace` passed in a clean detached worktree at `778e0d25`. `cargo nextest run --workspace` was started in the same clean worktree and remained in progress during bookkeeping after rebuilding the workspace; no failures were observed in streamed output. `cargo clippy --workspace -- -D warnings` was started in a separate clean target directory and remained in progress during bookkeeping. `br list --status=in_progress` shows `red-cell-c2-ddng2`, which matches the new claim in this range. Existing open issue `red-cell-c2-lnnh6` duplicates the already-closed `red-cell-c2-m7kqs`, so no new bug was filed.
 
 ### Arch Review — 2026-04-02 18:01
 

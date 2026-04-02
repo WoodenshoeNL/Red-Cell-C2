@@ -1583,10 +1583,7 @@ fn pack_config(
     add_u32(&mut out, amsi_patch_value(optional_string(config, "Amsi/Etw Patch")));
 
     // ARC-04: heap encryption during sleep — default ON.
-    add_u32(
-        &mut out,
-        if optional_bool(config, "HeapEnc").unwrap_or(true) { 1 } else { 0 },
-    );
+    add_u32(&mut out, if optional_bool(config, "HeapEnc").unwrap_or(true) { 1 } else { 0 });
 
     match listener {
         ListenerConfig::Http(http) => pack_http_listener(&mut out, http)?,
@@ -4450,6 +4447,7 @@ mod tests {
                 init_secret: None,
                 trust_x_forwarded_for: false,
                 trusted_proxy_peers: Vec::new(),
+                heap_enc: true,
                 allow_legacy_ctr: false,
             },
             None,
@@ -5601,6 +5599,7 @@ mod tests {
                 init_secret: None,
                 trust_x_forwarded_for: false,
                 trusted_proxy_peers: Vec::new(),
+                heap_enc: true,
                 allow_legacy_ctr: false,
             },
             None,
@@ -5873,6 +5872,7 @@ mod tests {
                 init_secret: None,
                 trust_x_forwarded_for: false,
                 trusted_proxy_peers: Vec::new(),
+                heap_enc: true,
                 allow_legacy_ctr: false,
             },
             None,
@@ -6176,6 +6176,7 @@ mod tests {
                 init_secret: None,
                 trust_x_forwarded_for: false,
                 trusted_proxy_peers: Vec::new(),
+                heap_enc: true,
                 allow_legacy_ctr: false,
             },
         )?;
@@ -6208,6 +6209,7 @@ mod tests {
                 init_secret: None,
                 trust_x_forwarded_for: false,
                 trusted_proxy_peers: Vec::new(),
+                heap_enc: true,
                 allow_legacy_ctr: false,
             },
         )?;
@@ -6241,6 +6243,7 @@ mod tests {
                 init_secret: None,
                 trust_x_forwarded_for: false,
                 trusted_proxy_peers: Vec::new(),
+                heap_enc: true,
                 allow_legacy_ctr: false,
             },
         )?;
@@ -6430,6 +6433,7 @@ mod tests {
                 init_secret: None,
                 trust_x_forwarded_for: false,
                 trusted_proxy_peers: Vec::new(),
+                heap_enc: true,
                 allow_legacy_ctr: false,
             },
         )?;
@@ -6462,6 +6466,7 @@ mod tests {
                 init_secret: None,
                 trust_x_forwarded_for: false,
                 trusted_proxy_peers: Vec::new(),
+                heap_enc: true,
                 allow_legacy_ctr: false,
             },
         )?;
@@ -6489,6 +6494,7 @@ mod tests {
                 init_secret: None,
                 trust_x_forwarded_for: false,
                 trusted_proxy_peers: Vec::new(),
+                heap_enc: true,
                 allow_legacy_ctr: false,
             },
         )

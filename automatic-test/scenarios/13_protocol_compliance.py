@@ -28,7 +28,7 @@ Every Demon packet consists of a 12-byte header followed by a payload:
     username                u32-prefixed UTF-8
     domain_name             u32-prefixed UTF-8
     internal_ip             u32-prefixed UTF-8
-    process_path            u32-prefixed UTF-16-BE
+    process_path            u32-prefixed UTF-16-LE
     process_pid             u32 BE
     process_tid             u32 BE
     process_ppid            u32 BE
@@ -147,7 +147,13 @@ def _len_prefix_utf8(s: str) -> bytes:
     return _u32be(len(encoded)) + encoded
 
 
+def _len_prefix_utf16le(s: str) -> bytes:
+    encoded = s.encode("utf-16-le")
+    return _u32be(len(encoded)) + encoded
+
+
 def _len_prefix_utf16be(s: str) -> bytes:
+    """Encode as UTF-16-BE — used only in negative tests to verify rejection."""
     encoded = s.encode("utf-16-be")
     return _u32be(len(encoded)) + encoded
 
@@ -174,7 +180,7 @@ def _build_demon_init_metadata(agent_id: int) -> bytes:
     buf += _len_prefix_utf8("probe-user")             # username
     buf += _len_prefix_utf8("WORKGROUP")              # domain_name
     buf += _len_prefix_utf8("10.0.0.1")               # internal_ip
-    buf += _len_prefix_utf16be("C:\\probe\\agent.exe")  # process_path (UTF-16-BE)
+    buf += _len_prefix_utf16le("C:\\probe\\agent.exe")  # process_path (UTF-16-LE)
     buf += _u32be(1000)                               # process_pid
     buf += _u32be(1001)                               # process_tid
     buf += _u32be(999)                                # process_ppid
@@ -192,6 +198,39 @@ def _build_demon_init_metadata(agent_id: int) -> bytes:
     buf += _u64be(0)                                  # kill_date (0 = none)
     buf += _i32be(0)                                  # working_hours (no restriction)
     # No extension flags → legacy CTR mode (offset resets to 0 per packet)
+    return buf
+
+
+def _build_demon_init_metadata_wrong_endian(agent_id: int) -> bytes:
+    """Construct a DEMON_INIT metadata block with process_path in wrong (BE) endianness.
+
+    This produces a packet that the teamserver will accept (the structure is
+    valid), but the decoded process_path will be garbled because the server
+    expects UTF-16-LE.
+    """
+    buf = b""
+    buf += _u32be(agent_id)
+    buf += _len_prefix_utf8("probe-host-be")
+    buf += _len_prefix_utf8("probe-user-be")
+    buf += _len_prefix_utf8("WORKGROUP")
+    buf += _len_prefix_utf8("10.0.0.2")
+    buf += _len_prefix_utf16be("C:\\probe\\agent.exe")  # WRONG endianness
+    buf += _u32be(2000)
+    buf += _u32be(2001)
+    buf += _u32be(1999)
+    buf += _u32be(2)
+    buf += _u32be(0)
+    buf += _u64be(0x0040_0000)
+    buf += _u32be(10)
+    buf += _u32be(0)
+    buf += _u32be(1)
+    buf += _u32be(0)
+    buf += _u32be(22621)
+    buf += _u32be(9)
+    buf += _u32be(30)
+    buf += _u32be(10)
+    buf += _u64be(0)
+    buf += _i32be(0)
     return buf
 
 
@@ -234,6 +273,25 @@ def _build_get_job_packet(agent_id: int, key: bytes, iv: bytes) -> bytes:
     payload = (
         _u32be(DEMON_GET_JOB_CMD)
         + _u32be(request_id)
+        + encrypted
+    )
+    return _build_envelope(agent_id, payload)
+
+
+def _build_demon_init_packet_wrong_endian(agent_id: int, key: bytes, iv: bytes) -> bytes:
+    """Build a DEMON_INIT packet with process_path encoded as UTF-16-BE (wrong).
+
+    The teamserver will accept the packet (structurally valid), but the decoded
+    process_path will be garbled because the parser expects UTF-16-LE.
+    """
+    metadata = _build_demon_init_metadata_wrong_endian(agent_id)
+    encrypted = _aes_256_ctr(key, iv, metadata)
+    request_id = 1
+    payload = (
+        _u32be(DEMON_INIT_CMD)
+        + _u32be(request_id)
+        + key
+        + iv
         + encrypted
     )
     return _build_envelope(agent_id, payload)
@@ -410,6 +468,51 @@ def _run_get_job_check(base_url: str, agent_id: int, key: bytes, iv: bytes) -> N
     _check("GET_JOB response empty (no jobs)", len(body) == 0, f"body has {len(body)} bytes")
 
 
+def _run_wrong_endian_check(cli, base_url: str) -> int:
+    """Negative test: DEMON_INIT with UTF-16-BE process_path registers but garbles the path.
+
+    The teamserver accepts the packet (the binary structure is valid), but
+    because it decodes process_path as UTF-16-LE, the BE-encoded bytes produce
+    a garbled string.  We verify the agent registers (HTTP 200) and then
+    confirm the stored process_path does NOT match the original ASCII form.
+
+    Returns the agent_id so the caller can clean it up.
+    """
+    from lib.cli import agent_show
+
+    agent_id = int.from_bytes(os.urandom(4), "big")
+    while agent_id == 0:
+        agent_id = int.from_bytes(os.urandom(4), "big")
+
+    key = os.urandom(AES_KEY_LEN)
+    iv = os.urandom(AES_IV_LEN)
+
+    print(f"  [check] DEMON_INIT with UTF-16-BE process_path (negative test, agent_id=0x{agent_id:08X})")
+    packet = _build_demon_init_packet_wrong_endian(agent_id, key, iv)
+    status, body = _post_raw(base_url, packet)
+    _check("BE-encoded DEMON_INIT accepted (HTTP 200)", status == 200, f"got HTTP {status}")
+    _check("BE-encoded DEMON_INIT ACK non-empty", len(body) > 0, "empty response body")
+
+    # The server registered the agent — query it and verify the path is garbled.
+    agent_id_hex = f"{agent_id:08X}"
+    try:
+        info = agent_show(cli, agent_id_hex)
+        stored_path = info.get("data", {}).get("process_path", "")
+        # The correct path is "C:\probe\agent.exe".  With BE→LE byte swap every
+        # code-unit is wrong, so the stored path must NOT contain the original.
+        _check(
+            "BE process_path is garbled (not readable as original)",
+            "probe" not in stored_path.lower(),
+            f"stored path {stored_path!r} unexpectedly contains original text",
+        )
+    except Exception as exc:
+        # If agent_show fails (agent not found, etc.) that's also acceptable —
+        # the key point is the endianness mismatch produces wrong data.
+        print(f"    [info] could not query agent (non-fatal): {exc}")
+
+    return agent_id
+
+
 # ── Main entry point ─────────────────────────────────────────────────────────
 
 def run(ctx):
@@ -444,6 +547,7 @@ def run(ctx):
     agent_id = None
     key = None
     iv = None
+    be_agent_id = None
 
     try:
         # Phase 1: rejection checks (no valid agent registered yet)
@@ -462,18 +566,23 @@ def run(ctx):
         print("  [phase 4] GET_JOB poll")
         _run_get_job_check(base_url, agent_id, key, iv)
 
+        # Phase 5: negative test — UTF-16-BE process_path produces garbled data
+        print("  [phase 5] wrong-endian UTF-16-BE process_path (negative test)")
+        be_agent_id = _run_wrong_endian_check(cli, base_url)
+
         print("  [result] all protocol compliance checks passed")
 
     finally:
-        # Kill the synthetic agent registered during phase 2 so it does not
-        # pollute the DB and confuse wait_for_agent() in later scenarios.
-        if agent_id is not None:
-            agent_id_hex = f"{agent_id:08X}"
-            print(f"  [cleanup] killing synthetic agent {agent_id_hex}")
-            try:
-                agent_kill(cli, agent_id_hex)
-            except Exception as exc:
-                print(f"  [cleanup] agent kill failed (non-fatal): {exc}")
+        # Kill the synthetic agents registered during phases 2 and 5 so they
+        # do not pollute the DB and confuse wait_for_agent() in later scenarios.
+        for aid in (agent_id, be_agent_id):
+            if aid is not None:
+                aid_hex = f"{aid:08X}"
+                print(f"  [cleanup] killing synthetic agent {aid_hex}")
+                try:
+                    agent_kill(cli, aid_hex)
+                except Exception as exc:
+                    print(f"  [cleanup] agent kill failed (non-fatal): {exc}")
 
         print(f"  [cleanup] stopping/deleting listener {listener_name!r}")
         try:

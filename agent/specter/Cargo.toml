@@ -54,6 +54,9 @@ windows-sys = { version = "0.59", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+[build-dependencies]
+cc = "1"
+
 [dev-dependencies]
 rcgen = "0.13"
 axum = { version = "0.8.8", features = ["ws"] }

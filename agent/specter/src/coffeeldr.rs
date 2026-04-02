@@ -243,24 +243,28 @@ unsafe extern "C" fn beacon_output(_cb_type: i32, data: *const u8, len: i32) {
     });
 }
 
-/// `void BeaconPrintf(int type, char *fmt, ...)`
-///
-/// Simplified stub: captures the format string verbatim (variadic
-/// formatting is not available on stable Rust).  On x86-64 Windows the
-/// caller manages the stack, so ignoring extra arguments is safe.
-#[allow(dead_code, unsafe_code)]
-unsafe extern "C" fn beacon_printf(_cb_type: i32, fmt: *const u8) {
-    if fmt.is_null() {
+// The actual `BeaconPrintf` entry point is implemented in C
+// (`csrc/bof_printf.c`) because Rust stable does not support defining
+// C-variadic functions.  The C shim calls `vsnprintf` and then invokes
+// `bof_printf_callback` below to append the formatted result to the
+// thread-local BOF output buffer.
+//
+// The symbol `bof_beacon_printf` is resolved by the COFF loader in
+// `resolve_beacon_api` when a BOF imports `BeaconPrintf`.
+#[allow(unsafe_code)]
+unsafe extern "C" {
+    fn bof_beacon_printf(cb_type: i32, fmt: *const u8, ...);
+}
+
+/// Callback invoked from the C `bof_beacon_printf` shim after it has
+/// formatted the variadic arguments with `vsnprintf`.
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+unsafe extern "C" fn bof_printf_callback(data: *const u8, len: i32) {
+    if data.is_null() || len <= 0 {
         return;
     }
-    // Walk until NUL to find the format string length.
-    let mut len = 0usize;
-    unsafe {
-        while *fmt.add(len) != 0 {
-            len += 1;
-        }
-    }
-    let slice = unsafe { std::slice::from_raw_parts(fmt, len) };
+    let slice = unsafe { std::slice::from_raw_parts(data, len as usize) };
     BOF_OUTPUT_TLS.with(|cell| {
         let ptr = cell.get();
         if !ptr.is_null() {
@@ -682,7 +686,7 @@ fn resolve_beacon_api(sym_name: &str) -> Option<u64> {
         "BeaconDataLength" => beacon_data_length as *const () as u64,
         // Output APIs
         "BeaconOutput" => beacon_output as *const () as u64,
-        "BeaconPrintf" => beacon_printf as *const () as u64,
+        "BeaconPrintf" => bof_beacon_printf as *const () as u64,
         // Spawn/inject APIs
         "BeaconGetSpawnTo" => beacon_get_spawn_to as *const () as u64,
         "BeaconSpawnTemporaryProcess" => beacon_spawn_temporary_process as *const () as u64,
@@ -1927,16 +1931,62 @@ mod tests {
 
     #[test]
     #[allow(unsafe_code)]
-    fn beacon_printf_captures_format_string() {
+    fn beacon_printf_captures_plain_string() {
         let mut buf: Vec<u8> = Vec::new();
         BOF_OUTPUT_TLS.with(|cell| cell.set(&mut buf as *mut Vec<u8>));
 
         let fmt = b"test output\0";
-        unsafe { beacon_printf(0, fmt.as_ptr()) };
+        unsafe { bof_beacon_printf(0, fmt.as_ptr()) };
 
         BOF_OUTPUT_TLS.with(|cell| cell.set(std::ptr::null_mut()));
 
         assert_eq!(buf, b"test output");
+    }
+
+    /// Regression test: `BeaconPrintf("pid=%d", pid)` must produce
+    /// the formatted value, not the literal `%d`.
+    #[test]
+    #[allow(unsafe_code)]
+    fn beacon_printf_formats_int_placeholder() {
+        let mut buf: Vec<u8> = Vec::new();
+        BOF_OUTPUT_TLS.with(|cell| cell.set(&mut buf as *mut Vec<u8>));
+
+        let fmt = b"pid=%d\0";
+        unsafe { bof_beacon_printf(0, fmt.as_ptr(), 42i32) };
+
+        BOF_OUTPUT_TLS.with(|cell| cell.set(std::ptr::null_mut()));
+        assert_eq!(std::str::from_utf8(&buf).ok(), Some("pid=42"));
+    }
+
+    /// Regression test: `BeaconPrintf("name=%s addr=0x%x", name, addr)`.
+    #[test]
+    #[allow(unsafe_code)]
+    fn beacon_printf_formats_string_and_hex() {
+        let mut buf: Vec<u8> = Vec::new();
+        BOF_OUTPUT_TLS.with(|cell| cell.set(&mut buf as *mut Vec<u8>));
+
+        let fmt = b"name=%s addr=0x%x\0";
+        let name = b"explorer.exe\0";
+        unsafe {
+            bof_beacon_printf(0, fmt.as_ptr(), name.as_ptr(), 0xDEADu32);
+        }
+
+        BOF_OUTPUT_TLS.with(|cell| cell.set(std::ptr::null_mut()));
+        assert_eq!(std::str::from_utf8(&buf).ok(), Some("name=explorer.exe addr=0xdead"),);
+    }
+
+    /// Regression test: `%%` literal percent.
+    #[test]
+    #[allow(unsafe_code)]
+    fn beacon_printf_formats_percent_literal() {
+        let mut buf: Vec<u8> = Vec::new();
+        BOF_OUTPUT_TLS.with(|cell| cell.set(&mut buf as *mut Vec<u8>));
+
+        let fmt = b"100%%\0";
+        unsafe { bof_beacon_printf(0, fmt.as_ptr()) };
+
+        BOF_OUTPUT_TLS.with(|cell| cell.set(std::ptr::null_mut()));
+        assert_eq!(std::str::from_utf8(&buf).ok(), Some("100%"));
     }
 
     // ── toWideChar tests ───────────────────────────────────────────────

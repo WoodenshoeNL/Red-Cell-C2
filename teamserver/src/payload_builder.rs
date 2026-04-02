@@ -565,7 +565,7 @@ impl PayloadBuilderService {
                 .await;
         }
 
-        let config = merged_request_config(&request.config, &self.inner.default_demon)?;
+        let config = merged_request_config(&request.config, agent_name, &self.inner.default_demon)?;
 
         // Compute the packed config bytes that will be embedded in the compiled
         // binary. Using these as part of the cache key ensures that any change
@@ -1220,6 +1220,7 @@ fn verify_tool_version_with(
 
 fn merged_request_config(
     input: &str,
+    agent_name: &str,
     defaults: &DemonConfig,
 ) -> Result<Map<String, Value>, PayloadBuildError> {
     let mut config = match serde_json::from_str::<Value>(input)? {
@@ -1237,7 +1238,15 @@ fn merged_request_config(
     insert_default_bool(&mut config, "Stack Duplication", defaults.stack_duplication);
     insert_default_string(&mut config, "Sleep Technique", defaults.sleep_technique.clone());
     insert_default_string(&mut config, "Proxy Loading", defaults.proxy_loading.clone());
-    insert_default_string(&mut config, "Amsi/Etw Patch", defaults.amsi_etw_patching.clone());
+    // ARC-01: Archon defaults to process-wide memory patching when the profile
+    // does not specify AmsiEtw.  Demon has no persistent patch and keeps the
+    // previous default of none (0).
+    let amsi_default = if agent_name == "archon" {
+        defaults.amsi_etw_patching.clone().or_else(|| Some("patch".to_owned()))
+    } else {
+        defaults.amsi_etw_patching.clone()
+    };
+    insert_default_string(&mut config, "Amsi/Etw Patch", amsi_default);
     if let Some(injection) = &defaults.injection {
         let entry =
             config.entry("Injection".to_owned()).or_insert_with(|| Value::Object(Map::new()));
@@ -2085,8 +2094,13 @@ fn proxy_loading_value(value: Option<&str>) -> u32 {
 
 fn amsi_patch_value(value: Option<&str>) -> u32 {
     match value.unwrap_or_default() {
+        // Legacy GUI values (Havoc-compatible)
         "Hardware breakpoints" => 1,
         "Memory" => 2,
+        // ARC-01 canonical profile keys: AmsiEtw = 'hwbp' | 'patch' | 'none'
+        "hwbp" => 1,
+        "patch" => 2,
+        "none" => 0,
         _ => 0,
     }
 }
@@ -2588,6 +2602,7 @@ mod tests {
     fn merged_request_config_applies_profile_defaults() -> Result<(), Box<dyn std::error::Error>> {
         let config = merged_request_config(
             r#"{"Injection":{"Alloc":"Win32","Execute":"Win32"}}"#,
+            "demon",
             &DemonConfig {
                 sleep: Some(10),
                 jitter: Some(25),
@@ -5859,8 +5874,13 @@ mod tests {
 
     #[test]
     fn amsi_patch_value_maps_known_methods() {
+        // Legacy value strings (backward compat)
         assert_eq!(amsi_patch_value(Some("Hardware breakpoints")), 1);
         assert_eq!(amsi_patch_value(Some("Memory")), 2);
+        // ARC-01 canonical profile values
+        assert_eq!(amsi_patch_value(Some("hwbp")), 1);
+        assert_eq!(amsi_patch_value(Some("patch")), 2);
+        assert_eq!(amsi_patch_value(Some("none")), 0);
     }
 
     #[test]
@@ -5868,6 +5888,104 @@ mod tests {
         assert_eq!(amsi_patch_value(None), 0);
         assert_eq!(amsi_patch_value(Some("")), 0);
         assert_eq!(amsi_patch_value(Some("unknown")), 0);
+    }
+
+    #[test]
+    fn merged_request_config_archon_defaults_amsi_to_patch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // When AmsiEtw is absent from both request and profile, Archon
+        // should default to "patch" (AMSIETW_PATCH_MEMORY = 2).
+        let config = merged_request_config(
+            r#"{}"#,
+            "archon",
+            &DemonConfig {
+                sleep: None,
+                jitter: None,
+                indirect_syscall: false,
+                stack_duplication: false,
+                sleep_technique: None,
+                proxy_loading: None,
+                amsi_etw_patching: None,
+                injection: None,
+                dotnet_name_pipe: None,
+                binary: None,
+                init_secret: None,
+                trust_x_forwarded_for: false,
+                trusted_proxy_peers: Vec::new(),
+                allow_legacy_ctr: false,
+            },
+        )?;
+        assert_eq!(
+            config.get("Amsi/Etw Patch"),
+            Some(&Value::String("patch".to_owned())),
+            "Archon without an explicit AmsiEtw key should default to 'patch'"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn merged_request_config_archon_profile_amsi_overrides_default()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // An explicit profile value must take precedence over the Archon default.
+        let config = merged_request_config(
+            r#"{}"#,
+            "archon",
+            &DemonConfig {
+                sleep: None,
+                jitter: None,
+                indirect_syscall: false,
+                stack_duplication: false,
+                sleep_technique: None,
+                proxy_loading: None,
+                amsi_etw_patching: Some("hwbp".to_owned()),
+                injection: None,
+                dotnet_name_pipe: None,
+                binary: None,
+                init_secret: None,
+                trust_x_forwarded_for: false,
+                trusted_proxy_peers: Vec::new(),
+                allow_legacy_ctr: false,
+            },
+        )?;
+        assert_eq!(
+            config.get("Amsi/Etw Patch"),
+            Some(&Value::String("hwbp".to_owned())),
+            "explicit profile AmsiEtw must win over the Archon default"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn merged_request_config_demon_amsi_stays_none_by_default()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // For Demon, absence of AmsiEtw in the profile should leave it unset
+        // (serialises to 0 = AMSIETW_PATCH_NONE in the agent config bytes).
+        let config = merged_request_config(
+            r#"{}"#,
+            "demon",
+            &DemonConfig {
+                sleep: None,
+                jitter: None,
+                indirect_syscall: false,
+                stack_duplication: false,
+                sleep_technique: None,
+                proxy_loading: None,
+                amsi_etw_patching: None,
+                injection: None,
+                dotnet_name_pipe: None,
+                binary: None,
+                init_secret: None,
+                trust_x_forwarded_for: false,
+                trusted_proxy_peers: Vec::new(),
+                allow_legacy_ctr: false,
+            },
+        )?;
+        assert_eq!(
+            config.get("Amsi/Etw Patch"),
+            None,
+            "Demon without an explicit AmsiEtw key should leave the field absent"
+        );
+        Ok(())
     }
 
     // ── injection_mode tests ──────────────────────────────────────────────
@@ -6033,6 +6151,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let config = merged_request_config(
             r#"{"Sleep":"20","Jitter":"50","Injection":{"Alloc":"Win32","Execute":"Win32"}}"#,
+            "demon",
             &DemonConfig {
                 sleep: Some(5),
                 jitter: Some(10),
@@ -6061,6 +6180,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let config = merged_request_config(
             r#"{"Injection":{"Alloc":"Win32","Execute":"Win32","Spawn64":"custom64.exe","Spawn32":"custom32.exe"}}"#,
+            "demon",
             &DemonConfig {
                 sleep: None,
                 jitter: None,
@@ -6090,6 +6210,7 @@ mod tests {
     fn merged_request_config_rejects_non_object_input() {
         let err = merged_request_config(
             r#""just a string""#,
+            "demon",
             &DemonConfig {
                 sleep: None,
                 jitter: None,

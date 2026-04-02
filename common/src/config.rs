@@ -783,7 +783,10 @@ pub struct DemonConfig {
     #[serde(rename = "ProxyLoading", default)]
     pub proxy_loading: Option<String>,
     /// AMSI/ETW patching mode.
-    #[serde(rename = "AmsiEtwPatching", default)]
+    /// Accepts canonical ARC-01 values: "patch" | "hwbp" | "none".
+    /// Legacy GUI values "Memory" and "Hardware breakpoints" are also accepted.
+    /// Profile key: `AmsiEtw` (ARC-01 canonical) or `AmsiEtwPatching` (legacy).
+    #[serde(rename = "AmsiEtwPatching", alias = "AmsiEtw", default)]
     pub amsi_etw_patching: Option<String>,
     /// Process injection defaults.
     #[serde(rename = "Injection", default)]
@@ -3188,5 +3191,43 @@ mod tests {
         let debug = format!("{config:?}");
 
         assert!(debug.contains("init_secret: None"));
+    }
+
+    #[test]
+    fn demon_config_amsi_etw_canonical_alias_deserialises() {
+        // ARC-01: the profile may use `AmsiEtw` (canonical) or `AmsiEtwPatching` (legacy).
+        // Both must deserialise to the same `amsi_etw_patching` field.
+        const PROFILE_CANONICAL: &str = r#"
+            Teamserver {
+              Host = "0.0.0.0"
+              Port = 40056
+            }
+            Operators {
+              user "test" { Password = "test" }
+            }
+            Demon {
+              AmsiEtw = "patch"
+            }
+        "#;
+        const PROFILE_LEGACY: &str = r#"
+            Teamserver {
+              Host = "0.0.0.0"
+              Port = 40056
+            }
+            Operators {
+              user "test" { Password = "test" }
+            }
+            Demon {
+              AmsiEtwPatching = "hwbp"
+            }
+        "#;
+
+        let canonical =
+            Profile::parse(PROFILE_CANONICAL).expect("canonical AmsiEtw key should deserialise");
+        let legacy =
+            Profile::parse(PROFILE_LEGACY).expect("legacy AmsiEtwPatching key should deserialise");
+
+        assert_eq!(canonical.demon.amsi_etw_patching.as_deref(), Some("patch"));
+        assert_eq!(legacy.demon.amsi_etw_patching.as_deref(), Some("hwbp"));
     }
 }

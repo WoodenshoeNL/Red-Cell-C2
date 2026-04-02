@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1135 | 248 | 33 |
-| Bugs filed against | 182 | 38 | 9 |
+| Tasks closed | 1138 | 248 | 33 |
+| Bugs filed against | 183 | 38 | 9 |
 | Bug rate (bugs/task) | 0.16 | 0.15 | 0.27 |
 | Quality score | 84% | 85% | 73% |
 
-*Bug rates: Claude 182/1135=0.1604→0.16, Codex 38/248=0.1532→0.15, Cursor 9/33=0.2727→0.27*
+*Bug rates: Claude 183/1138=0.1608→0.16, Codex 38/248=0.1532→0.15, Cursor 9/33=0.2727→0.27*
 
 ## Violation Breakdown
 
@@ -32,7 +32,7 @@ Each loop run updates the running totals and appends a review entry.
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 3 | 5 | 0 |
 | Correctness / pagination | 64 | 8 | 1 |
-| Workflow / close-hygiene | 29 | 0 | 0 |
+| Workflow / close-hygiene | 30 | 0 | 0 |
 | Code reuse / duplication | 10 | 0 | 0 |
 
 ---
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-03 00:35 — 3fd96d08..d7ba4d77
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 3 | 1 | Closed: `red-cell-c2-ojndl`, `red-cell-c2-m4f50`, `red-cell-c2-j865o`. Filed `red-cell-c2-lul3c` because interrupted commit `eda586ac` added a compiled `agent/archon/tests/test_doh_transport` binary to git. The reviewed `autotest` and `teamserver` fixes otherwise look correct. |
+| Codex | 0 | 0 | No attributed task closes or regressions in this range. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check --workspace` passed in an isolated target dir. `cargo clippy --workspace -- -D warnings` passed in an isolated target dir. `cargo nextest run --workspace` was started in an isolated target dir and was still compiling/running during bookkeeping with no failures observed in streamed output. `br list --status=in_progress` shows only `red-cell-c2-q459s`, which matches the new claim in this range.
 
 ### QA Review — 2026-04-02 18:34 — ec59f09f..778e0d25
 

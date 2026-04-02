@@ -342,12 +342,12 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) 
             Ok(data) => match print_success(fmt, &data) {
                 Ok(()) => EXIT_SUCCESS,
                 Err(e) => {
-                    print_error(&e);
+                    print_error(&e).ok();
                     e.exit_code()
                 }
             },
             Err(e) => {
-                print_error(&e);
+                print_error(&e).ok();
                 e.exit_code()
             }
         },
@@ -356,12 +356,12 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) 
             Ok(data) => match print_success(fmt, &data) {
                 Ok(()) => EXIT_SUCCESS,
                 Err(e) => {
-                    print_error(&e);
+                    print_error(&e).ok();
                     e.exit_code()
                 }
             },
             Err(e) => {
-                print_error(&e);
+                print_error(&e).ok();
                 e.exit_code()
             }
         },
@@ -373,12 +373,12 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) 
                     Ok(data) => match print_success(fmt, &data) {
                         Ok(()) => EXIT_SUCCESS,
                         Err(e) => {
-                            print_error(&e);
+                            print_error(&e).ok();
                             e.exit_code()
                         }
                     },
                     Err(e) => {
-                        print_error(&e);
+                        print_error(&e).ok();
                         e.exit_code()
                     }
                 }
@@ -387,12 +387,12 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) 
                     Ok(data) => match print_success(fmt, &data) {
                         Ok(()) => EXIT_SUCCESS,
                         Err(e) => {
-                            print_error(&e);
+                            print_error(&e).ok();
                             e.exit_code()
                         }
                     },
                     Err(e) => {
-                        print_error(&e);
+                        print_error(&e).ok();
                         e.exit_code()
                     }
                 }
@@ -407,12 +407,12 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) 
                     Ok(data) => match print_success(fmt, &data) {
                         Ok(()) => EXIT_SUCCESS,
                         Err(e) => {
-                            print_error(&e);
+                            print_error(&e).ok();
                             e.exit_code()
                         }
                     },
                     Err(e) => {
-                        print_error(&e);
+                        print_error(&e).ok();
                         e.exit_code()
                     }
                 }
@@ -423,12 +423,12 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) 
             Ok(data) => match print_success(fmt, &data) {
                 Ok(()) => EXIT_SUCCESS,
                 Err(e) => {
-                    print_error(&e);
+                    print_error(&e).ok();
                     e.exit_code()
                 }
             },
             Err(e) => {
-                print_error(&e);
+                print_error(&e).ok();
                 e.exit_code()
             }
         },
@@ -437,12 +437,12 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) 
             Ok(data) => match print_success(fmt, &data) {
                 Ok(()) => EXIT_SUCCESS,
                 Err(e) => {
-                    print_error(&e);
+                    print_error(&e).ok();
                     e.exit_code()
                 }
             },
             Err(e) => {
-                print_error(&e);
+                print_error(&e).ok();
                 e.exit_code()
             }
         },
@@ -451,12 +451,12 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) 
             Ok(data) => match print_success(fmt, &data) {
                 Ok(()) => EXIT_SUCCESS,
                 Err(e) => {
-                    print_error(&e);
+                    print_error(&e).ok();
                     e.exit_code()
                 }
             },
             Err(e) => {
-                print_error(&e);
+                print_error(&e).ok();
                 e.exit_code()
             }
         },
@@ -662,14 +662,19 @@ async fn watch_output(client: &ApiClient, fmt: &OutputFormat, id: &str, since: O
 
         match poll_result {
             Err(e) => {
-                print_error(&e);
+                print_error(&e).ok();
                 return e.exit_code();
             }
             Ok(entries) => {
                 for entry in &entries {
                     // Advance the numeric cursor so next poll only fetches newer entries.
                     cursor = Some(entry.entry_id);
-                    print_stream_entry(fmt, entry, &render_output_stream_line(entry));
+                    if let Err(e) =
+                        print_stream_entry(fmt, entry, &render_output_stream_line(entry))
+                    {
+                        print_error(&e).ok();
+                        return e.exit_code();
+                    }
                 }
             }
         }
@@ -1505,7 +1510,8 @@ mod tests {
             &OutputFormat::Json,
             &entry,
             &text_line,
-        );
+        )
+        .expect("no write error");
 
         let line = String::from_utf8(out).expect("utf-8");
         let v: serde_json::Value = serde_json::from_str(line.trim()).expect("single JSON line");
@@ -1545,7 +1551,8 @@ mod tests {
             &OutputFormat::Text,
             &entry,
             &text_line,
-        );
+        )
+        .expect("no write error");
 
         let line = String::from_utf8(out).expect("utf-8");
         assert_eq!(line.trim_end(), text_line);

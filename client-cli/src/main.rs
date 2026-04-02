@@ -1,3 +1,4 @@
+use std::io::Write as _;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
@@ -621,19 +622,22 @@ fn handle_help(command: Option<&str>) -> i32 {
     let mut root = Cli::command();
     match command {
         None => {
-            root.print_help().ok();
-            println!();
+            if root.print_help().is_err() || writeln!(std::io::stdout()).is_err() {
+                return EXIT_GENERAL;
+            }
             EXIT_SUCCESS
         }
         Some(name) => {
             if let Some(sub) = root.find_subcommand_mut(name) {
-                sub.print_long_help().ok();
-                println!();
+                if sub.print_long_help().is_err() || writeln!(std::io::stdout()).is_err() {
+                    return EXIT_GENERAL;
+                }
                 EXIT_SUCCESS
             } else {
-                output::print_error(&CliError::InvalidArgs(format!("unknown command '{name}'")));
+                output::print_error(&CliError::InvalidArgs(format!("unknown command '{name}'")))
+                    .ok();
                 root.print_help().ok();
-                println!();
+                writeln!(std::io::stdout()).ok();
                 EXIT_GENERAL
             }
         }
@@ -653,9 +657,8 @@ fn main() {
     // Bare invocation: print help and exit 0.
     if cli.command.is_none() {
         use clap::CommandFactory;
-        Cli::command().print_help().ok();
-        println!();
-        std::process::exit(EXIT_SUCCESS);
+        let ok = Cli::command().print_help().is_ok() && writeln!(std::io::stdout()).is_ok();
+        std::process::exit(if ok { EXIT_SUCCESS } else { EXIT_GENERAL });
     }
 
     // `help [command]` doesn't need a server or token — handle it before the
@@ -668,7 +671,8 @@ fn main() {
     let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
         Ok(rt) => rt,
         Err(e) => {
-            output::print_error(&CliError::General(format!("failed to build async runtime: {e}")));
+            output::print_error(&CliError::General(format!("failed to build async runtime: {e}")))
+                .ok();
             std::process::exit(error::EXIT_GENERAL);
         }
     };
@@ -695,7 +699,7 @@ async fn dispatch(cli: Cli) -> i32 {
         Ok(cfg) => cfg,
         Err(e) => {
             let err: CliError = e.into();
-            output::print_error(&err);
+            output::print_error(&err).ok();
             return err.exit_code();
         }
     };
@@ -704,7 +708,7 @@ async fn dispatch(cli: Cli) -> i32 {
     let api_client = match client::ApiClient::new(&resolved) {
         Ok(c) => c,
         Err(e) => {
-            output::print_error(&e);
+            output::print_error(&e).ok();
             return e.exit_code();
         }
     };
@@ -719,12 +723,12 @@ async fn dispatch(cli: Cli) -> i32 {
             Ok(data) => match output::print_success(&fmt, &data) {
                 Ok(()) => EXIT_SUCCESS,
                 Err(e) => {
-                    output::print_error(&e);
+                    output::print_error(&e).ok();
                     e.exit_code()
                 }
             },
             Err(e) => {
-                output::print_error(&e);
+                output::print_error(&e).ok();
                 e.exit_code()
             }
         },

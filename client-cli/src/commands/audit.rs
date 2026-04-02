@@ -105,12 +105,12 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AuditCommands) 
                 Ok(data) => match print_success(fmt, &data) {
                     Ok(()) => EXIT_SUCCESS,
                     Err(e) => {
-                        print_error(&e);
+                        print_error(&e).ok();
                         e.exit_code()
                     }
                 },
                 Err(e) => {
-                    print_error(&e);
+                    print_error(&e).ok();
                     e.exit_code()
                 }
             }
@@ -124,12 +124,12 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AuditCommands) 
                     Ok(data) => match print_success(fmt, &data) {
                         Ok(()) => EXIT_SUCCESS,
                         Err(e) => {
-                            print_error(&e);
+                            print_error(&e).ok();
                             e.exit_code()
                         }
                     },
                     Err(e) => {
-                        print_error(&e);
+                        print_error(&e).ok();
                         e.exit_code()
                     }
                 }
@@ -198,13 +198,16 @@ async fn tail_follow(client: &ApiClient, fmt: &OutputFormat) -> i32 {
 
     let mut cursor = match initial_result {
         Err(e) => {
-            print_error(&e);
+            print_error(&e).ok();
             return e.exit_code();
         }
         Ok(entries) => {
             // Print existing entries the same way as a plain `log tail`.
             for entry in &entries {
-                print_entry_line(fmt, entry);
+                if let Err(e) = print_entry_line(fmt, entry) {
+                    print_error(&e).ok();
+                    return e.exit_code();
+                }
             }
             FollowCursor::from_printed_entries(&entries)
         }
@@ -225,12 +228,15 @@ async fn tail_follow(client: &ApiClient, fmt: &OutputFormat) -> i32 {
 
         match poll_result {
             Err(e) => {
-                print_error(&e);
+                print_error(&e).ok();
                 return e.exit_code();
             }
             Ok(entries) => {
                 for entry in cursor.drain_new_entries(&entries) {
-                    print_entry_line(fmt, entry);
+                    if let Err(e) = print_entry_line(fmt, entry) {
+                        print_error(&e).ok();
+                        return e.exit_code();
+                    }
                 }
             }
         }
@@ -242,7 +248,7 @@ async fn tail_follow(client: &ApiClient, fmt: &OutputFormat) -> i32 {
 /// In JSON mode emits `{"ok": true, "data": <entry>}` — the same envelope as
 /// every other command — so that streaming output is consistent with bulk
 /// responses.  In text mode emits a human-readable one-line summary.
-fn print_entry_line(fmt: &OutputFormat, entry: &AuditEntry) {
+fn print_entry_line(fmt: &OutputFormat, entry: &AuditEntry) -> Result<(), CliError> {
     let text_line = format!(
         "[{}]  {:20}  {:16}  agent={}  {}  [{}]",
         entry.ts,
@@ -252,7 +258,7 @@ fn print_entry_line(fmt: &OutputFormat, entry: &AuditEntry) {
         entry.detail.as_deref().unwrap_or(""),
         entry.result_status,
     );
-    print_stream_entry(fmt, entry, &text_line);
+    print_stream_entry(fmt, entry, &text_line)
 }
 
 /// Follow-mode state for the inclusive `since` cursor exposed by the server.
@@ -634,7 +640,8 @@ mod tests {
             &OutputFormat::Json,
             &entry,
             &text,
-        );
+        )
+        .expect("no write error");
 
         let line = String::from_utf8(out).expect("utf-8");
         let v: serde_json::Value = serde_json::from_str(line.trim()).expect("single JSON line");
@@ -660,7 +667,8 @@ mod tests {
             &OutputFormat::Json,
             &entry,
             "ignored",
-        );
+        )
+        .expect("no write error");
 
         let line = String::from_utf8(out).expect("utf-8");
         let v: serde_json::Value = serde_json::from_str(line.trim()).expect("valid JSON");
@@ -690,7 +698,8 @@ mod tests {
             &OutputFormat::Text,
             &entry,
             &text_line,
-        );
+        )
+        .expect("no write error");
 
         let line = String::from_utf8(out).expect("utf-8");
         assert!(line.contains("alice"), "should contain operator");

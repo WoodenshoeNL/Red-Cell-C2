@@ -129,12 +129,12 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: OperatorCommand
             Ok(data) => match print_success(fmt, &data) {
                 Ok(()) => EXIT_SUCCESS,
                 Err(e) => {
-                    print_error(&e);
+                    print_error(&e).ok();
                     e.exit_code()
                 }
             },
             Err(e) => {
-                print_error(&e);
+                print_error(&e).ok();
                 e.exit_code()
             }
         },
@@ -144,12 +144,12 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: OperatorCommand
                 Ok(result) => match print_success(fmt, &result) {
                     Ok(()) => EXIT_SUCCESS,
                     Err(e) => {
-                        print_error(&e);
+                        print_error(&e).ok();
                         e.exit_code()
                     }
                 },
                 Err(e) => {
-                    print_error(&e);
+                    print_error(&e).ok();
                     e.exit_code()
                 }
             }
@@ -159,12 +159,12 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: OperatorCommand
             Ok(result) => match print_success(fmt, &result) {
                 Ok(()) => EXIT_SUCCESS,
                 Err(e) => {
-                    print_error(&e);
+                    print_error(&e).ok();
                     e.exit_code()
                 }
             },
             Err(e) => {
-                print_error(&e);
+                print_error(&e).ok();
                 e.exit_code()
             }
         },
@@ -174,12 +174,12 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: OperatorCommand
                 Ok(result) => match print_success(fmt, &result) {
                     Ok(()) => EXIT_SUCCESS,
                     Err(e) => {
-                        print_error(&e);
+                        print_error(&e).ok();
                         e.exit_code()
                     }
                 },
                 Err(e) => {
-                    print_error(&e);
+                    print_error(&e).ok();
                     e.exit_code()
                 }
             }

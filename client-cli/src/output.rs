@@ -119,8 +119,8 @@ pub fn print_success<T: Serialize + TextRender>(
 /// ```json
 /// {"ok": false, "error": "ERROR_CODE", "message": "human readable"}
 /// ```
-pub fn print_error(err: &CliError) {
-    write_error(&mut std::io::stderr(), err);
+pub fn print_error(err: &CliError) -> std::io::Result<()> {
+    write_error(&mut std::io::stderr(), err)
 }
 
 /// Write a single streaming entry to stdout.
@@ -133,8 +133,12 @@ pub fn print_error(err: &CliError) {
 ///   Serialisation failures are written as an error line to **stderr** and the
 ///   stream continues.
 /// * **Text mode** — emits `text_line` verbatim followed by a newline.
-pub fn print_stream_entry<T: Serialize>(format: &OutputFormat, entry: &T, text_line: &str) {
-    write_stream_entry(&mut std::io::stdout(), &mut std::io::stderr(), format, entry, text_line);
+pub fn print_stream_entry<T: Serialize>(
+    format: &OutputFormat,
+    entry: &T,
+    text_line: &str,
+) -> Result<(), CliError> {
+    write_stream_entry(&mut std::io::stdout(), &mut std::io::stderr(), format, entry, text_line)
 }
 
 // ── internal write helpers (accept any `Write` for testability) ───────────────
@@ -150,29 +154,25 @@ fn write_success<T: Serialize + TextRender, W: std::io::Write>(
             let serialized = serde_json::to_string_pretty(&envelope).map_err(|e| {
                 CliError::SerializeFailed(format!("failed to serialize response: {e}"))
             })?;
-            let _ = writeln!(out, "{serialized}");
+            writeln!(out, "{serialized}").map_err(|e| CliError::Io(e.to_string()))?;
         }
         OutputFormat::Text => {
-            let _ = writeln!(out, "{}", payload.render_text());
+            writeln!(out, "{}", payload.render_text()).map_err(|e| CliError::Io(e.to_string()))?;
         }
     }
 
     Ok(())
 }
 
-fn write_error<W: std::io::Write>(out: &mut W, err: &CliError) {
+fn write_error<W: std::io::Write>(out: &mut W, err: &CliError) -> std::io::Result<()> {
     let envelope = serde_json::json!({
         "ok": false,
         "error": err.error_code(),
         "message": err.to_string(),
     });
     match serde_json::to_string_pretty(&envelope) {
-        Ok(s) => {
-            let _ = writeln!(out, "{s}");
-        }
-        Err(_) => {
-            let _ = writeln!(out, r#"{{"ok":false,"error":"ERROR","message":"unknown error"}}"#);
-        }
+        Ok(s) => writeln!(out, "{s}"),
+        Err(_) => writeln!(out, r#"{{"ok":false,"error":"ERROR","message":"unknown error"}}"#),
     }
 }
 
@@ -182,13 +182,13 @@ pub(crate) fn write_stream_entry<T: Serialize, W: std::io::Write, E: std::io::Wr
     format: &OutputFormat,
     entry: &T,
     text_line: &str,
-) {
+) -> Result<(), CliError> {
     match format {
         OutputFormat::Json => {
             let envelope = SuccessEnvelope { ok: true, data: entry };
             match serde_json::to_string(&envelope) {
                 Ok(s) => {
-                    let _ = writeln!(out, "{s}");
+                    writeln!(out, "{s}").map_err(|e| CliError::Io(e.to_string()))?;
                 }
                 Err(e) => {
                     let err_envelope = serde_json::json!({
@@ -199,15 +199,16 @@ pub(crate) fn write_stream_entry<T: Serialize, W: std::io::Write, E: std::io::Wr
                     // Best-effort: if this serialisation also fails we have no
                     // further recourse.
                     if let Ok(s) = serde_json::to_string(&err_envelope) {
-                        let _ = writeln!(err_out, "{s}");
+                        writeln!(err_out, "{s}").map_err(|e| CliError::Io(e.to_string()))?;
                     }
                 }
             }
         }
         OutputFormat::Text => {
-            let _ = writeln!(out, "{text_line}");
+            writeln!(out, "{text_line}").map_err(|e| CliError::Io(e.to_string()))?;
         }
     }
+    Ok(())
 }
 
 // ── helpers for command handlers ──────────────────────────────────────────────
@@ -449,7 +450,7 @@ mod tests {
     fn write_error_emits_ok_false_envelope_with_code_and_message() {
         let err = CliError::NotFound("agent-abc".to_owned());
         let mut buf = Vec::new();
-        write_error(&mut buf, &err);
+        write_error(&mut buf, &err).expect("write_error must succeed on in-memory buffer");
 
         let output = String::from_utf8(buf).expect("utf-8");
         let v: serde_json::Value =
@@ -467,7 +468,8 @@ mod tests {
         let payload = FakePayload { value: "stream-item".to_owned() };
         let mut out = Vec::new();
         let mut err_out = Vec::new();
-        write_stream_entry(&mut out, &mut err_out, &OutputFormat::Json, &payload, "ignored");
+        write_stream_entry(&mut out, &mut err_out, &OutputFormat::Json, &payload, "ignored")
+            .expect("no write error");
 
         let line = String::from_utf8(out).expect("utf-8");
         let v: serde_json::Value =
@@ -482,7 +484,8 @@ mod tests {
         let payload = FakePayload { value: "compact".to_owned() };
         let mut out = Vec::new();
         let mut err_out = Vec::new();
-        write_stream_entry(&mut out, &mut err_out, &OutputFormat::Json, &payload, "ignored");
+        write_stream_entry(&mut out, &mut err_out, &OutputFormat::Json, &payload, "ignored")
+            .expect("no write error");
 
         let line = String::from_utf8(out).expect("utf-8").trim().to_owned();
         // Compact serialisation has no embedded newlines.
@@ -494,7 +497,8 @@ mod tests {
         let payload = FakePayload { value: "irrelevant".to_owned() };
         let mut out = Vec::new();
         let mut err_out = Vec::new();
-        write_stream_entry(&mut out, &mut err_out, &OutputFormat::Text, &payload, "my text line");
+        write_stream_entry(&mut out, &mut err_out, &OutputFormat::Text, &payload, "my text line")
+            .expect("no write error");
 
         let line = String::from_utf8(out).expect("utf-8");
         assert_eq!(line.trim(), "my text line");
@@ -507,7 +511,8 @@ mod tests {
         let mut err_out = Vec::new();
         for i in 0..3u32 {
             let payload = serde_json::json!({"i": i});
-            write_stream_entry(&mut out, &mut err_out, &OutputFormat::Json, &payload, "");
+            write_stream_entry(&mut out, &mut err_out, &OutputFormat::Json, &payload, "")
+                .expect("no write error");
         }
 
         let output = String::from_utf8(out).expect("utf-8");
@@ -525,7 +530,7 @@ mod tests {
         let payload = BrokenPayload;
         let mut out = Vec::new();
         let mut err_out = Vec::new();
-        write_stream_entry(&mut out, &mut err_out, &OutputFormat::Json, &payload, "ignored");
+        write_stream_entry(&mut out, &mut err_out, &OutputFormat::Json, &payload, "ignored").ok();
 
         assert!(out.is_empty(), "failed stream serialization must not emit stdout");
         let err = String::from_utf8(err_out).expect("utf-8");
@@ -535,5 +540,64 @@ mod tests {
         assert!(
             v["message"].as_str().unwrap_or_default().contains("failed to serialize stream entry")
         );
+    }
+
+    // ── broken-pipe propagation ───────────────────────────────────────────────
+
+    /// A writer that always returns a broken-pipe error.
+    struct BrokenPipeWriter;
+
+    impl std::io::Write for BrokenPipeWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "broken pipe"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn write_success_json_mode_returns_err_on_broken_pipe() {
+        let payload = FakePayload { value: "x".to_owned() };
+        let mut broken = BrokenPipeWriter;
+        let result = write_success(&mut broken, &OutputFormat::Json, &payload);
+        assert!(result.is_err(), "broken pipe must not return Ok");
+    }
+
+    #[test]
+    fn write_success_text_mode_returns_err_on_broken_pipe() {
+        let payload = FakePayload { value: "x".to_owned() };
+        let mut broken = BrokenPipeWriter;
+        let result = write_success(&mut broken, &OutputFormat::Text, &payload);
+        assert!(result.is_err(), "broken pipe must not return Ok");
+    }
+
+    #[test]
+    fn write_error_returns_err_on_broken_pipe() {
+        let err = CliError::General("test".to_owned());
+        let mut broken = BrokenPipeWriter;
+        let result = write_error(&mut broken, &err);
+        assert!(result.is_err(), "broken pipe must be propagated");
+    }
+
+    #[test]
+    fn write_stream_entry_json_mode_returns_err_on_broken_pipe() {
+        let payload = FakePayload { value: "x".to_owned() };
+        let mut broken = BrokenPipeWriter;
+        let mut err_out = Vec::new();
+        let result =
+            write_stream_entry(&mut broken, &mut err_out, &OutputFormat::Json, &payload, "");
+        assert!(result.is_err(), "broken pipe on stdout must not return Ok");
+    }
+
+    #[test]
+    fn write_stream_entry_text_mode_returns_err_on_broken_pipe() {
+        let payload = FakePayload { value: "x".to_owned() };
+        let mut broken = BrokenPipeWriter;
+        let mut err_out = Vec::new();
+        let result =
+            write_stream_entry(&mut broken, &mut err_out, &OutputFormat::Text, &payload, "line");
+        assert!(result.is_err(), "broken pipe on stdout must not return Ok");
     }
 }

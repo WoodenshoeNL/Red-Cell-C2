@@ -44,6 +44,8 @@ pub const ERROR_CODE_SERVER_ERROR: &str = "SERVER_ERROR";
 pub const ERROR_CODE_UNSUPPORTED: &str = "UNSUPPORTED";
 /// Machine-readable error code for an in-process serialization failure (serde_json).
 pub const ERROR_CODE_SERIALIZE_FAILED: &str = "SERIALIZE_FAILED";
+/// Machine-readable error code for a write failure on stdout/stderr (e.g. broken pipe).
+pub const ERROR_CODE_IO_WRITE_FAILED: &str = "IO_WRITE_FAILED";
 
 /// All errors that a CLI command can produce.
 #[derive(Debug, Error)]
@@ -85,6 +87,10 @@ pub enum CliError {
     #[error("serialize failed: {0}")]
     SerializeFailed(String),
 
+    /// A write to stdout or stderr failed (e.g. broken pipe).
+    #[error("I/O write failed: {0}")]
+    Io(String),
+
     /// Any other error not covered above.
     #[error("{0}")]
     General(String),
@@ -103,6 +109,7 @@ impl CliError {
             CliError::ServerError(_) => EXIT_GENERAL,
             CliError::Unsupported(_) => EXIT_GENERAL,
             CliError::SerializeFailed(_) => EXIT_GENERAL,
+            CliError::Io(_) => EXIT_GENERAL,
             CliError::Config(crate::config::ConfigError::MissingToken) => EXIT_AUTH_FAILURE,
             CliError::Config(_) => EXIT_GENERAL,
             CliError::General(_) => EXIT_GENERAL,
@@ -121,6 +128,7 @@ impl CliError {
             CliError::ServerError(_) => ERROR_CODE_SERVER_ERROR,
             CliError::Unsupported(_) => ERROR_CODE_UNSUPPORTED,
             CliError::SerializeFailed(_) => ERROR_CODE_SERIALIZE_FAILED,
+            CliError::Io(_) => ERROR_CODE_IO_WRITE_FAILED,
             CliError::Config(crate::config::ConfigError::MissingToken) => ERROR_CODE_AUTH_FAILURE,
             CliError::Config(_) => ERROR_CODE_GENERAL,
             CliError::General(_) => ERROR_CODE_GENERAL,

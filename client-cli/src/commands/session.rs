@@ -330,7 +330,8 @@ where
         match lines.next_line().await {
             Err(e) => {
                 // Fatal I/O error on stdin.
-                emit_error_to(writer, "", &CliError::General(format!("stdin read error: {e}")));
+                emit_error_to(writer, "", &CliError::General(format!("stdin read error: {e}")))
+                    .ok();
                 return EXIT_GENERAL;
             }
             Ok(None) => {
@@ -345,7 +346,15 @@ where
 
                 match serde_json::from_str::<SessionCmd>(&line) {
                     Err(e) => {
-                        emit_error_to(writer, "", &CliError::General(format!("invalid JSON: {e}")));
+                        if emit_error_to(
+                            writer,
+                            "",
+                            &CliError::General(format!("invalid JSON: {e}")),
+                        )
+                        .is_err()
+                        {
+                            return EXIT_GENERAL;
+                        }
                     }
                     Ok(msg) => {
                         let cmd_name = msg.cmd.clone();
@@ -353,9 +362,12 @@ where
                             return EXIT_SUCCESS;
                         }
                         let result = dispatch(client, &msg, default_agent).await;
-                        match result {
+                        let write_result = match result {
                             Ok(data) => emit_ok_to(writer, &cmd_name, data),
                             Err(e) => emit_error_to(writer, &cmd_name, &e),
+                        };
+                        if write_result.is_err() {
+                            return EXIT_GENERAL;
                         }
                     }
                 }
@@ -958,15 +970,15 @@ async fn log_list(
 // ── output helpers ────────────────────────────────────────────────────────────
 
 /// Write a success response line to `writer`.
-fn emit_ok_to(writer: &mut impl std::io::Write, cmd: &str, data: serde_json::Value) {
+fn emit_ok_to(
+    writer: &mut impl std::io::Write,
+    cmd: &str,
+    data: serde_json::Value,
+) -> std::io::Result<()> {
     let envelope = serde_json::json!({"ok": true, "cmd": cmd, "data": data});
     match serde_json::to_string(&envelope) {
-        Ok(s) => {
-            let _ = writeln!(writer, "{s}");
-        }
-        Err(_) => {
-            let _ = writeln!(writer, r#"{{"ok":true,"cmd":"{cmd}"}}"#);
-        }
+        Ok(s) => writeln!(writer, "{s}"),
+        Err(_) => writeln!(writer, r#"{{"ok":true,"cmd":"{cmd}"}}"#),
     }
 }
 
@@ -974,15 +986,20 @@ fn emit_ok_to(writer: &mut impl std::io::Write, cmd: &str, data: serde_json::Val
 ///
 /// In session mode all output (including errors) goes to the same stream so
 /// the consuming process reads a single coherent NDJSON stream.
-fn emit_error_to(writer: &mut impl std::io::Write, cmd: &str, err: &CliError) {
+fn emit_error_to(
+    writer: &mut impl std::io::Write,
+    cmd: &str,
+    err: &CliError,
+) -> std::io::Result<()> {
     let envelope = serde_json::json!({
         "ok": false,
         "cmd": cmd,
         "error": err.error_code(),
         "message": err.to_string(),
     });
-    if let Ok(s) = serde_json::to_string(&envelope) {
-        let _ = writeln!(writer, "{s}");
+    match serde_json::to_string(&envelope) {
+        Ok(s) => writeln!(writer, "{s}"),
+        Err(_) => writeln!(writer, r#"{{"ok":false,"cmd":"{cmd}","error":"ERROR"}}"#),
     }
 }
 
@@ -2222,5 +2239,49 @@ mod tests {
 
         assert_eq!(code, EXIT_SUCCESS);
         assert!(parse_lines(&out).is_empty());
+    }
+
+    // ── broken-pipe propagation ───────────────────────────────────────────────
+
+    /// A writer that always returns a broken-pipe error.
+    struct BrokenPipeWriter;
+
+    impl std::io::Write for BrokenPipeWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "broken pipe"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn emit_ok_to_returns_err_on_broken_pipe() {
+        let mut broken = BrokenPipeWriter;
+        let result = emit_ok_to(&mut broken, "ping", serde_json::json!({"pong": true}));
+        assert!(result.is_err(), "broken pipe must be propagated by emit_ok_to");
+    }
+
+    #[test]
+    fn emit_error_to_returns_err_on_broken_pipe() {
+        let mut broken = BrokenPipeWriter;
+        let err = CliError::General("test error".to_owned());
+        let result = emit_error_to(&mut broken, "ping", &err);
+        assert!(result.is_err(), "broken pipe must be propagated by emit_error_to");
+    }
+
+    /// Broken output writer → run_with_io exits non-zero.
+    #[tokio::test]
+    async fn run_loop_broken_pipe_exits_general() {
+        // Send a valid ping so the loop tries to write a response.
+        let input: &[u8] = b"{\"cmd\":\"ping\"}\n";
+        let reader = tokio::io::BufReader::new(input);
+        let client = loop_client();
+        let mut broken = BrokenPipeWriter;
+
+        let code = run_with_io(reader, &mut broken, &client, None).await;
+
+        assert_eq!(code, EXIT_GENERAL, "broken pipe must yield non-zero exit");
     }
 }

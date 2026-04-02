@@ -101,7 +101,7 @@ def run(ctx):
     )
     from lib.deploy import ensure_work_dir, execute_background, run_remote, upload
     from lib.wait import TimeoutError as WaitTimeout
-    from lib.wait import poll
+    from lib.wait import poll, wait_for_agent
 
     cli = ctx.cli
     uid = _short_id()
@@ -172,17 +172,8 @@ def run(ctx):
         checkin_timeout = ctx.env.get("timeouts", {}).get("agent_checkin", 60)
         print(f"  [wait] waiting up to {checkin_timeout}s for agent checkin")
 
-        def _new_agent_appeared():
-            agents = agent_list(cli)
-            return [a for a in agents if a["id"] not in pre_existing_ids]
-
-        new_agents = poll(
-            fn=_new_agent_appeared,
-            predicate=lambda agents: len(agents) > 0,
-            timeout=checkin_timeout,
-            description=f"new {target_label} agent checkin",
-        )
-        agent_id = new_agents[0]["id"]
+        agent = wait_for_agent(cli, timeout=checkin_timeout, pre_existing_ids=pre_existing_ids)
+        agent_id = agent["id"]
         print(f"  [wait] agent checked in: {agent_id}")
 
         # ── Step 5: Run 'whoami' via agent exec → audit: agent.task ──────────

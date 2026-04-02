@@ -137,7 +137,7 @@ def _run_smb_pivot(ctx, parent_target, child_target):
     )
     from lib.deploy import ensure_work_dir, execute_background, run_remote, upload
     from lib.wait import TimeoutError as WaitTimeout
-    from lib.wait import poll
+    from lib.wait import poll, wait_for_agent
 
     cli = ctx.cli
     uid = _short_id()
@@ -184,17 +184,8 @@ def _run_smb_pivot(ctx, parent_target, child_target):
         execute_background(parent_target, remote_parent_payload)
         print(f"  [step 3] waiting up to {checkin_timeout}s for parent agent checkin")
 
-        def _parent_appeared():
-            agents = agent_list(cli)
-            return [a for a in agents if a["id"] not in pre_existing_ids]
-
-        new_agents = poll(
-            fn=_parent_appeared,
-            predicate=lambda agents: len(agents) > 0,
-            timeout=checkin_timeout,
-            description="parent agent checkin",
-        )
-        parent_agent_id = new_agents[0]["id"]
+        parent = wait_for_agent(cli, timeout=checkin_timeout, pre_existing_ids=pre_existing_ids)
+        parent_agent_id = parent["id"]
         print(f"  [step 3] parent agent checked in: {parent_agent_id}")
 
         # ── Step 4: Open SMB pivot pipe on parent agent ──────────────────────
@@ -243,17 +234,8 @@ def _run_smb_pivot(ctx, parent_target, child_target):
         execute_background(child_target, remote_child_payload)
         print(f"  [step 7] waiting up to {checkin_timeout}s for child agent checkin through pivot")
 
-        def _child_appeared():
-            agents = agent_list(cli)
-            return [a for a in agents if a["id"] not in all_known_ids]
-
-        new_agents = poll(
-            fn=_child_appeared,
-            predicate=lambda agents: len(agents) > 0,
-            timeout=checkin_timeout,
-            description="child agent checkin through SMB pivot",
-        )
-        child_agent_id = new_agents[0]["id"]
+        child = wait_for_agent(cli, timeout=checkin_timeout, pre_existing_ids=all_known_ids)
+        child_agent_id = child["id"]
         print(f"  [step 7] child agent checked in: {child_agent_id}")
 
         # ── Step 8: Send whoami through child agent; verify output ───────────

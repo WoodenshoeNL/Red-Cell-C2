@@ -59,7 +59,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
         payload_build,
     )
     from lib.deploy import ensure_work_dir, execute_background, run_remote, upload
-    from lib.wait import poll
+    from lib.wait import wait_for_agent
 
     cli = ctx.cli
     target = ctx.linux
@@ -135,18 +135,8 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
             f"agent checkin over DNS"
         )
 
-        def _new_agent_appeared():
-            agents = agent_list(cli)
-            new = [a for a in agents if a["id"] not in pre_existing_ids]
-            return new
-
-        new_agents = poll(
-            fn=_new_agent_appeared,
-            predicate=lambda agents: len(agents) > 0,
-            timeout=checkin_timeout,
-            description=f"new {agent_type} DNS agent checkin",
-        )
-        agent_id = new_agents[0]["id"]
+        agent = wait_for_agent(cli, timeout=checkin_timeout, pre_existing_ids=pre_existing_ids)
+        agent_id = agent["id"]
         print(f"  [{agent_type}][wait] agent checked in over DNS: {agent_id}")
 
         # ── Step 6: Command suite ────────────────────────────────────────────

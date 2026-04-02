@@ -110,7 +110,7 @@ def run(ctx) -> None:
         payload_build,
     )
     from lib.deploy import ensure_work_dir, execute_background, run_remote, upload
-    from lib.wait import poll
+    from lib.wait import wait_for_agent
 
     cli = ctx.cli
     target = ctx.windows
@@ -180,18 +180,8 @@ def run(ctx) -> None:
         checkin_timeout = ctx.env.get("timeouts", {}).get("agent_checkin", 60)
         print(f"  [archon][wait] waiting up to {checkin_timeout}s for agent checkin")
 
-        def _new_agent_appeared():
-            agents = agent_list(cli)
-            new = [a for a in agents if a["id"] not in pre_existing_ids]
-            return new
-
-        new_agents = poll(
-            fn=_new_agent_appeared,
-            predicate=lambda agents: len(agents) > 0,
-            timeout=checkin_timeout,
-            description="new Archon Windows agent checkin",
-        )
-        agent_id = new_agents[0]["id"]
+        agent = wait_for_agent(cli, timeout=checkin_timeout, pre_existing_ids=pre_existing_ids)
+        agent_id = agent["id"]
         print(f"  [archon][wait] agent checked in: {agent_id}")
 
         # ── Step 6: Baseline command suite ───────────────────────────────────

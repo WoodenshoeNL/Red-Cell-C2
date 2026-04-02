@@ -43,21 +43,30 @@ def poll(
     raise TimeoutError(msg)
 
 
-def wait_for_agent(cfg: CliConfig, timeout: int = 60) -> dict:
+def wait_for_agent(
+    cfg: CliConfig,
+    timeout: int = 60,
+    pre_existing_ids: set[str] | None = None,
+) -> dict:
+    """Wait until a *new* agent appears in the agent list.
+
+    If *pre_existing_ids* is given, agents whose ``id`` is in that set are
+    ignored — this prevents ghost records left by earlier scenarios (e.g.
+    scenario 13's synthetic handshake) from being mistaken for a fresh
+    checkin.  Returns the first new agent's dict.
     """
-    Wait until at least one agent appears in the agent list.
-    Returns the first agent's dict.
-    """
+    _skip: set[str] = pre_existing_ids or set()
+
     def get_agents():
         return agent_list(cfg)
 
     agents = poll(
         fn=get_agents,
-        predicate=lambda agents: len(agents) > 0,
+        predicate=lambda agents: any(a["id"] not in _skip for a in agents),
         timeout=timeout,
         description="agent checkin",
     )
-    return agents[0]
+    return next(a for a in agents if a["id"] not in _skip)
 
 
 def wait_for_agent_id(cfg: CliConfig, agent_id: str, timeout: int = 60) -> dict:

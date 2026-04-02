@@ -422,7 +422,7 @@ def run(ctx):
 
     Raises AssertionError with a descriptive message on any compliance failure.
     """
-    from lib.cli import CliError, listener_create, listener_delete, listener_start, listener_stop
+    from lib.cli import CliError, agent_kill, listener_create, listener_delete, listener_start, listener_stop
 
     cli = ctx.cli
     uid = uuid.uuid4().hex[:8]
@@ -465,9 +465,16 @@ def run(ctx):
         print("  [result] all protocol compliance checks passed")
 
     finally:
-        # Best-effort cleanup.  The phantom agent record registered during
-        # phase 2 will remain in the DB but is harmless — it has no real
-        # process behind it and will be marked inactive by the liveness timer.
+        # Kill the synthetic agent registered during phase 2 so it does not
+        # pollute the DB and confuse wait_for_agent() in later scenarios.
+        if agent_id is not None:
+            agent_id_hex = f"{agent_id:08X}"
+            print(f"  [cleanup] killing synthetic agent {agent_id_hex}")
+            try:
+                agent_kill(cli, agent_id_hex)
+            except Exception as exc:
+                print(f"  [cleanup] agent kill failed (non-fatal): {exc}")
+
         print(f"  [cleanup] stopping/deleting listener {listener_name!r}")
         try:
             listener_stop(cli, listener_name)

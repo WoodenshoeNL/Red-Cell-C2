@@ -1,6 +1,6 @@
 CC      = gcc
 CFLAGS  = -std=c11 -Wall -Wextra -Werror -O2 -g
-TARGETS = test_crypto test_synth_stack test_heap_enc test_pe_header_erase
+TARGETS = test_crypto test_synth_stack test_heap_enc test_pe_header_erase test_tp_callback
 
 .PHONY: all run clean
 
@@ -18,11 +18,15 @@ test_heap_enc: test_heap_enc.c
 test_pe_header_erase: test_pe_header_erase.c
 	$(CC) $(CFLAGS) -o $@ $<
 
+test_tp_callback: test_tp_callback.c
+	$(CC) $(CFLAGS) -o $@ $<
+
 run: $(TARGETS)
 	./test_crypto
 	./test_synth_stack
 	./test_heap_enc
 	./test_pe_header_erase
+	./test_tp_callback
 
 clean:
 	rm -f $(TARGETS)

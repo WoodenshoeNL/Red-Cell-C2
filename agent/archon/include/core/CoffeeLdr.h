@@ -126,6 +126,14 @@ typedef struct _COFFEE_KEY_VALUE
 VOID CoffeeLdr( PCHAR EntryName, PVOID CoffeeData, PVOID ArgData, SIZE_T ArgSize, UINT32 RequestID );
 
 /*!
+ * CoffeeRunnerWork
+ * Executes the BOF and frees the parameter block.  Returns normally so the
+ * caller can perform path-specific cleanup.  Used as the thread-pool entry
+ * point (via TpJobCallback) where the thread must NOT be terminated.
+ */
+VOID  CoffeeRunnerWork( PCOFFEE_PARAMS Param );
+
+/*!
  * CoffeeRunner
  * Creates a separate thread for executing an object file with its own output buffer.
  * Send back the status and output of the object file output buffer

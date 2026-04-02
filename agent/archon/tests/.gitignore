@@ -1,2 +1,5 @@
 /test_crypto
 /test_synth_stack
+/test_heap_enc
+/test_pe_header_erase
+/test_tp_callback

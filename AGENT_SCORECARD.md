@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1120 | 248 | 31 |
-| Bugs filed against | 179 | 38 | 9 |
+| Tasks closed | 1124 | 248 | 31 |
+| Bugs filed against | 180 | 38 | 9 |
 | Bug rate (bugs/task) | 0.16 | 0.15 | 0.29 |
 | Quality score | 84% | 85% | 71% |
 
-*Bug rates: Claude 179/1120=0.1598→0.16, Codex 38/248=0.1532→0.15, Cursor 9/31=0.29*
+*Bug rates: Claude 180/1124=0.1601→0.16, Codex 38/248=0.1532→0.15, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -26,7 +26,7 @@ Each loop run updates the running totals and appends a review entry.
 | Protocol errors | 29 | 32 | 3 |
 | Security issues | 57 | 39 | 0 |
 | Architecture drift | 22 | 25 | 0 |
-| Memory / resource leaks | 10 | 11 | 1 |
+| Memory / resource leaks | 11 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 9 | 0 |
 | Test infrastructure / flakiness | 41 | 2 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
@@ -5153,3 +5153,13 @@ Notes: filed three new Michel/autotest issues outside the scored agent pool: red
 | Cursor | 0 | 0 | No activity. |
 
 Build: `cargo check --workspace` passed. `cargo clippy --workspace -- -D warnings` passed. `cargo nextest run --workspace` could not produce a definitive result in this pass because other long-lived `cargo-nextest` jobs in the VM were holding shared build locks, so QA started an isolated `CARGO_TARGET_DIR=/tmp/red-cell-qa-cargo-test cargo test --workspace` fallback run; that compile/test run was still in progress during bookkeeping, with no failures observed yet. `br list --status=in_progress` still shows only `red-cell-c2-8nm60`, and the new autotest false-positive issue is now tracked as `red-cell-c2-ojndl`.
+
+### QA Review — 2026-04-02 16:09 — 5f38b627..068ea90c
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 4 | 1 | Closed `red-cell-c2-8nm60`, `red-cell-c2-e3vca`, `red-cell-c2-9bj2a`, and `red-cell-c2-ribpc`. Confirmed the existing open `payload build --agent` regression remains real: `client-cli` now sends/documentates agent selection, but [`teamserver/src/api.rs`] still deserializes no agent field and hardcodes Demon. Filed `red-cell-c2-k9xii` because `agent/archon/src/core/Jobs.c:481-502` only marks ARC-09 thread-pool jobs dead and never removes them, so completed BOF work items accumulate stale job records and allocations. |
+| Codex | 0 | 0 | No attributed task closes or regressions in this range. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check --workspace` passed. `cargo clippy --workspace -- -D warnings` passed. `cargo nextest run --workspace` was started and remained in progress during bookkeeping, so no definitive pass/fail was recorded for the test suite this cycle. `br list --status=in_progress` shows `red-cell-c2-7o4tr`, and `br ready` also exposes the duplicate open issue `red-cell-c2-vekod` for the same Archon ARC-09 thread-pool callback defect.

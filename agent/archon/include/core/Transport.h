@@ -4,6 +4,7 @@
 #include <core/Package.h>
 #include <core/TransportHttp.h>
 #include <core/TransportSmb.h>
+#include <core/TransportDoH.h>
 
 #define PIPE_BUFFER_MAX 0x10000
 

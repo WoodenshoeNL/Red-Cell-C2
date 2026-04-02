@@ -120,6 +120,11 @@ typedef struct
             LPSTR   Name;   /* TODO: change type to BUFFER */
             HANDLE  Handle;
 #endif
+
+#ifdef TRANSPORT_DOH
+            LPSTR  DoHDomain;    /* Authoritative C2 domain (e.g. "c2.example.com") */
+            DWORD  DoHProvider;  /* DOH_PROVIDER_CLOUDFLARE (0) or DOH_PROVIDER_GOOGLE (1) */
+#endif
         } Transport;
 
         struct _CONFIG {

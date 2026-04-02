@@ -21,11 +21,11 @@ Each loop run updates the running totals and appends a review entry.
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 9 | 0 | 0 |
-| Missing tests / stale tests | 68 | 17 | 5 |
+| Missing tests / stale tests | 68 | 18 | 5 |
 | Clippy warnings | 9 | 0 | 1 |
 | Protocol errors | 29 | 32 | 3 |
 | Security issues | 57 | 39 | 0 |
-| Architecture drift | 22 | 24 | 0 |
+| Architecture drift | 22 | 25 | 0 |
 | Memory / resource leaks | 10 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 9 | 0 |
 | Test infrastructure / flakiness | 36 | 2 | 0 |
@@ -101,6 +101,17 @@ Build: passed with one caveat — `cargo check --workspace` and `cargo clippy --
 
 Overall codebase health: drifting
 Biggest blindspot: the workspace is currently broken in `client-cli`, and Specter still lacks core Windows-agent parity for `CommandPersist` and `CommandHarvest`
+
+### Arch Review — 2026-04-02 13:26
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 0 | — | No new Claude-attributed findings this review. |
+| Codex | 1 | architecture drift (1), missing tests (1) | Filed red-cell-c2-tyj0m: `client-cli` still discards stdout/stderr write failures in normal output, help, and session-mode paths, so a broken pipe can exit successfully despite the documented machine-facing CLI contract. |
+| Cursor | 0 | — | No new Cursor-attributed findings this review. |
+
+Overall codebase health: drifting
+Biggest blindspot: unsafe or under-validated machine-facing runtime paths are still shipping without adversarial tests, from Phantom sleep obfuscation to CLI output/error delivery
 
 ### QA Review — 2026-04-01 15:54 — c38b872f..f4a09bb4
 

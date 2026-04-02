@@ -1076,7 +1076,13 @@ impl ClientApp {
                 if self.local_config.scripts_dir.is_none() {
                     self.local_config.scripts_dir = scripts_dir.clone();
                 }
-                self.local_config.save();
+                if let Err(error) = self.local_config.save() {
+                    tracing::warn!(
+                        %error,
+                        "failed to persist local config — \
+                         server URL and username will be lost on next launch",
+                    );
+                }
                 self.python_runtime = python_runtime;
 
                 let login_state_clone = login_state.clone();
@@ -1116,7 +1122,13 @@ impl ClientApp {
         // Also keep the legacy global fingerprint for backwards compat.
         self.local_config.cert_fingerprint = Some(fingerprint.clone());
         self.tls_verification = TlsVerification::Fingerprint(fingerprint);
-        self.local_config.save();
+        if let Err(error) = self.local_config.save() {
+            tracing::warn!(
+                %error,
+                "failed to persist pinned certificate fingerprint — \
+                 TLS trust decision will be lost on next launch",
+            );
+        }
     }
 
     fn check_auth_response(&mut self) {

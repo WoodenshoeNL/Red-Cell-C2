@@ -59,23 +59,29 @@ impl LocalConfig {
 
     /// Persist the local config to the platform config directory.
     ///
-    /// Silently ignores write failures (non-critical persistence).
-    pub fn save(&self) {
-        self.save_with_path(config_file_path());
+    /// Returns an error if the config directory is unavailable, if parent
+    /// directories cannot be created, or if the file cannot be written.
+    /// Callers should log or surface this error — the config holds
+    /// security-relevant state (TLS trust material, pinned fingerprints) and
+    /// silent loss will cause unexpected fallback to defaults on next launch.
+    pub fn save(&self) -> Result<(), std::io::Error> {
+        self.save_with_path(config_file_path())
     }
 
     /// Persist the local config to a specific path.
     ///
-    /// Creates parent directories as needed. Silently ignores write failures.
+    /// Creates parent directories as needed.
     /// On Unix the file is created with mode 0600 (owner-only read/write).
-    pub fn save_to(&self, path: &std::path::Path) {
+    ///
+    /// Returns an error if directory creation or the file write fails.
+    pub fn save_to(&self, path: &std::path::Path) -> Result<(), std::io::Error> {
         if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
+            fs::create_dir_all(parent)?;
         }
 
-        if let Ok(contents) = toml::to_string_pretty(self) {
-            let _ = write_config_file(path, contents.as_bytes());
-        }
+        let contents = toml::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        write_config_file(path, contents.as_bytes())
     }
 
     /// Resolve the configured scripts directory, falling back to the default location.
@@ -90,11 +96,11 @@ impl LocalConfig {
         Self::load_from(&path)
     }
 
-    fn save_with_path(&self, path: Option<PathBuf>) {
+    fn save_with_path(&self, path: Option<PathBuf>) -> Result<(), std::io::Error> {
         let Some(path) = path else {
-            return;
+            return Ok(());
         };
-        self.save_to(&path);
+        self.save_to(&path)
     }
 }
 
@@ -194,7 +200,7 @@ mod tests {
             cert_fingerprint: None,
         };
 
-        config.save_to(&path);
+        config.save_to(&path).unwrap_or_else(|e| panic!("save_to should succeed: {e}"));
         let loaded = LocalConfig::load_from(&path);
 
         assert_eq!(loaded, config);
@@ -233,7 +239,8 @@ mod tests {
             cert_fingerprint: Some("abcdef0123456789".to_owned()),
         };
 
-        config.save_with_path(None);
+        // None path is a documented no-op — must succeed.
+        config.save_with_path(None).unwrap_or_else(|e| panic!("None path should be a no-op: {e}"));
     }
 
     #[test]
@@ -473,7 +480,7 @@ mod tests {
             ..LocalConfig::default()
         };
 
-        config.save_to(&path);
+        config.save_to(&path).unwrap_or_else(|e| panic!("save_to should succeed: {e}"));
 
         let metadata =
             fs::metadata(&path).unwrap_or_else(|error| panic!("metadata should succeed: {error}"));
@@ -500,7 +507,7 @@ mod tests {
             server_url: Some("wss://new-server/havoc/".to_owned()),
             ..LocalConfig::default()
         };
-        config.save_to(&path);
+        config.save_to(&path).unwrap_or_else(|e| panic!("save_to should succeed: {e}"));
 
         // Verify permissions were tightened.
         let mode = fs::metadata(&path)
@@ -515,11 +522,11 @@ mod tests {
         assert_eq!(loaded.server_url.as_deref(), Some("wss://new-server/havoc/"));
     }
 
-    /// `save_to()` must silently ignore write failures when the target path is
-    /// inside a read-only directory.  This guards against regressions where
-    /// someone changes `let _ = fs::write(…)` to `fs::write(…)?;`.
+    /// `save_to()` must return an `Err` (not panic) when the target path is
+    /// inside a read-only directory, so callers can surface the failure.
+    #[cfg(unix)]
     #[test]
-    fn save_to_silently_ignores_unwritable_path() {
+    fn save_to_returns_error_for_unwritable_path() {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::tempdir()
@@ -539,29 +546,26 @@ mod tests {
             ..LocalConfig::default()
         };
 
-        // Must not panic — the silent failure is the documented contract.
-        config.save_to(&path);
+        // Must return Err, not panic.
+        assert!(config.save_to(&path).is_err(), "save_to should return Err for an unwritable path",);
 
         // The file must not have been created.
-        assert!(!path.exists(), "config file should not exist under a read-only directory",);
+        assert!(!path.exists(), "config file should not exist under a read-only directory");
 
         // Restore write permission so tempdir cleanup can remove it.
         fs::set_permissions(&readonly_dir, fs::Permissions::from_mode(0o755))
             .unwrap_or_else(|error| panic!("restoring permissions should succeed: {error}"));
     }
 
-    /// `save()` must complete without panicking regardless of whether a config
-    /// directory is available.  When `dirs::config_dir()` returns `None` the
-    /// call is a documented silent no-op; when it returns `Some` it must also
-    /// not panic on success.  Either path is exercised here depending on the
-    /// host environment.
+    /// `save()` must not panic regardless of whether a config directory is
+    /// available.  The return value (Ok or Err) depends on the host environment
+    /// and is intentionally ignored here; we only assert no panic.
     #[test]
     fn public_save_does_not_panic() {
         let config = LocalConfig {
             server_url: Some("wss://10.0.0.1:40056/havoc/".to_owned()),
             ..LocalConfig::default()
         };
-        // Must not panic — silent failure on any I/O error is the documented contract.
-        config.save();
+        let _ = config.save();
     }
 }

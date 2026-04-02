@@ -30,7 +30,7 @@ fn persisted_config_populates_login_state_and_message() {
         cert_fingerprint: Some("0123456789abcdef".to_owned()),
     };
 
-    persisted.save_to(&config_path);
+    persisted.save_to(&config_path).unwrap_or_else(|e| panic!("save_to should succeed: {e}"));
     let loaded = LocalConfig::load_from(&config_path);
     let (state, message) = login_message_for(&loaded, "wss://cli.example/havoc/", "secret");
 
@@ -85,7 +85,7 @@ fn optional_tls_fields_remain_unset_in_persisted_flow() {
         cert_fingerprint: None,
     };
 
-    persisted.save_to(&config_path);
+    persisted.save_to(&config_path).unwrap_or_else(|e| panic!("save_to should succeed: {e}"));
     let serialized = fs::read_to_string(&config_path)
         .unwrap_or_else(|error| panic!("saved config should be readable: {error}"));
     let loaded = LocalConfig::load_from(&config_path);

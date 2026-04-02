@@ -81,8 +81,9 @@ impl SleepMode {
 /// Sleep for `duration` using the selected obfuscation technique.
 ///
 /// This function **blocks the calling thread**.  Call it from an async context
-/// via [`tokio::task::block_in_place`] so the Tokio executor can continue
-/// scheduling other tasks on sibling threads.
+/// via [`tokio::task::spawn_blocking`] so the Tokio executor can continue
+/// scheduling other tasks.  `spawn_blocking` routes to the dedicated blocking
+/// pool and works on both multi-thread and current-thread runtimes.
 ///
 /// For [`SleepMode::Plain`] this delegates to `libc::nanosleep`.
 /// For [`SleepMode::Mprotect`] anonymous heap pages are protected before

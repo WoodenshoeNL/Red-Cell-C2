@@ -564,15 +564,36 @@ def repair_db_if_needed(log: Logger, rename_prefix: bool):
         log.log("WARNING: DB rebuild failed")
 
 
+DEBUG_SIZE_LIMIT_GB   = 10     # nuke target/debug subdirs when it exceeds this size
+
+
+def _dir_size_gb(path) -> float:
+    """Return the total size of a directory tree in GB."""
+    total = 0
+    for entry in os.scandir(path):
+        try:
+            if entry.is_dir(follow_symlinks=False):
+                total += int(subprocess.run(
+                    ["du", "-sb", entry.path],
+                    capture_output=True, text=True,
+                ).stdout.split()[0])
+            else:
+                total += entry.stat(follow_symlinks=False).st_size
+        except (OSError, IndexError, ValueError):
+            pass
+    return total / (1024 ** 3)
+
+
 def clean_build_artifacts(log: Logger):
     """
     Remove stale Rust build artifacts to keep target/debug from growing unboundedly.
 
-    Strategy (in order of preference):
-    1. cargo sweep --time 1  — removes files unused for >24 h, keeps active artifacts
-    2. Fallback: delete the big subdirectories inside target/debug/ (incremental,
-       deps, build, .fingerprint) — all safe to delete, Cargo regenerates them on
-       the next build at the cost of one full recompile.
+    Strategy:
+    - If target/debug exceeds DEBUG_SIZE_LIMIT_GB, nuke the heavyweight subdirs
+      (incremental, deps, build, .fingerprint) unconditionally. With multiple agents
+      building concurrently, files are touched every few minutes so time-based sweeps
+      never remove anything.
+    - Otherwise skip — no point paying the rmtree cost when the dir is small.
 
     Called after every review-loop iteration and every DEV_CLEAN_EVERY dev iterations.
     """
@@ -582,18 +603,14 @@ def clean_build_artifacts(log: Logger):
     if not target_debug.exists():
         return
 
-    # Prefer cargo-sweep: surgical, keeps recently-used deps and incremental data
-    if subprocess.run(["which", "cargo-sweep"], capture_output=True).returncode == 0:
-        r = subprocess.run(
-            ["cargo", "sweep", "--time", "1"],
-            capture_output=True, text=True, cwd=str(SCRIPT_DIR),
-        )
-        if r.returncode == 0:
-            log.log("build cache: cargo sweep --time 1 ok")
-            return
-        log.log(f"build cache: cargo sweep failed ({r.stderr.strip()[:80]}) — falling back")
+    size_gb = _dir_size_gb(target_debug)
+    if size_gb < DEBUG_SIZE_LIMIT_GB:
+        log.log(f"build cache: target/debug is {size_gb:.1f} GB — under limit, skipping")
+        return
 
-    # Fallback: nuke the heavyweight subdirs inside target/debug/.
+    log.log(f"build cache: target/debug is {size_gb:.1f} GB — exceeds {DEBUG_SIZE_LIMIT_GB} GB limit, nuking")
+
+    # Nuke the heavyweight subdirs inside target/debug/.
     # incremental alone was insufficient — deps/ and build/ also grow to many GB
     # in a workspace with continuous dev-loop builds.
     heavyweight_dirs = ["incremental", "deps", "build", ".fingerprint"]

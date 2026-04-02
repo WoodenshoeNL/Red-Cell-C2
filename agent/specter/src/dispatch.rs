@@ -4013,6 +4013,26 @@ fn handle_inline_execute(
         "InlineExecute: executing BOF"
     );
 
+    // Install spawn config into thread-local context so Beacon API callbacks
+    // (BeaconGetSpawnTo, BeaconSpawnTemporaryProcess) can access it.
+    let bof_ctx = coffeeldr::BofContext {
+        spawn64: config.spawn64.as_ref().map(|s| {
+            let mut v: Vec<u16> = s.encode_utf16().collect();
+            if v.last() != Some(&0) {
+                v.push(0);
+            }
+            v
+        }),
+        spawn32: config.spawn32.as_ref().map(|s| {
+            let mut v: Vec<u16> = s.encode_utf16().collect();
+            if v.last() != Some(&0) {
+                v.push(0);
+            }
+            v
+        }),
+    };
+    coffeeldr::set_bof_context(&bof_ctx);
+
     // On Windows, attempt to run the BOF in a background thread when requested.
     // If the thread spawns successfully, register it in the job store so the
     // operator can suspend/resume/kill it via CommandJob, then return without
@@ -4032,6 +4052,7 @@ fn handle_inline_execute(
                 info!(job_id, function = %function_name, "BOF thread started and registered");
                 mem_files.remove(&bof_file_id);
                 mem_files.remove(&params_file_id);
+                coffeeldr::clear_bof_context();
                 // No immediate response — callbacks will be queued in
                 // bof_output_queue and drained by the main agent loop.
                 return DispatchResult::Ignore;
@@ -4044,6 +4065,7 @@ fn handle_inline_execute(
 
     // Execute the BOF synchronously (non-Windows, or when threaded spawn failed).
     let result = coffeeldr::coffee_execute(&function_name, &bof_data, &arg_data, threaded);
+    coffeeldr::clear_bof_context();
 
     // Clean up memfiles
     mem_files.remove(&bof_file_id);

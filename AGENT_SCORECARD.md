@@ -9,19 +9,19 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1126 | 248 | 31 |
-| Bugs filed against | 180 | 38 | 9 |
+| Tasks closed | 1130 | 248 | 31 |
+| Bugs filed against | 182 | 38 | 9 |
 | Bug rate (bugs/task) | 0.16 | 0.15 | 0.29 |
 | Quality score | 84% | 85% | 71% |
 
-*Bug rates: Claude 180/1126=0.1599→0.16, Codex 38/248=0.1532→0.15, Cursor 9/31=0.29*
+*Bug rates: Claude 182/1130=0.1611→0.16, Codex 38/248=0.1532→0.15, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 9 | 0 | 0 |
-| Missing tests / stale tests | 68 | 18 | 5 |
+| Missing tests / stale tests | 69 | 18 | 5 |
 | Clippy warnings | 9 | 0 | 1 |
 | Protocol errors | 29 | 32 | 3 |
 | Security issues | 57 | 39 | 0 |
@@ -31,7 +31,7 @@ Each loop run updates the running totals and appends a review entry.
 | Test infrastructure / flakiness | 41 | 2 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 3 | 5 | 0 |
-| Correctness / pagination | 63 | 8 | 1 |
+| Correctness / pagination | 64 | 8 | 1 |
 | Workflow / close-hygiene | 29 | 0 | 0 |
 | Code reuse / duplication | 10 | 0 | 0 |
 
@@ -5183,3 +5183,13 @@ Build: workspace Rust gates were not applicable because no files under `teamserv
 | Cursor | 0 | 0 | No activity. |
 
 Build: workspace Rust gates were not applicable because no files under `teamserver/`, `client/`, or `common/` changed in this range. `cd agent/archon/tests && make test_tp_callback && ./test_tp_callback` passed (7/7). `br list --status=in_progress` shows `red-cell-c2-zjoig`, which matches the claim commit at the reviewed tip rather than a stale closure mismatch.
+
+### QA Review — 2026-04-02 17:53 — b1f50a27..8e466058
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 4 | 2 | Closed `red-cell-c2-2vt09`, `red-cell-c2-jf38l`, `red-cell-c2-t1brs`, and `red-cell-c2-zjoig`. Filed `red-cell-c2-7nmhu` because `agent/specter/src/dispatch.rs:4016-4055` installs BOF spawn context on the dispatcher thread while `agent/specter/src/coffeeldr.rs:1344-1366` executes threaded BOFs on a fresh thread, so `BeaconGetSpawnTo` / `BeaconSpawnTemporaryProcess` lose their context. Filed `red-cell-c2-m7kqs` because the new `heap_enc` field was not added to multiple `teamserver/src/payload_builder.rs` test fixtures, breaking `cargo nextest run --workspace` with nine `DemonConfig` missing-field errors. |
+| Codex | 0 | 0 | No attributed task closes or regressions in this range. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check --workspace` passed. `cargo clippy --workspace -- -D warnings` passed. `cargo nextest run --workspace` failed while compiling `red-cell` tests on `8e466058` because `teamserver/src/payload_builder.rs` still has nine `DemonConfig` initializers missing the new `heap_enc` field (`E0063` at lines 4439, 5590, 5862, 6165, 6197, 6230, 6419, 6448, and 6478). `br list --status=in_progress` shows current Claude-owned issues and `br ready` remains consistent with the open Archon/client-cli/autotest backlog.

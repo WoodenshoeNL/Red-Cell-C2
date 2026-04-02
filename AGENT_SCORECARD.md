@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1134 | 248 | 33 |
+| Tasks closed | 1135 | 248 | 33 |
 | Bugs filed against | 182 | 38 | 9 |
 | Bug rate (bugs/task) | 0.16 | 0.15 | 0.27 |
 | Quality score | 84% | 85% | 73% |
 
-*Bug rates: Claude 182/1134=0.1605→0.16, Codex 38/248=0.1532→0.15, Cursor 9/33=0.2727→0.27*
+*Bug rates: Claude 182/1135=0.1604→0.16, Codex 38/248=0.1532→0.15, Cursor 9/33=0.2727→0.27*
 
 ## Violation Breakdown
 
@@ -5294,3 +5294,13 @@ Build: skipped for the reviewed range because `3778b2c9..0618c208` contains only
 | Cursor | 0 | 0 | No attributed task closes or new regressions in this range. |
 
 Build: `cargo check --workspace` passed in a clean detached worktree at `d34250bd`. `cargo nextest run --workspace` and `CARGO_TARGET_DIR=$(mktemp -d /tmp/red-cell-qa-clippy-XXXXXX) cargo clippy --workspace -- -D warnings` were started in the same review worktree and remained in progress at bookkeeping time, with no failures observed in streamed output. In this detached clone, `br list --status=in_progress`, `br list --status=open | head -30`, and `br ready | head -20` hung; QA fell back to `.beads/issues.jsonl`, which shows `red-cell-c2-nkdoq` and `red-cell-c2-tyj0m` still in progress and no stale closure mismatch for `red-cell-c2-a13rf`.
+
+### QA Review — 2026-04-02 23:50 — d34250bd..3fd96d08
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 0 | Closed `red-cell-c2-tyj0m` via `fix(client-cli): propagate stdout/stderr write failures to non-zero exit`. Reviewed the `client-cli` output/help/session write-path changes and the added broken-pipe tests; the fix matches the existing bug report and no new attributable regression was found in the committed diff. |
+| Codex | 0 | 0 | No attributed task closes or new regressions in this range. |
+| Cursor | 0 | 0 | No activity in this range. |
+
+Build: `cargo check --workspace` passed on `3fd96d08`. `cargo nextest run --workspace` in the shared worktree failed for a non-attributable build-directory race (`dep-graph.part.bin` / `query-cache.bin` missing under `target/`), so QA restarted `cargo nextest run --workspace` and `cargo clippy --workspace -- -D warnings` in a clean detached worktree with isolated target directories; both reruns were still compiling at bookkeeping time, with no product-code failures observed yet. `br list --status=in_progress` shows `red-cell-c2-j865o`, which matches the claim commit in this range rather than a stale close mismatch, and the open `client-cli` compile-warning issue `red-cell-c2-nkdoq` remains correctly unclosed.

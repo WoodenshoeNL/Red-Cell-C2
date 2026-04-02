@@ -84,6 +84,8 @@ async fn spawn_server_with_http_listener(
             response: None,
             proxy: None,
             ja3_randomize: None,
+            doh_domain: None,
+            doh_provider: None,
         }))
         .await?;
     drop(listener_guard);

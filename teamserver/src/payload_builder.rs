@@ -1683,6 +1683,21 @@ fn pack_http_listener(
     // fingerprinting is relevant), false for plain HTTP.
     add_u32(out, if config.ja3_randomize.unwrap_or(config.secure) { 1 } else { 0 });
 
+    // ARC-08: DoH fallback transport fields.
+    // Always packed so that the binary layout is stable regardless of whether
+    // the agent was compiled with TRANSPORT_DOH.  The agent only reads these
+    // bytes when TRANSPORT_DOH is defined.
+    // Domain: length-prefixed raw ASCII bytes (empty = DoH disabled).
+    add_bytes(out, config.doh_domain.as_deref().unwrap_or("").as_bytes())?;
+    // Provider: 0 = Cloudflare (default), 1 = Google.
+    add_u32(
+        out,
+        match config.doh_provider.as_deref().unwrap_or("cloudflare") {
+            p if p.eq_ignore_ascii_case("google") => 1,
+            _ => 0,
+        },
+    );
+
     Ok(())
 }
 
@@ -1718,6 +1733,13 @@ fn build_defines(
     };
     validate_define(transport)?;
     defines.push(transport.to_owned());
+    // ARC-08: add TRANSPORT_DOH when an HTTP listener has a DoH fallback domain.
+    if let ListenerConfig::Http(http) = listener {
+        if http.doh_domain.as_deref().is_some_and(|d| !d.is_empty()) {
+            validate_define("TRANSPORT_DOH")?;
+            defines.push("TRANSPORT_DOH".to_owned());
+        }
+    }
     if shellcode_define {
         validate_define("SHELLCODE")?;
         defines.push("SHELLCODE".to_owned());
@@ -2942,6 +2964,8 @@ mod tests {
                 password: Some(Zeroizing::new("trinity".to_owned())),
             }),
             ja3_randomize: None,
+            doh_domain: None,
+            doh_provider: None,
         }));
 
         let bytes = pack_config(&listener, &config)?;
@@ -2978,6 +3002,8 @@ mod tests {
         assert_eq!(read_wstring(&mut cursor)?, "neo");
         assert_eq!(read_wstring(&mut cursor)?, "trinity");
         assert_eq!(read_u32(&mut cursor)?, 1); // ja3_randomize: true (secure=true, ja3_randomize=None → defaults to true)
+        assert_eq!(read_bytes(&mut cursor)?, b""); // DoH domain: disabled (doh_domain=None)
+        assert_eq!(read_u32(&mut cursor)?, 0); // DoH provider: Cloudflare (default)
         assert!(cursor.is_empty());
         Ok(())
     }
@@ -3059,6 +3085,8 @@ mod tests {
             response: None,
             proxy: None,
             ja3_randomize: None,
+            doh_domain: None,
+            doh_provider: None,
         }));
 
         let bytes = pack_config(&listener, &config)?;
@@ -3091,6 +3119,8 @@ mod tests {
         assert_eq!(read_wstring(&mut cursor)?, "/");
         assert_eq!(read_u32(&mut cursor)?, 0); // proxy disabled
         assert_eq!(read_u32(&mut cursor)?, 1); // ja3_randomize: true (secure=true, ja3_randomize=None → defaults to true)
+        assert_eq!(read_bytes(&mut cursor)?, b""); // DoH domain: disabled (doh_domain=None)
+        assert_eq!(read_u32(&mut cursor)?, 0); // DoH provider: Cloudflare (default)
         assert!(cursor.is_empty());
         Ok(())
     }
@@ -3164,6 +3194,8 @@ mod tests {
             response: None,
             proxy: None,
             ja3_randomize: None,
+            doh_domain: None,
+            doh_provider: None,
         }))
     }
 
@@ -3259,6 +3291,8 @@ mod tests {
             response: None,
             proxy: None,
             ja3_randomize,
+            doh_domain: None,
+            doh_provider: None,
         }))
     }
 
@@ -3314,6 +3348,8 @@ mod tests {
             response: None,
             proxy: None,
             ja3_randomize: None,
+            doh_domain: None,
+            doh_provider: None,
         }));
         let http_false = ListenerConfig::Http(Box::new(HttpListenerConfig {
             name: "http".to_owned(),
@@ -3336,6 +3372,8 @@ mod tests {
             response: None,
             proxy: None,
             ja3_randomize: Some(false),
+            doh_domain: None,
+            doh_provider: None,
         }));
         let bytes_none = pack_config(&http_none, &minimal_config_json())?;
         let bytes_false = pack_config(&http_false, &minimal_config_json())?;
@@ -3581,6 +3619,15 @@ mod tests {
         })
     }
 
+    /// Read a length-prefixed raw byte slice (as written by `add_bytes`).
+    fn read_bytes<'a>(cursor: &mut &'a [u8]) -> Result<&'a [u8], PayloadBuildError> {
+        let byte_len =
+            usize::try_from(read_u32(cursor)?).map_err(|_| PayloadBuildError::InvalidRequest {
+                message: "test parser byte-slice length overflow".to_owned(),
+            })?;
+        take(cursor, byte_len)
+    }
+
     fn take<'a>(cursor: &mut &'a [u8], len: usize) -> Result<&'a [u8], PayloadBuildError> {
         if cursor.len() < len {
             return Err(PayloadBuildError::InvalidRequest {
@@ -3782,6 +3829,8 @@ mod tests {
             response: None,
             proxy: None,
             ja3_randomize: None,
+            doh_domain: None,
+            doh_provider: None,
         }));
 
         let error = service
@@ -3830,6 +3879,8 @@ mod tests {
             response: None,
             proxy: None,
             ja3_randomize: None,
+            doh_domain: None,
+            doh_provider: None,
         }));
 
         let error = service
@@ -3875,6 +3926,8 @@ mod tests {
             response: None,
             proxy: None,
             ja3_randomize: None,
+            doh_domain: None,
+            doh_provider: None,
         }));
 
         let error = service
@@ -3922,6 +3975,8 @@ mod tests {
             response: None,
             proxy: None,
             ja3_randomize: None,
+            doh_domain: None,
+            doh_provider: None,
         }));
 
         let error = service
@@ -4048,6 +4103,8 @@ mod tests {
             response: None,
             proxy: None,
             ja3_randomize: None,
+            doh_domain: None,
+            doh_provider: None,
         }));
 
         let mut messages = Vec::new();
@@ -4190,6 +4247,8 @@ mod tests {
             response: None,
             proxy: None,
             ja3_randomize: None,
+            doh_domain: None,
+            doh_provider: None,
         }));
 
         let artifact = service.build_payload(&listener, &request, |_| {}).await?;
@@ -4483,6 +4542,8 @@ mod tests {
             response: None,
             proxy: None,
             ja3_randomize: None,
+            doh_domain: None,
+            doh_provider: None,
         }));
 
         Ok((service, listener, request))
@@ -5147,6 +5208,8 @@ mod tests {
             response: None,
             proxy: None,
             ja3_randomize: None,
+            doh_domain: None,
+            doh_provider: None,
         }));
 
         let defines = build_stager_defines(&listener)?;
@@ -5194,6 +5257,8 @@ mod tests {
             response: None,
             proxy: None,
             ja3_randomize: None,
+            doh_domain: None,
+            doh_provider: None,
         }));
 
         let defines = build_stager_defines(&listener)?;
@@ -5225,6 +5290,8 @@ mod tests {
             response: None,
             proxy: None,
             ja3_randomize: None,
+            doh_domain: None,
+            doh_provider: None,
         }));
 
         let defines = build_stager_defines(&listener)?;
@@ -5289,6 +5356,8 @@ mod tests {
             response: None,
             proxy: None,
             ja3_randomize: None,
+            doh_domain: None,
+            doh_provider: None,
         }));
 
         let err = service
@@ -5459,6 +5528,8 @@ mod tests {
             response: None,
             proxy: None,
             ja3_randomize: None,
+            doh_domain: None,
+            doh_provider: None,
         }));
 
         let request = BuildPayloadRequestInfo {
@@ -5627,6 +5698,8 @@ mod tests {
             response: None,
             proxy: None,
             ja3_randomize: None,
+            doh_domain: None,
+            doh_provider: None,
         }));
 
         let request = BuildPayloadRequestInfo {
@@ -6705,6 +6778,8 @@ mod tests {
             response: None,
             proxy: None,
             ja3_randomize: None,
+            doh_domain: None,
+            doh_provider: None,
         }));
 
         let bytes = stager_cache_bytes(&listener)?;
@@ -6757,6 +6832,8 @@ mod tests {
                 response: None,
                 proxy: None,
                 ja3_randomize: None,
+                doh_domain: None,
+                doh_provider: None,
             }))
         };
 
@@ -6877,6 +6954,152 @@ mod tests {
         let err =
             build_defines(&listener, &[0x01], false).expect_err("DNS listener should be rejected");
         assert!(matches!(err, PayloadBuildError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn build_defines_adds_transport_doh_when_doh_domain_set()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let listener = ListenerConfig::Http(Box::new(HttpListenerConfig {
+            name: "http".to_owned(),
+            kill_date: None,
+            working_hours: None,
+            hosts: vec!["localhost:80".to_owned()],
+            host_bind: "0.0.0.0".to_owned(),
+            host_rotation: "round-robin".to_owned(),
+            port_bind: 80,
+            port_conn: None,
+            method: None,
+            behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
+            user_agent: None,
+            headers: Vec::new(),
+            uris: Vec::new(),
+            host_header: None,
+            secure: false,
+            cert: None,
+            response: None,
+            proxy: None,
+            ja3_randomize: None,
+            doh_domain: Some("c2.example.com".to_owned()),
+            doh_provider: Some("cloudflare".to_owned()),
+        }));
+        let defines = build_defines(&listener, &[0x01], false)?;
+        assert!(defines.iter().any(|d| d == "TRANSPORT_HTTP"), "TRANSPORT_HTTP missing");
+        assert!(defines.iter().any(|d| d == "TRANSPORT_DOH"), "TRANSPORT_DOH missing");
+        assert_eq!(defines.len(), 3, "config + TRANSPORT_HTTP + TRANSPORT_DOH");
+        Ok(())
+    }
+
+    #[test]
+    fn build_defines_does_not_add_transport_doh_when_doh_domain_absent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let listener = http_listener_with_method(None);
+        let defines = build_defines(&listener, &[0x01], false)?;
+        assert!(!defines.iter().any(|d| d == "TRANSPORT_DOH"), "TRANSPORT_DOH should be absent");
+        Ok(())
+    }
+
+    #[test]
+    fn pack_http_listener_packs_doh_domain_and_provider_cloudflare()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let listener = ListenerConfig::Http(Box::new(HttpListenerConfig {
+            name: "http".to_owned(),
+            kill_date: None,
+            working_hours: None,
+            hosts: vec!["localhost:80".to_owned()],
+            host_bind: "0.0.0.0".to_owned(),
+            host_rotation: "round-robin".to_owned(),
+            port_bind: 80,
+            port_conn: None,
+            method: None,
+            behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
+            user_agent: None,
+            headers: Vec::new(),
+            uris: Vec::new(),
+            host_header: None,
+            secure: false,
+            cert: None,
+            response: None,
+            proxy: None,
+            ja3_randomize: Some(false),
+            doh_domain: Some("c2.example.com".to_owned()),
+            doh_provider: Some("cloudflare".to_owned()),
+        }));
+        let bytes = pack_config(&listener, &minimal_config_json())?;
+        let mut cursor = bytes.as_slice();
+        // Skip to the DoH fields: consume all preceding fields.
+        // Sleep, Jitter, Alloc, Execute, Spawn64, Spawn32, SleepTech, SleepJmp,
+        // StackSpoof, ProxyLoading, SysIndirect, AmsiEtwPatch, HeapEnc
+        read_u32(&mut cursor)?; // Sleep
+        read_u32(&mut cursor)?; // Jitter
+        read_u32(&mut cursor)?; // Alloc
+        read_u32(&mut cursor)?; // Execute
+        read_wstring(&mut cursor)?; // Spawn64
+        read_wstring(&mut cursor)?; // Spawn32
+        read_u32(&mut cursor)?; // SleepTechnique
+        read_u32(&mut cursor)?; // SleepJmpBypass
+        read_u32(&mut cursor)?; // StackSpoof
+        read_u32(&mut cursor)?; // ProxyLoading
+        read_u32(&mut cursor)?; // SysIndirect
+        read_u32(&mut cursor)?; // AmsiEtwPatch
+        read_u32(&mut cursor)?; // HeapEnc
+        // HTTP-transport fields
+        read_u64(&mut cursor)?; // KillDate
+        read_u32(&mut cursor)?; // WorkingHours
+        read_wstring(&mut cursor)?; // Method
+        read_u32(&mut cursor)?; // HostRotation
+        read_u32(&mut cursor)?; // host count
+        read_wstring(&mut cursor)?; // host
+        read_u32(&mut cursor)?; // port
+        read_u32(&mut cursor)?; // Secure
+        read_wstring(&mut cursor)?; // UserAgent
+        read_u32(&mut cursor)?; // header count (1: Content-type)
+        read_wstring(&mut cursor)?; // header
+        read_u32(&mut cursor)?; // uri count (1: /)
+        read_wstring(&mut cursor)?; // uri
+        read_u32(&mut cursor)?; // Proxy enabled (0)
+        read_u32(&mut cursor)?; // Ja3Randomize
+        // DoH fields
+        assert_eq!(read_bytes(&mut cursor)?, b"c2.example.com");
+        assert_eq!(read_u32(&mut cursor)?, 0); // Cloudflare
+        assert!(cursor.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn pack_http_listener_packs_doh_provider_google() -> Result<(), Box<dyn std::error::Error>> {
+        let listener = ListenerConfig::Http(Box::new(HttpListenerConfig {
+            name: "http".to_owned(),
+            kill_date: None,
+            working_hours: None,
+            hosts: vec!["localhost:80".to_owned()],
+            host_bind: "0.0.0.0".to_owned(),
+            host_rotation: "round-robin".to_owned(),
+            port_bind: 80,
+            port_conn: None,
+            method: None,
+            behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
+            user_agent: None,
+            headers: Vec::new(),
+            uris: Vec::new(),
+            host_header: None,
+            secure: false,
+            cert: None,
+            response: None,
+            proxy: None,
+            ja3_randomize: Some(false),
+            doh_domain: Some("c2.example.com".to_owned()),
+            doh_provider: Some("google".to_owned()),
+        }));
+        let with_google = pack_config(&listener, &minimal_config_json())?;
+        // Verify the last 4 bytes (provider) are 1 = Google.
+        let provider = u32::from_le_bytes(
+            with_google[with_google.len() - 4..].try_into().expect("last 4 bytes"),
+        );
+        assert_eq!(provider, 1, "Google provider should be encoded as 1");
+        Ok(())
     }
 
     // ── main_args tests ───────────────────────────────────────────────────
@@ -7027,6 +7250,8 @@ mod tests {
             response: None,
             proxy: None,
             ja3_randomize: None,
+            doh_domain: None,
+            doh_provider: None,
         }));
         let url = rust_agent_callback_url(&listener)?;
         assert_eq!(url, "https://c2.example.com:8443/");
@@ -7057,6 +7282,8 @@ mod tests {
             response: None,
             proxy: None,
             ja3_randomize: None,
+            doh_domain: None,
+            doh_provider: None,
         }));
         let url = rust_agent_callback_url(&listener)?;
         assert_eq!(url, "http://10.0.0.1:80/");
@@ -7087,6 +7314,8 @@ mod tests {
             response: None,
             proxy: None,
             ja3_randomize: None,
+            doh_domain: None,
+            doh_provider: None,
         }));
         let url = rust_agent_callback_url(&listener)?;
         assert_eq!(url, "https://127.0.0.1:443/");
@@ -7137,6 +7366,8 @@ mod tests {
             response: None,
             proxy: None,
             ja3_randomize: None,
+            doh_domain: None,
+            doh_provider: None,
         }));
 
         let error = service
@@ -7182,6 +7413,8 @@ mod tests {
             response: None,
             proxy: None,
             ja3_randomize: None,
+            doh_domain: None,
+            doh_provider: None,
         }));
 
         let error = service

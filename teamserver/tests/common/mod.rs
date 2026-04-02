@@ -411,6 +411,8 @@ pub fn http_listener_config(name: &str, port: u16) -> red_cell_common::ListenerC
         response: None,
         proxy: None,
         ja3_randomize: None,
+        doh_domain: None,
+        doh_provider: None,
     })
 }
 

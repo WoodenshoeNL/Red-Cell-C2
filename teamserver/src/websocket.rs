@@ -4971,6 +4971,8 @@ mod tests {
             response: None,
             proxy: None,
             ja3_randomize: None,
+            doh_domain: None,
+            doh_provider: None,
         })
     }
 

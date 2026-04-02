@@ -1213,6 +1213,8 @@ pub fn listener_config_from_operator(
             response: http_response_from_operator(info),
             proxy: proxy_from_operator(info)?,
             ja3_randomize: parse_optional_extra_bool(info, EXTRA_JA3_RANDOMIZE)?,
+            doh_domain: None,
+            doh_provider: None,
         })),
         Ok(ListenerProtocol::Smb) => Ok(ListenerConfig::from(SmbListenerConfig {
             name: name.to_owned(),
@@ -1384,6 +1386,8 @@ fn profile_listener_configs(
             response: config.response.map(Into::into),
             proxy: config.proxy.map(Into::into),
             ja3_randomize: config.ja3_randomize,
+            doh_domain: config.doh_domain,
+            doh_provider: config.doh_provider,
         }));
     }
     for config in profile.listeners.smb.iter().cloned() {
@@ -3882,6 +3886,8 @@ mod tests {
             response: None,
             proxy: None,
             ja3_randomize: None,
+            doh_domain: None,
+            doh_provider: None,
         })
     }
 
@@ -3911,6 +3917,8 @@ mod tests {
             response: None,
             proxy: None,
             ja3_randomize: None,
+            doh_domain: None,
+            doh_provider: None,
         })
     }
 
@@ -4924,6 +4932,8 @@ mod tests {
             }),
             proxy: None,
             ja3_randomize: None,
+            doh_domain: None,
+            doh_provider: None,
         });
 
         manager.create(config).await?;
@@ -4995,6 +5005,8 @@ mod tests {
             }),
             proxy: None,
             ja3_randomize: None,
+            doh_domain: None,
+            doh_provider: None,
         });
 
         manager.create(config).await?;
@@ -5380,6 +5392,8 @@ mod tests {
             }),
             proxy: None,
             ja3_randomize: None,
+            doh_domain: None,
+            doh_provider: None,
         });
 
         registry.insert(sample_agent_info(agent_id, key, iv)).await?;
@@ -6169,6 +6183,8 @@ mod tests {
                 password: Some(Zeroizing::new("pass".to_owned())),
             }),
             ja3_randomize: None,
+            doh_domain: None,
+            doh_provider: None,
         });
         let summary = ListenerSummary {
             name: "edge".to_owned(),
@@ -6218,6 +6234,8 @@ mod tests {
                     password: Some(Zeroizing::new("pass".to_owned())),
                 }),
                 ja3_randomize: None,
+                doh_domain: None,
+                doh_provider: None,
             }),
         };
 
@@ -8202,6 +8220,8 @@ mod tests {
             response: None,
             proxy: None,
             ja3_randomize: None,
+            doh_domain: None,
+            doh_provider: None,
         });
         assert_eq!(operator_protocol_name(&https), "Https");
 

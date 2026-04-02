@@ -609,6 +609,12 @@ pub struct ProfileHttpListenerConfig {
     /// Defaults to `true` for HTTPS listeners when absent.
     #[serde(rename = "Ja3Randomize", default)]
     pub ja3_randomize: Option<bool>,
+    /// ARC-08: authoritative C2 domain for DNS-over-HTTPS fallback transport.
+    #[serde(rename = "DoHDomain", default)]
+    pub doh_domain: Option<String>,
+    /// ARC-08: DoH provider — `"cloudflare"` (default) or `"google"`.
+    #[serde(rename = "DoHProvider", default)]
+    pub doh_provider: Option<String>,
 }
 
 /// SMB pivot listener configuration.

@@ -98,6 +98,8 @@ fn sample_listener() -> ListenerConfig {
             password: Some(Zeroizing::new("secret".to_owned())),
         }),
         ja3_randomize: None,
+        doh_domain: None,
+        doh_provider: None,
     })
 }
 

@@ -226,6 +226,15 @@ pub struct HttpListenerConfig {
     /// to `true` for HTTPS listeners and `false` for plain HTTP.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ja3_randomize: Option<bool>,
+    /// Authoritative C2 domain for ARC-08 DNS-over-HTTPS fallback transport.
+    /// When set, Archon will fall back to DoH if the primary HTTP transport
+    /// fails.  `None` disables the DoH fallback entirely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doh_domain: Option<String>,
+    /// DoH provider selection for ARC-08.  `"cloudflare"` (default) or
+    /// `"google"`.  Ignored when `doh_domain` is `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doh_provider: Option<String>,
 }
 
 /// Shared SMB listener configuration.
@@ -801,6 +810,8 @@ mod tests {
                 password: Some(Zeroizing::new("pass".to_string())),
             }),
             ja3_randomize: None,
+            doh_domain: None,
+            doh_provider: None,
         });
 
         assert_eq!(config.name(), "edge");

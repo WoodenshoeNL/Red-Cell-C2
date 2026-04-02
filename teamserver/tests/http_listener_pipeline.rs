@@ -849,6 +849,8 @@ fn http_listener(name: &str, port: u16) -> ListenerConfig {
         response: None,
         proxy: None,
         ja3_randomize: None,
+        doh_domain: None,
+        doh_provider: None,
     })
 }
 
@@ -878,6 +880,8 @@ fn http_listener_with_redirector(
         response: None,
         proxy: None,
         ja3_randomize: None,
+        doh_domain: None,
+        doh_provider: None,
     })
 }
 

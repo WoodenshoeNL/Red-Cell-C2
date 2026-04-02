@@ -6411,6 +6411,77 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn pack_config_heap_enc_false_is_packed_as_zero() -> Result<(), Box<dyn std::error::Error>> {
+        let config = serde_json::from_value::<Map<String, Value>>(json!({
+            "Sleep": "5",
+            "Jitter": "0",
+            "Sleep Technique": "WaitForSingleObjectEx",
+            "HeapEnc": false,
+            "Injection": {
+                "Alloc": "Win32",
+                "Execute": "Win32",
+                "Spawn64": "a",
+                "Spawn32": "b"
+            }
+        }))?;
+        let listener = ListenerConfig::Smb(red_cell_common::SmbListenerConfig {
+            name: "smb".to_owned(),
+            pipe_name: "pivot".to_owned(),
+            kill_date: None,
+            working_hours: None,
+        });
+
+        let bytes = pack_config(&listener, &config)?;
+        let mut cursor = bytes.as_slice();
+        assert_eq!(read_u32(&mut cursor)?, 5);
+        assert_eq!(read_u32(&mut cursor)?, 0);
+        assert_eq!(read_u32(&mut cursor)?, 1);
+        assert_eq!(read_u32(&mut cursor)?, 1);
+        assert_eq!(read_wstring(&mut cursor)?, "a");
+        assert_eq!(read_wstring(&mut cursor)?, "b");
+        assert_eq!(read_u32(&mut cursor)?, 0);
+        assert_eq!(read_u32(&mut cursor)?, 0);
+        assert_eq!(read_u32(&mut cursor)?, 0);
+        assert_eq!(read_u32(&mut cursor)?, 0);
+        assert_eq!(read_u32(&mut cursor)?, 0);
+        assert_eq!(read_u32(&mut cursor)?, 0);
+        assert_eq!(read_u32(&mut cursor)?, 0); // HeapEnc (explicit false)
+        assert_eq!(read_wstring(&mut cursor)?, r"\\.\pipe\pivot");
+        assert_eq!(read_u64(&mut cursor)?, 0);
+        assert_eq!(read_u32(&mut cursor)?, 0);
+        assert!(cursor.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn merged_request_config_propagates_heap_enc_false_from_profile_defaults()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let config = merged_request_config(
+            r#"{"Sleep":"5","Jitter":"0","Sleep Technique":"WaitForSingleObjectEx","Injection":{"Alloc":"Win32","Execute":"Win32","Spawn64":"a","Spawn32":"b"}}"#,
+            "demon",
+            &DemonConfig {
+                sleep: None,
+                jitter: None,
+                indirect_syscall: false,
+                stack_duplication: false,
+                sleep_technique: None,
+                proxy_loading: None,
+                amsi_etw_patching: None,
+                injection: None,
+                dotnet_name_pipe: None,
+                binary: None,
+                init_secret: None,
+                trust_x_forwarded_for: false,
+                trusted_proxy_peers: Vec::new(),
+                heap_enc: false,
+                allow_legacy_ctr: false,
+            },
+        )?;
+        assert_eq!(config.get("HeapEnc"), Some(&Value::Bool(false)));
+        Ok(())
+    }
+
     // ── merged_request_config override tests ──────────────────────────────
 
     #[test]

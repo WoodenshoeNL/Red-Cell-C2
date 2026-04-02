@@ -475,8 +475,9 @@ grep -i "<test name or keyword>" docs/known-failures.md
 If it is already listed, do NOT create a new issue — the bug is tracked. Link your task
 to the existing issue if relevant: `br dep add <existing-id> <your-task-id>`
 
-If it is NOT listed, create a beads issue with ALL of the following:
+If it is NOT listed, search for duplicates then create a beads issue:
 ```bash
+br search "<key phrase from title>"
 br create \\
   --title="bug: <test name> — <one-line symptom>" \\
   --description="**Failing test**: <exact test name>
@@ -488,15 +489,15 @@ br create \\
 **Context**: Encountered while working on <your-issue-id> in zone(s): {', '.join(f'`{z}`' for z in zones)}.
 This is outside my zone — needs teamserver/common/client follow-up." \\
   --type=bug \\
-  --priority=2
-br label add <new-id> zone:<other-zone>
+  --priority=2 \\
+  --labels=zone:<other-zone>
 ```
 
 ### If work in another zone is required (not a test failure)
 
 ```bash
-br create --title="..." --description="..." --type=task --priority=<N>
-br label add <new-id> zone:<zone>
+br search "<key phrase from title>"
+br create --title="..." --description="..." --type=task --priority=<N> --labels=zone:<zone>
 ```
 """
 

@@ -218,6 +218,12 @@ Skip creating an issue if an existing open issue already covers the same functio
 Create one issue per logical unit of missing coverage. Do not create one giant issue
 for an entire file — break it down by function group or concern.
 
+**Before creating**, search for duplicates:
+```bash
+br search "<key phrase from title>"
+```
+If an open issue already covers the same function or gap, skip it.
+
 ```bash
 br create \
   --title="test: add <unit|integration|round-trip> tests for <module/function>" \
@@ -235,8 +241,13 @@ br create \
 
 **Test location**: inline \`#[cfg(test)]\` in <file.rs> OR \`teamserver/tests/<name>.rs\`" \
   --type=task \
-  --priority=<2|3|4>
+  --priority=<2|3|4> \
+  --labels=zone:<zone>
 ```
+
+Derive `<zone>` from the file path: `teamserver/` → teamserver, `client-cli/` → client-cli,
+`client/` → client, `common/` → common, `agent/archon/` → archon, `agent/phantom/` → phantom,
+`agent/specter/` → specter, `automatic-test/` → autotest.
 
 Aim for 4–10 issues per run, one per distinct coverage gap. Be specific: name the
 exact functions, not just the file. A good issue says exactly what to test and why.

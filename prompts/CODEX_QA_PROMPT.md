@@ -192,6 +192,12 @@ of your commit (Step 9), then file the beads issue.
 For each problem, create a beads issue. Always include the responsible agent from Step 3 in
 the description so the scorecard can be updated accurately.
 
+**Before creating**, search for duplicates:
+```bash
+br search "<key phrase from title>"
+```
+If an open issue already covers the same problem, skip it.
+
 ```bash
 br create \
   --title="<short description>" \
@@ -199,8 +205,13 @@ br create \
 
 <what is wrong, where it is (file:line), what the correct behavior should be>" \
   --type=bug \
-  --priority=<0-2 for real problems, 3-4 for polish>
+  --priority=<0-2 for real problems, 3-4 for polish> \
+  --labels=zone:<zone>
 ```
+
+Derive `<zone>` from the file path: `teamserver/` → teamserver, `client-cli/` → client-cli,
+`client/` → client, `common/` → common, `agent/archon/` → archon, `agent/phantom/` → phantom,
+`agent/specter/` → specter, `automatic-test/` → autotest.
 
 If the problem blocks an existing issue, add the dependency:
 

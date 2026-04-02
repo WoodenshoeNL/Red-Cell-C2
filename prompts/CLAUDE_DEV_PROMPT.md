@@ -112,15 +112,21 @@ Before writing code, think through:
 - If you discover a new problem or missing piece while working, create a beads issue:
 
 ```bash
+br search "<key phrase from title>"  # check for duplicates first
 br create \
   --title="<title>" \
   --description="<what needs to be done and why>" \
   --type=task \
-  --priority=2
+  --priority=2 \
+  --labels=zone:<zone>
 br sync --flush-only
 git add .beads/issues.jsonl && git commit -m "chore: add issue for <title>"
 git push
 ```
+
+Derive `<zone>` from the file path: `teamserver/` → teamserver, `client-cli/` → client-cli,
+`client/` → client, `common/` → common, `agent/archon/` → archon, `agent/phantom/` → phantom,
+`agent/specter/` → specter, `automatic-test/` → autotest.
 
 ### 6. Verify — all four must pass
 

@@ -260,6 +260,12 @@ For each meaningful gap, create a beads issue. Prioritize as follows:
 
 Use type `task` for all test coverage issues.
 
+**Before creating**, search for duplicates:
+```bash
+br search "<key phrase from title>"
+```
+If an open issue already covers the same function or gap, skip it.
+
 ```bash
 br create \
   --title="test: <specific description of what is missing>" \
@@ -274,8 +280,13 @@ without this test.>
 <Brief sketch of what the test should do — input, action, expected outcome.
 One or two sentences is enough.>" \
   --type=task \
-  --priority=<2|3|4>
+  --priority=<2|3|4> \
+  --labels=zone:<zone>
 ```
+
+Derive `<zone>` from the file path: `teamserver/` → teamserver, `client-cli/` → client-cli,
+`client/` → client, `common/` → common, `agent/archon/` → archon, `agent/phantom/` → phantom,
+`agent/specter/` → specter, `automatic-test/` → autotest.
 
 Aim for 3–8 issues per run. Quality over quantity — a vague issue like "add tests for
 foo.rs" is not actionable. Be specific about the function, the scenario, and why it matters.

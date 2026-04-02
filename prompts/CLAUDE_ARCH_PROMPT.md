@@ -217,6 +217,12 @@ Keep a mental tally per agent: how many findings, and of what category.
 For each real finding, create a beads issue. **Always include the responsible agent** so the
 scorecard can be updated accurately.
 
+**Before creating**, search for duplicates:
+```bash
+br search "<key phrase from title>"
+```
+If an open issue already covers the same problem, skip it.
+
 For **bugs and quality issues**:
 ```bash
 br create \
@@ -225,7 +231,8 @@ br create \
 
 <file:line — what is wrong, why it matters, what the fix should be>" \
   --type=bug \
-  --priority=<1 for security/crash, 2 for correctness, 3 for quality, 4 for polish>
+  --priority=<1 for security/crash, 2 for correctness, 3 for quality, 4 for polish> \
+  --labels=zone:<zone>
 ```
 
 For **unimplemented functionality** (from 5h):
@@ -234,8 +241,13 @@ br create \
   --title="impl: <what needs to be implemented>" \
   --description="<file:line — what is missing, what it should do, any relevant context from AGENTS.md or types>" \
   --type=task \
-  --priority=<2 for core functionality, 3 for secondary features, 4 for nice-to-haves>
+  --priority=<2 for core functionality, 3 for secondary features, 4 for nice-to-haves> \
+  --labels=zone:<zone>
 ```
+
+Derive `<zone>` from the file path: `teamserver/` → teamserver, `client-cli/` → client-cli,
+`client/` → client, `common/` → common, `agent/archon/` → archon, `agent/phantom/` → phantom,
+`agent/specter/` → specter, `automatic-test/` → autotest.
 
 If the finding blocks existing work:
 

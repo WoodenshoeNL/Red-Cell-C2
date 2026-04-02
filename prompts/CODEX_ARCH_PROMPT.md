@@ -206,6 +206,12 @@ Keep a mental tally per agent: how many findings, and of what category.
 
 For each real finding, create a beads issue and include the responsible agent:
 
+**Before creating**, search for duplicates:
+```bash
+br search "<key phrase from title>"
+```
+If an open issue already covers the same problem, skip it.
+
 ```bash
 br create \
   --title="<short, specific title>" \
@@ -213,8 +219,13 @@ br create \
 
 <file:line — what is wrong, why it matters, what the fix should be>" \
   --type=bug \
-  --priority=<1 for security/crash, 2 for correctness, 3 for quality, 4 for polish>
+  --priority=<1 for security/crash, 2 for correctness, 3 for quality, 4 for polish> \
+  --labels=zone:<zone>
 ```
+
+Derive `<zone>` from the file path: `teamserver/` → teamserver, `client-cli/` → client-cli,
+`client/` → client, `common/` → common, `agent/archon/` → archon, `agent/phantom/` → phantom,
+`agent/specter/` → specter, `automatic-test/` → autotest.
 
 If the finding blocks existing work:
 

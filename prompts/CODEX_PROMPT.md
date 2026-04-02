@@ -103,12 +103,18 @@ source files under `./src/Havoc`.
 - If you discover a new problem or missing piece, create a beads issue for it:
 
 ```bash
+br search "<key phrase from title>"  # check for duplicates first
 br create \
   --title="<title>" \
   --description="<what needs to be done and why>" \
   --type=task \
-  --priority=2
+  --priority=2 \
+  --labels=zone:<zone>
 ```
+
+Derive `<zone>` from the file path: `teamserver/` → teamserver, `client-cli/` → client-cli,
+`client/` → client, `common/` → common, `agent/archon/` → archon, `agent/phantom/` → phantom,
+`agent/specter/` → specter, `automatic-test/` → autotest.
 
 ### 5. Verify
 

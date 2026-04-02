@@ -61,6 +61,223 @@ pub struct BofCallback {
     pub request_id: u32,
 }
 
+// ─── Beacon API types and callbacks (Windows) ──────────────────────────────
+
+/// Beacon data parser — matches the Havoc `datap` struct layout from
+/// `payloads/Demon/include/core/ObjectApi.h`.
+///
+/// BOFs allocate this on their stack and pass it to `BeaconDataParse` /
+/// `BeaconDataInt` / etc.  The layout must be ABI-compatible with the C
+/// definition so that BOF object code can operate on it directly.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct DataParser {
+    /// Original buffer pointer (retained for the caller to free).
+    pub original: *const u8,
+    /// Current read cursor into the buffer.
+    pub buffer: *const u8,
+    /// Remaining bytes from `buffer` to end of data.
+    pub length: i32,
+    /// Total usable size (set once by `BeaconDataParse`).
+    pub size: i32,
+}
+
+// Thread-local pointer to the `Vec<u8>` that collects BOF output for the
+// current `coffee_execute` invocation.  Set before calling the BOF entry
+// point and cleared afterward.
+std::thread_local! {
+    static BOF_OUTPUT_TLS: std::cell::Cell<*mut Vec<u8>> =
+        const { std::cell::Cell::new(std::ptr::null_mut()) };
+}
+
+// ── Beacon data-parsing API ────────────────────────────────────────────────
+//
+// These `extern "C"` functions are called directly by BOF object code via
+// the function-pointer map (FunMap).  Each matches the signature declared in
+// Cobalt Strike / Havoc `beacon.h`.
+
+/// `void BeaconDataParse(datap *parser, char *buffer, int size)`
+///
+/// Initialises a [`DataParser`].  The first 4 bytes of `buffer` are a
+/// length prefix consumed here; the usable data starts at offset 4.
+#[allow(dead_code, unsafe_code)]
+unsafe extern "C" fn beacon_data_parse(parser: *mut DataParser, buffer: *const u8, size: i32) {
+    if parser.is_null() || buffer.is_null() {
+        return;
+    }
+    // SAFETY: caller guarantees `parser` is valid and writable.
+    let p = unsafe { &mut *parser };
+    p.original = buffer;
+    p.buffer = unsafe { buffer.add(4) };
+    p.length = size - 4;
+    p.size = size - 4;
+}
+
+/// `int BeaconDataInt(datap *parser)`
+///
+/// Reads a little-endian 32-bit integer and advances the cursor.
+#[allow(dead_code, unsafe_code)]
+unsafe extern "C" fn beacon_data_int(parser: *mut DataParser) -> i32 {
+    if parser.is_null() {
+        return 0;
+    }
+    let p = unsafe { &mut *parser };
+    if p.length < 4 {
+        return 0;
+    }
+    // SAFETY: caller guarantees at least `p.length` readable bytes at `p.buffer`.
+    let value = unsafe { std::ptr::read_unaligned(p.buffer.cast::<u32>()) };
+    p.buffer = unsafe { p.buffer.add(4) };
+    p.length -= 4;
+    value as i32
+}
+
+/// `short BeaconDataShort(datap *parser)`
+///
+/// Reads a little-endian 16-bit integer and advances the cursor.
+#[allow(dead_code, unsafe_code)]
+unsafe extern "C" fn beacon_data_short(parser: *mut DataParser) -> i16 {
+    if parser.is_null() {
+        return 0;
+    }
+    let p = unsafe { &mut *parser };
+    if p.length < 2 {
+        return 0;
+    }
+    let value = unsafe { std::ptr::read_unaligned(p.buffer.cast::<u16>()) };
+    p.buffer = unsafe { p.buffer.add(2) };
+    p.length -= 2;
+    value as i16
+}
+
+/// `char *BeaconDataExtract(datap *parser, int *size)`
+///
+/// Reads a 4-byte length prefix followed by that many bytes of data.
+/// Returns a pointer to the data (inside the original buffer) and
+/// optionally writes the length to `*size`.
+#[allow(dead_code, unsafe_code)]
+unsafe extern "C" fn beacon_data_extract(parser: *mut DataParser, size_out: *mut i32) -> *const u8 {
+    if parser.is_null() {
+        return std::ptr::null();
+    }
+    let p = unsafe { &mut *parser };
+    if p.length < 4 {
+        return std::ptr::null();
+    }
+    let length = unsafe { std::ptr::read_unaligned(p.buffer.cast::<u32>()) } as i32;
+    p.buffer = unsafe { p.buffer.add(4) };
+    let data = p.buffer;
+    p.length -= 4;
+    p.length -= length;
+    p.buffer = unsafe { p.buffer.add(length as usize) };
+    if !size_out.is_null() {
+        unsafe { *size_out = length };
+    }
+    data
+}
+
+/// `int BeaconDataLength(datap *parser)`
+///
+/// Returns the number of bytes remaining in the parser.
+#[allow(dead_code, unsafe_code)]
+unsafe extern "C" fn beacon_data_length(parser: *mut DataParser) -> i32 {
+    if parser.is_null() {
+        return 0;
+    }
+    unsafe { (*parser).length }
+}
+
+// ── Beacon output API ──────────────────────────────────────────────────────
+
+/// `void BeaconOutput(int type, char *data, int len)`
+///
+/// Appends raw bytes to the BOF output buffer.
+#[allow(dead_code, unsafe_code)]
+unsafe extern "C" fn beacon_output(_cb_type: i32, data: *const u8, len: i32) {
+    if data.is_null() || len <= 0 {
+        return;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(data, len as usize) };
+    BOF_OUTPUT_TLS.with(|cell| {
+        let ptr = cell.get();
+        if !ptr.is_null() {
+            // SAFETY: ptr is set by coffee_execute to a valid &mut Vec<u8>.
+            unsafe { (*ptr).extend_from_slice(slice) };
+        }
+    });
+}
+
+/// `void BeaconPrintf(int type, char *fmt, ...)`
+///
+/// Simplified stub: captures the format string verbatim (variadic
+/// formatting is not available on stable Rust).  On x86-64 Windows the
+/// caller manages the stack, so ignoring extra arguments is safe.
+#[allow(dead_code, unsafe_code)]
+unsafe extern "C" fn beacon_printf(_cb_type: i32, fmt: *const u8) {
+    if fmt.is_null() {
+        return;
+    }
+    // Walk until NUL to find the format string length.
+    let mut len = 0usize;
+    unsafe {
+        while *fmt.add(len) != 0 {
+            len += 1;
+        }
+    }
+    let slice = unsafe { std::slice::from_raw_parts(fmt, len) };
+    BOF_OUTPUT_TLS.with(|cell| {
+        let ptr = cell.get();
+        if !ptr.is_null() {
+            unsafe { (*ptr).extend_from_slice(slice) };
+        }
+    });
+}
+
+// ── Utility APIs ───────────────────────────────────────────────────────────
+
+/// `BOOL toWideChar(char *src, wchar_t *dst, int max)`
+///
+/// Converts an ASCII/ANSI string to UTF-16LE in-place.
+#[allow(dead_code, unsafe_code)]
+unsafe extern "C" fn to_wide_char(src: *const u8, dst: *mut u16, max: i32) -> i32 {
+    if src.is_null() || dst.is_null() || max <= 0 {
+        return 0;
+    }
+    let max = max as usize;
+    for i in 0..max {
+        let ch = unsafe { *src.add(i) };
+        unsafe { *dst.add(i) = ch as u16 };
+        if ch == 0 {
+            return 1; // TRUE — success
+        }
+    }
+    1 // TRUE
+}
+
+/// Resolve a `__imp_Beacon*` or `__imp_toWideChar` symbol name to the
+/// corresponding Beacon API function pointer, or `None` if the name is not
+/// a known Beacon API.
+#[allow(dead_code)]
+fn resolve_beacon_api(sym_name: &str) -> Option<u64> {
+    // Strip the `__imp_` prefix to get the bare function name.
+    let bare = sym_name.strip_prefix("__imp_")?;
+    let addr: u64 = match bare {
+        "BeaconDataParse" => beacon_data_parse as *const () as u64,
+        "BeaconDataInt" => beacon_data_int as *const () as u64,
+        "BeaconDataShort" => beacon_data_short as *const () as u64,
+        "BeaconDataExtract" => beacon_data_extract as *const () as u64,
+        "BeaconDataLength" => beacon_data_length as *const () as u64,
+        "BeaconOutput" => beacon_output as *const () as u64,
+        "BeaconPrintf" => beacon_printf as *const () as u64,
+        "toWideChar" => to_wide_char as *const () as u64,
+        _ => {
+            // Unknown Beacon API — return None so caller can decide.
+            return None;
+        }
+    };
+    Some(addr)
+}
+
 // ─── Windows implementation ─────────────────────────────────────────────────
 
 /// Execute a BOF (COFF object file) with the given entry function and arguments.
@@ -358,28 +575,39 @@ pub fn coffee_execute(
 
     // ── Resolve external imports ────────────────────────────────────────
 
-    // BOF output buffer shared with Beacon API callbacks
+    // BOF output buffer — Beacon API callbacks (BeaconPrintf / BeaconOutput)
+    // append to this Vec through the thread-local `BOF_OUTPUT_TLS`.
     let mut bof_output: Vec<u8> = Vec::new();
-    let bof_output_ptr: *mut Vec<u8> = &mut bof_output;
     let bof_arg_data: *const u8 = arg_data.as_ptr();
     let bof_arg_len: u32 = arg_data.len() as u32;
 
-    // Beacon API function table — stored as function pointers.
-    // These are simplified stubs: BeaconPrintf captures output, others are no-ops.
-    //
-    // In a full implementation each Beacon* function would be a proper callback.
-    // For now, we provide the minimum viable API surface.
+    // FunMap: IAT-like table of function pointers.  For every `__imp_*`
+    // symbol the COFF object contains an indirect call (`call [rip+disp32]`)
+    // that loads the function address from a pointer-sized slot.  We
+    // allocate those slots here and resolve the symbol to the slot address
+    // (not the function address itself).  This matches the Havoc CoffeeLdr
+    // FunMap approach.
+    let mut fun_map: Vec<u64> = Vec::with_capacity(external_symbols.len());
 
-    // We resolve __imp_DLL$Function style imports by loading the DLL dynamically.
     let mut resolved_imports: HashMap<usize, u64> = HashMap::new();
     let mut missing_symbols: Vec<String> = Vec::new();
 
     for (&sym_idx_key, sym_name) in &external_symbols {
         if sym_name.starts_with("__imp_Beacon") || sym_name.starts_with("__imp_toWideChar") {
-            // Beacon API stubs — resolve to a no-op trampoline for now.
-            // A full implementation would wire each to the corresponding
-            // data-parse / output / format function.
-            resolved_imports.insert(sym_idx_key, 0);
+            // Beacon API — resolve to a real implementation.
+            if let Some(func_addr) = resolve_beacon_api(sym_name) {
+                let slot_index = fun_map.len();
+                fun_map.push(func_addr);
+                let slot_addr = unsafe { fun_map.as_ptr().add(slot_index) } as u64;
+                resolved_imports.insert(sym_idx_key, slot_addr);
+            } else {
+                // Unknown Beacon API — warn but don't fail the whole BOF.
+                warn!(symbol = %sym_name, "BOF: unimplemented Beacon API, resolving as no-op");
+                let slot_index = fun_map.len();
+                fun_map.push(0);
+                let slot_addr = unsafe { fun_map.as_ptr().add(slot_index) } as u64;
+                resolved_imports.insert(sym_idx_key, slot_addr);
+            }
         } else if sym_name.starts_with("__imp_") {
             let import_name = &sym_name[6..]; // strip __imp_
             if let Some(dollar_pos) = import_name.find('$') {
@@ -404,7 +632,10 @@ pub fn coffee_execute(
                     )
                 };
                 if let Some(addr) = proc {
-                    resolved_imports.insert(sym_idx_key, addr as u64);
+                    let slot_index = fun_map.len();
+                    fun_map.push(addr as u64);
+                    let slot_addr = unsafe { fun_map.as_ptr().add(slot_index) } as u64;
+                    resolved_imports.insert(sym_idx_key, slot_addr);
                 } else {
                     missing_symbols.push(format!("{dll_name}!{func_name}"));
                 }
@@ -425,7 +656,10 @@ pub fn coffee_execute(
                         )
                     };
                     if let Some(addr) = proc {
-                        resolved_imports.insert(sym_idx_key, addr as u64);
+                        let slot_index = fun_map.len();
+                        fun_map.push(addr as u64);
+                        let slot_addr = unsafe { fun_map.as_ptr().add(slot_index) } as u64;
+                        resolved_imports.insert(sym_idx_key, slot_addr);
                         break;
                     }
                 }
@@ -579,6 +813,10 @@ pub fn coffee_execute(
 
     // ── Execute the entry point ─────────────────────────────────────────
 
+    // Install the output buffer into TLS so Beacon API callbacks can
+    // append output during execution.
+    BOF_OUTPUT_TLS.with(|cell| cell.set(&mut bof_output as *mut Vec<u8>));
+
     let callbacks = if let Some(ep) = entry_point {
         // BOF entry: void go(char* args, int arg_len)
         type BofEntry = unsafe extern "C" fn(*const u8, u32);
@@ -642,7 +880,12 @@ pub fn coffee_execute(
         }
     }
 
-    let _ = bof_output_ptr; // suppress unused warnings
+    // Clear TLS pointer — the bof_output Vec is about to go out of scope.
+    BOF_OUTPUT_TLS.with(|cell| cell.set(std::ptr::null_mut()));
+
+    // Keep fun_map alive until after cleanup (its slots were referenced
+    // during BOF execution via the FunMap pointers).
+    drop(fun_map);
 
     BofResult { callbacks }
 }
@@ -914,5 +1157,326 @@ mod tests {
         assert_eq!(drained.len(), 2);
         assert_eq!(drained[0].request_id, task_id);
         assert_eq!(drained[1].request_id, task_id);
+    }
+
+    // ── Beacon data-parsing API tests ──────────────────────────────────
+
+    /// Helper: build a BOF argument buffer with a 4-byte length prefix
+    /// followed by the given payload.
+    fn make_arg_buf(payload: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(4 + payload.len());
+        buf.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        buf.extend_from_slice(payload);
+        buf
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn beacon_data_parse_initialises_parser() {
+        // Build buffer: 4-byte prefix + 8 bytes of payload
+        let payload = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+        let buf = make_arg_buf(&payload);
+
+        let mut parser = std::mem::MaybeUninit::<DataParser>::uninit();
+        unsafe {
+            beacon_data_parse(parser.as_mut_ptr(), buf.as_ptr(), buf.len() as i32);
+        }
+        let parser = unsafe { parser.assume_init() };
+
+        assert_eq!(parser.original, buf.as_ptr());
+        assert_eq!(parser.buffer, unsafe { buf.as_ptr().add(4) });
+        assert_eq!(parser.length, payload.len() as i32);
+        assert_eq!(parser.size, payload.len() as i32);
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn beacon_data_int_reads_le_u32() {
+        // Payload: two 32-bit little-endian integers
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&42u32.to_le_bytes());
+        payload.extend_from_slice(&0xDEADBEEFu32.to_le_bytes());
+        let buf = make_arg_buf(&payload);
+
+        let mut parser = std::mem::MaybeUninit::<DataParser>::uninit();
+        unsafe { beacon_data_parse(parser.as_mut_ptr(), buf.as_ptr(), buf.len() as i32) };
+        let mut parser = unsafe { parser.assume_init() };
+
+        let v1 = unsafe { beacon_data_int(&mut parser) };
+        assert_eq!(v1, 42);
+
+        let v2 = unsafe { beacon_data_int(&mut parser) };
+        assert_eq!(v2, 0xDEADBEEFu32 as i32);
+
+        assert_eq!(parser.length, 0);
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn beacon_data_int_returns_zero_when_exhausted() {
+        // Only 2 bytes of payload — not enough for a 32-bit read.
+        let buf = make_arg_buf(&[0xAA, 0xBB]);
+
+        let mut parser = std::mem::MaybeUninit::<DataParser>::uninit();
+        unsafe { beacon_data_parse(parser.as_mut_ptr(), buf.as_ptr(), buf.len() as i32) };
+        let mut parser = unsafe { parser.assume_init() };
+
+        let v = unsafe { beacon_data_int(&mut parser) };
+        assert_eq!(v, 0);
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn beacon_data_short_reads_le_u16() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&1234u16.to_le_bytes());
+        payload.extend_from_slice(&0xBEEFu16.to_le_bytes());
+        let buf = make_arg_buf(&payload);
+
+        let mut parser = std::mem::MaybeUninit::<DataParser>::uninit();
+        unsafe { beacon_data_parse(parser.as_mut_ptr(), buf.as_ptr(), buf.len() as i32) };
+        let mut parser = unsafe { parser.assume_init() };
+
+        assert_eq!(unsafe { beacon_data_short(&mut parser) }, 1234);
+        assert_eq!(unsafe { beacon_data_short(&mut parser) }, 0xBEEFu16 as i16);
+        assert_eq!(parser.length, 0);
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn beacon_data_short_returns_zero_when_exhausted() {
+        // 1 byte payload — not enough for a 16-bit read.
+        let buf = make_arg_buf(&[0xFF]);
+
+        let mut parser = std::mem::MaybeUninit::<DataParser>::uninit();
+        unsafe { beacon_data_parse(parser.as_mut_ptr(), buf.as_ptr(), buf.len() as i32) };
+        let mut parser = unsafe { parser.assume_init() };
+
+        assert_eq!(unsafe { beacon_data_short(&mut parser) }, 0);
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn beacon_data_extract_reads_length_prefixed_blob() {
+        // Payload: length-prefixed string "hello"
+        let hello = b"hello";
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&(hello.len() as u32).to_le_bytes());
+        payload.extend_from_slice(hello);
+        let buf = make_arg_buf(&payload);
+
+        let mut parser = std::mem::MaybeUninit::<DataParser>::uninit();
+        unsafe { beacon_data_parse(parser.as_mut_ptr(), buf.as_ptr(), buf.len() as i32) };
+        let mut parser = unsafe { parser.assume_init() };
+
+        let mut out_size: i32 = 0;
+        let ptr = unsafe { beacon_data_extract(&mut parser, &mut out_size) };
+        assert!(!ptr.is_null());
+        assert_eq!(out_size, hello.len() as i32);
+        let extracted = unsafe { std::slice::from_raw_parts(ptr, out_size as usize) };
+        assert_eq!(extracted, hello);
+        assert_eq!(parser.length, 0);
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn beacon_data_extract_with_null_size_out() {
+        let data = b"ab";
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        payload.extend_from_slice(data);
+        let buf = make_arg_buf(&payload);
+
+        let mut parser = std::mem::MaybeUninit::<DataParser>::uninit();
+        unsafe { beacon_data_parse(parser.as_mut_ptr(), buf.as_ptr(), buf.len() as i32) };
+        let mut parser = unsafe { parser.assume_init() };
+
+        // Pass null for size_out — should not crash.
+        let ptr = unsafe { beacon_data_extract(&mut parser, std::ptr::null_mut()) };
+        assert!(!ptr.is_null());
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn beacon_data_extract_returns_null_when_exhausted() {
+        // Empty payload — not enough for 4-byte length prefix.
+        let buf = make_arg_buf(&[]);
+
+        let mut parser = std::mem::MaybeUninit::<DataParser>::uninit();
+        unsafe { beacon_data_parse(parser.as_mut_ptr(), buf.as_ptr(), buf.len() as i32) };
+        let mut parser = unsafe { parser.assume_init() };
+
+        let mut out_size: i32 = -1;
+        let ptr = unsafe { beacon_data_extract(&mut parser, &mut out_size) };
+        assert!(ptr.is_null());
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn beacon_data_length_returns_remaining() {
+        let payload = [0u8; 10];
+        let buf = make_arg_buf(&payload);
+
+        let mut parser = std::mem::MaybeUninit::<DataParser>::uninit();
+        unsafe { beacon_data_parse(parser.as_mut_ptr(), buf.as_ptr(), buf.len() as i32) };
+        let mut parser = unsafe { parser.assume_init() };
+
+        assert_eq!(unsafe { beacon_data_length(&mut parser) }, 10);
+        // Consume 4 bytes
+        let _ = unsafe { beacon_data_int(&mut parser) };
+        assert_eq!(unsafe { beacon_data_length(&mut parser) }, 6);
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn beacon_data_mixed_reads() {
+        // Build a complex buffer: short(5) + int(100) + extract("test")
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&5u16.to_le_bytes()); // short
+        payload.extend_from_slice(&100u32.to_le_bytes()); // int
+        let test_data = b"test";
+        payload.extend_from_slice(&(test_data.len() as u32).to_le_bytes());
+        payload.extend_from_slice(test_data); // extract
+
+        let buf = make_arg_buf(&payload);
+        let mut parser = std::mem::MaybeUninit::<DataParser>::uninit();
+        unsafe { beacon_data_parse(parser.as_mut_ptr(), buf.as_ptr(), buf.len() as i32) };
+        let mut parser = unsafe { parser.assume_init() };
+
+        assert_eq!(unsafe { beacon_data_short(&mut parser) }, 5);
+        assert_eq!(unsafe { beacon_data_int(&mut parser) }, 100);
+        let mut sz: i32 = 0;
+        let ptr = unsafe { beacon_data_extract(&mut parser, &mut sz) };
+        assert_eq!(sz, 4);
+        assert_eq!(unsafe { std::slice::from_raw_parts(ptr, sz as usize) }, b"test");
+        assert_eq!(unsafe { beacon_data_length(&mut parser) }, 0);
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn beacon_data_parse_null_parser_does_not_crash() {
+        unsafe { beacon_data_parse(std::ptr::null_mut(), [0u8; 8].as_ptr(), 8) };
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn beacon_data_int_null_parser_returns_zero() {
+        assert_eq!(unsafe { beacon_data_int(std::ptr::null_mut()) }, 0);
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn beacon_data_length_null_parser_returns_zero() {
+        assert_eq!(unsafe { beacon_data_length(std::ptr::null_mut()) }, 0);
+    }
+
+    // ── Beacon output API tests ────────────────────────────────────────
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn beacon_output_appends_to_tls_buffer() {
+        let mut buf: Vec<u8> = Vec::new();
+        BOF_OUTPUT_TLS.with(|cell| cell.set(&mut buf as *mut Vec<u8>));
+
+        let data = b"hello world";
+        unsafe { beacon_output(0, data.as_ptr(), data.len() as i32) };
+
+        BOF_OUTPUT_TLS.with(|cell| cell.set(std::ptr::null_mut()));
+
+        assert_eq!(buf, b"hello world");
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn beacon_output_null_data_is_noop() {
+        let mut buf: Vec<u8> = Vec::new();
+        BOF_OUTPUT_TLS.with(|cell| cell.set(&mut buf as *mut Vec<u8>));
+
+        unsafe { beacon_output(0, std::ptr::null(), 10) };
+
+        BOF_OUTPUT_TLS.with(|cell| cell.set(std::ptr::null_mut()));
+
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn beacon_printf_captures_format_string() {
+        let mut buf: Vec<u8> = Vec::new();
+        BOF_OUTPUT_TLS.with(|cell| cell.set(&mut buf as *mut Vec<u8>));
+
+        let fmt = b"test output\0";
+        unsafe { beacon_printf(0, fmt.as_ptr()) };
+
+        BOF_OUTPUT_TLS.with(|cell| cell.set(std::ptr::null_mut()));
+
+        assert_eq!(buf, b"test output");
+    }
+
+    // ── toWideChar tests ───────────────────────────────────────────────
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn to_wide_char_converts_ascii() {
+        let src = b"Hi\0";
+        let mut dst = [0u16; 4];
+        let result = unsafe { to_wide_char(src.as_ptr(), dst.as_mut_ptr(), 4) };
+        assert_eq!(result, 1); // TRUE
+        assert_eq!(dst[0], b'H' as u16);
+        assert_eq!(dst[1], b'i' as u16);
+        assert_eq!(dst[2], 0);
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn to_wide_char_null_returns_zero() {
+        let mut dst = [0u16; 4];
+        assert_eq!(unsafe { to_wide_char(std::ptr::null(), dst.as_mut_ptr(), 4) }, 0);
+        assert_eq!(unsafe { to_wide_char(b"x\0".as_ptr(), std::ptr::null_mut(), 4) }, 0);
+    }
+
+    // ── resolve_beacon_api tests ───────────────────────────────────────
+
+    #[test]
+    fn resolve_beacon_api_known_symbols() {
+        assert!(resolve_beacon_api("__imp_BeaconDataParse").is_some());
+        assert!(resolve_beacon_api("__imp_BeaconDataInt").is_some());
+        assert!(resolve_beacon_api("__imp_BeaconDataShort").is_some());
+        assert!(resolve_beacon_api("__imp_BeaconDataExtract").is_some());
+        assert!(resolve_beacon_api("__imp_BeaconDataLength").is_some());
+        assert!(resolve_beacon_api("__imp_BeaconOutput").is_some());
+        assert!(resolve_beacon_api("__imp_BeaconPrintf").is_some());
+        assert!(resolve_beacon_api("__imp_toWideChar").is_some());
+    }
+
+    #[test]
+    fn resolve_beacon_api_unknown_returns_none() {
+        assert!(resolve_beacon_api("__imp_BeaconGetSpawnTo").is_none());
+        assert!(resolve_beacon_api("__imp_BeaconSpawnTemporaryProcess").is_none());
+        assert!(resolve_beacon_api("not_a_beacon_api").is_none());
+    }
+
+    #[test]
+    fn resolve_beacon_api_returns_distinct_addresses() {
+        let addrs: Vec<u64> = [
+            "__imp_BeaconDataParse",
+            "__imp_BeaconDataInt",
+            "__imp_BeaconDataShort",
+            "__imp_BeaconDataExtract",
+            "__imp_BeaconDataLength",
+            "__imp_BeaconOutput",
+            "__imp_BeaconPrintf",
+            "__imp_toWideChar",
+        ]
+        .iter()
+        .map(|s| resolve_beacon_api(s).expect("known"))
+        .collect();
+
+        // All addresses should be non-zero and unique.
+        for &a in &addrs {
+            assert_ne!(a, 0);
+        }
+        let unique: std::collections::HashSet<u64> = addrs.iter().copied().collect();
+        assert_eq!(unique.len(), addrs.len());
     }
 }

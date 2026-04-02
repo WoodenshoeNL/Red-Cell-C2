@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1110 | 247 | 31 |
-| Bugs filed against | 173 | 38 | 9 |
+| Tasks closed | 1114 | 247 | 31 |
+| Bugs filed against | 175 | 38 | 9 |
 | Bug rate (bugs/task) | 0.16 | 0.15 | 0.29 |
 | Quality score | 84% | 85% | 71% |
 
-*Bug rates: Claude 173/1110=0.1559→0.16, Codex 38/247=0.1538→0.15, Cursor 9/31=0.29*
+*Bug rates: Claude 175/1114=0.1571→0.16, Codex 38/247=0.1538→0.15, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -24,7 +24,7 @@ Each loop run updates the running totals and appends a review entry.
 | Missing tests / stale tests | 68 | 17 | 5 |
 | Clippy warnings | 9 | 0 | 1 |
 | Protocol errors | 29 | 32 | 3 |
-| Security issues | 55 | 39 | 0 |
+| Security issues | 56 | 39 | 0 |
 | Architecture drift | 21 | 24 | 0 |
 | Memory / resource leaks | 10 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 9 | 0 |
@@ -32,7 +32,7 @@ Each loop run updates the running totals and appends a review entry.
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 3 | 5 | 0 |
 | Correctness / pagination | 63 | 8 | 1 |
-| Workflow / close-hygiene | 28 | 0 | 0 |
+| Workflow / close-hygiene | 29 | 0 | 0 |
 | Code reuse / duplication | 10 | 0 | 0 |
 
 ---
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-02 12:33 — e8b1cd52..284c5162
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 4 | 2 | Closed: red-cell-c2-z8222, red-cell-c2-5vtsg, red-cell-c2-vn8z7, red-cell-c2-q5at6. Filed: red-cell-c2-dm7ie (`agent/archon/src/core/Runtime.c` restores the stomped PE-header page to `PAGE_EXECUTE_READ` instead of `OldProt`), red-cell-c2-t09by (compiled `agent/archon/tests/test_heap_enc` and `agent/archon/tests/test_pe_header_erase` binaries were committed). |
+| Codex | 0 | 0 | No attributed task closes or regressions in this range. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: workspace Rust gates were not applicable in this review range because no files under `teamserver/`, `client/`, or `common/` changed. Local Archon test suite `agent/archon/tests/Makefile` passed, including the new `test_heap_enc` and `test_pe_header_erase` binaries. `br list --status=in_progress` showed only `red-cell-c2-j865o`, and `br ready` remained consistent with the open backlog.
 
 ### QA Review — 2026-04-02 11:58 — 8929f43c..e8b1cd52
 

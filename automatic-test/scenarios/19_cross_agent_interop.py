@@ -1,5 +1,5 @@
 """
-Scenario 13_cross_agent_interop: Cross-agent interoperability test
+Scenario 19_cross_agent_interop: Cross-agent interoperability test
 
 Spin up two different agent types simultaneously and verify they operate
 independently against the same teamserver without interfering with each other.
@@ -108,7 +108,7 @@ def _build_and_deploy_linux(cli, target, listener_name, uid):
     except Exception as exc:
         raise ScenarioSkipped(
             f"Phantom unavailable — skipping cross-agent interop test ({exc}). "
-            "Complete the Phantom agent implementation before running scenario 13."
+            "Complete the Phantom agent implementation before running scenario 19."
         ) from exc
     print(f"  [linux] Phantom ELF built ({len(raw)} bytes)")
 

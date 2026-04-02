@@ -1,6 +1,6 @@
 CC      = gcc
 CFLAGS  = -std=c11 -Wall -Wextra -Werror -O2 -g
-TARGETS = test_crypto test_synth_stack
+TARGETS = test_crypto test_synth_stack test_heap_enc
 
 .PHONY: all run clean
 
@@ -12,9 +12,13 @@ test_crypto: test_crypto.c
 test_synth_stack: test_synth_stack.c
 	$(CC) $(CFLAGS) -o $@ $<
 
+test_heap_enc: test_heap_enc.c
+	$(CC) $(CFLAGS) -o $@ $<
+
 run: $(TARGETS)
 	./test_crypto
 	./test_synth_stack
+	./test_heap_enc
 
 clean:
 	rm -f $(TARGETS)

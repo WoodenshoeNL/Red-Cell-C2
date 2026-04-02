@@ -4,51 +4,82 @@
 
 /*!
  * @brief
- *  allocate memory on the heap
+ *  Allocate memory on the heap with an ARC-04 sentinel header.
+ *  The sentinel allows HeapEncryptDecrypt() to distinguish agent-owned
+ *  allocations from system/library allocations during the sleep heap walk.
  *
- * @param Length
- *  size of memory to allocate
- *
- * @return
- *  allocated buffer pointer on the heap
+ * @param Length  size of usable memory to allocate
+ * @return pointer to usable memory (past the sentinel header)
  */
 PVOID MmHeapAlloc(
     _In_ ULONG Length
 ) {
-    return Instance->Win32.RtlAllocateHeap( NtProcessHeap(), HEAP_ZERO_MEMORY, Length );
+    PUCHAR Raw = Instance->Win32.RtlAllocateHeap(
+        NtProcessHeap(), HEAP_ZERO_MEMORY, HEAP_SENTINEL_SIZE + Length
+    );
+
+    if ( ! Raw )
+        return NULL;
+
+    /* Write sentinel magic at the start of the raw block */
+    *( (UINT32*) Raw ) = HEAP_SENTINEL_MAGIC;
+
+    return Raw + HEAP_SENTINEL_SIZE;
 }
 
 /*!
  * @brief
- *  allocate memory on the heap
+ *  Reallocate sentinel-tagged heap memory.
  *
- * @param Length
- *  size of memory to reallocate
- *
- * @return
- *  allocated buffer pointer on the heap
+ * @param Memory  pointer previously returned by MmHeapAlloc
+ * @param Length  new usable size
+ * @return new pointer to usable memory (past sentinel), or NULL
  */
 PVOID MmHeapReAlloc(
     _In_ PVOID Memory,
     _In_ ULONG Length
 ) {
-    return Instance->Win32.RtlReAllocateHeap( NtProcessHeap(), HEAP_ZERO_MEMORY, Memory, Length );
+    PUCHAR Raw;
+
+    if ( ! Memory )
+        return MmHeapAlloc( Length );
+
+    Raw = (PUCHAR) Memory - HEAP_SENTINEL_SIZE;
+
+    Raw = Instance->Win32.RtlReAllocateHeap(
+        NtProcessHeap(), HEAP_ZERO_MEMORY, Raw, HEAP_SENTINEL_SIZE + Length
+    );
+
+    if ( ! Raw )
+        return NULL;
+
+    /* Sentinel is preserved by RtlReAllocateHeap (data is copied),
+     * but re-stamp it defensively in case the block was moved. */
+    *( (UINT32*) Raw ) = HEAP_SENTINEL_MAGIC;
+
+    return Raw + HEAP_SENTINEL_SIZE;
 }
 
 /*!
  * @brief
- *  free memory on the heap
+ *  Free sentinel-tagged heap memory.
  *
- * @param Memory
- *  memory to free
- *
- * @return
- *  if successfully freed memory on the heap
+ * @param Memory  pointer previously returned by MmHeapAlloc
+ * @return TRUE on success
  */
 BOOL MmHeapFree(
     _In_ PVOID Memory
 ) {
-    return Instance->Win32.RtlFreeHeap( NtProcessHeap(), 0, Memory );
+    if ( ! Memory )
+        return TRUE;
+
+    PUCHAR Raw = (PUCHAR) Memory - HEAP_SENTINEL_SIZE;
+
+    /* Wipe the sentinel before freeing so stale pointers can't
+     * accidentally match during the heap walk. */
+    *( (UINT32*) Raw ) = 0;
+
+    return Instance->Win32.RtlFreeHeap( NtProcessHeap(), 0, Raw );
 }
 
 /*!

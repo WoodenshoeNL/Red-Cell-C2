@@ -259,8 +259,13 @@ static BOOL JsonExtractTxtData( const CHAR* Body, PCHAR Dst, SIZE_T DstSize )
                             if ( *v == '\\' && v[1] == '"' )
                             {
                                 /* Escaped quote — Cloudflare wraps TXT data
-                                 * in escaped quotes: "\"text\"" */
+                                 * in escaped quotes: "\"text\"".  Skip both
+                                 * the backslash and the following '"' so the
+                                 * '"' does not terminate the read loop early.
+                                 * The outer escaped-quote pair acts as a
+                                 * delimiter and is intentionally not copied. */
                                 v++; /* skip backslash */
+                                v++; /* skip the escaped '"' (delimiter, not content) */
                                 continue;
                             }
                             Dst[ idx++ ] = *v;

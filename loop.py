@@ -39,7 +39,7 @@ DEFAULT_SLEEP = {
 DEV_SLEEP_NO_WORK     = 60     # wait when no tasks are ready
 DEV_SLEEP_BETWEEN     = 15     # wait between tasks when --sleep not set
 DEV_SLEEP_TOKEN_LIMIT = 1200   # wait after Claude context limit hit
-DEV_CLEAN_EVERY       = 10     # run build-artifact cleanup every N dev iterations
+DEV_CLEAN_EVERY       = 3      # run build-artifact cleanup every N dev iterations
 
 # Valid zone names and their corresponding source paths
 ZONES = {
@@ -566,8 +566,9 @@ def clean_build_artifacts(log: Logger):
 
     Strategy (in order of preference):
     1. cargo sweep --time 1  — removes files unused for >24 h, keeps active artifacts
-    2. Fallback: delete target/debug/incremental entirely (always safe; just slows
-       the next incremental build slightly)
+    2. Fallback: delete the big subdirectories inside target/debug/ (incremental,
+       deps, build, .fingerprint) — all safe to delete, Cargo regenerates them on
+       the next build at the cost of one full recompile.
 
     Called after every review-loop iteration and every DEV_CLEAN_EVERY dev iterations.
     """
@@ -588,14 +589,21 @@ def clean_build_artifacts(log: Logger):
             return
         log.log(f"build cache: cargo sweep failed ({r.stderr.strip()[:80]}) — falling back")
 
-    # Fallback: nuke incremental (31 GB in practice; always safe to delete)
-    incremental = target_debug / "incremental"
-    if incremental.exists():
-        try:
-            shutil.rmtree(incremental)
-            log.log("build cache: removed target/debug/incremental")
-        except OSError as e:
-            log.log(f"build cache: could not remove incremental: {e}")
+    # Fallback: nuke the heavyweight subdirs inside target/debug/.
+    # incremental alone was insufficient — deps/ and build/ also grow to many GB
+    # in a workspace with continuous dev-loop builds.
+    heavyweight_dirs = ["incremental", "deps", "build", ".fingerprint"]
+    removed = []
+    for name in heavyweight_dirs:
+        d = target_debug / name
+        if d.exists():
+            try:
+                shutil.rmtree(d)
+                removed.append(name)
+            except OSError as e:
+                log.log(f"build cache: could not remove {name}: {e}")
+    if removed:
+        log.log(f"build cache: removed target/debug/{{{','.join(removed)}}}")
 
 
 def reset_stuck_tasks(log: Logger, stale_threshold_secs: int):

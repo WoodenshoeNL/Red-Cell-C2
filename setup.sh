@@ -182,10 +182,25 @@ if command -v cargo-sweep &>/dev/null; then
     ok "cargo-sweep: $(cargo-sweep --version 2>/dev/null | head -1)"
 else
     warn "cargo-sweep not found — installing (needed for auto build-cache cleanup)"
-    if cargo install cargo-sweep --quiet 2>/dev/null; then
+    sweep_installed=false
+    for attempt in 1 2 3; do
+        echo "  attempt $attempt/3 ..."
+        if cargo install cargo-sweep 2>/tmp/cargo-sweep-install.log; then
+            sweep_installed=true
+            break
+        fi
+        sleep 2
+    done
+    if $sweep_installed; then
         ok "cargo-sweep installed"
     else
-        warn "cargo-sweep install failed — loop.py will fall back to manual incremental cleanup"
+        warn "cargo-sweep install failed after 3 attempts"
+        warn "Without it, dev loops will do full target/debug/ wipes instead of surgical cleanup"
+        echo ""
+        echo "  To install manually, run:"
+        echo "    cargo install cargo-sweep"
+        echo ""
+        echo "  Install log: /tmp/cargo-sweep-install.log"
     fi
 fi
 

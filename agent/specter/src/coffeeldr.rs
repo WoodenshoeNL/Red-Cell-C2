@@ -165,6 +165,10 @@ unsafe extern "C" fn beacon_data_extract(parser: *mut DataParser, size_out: *mut
         return std::ptr::null();
     }
     let length = unsafe { std::ptr::read_unaligned(p.buffer.cast::<u32>()) } as i32;
+    // Defensive check: reject negative or overlong length prefixes.
+    if length < 0 || length > p.length - 4 {
+        return std::ptr::null();
+    }
     p.buffer = unsafe { p.buffer.add(4) };
     let data = p.buffer;
     p.length -= 4;
@@ -1309,6 +1313,107 @@ mod tests {
         let mut out_size: i32 = -1;
         let ptr = unsafe { beacon_data_extract(&mut parser, &mut out_size) };
         assert!(ptr.is_null());
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn beacon_data_extract_rejects_overlong_length_prefix() {
+        // Payload has a 4-byte length prefix claiming 100 bytes, but only 3 bytes follow.
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&100u32.to_le_bytes()); // length = 100
+        payload.extend_from_slice(b"abc"); // only 3 bytes
+        let buf = make_arg_buf(&payload);
+
+        let mut parser = std::mem::MaybeUninit::<DataParser>::uninit();
+        unsafe { beacon_data_parse(parser.as_mut_ptr(), buf.as_ptr(), buf.len() as i32) };
+        let mut parser = unsafe { parser.assume_init() };
+        let length_before = parser.length;
+
+        let mut out_size: i32 = -1;
+        let ptr = unsafe { beacon_data_extract(&mut parser, &mut out_size) };
+        assert!(ptr.is_null(), "overlong length must return null");
+        // Parser state must be unchanged (safe state).
+        assert_eq!(parser.length, length_before, "parser.length must not change on reject");
+        assert_eq!(out_size, -1, "size_out must not be written on reject");
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn beacon_data_extract_rejects_negative_length_prefix() {
+        // Payload with 0xFFFFFFFF which is -1 as i32.
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // -1 as i32
+        payload.extend_from_slice(b"data");
+        let buf = make_arg_buf(&payload);
+
+        let mut parser = std::mem::MaybeUninit::<DataParser>::uninit();
+        unsafe { beacon_data_parse(parser.as_mut_ptr(), buf.as_ptr(), buf.len() as i32) };
+        let mut parser = unsafe { parser.assume_init() };
+        let length_before = parser.length;
+
+        let mut out_size: i32 = -1;
+        let ptr = unsafe { beacon_data_extract(&mut parser, &mut out_size) };
+        assert!(ptr.is_null(), "negative length must return null");
+        assert_eq!(parser.length, length_before, "parser.length must not change on reject");
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn beacon_data_extract_rejects_length_equal_to_remaining_plus_one() {
+        // Exactly one byte more than available after the length prefix.
+        let actual_data = b"hi";
+        let mut payload = Vec::new();
+        // Claim 3 bytes but only 2 follow.
+        payload.extend_from_slice(&3u32.to_le_bytes());
+        payload.extend_from_slice(actual_data);
+        let buf = make_arg_buf(&payload);
+
+        let mut parser = std::mem::MaybeUninit::<DataParser>::uninit();
+        unsafe { beacon_data_parse(parser.as_mut_ptr(), buf.as_ptr(), buf.len() as i32) };
+        let mut parser = unsafe { parser.assume_init() };
+
+        let ptr = unsafe { beacon_data_extract(&mut parser, std::ptr::null_mut()) };
+        assert!(ptr.is_null(), "length exceeding remaining by 1 must return null");
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn beacon_data_extract_accepts_exact_fit() {
+        // Length prefix exactly matches remaining data — should succeed.
+        let data = b"exact";
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        payload.extend_from_slice(data);
+        let buf = make_arg_buf(&payload);
+
+        let mut parser = std::mem::MaybeUninit::<DataParser>::uninit();
+        unsafe { beacon_data_parse(parser.as_mut_ptr(), buf.as_ptr(), buf.len() as i32) };
+        let mut parser = unsafe { parser.assume_init() };
+
+        let mut out_size: i32 = 0;
+        let ptr = unsafe { beacon_data_extract(&mut parser, &mut out_size) };
+        assert!(!ptr.is_null(), "exact-fit length must succeed");
+        assert_eq!(out_size, data.len() as i32);
+        assert_eq!(parser.length, 0);
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn beacon_data_extract_zero_length_returns_valid_ptr() {
+        // A zero-length blob is valid — should return a non-null pointer.
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&0u32.to_le_bytes()); // length = 0
+        let buf = make_arg_buf(&payload);
+
+        let mut parser = std::mem::MaybeUninit::<DataParser>::uninit();
+        unsafe { beacon_data_parse(parser.as_mut_ptr(), buf.as_ptr(), buf.len() as i32) };
+        let mut parser = unsafe { parser.assume_init() };
+
+        let mut out_size: i32 = -1;
+        let ptr = unsafe { beacon_data_extract(&mut parser, &mut out_size) };
+        assert!(!ptr.is_null(), "zero-length extract must return valid pointer");
+        assert_eq!(out_size, 0);
+        assert_eq!(parser.length, 0);
     }
 
     #[test]

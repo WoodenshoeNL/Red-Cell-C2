@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1093 | 247 | 31 |
-| Bugs filed against | 167 | 38 | 9 |
+| Tasks closed | 1103 | 247 | 31 |
+| Bugs filed against | 170 | 38 | 9 |
 | Bug rate (bugs/task) | 0.15 | 0.15 | 0.29 |
 | Quality score | 85% | 85% | 71% |
 
-*Bug rates: Claude 167/1093=0.1528→0.15, Codex 38/247=0.1538→0.15, Cursor 9/31=0.29*
+*Bug rates: Claude 170/1103=0.1541→0.15, Codex 38/247=0.1538→0.15, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -24,14 +24,14 @@ Each loop run updates the running totals and appends a review entry.
 | Missing tests / stale tests | 67 | 17 | 5 |
 | Clippy warnings | 9 | 0 | 1 |
 | Protocol errors | 29 | 32 | 3 |
-| Security issues | 54 | 39 | 0 |
+| Security issues | 55 | 39 | 0 |
 | Architecture drift | 21 | 24 | 0 |
 | Memory / resource leaks | 10 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 9 | 0 |
-| Test infrastructure / flakiness | 35 | 2 | 0 |
+| Test infrastructure / flakiness | 36 | 2 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 3 | 5 | 0 |
-| Correctness / pagination | 61 | 8 | 1 |
+| Correctness / pagination | 62 | 8 | 1 |
 | Workflow / close-hygiene | 27 | 0 | 0 |
 | Code reuse / duplication | 10 | 0 | 0 |
 
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-02 11:16 — 1a1fac7b..f644eb64
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 10 | 3 | Closed: red-cell-c2-agylj, red-cell-c2-tad8v, red-cell-c2-zk85g, red-cell-c2-3cgri, red-cell-c2-35sm6, red-cell-c2-re6ws, red-cell-c2-ul6wq, red-cell-c2-2kd3k, red-cell-c2-1nymz, red-cell-c2-1dhau. Filed: red-cell-c2-act5e (BeaconDataExtract trusts oversized length prefixes and can walk past the BOF arg buffer), red-cell-c2-t1brs (BeaconPrintf emits literal format strings instead of formatted output), red-cell-c2-7sids (scenario 19 disconnect poll reads a non-existent `active` field instead of CLI `status`). |
+| Codex | 0 | 0 | No attributed task closes or regressions in this range. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check --workspace` passed. `cargo clippy --workspace -- -D warnings` passed. `cargo nextest run --workspace` was started and remained in progress during scorecard update after clearing 2,439/4,925 tests with no observed failures in the streamed output.
 
 ### QA Review — 2026-04-01 18:10 — ac6da996..7a213093
 

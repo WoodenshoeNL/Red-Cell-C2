@@ -867,19 +867,19 @@ VOID CoffeeRunner( PCHAR EntryName, DWORD EntryNameSize, PVOID CoffeeData, SIZE_
     /* ARC-09: route through the NT thread pool when configured.
      * Pass CoffeeRunnerWork (not CoffeeRunnerThread) so the callback
      * returns normally to TpJobCallback, which handles job bookkeeping
-     * and returns the worker thread to the pool. */
-    if ( Instance->Config.Implant.JobExecution == JOB_EXEC_THREADPOOL )
+     * and returns the worker thread to the pool.
+     *
+     * If the TP APIs are unavailable, JobSubmitThreadPool returns FALSE
+     * and we fall through to the dedicated-thread path which uses
+     * CoffeeRunnerThread (with proper thread-level cleanup). */
+    if ( Instance->Config.Implant.JobExecution == JOB_EXEC_THREADPOOL &&
+         JobSubmitThreadPool( CoffeeRunnerWork, CoffeeParams ) )
     {
-        if ( ! JobSubmitThreadPool( CoffeeRunnerWork, CoffeeParams ) ) {
-            PRINTF( "Failed to submit CoffeeRunnerThread to thread pool: %d", NtGetLastError() )
-            PACKAGE_ERROR_WIN32
-        }
+        return;
     }
-    else
-    {
-        if ( ! ThreadCreate( THREAD_METHOD_NTCREATEHREADEX, NtCurrentProcess(), x64, CoffeeRunnerThread, CoffeeParams, NULL ) ) {
-            PRINTF( "Failed to create new CoffeeRunnerThread thread: %d", NtGetLastError() )
-            PACKAGE_ERROR_WIN32
-        }
+
+    if ( ! ThreadCreate( THREAD_METHOD_NTCREATEHREADEX, NtCurrentProcess(), x64, CoffeeRunnerThread, CoffeeParams, NULL ) ) {
+        PRINTF( "Failed to create new CoffeeRunnerThread thread: %d", NtGetLastError() )
+        PACKAGE_ERROR_WIN32
     }
 }

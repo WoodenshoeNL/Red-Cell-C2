@@ -517,18 +517,12 @@ static VOID NTAPI TpJobCallback( PVOID Instance_, PVOID Context, PVOID Work )
  */
 BOOL JobSubmitThreadPool( PVOID Entry, PVOID Arg )
 {
-    /* If the TP functions were not resolved, fall back to a plain thread */
+    /* If the TP functions were not resolved, return FALSE so the caller
+     * can fall back to a dedicated thread with proper cleanup. */
     if ( ! Instance->Win32.TpAllocWork || ! Instance->Win32.TpPostWork )
     {
-        PUTS( "[ARC-09] TpAllocWork unavailable - falling back to ThreadCreate" )
-        HANDLE hThread = ThreadCreate( THREAD_METHOD_NTCREATEHREADEX, NtCurrentProcess(),
-#if _WIN64
-            TRUE,
-#else
-            FALSE,
-#endif
-            Entry, Arg, NULL );
-        return hThread != NULL;
+        PUTS( "[ARC-09] TpAllocWork unavailable - caller should fall back to dedicated thread" )
+        return FALSE;
     }
 
     /* Allocate the wrapper context */

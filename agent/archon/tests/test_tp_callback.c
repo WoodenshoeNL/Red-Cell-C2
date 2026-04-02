@@ -442,6 +442,57 @@ TEST( test_work_handles_null_entry )
 }
 
 /* =========================================================================
+ * Test 6: Fallback path — when TP unavailable, CoffeeRunnerThread must be
+ * used (not CoffeeRunnerWork) so thread-level cleanup still runs.
+ *
+ * Simulates the scenario where JobSubmitThreadPool returns FALSE and
+ * the caller falls back to spawning a dedicated thread with
+ * CoffeeRunnerThread.
+ * ======================================================================= */
+TEST( test_fallback_to_dedicated_thread_cleans_up )
+{
+    reset_state();
+    g_threads = 1;  /* CoffeeRunner increments before attempt */
+
+    /* Simulate: TP submit failed, caller falls back to CoffeeRunnerThread */
+    PCOFFEE_PARAMS p = make_params();
+    CoffeeRunnerThread( p );
+
+    /* Thread counter decremented (no leak) */
+    ASSERT( g_threads == 0 );
+
+    /* JobRemove was called */
+    ASSERT( g_job_remove_calls == 1 );
+
+    /* RtlExitUserThread was called (dedicated-thread exit) */
+    ASSERT( g_exit_thread_calls == 1 );
+
+    /* CoffeeLdr was invoked */
+    ASSERT( g_coffeeldr_calls == 1 );
+}
+
+/* =========================================================================
+ * Test 7: Verify CoffeeRunnerWork alone does NOT decrement threads or
+ * call ExitThread — proving it's unsafe for the fallback plain-thread
+ * path (validates that the fallback MUST use CoffeeRunnerThread).
+ * ======================================================================= */
+TEST( test_work_alone_leaks_thread_counter )
+{
+    reset_state();
+    g_threads = 1;
+
+    PCOFFEE_PARAMS p = make_params();
+    CoffeeRunnerWork( p );
+
+    /* Thread counter NOT decremented — this is the leak the fix prevents */
+    ASSERT( g_threads == 1 );
+
+    /* No thread-level cleanup */
+    ASSERT( g_job_remove_calls == 0 );
+    ASSERT( g_exit_thread_calls == 0 );
+}
+
+/* =========================================================================
  * Main
  * ======================================================================= */
 int main( void )
@@ -453,6 +504,8 @@ int main( void )
     run_test_dedicated_thread_path_exits();
     run_test_no_double_decrement_threadpool();
     run_test_work_handles_null_entry();
+    run_test_fallback_to_dedicated_thread_cleans_up();
+    run_test_work_alone_leaks_thread_counter();
 
     printf( "\n%d / %d tests passed\n", tests_passed, tests_run );
     return ( tests_passed == tests_run ) ? 0 : 1;

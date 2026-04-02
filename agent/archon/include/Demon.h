@@ -143,6 +143,8 @@ typedef struct
             BOOL  HeapEnc;
             /* ARC-05: stomp own DLL PE headers with a decoy after init */
             BOOL  ModuleStomp;
+            /* ARC-09: job execution mode (JOB_EXEC_THREAD or JOB_EXEC_THREADPOOL) */
+            BYTE  JobExecution;
             /* Process-wide in-memory bypass state (ARC-01) */
             BOOL  AmsiPatched;
             BOOL  EtwPatched;
@@ -208,6 +210,11 @@ typedef struct
         WIN_FUNC( RtlAddVectoredExceptionHandler );
         WIN_FUNC( RtlRemoveVectoredExceptionHandler );
         WIN_FUNC( RtlCopyMappedMemory );
+
+        /* ARC-09: NT thread pool — TpAllocWork / TpPostWork / TpReleaseWork (ntdll) */
+        NTSTATUS ( NTAPI *TpAllocWork  )( PVOID* WorkReturn, PVOID Callback, PVOID Context, PVOID CallbackEnviron );
+        VOID     ( NTAPI *TpPostWork   )( PVOID Work );
+        VOID     ( NTAPI *TpReleaseWork)( PVOID Work );
 
         WIN_FUNC( NtClose );
         WIN_FUNC( NtSetEvent );

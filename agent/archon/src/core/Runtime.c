@@ -585,18 +585,20 @@ NTSTATUS RtStompPeHeader(
 
     PUTS( "[ARC-07] PE header signatures erased" )
 
-    /* 5. Restore page protection to PAGE_EXECUTE_READ ----------------- */
+    /* 5. Restore page protection to its original value (captured in
+     *    OldProt by the earlier PAGE_READWRITE call) so that we leave
+     *    the header page's steady-state permissions unchanged. */
     Base       = ModuleBase;
     RegionSize = PE_HEADER_PAGE_SIZE;
     Status = SysNtProtectVirtualMemory(
         NtCurrentProcess(),
         (PVOID*) &Base,
         &RegionSize,
-        PAGE_EXECUTE_READ,
+        OldProt,
         &Dummy
     );
     if ( ! NT_SUCCESS( Status ) ) {
-        PRINTF( "[ARC-07] NtProtectVirtualMemory(XR) failed: %08x\n", Status )
+        PRINTF( "[ARC-07] NtProtectVirtualMemory(restore) failed: %08x\n", Status )
     }
 
     return STATUS_SUCCESS;

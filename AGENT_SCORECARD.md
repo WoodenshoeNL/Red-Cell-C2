@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1114 | 247 | 31 |
-| Bugs filed against | 175 | 38 | 9 |
+| Tasks closed | 1114 | 248 | 31 |
+| Bugs filed against | 177 | 38 | 9 |
 | Bug rate (bugs/task) | 0.16 | 0.15 | 0.29 |
 | Quality score | 84% | 85% | 71% |
 
-*Bug rates: Claude 175/1114=0.1571→0.16, Codex 38/247=0.1538→0.15, Cursor 9/31=0.29*
+*Bug rates: Claude 177/1114=0.1589→0.16, Codex 38/248=0.1532→0.15, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -24,8 +24,8 @@ Each loop run updates the running totals and appends a review entry.
 | Missing tests / stale tests | 68 | 17 | 5 |
 | Clippy warnings | 9 | 0 | 1 |
 | Protocol errors | 29 | 32 | 3 |
-| Security issues | 56 | 39 | 0 |
-| Architecture drift | 21 | 24 | 0 |
+| Security issues | 57 | 39 | 0 |
+| Architecture drift | 22 | 24 | 0 |
 | Memory / resource leaks | 10 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 9 | 0 |
 | Test infrastructure / flakiness | 36 | 2 | 0 |
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-02 13:35 — 284c5162..8023dccd
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 2 | Reviewed interrupted `red-cell-c2-j865o` Archon DoH WIP commit `d966cbe2`. Filed: `red-cell-c2-miiwk` (`agent/archon/src/core/TransportDoH.c:517` disables HTTPS certificate validation for public DoH requests), `red-cell-c2-xzow0` (`agent/archon/include/Demon.h:124` adds `DoHDomain`/`DoHProvider`, but `agent/archon/src/Demon.c:703` never parses them so ARC-08 cannot be configured). Both bugs now block `red-cell-c2-j865o`. |
+| Codex | 1 | 0 | Closed `red-cell-c2-7sids`. The `automatic-test/scenarios/19_cross_agent_interop.py` fix correctly switched the disconnect poll to the CLI `status` field and added a focused regression test in `automatic-test/tests/test_scenario_19_cross_agent_interop.py`; no attributable regressions found. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check --workspace` passed, `cargo clippy --workspace -- -D warnings` passed, `cd agent/archon && make` passed, and `python3 -m unittest automatic-test.tests.test_scenario_19_cross_agent_interop` passed. `cargo nextest run --workspace` was still in progress during scorecard update after clearing 2404/4941 tests with no observed failures. `br list --status=in_progress` still shows ARC-08 and other active work, and the new ARC-08 bugs now correctly block `red-cell-c2-j865o`.
 
 ### QA Review — 2026-04-02 12:33 — e8b1cd52..284c5162
 

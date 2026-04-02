@@ -118,39 +118,39 @@ Derive `<zone>` from the file path: `teamserver/` → teamserver, `client-cli/` 
 
 ### 5. Verify
 
+Use `CARGO_FLAGS` from the **Cargo scope** section of your Zone Constraint if one is present.
+Fall back to `--workspace` when no zone is active.
+
+If the task is in a non-Rust zone (archon, demon) and you made no Rust changes, skip cargo
+commands entirely.
+
 ```bash
-cargo check --workspace
-cargo test --workspace
-cargo clippy --workspace -- -D warnings
-cargo fmt --check
+cargo fmt                          # auto-fix formatting first
+cargo check $CARGO_FLAGS           # abort if this fails — do not run tests against broken code
+cargo nextest run $CARGO_FLAGS     # or: cargo test $CARGO_FLAGS
+cargo clippy $CARGO_FLAGS -- -D warnings
 ```
 
-All four must pass before committing. Fix any issues before proceeding.
+If tests fail: read the error, diagnose, fix, then re-run once. Do not retry with narrower scopes.
 
-### 6. Commit and push
+### 6. Close, commit, and push
+
+Do this in a single commit — do not split code and issue-close into separate commits.
 
 ```bash
+br close <id> --reason="<brief description of what was implemented>"
 br sync --flush-only
-git add <specific files — never `git add .` blindly>
+git add <specific files> .beads/issues.jsonl
 git commit -m "<type>: <concise description>
 
 <optional body explaining why>
 
+Closes: <id>
 Co-Authored-By: Cursor Agent <noreply@cursor.com>"
 git push
 ```
 
 Commit types: `feat`, `fix`, `refactor`, `test`, `chore`, `docs`
-
-### 7. Close the issue
-
-```bash
-br close <id> --reason="<brief description of what was implemented>"
-br sync --flush-only
-git add .beads/issues.jsonl
-git commit -m "chore: close red-cell-c2-<id> - <title>"
-git push
-```
 
 ---
 

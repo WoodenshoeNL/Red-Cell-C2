@@ -133,64 +133,39 @@ Derive `<zone>` from the file path: `teamserver/` → teamserver, `client-cli/` 
 Use `CARGO_FLAGS` from the **Cargo scope** section of your Zone Constraint if one is present.
 Fall back to `--workspace` when no zone is active.
 
-**Step 1 — type/syntax check (abort if this fails):**
+If the task is in a non-Rust zone (archon, demon) and you made no Rust changes, skip cargo
+commands entirely.
 
 ```bash
-cargo check $CARGO_FLAGS
-```
-
-If `cargo check` fails, fix the errors before proceeding. Do not run tests against broken code.
-
-**Step 2 — run tests:**
-
-Prefer `cargo nextest run` (faster parallel runner). Fall back to `cargo test` if nextest is not installed.
-
-```bash
-# preferred:
-cargo nextest run $CARGO_FLAGS
-# fallback if nextest is absent:
-cargo test $CARGO_FLAGS
-```
-
-**Step 3 — lint:**
-
-```bash
+cargo fmt                          # auto-fix formatting first
+cargo check $CARGO_FLAGS           # abort if this fails — do not run tests against broken code
+cargo nextest run $CARGO_FLAGS     # or: cargo test $CARGO_FLAGS
 cargo clippy $CARGO_FLAGS -- -D warnings
 ```
 
-**Step 4 — format check:**
+**If tests fail**: read the error output and diagnose the root cause before retrying.
+Do NOT retry with progressively narrower package scopes — that wastes time. Fix the
+issue, then re-run once.
+
+### 7. Close, commit, and push
+
+Do this in a single commit — do not split code and issue-close into separate commits.
 
 ```bash
-cargo fmt --check
-```
-
-Fix any issues before committing. Do not skip this step.
-
-### 7. Commit and push
-
-```bash
+br close <id> --reason="<brief description of what was implemented>"
 br sync --flush-only
-git add <specific files>
+git add <specific changed files> .beads/issues.jsonl
 git commit -m "<type>(<scope>): <concise description>
 
 <optional body explaining the why>
 
+Closes: <id>
 Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>"
 git push
 ```
 
 Commit types: `feat`, `fix`, `refactor`, `test`, `chore`, `docs`
 Scopes: `common`, `teamserver`, `client`, `protocol`, `crypto`, `db`, `ws`, `auth`
-
-### 8. Close the issue
-
-```bash
-br close <id> --reason="<brief description of what was implemented>"
-br sync --flush-only
-git add .beads/issues.jsonl
-git commit -m "chore: close <id>"
-git push
-```
 
 ---
 

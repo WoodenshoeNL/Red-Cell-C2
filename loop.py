@@ -156,10 +156,13 @@ def build_agent_cmd(agent: str, model: str) -> tuple:
 
     if agent == "cursor":
         # prompt is injected as positional arg at call time
-        return [
+        cmd = [
             "agent", "--print", "--yolo", "--trust", "--approve-mcps",
             "--workspace", str(SCRIPT_DIR),
-        ], False
+        ]
+        if model:
+            cmd += ["--model", model]
+        return cmd, False
 
     raise ValueError(f"Unknown agent: {agent}")
 
@@ -927,7 +930,25 @@ def dev_loop(args, log: Logger):
         ready_lines = "\n".join(ready_output.splitlines()[:15])
         in_progress = br(["list", "--status=in_progress"]).stdout.strip() or "None"
 
-        zone_block = build_zone_block(zones)
+        # Auto-detect zone from task labels when --zone was not passed.
+        # This ensures CARGO_FLAGS is scoped even in "all zones" mode.
+        effective_zones = list(zones) if zones else []
+        if not effective_zones:
+            r_task = br(["show", next_id, "--json"])
+            if r_task.returncode == 0:
+                try:
+                    task_data = json.loads(r_task.stdout)
+                    for label in task_data.get("labels", []):
+                        if label.startswith("zone:"):
+                            z = label[5:]
+                            if z in ZONES:
+                                effective_zones.append(z)
+                except Exception:
+                    pass
+            if effective_zones:
+                log.log(f"Auto-detected zone(s) from task labels: {', '.join(effective_zones)}")
+
+        zone_block = build_zone_block(effective_zones)
 
         runtime_prompt = f"""{dev_prompt}
 
@@ -961,6 +982,32 @@ Start directly with understanding the task and implementing it.
         exit_code, output = run_agent(agent, args.model, runtime_prompt, log)
 
         token_limit_hit = agent == "claude" and "Context limit reached" in output
+
+        # Detect rate limiting — agent was unable to do any work
+        rate_limited = (
+            "out of extra usage" in output.lower()
+            or ("rate_limit" in output.lower() and '"rejected"' in output.lower())
+        )
+
+        if rate_limited:
+            log.log(f"RATE LIMITED: releasing task {next_id} back to open")
+            br(["update", next_id, "--status=open"])
+            br(["sync", "--flush-only"])
+            git(["add", ".beads/issues.jsonl"])
+            r = git(["diff", "--cached", "--quiet"])
+            if r.returncode != 0:
+                git(["commit", "-m", f"chore: release {next_id} after rate limit [{agent_id}]", "--quiet"])
+                git(["push", "--quiet"])
+            log.log("========================LOOP=========================")
+            # Parse reset time from output if available, otherwise default to 20 min
+            import re as _re
+            reset_match = _re.search(r'resets?\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)', output, _re.IGNORECASE)
+            if reset_match:
+                log.log(f"Rate limit resets at {reset_match.group(1)} — sleeping 20m")
+            else:
+                log.log("Rate limit detected — sleeping 20m")
+            time.sleep(1200)
+            continue
 
         if exit_code != 0:
             log.log(f"WARNING: {agent.title()} exited with code {exit_code} for task {next_id}")

@@ -9,19 +9,19 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1105 | 247 | 31 |
-| Bugs filed against | 171 | 38 | 9 |
-| Bug rate (bugs/task) | 0.15 | 0.15 | 0.29 |
-| Quality score | 85% | 85% | 71% |
+| Tasks closed | 1110 | 247 | 31 |
+| Bugs filed against | 173 | 38 | 9 |
+| Bug rate (bugs/task) | 0.16 | 0.15 | 0.29 |
+| Quality score | 84% | 85% | 71% |
 
-*Bug rates: Claude 171/1105=0.1548→0.15, Codex 38/247=0.1538→0.15, Cursor 9/31=0.29*
+*Bug rates: Claude 173/1110=0.1559→0.16, Codex 38/247=0.1538→0.15, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 9 | 0 | 0 |
-| Missing tests / stale tests | 67 | 17 | 5 |
+| Missing tests / stale tests | 68 | 17 | 5 |
 | Clippy warnings | 9 | 0 | 1 |
 | Protocol errors | 29 | 32 | 3 |
 | Security issues | 55 | 39 | 0 |
@@ -31,7 +31,7 @@ Each loop run updates the running totals and appends a review entry.
 | Test infrastructure / flakiness | 36 | 2 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 3 | 5 | 0 |
-| Correctness / pagination | 62 | 8 | 1 |
+| Correctness / pagination | 63 | 8 | 1 |
 | Workflow / close-hygiene | 28 | 0 | 0 |
 | Code reuse / duplication | 10 | 0 | 0 |
 
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-02 11:58 — 8929f43c..e8b1cd52
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 5 | 2 | Closed: red-cell-c2-0fqj2, red-cell-c2-j8zer, red-cell-c2-s9iiq, red-cell-c2-am8b0, red-cell-c2-act5e. Filed: red-cell-c2-2vt09 (Phantom harvest claims Firefox saved-password support but omits `key4.db`, so harvested `logins.json` is unusable), red-cell-c2-jf38l (new git credential cache test never calls `collect_git_credential_cache()`, leaving the real hard-coded path untested). |
+| Codex | 0 | 0 | No attributed task closes or regressions in this range. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check --workspace` passed. `cargo clippy --workspace -- -D warnings` passed. `cargo nextest run --workspace` was still running during scorecard update after recompiling `red-cell`, `red-cell-client`, `red-cell-cli`, `specter`, and `phantom`; no test failures were observed in the streamed output before the QA bookkeeping update.
 
 ### QA Review — 2026-04-02 11:20 — 1a1fac7b..8929f43c
 

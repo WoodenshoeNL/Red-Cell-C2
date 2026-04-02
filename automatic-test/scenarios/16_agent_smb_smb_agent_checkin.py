@@ -28,7 +28,6 @@ SMB listener config is read from env.toml [listeners]:
 
 DESCRIPTION = "SMB agent checkin (Demon + Specter over SMB named pipe)"
 
-import base64
 import os
 import tempfile
 import uuid
@@ -64,7 +63,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
         listener_delete,
         listener_start,
         listener_stop,
-        payload_build,
+        payload_build_and_fetch,
     )
     from lib.deploy import ensure_work_dir, execute_background, run_remote, upload
     from lib.wait import wait_for_agent
@@ -105,15 +104,14 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
             f"with SMB listener {listener_name!r}"
         )
         try:
-            result = payload_build(
-                cli, agent=agent_type, listener=listener_name, arch="x64", fmt=fmt
+            raw = payload_build_and_fetch(
+                cli, listener=listener_name, arch="x64", fmt=fmt
             )
         except CliError as exc:
             raise ScenarioSkipped(
                 f"{agent_type} SMB payload build failed — "
                 f"agent or SMB transport may not be available yet: {exc}"
             )
-        raw = base64.b64decode(result["bytes"])
         assert len(raw) > 0, "payload is empty"
         print(f"  [{agent_type}][payload] built ({len(raw)} bytes)")
 

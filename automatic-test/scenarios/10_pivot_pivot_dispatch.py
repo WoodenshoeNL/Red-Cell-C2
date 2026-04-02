@@ -41,7 +41,6 @@ raising an exception, so the overall test suite still passes.
 
 DESCRIPTION = "Pivot chain dispatch"
 
-import base64
 import os
 import tempfile
 import uuid
@@ -133,7 +132,7 @@ def _run_smb_pivot(ctx, parent_target, child_target):
         listener_list,
         listener_start,
         listener_stop,
-        payload_build,
+        payload_build_and_fetch,
     )
     from lib.deploy import ensure_work_dir, execute_background, run_remote, upload
     from lib.wait import TimeoutError as WaitTimeout
@@ -170,8 +169,7 @@ def _run_smb_pivot(ctx, parent_target, child_target):
 
         # ── Step 2: Build Demon EXE for parent host ──────────────────────────
         print("  [step 2] building Demon EXE (x64) for parent host")
-        result = payload_build(cli, agent="demon", listener=listener_name, arch="x64", fmt="exe")
-        raw = base64.b64decode(result["bytes"])
+        raw = payload_build_and_fetch(cli, listener=listener_name, arch="x64", fmt="exe")
         assert len(raw) > 0, "parent payload is empty"
         with open(local_parent, "wb") as fh:
             fh.write(raw)
@@ -217,10 +215,9 @@ def _run_smb_pivot(ctx, parent_target, child_target):
 
         # ── Step 6: Build Demon EXE linked to SMB pivot listener ─────────────
         print(f"  [step 6] building Demon EXE (x64) linked to {smb_listener_name!r}")
-        result = payload_build(
-            cli, agent="demon", listener=smb_listener_name, arch="x64", fmt="exe"
+        raw = payload_build_and_fetch(
+            cli, listener=smb_listener_name, arch="x64", fmt="exe"
         )
-        raw = base64.b64decode(result["bytes"])
         assert len(raw) > 0, "child payload is empty"
         with open(local_child, "wb") as fh:
             fh.write(raw)

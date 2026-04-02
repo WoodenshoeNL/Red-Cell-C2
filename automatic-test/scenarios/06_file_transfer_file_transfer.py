@@ -30,7 +30,6 @@ Skip Windows passes if ctx.windows is None.
 
 DESCRIPTION = "File transfer (Demon + Phantom + Specter)"
 
-import base64
 import hashlib
 import os
 import tempfile
@@ -82,7 +81,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
         listener_delete,
         listener_start,
         listener_stop,
-        payload_build,
+        payload_build_and_fetch,
     )
     from lib.deploy import ensure_work_dir, execute_background, run_remote, upload
     from lib.wait import wait_for_agent
@@ -115,10 +114,9 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
     try:
         # ── Step 2: Build agent payload ──────────────────────────────────────
         print(f"  [{agent_type}][payload] building {agent_type} {fmt} x64 for Linux target")
-        result = payload_build(
-            cli, agent=agent_type, listener=listener_name, arch="x64", fmt=fmt
+        raw = payload_build_and_fetch(
+            cli, listener=listener_name, arch="x64", fmt=fmt
         )
-        raw = base64.b64decode(result["bytes"])
         assert len(raw) > 0, "payload is empty"
         print(f"  [{agent_type}][payload] built ({len(raw)} bytes)")
 
@@ -279,7 +277,7 @@ def _run_for_agent_windows(ctx, agent_type: str, fmt: str, name_prefix: str) -> 
         listener_delete,
         listener_start,
         listener_stop,
-        payload_build,
+        payload_build_and_fetch,
     )
     from lib.deploy import ensure_work_dir, execute_background, run_remote, upload
     from lib.wait import wait_for_agent
@@ -312,10 +310,9 @@ def _run_for_agent_windows(ctx, agent_type: str, fmt: str, name_prefix: str) -> 
     try:
         # ── Step 2: Build agent payload ──────────────────────────────────────
         print(f"  [{agent_type}][payload] building {agent_type} {fmt} x64 for Windows target")
-        result = payload_build(
-            cli, agent=agent_type, listener=listener_name, arch="x64", fmt=fmt
+        raw = payload_build_and_fetch(
+            cli, listener=listener_name, arch="x64", fmt=fmt
         )
-        raw = base64.b64decode(result["bytes"])
         assert len(raw) > 0, "payload is empty"
         print(f"  [{agent_type}][payload] built ({len(raw)} bytes)")
 
@@ -468,7 +465,7 @@ def run(ctx):
         if "phantom" not in available_agents:
             print("  [phantom] SKIPPED — 'phantom' not listed in agents.available")
         else:
-            _run_for_agent(ctx, agent_type="phantom", fmt="elf", name_prefix="test-ftransfer-phantom")
+            _run_for_agent(ctx, agent_type="phantom", fmt="bin", name_prefix="test-ftransfer-phantom")
     else:
         print("  [skip] ctx.linux is None — skipping Linux agent passes")
 

@@ -25,7 +25,6 @@ Skip if ctx.windows is None (and ctx.linux is None or lacks display config).
 
 DESCRIPTION = "Screenshot capture"
 
-import base64
 import os
 import tempfile
 import uuid
@@ -107,7 +106,7 @@ def run(ctx):
         listener_stop,
         loot_download,
         loot_list,
-        payload_build,
+        payload_build_and_fetch,
     )
     from lib.deploy import ensure_work_dir, execute_background, run_remote, upload
     from lib.wait import wait_for_agent, TimeoutError as WaitTimeout
@@ -150,10 +149,9 @@ def run(ctx):
     try:
         # ── Step 2: Build Demon payload ──────────────────────────────────────
         print(f"  [payload] building Demon {payload_fmt} x64 for {target_label} target")
-        result = payload_build(
-            cli, agent="demon", listener=listener_name, arch="x64", fmt=payload_fmt
+        raw = payload_build_and_fetch(
+            cli, listener=listener_name, arch="x64", fmt=payload_fmt
         )
-        raw = base64.b64decode(result["bytes"])
         assert len(raw) > 0, "payload is empty"
         print(f"  [payload] built ({len(raw)} bytes)")
 

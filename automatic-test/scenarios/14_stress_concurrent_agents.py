@@ -47,7 +47,6 @@ EXEC_INTERVAL = 10       # seconds between parallel exec rounds during the run
 CHECKIN_DEADLINE = 30    # seconds to wait for all agents to check in
 CPU_LIMIT_PCT = 80.0     # maximum allowable teamserver CPU %
 
-import base64
 import os
 import subprocess
 import tempfile
@@ -268,7 +267,7 @@ def _run_stress_for_agent(
         listener_start,
         listener_stop,
         log_list,
-        payload_build,
+        payload_build_and_fetch,
     )
     from lib.deploy import ensure_work_dir, execute_background, run_remote, upload
 
@@ -296,10 +295,9 @@ def _run_stress_for_agent(
     try:
         # ── Step 2: Build one payload ─────────────────────────────────────────
         print(f"  [{agent_type}][payload] building {agent_type} {fmt} x64 for listener {listener_name!r}")
-        result = payload_build(
-            cli, agent=agent_type, listener=listener_name, arch="x64", fmt=fmt
+        raw = payload_build_and_fetch(
+            cli, listener=listener_name, arch="x64", fmt=fmt
         )
-        raw = base64.b64decode(result["bytes"])
         assert len(raw) > 0, "payload is empty"
         print(f"  [{agent_type}][payload] built ({len(raw)} bytes)")
 
@@ -519,7 +517,7 @@ def run(ctx):
         _run_stress_for_agent(
             ctx,
             agent_type="phantom",
-            fmt="elf",
+            fmt="bin",
             name_prefix="test-stress-phantom",
             agent_count=PHANTOM_AGENT_COUNT,
             run_seconds=PHANTOM_RUN_SECONDS,

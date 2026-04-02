@@ -23,7 +23,6 @@ Skip conditions:
 
 DESCRIPTION = "Kerberos token ops"
 
-import base64
 import os
 import tempfile
 import uuid
@@ -59,7 +58,7 @@ def run(ctx):
         listener_delete,
         listener_start,
         listener_stop,
-        payload_build,
+        payload_build_and_fetch,
     )
     from lib.deploy import ensure_work_dir, execute_background, run_remote, upload
     from lib.wait import wait_for_agent, TimeoutError as WaitTimeout
@@ -89,10 +88,9 @@ def run(ctx):
     try:
         # ── Step 2: Build Demon payload ──────────────────────────────────────
         print("  [payload] building Demon EXE x64 for Windows target")
-        result = payload_build(
-            cli, agent="demon", listener=listener_name, arch="x64", fmt="exe"
+        raw = payload_build_and_fetch(
+            cli, listener=listener_name, arch="x64", fmt="exe"
         )
-        raw = base64.b64decode(result["bytes"])
         assert len(raw) > 0, "payload is empty"
         print(f"  [payload] built ({len(raw)} bytes)")
 

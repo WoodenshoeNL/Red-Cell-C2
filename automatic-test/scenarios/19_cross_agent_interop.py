@@ -32,7 +32,6 @@ from __future__ import annotations
 
 DESCRIPTION = "Cross-agent interoperability: session isolation between Demon (Windows) and Phantom (Linux)"
 
-import base64
 import os
 import tempfile
 import uuid
@@ -55,15 +54,14 @@ def _unique_marker() -> str:
 
 def _build_and_deploy_windows(cli, target, listener_name, uid):
     """Build Demon EXE and deploy to Windows target.  Returns remote_payload path."""
-    from lib.cli import payload_build
+    from lib.cli import payload_build_and_fetch
     from lib.deploy import ensure_work_dir, execute_background, upload
 
     remote_payload = f"{target.work_dir}\\agent-{uid}.exe"
     local_payload = tempfile.mktemp(suffix=".exe")
 
     print(f"  [windows] building Demon EXE x64 for listener {listener_name!r}")
-    result = payload_build(cli, agent="demon", listener=listener_name, arch="x64", fmt="exe")
-    raw = base64.b64decode(result["bytes"])
+    raw = payload_build_and_fetch(cli, listener=listener_name, arch="x64", fmt="exe")
     assert len(raw) > 0, "Windows payload is empty"
     print(f"  [windows] built ({len(raw)} bytes)")
 
@@ -85,7 +83,7 @@ def _build_and_deploy_windows(cli, target, listener_name, uid):
 
 
 def _build_and_deploy_linux(cli, target, listener_name, uid):
-    """Build Phantom ELF and deploy to Linux target.
+    """Build Phantom payload and deploy to Linux target.
 
     Raises ScenarioSkipped if the teamserver cannot produce a Phantom payload —
     this scenario requires two *different* agent types and must not silently
@@ -93,16 +91,15 @@ def _build_and_deploy_linux(cli, target, listener_name, uid):
 
     Returns remote_payload path.
     """
-    from lib.cli import CliError, payload_build
+    from lib.cli import CliError, payload_build_and_fetch
     from lib.deploy import ensure_work_dir, execute_background, run_remote, upload
 
     remote_payload = f"{target.work_dir}/agent-{uid}.bin"
     local_payload = tempfile.mktemp(suffix=".bin")
 
-    print(f"  [linux] building Phantom ELF x64 for listener {listener_name!r}")
+    print(f"  [linux] building Phantom bin x64 for listener {listener_name!r}")
     try:
-        result = payload_build(cli, agent="phantom", listener=listener_name, arch="x64", fmt="elf")
-        raw = base64.b64decode(result["bytes"])
+        raw = payload_build_and_fetch(cli, listener=listener_name, arch="x64", fmt="bin")
         if len(raw) == 0:
             raise CliError("EMPTY_PAYLOAD", "Phantom payload is empty", 1)
     except Exception as exc:
@@ -110,7 +107,7 @@ def _build_and_deploy_linux(cli, target, listener_name, uid):
             f"Phantom unavailable — skipping cross-agent interop test ({exc}). "
             "Complete the Phantom agent implementation before running scenario 19."
         ) from exc
-    print(f"  [linux] Phantom ELF built ({len(raw)} bytes)")
+    print(f"  [linux] Phantom bin built ({len(raw)} bytes)")
 
     with open(local_payload, "wb") as fh:
         fh.write(raw)

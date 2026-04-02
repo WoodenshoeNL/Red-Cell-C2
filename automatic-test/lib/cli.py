@@ -113,17 +113,58 @@ def listener_delete(cfg: CliConfig, name: str) -> dict:
 
 # ── Payloads ────────────────────────────────────────────────────────────────
 
-def payload_build(cfg: CliConfig, agent: str, listener: str,
+def payload_build(cfg: CliConfig, listener: str,
                   arch: str = "x64", fmt: str = "exe",
-                  output: str | None = None) -> dict:
+                  sleep_secs: int | None = None,
+                  wait: bool = False) -> dict:
+    """Submit a payload build job.
+
+    Without ``wait``: returns ``{"job_id": ...}`` immediately.
+    With ``wait=True``: polls until build completes, returns
+    ``{"id": <payload_id>, "size_bytes": N}``.
+    """
     args = ["payload", "build",
-            "--agent", agent,
             "--listener", listener,
             "--arch", arch,
             "--format", fmt]
-    if output:
-        args += ["--output", output]
+    if sleep_secs is not None:
+        args += ["--sleep", str(sleep_secs)]
+    if wait:
+        args.append("--wait")
     return _run(cfg, *args)
+
+
+def payload_download(cfg: CliConfig, payload_id: str | int, dst: str) -> dict:
+    """Download a built payload to a local file."""
+    return _run(cfg, "payload", "download", str(payload_id), "--dst", dst)
+
+
+def payload_build_and_fetch(cfg: CliConfig, listener: str,
+                            arch: str = "x64", fmt: str = "exe",
+                            sleep_secs: int | None = None) -> bytes:
+    """Build a payload (blocking) and return the raw bytes.
+
+    Combines ``payload build --wait`` with ``payload download`` into a
+    single call.  A temporary file is used to receive the download and
+    is deleted before returning.
+    """
+    import tempfile as _tempfile
+
+    result = payload_build(cfg, listener=listener, arch=arch, fmt=fmt,
+                           sleep_secs=sleep_secs, wait=True)
+    payload_id = result["id"]
+
+    with _tempfile.NamedTemporaryFile(delete=False, suffix=f".{fmt}") as tmp:
+        tmp_path = tmp.name
+    try:
+        payload_download(cfg, payload_id, tmp_path)
+        with open(tmp_path, "rb") as fh:
+            return fh.read()
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
 
 # ── Agents ──────────────────────────────────────────────────────────────────

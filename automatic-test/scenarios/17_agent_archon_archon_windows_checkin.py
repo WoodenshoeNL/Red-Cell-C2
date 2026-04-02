@@ -28,7 +28,6 @@ Steps:
 
 DESCRIPTION = "Archon agent Windows checkin (Makefile build + Archon extensions)"
 
-import base64
 import os
 import tempfile
 import uuid
@@ -107,7 +106,7 @@ def run(ctx) -> None:
         listener_delete,
         listener_start,
         listener_stop,
-        payload_build,
+        payload_build_and_fetch,
     )
     from lib.deploy import ensure_work_dir, execute_background, run_remote, upload
     from lib.wait import wait_for_agent
@@ -150,15 +149,14 @@ def run(ctx) -> None:
         # scenario is skipped — not failed.
         print("  [archon][payload] building archon exe x64 for Windows target")
         try:
-            result = payload_build(
-                cli, agent="archon", listener=listener_name, arch="x64", fmt="exe"
+            raw = payload_build_and_fetch(
+                cli, listener=listener_name, arch="x64", fmt="exe"
             )
         except CliError as exc:
             raise ScenarioSkipped(
                 f"Archon payload build failed — Archon has not yet diverged from "
                 f"Demon or is not registered as a distinct agent type: {exc}"
             )
-        raw = base64.b64decode(result["bytes"])
         assert len(raw) > 0, "Archon payload is empty"
         print(f"  [archon][payload] built ({len(raw)} bytes)")
 

@@ -20,7 +20,6 @@ Steps (per agent pass):
 
 DESCRIPTION = "DNS agent checkin (Demon + Phantom over DNS)"
 
-import base64
 import os
 import tempfile
 import uuid
@@ -56,7 +55,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
         listener_delete,
         listener_start,
         listener_stop,
-        payload_build,
+        payload_build_and_fetch,
     )
     from lib.deploy import ensure_work_dir, execute_background, run_remote, upload
     from lib.wait import wait_for_agent
@@ -101,15 +100,14 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
             f"with DNS listener {listener_name!r}"
         )
         try:
-            result = payload_build(
-                cli, agent=agent_type, listener=listener_name, arch="x64", fmt=fmt
+            raw = payload_build_and_fetch(
+                cli, listener=listener_name, arch="x64", fmt=fmt
             )
         except CliError as exc:
             raise ScenarioSkipped(
                 f"{agent_type} DNS payload build failed — "
                 f"agent or DNS transport may not be available yet: {exc}"
             )
-        raw = base64.b64decode(result["bytes"])
         assert len(raw) > 0, "payload is empty"
         print(f"  [{agent_type}][payload] built ({len(raw)} bytes)")
 
@@ -241,6 +239,6 @@ def run(ctx):
     # ── Phantom pass (Rust Linux agent) ─────────────────────────────────────
     print("\n  === DNS agent pass: phantom ===")
     try:
-        _run_for_agent(ctx, agent_type="phantom", fmt="elf", name_prefix="test-dns-phantom")
+        _run_for_agent(ctx, agent_type="phantom", fmt="bin", name_prefix="test-dns-phantom")
     except ScenarioSkipped as exc:
         print(f"  [phantom] SKIPPED (Phantom DNS transport not yet available): {exc}")

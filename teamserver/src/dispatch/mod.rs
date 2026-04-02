@@ -1887,7 +1887,7 @@ mod tests {
     }
 
     fn add_length_prefixed_utf16(buf: &mut Vec<u8>, value: &str) {
-        let mut encoded: Vec<u8> = value.encode_utf16().flat_map(u16::to_be_bytes).collect();
+        let mut encoded: Vec<u8> = value.encode_utf16().flat_map(u16::to_le_bytes).collect();
         encoded.extend_from_slice(&[0, 0]);
         add_length_prefixed_bytes(buf, &encoded);
     }

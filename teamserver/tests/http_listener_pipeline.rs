@@ -892,7 +892,7 @@ fn plaintext_zero_key_demon_init_body(agent_id: u32) -> Vec<u8> {
     common::add_length_prefixed_bytes_be(&mut metadata, b"operator");
     common::add_length_prefixed_bytes_be(&mut metadata, b"REDCELL");
     common::add_length_prefixed_bytes_be(&mut metadata, b"10.0.0.25");
-    common::add_length_prefixed_utf16_be(&mut metadata, "C:\\Windows\\explorer.exe");
+    common::add_length_prefixed_utf16_le(&mut metadata, "C:\\Windows\\explorer.exe");
     metadata.extend_from_slice(&1337_u32.to_be_bytes());
     metadata.extend_from_slice(&1338_u32.to_be_bytes());
     metadata.extend_from_slice(&512_u32.to_be_bytes());

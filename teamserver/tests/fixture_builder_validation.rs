@@ -37,15 +37,15 @@ fn add_length_prefixed_bytes_be_handles_empty() {
 }
 
 #[test]
-fn add_length_prefixed_utf16_be_encodes_correctly() {
+fn add_length_prefixed_utf16_le_encodes_correctly() {
     let mut buf = Vec::new();
-    common::add_length_prefixed_utf16_be(&mut buf, "AB");
+    common::add_length_prefixed_utf16_le(&mut buf, "AB");
     // "AB" = 2 code units × 2 bytes + 2 null terminator = 6 bytes payload
     // Total = 4 length prefix + 6 payload = 10
     let len = u32::from_be_bytes(buf[..4].try_into().unwrap());
     assert_eq!(len, 6);
-    // 'A' = 0x0041 BE, 'B' = 0x0042 BE, null = 0x0000
-    assert_eq!(&buf[4..], &[0x00, 0x41, 0x00, 0x42, 0x00, 0x00]);
+    // 'A' = 0x0041 LE, 'B' = 0x0042 LE, null = 0x0000
+    assert_eq!(&buf[4..], &[0x41, 0x00, 0x42, 0x00, 0x00, 0x00]);
 }
 
 #[test]
@@ -159,9 +159,9 @@ fn init_body_encrypted_metadata_decrypts_to_expected_fields() {
     let ip = read_lp_bytes(&plaintext, &mut cursor);
     assert_eq!(ip, b"10.0.0.25");
 
-    // process path: UTF-16 BE null-terminated "C:\Windows\explorer.exe"
+    // process path: UTF-16 LE null-terminated "C:\Windows\explorer.exe"
     let process_raw = read_lp_bytes(&plaintext, &mut cursor);
-    let decoded = decode_utf16_be_null_terminated(&process_raw);
+    let decoded = decode_utf16_le_null_terminated(&process_raw);
     assert_eq!(decoded, r"C:\Windows\explorer.exe");
 
     // PID = 1337
@@ -383,11 +383,11 @@ fn read_u64_be(data: &[u8], cursor: &mut usize) -> u64 {
     value
 }
 
-/// Decode a null-terminated UTF-16BE byte sequence into a String.
-fn decode_utf16_be_null_terminated(raw: &[u8]) -> String {
+/// Decode a null-terminated UTF-16LE byte sequence into a String.
+fn decode_utf16_le_null_terminated(raw: &[u8]) -> String {
     let code_units: Vec<u16> = raw
         .chunks_exact(2)
-        .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
+        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
         .take_while(|&cu| cu != 0)
         .collect();
     String::from_utf16(&code_units).expect("valid UTF-16")

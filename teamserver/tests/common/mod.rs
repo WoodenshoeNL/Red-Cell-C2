@@ -240,7 +240,7 @@ pub fn valid_demon_init_body(
     add_length_prefixed_bytes_be(&mut metadata, b"operator");
     add_length_prefixed_bytes_be(&mut metadata, b"REDCELL");
     add_length_prefixed_bytes_be(&mut metadata, b"10.0.0.25");
-    add_length_prefixed_utf16_be(&mut metadata, "C:\\Windows\\explorer.exe");
+    add_length_prefixed_utf16_le(&mut metadata, "C:\\Windows\\explorer.exe");
     metadata.extend_from_slice(&1337_u32.to_be_bytes());
     metadata.extend_from_slice(&1338_u32.to_be_bytes());
     metadata.extend_from_slice(&512_u32.to_be_bytes());
@@ -292,7 +292,7 @@ pub fn valid_demon_init_body_with_ext_flags(
     add_length_prefixed_bytes_be(&mut metadata, b"operator");
     add_length_prefixed_bytes_be(&mut metadata, b"REDCELL");
     add_length_prefixed_bytes_be(&mut metadata, b"10.0.0.25");
-    add_length_prefixed_utf16_be(&mut metadata, "C:\\Windows\\explorer.exe");
+    add_length_prefixed_utf16_le(&mut metadata, "C:\\Windows\\explorer.exe");
     metadata.extend_from_slice(&1337_u32.to_be_bytes());
     metadata.extend_from_slice(&1338_u32.to_be_bytes());
     metadata.extend_from_slice(&512_u32.to_be_bytes());
@@ -528,9 +528,13 @@ pub fn add_length_prefixed_bytes_be(buffer: &mut Vec<u8>, value: &[u8]) {
     buffer.extend_from_slice(value);
 }
 
-/// Append `value` to `buffer` as a BE-length-prefixed UTF-16BE string (null-terminated).
-pub fn add_length_prefixed_utf16_be(buffer: &mut Vec<u8>, value: &str) {
-    let mut encoded: Vec<u8> = value.encode_utf16().flat_map(u16::to_be_bytes).collect();
+/// Append `value` to `buffer` as a BE-length-prefixed UTF-16LE string (null-terminated).
+///
+/// The Demon agent encodes strings as UTF-16 little-endian (matching Windows-native
+/// `WCHAR`/`wchar_t`). The length prefix itself is big-endian to match the rest of
+/// the Demon binary protocol framing.
+pub fn add_length_prefixed_utf16_le(buffer: &mut Vec<u8>, value: &str) {
+    let mut encoded: Vec<u8> = value.encode_utf16().flat_map(u16::to_le_bytes).collect();
     encoded.extend_from_slice(&[0, 0]);
     add_length_prefixed_bytes_be(buffer, &encoded);
 }

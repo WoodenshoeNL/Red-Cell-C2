@@ -1,17 +1,20 @@
 CC      = gcc
 CFLAGS  = -std=c11 -Wall -Wextra -Werror -O2 -g
-TARGET  = test_crypto
-SRC     = test_crypto.c
+TARGETS = test_crypto test_synth_stack
 
 .PHONY: all run clean
 
-all: $(TARGET)
+all: $(TARGETS)
 
-$(TARGET): $(SRC)
+test_crypto: test_crypto.c
 	$(CC) $(CFLAGS) -o $@ $<
 
-run: $(TARGET)
-	./$(TARGET)
+test_synth_stack: test_synth_stack.c
+	$(CC) $(CFLAGS) -o $@ $<
+
+run: $(TARGETS)
+	./test_crypto
+	./test_synth_stack
 
 clean:
-	rm -f $(TARGET)
+	rm -f $(TARGETS)

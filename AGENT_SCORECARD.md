@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1148 | 248 | 33 |
-| Bugs filed against | 185 | 38 | 9 |
+| Tasks closed | 1153 | 248 | 33 |
+| Bugs filed against | 186 | 38 | 9 |
 | Bug rate (bugs/task) | 0.16 | 0.15 | 0.27 |
 | Quality score | 84% | 85% | 73% |
 
-*Bug rates: Claude 185/1148=0.1611→0.16, Codex 38/248=0.1532→0.15, Cursor 9/33=0.2727→0.27*
+*Bug rates: Claude 186/1153=0.1613→0.16, Codex 38/248=0.1532→0.15, Cursor 9/33=0.2727→0.27*
 
 ## Violation Breakdown
 
@@ -30,7 +30,7 @@ Each loop run updates the running totals and appends a review entry.
 | Startup / lifecycle regressions | 4 | 9 | 0 |
 | Test infrastructure / flakiness | 41 | 2 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
-| Availability / timeout regressions | 3 | 5 | 0 |
+| Availability / timeout regressions | 4 | 5 | 0 |
 | Correctness / pagination | 64 | 8 | 1 |
 | Workflow / close-hygiene | 32 | 0 | 0 |
 | Code reuse / duplication | 10 | 0 | 0 |
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-03 09:56 — 03070796..bf4d9846
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 5 | 1 | Closed `red-cell-c2-n5euj`, `red-cell-c2-ciamf`, `red-cell-c2-dodxq`, `red-cell-c2-kosko`, and `red-cell-c2-nkdoq`. Reviewed the `client-cli` session rewrite, autotest stderr parsing fix, loop worktree-activity guard, and Phantom warning cleanup. Filed `red-cell-c2-4wo7x` because `red-cell-cli session` now hard-depends on `/api/v1/ws` even though the current teamserver router still exposes no such route. |
+| Codex | 0 | 0 | No Codex-attributed product commits in this range. |
+| Cursor | 0 | 0 | No activity in this range. |
+
+Build: `cargo check --workspace` passed. `cargo clippy --workspace -- -D warnings` passed. `cargo nextest run --workspace` was started, but a separate long-running `cargo-nextest` job was already active on the VM and the shared run was still compiling/running during bookkeeping with no failures observed in streamed output. `br list --status=in_progress` shows only `red-cell-c2-kpmhx`, which matches the new claim commit at the reviewed tip rather than a stale closure mismatch. `br list --status=open | head -30` and `br ready | head -20` intermittently returned `DATABASE_ERROR: database is busy`, but the open-backlog snapshot remained consistent once the lock cleared.
 
 ### QA Review — 2026-04-03 06:17 — 11335803..14138d8c
 

@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1154 | 248 | 33 |
-| Bugs filed against | 186 | 38 | 9 |
-| Bug rate (bugs/task) | 0.16 | 0.15 | 0.27 |
-| Quality score | 84% | 85% | 73% |
+| Tasks closed | 1166 | 249 | 36 |
+| Bugs filed against | 187 | 38 | 9 |
+| Bug rate (bugs/task) | 0.16 | 0.15 | 0.25 |
+| Quality score | 84% | 85% | 75% |
 
-*Bug rates: Claude 186/1154=0.1612→0.16, Codex 38/248=0.1532→0.15, Cursor 9/33=0.2727→0.27*
+*Bug rates: Claude 187/1166=0.1604→0.16, Codex 38/249=0.1526→0.15, Cursor 9/36=0.2500→0.25*
 
 ## Violation Breakdown
 
@@ -25,7 +25,7 @@ Each loop run updates the running totals and appends a review entry.
 | Clippy warnings | 9 | 0 | 1 |
 | Protocol errors | 30 | 32 | 3 |
 | Security issues | 57 | 39 | 0 |
-| Architecture drift | 23 | 25 | 0 |
+| Architecture drift | 24 | 25 | 0 |
 | Memory / resource leaks | 11 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 9 | 0 |
 | Test infrastructure / flakiness | 41 | 2 | 0 |
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-03 12:20 — d00724fc..246d20d0
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 12 | 1 | Closed `red-cell-c2-nfx9e`, `red-cell-c2-4wo7x`, `red-cell-c2-h6g7w`, `red-cell-c2-lmgs5`, `red-cell-c2-lfpog`, `red-cell-c2-5cs1s`, `red-cell-c2-9uocv`, `red-cell-c2-kw875`, `red-cell-c2-lul3c`, `red-cell-c2-zo0yv`, `red-cell-c2-vo2si`, and `red-cell-c2-odsy6`. Filed `red-cell-c2-7bcrc` because `automatic-test/lib/cli.py` now polls `/api/v1/payloads/jobs/{job_id}` directly with `urllib`, bypassing the documented requirement that harness interaction stay behind `red-cell-cli`. |
+| Codex | 1 | 0 | Closed `red-cell-c2-34axk` via the DoH DNS listener interop scaffold. The new scenario remains intentionally skip-gated behind the already-open teamserver DoH grammar bugs, and no new Codex-attributed regression was found in the reviewed range. |
+| Cursor | 3 | 0 | Closed `red-cell-c2-llv7p`, `red-cell-c2-9gxwf`, and `red-cell-c2-9ebj4`. The SMB DEMON_INIT throttling change and the new DNS/session tests match the intended behavior, and no new Cursor-attributed regression was found. |
+
+Build: failed. The shared VM had concurrent cargo jobs, so this review’s own `cargo check --workspace` / `cargo nextest run --workspace` attempts were lock-blocked; however, the currently running `cargo clippy --workspace -- -D warnings` on the same tip is failing in `teamserver/src/sockets.rs` with the already-open `red-cell-c2-xrwgz` unwrap/clippy violations, so the workspace lint gate is not clean at this checkpoint.
 
 ### QA Review — 2026-04-03 10:01 — e4d65c1d..d00724fc
 

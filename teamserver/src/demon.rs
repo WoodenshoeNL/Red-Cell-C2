@@ -31,6 +31,14 @@ use crate::{AgentRegistry, TeamserverError};
 /// advances across packets rather than resetting to 0 for each message.
 pub const INIT_EXT_MONOTONIC_CTR: u32 = 1 << 0;
 
+/// Bit 1: callback sequence-number protection.  When set, the agent prefixes every
+/// encrypted callback payload with an 8-byte little-endian monotonically increasing
+/// sequence number.  The teamserver enforces strict ordering and rejects replays.
+///
+/// Demon and Archon agents do not set this flag (frozen wire format).
+/// Specter agents set this flag during `DEMON_INIT`.
+pub const INIT_EXT_SEQ_PROTECTED: u32 = 1 << 1;
+
 /// A decrypted Demon callback package parsed from an agent request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DemonCallbackPackage {
@@ -253,7 +261,7 @@ impl DemonPacketParser {
                 // existing record in-place instead of failing.  This handles the case
                 // where a Demon agent restarts after a crash or kill-date reset and
                 // sends a full DEMON_INIT with the same agent_id.
-                let (agent, legacy_ctr) = parse_init_agent(
+                let (agent, legacy_ctr, seq_protected) = parse_init_agent(
                     envelope.header.agent_id,
                     remaining,
                     &external_ip,
@@ -294,7 +302,11 @@ impl DemonPacketParser {
                     listener_name,
                     "DEMON_INIT re-registration: updating existing agent record (CTR reset to 0)"
                 );
+                // reregister_full resets ctr_block_offset and last_seen_seq to 0 in both
+                // memory and DB, so the fresh session starts clean.
                 self.registry.reregister_full(agent.clone(), listener_name, legacy_ctr).await?;
+                // Update seq_protected to match what the re-registering agent negotiated.
+                self.registry.set_seq_protected(envelope.header.agent_id, seq_protected).await?;
 
                 return Ok(ParsedDemonPacket::ReInit(Box::new(ParsedDemonInit {
                     header: envelope.header,
@@ -303,7 +315,7 @@ impl DemonPacketParser {
                 })));
             }
 
-            let (agent, legacy_ctr) = parse_init_agent(
+            let (agent, legacy_ctr, seq_protected) = parse_init_agent(
                 envelope.header.agent_id,
                 remaining,
                 &external_ip,
@@ -323,6 +335,9 @@ impl DemonPacketParser {
             }
 
             self.registry.insert_full(agent.clone(), listener_name, 0, legacy_ctr).await?;
+            if seq_protected {
+                self.registry.set_seq_protected(envelope.header.agent_id, seq_protected).await?;
+            }
 
             return Ok(ParsedDemonPacket::Init(Box::new(ParsedDemonInit {
                 header: envelope.header,
@@ -340,15 +355,72 @@ impl DemonPacketParser {
         //
         // By deferring the advance until after a successful parse we ensure the offset is only
         // committed when we have confirmed the payload was valid Demon data.
+        let agent_id = envelope.header.agent_id;
         let decrypted = self
             .registry
-            .decrypt_from_agent_without_advancing(envelope.header.agent_id, remaining)
+            .decrypt_from_agent_without_advancing(agent_id, remaining)
             .await
-            .map_err(|e| lift_crypto_encoding_error(envelope.header.agent_id, e))?;
-        let packages = parse_callback_packages(command_id, request_id, &decrypted)?;
+            .map_err(|e| lift_crypto_encoding_error(agent_id, e))?;
 
-        // Parse succeeded: advance the offset now that we know the payload was genuine.
-        self.registry.advance_ctr_for_agent(envelope.header.agent_id, remaining.len()).await?;
+        // For seq-protected agents (Specter/Archon with INIT_EXT_SEQ_PROTECTED), extract and
+        // validate the 8-byte little-endian sequence number that prefixes the decrypted body.
+        // This check happens before the Demon protocol parse so that a replay is rejected fast.
+        // The sequence number is only *advanced* (persisted) after a successful parse below.
+        //
+        // Demon agents are exempt — they cannot be modified (frozen wire format), so their
+        // callback payloads carry no sequence number prefix.  See also: AGENTS.md §Agent Variants.
+        let (callback_body, incoming_seq): (Cow<'_, [u8]>, Option<u64>) =
+            if self.registry.is_seq_protected(agent_id).await {
+                use red_cell_common::callback_seq::SEQ_PREFIX_BYTES;
+
+                if decrypted.len() < SEQ_PREFIX_BYTES {
+                    return Err(DemonParserError::Registry(
+                        TeamserverError::InvalidPersistedValue {
+                            field: "callback_seq_prefix",
+                            message: format!(
+                                "payload too short: {} bytes < {SEQ_PREFIX_BYTES} required",
+                                decrypted.len()
+                            ),
+                        },
+                    ));
+                }
+
+                let incoming_seq = u64::from_le_bytes(
+                    decrypted[..SEQ_PREFIX_BYTES].try_into().expect("slice length is 8"),
+                );
+                let body = decrypted[SEQ_PREFIX_BYTES..].to_vec();
+
+                // Validate seq against the registry's stored last_seen_seq.
+                // Rejection happens here (fast path) before any protocol parsing work.
+                self.registry.check_callback_seq(agent_id, incoming_seq).await.map_err(|e| {
+                    match &e {
+                        TeamserverError::CallbackSeqReplay { .. }
+                        | TeamserverError::CallbackSeqGapTooLarge { .. } => {
+                            warn!(
+                                agent_id = format_args!("0x{agent_id:08X}"),
+                                "rejecting seq-protected callback: {e}"
+                            );
+                        }
+                        _ => {}
+                    }
+                    DemonParserError::Registry(e)
+                })?;
+
+                (Cow::Owned(body), Some(incoming_seq))
+            } else {
+                (Cow::Borrowed(decrypted.as_slice()), None)
+            };
+
+        let packages = parse_callback_packages(command_id, request_id, &callback_body)?;
+
+        // Parse succeeded: advance the CTR offset now that we know the payload was genuine.
+        self.registry.advance_ctr_for_agent(agent_id, remaining.len()).await?;
+
+        // Advance the sequence number only after a successful parse (deferred commit pattern,
+        // mirrors the CTR offset advance above).
+        if let Some(seq) = incoming_seq {
+            self.registry.advance_last_seen_seq(agent_id, seq).await?;
+        }
 
         Ok(ParsedDemonPacket::Callback { header: envelope.header, packages })
     }
@@ -440,18 +512,22 @@ fn parse_callback_packages(
     Ok(packages)
 }
 
-/// Parse a DEMON_INIT payload into an `AgentRecord` and a `legacy_ctr` flag.
+/// Parse a DEMON_INIT payload into an `AgentRecord` and extension flags.
 ///
-/// Returns `(agent, legacy_ctr)`.  When the decrypted metadata contains trailing
-/// extension flags with [`INIT_EXT_MONOTONIC_CTR`] set, `legacy_ctr` is `false`;
-/// otherwise it defaults to `true` (legacy Demon behaviour).
+/// Returns `(agent, legacy_ctr, seq_protected)`.
+///
+/// When the decrypted metadata contains trailing extension flags:
+/// - If [`INIT_EXT_MONOTONIC_CTR`] is set, `legacy_ctr` is `false`; otherwise `true`.
+/// - If [`INIT_EXT_SEQ_PROTECTED`] is set, `seq_protected` is `true`; otherwise `false`.
+///
+/// Legacy Demon agents omit the extension flags field entirely; both defaults apply.
 fn parse_init_agent(
     agent_id: u32,
     payload: &[u8],
     external_ip: &str,
     now: OffsetDateTime,
     init_secret: Option<&[u8]>,
-) -> Result<(AgentRecord, bool), DemonParserError> {
+) -> Result<(AgentRecord, bool, bool), DemonParserError> {
     let mut offset = 0_usize;
     let key = read_fixed::<AGENT_KEY_LENGTH>(payload, &mut offset, "init AES key")?;
     let iv = read_fixed::<AGENT_IV_LENGTH>(payload, &mut offset, "init AES IV")?;
@@ -509,20 +585,23 @@ fn parse_init_agent(
 
     // Optional extension flags — appended by Specter (and future) agents after the
     // standard metadata fields.  Legacy Demon agents omit this, so an absent field
-    // means legacy CTR mode.
-    let legacy_ctr = if decrypted.len() - decrypted_offset >= 4 {
+    // means legacy CTR mode and no seq protection.
+    let (legacy_ctr, seq_protected) = if decrypted.len() - decrypted_offset >= 4 {
         let ext_flags = read_u32_be(&decrypted, &mut decrypted_offset, "init extension flags")?;
         let monotonic = ext_flags & INIT_EXT_MONOTONIC_CTR != 0;
-        if monotonic {
+        let seq_prot = ext_flags & INIT_EXT_SEQ_PROTECTED != 0;
+        if monotonic || seq_prot {
             tracing::info!(
                 agent_id = format_args!("0x{agent_id:08X}"),
                 ext_flags,
-                "agent requested monotonic CTR mode via init extension flags"
+                monotonic_ctr = monotonic,
+                seq_protected = seq_prot,
+                "agent requested protocol extensions via init extension flags"
             );
         }
-        !monotonic
+        (!monotonic, seq_prot)
     } else {
-        true
+        (true, false)
     };
 
     // Reject trailing bytes after the last parsed field.  The decrypted init
@@ -603,6 +682,7 @@ fn parse_init_agent(
             last_call_in: timestamp,
         },
         legacy_ctr,
+        seq_protected,
     ))
 }
 
@@ -715,7 +795,7 @@ mod tests {
 
     use super::{
         DemonCallbackPackage, DemonPacketParser, DemonParserError, INIT_EXT_MONOTONIC_CTR,
-        ParsedDemonPacket, build_init_ack, build_reconnect_ack,
+        INIT_EXT_SEQ_PROTECTED, ParsedDemonPacket, build_init_ack, build_reconnect_ack,
     };
     use crate::{AgentRegistry, Database};
 
@@ -2959,5 +3039,191 @@ mod tests {
             registry.get(agent_id).await.is_none(),
             "agent must not be registered after trailing-byte rejection"
         );
+    }
+
+    // ── Seq-protected callback tests ─────────────────────────────────────────
+
+    /// Build a seq-protected callback packet: the decrypted body starts with
+    /// an 8-byte LE seq number, then a normal Demon package stream.
+    fn build_seq_protected_callback(
+        agent_id: u32,
+        key: [u8; AGENT_KEY_LENGTH],
+        iv: [u8; AGENT_IV_LENGTH],
+        ctr_offset: u64,
+        seq: u64,
+    ) -> Vec<u8> {
+        let mut decrypted = Vec::new();
+        // 8-byte LE seq prefix
+        decrypted.extend_from_slice(&seq.to_le_bytes());
+        // One Demon package (first cmd + payload)
+        decrypted.extend_from_slice(&u32_be(3)); // payload length prefix
+        decrypted.extend_from_slice(b"out");
+        // No additional packages
+        let encrypted = encrypt_agent_data_at_offset(&key, &iv, ctr_offset, &decrypted)
+            .expect("seq callback encryption must succeed");
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&u32_be(u32::from(DemonCommand::CommandOutput)));
+        payload.extend_from_slice(&u32_be(1)); // request_id
+        payload.extend_from_slice(&encrypted);
+        DemonEnvelope::new(agent_id, payload)
+            .expect("seq callback envelope must be valid")
+            .to_bytes()
+    }
+
+    /// Register a seq-protected agent, parse the init, set seq_protected flag.
+    async fn register_seq_protected_agent(
+        agent_id: u32,
+        key: [u8; AGENT_KEY_LENGTH],
+        iv: [u8; AGENT_IV_LENGTH],
+    ) -> (AgentRegistry, DemonPacketParser) {
+        let registry = test_registry().await;
+        let parser = DemonPacketParser::new(registry.clone()); // allow_legacy_ctr = false
+        let init = build_init_packet_with_ext_flags(
+            agent_id,
+            key,
+            iv,
+            INIT_EXT_SEQ_PROTECTED | INIT_EXT_MONOTONIC_CTR,
+        );
+        parser
+            .parse_at(&init, "10.0.0.1".to_owned(), datetime!(2026-03-20 12:00:00 UTC))
+            .await
+            .expect("seq-protected init must succeed");
+        (registry, parser)
+    }
+
+    #[tokio::test]
+    async fn seq_protected_init_sets_seq_protected_flag() {
+        let agent_id = 0xA000_0001;
+        let key = test_key(0xA1);
+        let iv = test_iv(0xB1);
+        let (registry, _parser) = register_seq_protected_agent(agent_id, key, iv).await;
+        assert!(
+            registry.is_seq_protected(agent_id).await,
+            "INIT_EXT_SEQ_PROTECTED must set seq_protected = true in the registry"
+        );
+    }
+
+    #[tokio::test]
+    async fn seq_protected_callback_accepted_with_valid_seq() {
+        let agent_id = 0xA000_0002;
+        let key = test_key(0xA2);
+        let iv = test_iv(0xB2);
+        let (registry, parser) = register_seq_protected_agent(agent_id, key, iv).await;
+
+        // Init ACK advances CTR by one block; callback must start at that offset.
+        let ack = build_init_ack(&registry, agent_id).await.expect("build_init_ack must succeed");
+        let offset = ctr_blocks_for_len(ack.len());
+
+        let packet = build_seq_protected_callback(agent_id, key, iv, offset as u64, 1);
+        let result = parser
+            .parse_at(&packet, "10.0.0.1".to_owned(), datetime!(2026-03-20 12:01:00 UTC))
+            .await;
+        assert!(result.is_ok(), "valid seq-protected callback must be accepted: {result:?}");
+
+        // last_seen_seq must have been advanced to 1.
+        assert!(
+            registry.check_callback_seq(agent_id, 1).await.is_err(),
+            "seq=1 must now be rejected after being accepted"
+        );
+        assert!(
+            registry.check_callback_seq(agent_id, 2).await.is_ok(),
+            "seq=2 must still be acceptable"
+        );
+    }
+
+    #[tokio::test]
+    async fn seq_protected_callback_rejects_replay() {
+        let agent_id = 0xA000_0003;
+        let key = test_key(0xA3);
+        let iv = test_iv(0xB3);
+        let (registry, parser) = register_seq_protected_agent(agent_id, key, iv).await;
+
+        let ack = build_init_ack(&registry, agent_id).await.expect("build_init_ack must succeed");
+        let offset = ctr_blocks_for_len(ack.len());
+
+        // First packet with seq=1 — must be accepted.
+        let packet1 = build_seq_protected_callback(agent_id, key, iv, offset as u64, 1);
+        parser
+            .parse_at(&packet1, "10.0.0.1".to_owned(), datetime!(2026-03-20 12:01:00 UTC))
+            .await
+            .expect("first seq-protected callback must succeed");
+
+        // Re-use the same ciphertext (replay of seq=1) — must be rejected.
+        // Build a new packet with seq=1 at the new offset.
+        let next_offset = offset
+            + ctr_blocks_for_len(
+                // seq prefix + payload length: 8 + 4 + 3 = 15 bytes
+                8 + 4 + 3,
+            );
+        let replay = build_seq_protected_callback(agent_id, key, iv, next_offset as u64, 1);
+        let err = parser
+            .parse_at(&replay, "10.0.0.1".to_owned(), datetime!(2026-03-20 12:02:00 UTC))
+            .await
+            .expect_err("replay of seq=1 must be rejected");
+        assert!(
+            matches!(
+                err,
+                DemonParserError::Registry(crate::TeamserverError::CallbackSeqReplay { .. })
+            ),
+            "expected CallbackSeqReplay, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn seq_protected_callback_rejects_large_gap() {
+        use red_cell_common::callback_seq::MAX_SEQ_GAP;
+        let agent_id = 0xA000_0004;
+        let key = test_key(0xA4);
+        let iv = test_iv(0xB4);
+        let (_registry, parser) = register_seq_protected_agent(agent_id, key, iv).await;
+
+        let ack = build_init_ack(&_registry, agent_id).await.expect("build_init_ack must succeed");
+        let offset = ctr_blocks_for_len(ack.len());
+
+        let packet =
+            build_seq_protected_callback(agent_id, key, iv, offset as u64, MAX_SEQ_GAP + 1);
+        let err = parser
+            .parse_at(&packet, "10.0.0.1".to_owned(), datetime!(2026-03-20 12:01:00 UTC))
+            .await
+            .expect_err("seq gap > MAX_SEQ_GAP must be rejected");
+        assert!(
+            matches!(
+                err,
+                DemonParserError::Registry(crate::TeamserverError::CallbackSeqGapTooLarge { .. })
+            ),
+            "expected CallbackSeqGapTooLarge, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_seq_protected_callback_not_checked_for_seq() {
+        // Legacy Demon agent: seq_protected = false, no seq prefix in payload.
+        let agent_id = 0xA000_0005;
+        let key = test_key(0xA5);
+        let iv = test_iv(0xB5);
+        let registry = test_registry().await;
+        let parser = legacy_parser(registry.clone());
+
+        let init = build_init_packet(agent_id, key, iv);
+        parser
+            .parse_at(&init, "10.0.0.1".to_owned(), datetime!(2026-03-20 12:00:00 UTC))
+            .await
+            .expect("legacy init must succeed");
+
+        // For a legacy agent, is_seq_protected must be false.
+        assert!(
+            !registry.is_seq_protected(agent_id).await,
+            "legacy agent must not be seq-protected"
+        );
+
+        // A normal (non-seq-prefixed) callback must still parse fine.
+        let ack = build_init_ack(&registry, agent_id).await.expect("build_init_ack must succeed");
+        let _ = ack; // legacy mode doesn't advance CTR
+
+        let callback = build_callback_packet(agent_id, key, iv, 0);
+        parser
+            .parse_at(&callback, "10.0.0.1".to_owned(), datetime!(2026-03-20 12:01:00 UTC))
+            .await
+            .expect("legacy callback without seq prefix must still be accepted");
     }
 }

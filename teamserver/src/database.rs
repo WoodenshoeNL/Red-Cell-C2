@@ -111,6 +111,35 @@ pub enum TeamserverError {
         /// Number of jobs already queued when the enqueue was attempted.
         queued: usize,
     },
+    /// Returned when a seq-protected callback is a replay of a previously seen sequence number.
+    #[error(
+        "callback replay for agent 0x{agent_id:08X}: \
+         incoming seq {incoming_seq} <= last_seen_seq {last_seen_seq}"
+    )]
+    CallbackSeqReplay {
+        /// Agent for which the replay was detected.
+        agent_id: u32,
+        /// Sequence number carried in the incoming callback.
+        incoming_seq: u64,
+        /// Last sequence number accepted for this agent.
+        last_seen_seq: u64,
+    },
+    /// Returned when the gap between the incoming and last-seen sequence numbers exceeds
+    /// the allowed maximum, indicating a suspicious large forward jump.
+    #[error(
+        "callback seq gap too large for agent 0x{agent_id:08X}: \
+         incoming seq {incoming_seq}, last_seen_seq {last_seen_seq}, gap {gap} > max"
+    )]
+    CallbackSeqGapTooLarge {
+        /// Agent for which the large gap was detected.
+        agent_id: u32,
+        /// Sequence number carried in the incoming callback.
+        incoming_seq: u64,
+        /// Last sequence number accepted for this agent.
+        last_seen_seq: u64,
+        /// Computed gap (`incoming_seq - last_seen_seq`).
+        gap: u64,
+    },
 }
 
 /// Connection pool and repository factory for the teamserver database.
@@ -229,6 +258,12 @@ pub struct PersistedAgent {
     /// compatibility).  When `false`, the monotonic `ctr_block_offset` advances across
     /// packets (Specter behaviour).
     pub legacy_ctr: bool,
+    /// Last callback sequence number accepted from this agent.  `0` means no seq-protected
+    /// callback has been received yet.
+    pub last_seen_seq: u64,
+    /// When `true`, the teamserver enforces monotonic sequence numbers on incoming callbacks.
+    /// Demon and Archon agents (frozen wire format) are exempt (`false`).
+    pub seq_protected: bool,
 }
 
 impl AgentRepository {
@@ -342,9 +377,9 @@ impl AgentRepository {
         Ok(())
     }
 
-    /// Update an existing agent row on re-registration, resetting the CTR block offset
-    /// to 0 and refreshing all runtime metadata.  Preserves the original `first_call_in`
-    /// and the operator-authored `note`.
+    /// Update an existing agent row on re-registration, resetting the CTR block offset and
+    /// last-seen sequence number to 0 and refreshing all runtime metadata.
+    /// Preserves the original `first_call_in` and the operator-authored `note`.
     pub async fn reregister_full(
         &self,
         agent: &AgentRecord,
@@ -354,7 +389,7 @@ impl AgentRepository {
         let result = sqlx::query(
             r#"
             UPDATE ts_agents SET
-                active = 1, reason = '', ctr_block_offset = 0, legacy_ctr = ?,
+                active = 1, reason = '', ctr_block_offset = 0, last_seen_seq = 0, legacy_ctr = ?,
                 aes_key = ?, aes_iv = ?, hostname = ?, username = ?, domain_name = ?,
                 external_ip = ?, internal_ip = ?, process_name = ?, process_path = ?,
                 base_address = ?, process_pid = ?, process_tid = ?, process_ppid = ?,
@@ -533,6 +568,40 @@ impl AgentRepository {
         }
         Ok(())
     }
+
+    /// Persist the last accepted callback sequence number for an agent.
+    pub async fn set_last_seen_seq(
+        &self,
+        agent_id: u32,
+        last_seen_seq: u64,
+    ) -> Result<(), TeamserverError> {
+        let result = sqlx::query("UPDATE ts_agents SET last_seen_seq = ? WHERE agent_id = ?")
+            .bind(i64_from_u64("last_seen_seq", last_seen_seq)?)
+            .bind(i64::from(agent_id))
+            .execute(&self.pool)
+            .await?;
+        if result.rows_affected() == 0 {
+            return Err(TeamserverError::AgentNotFound { agent_id });
+        }
+        Ok(())
+    }
+
+    /// Persist the seq-protected flag for an agent.
+    pub async fn set_seq_protected(
+        &self,
+        agent_id: u32,
+        seq_protected: bool,
+    ) -> Result<(), TeamserverError> {
+        let result = sqlx::query("UPDATE ts_agents SET seq_protected = ? WHERE agent_id = ?")
+            .bind(bool_to_i64(seq_protected))
+            .bind(i64::from(agent_id))
+            .execute(&self.pool)
+            .await?;
+        if result.rows_affected() == 0 {
+            return Err(TeamserverError::AgentNotFound { agent_id });
+        }
+        Ok(())
+    }
 }
 
 async fn insert_agent_row(
@@ -548,8 +617,8 @@ async fn insert_agent_row(
             agent_id, active, reason, note, ctr_block_offset, legacy_ctr, aes_key, aes_iv, hostname, username, domain_name,
             external_ip, internal_ip, process_name, process_path, base_address, process_pid, process_tid,
             process_ppid, process_arch, elevated, os_version, os_build, os_arch, listener_name, sleep_delay,
-            sleep_jitter, kill_date, working_hours, first_call_in, last_call_in
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            sleep_jitter, kill_date, working_hours, first_call_in, last_call_in, last_seen_seq, seq_protected
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(i64::from(agent.agent_id))
@@ -583,6 +652,8 @@ async fn insert_agent_row(
     .bind(agent.working_hours.map(i64::from))
     .bind(&agent.first_call_in)
     .bind(&agent.last_call_in)
+    .bind(0_i64) // last_seen_seq starts at 0
+    .bind(0_i64) // seq_protected defaults to false
     .execute(executor)
     .await?;
 
@@ -1573,6 +1644,8 @@ struct AgentRow {
     first_call_in: String,
     last_call_in: String,
     legacy_ctr: i64,
+    last_seen_seq: i64,
+    seq_protected: i64,
 }
 
 impl TryFrom<AgentRow> for AgentRecord {
@@ -1634,9 +1707,11 @@ impl TryFrom<AgentRow> for PersistedAgent {
     fn try_from(row: AgentRow) -> Result<Self, Self::Error> {
         let ctr_block_offset = u64_from_i64("ctr_block_offset", row.ctr_block_offset)?;
         let legacy_ctr = bool_from_i64("legacy_ctr", row.legacy_ctr)?;
+        let last_seen_seq = u64_from_i64("last_seen_seq", row.last_seen_seq)?;
+        let seq_protected = bool_from_i64("seq_protected", row.seq_protected)?;
         let listener_name = row.listener_name.clone();
         let info = AgentRecord::try_from(row)?;
-        Ok(Self { info, listener_name, ctr_block_offset, legacy_ctr })
+        Ok(Self { info, listener_name, ctr_block_offset, legacy_ctr, last_seen_seq, seq_protected })
     }
 }
 

@@ -70,6 +70,12 @@ struct AgentEntry {
     ctr_block_offset: Mutex<u64>,
     /// When `true`, AES-CTR always uses block offset 0 (legacy Demon/Archon behaviour).
     legacy_ctr: AtomicBool,
+    /// Last callback sequence number accepted from this agent.
+    /// `0` means no seq-protected callback has been received yet.
+    last_seen_seq: Mutex<u64>,
+    /// When `true`, the teamserver enforces monotonic sequence numbers on incoming callbacks.
+    /// Demon and Archon agents are exempt (`false`).
+    seq_protected: AtomicBool,
 }
 
 impl AgentEntry {
@@ -78,6 +84,8 @@ impl AgentEntry {
         listener_name: String,
         ctr_block_offset: u64,
         legacy_ctr: bool,
+        last_seen_seq: u64,
+        seq_protected: bool,
     ) -> Self {
         Self {
             info: RwLock::new(info),
@@ -85,6 +93,8 @@ impl AgentEntry {
             jobs: Mutex::new(VecDeque::new()),
             ctr_block_offset: Mutex::new(ctr_block_offset),
             legacy_ctr: AtomicBool::new(legacy_ctr),
+            last_seen_seq: Mutex::new(last_seen_seq),
+            seq_protected: AtomicBool::new(seq_protected),
         }
     }
 }
@@ -207,6 +217,8 @@ impl AgentRegistry {
                     agent.listener_name,
                     agent.ctr_block_offset,
                     agent.legacy_ctr,
+                    agent.last_seen_seq,
+                    agent.seq_protected,
                 )),
             );
         }
@@ -310,6 +322,8 @@ impl AgentRegistry {
                 listener_name.to_owned(),
                 ctr_block_offset,
                 legacy_ctr,
+                0,     // last_seen_seq starts at 0 for new agents
+                false, // seq_protected defaults to false (Demon/Archon compatibility)
             )),
         );
         Ok(())
@@ -348,9 +362,12 @@ impl AgentRegistry {
         *stored_listener_name = listener_name.to_owned();
         drop(stored_listener_name);
 
-        // Reset CTR block offset to 0 — the re-registering agent starts a fresh session.
+        // Reset transport state — the re-registering agent starts a fresh session.
         *entry.ctr_block_offset.lock().await = 0;
         entry.legacy_ctr.store(legacy_ctr, Ordering::Relaxed);
+        // Reset last_seen_seq to 0 so the fresh session begins at seq=1.
+        // seq_protected may be updated separately by the caller after this returns.
+        *entry.last_seen_seq.lock().await = 0;
 
         Ok(())
     }
@@ -649,6 +666,98 @@ impl AgentRegistry {
             self.repository.set_ctr_block_offset(agent_id, next_offset).await?;
             *ctr_offset = next_offset;
         }
+        Ok(())
+    }
+
+    /// Return `true` if the agent has seq-protection enabled.
+    ///
+    /// Demon and Archon agents are not seq-protected (returns `false`).
+    /// Returns `false` also when the agent is not registered.
+    pub(crate) async fn is_seq_protected(&self, agent_id: u32) -> bool {
+        match self.entry(agent_id).await {
+            Some(entry) => entry.seq_protected.load(Ordering::Relaxed),
+            None => false,
+        }
+    }
+
+    /// Validate that `incoming_seq` is acceptable for `agent_id` without advancing
+    /// the stored last-seen sequence number.
+    ///
+    /// Returns [`TeamserverError::CallbackSeqReplay`] when `incoming_seq <= last_seen_seq`
+    /// and [`TeamserverError::CallbackSeqGapTooLarge`] when the forward gap exceeds
+    /// [`red_cell_common::callback_seq::MAX_SEQ_GAP`].
+    ///
+    /// The stored value is **not** updated by this call; call
+    /// [`AgentRegistry::advance_last_seen_seq`] after a successful payload parse.
+    #[instrument(skip(self), fields(agent_id = format_args!("0x{:08X}", agent_id), incoming_seq))]
+    pub(crate) async fn check_callback_seq(
+        &self,
+        agent_id: u32,
+        incoming_seq: u64,
+    ) -> Result<(), TeamserverError> {
+        let entry =
+            self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
+        let last_seen_seq = *entry.last_seen_seq.lock().await;
+        red_cell_common::callback_seq::validate_seq(agent_id, incoming_seq, last_seen_seq).map_err(
+            |e| match e {
+                red_cell_common::callback_seq::CallbackSeqError::Replay {
+                    incoming_seq,
+                    last_seen_seq,
+                    ..
+                } => TeamserverError::CallbackSeqReplay { agent_id, incoming_seq, last_seen_seq },
+                red_cell_common::callback_seq::CallbackSeqError::GapTooLarge {
+                    incoming_seq,
+                    last_seen_seq,
+                    gap,
+                    ..
+                } => TeamserverError::CallbackSeqGapTooLarge {
+                    agent_id,
+                    incoming_seq,
+                    last_seen_seq,
+                    gap,
+                },
+                // PayloadTooShort is not returned by validate_seq (only by extract_and_validate_seq)
+                red_cell_common::callback_seq::CallbackSeqError::PayloadTooShort {
+                    actual, ..
+                } => TeamserverError::InvalidPersistedValue {
+                    field: "callback_seq_prefix",
+                    message: format!("payload too short: {actual} bytes"),
+                },
+            },
+        )
+    }
+
+    /// Advance the last-seen sequence number for `agent_id` to `new_seq` and persist it.
+    ///
+    /// This must only be called after a successful payload parse to avoid burning a sequence
+    /// number on an unvalidated (garbage) payload.
+    #[instrument(skip(self), fields(agent_id = format_args!("0x{:08X}", agent_id), new_seq))]
+    pub(crate) async fn advance_last_seen_seq(
+        &self,
+        agent_id: u32,
+        new_seq: u64,
+    ) -> Result<(), TeamserverError> {
+        let entry =
+            self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
+        self.repository.set_last_seen_seq(agent_id, new_seq).await?;
+        *entry.last_seen_seq.lock().await = new_seq;
+        Ok(())
+    }
+
+    /// Enable or disable seq-protection for `agent_id` and persist the flag.
+    ///
+    /// Called during agent registration when the agent signals seq-protection support
+    /// via a protocol extension flag.  Demon and Archon agents never call this.
+    #[instrument(skip(self), fields(agent_id = format_args!("0x{:08X}", agent_id), seq_protected))]
+    pub(crate) async fn set_seq_protected(
+        &self,
+        agent_id: u32,
+        seq_protected: bool,
+    ) -> Result<(), TeamserverError> {
+        let entry =
+            self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
+        self.repository.set_seq_protected(agent_id, seq_protected).await?;
+        entry.seq_protected.store(seq_protected, Ordering::Relaxed);
         Ok(())
     }
 
@@ -4192,5 +4301,161 @@ mod tests {
         assert_ne!(ct1, ct2, "default insert must use monotonic mode");
 
         Ok(())
+    }
+
+    // ── Sequence-number replay protection ────────────────────────────────────
+
+    #[tokio::test]
+    async fn check_callback_seq_accepts_first_seq_after_init() -> Result<(), TeamserverError> {
+        let registry = AgentRegistry::new(test_database().await?);
+        let agent = sample_agent_with_crypto(0x200A_0001, test_key(0xE1), test_iv(0xF1));
+        registry.insert(agent.clone()).await?;
+
+        // With last_seen_seq=0 (default), any seq in 1..=MAX_SEQ_GAP must be accepted.
+        registry.check_callback_seq(agent.agent_id, 1).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn check_callback_seq_rejects_replay() -> Result<(), TeamserverError> {
+        let registry = AgentRegistry::new(test_database().await?);
+        let agent = sample_agent_with_crypto(0x200A_0002, test_key(0xE2), test_iv(0xF2));
+        registry.insert(agent.clone()).await?;
+
+        // Advance to seq=5
+        registry.advance_last_seen_seq(agent.agent_id, 5).await?;
+
+        // Same seq must be rejected as a replay.
+        let err = registry
+            .check_callback_seq(agent.agent_id, 5)
+            .await
+            .expect_err("same seq must be rejected");
+        assert!(
+            matches!(
+                err,
+                TeamserverError::CallbackSeqReplay {
+                    agent_id: _,
+                    incoming_seq: 5,
+                    last_seen_seq: 5
+                }
+            ),
+            "expected CallbackSeqReplay, got: {err:?}"
+        );
+
+        // Lower seq must also be rejected.
+        let err = registry
+            .check_callback_seq(agent.agent_id, 3)
+            .await
+            .expect_err("lower seq must be rejected");
+        assert!(matches!(err, TeamserverError::CallbackSeqReplay { .. }), "got: {err:?}");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn check_callback_seq_rejects_large_gap() -> Result<(), TeamserverError> {
+        use red_cell_common::callback_seq::MAX_SEQ_GAP;
+
+        let registry = AgentRegistry::new(test_database().await?);
+        let agent = sample_agent_with_crypto(0x200A_0003, test_key(0xE3), test_iv(0xF3));
+        registry.insert(agent.clone()).await?;
+
+        let err = registry
+            .check_callback_seq(agent.agent_id, MAX_SEQ_GAP + 1)
+            .await
+            .expect_err("gap > MAX_SEQ_GAP must be rejected");
+        assert!(
+            matches!(err, TeamserverError::CallbackSeqGapTooLarge { .. }),
+            "expected CallbackSeqGapTooLarge, got: {err:?}"
+        );
+
+        // Exactly MAX_SEQ_GAP must be accepted.
+        registry.check_callback_seq(agent.agent_id, MAX_SEQ_GAP).await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn advance_last_seen_seq_persists_across_reload() -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+
+        {
+            let registry = AgentRegistry::new(database.clone());
+            let agent = sample_agent_with_crypto(0x200A_0004, test_key(0xE4), test_iv(0xF4));
+            registry.insert(agent.clone()).await?;
+            registry.advance_last_seen_seq(agent.agent_id, 42).await?;
+        }
+
+        let registry = AgentRegistry::load(database.clone()).await?;
+        let persisted =
+            database.agents().get_persisted(0x200A_0004).await?.expect("agent must still exist");
+        assert_eq!(persisted.last_seen_seq, 42, "last_seen_seq must survive registry reload");
+
+        // After reload, check_callback_seq must also use the persisted value.
+        let err = registry
+            .check_callback_seq(0x200A_0004, 42)
+            .await
+            .expect_err("seq=42 must be rejected after loading last_seen_seq=42");
+        assert!(matches!(err, TeamserverError::CallbackSeqReplay { .. }));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn set_seq_protected_persists_and_controls_is_seq_protected()
+    -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let agent = sample_agent_with_crypto(0x200A_0005, test_key(0xE5), test_iv(0xF5));
+        registry.insert(agent.clone()).await?;
+
+        // Default must be false.
+        assert!(!registry.is_seq_protected(agent.agent_id).await);
+
+        // Enable seq-protection.
+        registry.set_seq_protected(agent.agent_id, true).await?;
+        assert!(registry.is_seq_protected(agent.agent_id).await);
+
+        // Must be persisted.
+        let persisted = database.agents().get_persisted(agent.agent_id).await?.expect("must exist");
+        assert!(persisted.seq_protected, "seq_protected must be persisted to DB");
+
+        // Disable again.
+        registry.set_seq_protected(agent.agent_id, false).await?;
+        assert!(!registry.is_seq_protected(agent.agent_id).await);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reregister_full_resets_last_seen_seq() -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let key = test_key(0xE6);
+        let iv = test_iv(0xF6);
+        let mut agent = sample_agent_with_crypto(0x200A_0006, key, iv);
+        agent.active = true;
+        registry.insert_full(agent.clone(), "http", 0, false).await?;
+
+        // Advance seq so it is non-zero before re-registration.
+        registry.advance_last_seen_seq(agent.agent_id, 99).await?;
+
+        // Re-register (simulates agent restart).
+        registry.reregister_full(agent.clone(), "http", false).await?;
+
+        // last_seen_seq must be reset to 0.
+        let persisted = database.agents().get_persisted(agent.agent_id).await?.expect("must exist");
+        assert_eq!(persisted.last_seen_seq, 0, "reregister_full must reset last_seen_seq to 0");
+
+        // check_callback_seq should accept seq=1 after reset.
+        registry.check_callback_seq(agent.agent_id, 1).await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn is_seq_protected_returns_false_for_unknown_agent() {
+        let registry = AgentRegistry::new(test_database().await.expect("db"));
+        assert!(!registry.is_seq_protected(0xDEAD_BEEF).await);
     }
 }

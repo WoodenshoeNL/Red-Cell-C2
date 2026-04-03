@@ -925,7 +925,8 @@ pub(crate) async fn execute(
         | DemonCommand::CommandPsImport
         | DemonCommand::CommandAssemblyInlineExecute
         | DemonCommand::CommandAssemblyListVersions
-        | DemonCommand::CommandKerberos) => {
+        | DemonCommand::CommandKerberos
+        | DemonCommand::CommandProcPpidSpoof) => {
             state.queue_callback(PendingCallback::Error {
                 request_id: package.request_id,
                 text: format!("command {command:?} is not supported on Linux"),
@@ -7159,6 +7160,11 @@ mod tests {
     #[tokio::test]
     async fn windows_only_command_assembly_list_versions_rejected() {
         assert_windows_only_rejected(DemonCommand::CommandAssemblyListVersions).await;
+    }
+
+    #[tokio::test]
+    async fn windows_only_command_proc_ppid_spoof_rejected() {
+        assert_windows_only_rejected(DemonCommand::CommandProcPpidSpoof).await;
     }
 
     // ------------------------------------------------------------------

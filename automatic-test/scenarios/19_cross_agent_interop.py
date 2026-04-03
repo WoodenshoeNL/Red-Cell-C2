@@ -62,7 +62,7 @@ def _build_and_deploy_windows(cli, target, listener_name, uid):
     os.close(_fd)
 
     print(f"  [windows] building Demon EXE x64 for listener {listener_name!r}")
-    raw = payload_build_and_fetch(cli, listener=listener_name, arch="x64", fmt="exe")
+    raw = payload_build_and_fetch(cli, listener=listener_name, arch="x64", fmt="exe", agent="demon")
     assert len(raw) > 0, "Windows payload is empty"
     print(f"  [windows] built ({len(raw)} bytes)")
 
@@ -101,7 +101,7 @@ def _build_and_deploy_linux(cli, target, listener_name, uid):
 
     print(f"  [linux] building Phantom bin x64 for listener {listener_name!r}")
     try:
-        raw = payload_build_and_fetch(cli, listener=listener_name, arch="x64", fmt="bin")
+        raw = payload_build_and_fetch(cli, listener=listener_name, arch="x64", fmt="bin", agent="phantom")
         if len(raw) == 0:
             raise CliError("EMPTY_PAYLOAD", "Phantom payload is empty", 1)
     except Exception as exc:

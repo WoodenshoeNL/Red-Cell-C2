@@ -98,6 +98,7 @@ def run(ctx) -> None:
         raise ScenarioSkipped("ctx.windows is None — no Windows target configured")
 
     from lib.cli import (
+        AgentNotSupportedError,
         CliError,
         agent_exec,
         agent_kill,
@@ -151,9 +152,9 @@ def run(ctx) -> None:
         print("  [archon][payload] building archon exe x64 for Windows target")
         try:
             raw = payload_build_and_fetch(
-                cli, listener=listener_name, arch="x64", fmt="exe"
+                cli, listener=listener_name, arch="x64", fmt="exe", agent="archon"
             )
-        except CliError as exc:
+        except (CliError, AgentNotSupportedError) as exc:
             raise ScenarioSkipped(
                 f"Archon payload build failed — Archon has not yet diverged from "
                 f"Demon or is not registered as a distinct agent type: {exc}"

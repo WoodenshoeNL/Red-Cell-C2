@@ -63,6 +63,21 @@ class TestRunSkipsWhenPayloadBuildFails(unittest.TestCase):
                 _mod.run(ctx)
         self.assertIn("Archon payload build failed", str(cm.exception))
 
+    def test_agent_not_supported_error_raises_scenario_skipped(self) -> None:
+        from lib.cli import AgentNotSupportedError
+
+        ctx = _make_ctx()
+
+        with patch("lib.cli.agent_list", return_value=[]), \
+             patch("lib.cli.listener_create"), \
+             patch("lib.cli.listener_start"), \
+             patch("lib.cli.listener_stop"), \
+             patch("lib.cli.listener_delete"), \
+             patch("lib.cli.payload_build", side_effect=AgentNotSupportedError("archon")):
+            with self.assertRaises(ScenarioSkipped) as cm:
+                _mod.run(ctx)
+        self.assertIn("Archon payload build failed", str(cm.exception))
+
 
 class TestRunArchonExtensions(unittest.TestCase):
     def test_no_extensions_does_not_raise(self) -> None:

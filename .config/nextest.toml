@@ -6,10 +6,12 @@
 # groups with `max-threads = 1` avoid concurrent exec of that binary.
 #
 # Add binaries here if they show the same intermittent ENOENT (see red-cell-c2-b6i4g).
+# client-cli `*_contract` integration tests: red-cell-c2-0h7q9 (same double-spawn as b6i4g).
 
 [test-groups]
 assembly-dispatch-serial = { max-threads = 1 }
 service-bridge-serial = { max-threads = 1 }
+client-cli-contract-serial = { max-threads = 1 }
 
 [[profile.default.overrides]]
 filter = 'package(red-cell) & binary(assembly_dispatch)'
@@ -18,3 +20,23 @@ test-group = 'assembly-dispatch-serial'
 [[profile.default.overrides]]
 filter = 'package(red-cell) & binary(service_bridge)'
 test-group = 'service-bridge-serial'
+
+[[profile.default.overrides]]
+filter = 'package(red-cell-cli) & binary(audit_api_contract)'
+test-group = 'client-cli-contract-serial'
+
+[[profile.default.overrides]]
+filter = 'package(red-cell-cli) & binary(agent_api_contract)'
+test-group = 'client-cli-contract-serial'
+
+[[profile.default.overrides]]
+filter = 'package(red-cell-cli) & binary(session_api_contract)'
+test-group = 'client-cli-contract-serial'
+
+[[profile.default.overrides]]
+filter = 'package(red-cell-cli) & binary(payload_api_contract)'
+test-group = 'client-cli-contract-serial'
+
+[[profile.default.overrides]]
+filter = 'package(red-cell-cli) & binary(operator_api_contract)'
+test-group = 'client-cli-contract-serial'

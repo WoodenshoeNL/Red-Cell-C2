@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1138 | 248 | 33 |
-| Bugs filed against | 183 | 38 | 9 |
+| Tasks closed | 1139 | 248 | 33 |
+| Bugs filed against | 184 | 38 | 9 |
 | Bug rate (bugs/task) | 0.16 | 0.15 | 0.27 |
 | Quality score | 84% | 85% | 73% |
 
-*Bug rates: Claude 183/1138=0.1608→0.16, Codex 38/248=0.1532→0.15, Cursor 9/33=0.2727→0.27*
+*Bug rates: Claude 184/1139=0.1615→0.16, Codex 38/248=0.1532→0.15, Cursor 9/33=0.2727→0.27*
 
 ## Violation Breakdown
 
@@ -32,7 +32,7 @@ Each loop run updates the running totals and appends a review entry.
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 3 | 5 | 0 |
 | Correctness / pagination | 64 | 8 | 1 |
-| Workflow / close-hygiene | 30 | 0 | 0 |
+| Workflow / close-hygiene | 31 | 0 | 0 |
 | Code reuse / duplication | 10 | 0 | 0 |
 
 ---
@@ -5324,3 +5324,13 @@ Build: `cargo check --workspace` passed on `3fd96d08`. `cargo nextest run --work
 | Cursor | 0 | 0 | No activity in this range. |
 
 Build: skipped for the reviewed range because `d7ba4d77..db1ae467` contains only the prior QA checkpoint/scorecard commit and no product-code changes. `br list --status=in_progress`, `br list --status=open | head -30`, and `br ready | head -20` remain consistent with the current backlog; no stale close mismatch or newly untracked regression was identified in this pass.
+
+### QA Review — 2026-04-03 02:14 — db1ae467..f556a891
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 1 | Closed `red-cell-c2-q459s` via `fix(teamserver): plumb agent type through payload build API`. Reviewed `teamserver/src/api.rs`; the agent-type plumbing and added validation/tests look correct. Filed `red-cell-c2-3r4to` because the same work left the actually claimed duplicate `red-cell-c2-iyl94` stuck `in_progress`, creating a close-hygiene mismatch in beads state. |
+| Codex | 0 | 0 | No attributed task closes or regressions in this range. |
+| Cursor | 0 | 0 | No activity in this range. |
+
+Build: `cargo check --workspace` passed in the shared worktree before QA detected unrelated uncommitted `teamserver` changes outside the review range. `cargo clippy --workspace -- -D warnings` against that dirty worktree failed on the uncommitted `PayloadBuildRecord.agent_type` changes and was treated as non-attributable. QA restarted `cargo check --workspace`, `cargo clippy --workspace -- -D warnings`, and `cargo nextest run --workspace` in a clean detached worktree at `f556a891`; all three reruns were still compiling/running during bookkeeping with no attributable failures observed in streamed output. `br list --status=in_progress` still shows `red-cell-c2-iyl94`, which is the close-hygiene regression now tracked by `red-cell-c2-3r4to`.

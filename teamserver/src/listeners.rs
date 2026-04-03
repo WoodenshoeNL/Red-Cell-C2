@@ -2544,20 +2544,18 @@ impl DnsListenerState {
                     Some(build_dns_refused_response(query.id))
                 }
             }
-            DnsC2Query::DohReady { session } => {
-                match self.handle_doh_ready(&session).await {
-                    Some(total_chunks) => {
-                        let txt = format!("{total_chunks:x}");
-                        Some(self.dns_c2_response_or_refused(
-                            query.id,
-                            &query.qname_raw,
-                            query.qtype,
-                            txt.as_bytes(),
-                        ))
-                    }
-                    None => Some(build_dns_nxdomain_response(query.id, &query.qname_raw, query.qtype)),
+            DnsC2Query::DohReady { session } => match self.handle_doh_ready(&session).await {
+                Some(total_chunks) => {
+                    let txt = format!("{total_chunks:x}");
+                    Some(self.dns_c2_response_or_refused(
+                        query.id,
+                        &query.qname_raw,
+                        query.qtype,
+                        txt.as_bytes(),
+                    ))
                 }
-            }
+                None => Some(build_dns_nxdomain_response(query.id, &query.qname_raw, query.qtype)),
+            },
             DnsC2Query::DohDownload { session, seq } => {
                 let txt = self.handle_doh_download(&session, seq).await;
                 Some(self.dns_c2_response_or_refused(
@@ -2896,10 +2894,10 @@ impl DnsListenerState {
     ) -> bool {
         let assembled =
             match self.try_assemble_doh_upload(&session, seq, total, data, peer_ip).await {
-            DnsUploadAssembly::Pending => return true,
-            DnsUploadAssembly::Rejected => return false,
-            DnsUploadAssembly::Complete(assembled) => assembled,
-        };
+                DnsUploadAssembly::Pending => return true,
+                DnsUploadAssembly::Rejected => return false,
+                DnsUploadAssembly::Complete(assembled) => assembled,
+            };
 
         let Some(_callback_guard) = self.shutdown.try_track_callback() else {
             return false;
@@ -3385,12 +3383,7 @@ fn parse_dns_c2_query(labels: &[String], domain: &str) -> Option<DnsC2Query> {
             let seq = u16::from_str_radix(&seqtotal[..4], 16).ok()?;
             let total = u16::from_str_radix(&seqtotal[4..], 16).ok()?;
             let data = base32_rfc4648_decode(b32data)?;
-            Some(DnsC2Query::DohUpload {
-                session: session.clone(),
-                seq,
-                total,
-                data,
-            })
+            Some(DnsC2Query::DohUpload { session: session.clone(), seq, total, data })
         }
         3 => {
             let a = c2_labels.first()?;
@@ -4421,23 +4414,21 @@ mod tests {
         DEMON_INIT_WINDOW_DURATION, DNS_DOH_RESPONSE_CHUNK_BYTES, DNS_HEADER_LEN,
         DNS_MAX_DOWNLOAD_CHUNKS, DNS_MAX_PENDING_RESPONSE_BYTES, DNS_MAX_PENDING_RESPONSES,
         DNS_MAX_PENDING_UPLOADS, DNS_MAX_UPLOAD_CHUNKS, DNS_MAX_UPLOADS_PER_IP,
-        DNS_RESPONSE_CHUNK_BYTES, DNS_TYPE_A,
-        DNS_TYPE_CNAME, DNS_TYPE_TXT, DNS_UPLOAD_TIMEOUT_SECS, DemonInitRateLimiter,
-        DnsListenerState, DnsPendingResponse, DnsPendingUpload, DnsUploadAssembly, DownloadTracker,
-        ListenerEventAction, ListenerManager, ListenerManagerError, ListenerStatus,
-        ListenerSummary, MAX_AGENT_MESSAGE_LEN, MAX_DEMON_INIT_ATTEMPT_WINDOWS,
-        MAX_DEMON_INIT_ATTEMPTS_PER_IP, MAX_SMB_FRAME_PAYLOAD_LEN,
+        DNS_RESPONSE_CHUNK_BYTES, DNS_TYPE_A, DNS_TYPE_CNAME, DNS_TYPE_TXT,
+        DNS_UPLOAD_TIMEOUT_SECS, DemonInitRateLimiter, DnsListenerState, DnsPendingResponse,
+        DnsPendingUpload, DnsUploadAssembly, DownloadTracker, ListenerEventAction, ListenerManager,
+        ListenerManagerError, ListenerStatus, ListenerSummary, MAX_AGENT_MESSAGE_LEN,
+        MAX_DEMON_INIT_ATTEMPT_WINDOWS, MAX_DEMON_INIT_ATTEMPTS_PER_IP, MAX_SMB_FRAME_PAYLOAD_LEN,
         MAX_UNKNOWN_CALLBACK_PROBE_AUDITS_PER_SOURCE, TrustedProxyPeer,
         UNKNOWN_CALLBACK_PROBE_AUDIT_WINDOW_DURATION, UnknownCallbackProbeAuditLimiter,
         action_from_mark, base32_rfc4648_decode, base32_rfc4648_encode, base32hex_decode,
         base32hex_encode, build_dns_c2_response, build_dns_nxdomain_response,
         chunk_response_to_b32hex, chunk_response_to_doh_b32, collect_body_with_magic_precheck,
-        dns_allowed_query_types,
-        dns_wire_domain_from_ascii_payload, extract_external_ip, handle_external_request,
-        is_past_kill_date, listener_config_from_operator, listener_error_event,
-        listener_event_for_action, listener_removed_event, operator_protocol_name,
-        operator_requests_start, parse_dns_c2_query, parse_dns_query, parse_trusted_proxy_peer,
-        profile_listener_configs, read_smb_frame, smb_local_socket_name,
+        dns_allowed_query_types, dns_wire_domain_from_ascii_payload, extract_external_ip,
+        handle_external_request, is_past_kill_date, listener_config_from_operator,
+        listener_error_event, listener_event_for_action, listener_removed_event,
+        operator_protocol_name, operator_requests_start, parse_dns_c2_query, parse_dns_query,
+        parse_trusted_proxy_peer, profile_listener_configs, read_smb_frame, smb_local_socket_name,
         spawn_dns_listener_runtime, spawn_managed_listener_task, spawn_smb_listener_runtime,
     };
     use crate::{
@@ -7751,10 +7742,8 @@ mod tests {
     #[test]
     fn parse_dns_c2_query_recognises_doh_ready() {
         let session = "0123456789abcdef";
-        let labels: Vec<String> = ["rdy", session, "d", "c2", "example", "com"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let labels: Vec<String> =
+            ["rdy", session, "d", "c2", "example", "com"].iter().map(|s| s.to_string()).collect();
         let result = parse_dns_c2_query(&labels, "c2.example.com");
         let Some(super::DnsC2Query::DohReady { session: s }) = result else {
             panic!("expected DohReady variant");
@@ -7765,10 +7754,8 @@ mod tests {
     #[test]
     fn parse_dns_c2_query_recognises_doh_chunk_download() {
         let session = "fedcba9876543210";
-        let labels: Vec<String> = ["0003", session, "d", "c2", "example", "com"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let labels: Vec<String> =
+            ["0003", session, "d", "c2", "example", "com"].iter().map(|s| s.to_string()).collect();
         let result = parse_dns_c2_query(&labels, "c2.example.com");
         let Some(super::DnsC2Query::DohDownload { session: s, seq }) = result else {
             panic!("expected DohDownload variant");

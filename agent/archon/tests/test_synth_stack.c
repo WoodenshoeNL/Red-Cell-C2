@@ -407,6 +407,74 @@ static void test_edge_cases(void)
 }
 
 /* -------------------------------------------------------------------------
+ * Section 4: Regression — frame count and module name verification
+ *
+ * Verifies exactly 3 frames are present during sleep (the synthetic
+ * call stack that makes the sleeping thread appear to originate from
+ * normal Windows thread startup).
+ * ---------------------------------------------------------------------- */
+static void test_frame_count_and_module_names(void)
+{
+    printf("\n=== Frame count and module-name addresses ===\n");
+
+    /* Use distinct fake addresses that encode "module + offset" info */
+    const uintptr_t KERNEL32_BASE = 0x00007FFA10000000;
+    const uintptr_t NTDLL_BASE   = 0x00007FFA20000000;
+    const uintptr_t FAKE_BTIT = KERNEL32_BASE + SYNTH_OFFSET_BTIT;
+    const uintptr_t FAKE_RUTS = NTDLL_BASE + SYNTH_OFFSET_RUTS;
+
+    void *shadow = calloc(1, SYNTH_SHADOW_SIZE);
+    if (!shadow) { printf("  SKIP  allocation failed\n"); return; }
+
+    SYNTH_STACK_CTX ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.ShadowBase              = shadow;
+    ctx.ShadowSize              = SYNTH_SHADOW_SIZE;
+    ctx.BaseThreadInitThunkRet  = (PVOID)FAKE_BTIT;
+    ctx.RtlUserThreadStartRet   = (PVOID)FAKE_RUTS;
+    ctx.Ready                   = TRUE;
+
+    SynthStackPrepare(&ctx);
+
+    /* Walk the chain and count frames */
+    int frame_count = 0;
+    uintptr_t rbp = (uintptr_t)ctx.ShadowRbp;
+    while (rbp != 0 && frame_count < 10) {
+        frame_count++;
+        PUINT_PTR fp = (PUINT_PTR)rbp;
+        rbp = fp[0];  /* next frame's saved RBP */
+    }
+
+    check("Exactly 3 frames in the chain", frame_count == 3);
+
+    /* Verify return addresses point into the correct "module" ranges.
+     * Frame 2 (innermost) and Frame 1 both use BaseThreadInitThunk's return address.
+     * Frame 0 (outermost) uses RtlUserThreadStart's return address. */
+    PUINT_PTR frame2 = (PUINT_PTR)ctx.ShadowRbp;
+    uintptr_t ret2 = frame2[1];
+    check("Frame2 return addr is in kernel32 range",
+          ret2 >= KERNEL32_BASE && ret2 < KERNEL32_BASE + 0x100000);
+
+    PUINT_PTR frame1 = (PUINT_PTR)frame2[0];
+    uintptr_t ret1 = frame1[1];
+    check("Frame1 return addr is in kernel32 range",
+          ret1 >= KERNEL32_BASE && ret1 < KERNEL32_BASE + 0x100000);
+
+    PUINT_PTR frame0 = (PUINT_PTR)frame1[0];
+    uintptr_t ret0 = frame0[1];
+    check("Frame0 return addr is in ntdll range",
+          ret0 >= NTDLL_BASE && ret0 < NTDLL_BASE + 0x100000);
+
+    /* Verify offsets match the expected constants */
+    check("BTIT offset is 0xe from kernel32 base",
+          (ret2 - KERNEL32_BASE) == SYNTH_OFFSET_BTIT);
+    check("RUTS offset is 0x21 from ntdll base",
+          (ret0 - NTDLL_BASE) == SYNTH_OFFSET_RUTS);
+
+    free(shadow);
+}
+
+/* -------------------------------------------------------------------------
  * main
  * ---------------------------------------------------------------------- */
 int main(void)
@@ -416,6 +484,7 @@ int main(void)
     test_x64_synth_stack();
     test_x86_synth_stack();
     test_edge_cases();
+    test_frame_count_and_module_names();
 
     printf("\n--- Results: %d passed, %d failed ---\n", g_pass, g_fail);
     return g_fail > 0 ? 1 : 0;

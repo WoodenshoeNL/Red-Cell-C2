@@ -3,3 +3,8 @@
 /test_heap_enc
 /test_pe_header_erase
 /test_tp_callback
+/test_doh_transport
+/test_amsi_etw
+/test_cronos
+/test_module_stomp
+/test_ja3

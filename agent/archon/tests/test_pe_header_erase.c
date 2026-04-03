@@ -254,6 +254,96 @@ static void test_zero_pe_offset(void)
 }
 
 /* -------------------------------------------------------------------------
+ * Regression: original page protection is restored, not hardcoded
+ *
+ * ARC-07 bug: the PE header stomp originally hardcoded PAGE_EXECUTE_READ
+ * as the restore value.  The correct behaviour is to save OldProt from
+ * NtProtectVirtualMemory and pass it back on the restore call.
+ *
+ * Since we're on Linux and don't have NtProtectVirtualMemory, we verify
+ * the erase_pe_header logic itself and add a simulated protection test.
+ * ---------------------------------------------------------------------- */
+
+/* Simulated protection tracking */
+#define PAGE_READWRITE          0x04
+#define PAGE_EXECUTE_READ       0x20
+#define PAGE_READONLY           0x02
+#define PAGE_EXECUTE_READWRITE  0x40
+
+static int g_prot_call_count = 0;
+static uint32_t g_prot_new[8] = { 0 };
+static uint32_t g_current_prot = PAGE_EXECUTE_READ;
+
+static void sim_protect(uint32_t new_prot, uint32_t *old_prot)
+{
+    *old_prot = g_current_prot;
+    if (g_prot_call_count < 8)
+        g_prot_new[g_prot_call_count] = new_prot;
+    g_prot_call_count++;
+    g_current_prot = new_prot;
+}
+
+/*
+ * Erase-with-protection: simulates the full NtProtectVirtualMemory flow
+ * around the erase.  This is the code path that had the ARC-07 bug.
+ */
+static int erase_pe_header_with_protection(uint8_t *buf, size_t page_size)
+{
+    uint32_t old_prot = 0;
+    uint32_t dummy = 0;
+    int ret;
+
+    /* Make writable */
+    sim_protect(PAGE_READWRITE, &old_prot);
+
+    ret = erase_pe_header(buf, page_size);
+
+    /* Restore ORIGINAL protection — must use old_prot, NOT a constant */
+    sim_protect(old_prot, &dummy);
+
+    return ret;
+}
+
+static void test_protection_restore_not_hardcoded(void)
+{
+    uint8_t buf[PE_HEADER_PAGE_SIZE];
+
+    /* Scenario 1: initial protection is PAGE_EXECUTE_READ */
+    build_synthetic_pe(buf, sizeof(buf), 0x80);
+    g_prot_call_count = 0;
+    g_current_prot = PAGE_EXECUTE_READ;
+
+    int ret = erase_pe_header_with_protection(buf, PE_HEADER_PAGE_SIZE);
+    ASSERT_MSG(ret == 1, "should erase successfully");
+    ASSERT_MSG(g_prot_call_count == 2, "should make 2 protection calls");
+    ASSERT_MSG(g_prot_new[0] == PAGE_READWRITE, "first call sets PAGE_READWRITE");
+    ASSERT_MSG(g_prot_new[1] == PAGE_EXECUTE_READ, "second call restores PAGE_EXECUTE_READ");
+
+    /* Scenario 2: initial protection is PAGE_READONLY —
+     * must NOT restore PAGE_EXECUTE_READ (the old bug) */
+    build_synthetic_pe(buf, sizeof(buf), 0x80);
+    g_prot_call_count = 0;
+    g_current_prot = PAGE_READONLY;
+
+    ret = erase_pe_header_with_protection(buf, PE_HEADER_PAGE_SIZE);
+    ASSERT_MSG(ret == 1, "should erase successfully with PAGE_READONLY");
+    ASSERT_MSG(g_prot_new[1] == PAGE_READONLY,
+               "REGRESSION: must restore PAGE_READONLY, not hardcoded PAGE_EXECUTE_READ");
+
+    /* Scenario 3: initial protection is PAGE_EXECUTE_READWRITE */
+    build_synthetic_pe(buf, sizeof(buf), 0x80);
+    g_prot_call_count = 0;
+    g_current_prot = PAGE_EXECUTE_READWRITE;
+
+    ret = erase_pe_header_with_protection(buf, PE_HEADER_PAGE_SIZE);
+    ASSERT_MSG(ret == 1, "should erase successfully with PAGE_EXECUTE_READWRITE");
+    ASSERT_MSG(g_prot_new[1] == PAGE_EXECUTE_READWRITE,
+               "REGRESSION: must restore PAGE_EXECUTE_READWRITE, not hardcoded PAGE_EXECUTE_READ");
+
+    printf("  PASS: test_protection_restore_not_hardcoded\n");
+}
+
+/* -------------------------------------------------------------------------
  * Main
  * ---------------------------------------------------------------------- */
 
@@ -267,6 +357,7 @@ int main(void)
     test_minimal_dos_stub();
     test_invalid_pe_offset();
     test_zero_pe_offset();
+    test_protection_restore_not_hardcoded();
 
     printf("\n%d / %d tests passed\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

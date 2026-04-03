@@ -322,6 +322,109 @@ TEST( xor_block_large_buffer )
 }
 
 /* =========================================================================
+ * Regression: canary (sentinel) survives full encrypt→decrypt cycle
+ *
+ * The real HeapEncryptDecrypt walks the heap and only XOR-encrypts the
+ * user-data portion AFTER the sentinel header.  The sentinel magic must
+ * remain readable at all times so the decrypt pass can identify which
+ * blocks to process.
+ *
+ * This test simulates multiple heap blocks (tagged and untagged) going
+ * through a full sleep-cycle encrypt→decrypt and verifies:
+ *   - Tagged blocks are encrypted (user data differs from plaintext)
+ *   - Sentinel magic is untouched after encryption
+ *   - User data is fully recovered after decryption
+ *   - Untagged blocks are completely untouched
+ * ====================================================================== */
+TEST( canary_survives_encrypt_decrypt_cycle )
+{
+    UINT8 key[] = { 0x42, 0x13, 0x37, 0xAB, 0xCD, 0xEF, 0x01, 0x23,
+                    0x45, 0x67, 0x89, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E };
+
+    /* Simulate 3 heap blocks: tagged, untagged, tagged */
+    #define BLK_SIZE 64
+    UINT8 blk_a[HEAP_SENTINEL_SIZE + BLK_SIZE]; /* tagged */
+    UINT8 blk_b[BLK_SIZE];                       /* untagged */
+    UINT8 blk_c[HEAP_SENTINEL_SIZE + BLK_SIZE]; /* tagged */
+
+    /* Backups for comparison */
+    UINT8 bak_a[BLK_SIZE];
+    UINT8 bak_b[BLK_SIZE];
+    UINT8 bak_c[BLK_SIZE];
+
+    /* Setup block A: sentinel + user data */
+    memset( blk_a, 0, sizeof(blk_a) );
+    *((UINT32*)blk_a) = HEAP_SENTINEL_MAGIC;
+    for ( SIZE_T i = 0; i < BLK_SIZE; i++ )
+        blk_a[ HEAP_SENTINEL_SIZE + i ] = (UINT8)( i + 0x10 );
+    memcpy( bak_a, blk_a + HEAP_SENTINEL_SIZE, BLK_SIZE );
+
+    /* Setup block B: no sentinel, random data */
+    for ( SIZE_T i = 0; i < BLK_SIZE; i++ )
+        blk_b[i] = (UINT8)( i * 3 + 7 );
+    memcpy( bak_b, blk_b, BLK_SIZE );
+
+    /* Setup block C: sentinel + different user data */
+    memset( blk_c, 0, sizeof(blk_c) );
+    *((UINT32*)blk_c) = HEAP_SENTINEL_MAGIC;
+    for ( SIZE_T i = 0; i < BLK_SIZE; i++ )
+        blk_c[ HEAP_SENTINEL_SIZE + i ] = (UINT8)( i ^ 0xFF );
+    memcpy( bak_c, blk_c + HEAP_SENTINEL_SIZE, BLK_SIZE );
+
+    /* ---- Encrypt pass (simulates HeapEncryptDecrypt before sleep) ---- */
+    /* Block A: tagged → encrypt user portion */
+    if ( sizeof(blk_a) > HEAP_SENTINEL_SIZE && HEAP_HAS_SENTINEL( blk_a ) )
+        HeapXorBlock( blk_a + HEAP_SENTINEL_SIZE, BLK_SIZE, key, sizeof(key) );
+
+    /* Block B: not tagged → skip */
+    if ( sizeof(blk_b) > HEAP_SENTINEL_SIZE && HEAP_HAS_SENTINEL( blk_b ) )
+        HeapXorBlock( blk_b + HEAP_SENTINEL_SIZE, sizeof(blk_b) - HEAP_SENTINEL_SIZE, key, sizeof(key) );
+
+    /* Block C: tagged → encrypt user portion */
+    if ( sizeof(blk_c) > HEAP_SENTINEL_SIZE && HEAP_HAS_SENTINEL( blk_c ) )
+        HeapXorBlock( blk_c + HEAP_SENTINEL_SIZE, BLK_SIZE, key, sizeof(key) );
+
+    /* Verify sentinels are intact after encryption */
+    ASSERT_EQ( *((UINT32*)blk_a), HEAP_SENTINEL_MAGIC );
+    ASSERT_EQ( *((UINT32*)blk_c), HEAP_SENTINEL_MAGIC );
+
+    /* Verify user data is actually encrypted (differs from backup) */
+    ASSERT( memcmp( blk_a + HEAP_SENTINEL_SIZE, bak_a, BLK_SIZE ) != 0 );
+    ASSERT( memcmp( blk_c + HEAP_SENTINEL_SIZE, bak_c, BLK_SIZE ) != 0 );
+
+    /* Verify untagged block is completely untouched */
+    ASSERT( memcmp( blk_b, bak_b, BLK_SIZE ) == 0 );
+
+    /* ---- Decrypt pass (simulates HeapEncryptDecrypt after wake) ---- */
+    /* Sentinels must still be detectable for the decrypt pass to work */
+    ASSERT( HEAP_HAS_SENTINEL( blk_a ) );
+    ASSERT( ! HEAP_HAS_SENTINEL( blk_b ) );
+    ASSERT( HEAP_HAS_SENTINEL( blk_c ) );
+
+    if ( sizeof(blk_a) > HEAP_SENTINEL_SIZE && HEAP_HAS_SENTINEL( blk_a ) )
+        HeapXorBlock( blk_a + HEAP_SENTINEL_SIZE, BLK_SIZE, key, sizeof(key) );
+
+    if ( sizeof(blk_b) > HEAP_SENTINEL_SIZE && HEAP_HAS_SENTINEL( blk_b ) )
+        HeapXorBlock( blk_b + HEAP_SENTINEL_SIZE, sizeof(blk_b) - HEAP_SENTINEL_SIZE, key, sizeof(key) );
+
+    if ( sizeof(blk_c) > HEAP_SENTINEL_SIZE && HEAP_HAS_SENTINEL( blk_c ) )
+        HeapXorBlock( blk_c + HEAP_SENTINEL_SIZE, BLK_SIZE, key, sizeof(key) );
+
+    /* User data must be fully recovered */
+    ASSERT_MEM_EQ( blk_a + HEAP_SENTINEL_SIZE, bak_a, BLK_SIZE );
+    ASSERT_MEM_EQ( blk_c + HEAP_SENTINEL_SIZE, bak_c, BLK_SIZE );
+
+    /* Untagged block still untouched */
+    ASSERT_MEM_EQ( blk_b, bak_b, BLK_SIZE );
+
+    /* Sentinels still intact after full cycle */
+    ASSERT_EQ( *((UINT32*)blk_a), HEAP_SENTINEL_MAGIC );
+    ASSERT_EQ( *((UINT32*)blk_c), HEAP_SENTINEL_MAGIC );
+
+    #undef BLK_SIZE
+}
+
+/* =========================================================================
  * Runner
  * ====================================================================== */
 
@@ -340,6 +443,7 @@ int main( void )
     run_untagged_block_not_encrypted();
     run_sentinel_alloc_layout();
     run_xor_block_large_buffer();
+    run_canary_survives_encrypt_decrypt_cycle();
 
     printf( "\n%d/%d tests passed.\n", tests_passed, tests_run );
     return ( tests_passed == tests_run ) ? 0 : 1;

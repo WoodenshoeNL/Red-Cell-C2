@@ -1,6 +1,8 @@
 CC      = gcc
 CFLAGS  = -std=c11 -Wall -Wextra -Werror -O2 -g
-TARGETS = test_crypto test_synth_stack test_heap_enc test_pe_header_erase test_tp_callback test_doh_transport
+TARGETS = test_crypto test_synth_stack test_heap_enc test_pe_header_erase \
+          test_tp_callback test_doh_transport test_amsi_etw test_cronos \
+          test_module_stomp test_ja3
 
 .PHONY: all run clean
 
@@ -24,6 +26,18 @@ test_tp_callback: test_tp_callback.c
 test_doh_transport: test_doh_transport.c
 	$(CC) $(CFLAGS) -o $@ $<
 
+test_amsi_etw: test_amsi_etw.c
+	$(CC) $(CFLAGS) -o $@ $<
+
+test_cronos: test_cronos.c
+	$(CC) $(CFLAGS) -o $@ $<
+
+test_module_stomp: test_module_stomp.c
+	$(CC) $(CFLAGS) -o $@ $<
+
+test_ja3: test_ja3.c
+	$(CC) $(CFLAGS) -o $@ $<
+
 run: $(TARGETS)
 	./test_crypto
 	./test_synth_stack
@@ -31,6 +45,10 @@ run: $(TARGETS)
 	./test_pe_header_erase
 	./test_tp_callback
 	./test_doh_transport
+	./test_amsi_etw
+	./test_cronos
+	./test_module_stomp
+	./test_ja3
 
 clean:
 	rm -f $(TARGETS)

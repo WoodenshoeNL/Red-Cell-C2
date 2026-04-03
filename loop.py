@@ -627,6 +627,92 @@ def clean_build_artifacts(log: Logger):
         log.log(f"build cache: removed target/debug/{{{','.join(removed)}}}")
 
 
+WORKTREE_MAX_AGE_SECS = 3600   # remove /tmp/red-cell* worktrees older than 1 hour
+
+
+def clean_tmp_worktrees(log: Logger):
+    """
+    Remove stale git worktrees under /tmp that were created by QA/arch review runs.
+
+    Each review loop iteration creates a worktree in /tmp (e.g. /tmp/red-cell-qa-*)
+    via Claude Code's isolation: worktree feature. Every worktree accumulates its own
+    cargo build artifacts. Without cleanup these fill the disk within hours.
+
+    Strategy:
+    1. git worktree prune  — removes entries whose directory is already gone.
+    2. For each remaining /tmp/red-cell* worktree: if the directory is older than
+       WORKTREE_MAX_AGE_SECS, nuke its cargo target dir first (cheap I/O), then
+       git worktree remove --force it. If that fails, rm -rf as a fallback.
+    """
+    import shutil, time as _time
+
+    # Step 1: prune stale registrations
+    subprocess.run(
+        ["git", "worktree", "prune"],
+        capture_output=True, cwd=str(SCRIPT_DIR),
+    )
+
+    # Step 2: list all worktrees, find /tmp/red-cell* ones past their age limit
+    r = subprocess.run(
+        ["git", "worktree", "list", "--porcelain"],
+        capture_output=True, text=True, cwd=str(SCRIPT_DIR),
+    )
+    if r.returncode != 0:
+        return
+
+    worktree_paths = [
+        line.split(" ", 1)[1]
+        for line in r.stdout.splitlines()
+        if line.startswith("worktree ")
+    ]
+
+    now = _time.time()
+    removed = []
+    for path_str in worktree_paths:
+        p = Path(path_str)
+        # Only touch /tmp/red-cell* dirs — never the main worktree or .claude/worktrees
+        if not path_str.startswith("/tmp/") or not p.name.startswith(("red-cell", "redcell")):
+            continue
+        try:
+            age = now - p.stat().st_mtime
+        except OSError:
+            continue
+        if age < WORKTREE_MAX_AGE_SECS:
+            continue
+
+        # Remove cargo artifacts inside the worktree first to avoid slow rmtree
+        for subdir in ["target/debug", "target/release"]:
+            td = p / subdir
+            if td.exists():
+                try:
+                    shutil.rmtree(td)
+                except OSError:
+                    pass
+
+        # Remove the worktree registration + directory
+        rm = subprocess.run(
+            ["git", "worktree", "remove", "--force", path_str],
+            capture_output=True, cwd=str(SCRIPT_DIR),
+        )
+        if rm.returncode != 0 and p.exists():
+            # git couldn't remove it (e.g. untracked files) — force via rm
+            try:
+                shutil.rmtree(p)
+                subprocess.run(
+                    ["git", "worktree", "prune"],
+                    capture_output=True, cwd=str(SCRIPT_DIR),
+                )
+            except OSError as e:
+                log.log(f"worktree cleanup: could not remove {p}: {e}")
+                continue
+        removed.append(p.name)
+
+    if removed:
+        log.log(f"worktree cleanup: removed {len(removed)} stale worktree(s): {', '.join(removed)}")
+    else:
+        log.log("worktree cleanup: nothing to remove")
+
+
 def reset_stuck_tasks(log: Logger, stale_threshold_secs: int):
     """Reset any in_progress tasks that have been stuck longer than the threshold."""
     r = br(["list", "--status=in_progress", "--json"])
@@ -1068,9 +1154,10 @@ Start directly with understanding the task and implementing it.
 
         log.log("========================LOOP=========================")
 
-        # Periodically clean up stale build artifacts (every DEV_CLEAN_EVERY iterations)
+        # Periodically clean up stale build artifacts and tmp worktrees
         if iteration % DEV_CLEAN_EVERY == 0:
             clean_build_artifacts(log)
+            clean_tmp_worktrees(log)
 
         if token_limit_hit:
             log.log(f"Token limit hit — sleeping {DEV_SLEEP_TOKEN_LIMIT}s before next iteration")
@@ -1147,9 +1234,10 @@ def review_loop(args, log: Logger):
         else:
             log.log(f"{loop_type.title()} review completed successfully")
 
-        # Clean up stale build artifacts after every review run — review loops run
-        # cargo check/clippy/test which are the main contributors to target/debug growth.
+        # Clean up stale build artifacts and tmp worktrees after every review run.
+        # Review loops are the primary source of /tmp/red-cell* worktrees.
         clean_build_artifacts(log)
+        clean_tmp_worktrees(log)
 
         iteration += 1
 

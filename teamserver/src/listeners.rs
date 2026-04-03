@@ -7693,6 +7693,55 @@ mod tests {
             Some(DNS_TYPE_CNAME),
             "answer RR must be CNAME when the query is CNAME"
         );
+        let expected_rdata =
+            super::dns_wire_domain_from_ascii_payload("wait").expect("wait encodes as CNAME RDATA");
+        assert_eq!(dns_answer_rdata(&buf, parsed.qname_raw.len()), Some(expected_rdata));
+        handle.abort();
+    }
+
+    /// When multiple record types are enabled, each successful C2 poll must answer with an RR
+    /// whose TYPE matches the question QTYPE (not always TXT).
+    #[tokio::test]
+    async fn dns_listener_multi_record_types_each_answer_rr_matches_query_qtype() {
+        let port = free_udp_port();
+        let config = red_cell_common::DnsListenerConfig {
+            name: "dns-multi-qtype".to_owned(),
+            host_bind: "127.0.0.1".to_owned(),
+            port_bind: port,
+            domain: "c2.example.com".to_owned(),
+            record_types: vec!["TXT".to_owned(), "A".to_owned(), "CNAME".to_owned()],
+            kill_date: None,
+            working_hours: None,
+        };
+        let (handle, _) = spawn_test_dns_listener(config).await;
+
+        sleep(Duration::from_millis(50)).await;
+
+        let client = TokioUdpSocket::bind("127.0.0.1:0").await.expect("client bind failed");
+        client.connect(format!("127.0.0.1:{port}")).await.expect("connect failed");
+
+        let qname = "0-deadbeef.dn.c2.example.com";
+        for (id, qtype) in
+            [(0x6001u16, DNS_TYPE_TXT), (0x6002, DNS_TYPE_A), (0x6003, DNS_TYPE_CNAME)]
+        {
+            let packet = build_dns_query(id, qname, qtype);
+            client.send(&packet).await.expect("send failed");
+
+            let mut buf = vec![0u8; 512];
+            tokio::time::timeout(Duration::from_secs(2), client.recv(&mut buf))
+                .await
+                .expect("no response received")
+                .expect("recv failed");
+
+            assert_eq!(buf[3] & 0x0F, 0, "expected NOERROR for qtype {qtype}");
+            let parsed = parse_dns_query(&packet).expect("query should parse");
+            assert_eq!(
+                dns_answer_rr_type(&buf, parsed.qname_raw.len()),
+                Some(qtype),
+                "answer RR TYPE must match QTYPE {qtype}"
+            );
+        }
+
         handle.abort();
     }
 

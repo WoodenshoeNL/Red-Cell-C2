@@ -41,6 +41,20 @@ Each loop run updates the running totals and appends a review entry.
 
 <!-- QA and arch loops append entries below this line -->
 
+### Arch Review — 2026-04-03 20:00
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 0 | — | No new attributed production-code defects in reviewed paths |
+| Codex | 0 | — |  |
+| Cursor | 0 | — |  |
+
+**Infrastructure (no code author):** Filed `red-cell-c2-en1v7` — `cargo nextest run --workspace` hit `[double-spawn] ... ENOENT` on the `output_dispatch` integration-test binary (`config_spf_thread_start_broadcasts_module`); same class as `red-cell-c2-fka3c` / `net_dispatch`. Fix: add `binary(output_dispatch)` to a serial test-group in `.config/nextest.toml`.
+
+Overall codebase health: **on track** — `cargo check --workspace` OK; `cargo clippy --workspace -- -D warnings` OK; `cargo nextest` failed once on `output_dispatch` then `cargo test` continued (teamserver lib tests 2262 passed). Demon path: CTR advance only after successful parse; HKDF when `InitSecret` set; weak key/IV rejection; constant-time key match on re-init; `MAX_AGENT_MESSAGE_LEN` enforced at listeners.
+
+Biggest blindspot: **nextest parallel exec of large teamserver integration binaries** — extend serial groups (`red-cell-c2-fka3c`, `red-cell-c2-en1v7`) until the class is eliminated.
+
 ### QA Review — 2026-04-03 19:15 — a26b81d9..c1c3618f
 
 | Agent | Tasks closed | Bugs filed | Notes |

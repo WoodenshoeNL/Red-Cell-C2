@@ -31,7 +31,7 @@ Each loop run updates the running totals and appends a review entry.
 | Test infrastructure / flakiness | 43 | 2 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 4 | 5 | 0 |
-| Correctness / pagination | 65 | 8 | 1 |
+| Correctness / pagination | 64 | 8 | 1 |
 | Workflow / close-hygiene | 32 | 0 | 0 |
 | Code reuse / duplication | 10 | 0 | 0 |
 
@@ -45,7 +45,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Agent | Findings | Categories | Notes |
 |-------|---------|------------|-------|
-| Claude | 4 | test infra ×2, correctness ×1, completeness ×1 | Phantom parallel test SIGSEGV; nextest exec flake on assembly_dispatch; silent audit error path in `operator_inventory`; Archon has no `src/` tree |
+| Claude | 3 | test infra ×2, completeness ×1 | Phantom parallel test SIGSEGV; nextest exec flake on assembly_dispatch; Archon has no `src/` tree (audit `operator_inventory` gap already tracked as `red-cell-c2-opul1`) |
 | Codex | 0 | — | No Codex-attributed findings this review |
 | Cursor | 0 | — | No Cursor-attributed findings this review |
 

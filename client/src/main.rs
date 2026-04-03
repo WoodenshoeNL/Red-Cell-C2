@@ -6861,8 +6861,11 @@ fn credential_category_color(item: &LootItem) -> Color32 {
     }
 }
 
-/// Export loot items to CSV and save to the downloads directory.
-fn export_loot_csv(items: &[&LootItem]) -> std::result::Result<String, String> {
+/// Export loot items to CSV under `output_dir` (as `loot.csv`, or a suffixed name if needed).
+fn export_loot_csv_to(
+    items: &[&LootItem],
+    output_dir: &Path,
+) -> std::result::Result<String, String> {
     let mut out = String::from(
         "id,kind,sub_category,name,agent_id,source,collected_at,file_path,size_bytes,preview\n",
     );
@@ -6889,10 +6892,15 @@ fn export_loot_csv(items: &[&LootItem]) -> std::result::Result<String, String> {
         out.push_str(&csv_field(item.preview.as_deref().unwrap_or("")));
         out.push('\n');
     }
-    let output_dir = dirs::download_dir().unwrap_or_else(std::env::temp_dir);
     let output_path = next_available_path(&output_dir.join("loot.csv"));
     std::fs::write(&output_path, out.as_bytes()).map_err(|e| format!("Failed to save CSV: {e}"))?;
     Ok(format!("Exported {} item(s) to {}", items.len(), output_path.display()))
+}
+
+/// Export loot items to CSV and save to the downloads directory.
+fn export_loot_csv(items: &[&LootItem]) -> std::result::Result<String, String> {
+    let output_dir = dirs::download_dir().unwrap_or_else(std::env::temp_dir);
+    export_loot_csv_to(items, &output_dir)
 }
 
 fn csv_field(value: &str) -> String {
@@ -6917,8 +6925,11 @@ fn csv_field(value: &str) -> String {
     }
 }
 
-/// Export loot items to JSON and save to the downloads directory.
-fn export_loot_json(items: &[&LootItem]) -> std::result::Result<String, String> {
+/// Export loot items to JSON under `output_dir` (as `loot.json`, or a suffixed name if needed).
+fn export_loot_json_to(
+    items: &[&LootItem],
+    output_dir: &Path,
+) -> std::result::Result<String, String> {
     let mut out = String::from("[\n");
     for (index, item) in items.iter().enumerate() {
         let sub = loot_sub_category_label(item);
@@ -6949,11 +6960,16 @@ fn export_loot_json(items: &[&LootItem]) -> std::result::Result<String, String> 
         out.push('\n');
     }
     out.push(']');
-    let output_dir = dirs::download_dir().unwrap_or_else(std::env::temp_dir);
     let output_path = next_available_path(&output_dir.join("loot.json"));
     std::fs::write(&output_path, out.as_bytes())
         .map_err(|e| format!("Failed to save JSON: {e}"))?;
     Ok(format!("Exported {} item(s) to {}", items.len(), output_path.display()))
+}
+
+/// Export loot items to JSON and save to the downloads directory.
+fn export_loot_json(items: &[&LootItem]) -> std::result::Result<String, String> {
+    let output_dir = dirs::download_dir().unwrap_or_else(std::env::temp_dir);
+    export_loot_json_to(items, &output_dir)
 }
 
 fn json_str(value: &str) -> String {
@@ -8214,26 +8230,26 @@ mod tests {
 
     #[test]
     fn export_loot_csv_writes_file_and_returns_path() {
-        let _guard = lock_export_test();
+        let dir = tempfile::tempdir().expect("tempdir");
         let items: Vec<&LootItem> = vec![];
         // exporting zero items should still succeed and report 0 items
-        let result = export_loot_csv(&items);
+        let result = export_loot_csv_to(&items, dir.path());
         assert!(result.is_ok(), "export_loot_csv failed: {:?}", result.err());
         assert!(result.unwrap().contains("0 item(s)"));
     }
 
     #[test]
     fn export_loot_json_writes_file_and_returns_path() {
-        let _guard = lock_export_test();
+        let dir = tempfile::tempdir().expect("tempdir");
         let items: Vec<&LootItem> = vec![];
-        let result = export_loot_json(&items);
+        let result = export_loot_json_to(&items, dir.path());
         assert!(result.is_ok(), "export_loot_json failed: {:?}", result.err());
         assert!(result.unwrap().contains("0 item(s)"));
     }
 
     #[test]
     fn export_loot_csv_serializes_non_empty_rows_and_escapes_fields() {
-        let _guard = lock_export_test();
+        let dir = tempfile::tempdir().expect("tempdir");
         let credential = LootItem {
             id: Some(7),
             kind: LootKind::Credential,
@@ -8260,8 +8276,8 @@ mod tests {
         };
         let items = vec![&credential, &file];
 
-        let result =
-            export_loot_csv(&items).unwrap_or_else(|error| panic!("CSV export failed: {error}"));
+        let result = export_loot_csv_to(&items, dir.path())
+            .unwrap_or_else(|error| panic!("CSV export failed: {error}"));
         assert!(result.contains("2 item(s)"));
 
         let contents = read_exported_file(&result);
@@ -8278,7 +8294,7 @@ mod tests {
 
     #[test]
     fn export_loot_json_serializes_non_empty_rows_and_preserves_nulls() {
-        let _guard = lock_export_test();
+        let dir = tempfile::tempdir().expect("tempdir");
         let credential = LootItem {
             id: Some(7),
             kind: LootKind::Credential,
@@ -8305,8 +8321,8 @@ mod tests {
         };
         let items = vec![&credential, &file];
 
-        let result =
-            export_loot_json(&items).unwrap_or_else(|error| panic!("JSON export failed: {error}"));
+        let result = export_loot_json_to(&items, dir.path())
+            .unwrap_or_else(|error| panic!("JSON export failed: {error}"));
         assert!(result.contains("2 item(s)"));
 
         let contents = read_exported_file(&result);

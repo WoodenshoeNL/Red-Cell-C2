@@ -10,11 +10,9 @@ use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq;
 
 use axum::body::{Body, to_bytes};
-use axum::extract::{
-    ConnectInfo, FromRequestParts, Path, Query, Request, State,
-};
-use axum::http::Request as HttpRequest;
+use axum::extract::{ConnectInfo, FromRequestParts, Path, Query, Request, State};
 use axum::http::HeaderValue;
+use axum::http::Request as HttpRequest;
 use axum::http::header::AUTHORIZATION;
 use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE, RETRY_AFTER};
 use axum::http::{HeaderMap, StatusCode, request::Parts};
@@ -34,8 +32,8 @@ use thiserror::Error;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tokio::sync::Mutex;
-use tracing::{debug, instrument, warn};
 use tower::ServiceExt as _;
+use tracing::{debug, instrument, warn};
 use utoipa::openapi::security::{ApiKey, ApiKeyValue, SecurityScheme};
 use utoipa::{IntoParams, Modify, OpenApi, ToSchema};
 use utoipa_swagger_ui::SwaggerUi;
@@ -3832,8 +3830,7 @@ fn session_query_string_from_value(val: &Value) -> Result<String, SessionBuildEr
     if map.is_empty() {
         Ok(String::new())
     } else {
-        serde_urlencoded::to_string(&map)
-            .map_err(|e| SessionBuildError::InvalidBody(e.to_string()))
+        serde_urlencoded::to_string(&map).map_err(|e| SessionBuildError::InvalidBody(e.to_string()))
     }
 }
 
@@ -3848,7 +3845,10 @@ fn session_strip_meta_object(val: &Value) -> Result<Value, SessionBuildError> {
     Ok(Value::Object(std::mem::take(obj)))
 }
 
-fn build_session_rest_request(cmd: &str, val: &Value) -> Result<HttpRequest<Body>, SessionBuildError> {
+fn build_session_rest_request(
+    cmd: &str,
+    val: &Value,
+) -> Result<HttpRequest<Body>, SessionBuildError> {
     let build = |method: &str, uri: &str, body: Body| {
         HttpRequest::builder()
             .method(method)
@@ -3860,18 +3860,18 @@ fn build_session_rest_request(cmd: &str, val: &Value) -> Result<HttpRequest<Body
 
     match cmd {
         "status" => {
-            let req = HttpRequest::builder().method("GET").uri("/").body(Body::empty()).map_err(
-                |e| SessionBuildError::InvalidBody(e.to_string()),
-            )?;
+            let req = HttpRequest::builder()
+                .method("GET")
+                .uri("/")
+                .body(Body::empty())
+                .map_err(|e| SessionBuildError::InvalidBody(e.to_string()))?;
             Ok(req)
         }
-        "agent.list" => Ok(
-            HttpRequest::builder()
-                .method("GET")
-                .uri("/agents")
-                .body(Body::empty())
-                .map_err(|e| SessionBuildError::InvalidBody(e.to_string()))?,
-        ),
+        "agent.list" => Ok(HttpRequest::builder()
+            .method("GET")
+            .uri("/agents")
+            .body(Body::empty())
+            .map_err(|e| SessionBuildError::InvalidBody(e.to_string()))?),
         "agent.show" => {
             let id = val
                 .get("id")
@@ -3892,10 +3892,7 @@ fn build_session_rest_request(cmd: &str, val: &Value) -> Result<HttpRequest<Body
                 .get("command")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| SessionBuildError::missing(cmd, "command"))?;
-            let command_id = val
-                .get("command_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("21");
+            let command_id = val.get("command_id").and_then(|v| v.as_str()).unwrap_or("21");
             let body = serde_json::json!({
                 "CommandLine": command_line,
                 "CommandID": command_id,
@@ -3953,13 +3950,11 @@ fn build_session_rest_request(cmd: &str, val: &Value) -> Result<HttpRequest<Body
                 .map_err(|e| SessionBuildError::InvalidBody(e.to_string()))?;
             build("POST", &format!("/agents/{id}/download"), Body::from(bytes))
         }
-        "listener.list" => Ok(
-            HttpRequest::builder()
-                .method("GET")
-                .uri("/listeners")
-                .body(Body::empty())
-                .map_err(|e| SessionBuildError::InvalidBody(e.to_string()))?,
-        ),
+        "listener.list" => Ok(HttpRequest::builder()
+            .method("GET")
+            .uri("/listeners")
+            .body(Body::empty())
+            .map_err(|e| SessionBuildError::InvalidBody(e.to_string()))?),
         "listener.show" => {
             let name = val
                 .get("name")
@@ -3975,8 +3970,8 @@ fn build_session_rest_request(cmd: &str, val: &Value) -> Result<HttpRequest<Body
             let body_val = session_strip_meta_object(val)?;
             let cfg: ListenerConfig = serde_json::from_value(body_val)
                 .map_err(|e| SessionBuildError::InvalidBody(e.to_string()))?;
-            let bytes =
-                serde_json::to_vec(&cfg).map_err(|e| SessionBuildError::InvalidBody(e.to_string()))?;
+            let bytes = serde_json::to_vec(&cfg)
+                .map_err(|e| SessionBuildError::InvalidBody(e.to_string()))?;
             build("POST", "/listeners", Body::from(bytes))
         }
         "listener.update" => {
@@ -3990,8 +3985,8 @@ fn build_session_rest_request(cmd: &str, val: &Value) -> Result<HttpRequest<Body
             }
             let cfg: ListenerConfig = serde_json::from_value(body_val)
                 .map_err(|e| SessionBuildError::InvalidBody(e.to_string()))?;
-            let bytes =
-                serde_json::to_vec(&cfg).map_err(|e| SessionBuildError::InvalidBody(e.to_string()))?;
+            let bytes = serde_json::to_vec(&cfg)
+                .map_err(|e| SessionBuildError::InvalidBody(e.to_string()))?;
             build("PUT", &format!("/listeners/{name}"), Body::from(bytes))
         }
         "listener.start" => {
@@ -4040,13 +4035,11 @@ fn build_session_rest_request(cmd: &str, val: &Value) -> Result<HttpRequest<Body
                 .map_err(|e| SessionBuildError::InvalidBody(e.to_string()))?;
             build("POST", &format!("/listeners/{name}/mark"), Body::from(body))
         }
-        "operator.list" => Ok(
-            HttpRequest::builder()
-                .method("GET")
-                .uri("/operators")
-                .body(Body::empty())
-                .map_err(|e| SessionBuildError::InvalidBody(e.to_string()))?,
-        ),
+        "operator.list" => Ok(HttpRequest::builder()
+            .method("GET")
+            .uri("/operators")
+            .body(Body::empty())
+            .map_err(|e| SessionBuildError::InvalidBody(e.to_string()))?),
         "operator.create" => {
             let body_val = session_strip_meta_object(val)?;
             let bytes = serde_json::to_vec(&body_val)
@@ -4075,19 +4068,11 @@ fn build_session_rest_request(cmd: &str, val: &Value) -> Result<HttpRequest<Body
             }
             let bytes = serde_json::to_vec(&body_val)
                 .map_err(|e| SessionBuildError::InvalidBody(e.to_string()))?;
-            build(
-                "PUT",
-                &format!("/operators/{username}/role"),
-                Body::from(bytes),
-            )
+            build("PUT", &format!("/operators/{username}/role"), Body::from(bytes))
         }
         "audit.list" | "log.list" => {
             let qs = session_query_string_from_value(val)?;
-            let uri = if qs.is_empty() {
-                "/audit".to_owned()
-            } else {
-                format!("/audit?{qs}")
-            };
+            let uri = if qs.is_empty() { "/audit".to_owned() } else { format!("/audit?{qs}") };
             Ok(HttpRequest::builder()
                 .method("GET")
                 .uri(uri)
@@ -4133,11 +4118,7 @@ fn build_session_rest_request(cmd: &str, val: &Value) -> Result<HttpRequest<Body
         }
         "job.list" => {
             let qs = session_query_string_from_value(val)?;
-            let uri = if qs.is_empty() {
-                "/jobs".to_owned()
-            } else {
-                format!("/jobs?{qs}")
-            };
+            let uri = if qs.is_empty() { "/jobs".to_owned() } else { format!("/jobs?{qs}") };
             Ok(HttpRequest::builder()
                 .method("GET")
                 .uri(uri)
@@ -4161,11 +4142,7 @@ fn build_session_rest_request(cmd: &str, val: &Value) -> Result<HttpRequest<Body
         }
         "loot.list" => {
             let qs = session_query_string_from_value(val)?;
-            let uri = if qs.is_empty() {
-                "/loot".to_owned()
-            } else {
-                format!("/loot?{qs}")
-            };
+            let uri = if qs.is_empty() { "/loot".to_owned() } else { format!("/loot?{qs}") };
             Ok(HttpRequest::builder()
                 .method("GET")
                 .uri(uri)
@@ -4183,13 +4160,11 @@ fn build_session_rest_request(cmd: &str, val: &Value) -> Result<HttpRequest<Body
                 .body(Body::empty())
                 .map_err(|e| SessionBuildError::InvalidBody(e.to_string()))?)
         }
-        "payload.list" => Ok(
-            HttpRequest::builder()
-                .method("GET")
-                .uri("/payloads")
-                .body(Body::empty())
-                .map_err(|e| SessionBuildError::InvalidBody(e.to_string()))?,
-        ),
+        "payload.list" => Ok(HttpRequest::builder()
+            .method("GET")
+            .uri("/payloads")
+            .body(Body::empty())
+            .map_err(|e| SessionBuildError::InvalidBody(e.to_string()))?),
         "payload.build" => {
             let body_val = session_strip_meta_object(val)?;
             let bytes = serde_json::to_vec(&body_val)
@@ -4218,27 +4193,25 @@ fn build_session_rest_request(cmd: &str, val: &Value) -> Result<HttpRequest<Body
                 .body(Body::empty())
                 .map_err(|e| SessionBuildError::InvalidBody(e.to_string()))?)
         }
-        "payload_cache.flush" | "payload-cache.flush" => Ok(
-            HttpRequest::builder()
-                .method("POST")
-                .uri("/payload-cache")
-                .body(Body::empty())
-                .map_err(|e| SessionBuildError::InvalidBody(e.to_string()))?,
-        ),
-        "webhooks.stats" => Ok(
-            HttpRequest::builder()
-                .method("GET")
-                .uri("/webhooks/stats")
-                .body(Body::empty())
-                .map_err(|e| SessionBuildError::InvalidBody(e.to_string()))?,
-        ),
+        "payload_cache.flush" | "payload-cache.flush" => Ok(HttpRequest::builder()
+            .method("POST")
+            .uri("/payload-cache")
+            .body(Body::empty())
+            .map_err(|e| SessionBuildError::InvalidBody(e.to_string()))?),
+        "webhooks.stats" => Ok(HttpRequest::builder()
+            .method("GET")
+            .uri("/webhooks/stats")
+            .body(Body::empty())
+            .map_err(|e| SessionBuildError::InvalidBody(e.to_string()))?),
         other => Err(SessionBuildError::UnknownCommand(other.to_owned())),
     }
 }
 
 fn session_build_error_envelope(cmd: &str, err: &SessionBuildError) -> String {
     let (code, message) = match err {
-        SessionBuildError::UnknownCommand(c) => ("UNKNOWN_COMMAND", format!("unknown command `{c}`")),
+        SessionBuildError::UnknownCommand(c) => {
+            ("UNKNOWN_COMMAND", format!("unknown command `{c}`"))
+        }
         SessionBuildError::MissingField { field, .. } => {
             ("MISSING_FIELD", format!("missing required field `{field}`"))
         }
@@ -4258,10 +4231,7 @@ async fn session_ws_envelope_response(cmd: &str, response: Response) -> String {
 
     let status = response.status();
     let headers = response.headers().clone();
-    let ct = headers
-        .get(CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
+    let ct = headers.get(CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("");
     let bytes = match to_bytes(response.into_body(), usize::MAX).await {
         Ok(b) => b,
         Err(_) => {
@@ -4296,10 +4266,7 @@ async fn session_ws_envelope_response(cmd: &str, response: Response) -> String {
             .unwrap_or("HTTP_ERROR")
             .to_ascii_uppercase()
             .replace('.', "_");
-        let message = parsed["error"]["message"]
-            .as_str()
-            .unwrap_or("request failed")
-            .to_owned();
+        let message = parsed["error"]["message"].as_str().unwrap_or("request failed").to_owned();
         serde_json::json!({
             "ok": false,
             "cmd": cmd,
@@ -4312,7 +4279,7 @@ async fn session_ws_envelope_response(cmd: &str, response: Response) -> String {
 
 /// Dispatch one session NDJSON command through the same REST [`api_routes`] router.
 pub(crate) async fn session_api_dispatch_line(
-    app: &Router<TeamserverState>,
+    app: &Router,
     cmd: &str,
     value: &Value,
     client_ip: SocketAddr,

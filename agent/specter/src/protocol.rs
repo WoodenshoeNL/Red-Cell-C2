@@ -286,15 +286,12 @@ fn write_length_prefixed_string(buf: &mut Vec<u8>, s: &str) -> Result<(), Specte
 /// Write a length-prefixed UTF-16LE string (4-byte BE length of byte payload + UTF-16LE bytes).
 fn write_length_prefixed_utf16le(buf: &mut Vec<u8>, s: &str) -> Result<(), SpecterError> {
     let utf16: Vec<u16> = s.encode_utf16().collect();
-    let byte_len = utf16
-        .len()
-        .checked_mul(2)
-        .ok_or(SpecterError::Protocol(
-            red_cell_common::demon::DemonProtocolError::LengthOverflow {
-                context: "UTF-16LE field byte length overflow",
-                length: utf16.len(),
-            },
-        ))?;
+    let byte_len = utf16.len().checked_mul(2).ok_or(SpecterError::Protocol(
+        red_cell_common::demon::DemonProtocolError::LengthOverflow {
+            context: "UTF-16LE field byte length overflow",
+            length: utf16.len(),
+        },
+    ))?;
     let len = u32::try_from(byte_len).map_err(|_| {
         SpecterError::Protocol(red_cell_common::demon::DemonProtocolError::LengthOverflow {
             context: "UTF-16LE length-prefixed field",

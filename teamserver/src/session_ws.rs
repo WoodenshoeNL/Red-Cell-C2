@@ -84,25 +84,16 @@ async fn run_session_socket(
                     "error": "INVALID_JSON",
                     "message": e.to_string(),
                 });
-                if socket
-                    .send(Message::Text(err_line.to_string().into()))
-                    .await
-                    .is_err()
-                {
+                if socket.send(Message::Text(err_line.to_string().into())).await.is_err() {
                     break;
                 }
                 continue;
             }
         };
 
-        let cmd = value
-            .get("cmd")
-            .and_then(|c| c.as_str())
-            .unwrap_or("")
-            .to_owned();
+        let cmd = value.get("cmd").and_then(|c| c.as_str()).unwrap_or("").to_owned();
 
-        let out =
-            session_api_dispatch_line(&app, &cmd, &value, client_ip, &api_key).await;
+        let out = session_api_dispatch_line(&app, &cmd, &value, client_ip, &api_key).await;
 
         if socket.send(Message::Text(out.into())).await.is_err() {
             break;

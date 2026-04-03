@@ -3,8 +3,9 @@ Scenario 15_agent_dns: End-to-end agent checkin over DNS listener
 
 Deploy a Linux agent using DNS transport, wait for checkin, run command suite.
 Runs twice: first with Demon (bin), then with Phantom (elf).  The Phantom
-pass is skipped with a warning if the payload build fails (e.g. Phantom not
-yet fully implemented), so the Demon pass still counts as coverage.
+pass is skipped only when ``"phantom"`` is absent from ``agents.available`` in
+env.toml; if it is listed and its build fails, the scenario fails so DNS
+transport regressions are visible.
 
 Skip if ctx.linux is None.
 
@@ -44,10 +45,9 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
 
     Raises:
         AssertionError on test failure.
-        ScenarioSkipped if the payload cannot be built (agent not yet available).
+        CliError if the payload build fails (propagates as a scenario failure).
     """
     from lib.cli import (
-        CliError,
         agent_exec,
         agent_kill,
         agent_list,
@@ -99,15 +99,9 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
             f"  [{agent_type}][payload] building {agent_type} {fmt} x64 "
             f"with DNS listener {listener_name!r}"
         )
-        try:
-            raw = payload_build_and_fetch(
-                cli, listener=listener_name, arch="x64", fmt=fmt
-            )
-        except CliError as exc:
-            raise ScenarioSkipped(
-                f"{agent_type} DNS payload build failed — "
-                f"agent or DNS transport may not be available yet: {exc}"
-            )
+        raw = payload_build_and_fetch(
+            cli, listener=listener_name, arch="x64", fmt=fmt
+        )
         assert len(raw) > 0, "payload is empty"
         print(f"  [{agent_type}][payload] built ({len(raw)} bytes)")
 
@@ -237,8 +231,9 @@ def run(ctx):
     _run_for_agent(ctx, agent_type="demon", fmt="bin", name_prefix="test-dns-demon")
 
     # ── Phantom pass (Rust Linux agent) ─────────────────────────────────────
+    available_agents = set(ctx.env.get("agents", {}).get("available", ["demon"]))
     print("\n  === DNS agent pass: phantom ===")
-    try:
+    if "phantom" not in available_agents:
+        print("  [phantom] SKIPPED — 'phantom' not listed in agents.available")
+    else:
         _run_for_agent(ctx, agent_type="phantom", fmt="bin", name_prefix="test-dns-phantom")
-    except ScenarioSkipped as exc:
-        print(f"  [phantom] SKIPPED (Phantom DNS transport not yet available): {exc}")

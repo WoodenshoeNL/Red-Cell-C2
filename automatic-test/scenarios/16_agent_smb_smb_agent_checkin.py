@@ -3,9 +3,10 @@ Scenario 16_agent_smb: End-to-end agent checkin over SMB listener
 
 Deploy a Windows agent whose *initial* C2 channel is an SMB named pipe,
 wait for checkin, run command suite.  Runs twice: first with Demon (exe),
-then with Specter (exe).  The Specter pass is skipped with a warning if the
-payload build fails (e.g. Specter not yet fully implemented), so the Demon
-pass still counts as coverage.
+then with Specter (exe).  The Specter pass is skipped only when
+``"specter"`` is absent from ``agents.available`` in env.toml; if it is
+listed and its build fails, the scenario fails so SMB transport regressions
+are visible.
 
 This differs from scenario 10 (pivot dispatch): there is no HTTP parent agent
 here.  The agent connects directly to the teamserver over the named pipe —
@@ -52,10 +53,9 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
 
     Raises:
         AssertionError on test failure.
-        ScenarioSkipped if the payload cannot be built (agent not yet available).
+        CliError if the payload build fails (propagates as a scenario failure).
     """
     from lib.cli import (
-        CliError,
         agent_exec,
         agent_kill,
         agent_list,
@@ -103,15 +103,9 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
             f"  [{agent_type}][payload] building {agent_type} {fmt} x64 "
             f"with SMB listener {listener_name!r}"
         )
-        try:
-            raw = payload_build_and_fetch(
-                cli, listener=listener_name, arch="x64", fmt=fmt
-            )
-        except CliError as exc:
-            raise ScenarioSkipped(
-                f"{agent_type} SMB payload build failed — "
-                f"agent or SMB transport may not be available yet: {exc}"
-            )
+        raw = payload_build_and_fetch(
+            cli, listener=listener_name, arch="x64", fmt=fmt
+        )
         assert len(raw) > 0, "payload is empty"
         print(f"  [{agent_type}][payload] built ({len(raw)} bytes)")
 
@@ -231,8 +225,9 @@ def run(ctx):
     _run_for_agent(ctx, agent_type="demon", fmt="exe", name_prefix="test-smb-demon")
 
     # ── Specter pass (Rust Windows agent) ───────────────────────────────────
+    available_agents = set(ctx.env.get("agents", {}).get("available", ["demon"]))
     print("\n  === SMB agent pass: specter ===")
-    try:
+    if "specter" not in available_agents:
+        print("  [specter] SKIPPED — 'specter' not listed in agents.available")
+    else:
         _run_for_agent(ctx, agent_type="specter", fmt="exe", name_prefix="test-smb-specter")
-    except ScenarioSkipped as exc:
-        print(f"  [specter] SKIPPED (Specter SMB transport not yet available): {exc}")

@@ -23,7 +23,7 @@ Each loop run updates the running totals and appends a review entry.
 | unwrap / expect in production | 9 | 0 | 0 |
 | Missing tests / stale tests | 70 | 18 | 5 |
 | Clippy warnings | 9 | 0 | 1 |
-| Protocol errors | 29 | 32 | 3 |
+| Protocol errors | 30 | 32 | 3 |
 | Security issues | 57 | 39 | 0 |
 | Architecture drift | 23 | 25 | 0 |
 | Memory / resource leaks | 11 | 11 | 1 |
@@ -50,6 +50,17 @@ Each loop run updates the running totals and appends a review entry.
 | Cursor | 0 | 0 | No activity. |
 
 Build: `cargo check --workspace` passed in an isolated target dir. `cargo clippy --workspace -- -D warnings` passed in an isolated target dir. `cargo nextest run --workspace` was started in an isolated target dir and was still compiling/running during bookkeeping with no failures observed in streamed output. `br list --status=in_progress` shows only `red-cell-c2-q459s`, which matches the new claim in this range.
+
+### Arch Review — 2026-04-03 03:08
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 1 | protocol errors (1) | Filed `red-cell-c2-kw875` because `agent/specter/src/protocol.rs:273-287` still serializes DEMON_INIT string lengths with unchecked `as u32` truncation, so oversized metadata would produce malformed wire framing instead of a clean error. |
+| Codex | 0 | — | No new Codex-attributed findings this review. |
+| Cursor | 0 | — | No new Cursor-attributed findings this review. |
+
+Overall codebase health: on track
+Biggest blindspot: broad autotest agent-coverage drift is already known and still open, while smaller machine-facing error paths in teamserver and Specter remain under-asserted enough to hide degraded behavior until a bad environment or edge-sized input hits them.
 
 ### QA Review — 2026-04-02 18:34 — ec59f09f..778e0d25
 

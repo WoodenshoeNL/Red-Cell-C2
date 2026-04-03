@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1169 | 249 | 36 |
+| Tasks closed | 1169 | 249 | 37 |
 | Bugs filed against | 188 | 38 | 9 |
-| Bug rate (bugs/task) | 0.16 | 0.15 | 0.25 |
-| Quality score | 84% | 85% | 75% |
+| Bug rate (bugs/task) | 0.16 | 0.15 | 0.24 |
+| Quality score | 84% | 85% | 76% |
 
-*Bug rates: Claude 188/1169=0.1608→0.16, Codex 38/249=0.1526→0.15, Cursor 9/36=0.2500→0.25*
+*Bug rates: Claude 188/1169=0.1608→0.16, Codex 38/249=0.1526→0.15, Cursor 9/37=0.2432→0.24*
 
 ## Violation Breakdown
 
@@ -5507,3 +5507,13 @@ Build: `cargo check --workspace` passed on `03070796` in isolated worktree `/tmp
 
 Overall codebase health: drifting
 Biggest blindspot: cross-component transport features are landing without real interoperability coverage, which left the current Specter/Archon DoH query grammar incompatible with the teamserver DNS listener while still looking implemented in unit-level checks.
+
+### QA Review — 2026-04-03 14:30 — 40dabe4f..619fd353
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | Committed DoH listener grammar implementation (`619fd353`, WIP interrupted) and autotest payload-polling CLI refactor (`1e922feb`). No task closures. Closed prior bug `red-cell-c2-qlmcg` (build breakage resolved — code now compiles clean). |
+| Codex | 0 | 0 | No Codex-attributed commits in this range. |
+| Cursor | 1 | 0 | Closed `red-cell-c2-xrwgz` (unwrap_used clippy fixes in tests) via `15c3ce99`. Clean work. |
+
+Build: passed — `cargo check`, `cargo clippy -- -D warnings`, and `cargo nextest run` (4975 tests, all pass; 1 flake from concurrent clippy compilation, confirmed pass on re-run).

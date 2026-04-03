@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1153 | 248 | 33 |
+| Tasks closed | 1154 | 248 | 33 |
 | Bugs filed against | 186 | 38 | 9 |
 | Bug rate (bugs/task) | 0.16 | 0.15 | 0.27 |
 | Quality score | 84% | 85% | 73% |
 
-*Bug rates: Claude 186/1153=0.1613→0.16, Codex 38/248=0.1532→0.15, Cursor 9/33=0.2727→0.27*
+*Bug rates: Claude 186/1154=0.1612→0.16, Codex 38/248=0.1532→0.15, Cursor 9/33=0.2727→0.27*
 
 ## Violation Breakdown
 
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-03 10:01 — e4d65c1d..d00724fc
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 0 | Closed `red-cell-c2-kpmhx` via `fix(teamserver): validate agent/format combinations for Rust agents`. Reviewed `teamserver/src/api.rs`; the new agent/format validation rejects Phantom and Specter `dll`/`bin` requests early with a structured 400 response and adds matching unit/integration coverage. No new attributable regression found in this single-commit follow-up review. |
+| Codex | 0 | 0 | No Codex-attributed product commits in this range. |
+| Cursor | 0 | 0 | No activity in this range. |
+
+Build: `cargo check --workspace` passed. `cargo clippy --workspace -- -D warnings` passed. A focused `cargo nextest` run for the new payload-build rejection coverage was started after the lint pass but was still compiling during bookkeeping, with no failures observed before the checkpoint update.
 
 ### QA Review — 2026-04-03 09:56 — 03070796..bf4d9846
 

@@ -148,8 +148,10 @@ def _run_smb_pivot(ctx, parent_target, child_target):
 
     remote_parent_payload = f"{parent_target.work_dir}\\agent-parent-{uid}.exe"
     remote_child_payload = f"{child_target.work_dir}\\agent-child-{uid}.exe"
-    local_parent = tempfile.mktemp(suffix=".exe")
-    local_child = tempfile.mktemp(suffix=".exe")
+    _fd, local_parent = tempfile.mkstemp(suffix=".exe")
+    os.close(_fd)
+    _fd, local_child = tempfile.mkstemp(suffix=".exe")
+    os.close(_fd)
 
     try:
         pre_existing_ids = {a["id"] for a in agent_list(cli)}

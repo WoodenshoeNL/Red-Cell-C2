@@ -72,7 +72,8 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
     except Exception:
         pre_existing_ids = set()
 
-    local_payload = tempfile.mktemp(suffix=f".{fmt}")
+    _fd, local_payload = tempfile.mkstemp(suffix=f".{fmt}")
+    os.close(_fd)
 
     # ── Step 1: Create + start HTTP listener ────────────────────────────────
     print(f"  [{agent_type}][listener] creating HTTP listener {listener_name!r} on port {listener_port}")

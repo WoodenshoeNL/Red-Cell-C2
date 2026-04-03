@@ -301,7 +301,8 @@ def _run_stress_for_agent(
         assert len(raw) > 0, "payload is empty"
         print(f"  [{agent_type}][payload] built ({len(raw)} bytes)")
 
-        local_payload = tempfile.mktemp(suffix=f".{fmt}")
+        _fd, local_payload = tempfile.mkstemp(suffix=f".{fmt}")
+        os.close(_fd)
         with open(local_payload, "wb") as fh:
             fh.write(raw)
 

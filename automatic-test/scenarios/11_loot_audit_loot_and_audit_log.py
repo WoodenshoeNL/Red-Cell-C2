@@ -133,8 +133,10 @@ def run(ctx):
     except Exception:
         pre_existing_loot_ids = set()
 
-    local_payload = tempfile.mktemp(suffix="." + payload_fmt)
-    local_download_dst = tempfile.mktemp(suffix=".txt")
+    _fd, local_payload = tempfile.mkstemp(suffix="." + payload_fmt)
+    os.close(_fd)
+    _fd, local_download_dst = tempfile.mkstemp(suffix=".txt")
+    os.close(_fd)
 
     # ── Step 2: Create + start HTTP listener ─────────────────────────────────
     print(f"  [listener] creating HTTP listener {listener_name!r} on port {listener_port}")

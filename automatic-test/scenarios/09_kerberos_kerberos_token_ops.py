@@ -76,7 +76,8 @@ def run(ctx):
     except Exception:
         pre_existing_ids = set()
 
-    local_payload = tempfile.mktemp(suffix=".exe")
+    _fd, local_payload = tempfile.mkstemp(suffix=".exe")
+    os.close(_fd)
 
     # ── Step 1: Create + start HTTP listener ────────────────────────────────
     print(f"  [listener] creating HTTP listener {listener_name!r} on port {listener_port}")

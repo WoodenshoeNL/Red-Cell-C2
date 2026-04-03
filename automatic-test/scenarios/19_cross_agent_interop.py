@@ -58,7 +58,8 @@ def _build_and_deploy_windows(cli, target, listener_name, uid):
     from lib.deploy import ensure_work_dir, execute_background, upload
 
     remote_payload = f"{target.work_dir}\\agent-{uid}.exe"
-    local_payload = tempfile.mktemp(suffix=".exe")
+    _fd, local_payload = tempfile.mkstemp(suffix=".exe")
+    os.close(_fd)
 
     print(f"  [windows] building Demon EXE x64 for listener {listener_name!r}")
     raw = payload_build_and_fetch(cli, listener=listener_name, arch="x64", fmt="exe")
@@ -95,7 +96,8 @@ def _build_and_deploy_linux(cli, target, listener_name, uid):
     from lib.deploy import ensure_work_dir, execute_background, run_remote, upload
 
     remote_payload = f"{target.work_dir}/agent-{uid}.bin"
-    local_payload = tempfile.mktemp(suffix=".bin")
+    _fd, local_payload = tempfile.mkstemp(suffix=".bin")
+    os.close(_fd)
 
     print(f"  [linux] building Phantom bin x64 for listener {listener_name!r}")
     try:

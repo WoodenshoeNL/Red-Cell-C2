@@ -99,10 +99,14 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
     except Exception:
         pre_existing_ids = set()
 
-    local_payload = tempfile.mktemp(suffix=f".{fmt}")
-    local_upload_src = tempfile.mktemp(suffix=".dat")
-    local_download_dst = tempfile.mktemp(suffix=".dat")
-    local_sysfile_dst = tempfile.mktemp(suffix=".txt")
+    _fd, local_payload = tempfile.mkstemp(suffix=f".{fmt}")
+    os.close(_fd)
+    _fd, local_upload_src = tempfile.mkstemp(suffix=".dat")
+    os.close(_fd)
+    _fd, local_download_dst = tempfile.mkstemp(suffix=".dat")
+    os.close(_fd)
+    _fd, local_sysfile_dst = tempfile.mkstemp(suffix=".txt")
+    os.close(_fd)
 
     # ── Step 1: Create + start HTTP listener ────────────────────────────────
     print(f"  [{agent_type}][listener] creating HTTP listener {listener_name!r} on port {listener_port}")
@@ -295,10 +299,14 @@ def _run_for_agent_windows(ctx, agent_type: str, fmt: str, name_prefix: str) -> 
     except Exception:
         pre_existing_ids = set()
 
-    local_payload = tempfile.mktemp(suffix=f".{fmt}")
-    local_upload_src = tempfile.mktemp(suffix=".dat")
-    local_download_dst = tempfile.mktemp(suffix=".dat")
-    local_sysfile_dst = tempfile.mktemp(suffix=".txt")
+    _fd, local_payload = tempfile.mkstemp(suffix=f".{fmt}")
+    os.close(_fd)
+    _fd, local_upload_src = tempfile.mkstemp(suffix=".dat")
+    os.close(_fd)
+    _fd, local_download_dst = tempfile.mkstemp(suffix=".dat")
+    os.close(_fd)
+    _fd, local_sysfile_dst = tempfile.mkstemp(suffix=".txt")
+    os.close(_fd)
 
     # ── Step 1: Create + start HTTP listener ────────────────────────────────
     print(f"  [{agent_type}][listener] creating HTTP listener {listener_name!r} on port {listener_port}")

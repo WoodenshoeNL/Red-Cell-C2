@@ -630,6 +630,40 @@ def clean_build_artifacts(log: Logger):
 WORKTREE_MAX_AGE_SECS = 3600   # remove /tmp/red-cell* worktrees older than 1 hour
 
 
+def _active_worktree_paths() -> set:
+    """
+    Return the set of /tmp/red-cell* root paths that are, or contain, the
+    working directory of at least one currently running process.
+
+    Uses /proc/PID/cwd (Linux only). Silently ignores entries we cannot
+    read (permission errors, races with short-lived processes, etc.).
+
+    This is used by clean_tmp_worktrees() to skip worktrees that still have
+    active processes (cargo, git, Claude Code sub-agents, etc.) inside them,
+    preventing the cleanup from destroying a live loop's workspace.
+    """
+    active: set = set()
+    try:
+        for pid_dir in Path("/proc").iterdir():
+            if not pid_dir.name.isdigit():
+                continue
+            try:
+                # os.readlink is a single syscall — fast, no stat, no resolve
+                cwd_str = os.readlink(pid_dir / "cwd")
+            except OSError:
+                continue
+            if not cwd_str.startswith("/tmp/"):
+                continue
+            # Extract the top-level /tmp/<name> component
+            rest = cwd_str[len("/tmp/"):]
+            top_name = rest.split("/")[0]
+            if top_name.startswith(("red-cell", "redcell")):
+                active.add("/tmp/" + top_name)
+    except OSError:
+        pass
+    return active
+
+
 def clean_tmp_worktrees(log: Logger):
     """
     Remove stale git worktrees under /tmp that were created by QA/arch review runs.
@@ -640,9 +674,12 @@ def clean_tmp_worktrees(log: Logger):
 
     Strategy:
     1. git worktree prune  — removes entries whose directory is already gone.
-    2. For each remaining /tmp/red-cell* worktree: if the directory is older than
-       WORKTREE_MAX_AGE_SECS, nuke its cargo target dir first (cheap I/O), then
-       git worktree remove --force it. If that fails, rm -rf as a fallback.
+    2. For each remaining /tmp/red-cell* worktree:
+       a. Skip if any process currently has its CWD inside this worktree — it is
+          still active (running agent, cargo build, git operation, etc.).
+       b. Skip if the directory is younger than WORKTREE_MAX_AGE_SECS.
+       c. Otherwise: nuke cargo artifacts first, then git worktree remove --force,
+          falling back to shutil.rmtree if git refuses.
     """
     import shutil, time as _time
 
@@ -666,13 +703,23 @@ def clean_tmp_worktrees(log: Logger):
         if line.startswith("worktree ")
     ]
 
+    # Snapshot active worktrees once — avoids repeated /proc scans per iteration
+    active_worktrees = _active_worktree_paths()
+
     now = _time.time()
     removed = []
+    skipped_active = []
     for path_str in worktree_paths:
         p = Path(path_str)
         # Only touch /tmp/red-cell* dirs — never the main worktree or .claude/worktrees
         if not path_str.startswith("/tmp/") or not p.name.startswith(("red-cell", "redcell")):
             continue
+
+        # Skip worktrees that have at least one process currently running inside them
+        if path_str in active_worktrees:
+            skipped_active.append(p.name)
+            continue
+
         try:
             age = now - p.stat().st_mtime
         except OSError:
@@ -707,6 +754,11 @@ def clean_tmp_worktrees(log: Logger):
                 continue
         removed.append(p.name)
 
+    if skipped_active:
+        log.log(
+            f"worktree cleanup: skipped {len(skipped_active)} active worktree(s)"
+            f" (processes still running): {', '.join(skipped_active)}"
+        )
     if removed:
         log.log(f"worktree cleanup: removed {len(removed)} stale worktree(s): {', '.join(removed)}")
     else:

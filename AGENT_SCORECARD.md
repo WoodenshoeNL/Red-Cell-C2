@@ -28,10 +28,10 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 24 | 25 | 0 |
 | Memory / resource leaks | 11 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 9 | 0 |
-| Test infrastructure / flakiness | 41 | 2 | 0 |
+| Test infrastructure / flakiness | 43 | 2 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 4 | 5 | 0 |
-| Correctness / pagination | 64 | 8 | 1 |
+| Correctness / pagination | 65 | 8 | 1 |
 | Workflow / close-hygiene | 32 | 0 | 0 |
 | Code reuse / duplication | 10 | 0 | 0 |
 
@@ -40,6 +40,18 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-04-03 11:30
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 4 | test infra ×2, correctness ×1, completeness ×1 | Phantom parallel test SIGSEGV; nextest exec flake on assembly_dispatch; silent audit error path in `operator_inventory`; Archon has no `src/` tree |
+| Codex | 0 | — | No Codex-attributed findings this review |
+| Cursor | 0 | — | No Cursor-attributed findings this review |
+
+Overall codebase health: on track — strong crypto/CTR docs, auth hardening, broad integration tests; main risks are test flakiness and stubbed Archon scope.
+
+Biggest blindspot: **Phantom/unsafe test paths** under parallel execution — intermittent SIGSEGV can mask real regressions in CI and local loops.
 
 ### QA Review — 2026-04-03 12:53 — 246d20d0..40dabe4f
 

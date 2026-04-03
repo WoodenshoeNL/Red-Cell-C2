@@ -805,6 +805,9 @@ mod tests {
         let config = PhantomConfig {
             callback_url: format!("http://{address}/"),
             sleep_delay_ms: 0,
+            // Use Plain mode: Mprotect marks the process-wide heap PROT_NONE
+            // which crashes any other test thread that touches the heap.
+            sleep_mode: crate::sleep_obfuscate::SleepMode::Plain,
             ..PhantomConfig::default()
         };
         let mut agent = PhantomAgent::new(config)?;

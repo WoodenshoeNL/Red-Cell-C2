@@ -4,6 +4,7 @@ pub mod agent;
 mod command;
 pub mod config;
 pub mod error;
+pub(crate) mod kerberos;
 mod parser;
 pub mod protocol;
 pub mod sleep_obfuscate;

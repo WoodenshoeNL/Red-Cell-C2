@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1171 | 249 | 38 |
-| Bugs filed against | 188 | 39 | 9 |
-| Bug rate (bugs/task) | 0.16 | 0.15 | 0.24 |
-| Quality score | 84% | 85% | 76% |
+| Tasks closed | 1171 | 249 | 39 |
+| Bugs filed against | 188 | 40 | 9 |
+| Bug rate (bugs/task) | 0.16 | 0.16 | 0.23 |
+| Quality score | 84% | 84% | 77% |
 
-*Bug rates: Claude 188/1171=0.1605→0.16, Codex 38/249=0.1526→0.15, Cursor 9/38=0.2368→0.24*
+*Bug rates: Claude 188/1171=0.1605→0.16, Codex 40/249=0.1606→0.16, Cursor 9/39=0.2308→0.23*
 
 ## Violation Breakdown
 
@@ -28,7 +28,7 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 24 | 25 | 0 |
 | Memory / resource leaks | 11 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 9 | 0 |
-| Test infrastructure / flakiness | 43 | 3 | 0 |
+| Test infrastructure / flakiness | 43 | 4 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 4 | 5 | 0 |
 | Correctness / pagination | 64 | 8 | 1 |
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-03 17:45 — 354406fb..9f9c4f31
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | 1 housekeeping commit (QA checkpoint). |
+| Codex | 0 | 1 | Pre-existing flaky test `export_loot_json_serializes_non_empty_rows_and_preserves_nulls` — nextest parallel file collision (`red-cell-c2-x671s`). |
+| Cursor | 1 | 0 | Fixed `resolve` tests in client-cli config to pass explicit timeout, isolating from global config. Clean fix with good comments. |
+
+Build: passed. Tests: 3797/3798 passed (1 flaky failure in client crate, passes in isolation). Clippy: clean.
 
 ### Arch Review — 2026-04-03 14:30
 

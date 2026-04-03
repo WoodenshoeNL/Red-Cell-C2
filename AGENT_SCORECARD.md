@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1169 | 249 | 38 |
+| Tasks closed | 1171 | 249 | 38 |
 | Bugs filed against | 188 | 38 | 9 |
 | Bug rate (bugs/task) | 0.16 | 0.15 | 0.24 |
 | Quality score | 84% | 85% | 76% |
 
-*Bug rates: Claude 188/1169=0.1608→0.16, Codex 38/249=0.1526→0.15, Cursor 9/38=0.2368→0.24*
+*Bug rates: Claude 188/1171=0.1605→0.16, Codex 38/249=0.1526→0.15, Cursor 9/38=0.2368→0.24*
 
 ## Violation Breakdown
 
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-03 16:15 — d1e4060c..31c19e90
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 0 | Closed `red-cell-c2-r7tvn` (Archon src/ tree). Closed `red-cell-c2-xvr5m` (phantom SIGSEGV — SleepMode::Plain in test). WIP DNS session normalization in `listeners.rs` (canonical lowercase hex, interop test). |
+| Codex | 0 | 0 | No activity in this range. |
+| Cursor | 0 | 0 | Claimed `red-cell-c2-2ht9z` (DNS grammar). Solid fix in `auth.rs`/`api.rs`/`websocket.rs`: surfaced `operator_inventory()` audit-log failures as `AuthError::AuditLog` instead of silently swallowing. Good test updates. |
+
+Build: passed. Tests: 4976/4976 passed. Clippy: clean. No bugs filed.
 
 ### QA Review — 2026-04-03 15:30 — c10bda8b..d1e4060c
 

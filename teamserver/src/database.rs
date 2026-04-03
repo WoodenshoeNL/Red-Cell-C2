@@ -1846,6 +1846,8 @@ pub struct PayloadBuildRecord {
     pub format: String,
     /// Listener name embedded in the payload.
     pub listener: String,
+    /// Agent type requested for this build (e.g. `"Demon"`, `"Phantom"`).
+    pub agent_type: String,
     /// Optional sleep interval in seconds.
     pub sleep_secs: Option<i64>,
     /// Compiled payload bytes (populated when status is `"done"`).
@@ -1869,6 +1871,7 @@ struct PayloadBuildRow {
     arch: String,
     format: String,
     listener: String,
+    agent_type: String,
     sleep_secs: Option<i64>,
     artifact: Option<Vec<u8>>,
     size_bytes: Option<i64>,
@@ -1886,6 +1889,7 @@ impl From<PayloadBuildRow> for PayloadBuildRecord {
             arch: row.arch,
             format: row.format,
             listener: row.listener,
+            agent_type: row.agent_type,
             sleep_secs: row.sleep_secs,
             artifact: row.artifact,
             size_bytes: row.size_bytes,
@@ -1913,6 +1917,8 @@ pub struct PayloadBuildSummary {
     pub format: String,
     /// Listener name embedded in the payload.
     pub listener: String,
+    /// Agent type requested for this build (e.g. `"Demon"`, `"Phantom"`).
+    pub agent_type: String,
     /// Optional sleep interval in seconds.
     pub sleep_secs: Option<i64>,
     /// Artifact size in bytes.
@@ -1934,6 +1940,7 @@ struct PayloadBuildSummaryRow {
     arch: String,
     format: String,
     listener: String,
+    agent_type: String,
     sleep_secs: Option<i64>,
     size_bytes: Option<i64>,
     error: Option<String>,
@@ -1950,6 +1957,7 @@ impl From<PayloadBuildSummaryRow> for PayloadBuildSummary {
             arch: row.arch,
             format: row.format,
             listener: row.listener,
+            agent_type: row.agent_type,
             sleep_secs: row.sleep_secs,
             size_bytes: row.size_bytes,
             error: row.error,
@@ -1977,9 +1985,9 @@ impl PayloadBuildRepository {
         sqlx::query(
             r#"
             INSERT INTO ts_payload_builds (
-                id, status, name, arch, format, listener, sleep_secs,
+                id, status, name, arch, format, listener, agent_type, sleep_secs,
                 artifact, size_bytes, error, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&record.id)
@@ -1988,6 +1996,7 @@ impl PayloadBuildRepository {
         .bind(&record.arch)
         .bind(&record.format)
         .bind(&record.listener)
+        .bind(&record.agent_type)
         .bind(record.sleep_secs)
         .bind(&record.artifact)
         .bind(record.size_bytes)
@@ -2025,7 +2034,7 @@ impl PayloadBuildRepository {
         id: &str,
     ) -> Result<Option<PayloadBuildSummary>, TeamserverError> {
         const QUERY: &str = "\
-            SELECT id, status, name, arch, format, listener, sleep_secs, \
+            SELECT id, status, name, arch, format, listener, agent_type, sleep_secs, \
                    size_bytes, error, created_at, updated_at \
             FROM ts_payload_builds WHERE id = ?";
         let row = sqlx::query_as::<_, PayloadBuildSummaryRow>(QUERY)
@@ -2038,7 +2047,7 @@ impl PayloadBuildRepository {
     /// List all build records as summaries (no artifact), ordered by creation time descending.
     pub async fn list_summaries(&self) -> Result<Vec<PayloadBuildSummary>, TeamserverError> {
         const QUERY: &str = "\
-            SELECT id, status, name, arch, format, listener, sleep_secs, \
+            SELECT id, status, name, arch, format, listener, agent_type, sleep_secs, \
                    size_bytes, error, created_at, updated_at \
             FROM ts_payload_builds ORDER BY created_at DESC";
         let rows = sqlx::query_as::<_, PayloadBuildSummaryRow>(QUERY).fetch_all(&self.pool).await?;
@@ -3218,6 +3227,7 @@ mod tests {
             arch: "x64".to_owned(),
             format: "exe".to_owned(),
             listener: "http-default".to_owned(),
+            agent_type: "Demon".to_owned(),
             sleep_secs: Some(10),
             artifact: None,
             size_bytes: None,
@@ -3368,6 +3378,7 @@ mod tests {
             arch: "x64".to_owned(),
             format: "exe".to_owned(),
             listener: "https-main".to_owned(),
+            agent_type: "Demon".to_owned(),
             sleep_secs: Some(30),
             artifact: Some(vec![0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE]),
             size_bytes: Some(6),
@@ -3382,6 +3393,7 @@ mod tests {
             arch: "x86".to_owned(),
             format: "dll".to_owned(),
             listener: "dns-backup".to_owned(),
+            agent_type: "Archon".to_owned(),
             sleep_secs: None,
             artifact: Some(vec![0xFF; 256]),
             size_bytes: Some(256),
@@ -3459,6 +3471,7 @@ mod tests {
         assert_eq!(summary.arch, "x64");
         assert_eq!(summary.format, "exe");
         assert_eq!(summary.listener, "http-default");
+        assert_eq!(summary.agent_type, "Demon");
         assert_eq!(summary.sleep_secs, Some(10));
         assert_eq!(summary.size_bytes, Some(4));
         assert!(summary.error.is_none());

@@ -3297,6 +3297,8 @@ struct PayloadJobStatus {
     job_id: String,
     /// Current status: `"pending"`, `"running"`, `"done"`, or `"error"`.
     status: String,
+    /// Agent type that was requested for this build (e.g. `"Demon"`, `"Phantom"`).
+    agent_type: String,
     /// Payload identifier (set when status is `"done"`).
     payload_id: Option<String>,
     /// Artifact size in bytes (set when status is `"done"`).
@@ -3451,6 +3453,7 @@ async fn submit_payload_build(
         arch: request.arch.clone(),
         format: request.format.clone(),
         listener: request.listener.clone(),
+        agent_type: agent_type.to_owned(),
         sleep_secs: request.sleep.map(|s| i64::try_from(s).unwrap_or(i64::MAX)),
         artifact: None,
         size_bytes: None,
@@ -3610,6 +3613,7 @@ async fn get_payload_job(
             Json(PayloadJobStatus {
                 job_id: record.id,
                 status: record.status,
+                agent_type: record.agent_type,
                 payload_id,
                 size_bytes: record.size_bytes.map(|s| s as u64),
                 error: record.error,
@@ -9138,6 +9142,7 @@ mod tests {
             arch: "x64".to_owned(),
             format: "exe".to_owned(),
             listener: "http1".to_owned(),
+            agent_type: "Demon".to_owned(),
             sleep_secs: None,
             artifact: Some(vec![0xDE, 0xAD]),
             size_bytes: Some(2),
@@ -9185,6 +9190,7 @@ mod tests {
             arch: "x64".to_owned(),
             format: "exe".to_owned(),
             listener: "http1".to_owned(),
+            agent_type: "Demon".to_owned(),
             sleep_secs: None,
             artifact: None,
             size_bytes: None,
@@ -9335,6 +9341,7 @@ mod tests {
             arch: "x64".to_owned(),
             format: "exe".to_owned(),
             listener: "http1".to_owned(),
+            agent_type: "Demon".to_owned(),
             sleep_secs: None,
             artifact: None,
             size_bytes: None,
@@ -9378,6 +9385,7 @@ mod tests {
             arch: "x64".to_owned(),
             format: "exe".to_owned(),
             listener: "http1".to_owned(),
+            agent_type: "Demon".to_owned(),
             sleep_secs: None,
             artifact: Some(vec![0xCA, 0xFE]),
             size_bytes: Some(2),
@@ -9422,6 +9430,7 @@ mod tests {
             arch: "x64".to_owned(),
             format: "exe".to_owned(),
             listener: "http1".to_owned(),
+            agent_type: "Demon".to_owned(),
             sleep_secs: None,
             artifact: None,
             size_bytes: None,
@@ -9467,6 +9476,7 @@ mod tests {
             arch: "x64".to_owned(),
             format: "exe".to_owned(),
             listener: "http1".to_owned(),
+            agent_type: "Demon".to_owned(),
             sleep_secs: None,
             artifact: Some(artifact.clone()),
             size_bytes: Some(i64::try_from(artifact.len()).unwrap_or(i64::MAX)),
@@ -9521,6 +9531,7 @@ mod tests {
             arch: "x64".to_owned(),
             format: "exe".to_owned(),
             listener: "http1".to_owned(),
+            agent_type: "Demon".to_owned(),
             sleep_secs: None,
             artifact: None,
             size_bytes: None,
@@ -9582,6 +9593,7 @@ mod tests {
             arch: "x64".to_owned(),
             format: "exe".to_owned(),
             listener: "http1".to_owned(),
+            agent_type: "Demon".to_owned(),
             sleep_secs: None,
             artifact: Some(vec![0x4D, 0x5A]),
             size_bytes: Some(2),
@@ -9625,6 +9637,7 @@ mod tests {
             arch: "x64".to_owned(),
             format: "exe".to_owned(),
             listener: "pivot".to_owned(),
+            agent_type: "Demon".to_owned(),
             sleep_secs: None,
             artifact: Some(vec![0xDE, 0xAD]),
             size_bytes: Some(2),
@@ -9687,6 +9700,7 @@ mod tests {
             arch: "x64".to_owned(),
             format: "exe".to_owned(),
             listener: "noop-smb".to_owned(),
+            agent_type: "Demon".to_owned(),
             sleep_secs: None,
             artifact: Some(vec![0xDE, 0xAD]),
             size_bytes: Some(2),
@@ -9908,6 +9922,86 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
+    /// End-to-end test: the agent type requested via `POST /payloads/build` is
+    /// persisted in the build record and returned by `GET /payloads/jobs/{id}`.
+    ///
+    /// This proves the full path: request → normalisation → DB record → response,
+    /// i.e. the agent type actually reaches the payload builder call.
+    #[tokio::test]
+    async fn payload_build_agent_type_reaches_job_record() {
+        for (agent_in, agent_out) in &[
+            ("demon", "Demon"),
+            ("archon", "Archon"),
+            ("phantom", "Phantom"),
+            ("specter", "Specter"),
+        ] {
+            let app =
+                test_router(Some((60, "operator", "secret-operator", OperatorRole::Operator)))
+                    .await;
+
+            // First create a listener so the build request passes the listener-lookup
+            // check and a job record is actually created.
+            let create_resp = app
+                .clone()
+                .oneshot(create_listener_request(
+                    &smb_listener_json("build-test-pivot", "test-pipe"),
+                    "secret-operator",
+                ))
+                .await
+                .expect("create listener response");
+            assert_eq!(
+                create_resp.status(),
+                StatusCode::CREATED,
+                "failed to create listener for agent={agent_in}"
+            );
+
+            // Submit the build.
+            let body =
+                serde_json::json!({"listener":"build-test-pivot","arch":"x64","format":"exe","agent":agent_in})
+                    .to_string();
+            let submit_resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/payloads/build")
+                        .header(API_KEY_HEADER, "secret-operator")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .expect("request"),
+                )
+                .await
+                .expect("submit response");
+
+            assert_eq!(
+                submit_resp.status(),
+                StatusCode::ACCEPTED,
+                "expected 202 for agent={agent_in}"
+            );
+            let submit_json = read_json(submit_resp).await;
+            let job_id = submit_json["job_id"].as_str().expect("job_id").to_owned();
+
+            // Fetch the job status — agent_type must reflect what was submitted.
+            let status_resp = app
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/payloads/jobs/{job_id}"))
+                        .header(API_KEY_HEADER, "secret-operator")
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("status response");
+
+            assert_eq!(status_resp.status(), StatusCode::OK, "job not found for agent={agent_in}");
+            let status_json = read_json(status_resp).await;
+            assert_eq!(
+                status_json["agent_type"], *agent_out,
+                "agent_type mismatch for agent_in={agent_in}: expected {agent_out}"
+            );
+        }
+    }
+
     // ── PayloadBuildRepository unit tests ────────────────────────────────
 
     #[tokio::test]
@@ -9922,6 +10016,7 @@ mod tests {
             arch: "x64".to_owned(),
             format: "exe".to_owned(),
             listener: "http1".to_owned(),
+            agent_type: "Demon".to_owned(),
             sleep_secs: Some(10),
             artifact: None,
             size_bytes: None,
@@ -9958,6 +10053,7 @@ mod tests {
                 arch: "x64".to_owned(),
                 format: "exe".to_owned(),
                 listener: "http1".to_owned(),
+                agent_type: "Demon".to_owned(),
                 sleep_secs: None,
                 artifact: Some(vec![0xDE, 0xAD]),
                 size_bytes: Some(2),
@@ -9984,6 +10080,7 @@ mod tests {
             arch: "x64".to_owned(),
             format: "exe".to_owned(),
             listener: "http1".to_owned(),
+            agent_type: "Demon".to_owned(),
             sleep_secs: None,
             artifact: None,
             size_bytes: None,
@@ -10038,6 +10135,7 @@ mod tests {
             arch: "x64".to_owned(),
             format: "exe".to_owned(),
             listener: "http1".to_owned(),
+            agent_type: "Demon".to_owned(),
             sleep_secs: Some(5),
             artifact: Some(vec![0xDE, 0xAD, 0xBE, 0xEF]),
             size_bytes: Some(4),
@@ -10079,6 +10177,7 @@ mod tests {
                 arch: "x64".to_owned(),
                 format: "exe".to_owned(),
                 listener: "http1".to_owned(),
+                agent_type: "Demon".to_owned(),
                 sleep_secs: None,
                 artifact: Some(vec![0xCA; 1024]),
                 size_bytes: Some(1024),

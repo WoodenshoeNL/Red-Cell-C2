@@ -3333,6 +3333,29 @@ fn normalize_agent_type(agent: &str) -> Result<&'static str, String> {
     }
 }
 
+/// Validate that the requested format is supported for the given agent type.
+///
+/// Phantom and Specter are Rust agents with a fixed build pipeline that always
+/// produces a single executable output regardless of the `format` field.
+/// Accepting `dll` or `bin` for those agents would silently build an exe while
+/// returning a successful response, misleading callers.  Demon and Archon use
+/// the Havoc C/ASM toolchain and support all three output classes.
+///
+/// `agent_type` must already be normalised to PascalCase (i.e. the output of
+/// [`normalize_agent_type`]).  `format` is the CLI short form (`"exe"`, `"dll"`,
+/// or `"bin"`).
+///
+/// Returns `Err` with a user-facing message when the combination is unsupported.
+fn validate_agent_format_combination(agent_type: &str, format: &str) -> Result<(), String> {
+    match agent_type {
+        // Rust agents have a single fixed output format (exe).
+        "Phantom" | "Specter" if format != "exe" => {
+            Err(format!("agent '{agent_type}' only supports format 'exe'; got '{format}'"))
+        }
+        _ => Ok(()),
+    }
+}
+
 fn now_rfc3339() -> String {
     OffsetDateTime::now_utc().format(&Rfc3339).unwrap_or_else(|_| "unknown".to_owned())
 }
@@ -3413,6 +3436,11 @@ async fn submit_payload_build(
             return json_error_response(StatusCode::BAD_REQUEST, "invalid_agent_type", msg);
         }
     };
+
+    // Validate that the agent/format combination is supported.
+    if let Err(msg) = validate_agent_format_combination(agent_type, &request.format) {
+        return json_error_response(StatusCode::BAD_REQUEST, "unsupported_agent_format", msg);
+    }
 
     // Validate architecture.
     if !matches!(request.arch.as_str(), "x64" | "x86") {
@@ -9836,6 +9864,42 @@ mod tests {
         assert!(normalize_agent_type("Shellcode").is_err());
     }
 
+    // ── validate_agent_format_combination unit tests ─────────────────────
+
+    #[test]
+    fn agent_format_combination_accepts_demon_all_formats() {
+        for fmt in &["exe", "dll", "bin"] {
+            assert!(
+                validate_agent_format_combination("Demon", fmt).is_ok(),
+                "Demon should accept format '{fmt}'"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_format_combination_accepts_archon_all_formats() {
+        for fmt in &["exe", "dll", "bin"] {
+            assert!(
+                validate_agent_format_combination("Archon", fmt).is_ok(),
+                "Archon should accept format '{fmt}'"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_format_combination_accepts_phantom_exe_only() {
+        assert!(validate_agent_format_combination("Phantom", "exe").is_ok());
+        assert!(validate_agent_format_combination("Phantom", "dll").is_err());
+        assert!(validate_agent_format_combination("Phantom", "bin").is_err());
+    }
+
+    #[test]
+    fn agent_format_combination_accepts_specter_exe_only() {
+        assert!(validate_agent_format_combination("Specter", "exe").is_ok());
+        assert!(validate_agent_format_combination("Specter", "dll").is_err());
+        assert!(validate_agent_format_combination("Specter", "bin").is_err());
+    }
+
     // ── payload build agent-type API tests ──────────────────────────────
 
     #[tokio::test]
@@ -9894,6 +9958,47 @@ mod tests {
                 StatusCode::NOT_FOUND,
                 "expected 404 for agent={agent}, got {}",
                 response.status()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn payload_build_rejects_unsupported_agent_format_combination() {
+        // Phantom and Specter only produce exe artifacts; requesting dll or bin
+        // must be rejected with 400 / unsupported_agent_format before the listener
+        // lookup so callers never receive a misleading successful response.
+        for (agent, format) in
+            &[("phantom", "dll"), ("phantom", "bin"), ("specter", "dll"), ("specter", "bin")]
+        {
+            let app =
+                test_router(Some((60, "operator", "secret-operator", OperatorRole::Operator)))
+                    .await;
+            let body =
+                serde_json::json!({"listener":"nonexistent","arch":"x64","format": format,"agent": agent})
+                    .to_string();
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/payloads/build")
+                        .header(API_KEY_HEADER, "secret-operator")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "expected 400 for agent={agent} format={format}"
+            );
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("body");
+            let json: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+            assert_eq!(
+                json["error"]["code"], "unsupported_agent_format",
+                "wrong error code for agent={agent} format={format}"
             );
         }
     }

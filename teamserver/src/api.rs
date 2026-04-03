@@ -994,6 +994,9 @@ impl IntoResponse for OperatorApiError {
             Self::Auth(AuthError::ProfileOperator { .. }) => {
                 (StatusCode::NOT_FOUND, "operator_not_found")
             }
+            Self::Auth(AuthError::AuditLog(_)) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "operator_audit_unavailable")
+            }
             Self::Auth(_) => (StatusCode::INTERNAL_SERVER_ERROR, "operator_api_error"),
         };
 
@@ -2121,17 +2124,18 @@ async fn get_loot(
         (status = 200, description = "List configured and runtime-created operators with presence state", body = [OperatorSummary]),
         (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
         (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
+        (status = 500, description = "Audit log unavailable for operator presence", body = ApiErrorBody),
         (status = 429, description = "Rate limit exceeded", body = ApiErrorBody)
     )
 )]
 async fn list_operators(
     State(state): State<TeamserverState>,
     _identity: AdminApiAccess,
-) -> Json<Vec<OperatorSummary>> {
+) -> Result<Json<Vec<OperatorSummary>>, OperatorApiError> {
     let operators = state
         .auth
         .operator_inventory()
-        .await
+        .await?
         .into_iter()
         .map(|operator| OperatorSummary {
             username: operator.username,
@@ -2140,7 +2144,7 @@ async fn list_operators(
             last_seen: operator.last_seen,
         })
         .collect::<Vec<_>>();
-    Json(operators)
+    Ok(Json(operators))
 }
 
 #[utoipa::path(
@@ -2301,6 +2305,7 @@ async fn delete_operator(
         (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
         (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
         (status = 404, description = "Operator not found or profile-configured", body = ApiErrorBody),
+        (status = 500, description = "Audit log unavailable for operator presence", body = ApiErrorBody),
         (status = 429, description = "Rate limit exceeded", body = ApiErrorBody)
     )
 )]
@@ -2332,7 +2337,7 @@ async fn update_operator_role(
             .await;
 
             // Fetch updated presence info for the response.
-            let operators = state.auth.operator_inventory().await;
+            let operators = state.auth.operator_inventory().await?;
             let summary = operators
                 .into_iter()
                 .find(|op| op.username == username)

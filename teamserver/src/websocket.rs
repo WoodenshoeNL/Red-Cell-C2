@@ -646,8 +646,8 @@ async fn handle_authentication(
                 .await;
             return Err(());
         }
-        Err(AuthError::Persistence(error)) => {
-            warn!(%connection_id, %error, "operator authentication persistence failed");
+        Err(AuthError::Persistence(error)) | Err(AuthError::AuditLog(error)) => {
+            warn!(%connection_id, %error, "operator authentication backing store error");
             tokio::time::sleep(FAILED_LOGIN_DELAY).await;
             send_login_error(socket, "", AuthenticationFailure::InvalidCredentials, connection_id)
                 .await;
@@ -2552,6 +2552,8 @@ enum SnapshotSyncError {
     Listener(#[from] crate::ListenerManagerError),
     #[error(transparent)]
     Teamserver(#[from] crate::TeamserverError),
+    #[error(transparent)]
+    Auth(#[from] AuthError),
 }
 
 async fn send_session_snapshot(
@@ -2561,8 +2563,12 @@ async fn send_session_snapshot(
     listeners: &ListenerManager,
     registry: &AgentRegistry,
 ) -> Result<(), SnapshotSyncError> {
-    let operators =
-        auth.operator_inventory().await.into_iter().map(|entry| entry.as_operator_info()).collect();
+    let operators = auth
+        .operator_inventory()
+        .await?
+        .into_iter()
+        .map(|entry| entry.as_operator_info())
+        .collect();
     send_operator_message(socket, &operator_snapshot_event(operators)?).await?;
 
     for summary in listeners.list().await?.into_iter() {

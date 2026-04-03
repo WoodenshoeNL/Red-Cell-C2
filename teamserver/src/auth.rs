@@ -14,7 +14,7 @@ use red_cell_common::operator::{
 use subtle::ConstantTimeEq;
 use thiserror::Error;
 use tokio::sync::RwLock;
-use tracing::instrument;
+use tracing::{instrument, warn};
 use uuid::Uuid;
 
 use crate::{Database, OperatorRepository, PersistedOperator, TeamserverError};
@@ -58,6 +58,9 @@ pub enum AuthError {
     /// Runtime operator persistence failed.
     #[error(transparent)]
     Persistence(#[from] TeamserverError),
+    /// Audit log query failed while loading operator presence metadata.
+    #[error(transparent)]
+    AuditLog(TeamserverError),
 }
 
 impl PartialEq for AuthError {
@@ -82,6 +85,7 @@ impl PartialEq for AuthError {
             (Self::Persistence(left), Self::Persistence(right)) => {
                 left.to_string() == right.to_string()
             }
+            (Self::AuditLog(left), Self::AuditLog(right)) => left.to_string() == right.to_string(),
             _ => false,
         }
     }
@@ -393,7 +397,11 @@ impl AuthService {
     }
 
     /// Return all configured and runtime-created operators with current presence state.
-    pub async fn operator_inventory(&self) -> Vec<OperatorPresence> {
+    ///
+    /// When an audit log repository is configured (`from_profile_with_database`), a failure
+    /// to query last-activity timestamps is returned as [`AuthError::AuditLog`] so callers do
+    /// not silently return empty `last_seen` values while the backing store is broken.
+    pub async fn operator_inventory(&self) -> Result<Vec<OperatorPresence>, AuthError> {
         let credentials = self.credentials.read().await.clone();
         let sessions = self.sessions.read().await.list();
         let last_seen = match &self.audit_log {
@@ -404,7 +412,13 @@ impl AuthService {
                     "operator.chat",
                 ])
                 .await
-                .unwrap_or_default(),
+                .inspect_err(|err| {
+                    warn!(
+                        error = %err,
+                        "operator_inventory: audit log query failed; last_seen cannot be trusted"
+                    );
+                })
+                .map_err(AuthError::AuditLog)?,
             None => BTreeMap::new(),
         };
         let mut operators = credentials
@@ -431,7 +445,7 @@ impl AuthService {
                 });
         }
 
-        operators.into_values().collect()
+        Ok(operators.into_values().collect())
     }
 
     /// Parse and authenticate a raw JSON operator message.
@@ -1382,7 +1396,10 @@ mod tests {
             .await;
         assert!(matches!(result, AuthenticationResult::Success(_)));
 
-        let inventory = service.operator_inventory().await;
+        let inventory = service
+            .operator_inventory()
+            .await
+            .expect("operator inventory should succeed when audit log is healthy");
         assert_eq!(
             inventory,
             vec![
@@ -1434,7 +1451,10 @@ mod tests {
             .await
             .expect("auth service should initialize");
 
-        let inventory = service.operator_inventory().await;
+        let inventory = service
+            .operator_inventory()
+            .await
+            .expect("operator inventory should succeed when audit log is healthy");
         let operator = inventory
             .into_iter()
             .find(|entry| entry.username == "operator")
@@ -1980,7 +2000,10 @@ mod tests {
             .expect("auth service should initialize");
 
         // No audit rows inserted — every operator should have last_seen: None.
-        let inventory = service.operator_inventory().await;
+        let inventory = service
+            .operator_inventory()
+            .await
+            .expect("operator inventory should succeed when audit log is healthy");
         assert!(!inventory.is_empty(), "inventory should contain configured operators");
         for entry in &inventory {
             assert_eq!(
@@ -1992,27 +2015,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn operator_inventory_returns_results_after_database_closed() {
+    async fn operator_inventory_returns_audit_error_after_database_closed() {
         let database = Database::connect_in_memory().await.expect("database should initialize");
         let service = AuthService::from_profile_with_database(&profile(), &database)
             .await
             .expect("auth service should initialize");
 
-        // Close the database — the audit log query should fail gracefully.
+        // Close the database — the audit log query must fail loudly (no fake empty last_seen map).
         database.close().await;
 
-        let inventory = service.operator_inventory().await;
-        assert!(
-            !inventory.is_empty(),
-            "inventory should still return configured operators after database close"
-        );
-        for entry in &inventory {
-            assert_eq!(
-                entry.last_seen, None,
-                "operator `{}` should have last_seen None when audit log query fails",
-                entry.username
-            );
-        }
+        let err = service
+            .operator_inventory()
+            .await
+            .expect_err("operator inventory should fail when audit log cannot be queried");
+        assert!(matches!(err, AuthError::AuditLog(_)), "expected AuditLog error, got {err:?}");
     }
 
     #[tokio::test]
@@ -2089,7 +2105,10 @@ mod tests {
 
         auth.delete_operator("runtime_user").await.expect("delete should succeed");
 
-        let inventory = auth.operator_inventory().await;
+        let inventory = auth
+            .operator_inventory()
+            .await
+            .expect("operator inventory should succeed when audit log is healthy");
         assert!(
             !inventory.iter().any(|op| op.username == "runtime_user"),
             "deleted operator should not appear in inventory"
@@ -2230,7 +2249,10 @@ mod tests {
             .await
             .expect("update should succeed");
 
-        let inventory = auth.operator_inventory().await;
+        let inventory = auth
+            .operator_inventory()
+            .await
+            .expect("operator inventory should succeed when audit log is healthy");
         let op = inventory.iter().find(|op| op.username == "roleuser").expect("should exist");
         assert_eq!(op.role, OperatorRole::Admin);
     }

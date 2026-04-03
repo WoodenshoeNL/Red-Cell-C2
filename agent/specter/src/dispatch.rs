@@ -4046,6 +4046,7 @@ fn handle_inline_execute(
             arg_data.clone(),
             bof_output_queue.clone(),
             request_id,
+            bof_ctx.clone(),
         ) {
             Some(handle) => {
                 let job_id = job_store.add(JOB_TYPE_THREAD, handle, request_id);

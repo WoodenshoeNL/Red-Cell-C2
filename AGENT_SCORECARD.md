@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1171 | 249 | 39 |
+| Tasks closed | 1171 | 249 | 41 |
 | Bugs filed against | 188 | 40 | 10 |
-| Bug rate (bugs/task) | 0.16 | 0.16 | 0.26 |
-| Quality score | 84% | 84% | 74% |
+| Bug rate (bugs/task) | 0.16 | 0.16 | 0.24 |
+| Quality score | 84% | 84% | 76% |
 
-*Bug rates: Claude 188/1171=0.1605→0.16, Codex 40/249=0.1606→0.16, Cursor 10/39=0.2564→0.26*
+*Bug rates: Claude 188/1171=0.1605→0.16, Codex 40/249=0.1606→0.16, Cursor 10/41=0.2439→0.24*
 
 ## Violation Breakdown
 
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-03 19:15 — a26b81d9..c1c3618f
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | 1 housekeeping commit (QA checkpoint). |
+| Codex | 0 | 0 | No activity this range. |
+| Cursor | 2 | 0 | Closed `red-cell-c2-v4wx2` (teamserver/specter mega-module split) and `red-cell-c2-zgf4j` (phantom command module split). Clean refactors, no production `unwrap`/`expect`. |
+
+Build: passed. Tests: 2796/2797 ran, 1 flaky failure (`net_dispatch::net_truncated_utf16_does_not_crash_server` — nextest double-spawn ENOENT, filed `red-cell-c2-fka3c`). Clippy: clean.
 
 ### Arch Review — 2026-04-03 18:45
 

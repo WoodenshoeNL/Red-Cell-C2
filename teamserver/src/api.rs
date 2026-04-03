@@ -6412,6 +6412,53 @@ mod tests {
         assert_eq!(body["error"]["code"], "not_found");
     }
 
+    #[tokio::test]
+    async fn session_dispatch_status_matches_api_root() {
+        let (app, _, _) = test_router_with_registry(Some((
+            60,
+            "rest-admin",
+            "secret-admin",
+            OperatorRole::Admin,
+        )))
+        .await;
+        let value = serde_json::json!({"cmd": "status"});
+        let line = session_api_dispatch_line(
+            &app,
+            "status",
+            &value,
+            std::net::SocketAddr::from(([127, 0, 0, 1], 12345)),
+            "secret-admin",
+        )
+        .await;
+        let parsed: Value = serde_json::from_str(&line).expect("session line json");
+        assert_eq!(parsed["ok"], true);
+        assert_eq!(parsed["cmd"], "status");
+        assert_eq!(parsed["data"]["prefix"], "/api/v1");
+    }
+
+    #[tokio::test]
+    async fn session_dispatch_unknown_command_returns_envelope() {
+        let (app, _, _) = test_router_with_registry(Some((
+            60,
+            "rest-admin",
+            "secret-admin",
+            OperatorRole::Admin,
+        )))
+        .await;
+        let value = serde_json::json!({"cmd": "nosuch"});
+        let line = session_api_dispatch_line(
+            &app,
+            "nosuch",
+            &value,
+            std::net::SocketAddr::from(([127, 0, 0, 1], 12345)),
+            "secret-admin",
+        )
+        .await;
+        let parsed: Value = serde_json::from_str(&line).expect("session line json");
+        assert_eq!(parsed["ok"], false);
+        assert_eq!(parsed["error"], "UNKNOWN_COMMAND");
+    }
+
     async fn test_router(api_key: Option<(u32, &str, &str, OperatorRole)>) -> Router {
         test_router_with_registry(api_key).await.0
     }

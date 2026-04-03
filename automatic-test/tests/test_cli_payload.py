@@ -93,7 +93,8 @@ class TestPollPayloadJob(unittest.TestCase):
             "payload_id": "payload-7",
             "size_bytes": 9001,
         }
-        with patch("lib.cli._api_get", return_value=status) as mock_get:
+        with patch("lib.cli._run", return_value={"job_id": "job-7"}), \
+             patch("lib.cli._api_get", return_value=status) as mock_get:
             result = payload_build(_CFG, listener="listener-1", agent="phantom", wait=True)
         self.assertEqual(result["id"], "payload-7")
         self.assertEqual(result["agent_type"], "Phantom")

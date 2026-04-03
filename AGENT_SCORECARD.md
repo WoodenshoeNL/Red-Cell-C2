@@ -25,10 +25,10 @@ Each loop run updates the running totals and appends a review entry.
 | Clippy warnings | 10 | 0 | 1 |
 | Protocol errors | 30 | 32 | 3 |
 | Security issues | 57 | 39 | 0 |
-| Architecture drift | 25 | 25 | 0 |
+| Architecture drift | 25 | 25 | 1 |
 | Memory / resource leaks | 11 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 9 | 0 |
-| Test infrastructure / flakiness | 43 | 4 | 1 |
+| Test infrastructure / flakiness | 43 | 5 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 4 | 5 | 0 |
 | Correctness / pagination | 64 | 8 | 1 |
@@ -40,6 +40,18 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-04-03 18:45
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 2 | test infra, maintainability / architecture | Filed `red-cell-c2-0h7q9` (nextest ENOENT on `red-cell-cli::audit_api_contract` under parallel nextest); `red-cell-c2-la31d` (Phantom `command/mod.rs` still ~6.5k LOC after partial split) |
+| Codex | 1 | test infrastructure | `audit_api_contract` integration tests — same double-spawn class as mitigated teamserver binaries in `.config/nextest.toml` |
+| Cursor | 1 | architecture drift (Phantom module size) | Partial `command/` split leaves megamodule in `mod.rs` — tracked as follow-up task |
+
+Overall codebase health: **on track** — `cargo check --workspace` and `cargo clippy --workspace -- -D warnings` clean; no `todo!`/`unimplemented!` in Rust sources reviewed; Demon path documents CTR/HKDF/weak-key rejection; auth uses constant-time token checks where designed.
+
+Biggest blindspot: **Parallel nextest + large integration-test binaries** — intermittent ENOENT on exec can still skip ~40% of the suite when `--fail-fast` stops the run; extend serial groups beyond `assembly_dispatch` / `service_bridge`.
 
 ### Arch Review — 2026-04-03 17:28
 

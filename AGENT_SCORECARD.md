@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1139 | 248 | 33 |
+| Tasks closed | 1145 | 248 | 33 |
 | Bugs filed against | 184 | 38 | 9 |
 | Bug rate (bugs/task) | 0.16 | 0.15 | 0.27 |
 | Quality score | 84% | 85% | 73% |
 
-*Bug rates: Claude 184/1139=0.1615→0.16, Codex 38/248=0.1532→0.15, Cursor 9/33=0.2727→0.27*
+*Bug rates: Claude 184/1145=0.1607→0.16, Codex 38/248=0.1532→0.15, Cursor 9/33=0.2727→0.27*
 
 ## Violation Breakdown
 
@@ -5365,3 +5365,13 @@ Build: skipped for the reviewed range because `f556a891..db97a56d` contains only
 | Cursor | 0 | 0 | No activity in this range. |
 
 Build: skipped for the reviewed range because `db97a56d..b5c8da89` contains only QA/arch-review bookkeeping commits and no product-code changes. `br list --status=in_progress`, `br list --status=open | head -30`, and `br ready | head -20` remain consistent with the current backlog, including the already-open close-hygiene bug `red-cell-c2-3r4to` for `red-cell-c2-iyl94`. Repo-wide `cargo check --workspace` and `cargo clippy --workspace -- -D warnings` were started in a clean detached worktree at `b5c8da89` with isolated target directories and were still compiling during bookkeeping, with no attributable failures observed yet.
+
+### QA Review — 2026-04-03 04:11 — b5c8da89..7ccbe460
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 6 | 0 | Closed `red-cell-c2-iyl94`, `red-cell-c2-0sghn`, `red-cell-c2-y4k02`, `red-cell-c2-yslnt`, `red-cell-c2-kpzq2`, and `red-cell-c2-k9xii`. Reviewed the `teamserver` payload-build persistence change, the `autotest` agent/toolchain/tempfile fixes, and the Archon threadpool-job cleanup. No new duplicate-worthy regression was filed this pass; the remaining non-Demon autotest gap in scenarios 15/16/17/19 is already tracked by open issue `red-cell-c2-odsy6`. |
+| Codex | 0 | 0 | No attributed task closes or regressions in this range. |
+| Cursor | 0 | 0 | No activity in this range. |
+
+Build: `cargo check --workspace` passed in an isolated target dir. `cargo clippy --workspace -- -D warnings` passed in an isolated target dir. `cargo nextest run --workspace` was started in an isolated target dir and was still compiling/running during bookkeeping with no failures observed in streamed output. `br list --status=in_progress`, `br list --status=open | head -30`, and `br ready | head -20` remain consistent with the current backlog; `red-cell-c2-7nmhu` is the only in-progress issue and matches the new claim commit in this range.

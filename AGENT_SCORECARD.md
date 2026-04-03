@@ -10,11 +10,11 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 1171 | 249 | 39 |
-| Bugs filed against | 188 | 40 | 9 |
-| Bug rate (bugs/task) | 0.16 | 0.16 | 0.23 |
-| Quality score | 84% | 84% | 77% |
+| Bugs filed against | 188 | 40 | 10 |
+| Bug rate (bugs/task) | 0.16 | 0.16 | 0.26 |
+| Quality score | 84% | 84% | 74% |
 
-*Bug rates: Claude 188/1171=0.1605→0.16, Codex 40/249=0.1606→0.16, Cursor 9/39=0.2308→0.23*
+*Bug rates: Claude 188/1171=0.1605→0.16, Codex 40/249=0.1606→0.16, Cursor 10/39=0.2564→0.26*
 
 ## Violation Breakdown
 
@@ -28,7 +28,7 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 25 | 25 | 0 |
 | Memory / resource leaks | 11 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 9 | 0 |
-| Test infrastructure / flakiness | 43 | 4 | 0 |
+| Test infrastructure / flakiness | 43 | 4 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 4 | 5 | 0 |
 | Correctness / pagination | 64 | 8 | 1 |
@@ -5623,3 +5623,13 @@ Build: passed — `cargo check`, `cargo clippy -- -D warnings`, and `cargo test 
 | Cursor | 0 | 0 | Arch review commit (`5f1b6938`) — filed 1 architecture drift finding, updated scorecard. |
 
 Build: passed — `cargo check`, `cargo clippy -- -D warnings`, and `cargo nextest run --workspace` all clean (4976 tests, 0 failures). 1 open task (`red-cell-c2-v4wx2`, P3, split mega-modules) ready for pickup. No issues stuck in_progress.
+
+### QA Review — 2026-04-03 18:30 — 5f1b6938..a26b81d9
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | Only prior QA checkpoint commit (`f5a40859`). |
+| Codex | 0 | 0 | No activity in this range. |
+| Cursor | 0 | 1 | Claimed `red-cell-c2-v4wx2` (split mega-modules). WIP module split left untracked files that delete committed `listeners.rs` and break `cargo test` with 123 private-access errors (`red-cell-c2-w1kli`). |
+
+Build: `cargo check` passed. `cargo clippy -- -D warnings` passed. `cargo test --workspace` **failed** — 123 compilation errors in teamserver test target due to Cursor's untracked `teamserver/src/listeners/{mod.rs,dns.rs,tests.rs}` replacing committed `listeners.rs`. Tests access private fields/methods across sibling modules. Filed `red-cell-c2-w1kli` (P1). 1 task in_progress (`red-cell-c2-v4wx2`).

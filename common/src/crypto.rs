@@ -887,7 +887,7 @@ mod tests {
         let result = encrypt_agent_data_at_offset(&key, &iv, max_offset, plaintext);
         assert!(result.is_ok(), "max valid block offset must succeed: {result:?}");
 
-        let ciphertext = result.unwrap();
+        let ciphertext = result.expect("unwrap");
         let decrypted = decrypt_agent_data_at_offset(&key, &iv, max_offset, &ciphertext)
             .expect("round-trip at max valid offset");
         assert_eq!(decrypted, plaintext);

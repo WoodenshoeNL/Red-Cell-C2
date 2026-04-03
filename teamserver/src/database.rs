@@ -2784,7 +2784,7 @@ mod tests {
         // bob: max of 2026-03-02 (create) and 2026-03-05 (complete) → 2026-03-05
         assert_eq!(result.get("bob").map(String::as_str), Some("2026-03-05T10:00:00Z"));
         // carol only has agent.checkin, not in the action list.
-        assert!(result.get("carol").is_none());
+        assert!(!result.contains_key("carol"));
     }
 
     #[tokio::test]
@@ -3322,7 +3322,7 @@ mod tests {
         assert_eq!(persisted.listener_name, "smb-pipe");
         assert_eq!(persisted.ctr_block_offset, 99);
         assert_eq!(persisted.info.agent_id, 0xBB);
-        assert_eq!(persisted.info.active, true);
+        assert!(persisted.info.active);
     }
 
     // ── set_status tests ─────────────────────────────────────────────────

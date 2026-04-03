@@ -4117,6 +4117,7 @@ havoc.RegisterCommand("scan", "second scan", run_scan)
     }
 
     #[allow(clippy::await_holding_lock)]
+    #[allow(clippy::type_complexity)]
     #[tokio::test(flavor = "multi_thread")]
     async fn multiple_callbacks_same_event_all_fire() -> Result<(), Box<dyn std::error::Error>> {
         let _guard = lock_test_guard();

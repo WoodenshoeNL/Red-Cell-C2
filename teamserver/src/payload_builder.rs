@@ -707,6 +707,7 @@ impl PayloadBuilderService {
     }
 
     #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
     fn with_paths_for_tests(
         toolchain: Toolchain,
         source_root: PathBuf,

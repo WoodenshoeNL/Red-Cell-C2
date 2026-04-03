@@ -1907,8 +1907,8 @@ mod tests {
         let serialized = serde_json::to_value(&record)?;
         let deserialized: AgentRecord = serde_json::from_value(serialized)?;
 
-        assert_eq!(deserialized.active, false);
-        assert_eq!(deserialized.elevated, false);
+        assert!(!deserialized.active);
+        assert!(!deserialized.elevated);
         assert_eq!(deserialized, record);
         Ok(())
     }
@@ -1970,23 +1970,23 @@ mod tests {
 
     #[test]
     fn parse_kill_date_to_epoch_accepts_unix_timestamp() {
-        assert_eq!(parse_kill_date_to_epoch("1773086400").unwrap(), 1773086400);
+        assert_eq!(parse_kill_date_to_epoch("1773086400").expect("unwrap"), 1773086400);
     }
 
     #[test]
     fn parse_kill_date_to_epoch_accepts_zero() {
-        assert_eq!(parse_kill_date_to_epoch("0").unwrap(), 0);
+        assert_eq!(parse_kill_date_to_epoch("0").expect("unwrap"), 0);
     }
 
     #[test]
     fn parse_kill_date_to_epoch_accepts_negative() {
-        assert_eq!(parse_kill_date_to_epoch("-1").unwrap(), -1);
+        assert_eq!(parse_kill_date_to_epoch("-1").expect("unwrap"), -1);
     }
 
     #[test]
     fn parse_kill_date_to_epoch_accepts_human_readable_datetime() {
         // "2026-03-09 20:00:00" UTC
-        assert_eq!(parse_kill_date_to_epoch("2026-03-09 20:00:00").unwrap(), 1773086400);
+        assert_eq!(parse_kill_date_to_epoch("2026-03-09 20:00:00").expect("unwrap"), 1773086400);
     }
 
     #[test]
@@ -2013,22 +2013,22 @@ mod tests {
 
     #[test]
     fn validate_kill_date_returns_none_for_absent() {
-        assert_eq!(validate_kill_date(None).unwrap(), None);
+        assert_eq!(validate_kill_date(None).expect("unwrap"), None);
     }
 
     #[test]
     fn validate_kill_date_returns_none_for_empty() {
-        assert_eq!(validate_kill_date(Some("")).unwrap(), None);
-        assert_eq!(validate_kill_date(Some("   ")).unwrap(), None);
+        assert_eq!(validate_kill_date(Some("")).expect("unwrap"), None);
+        assert_eq!(validate_kill_date(Some("   ")).expect("unwrap"), None);
     }
 
     #[test]
     fn validate_kill_date_normalises_to_timestamp_string() {
         assert_eq!(
-            validate_kill_date(Some("2026-03-09 20:00:00")).unwrap(),
+            validate_kill_date(Some("2026-03-09 20:00:00")).expect("unwrap"),
             Some("1773086400".to_string())
         );
-        assert_eq!(validate_kill_date(Some("1773086400")).unwrap(), Some("1773086400".to_string()));
+        assert_eq!(validate_kill_date(Some("1773086400")).expect("unwrap"), Some("1773086400".to_string()));
     }
 
     #[test]

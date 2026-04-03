@@ -241,7 +241,7 @@ mod tests {
         let base = Instant::now() - Duration::from_secs(100);
         for i in 0u8..5 {
             windows.insert(
-                format!("listener\0192.168.0.{i}"),
+                format!("listener192.168.0.{i}"),
                 AttemptWindow {
                     attempts: 1,
                     window_start: base + Duration::from_secs(u64::from(i)),
@@ -253,11 +253,11 @@ mod tests {
 
         assert_eq!(windows.len(), 2);
         // The 2 youngest (i=3,4) must remain; the 3 oldest (i=0..2) must be gone.
-        assert!(!windows.contains_key("listener\0192.168.0.0"));
-        assert!(!windows.contains_key("listener\0192.168.0.1"));
-        assert!(!windows.contains_key("listener\0192.168.0.2"));
-        assert!(windows.contains_key("listener\0192.168.0.3"));
-        assert!(windows.contains_key("listener\0192.168.0.4"));
+        assert!(!windows.contains_key("listener192.168.0.0"));
+        assert!(!windows.contains_key("listener192.168.0.1"));
+        assert!(!windows.contains_key("listener192.168.0.2"));
+        assert!(windows.contains_key("listener192.168.0.3"));
+        assert!(windows.contains_key("listener192.168.0.4"));
     }
 
     #[test]

@@ -11026,7 +11026,7 @@ mod tests {
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri(&format!("/agents/DEAD0003/output?since={id1}"))
+                    .uri(format!("/agents/DEAD0003/output?since={id1}"))
                     .header(API_KEY_HEADER, "secret-reader")
                     .body(Body::empty())
                     .expect("request"),

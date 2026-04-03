@@ -4160,7 +4160,7 @@ mod tests {
     #[tokio::test]
     async fn unknown_callback_probe_audit_limiter_prunes_expired_windows() {
         let limiter = UnknownCallbackProbeAuditLimiter::new();
-        let stale_source = "edge-http\0127.0.0.1".to_owned();
+        let stale_source = format!("{}\0{}", "edge-http", "127.0.0.1");
 
         {
             let mut windows = limiter.windows.lock().await;

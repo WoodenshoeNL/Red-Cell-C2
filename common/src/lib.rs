@@ -24,19 +24,19 @@ mod tests {
 
     #[test]
     fn listener_protocol_round_trips_from_crate_root() {
-        let proto = ListenerProtocol::try_from_str("http").unwrap();
+        let proto = ListenerProtocol::try_from_str("http").expect("unwrap");
         assert_eq!(proto, ListenerProtocol::Http);
     }
 
     #[test]
     fn parse_kill_date_epoch_from_crate_root() {
-        let epoch = parse_kill_date_to_epoch("2030-01-01 00:00:00").unwrap();
+        let epoch = parse_kill_date_to_epoch("2030-01-01 00:00:00").expect("unwrap");
         assert!(epoch > 0, "kill-date epoch should be positive");
     }
 
     #[test]
     fn validate_kill_date_none_from_crate_root() {
-        let result = validate_kill_date(None).unwrap();
+        let result = validate_kill_date(None).expect("unwrap");
         assert!(result.is_none());
     }
 

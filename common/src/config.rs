@@ -1639,7 +1639,7 @@ mod tests {
         let result = Profile::from_reader("{{invalid hcl".as_bytes());
         assert!(result.is_err(), "malformed HCL must return an error");
         assert!(
-            matches!(result.unwrap_err(), ProfileError::Parse(_)),
+            matches!(result.expect_err("expected Err"), ProfileError::Parse(_)),
             "error must be the Parse variant"
         );
     }
@@ -2572,7 +2572,7 @@ mod tests {
         let result = Profile::parse("{completely invalid hcl]");
         assert!(result.is_err(), "malformed HCL must return an error");
         assert!(
-            matches!(result.unwrap_err(), ProfileError::Parse(_)),
+            matches!(result.expect_err("expected Err"), ProfileError::Parse(_)),
             "error must be the Parse variant"
         );
     }
@@ -2585,7 +2585,7 @@ mod tests {
         let result = Profile::from_file(&missing_path);
         assert!(result.is_err(), "missing file must return an error");
 
-        match result.unwrap_err() {
+        match result.expect_err("expected Err") {
             ProfileError::Read { path, .. } => {
                 assert_eq!(
                     path,
@@ -2634,7 +2634,7 @@ mod tests {
             assert!(
                 profile.validate().is_ok(),
                 "expected valid for {url}: {:?}",
-                profile.validate().unwrap_err()
+                profile.validate().expect_err("expected Err")
             );
         }
     }
@@ -2645,7 +2645,7 @@ mod tests {
         assert!(
             profile.validate().is_ok(),
             "discord.com with explicit port 443 should be accepted: {:?}",
-            profile.validate().unwrap_err()
+            profile.validate().expect_err("expected Err")
         );
     }
 
@@ -2904,7 +2904,7 @@ mod tests {
         );
         assert!(result.is_err(), "HCL missing Teamserver block must return an error");
         assert!(
-            matches!(result.unwrap_err(), ProfileError::Parse(_)),
+            matches!(result.expect_err("expected Err"), ProfileError::Parse(_)),
             "error must be the Parse variant"
         );
     }
@@ -2912,7 +2912,7 @@ mod tests {
     #[test]
     fn profile_error_parse_display_format() {
         // Trigger a parse error by passing garbage HCL.
-        let err = Profile::parse("{{{{not valid hcl@@@@").unwrap_err();
+        let err = Profile::parse("{{{{not valid hcl@@@@").expect_err("expected Err");
         let msg = err.to_string();
         assert!(
             msg.starts_with("failed to parse YAOTL profile:"),
@@ -2923,7 +2923,7 @@ mod tests {
     #[test]
     fn profile_error_read_display_contains_path() {
         let missing = "/tmp/red_cell_c2_nonexistent_profile_12345.hcl";
-        let err = Profile::from_file(missing).unwrap_err();
+        let err = Profile::from_file(missing).expect_err("expected Err");
         let msg = err.to_string();
         assert!(
             msg.starts_with("failed to read YAOTL profile from"),

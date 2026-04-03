@@ -1543,7 +1543,7 @@ mod tests {
             .expect("persisted record should exist");
         assert_eq!(persisted.info.external_ip, "203.0.113.99");
         assert_eq!(persisted.ctr_block_offset, 0);
-        assert_eq!(persisted.legacy_ctr, false);
+        assert!(!persisted.legacy_ctr);
         assert_eq!(persisted.listener_name, "smb-pivot");
 
         Ok(())

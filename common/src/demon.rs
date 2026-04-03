@@ -1106,7 +1106,7 @@ mod tests {
         // u32::MAX itself must be accepted — only values above it overflow.
         let len = u32::MAX as usize;
         let result = DemonPackage::checked_payload_len(len);
-        assert_eq!(result.unwrap(), u32::MAX);
+        assert_eq!(result.expect("unwrap"), u32::MAX);
     }
 
     // ── Golden-vector tests ────────────────────────────────────────────────

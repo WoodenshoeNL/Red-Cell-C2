@@ -319,6 +319,7 @@ mod tests {
     }
 
     /// Build one session's fixed fields (before tickets) into `buf`.
+    #[allow(clippy::too_many_arguments)]
     fn push_session_header(
         buf: &mut Vec<u8>,
         username: &str,
@@ -353,6 +354,7 @@ mod tests {
     }
 
     /// Build one ticket entry into `buf`.
+    #[allow(clippy::too_many_arguments)]
     fn push_ticket(
         buf: &mut Vec<u8>,
         client_name: &str,

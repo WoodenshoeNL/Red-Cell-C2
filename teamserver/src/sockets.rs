@@ -2360,8 +2360,7 @@ mod tests {
 
         // Spread clients across multiple agents to hit the global limit without hitting
         // the per-agent limit. We need MAX_GLOBAL_SOCKETS total clients.
-        let agents_needed = (super::MAX_GLOBAL_SOCKETS + super::MAX_SOCKETS_PER_AGENT - 1)
-            / super::MAX_SOCKETS_PER_AGENT;
+        let agents_needed = super::MAX_GLOBAL_SOCKETS.div_ceil(super::MAX_SOCKETS_PER_AGENT);
         let clients_per_agent = super::MAX_GLOBAL_SOCKETS / agents_needed;
 
         for agent_idx in 0..agents_needed {
@@ -2442,7 +2441,7 @@ mod tests {
         let (_database, registry, manager) = test_manager().await?;
 
         // Fill up to the listener limit by inserting fake server handles.
-        let agents_needed = (super::MAX_RELAY_LISTENERS + 9) / 10; // ≤10 servers per agent
+        let agents_needed = super::MAX_RELAY_LISTENERS.div_ceil(10); // ≤10 servers per agent
         for agent_idx in 0..agents_needed {
             let agent_id = (agent_idx as u32) + 1;
             registry.insert(sample_agent(agent_id)).await?;

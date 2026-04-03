@@ -2394,7 +2394,7 @@ mod tests {
         let event = receiver
             .recv()
             .await
-            .ok_or_else(|| "expected an operator event after pivot connect failure")?;
+            .ok_or("expected an operator event after pivot connect failure")?;
         let OperatorMessage::AgentResponse(msg) = event else {
             return Err(format!("expected AgentResponse, got {event:?}").into());
         };
@@ -2466,7 +2466,7 @@ mod tests {
         let event = receiver
             .recv()
             .await
-            .ok_or_else(|| "expected an operator event after pivot disconnect failure")?;
+            .ok_or("expected an operator event after pivot disconnect failure")?;
         let OperatorMessage::AgentResponse(msg) = event else {
             return Err(format!("expected AgentResponse, got {event:?}").into());
         };
@@ -2685,8 +2685,7 @@ mod tests {
             .await?;
 
         assert_eq!(response, None);
-        let event =
-            receiver.recv().await.ok_or_else(|| "expected error event for unknown error code")?;
+        let event = receiver.recv().await.ok_or("expected error event for unknown error code")?;
         let OperatorMessage::AgentResponse(msg) = event else {
             return Err(format!("expected AgentResponse, got {event:?}").into());
         };
@@ -2758,7 +2757,7 @@ mod tests {
         let event = receiver
             .recv()
             .await
-            .ok_or_else(|| "expected AgentUpdate event for disconnected child")?;
+            .ok_or("expected AgentUpdate event for disconnected child")?;
         let OperatorMessage::AgentUpdate(mark_msg) = event else {
             return Err(format!("expected AgentUpdate (mark), got {event:?}").into());
         };
@@ -2767,7 +2766,7 @@ mod tests {
 
         // Second event: AgentResponse with Info about successful disconnect.
         let event =
-            receiver.recv().await.ok_or_else(|| "expected AgentResponse event after disconnect")?;
+            receiver.recv().await.ok_or("expected AgentResponse event after disconnect")?;
         let OperatorMessage::AgentResponse(resp_msg) = event else {
             return Err(format!("expected AgentResponse, got {event:?}").into());
         };
@@ -2836,7 +2835,7 @@ mod tests {
 
         // With no link, disconnect_link returns empty affected list, so the only event
         // should be the AgentResponse Info — no AgentUpdate marks.
-        let event = receiver.recv().await.ok_or_else(|| "expected AgentResponse event")?;
+        let event = receiver.recv().await.ok_or("expected AgentResponse event")?;
         let OperatorMessage::AgentResponse(resp_msg) = event else {
             return Err(format!("expected AgentResponse, got {event:?}").into());
         };

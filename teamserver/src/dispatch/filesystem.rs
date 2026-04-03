@@ -831,7 +831,7 @@ mod tests {
 
         // No MiscType for non-explorer mode
         assert!(
-            msg.info.extra.get("MiscType").is_none(),
+            !msg.info.extra.contains_key("MiscType"),
             "non-explorer Dir should not set MiscType"
         );
     }
@@ -2080,7 +2080,7 @@ mod tests {
         assert_eq!(message, "Directory listing completed");
 
         // No MiscType in normal mode
-        assert!(msg.info.extra.get("MiscType").is_none());
+        assert!(!msg.info.extra.contains_key("MiscType"));
     }
 
     // ---------------------------------------------------------------

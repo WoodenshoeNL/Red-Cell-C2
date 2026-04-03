@@ -974,7 +974,6 @@ struct SmbListenerState {
     parser: DemonPacketParser,
     events: EventBus,
     dispatcher: CommandDispatcher,
-    demon_init_rate_limiter: DemonInitRateLimiter,
     unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
     shutdown: ShutdownController,
 }
@@ -992,7 +991,8 @@ pub struct ExternalListenerState {
     events: EventBus,
     dispatcher: CommandDispatcher,
     /// Per-IP rate limiter for `DEMON_INIT` requests — same gate used by
-    /// HTTP, SMB, and DNS listeners.
+    /// HTTP and DNS listeners (SMB uses per-connection admission; see
+    /// `handle_smb_connection`).
     demon_init_rate_limiter: DemonInitRateLimiter,
     unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
     shutdown: ShutdownController,
@@ -1143,7 +1143,6 @@ impl SmbListenerState {
         sockets: SocketRelayManager,
         plugins: Option<PluginRuntime>,
         downloads: DownloadTracker,
-        demon_init_rate_limiter: DemonInitRateLimiter,
         unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
         shutdown: ShutdownController,
         init_secret: Option<Vec<u8>>,
@@ -1156,7 +1155,6 @@ impl SmbListenerState {
             parser: DemonPacketParser::with_init_secret(registry.clone(), init_secret)
                 .with_allow_legacy_ctr(allow_legacy_ctr),
             events: events.clone(),
-            demon_init_rate_limiter,
             unknown_callback_probe_audit_limiter,
             shutdown,
             dispatcher: CommandDispatcher::with_builtin_handlers_and_downloads(
@@ -1826,6 +1824,38 @@ async fn allow_demon_init_for_ip(
     false
 }
 
+/// Sliding-window admission for full `DEMON_INIT` registrations on a single SMB named-pipe
+/// connection.  Unlike HTTP/DNS/External, SMB has no trustworthy remote IP; the only stable
+/// transport identity is the connection itself, so we key the limiter here instead of using a
+/// synthetic IPv4 derived from `agent_id` (which an attacker could rotate to bypass throttling).
+async fn allow_demon_init_for_smb_connection(
+    listener_name: &str,
+    window: &Mutex<AttemptWindow>,
+    body: &[u8],
+) -> bool {
+    if classify_demon_transport(body) != Some(DemonTransportKind::Init) {
+        return true;
+    }
+
+    let mut w = window.lock().await;
+    let now = Instant::now();
+    if now.duration_since(w.window_start) >= DEMON_INIT_WINDOW_DURATION {
+        w.attempts = 0;
+        w.window_start = now;
+    }
+    if w.attempts >= MAX_DEMON_INIT_ATTEMPTS_PER_IP {
+        warn!(
+            listener = listener_name,
+            max_attempts = MAX_DEMON_INIT_ATTEMPTS_PER_IP,
+            window_seconds = DEMON_INIT_WINDOW_DURATION.as_secs(),
+            "rejecting DEMON_INIT because the per-SMB-connection rate limit was exceeded"
+        );
+        return false;
+    }
+    w.attempts += 1;
+    true
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn spawn_smb_listener_runtime(
     config: &SmbListenerConfig,
@@ -1835,7 +1865,6 @@ async fn spawn_smb_listener_runtime(
     sockets: SocketRelayManager,
     plugins: Option<PluginRuntime>,
     downloads: DownloadTracker,
-    demon_init_rate_limiter: DemonInitRateLimiter,
     unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
     shutdown: ShutdownController,
     init_secret: Option<Vec<u8>>,
@@ -1849,7 +1878,6 @@ async fn spawn_smb_listener_runtime(
         sockets,
         plugins,
         downloads,
-        demon_init_rate_limiter,
         unknown_callback_probe_audit_limiter,
         shutdown,
         init_secret,
@@ -1898,6 +1926,7 @@ async fn spawn_smb_listener_runtime(
 }
 
 async fn handle_smb_connection(state: Arc<SmbListenerState>, mut stream: LocalSocketStream) {
+    let demon_init_window = Mutex::new(AttemptWindow::default());
     loop {
         if state.shutdown.is_shutting_down() {
             break;
@@ -1925,15 +1954,14 @@ async fn handle_smb_connection(state: Arc<SmbListenerState>, mut stream: LocalSo
             break;
         };
 
-        // SMB runs over a local named pipe so there is no real remote IP address.
-        // Derive a synthetic IPv4 from the agent_id so that the per-IP rate limiter
-        // gives each agent its own token bucket rather than sharing one global bucket
-        // under 127.0.0.1.
+        // SMB runs over a local named pipe — no trustworthy remote IP.  Keep operator-facing
+        // `external_ip` as a deterministic IPv4 derived from `agent_id` (Havoc-compatible),
+        // but rate-limit full DEMON_INIT registrations per named-pipe connection (not per
+        // attacker-chosen agent_id).
         let client_ip = IpAddr::V4(Ipv4Addr::from(frame.agent_id.to_be_bytes()));
-        if !allow_demon_init_for_ip(
+        if !allow_demon_init_for_smb_connection(
             &state.config.name,
-            &state.demon_init_rate_limiter,
-            client_ip,
+            &demon_init_window,
             &frame.payload,
         )
         .await
@@ -2206,7 +2234,6 @@ impl ListenerManager {
                     self.sockets.clone(),
                     self.plugins.clone(),
                     self.downloads.clone(),
-                    self.demon_init_rate_limiter.clone(),
                     self.unknown_callback_probe_audit_limiter.clone(),
                     self.shutdown.clone(),
                     self.demon_init_secret.clone(),
@@ -5921,7 +5948,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn smb_listener_rate_limits_demon_init_per_agent_id()
+    async fn smb_listener_rate_limits_demon_init_per_named_pipe_connection()
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::connect_in_memory().await?;
         let registry = AgentRegistry::new(database.clone());
@@ -5935,13 +5962,12 @@ mod tests {
         manager.start("edge-smb-init-limit").await?;
         wait_for_smb_listener(&pipe_name).await?;
 
-        // Part 1 — distinct agent_ids must NOT share a rate-limit bucket.
-        // Each of the MAX agents should INIT successfully even though they arrive on
-        // the same connection.  An additional agent (0x2000_00FF) must also succeed,
-        // proving that the old shared-127.0.0.1 bucket no longer exists.
+        // On one named-pipe connection, each full DEMON_INIT counts against the same sliding
+        // window — rotating `agent_id` must not grant a fresh bucket (regression for
+        // synthetic-IPv4 keying).
         let mut stream = connect_smb_stream(&pipe_name).await?;
         for attempt in 0..MAX_DEMON_INIT_ATTEMPTS_PER_IP {
-            let agent_id = 0x2000_0000 + attempt;
+            let agent_id = 0x5000_0000 + attempt;
             write_test_smb_frame(
                 &mut stream,
                 agent_id,
@@ -5955,76 +5981,38 @@ mod tests {
             assert!(registry.get(agent_id).await.is_some());
         }
 
-        // This agent has a fresh per-agent_id bucket and must not be blocked.
-        let extra_agent_id = 0x2000_00FF_u32;
+        let rotated_id = 0x5000_00FF_u32;
         write_test_smb_frame(
             &mut stream,
-            extra_agent_id,
-            &valid_demon_init_body(extra_agent_id, test_key(0x41), test_iv(0x24)),
-        )
-        .await?;
-        let (extra_resp_id, extra_resp) = read_test_smb_frame(&mut stream).await?;
-        assert_eq!(extra_resp_id, extra_agent_id);
-        assert!(!extra_resp.is_empty(), "extra agent with fresh bucket must receive an ack");
-        assert!(registry.get(extra_agent_id).await.is_some());
-
-        // Part 2 — the same agent_id IS blocked after MAX_DEMON_INIT_ATTEMPTS_PER_IP
-        // attempts.  The synthetic IPv4 is derived from agent_id so repeat attempts
-        // for the same ID share one token bucket.
-        //
-        // Attempt 1: INIT succeeds and registers the agent.
-        // Attempts 2–MAX: duplicate INITs for an already-registered agent are silently
-        // dropped by process_demon_transport, but the rate-limiter still consumes a
-        // token for each one before dispatch.
-        // Attempt MAX+1: rate-limiter blocks.
-        let repeated_agent_id = 0x3000_0000_u32;
-        let repeated_key = test_key(0x51);
-        let repeated_iv = test_iv(0x25);
-
-        let mut rate_stream = connect_smb_stream(&pipe_name).await?;
-
-        // First attempt — must succeed.
-        write_test_smb_frame(
-            &mut rate_stream,
-            repeated_agent_id,
-            &valid_demon_init_body(repeated_agent_id, repeated_key, repeated_iv),
-        )
-        .await?;
-        let (r_id, r_resp) = read_test_smb_frame(&mut rate_stream).await?;
-        assert_eq!(r_id, repeated_agent_id);
-        assert!(!r_resp.is_empty());
-        assert!(registry.get(repeated_agent_id).await.is_some());
-
-        // Attempts 2 through MAX — each consumes a rate-limit token.  Re-registration
-        // is now accepted (not silently dropped), so each attempt produces an ack that
-        // must be drained before we check the rate-limited attempt.
-        for _ in 1..MAX_DEMON_INIT_ATTEMPTS_PER_IP {
-            write_test_smb_frame(
-                &mut rate_stream,
-                repeated_agent_id,
-                &valid_demon_init_body(repeated_agent_id, repeated_key, repeated_iv),
-            )
-            .await?;
-        }
-        // Drain re-registration acks from attempts 2-MAX.
-        for _ in 1..MAX_DEMON_INIT_ATTEMPTS_PER_IP {
-            tokio::time::timeout(Duration::from_millis(500), read_test_smb_frame(&mut rate_stream))
-                .await
-                .expect("re-registration ack must arrive within timeout")
-                .expect("re-registration ack read must succeed");
-        }
-
-        // Attempt MAX+1 — rate-limiter must block.
-        write_test_smb_frame(
-            &mut rate_stream,
-            repeated_agent_id,
-            &valid_demon_init_body(repeated_agent_id, repeated_key, repeated_iv),
+            rotated_id,
+            &valid_demon_init_body(rotated_id, test_key(0x42), test_iv(0x26)),
         )
         .await?;
         let blocked =
-            tokio::time::timeout(Duration::from_millis(250), read_test_smb_frame(&mut rate_stream))
+            tokio::time::timeout(Duration::from_millis(250), read_test_smb_frame(&mut stream))
                 .await;
-        assert!(blocked.is_err(), "rate-limited SMB init should not receive an ack");
+        assert!(
+            blocked.is_err(),
+            "sixth DEMON_INIT on the same SMB connection must be rate-limited even with a new agent_id"
+        );
+        assert!(
+            registry.get(rotated_id).await.is_none(),
+            "rate-limited init must not register a new agent"
+        );
+
+        // A new connection gets its own window — one more full DEMON_INIT must succeed.
+        let mut stream2 = connect_smb_stream(&pipe_name).await?;
+        let fresh_id = 0x6000_0001_u32;
+        write_test_smb_frame(
+            &mut stream2,
+            fresh_id,
+            &valid_demon_init_body(fresh_id, test_key(0x43), test_iv(0x27)),
+        )
+        .await?;
+        let (ack_id, ack) = read_test_smb_frame(&mut stream2).await?;
+        assert_eq!(ack_id, fresh_id);
+        assert!(!ack.is_empty());
+        assert!(registry.get(fresh_id).await.is_some());
 
         manager.stop("edge-smb-init-limit").await?;
         Ok(())
@@ -7031,7 +7019,6 @@ mod tests {
             sockets,
             None,
             DownloadTracker::from_max_download_bytes(super::DEFAULT_MAX_DOWNLOAD_BYTES),
-            DemonInitRateLimiter::new(),
             UnknownCallbackProbeAuditLimiter::new(),
             shutdown,
             None,

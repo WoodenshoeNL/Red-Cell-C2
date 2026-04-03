@@ -510,4 +510,41 @@ mod tests {
     fn set_role_validation_accepts_analyst() {
         assert!(validate_role("analyst").is_ok());
     }
+
+    // ── help-surface drift prevention ────────────────────────────────────────
+
+    /// Ensure the `operator set-role` help text documents exactly the roles
+    /// accepted by [`VALID_ROLES`], preventing future drift between CLI docs
+    /// and validation logic.
+    #[test]
+    fn set_role_help_documents_only_valid_roles() {
+        use clap::CommandFactory;
+        let cmd = crate::Cli::command();
+        let operator = cmd
+            .get_subcommands()
+            .find(|c| c.get_name() == "operator")
+            .expect("operator subcommand exists");
+        let set_role = operator
+            .get_subcommands()
+            .find(|c| c.get_name() == "set-role")
+            .expect("set-role subcommand exists");
+
+        let mut buf = Vec::new();
+        set_role.clone().write_help(&mut buf).expect("render help");
+        let help = String::from_utf8(buf).expect("valid utf-8");
+
+        // Every valid role must appear in the help text.
+        for role in VALID_ROLES {
+            assert!(
+                help.contains(role),
+                "help text must mention valid role '{role}' but was:\n{help}"
+            );
+        }
+
+        // The retired `viewer` role must not appear.
+        assert!(
+            !help.contains("viewer"),
+            "help text must NOT mention retired role 'viewer' but was:\n{help}"
+        );
+    }
 }

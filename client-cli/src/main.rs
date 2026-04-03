@@ -509,12 +509,12 @@ pub enum OperatorCommands {
     ///
     /// Examples:
     ///   red-cell-cli operator set-role alice admin
-    ///   red-cell-cli operator set-role bob   viewer
+    ///   red-cell-cli operator set-role bob   analyst
     #[command(verbatim_doc_comment)]
     SetRole {
         /// Operator username
         username: String,
-        /// New role (admin, operator, viewer)
+        /// New role (admin, operator, analyst)
         role: String,
     },
 }

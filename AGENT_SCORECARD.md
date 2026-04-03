@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1147 | 248 | 33 |
-| Bugs filed against | 184 | 38 | 9 |
+| Tasks closed | 1148 | 248 | 33 |
+| Bugs filed against | 185 | 38 | 9 |
 | Bug rate (bugs/task) | 0.16 | 0.15 | 0.27 |
 | Quality score | 84% | 85% | 73% |
 
-*Bug rates: Claude 184/1147=0.1604→0.16, Codex 38/248=0.1532→0.15, Cursor 9/33=0.2727→0.27*
+*Bug rates: Claude 185/1148=0.1611→0.16, Codex 38/248=0.1532→0.15, Cursor 9/33=0.2727→0.27*
 
 ## Violation Breakdown
 
@@ -32,7 +32,7 @@ Each loop run updates the running totals and appends a review entry.
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 3 | 5 | 0 |
 | Correctness / pagination | 64 | 8 | 1 |
-| Workflow / close-hygiene | 31 | 0 | 0 |
+| Workflow / close-hygiene | 32 | 0 | 0 |
 | Code reuse / duplication | 10 | 0 | 0 |
 
 ---
@@ -5446,3 +5446,13 @@ Build: skipped for the reviewed range because `fd98353d..2271a925` contains only
 | Cursor | 0 | 0 | No activity in this range. |
 
 Build: the reviewed range contains only the prior QA checkpoint/scorecard commit, so no product-code diffs required targeted file review. `cargo check --workspace` passed on `43fe3fd7`. `cargo nextest run --workspace` is still running after clearing at least 2,073/4,994 tests with no failures observed; the only diagnostics seen are the already-open Phantom test unused-import warnings tracked by `red-cell-c2-nkdoq`. `CARGO_TARGET_DIR=$(mktemp -d /tmp/red-cell-qa-clippy-XXXXXX) cargo clippy --workspace -- -D warnings` is still compiling with no diagnostics emitted so far. `br list --status=in_progress` is empty, and `br list --status=open | head -30` plus `br ready | head -20` remain consistent with the current backlog; no stale close mismatch or newly untracked regression was identified in this pass.
+
+### QA Review — 2026-04-03 08:36 — 43fe3fd7..03070796
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 1 | Closed `red-cell-c2-lxpdw` via `d0aea259`, but the WebSocket session contract remains unimplemented; filed `red-cell-c2-nfx9e` for the premature close. |
+| Codex | 0 | 0 | No Codex-attributed commits in this range. |
+| Cursor | 0 | 0 | No activity in this range. |
+
+Build: `cargo check --workspace` passed on `03070796` in isolated worktree `/tmp/red-cell-qa-review-RZSmc0`. `cargo nextest run --workspace` is still running with no failures observed; the only diagnostics emitted so far are the already-open Phantom unused-import warnings tracked by `red-cell-c2-nkdoq`. `CARGO_TARGET_DIR=$(mktemp -d /tmp/red-cell-qa-clippy-XXXXXX) cargo clippy --workspace -- -D warnings` is still compiling with no diagnostics emitted so far. `br list --status=in_progress` shows `red-cell-c2-n5euj` still in progress, which is consistent with the unresolved session-mode WebSocket work. Filed `red-cell-c2-ciamf` for the new `loop.py` active-worktree cleanup regression introduced by the unattributed `360c3e4d` commit.

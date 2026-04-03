@@ -6,8 +6,9 @@ modern tooling.
 
 ## Status
 
-~95% feature-complete. Do not re-implement existing functionality — read this
-file and the source before adding new code.
+~100% feature-complete (Demon protocol parity). Do not re-implement existing
+functionality — read this file and the source before adding new code.
+See `GAP_ANALYSIS.md` for the full command-by-command inventory.
 
 ### What is implemented
 
@@ -23,7 +24,7 @@ file and the source before adding new code.
   - `COMMAND_PROC_LIST` — full process snapshot
   - `COMMAND_PROC_PPID_SPOOF` — parent-PID spoofing
   - `COMMAND_NET` — domain, logons, sessions, name-list, shares, groups,
-    users, Computer (stub), DcList (stub — see `red-cell-c2-5la4k`)
+    users, Computer (NetServerEnum), DcList (NetServerEnum)
   - `COMMAND_TOKEN` — impersonate, steal, list, privs, make, getuid, revert,
     remove, clear, find
   - `COMMAND_KERBEROS` — luid, klist, purge, ptt
@@ -48,11 +49,8 @@ file and the source before adding new code.
 
 ### Known gaps (open issues)
 
-| Issue | Description |
-|---|---|
-| `red-cell-c2-5la4k` | NetComputer and NetDcList return empty — real domain recon not yet wired up |
-| `red-cell-c2-9aq7r` | PE header stomping and heap encryption at rest |
-| `red-cell-c2-s79pa` | DNS-over-HTTPS fallback transport |
+None — all previously identified gaps have been resolved. See `GAP_ANALYSIS.md`
+for the full audit (red-cell-c2-lmgs5).
 
 ### AES-CTR model note
 

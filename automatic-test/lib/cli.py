@@ -77,8 +77,25 @@ def _run(cfg: CliConfig, *args: str) -> dict[str, Any]:
         data = {}
 
     if result.returncode != 0 or not data.get("ok", True):
-        error = data.get("error", "UNKNOWN")
-        msg = data.get("message", result.stderr.strip() or "no message")
+        # Try to parse stderr as a structured error envelope so that machine-
+        # readable error codes survive even when stdout is empty or bare text.
+        stderr_data: dict[str, Any] = {}
+        stderr_raw = result.stderr.strip()
+        if stderr_raw:
+            try:
+                parsed = json.loads(stderr_raw)
+                if isinstance(parsed, dict):
+                    stderr_data = parsed
+            except json.JSONDecodeError:
+                pass
+
+        error = data.get("error") or stderr_data.get("error") or "UNKNOWN"
+        msg = (
+            data.get("message")
+            or stderr_data.get("message")
+            or stderr_raw
+            or "no message"
+        )
         raise CliError(error, msg, result.returncode)
 
     return data.get("data", data)

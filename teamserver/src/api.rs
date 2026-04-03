@@ -3271,8 +3271,16 @@ struct PayloadBuildRequest {
     arch: String,
     /// Desired output format: `"exe"`, `"dll"`, or `"bin"`.
     format: String,
+    /// Agent type to build: `"demon"`, `"archon"`, `"phantom"`, or `"specter"`.
+    /// Defaults to `"demon"` when omitted.
+    #[serde(default = "default_agent_type")]
+    agent: String,
     /// Optional agent sleep interval in seconds.
     sleep: Option<u64>,
+}
+
+fn default_agent_type() -> String {
+    "demon".to_owned()
 }
 
 /// Response returned by `POST /payloads/build`.
@@ -3304,6 +3312,22 @@ fn cli_format_to_havoc(format: &str) -> Result<&'static str, String> {
         "dll" => Ok("Windows Dll"),
         "bin" => Ok("Windows Shellcode"),
         other => Err(format!("unsupported format '{other}': expected exe, dll, or bin")),
+    }
+}
+
+/// Normalize a CLI agent type string (case-insensitive) to the canonical
+/// PascalCase name expected by the payload builder.
+///
+/// Returns `Err` with a user-facing message for unrecognised values.
+fn normalize_agent_type(agent: &str) -> Result<&'static str, String> {
+    match agent.to_lowercase().as_str() {
+        "demon" => Ok("Demon"),
+        "archon" => Ok("Archon"),
+        "phantom" => Ok("Phantom"),
+        "specter" => Ok("Specter"),
+        other => Err(format!(
+            "unsupported agent type '{other}': expected demon, archon, phantom, or specter"
+        )),
     }
 }
 
@@ -3380,6 +3404,14 @@ async fn submit_payload_build(
         }
     };
 
+    // Validate and normalise agent type.
+    let agent_type = match normalize_agent_type(&request.agent) {
+        Ok(a) => a,
+        Err(msg) => {
+            return json_error_response(StatusCode::BAD_REQUEST, "invalid_agent_type", msg);
+        }
+    };
+
     // Validate architecture.
     if !matches!(request.arch.as_str(), "x64" | "x86") {
         return json_error_response(
@@ -3448,7 +3480,7 @@ async fn submit_payload_build(
     let build_job_id = job_id.clone();
 
     let build_request = red_cell_common::operator::BuildPayloadRequestInfo {
-        agent_type: "Demon".to_owned(),
+        agent_type: agent_type.to_owned(),
         listener: request.listener.clone(),
         arch: request.arch.clone(),
         format: havoc_format.to_owned(),
@@ -9763,6 +9795,117 @@ mod tests {
     fn cli_format_to_havoc_rejects_unknown_formats() {
         assert!(cli_format_to_havoc("elf").is_err());
         assert!(cli_format_to_havoc("").is_err());
+    }
+
+    // ── normalize_agent_type unit tests ─────────────────────────────────
+
+    #[test]
+    fn normalize_agent_type_maps_all_valid_types() {
+        assert_eq!(normalize_agent_type("demon"), Ok("Demon"));
+        assert_eq!(normalize_agent_type("archon"), Ok("Archon"));
+        assert_eq!(normalize_agent_type("phantom"), Ok("Phantom"));
+        assert_eq!(normalize_agent_type("specter"), Ok("Specter"));
+    }
+
+    #[test]
+    fn normalize_agent_type_is_case_insensitive() {
+        assert_eq!(normalize_agent_type("Demon"), Ok("Demon"));
+        assert_eq!(normalize_agent_type("ARCHON"), Ok("Archon"));
+        assert_eq!(normalize_agent_type("Phantom"), Ok("Phantom"));
+        assert_eq!(normalize_agent_type("SPECTER"), Ok("Specter"));
+    }
+
+    #[test]
+    fn normalize_agent_type_rejects_unknown() {
+        assert!(normalize_agent_type("alien").is_err());
+        assert!(normalize_agent_type("").is_err());
+        assert!(normalize_agent_type("Shellcode").is_err());
+    }
+
+    // ── payload build agent-type API tests ──────────────────────────────
+
+    #[tokio::test]
+    async fn payload_build_rejects_unsupported_agent_type() {
+        let app =
+            test_router(Some((60, "operator", "secret-operator", OperatorRole::Operator))).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/payloads/build")
+                    .header(API_KEY_HEADER, "secret-operator")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"listener":"http1","arch":"x64","format":"exe","agent":"alien"}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(json["error"]["code"], "invalid_agent_type");
+    }
+
+    #[tokio::test]
+    async fn payload_build_accepts_all_valid_agent_types() {
+        // The listener doesn't exist so we expect 404 (listener_not_found), not a
+        // 400 agent-validation error.  That proves the agent value passed validation.
+        for agent in &["demon", "archon", "phantom", "specter"] {
+            let app =
+                test_router(Some((60, "operator", "secret-operator", OperatorRole::Operator)))
+                    .await;
+            let body =
+                serde_json::json!({"listener":"nonexistent","arch":"x64","format":"exe","agent": agent})
+                    .to_string();
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/payloads/build")
+                        .header(API_KEY_HEADER, "secret-operator")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+
+            // 404 means agent validation passed and we reached the listener lookup.
+            assert_eq!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "expected 404 for agent={agent}, got {}",
+                response.status()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn payload_build_defaults_to_demon_when_agent_omitted() {
+        // Without an `agent` field the default "demon" value should apply, so
+        // validation passes and we fail at the listener lookup (404) rather
+        // than at agent validation (400).
+        let app =
+            test_router(Some((60, "operator", "secret-operator", OperatorRole::Operator))).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/payloads/build")
+                    .header(API_KEY_HEADER, "secret-operator")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"listener":"nonexistent","arch":"x64","format":"exe"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     // ── PayloadBuildRepository unit tests ────────────────────────────────

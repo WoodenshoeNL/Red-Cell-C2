@@ -507,8 +507,8 @@ where
         None => LoopControl::Exit(EXIT_SUCCESS),
 
         Some(Err(e)) => {
-            use tokio_tungstenite::tungstenite::error::ProtocolError;
             use tokio_tungstenite::tungstenite::Error as WsErr;
+            use tokio_tungstenite::tungstenite::error::ProtocolError;
             // Connection-closed variants indicate the server has ended the
             // session — treat them as a clean exit rather than an error.
             match &e {

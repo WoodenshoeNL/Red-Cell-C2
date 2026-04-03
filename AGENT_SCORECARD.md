@@ -10,11 +10,11 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 1172 | 249 | 42 |
-| Bugs filed against | 190 | 40 | 10 |
+| Bugs filed against | 191 | 40 | 10 |
 | Bug rate (bugs/task) | 0.16 | 0.16 | 0.24 |
 | Quality score | 84% | 84% | 76% |
 
-*Bug rates: Claude 190/1172=0.1621→0.16, Codex 40/249=0.1606→0.16, Cursor 10/42=0.2381→0.24*
+*Bug rates: Claude 191/1172=0.1630→0.16, Codex 40/249=0.1606→0.16, Cursor 10/42=0.2381→0.24*
 
 ## Violation Breakdown
 
@@ -24,7 +24,7 @@ Each loop run updates the running totals and appends a review entry.
 | Missing tests / stale tests | 70 | 19 | 5 |
 | Clippy warnings | 11 | 0 | 1 |
 | Protocol errors | 30 | 32 | 3 |
-| Security issues | 57 | 39 | 0 |
+| Security issues | 58 | 39 | 0 |
 | Architecture drift | 25 | 25 | 1 |
 | Memory / resource leaks | 11 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 9 | 0 |
@@ -5691,3 +5691,13 @@ Build: `cargo check --workspace` passed (1 warning — unused `CallbackSeqError`
 Build: `cargo check --workspace` passed. `cargo clippy --workspace -- -D warnings` **failed** — 1 new error: `clippy::needless-lifetimes` in `common/src/callback_seq.rs:92` (red-cell-c2-jtpjr, blocks pg0al). The unused-import error (red-cell-c2-asvj8) was not reached due to upstream failure. `cargo nextest run --workspace` ran 2682/4987 tests before halting on the pre-existing `repeated_wrong_passwords_trigger_rate_limiter_lockout` flake (red-cell-c2-lygl7); 2681 passed, 1 known fail.
 
 Overall codebase health: stable on committed code; WIP seq-protection branch has 3 blocking clippy/correctness issues before it can land.
+
+### QA Review — 2026-04-04 00:30 — 7db1572a..d79d9010
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 1 | Reviewed WIP seq-protection code (red-cell-c2-pg0al). Filed `red-cell-c2-6ae3y` (P2): TOCTOU race in `check_callback_seq`/`advance_last_seen_seq` — concurrent callbacks can pass seq validation before seq is advanced. Pre-existing tracked issues: oxylj (expect() in prod), jtpjr (needless lifetime, auto-fixed by linter), asvj8 (unused import, appears fixed in WIP), pt7rr (agent-side seq not implemented). |
+| Codex | 0 | 0 | No activity in review range. |
+| Cursor | 0 | 0 | No activity in review range. |
+
+Build: `cargo check --workspace` passed. `cargo clippy --workspace -- -D warnings` passed (needless_lifetimes auto-fixed by linter in callback_seq.rs). `cargo nextest run --workspace` 4999/4999 passed (1 pre-existing flaky timeout in rate_limiter_lockout test, known as red-cell-c2-lygl7). WIP uncommitted changes (callback_seq module + agents/database/demon.rs additions) compile and test clean — blocked on pt7rr (agent side) and 6ae3y (TOCTOU) before pg0al can land.

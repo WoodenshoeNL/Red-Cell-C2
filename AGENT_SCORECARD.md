@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1166 | 249 | 36 |
-| Bugs filed against | 187 | 38 | 9 |
+| Tasks closed | 1169 | 249 | 36 |
+| Bugs filed against | 188 | 38 | 9 |
 | Bug rate (bugs/task) | 0.16 | 0.15 | 0.25 |
 | Quality score | 84% | 85% | 75% |
 
-*Bug rates: Claude 187/1166=0.1604→0.16, Codex 38/249=0.1526→0.15, Cursor 9/36=0.2500→0.25*
+*Bug rates: Claude 188/1169=0.1608→0.16, Codex 38/249=0.1526→0.15, Cursor 9/36=0.2500→0.25*
 
 ## Violation Breakdown
 
@@ -22,7 +22,7 @@ Each loop run updates the running totals and appends a review entry.
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 9 | 0 | 0 |
 | Missing tests / stale tests | 70 | 18 | 5 |
-| Clippy warnings | 9 | 0 | 1 |
+| Clippy warnings | 10 | 0 | 1 |
 | Protocol errors | 30 | 32 | 3 |
 | Security issues | 57 | 39 | 0 |
 | Architecture drift | 24 | 25 | 0 |
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-03 12:53 — 246d20d0..40dabe4f
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 3 | 1 | Closed `red-cell-c2-7fod4`, `red-cell-c2-aj1be`, and `red-cell-c2-3r4to`. Reviewed the committed `client-cli` role-help fix plus the live teamserver DoH WIP in the working tree. Filed `red-cell-c2-qlmcg` because the uncommitted `teamserver/src/listeners.rs` DoH changes break `cargo nextest` with missing symbols and break `cargo clippy` with an `E0382` moved-value error. |
+| Codex | 0 | 0 | No Codex-attributed product commits in this range. |
+| Cursor | 0 | 0 | No activity in this range. |
+
+Build: `cargo check --workspace` passed. `cargo nextest run --workspace` failed while compiling `teamserver/src/listeners.rs` (`build_dns_nxdomain_response` / `enforce_doh_response_caps` missing in the active DoH WIP). `cargo clippy --workspace -- -D warnings` also failed in the same file with `E0382` after moving `session` into `try_assemble_doh_upload(...)`. `br list --status=in_progress` shows `red-cell-c2-mn9zk` and `red-cell-c2-7bcrc`; the new build-break issue was filed separately as `red-cell-c2-qlmcg`.
 
 ### QA Review — 2026-04-03 12:20 — d00724fc..246d20d0
 

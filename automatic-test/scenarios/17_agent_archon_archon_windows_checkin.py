@@ -5,19 +5,18 @@ Archon is a C/ASM fork of Demon.  This scenario exercises the Archon-specific
 test surface: build via Makefile, Windows checkin, and any Archon-specific
 command extensions that exist at the time of the run.
 
-While Archon is still byte-for-byte identical to Demon the scenario will be
-skipped automatically (the payload build will fail with an ``archon`` type
-unknown to the teamserver).  As soon as the teamserver recognises an
-``archon`` agent type this scenario becomes active with no further changes
-needed.
+The scenario is skip-gated only when ``"archon"`` is absent from
+``agents.available`` in env.toml. If Archon is configured as available,
+any payload build failure is treated as a hard failure so the harness does
+not silently fall back to Demon semantics.
 
 Skip conditions:
   - ctx.windows is None (no Windows target configured)
-  - Archon payload build fails (agent not yet registered with the teamserver)
+  - ``"archon"`` is not listed in ``agents.available`` in env.toml
 
 Steps:
   1. Create + start HTTP listener
-  2. Build Archon payload (EXE x64) — skip if teamserver rejects agent type
+  2. Build Archon payload (EXE x64)
   3. Deploy via SSH/SCP to Windows 11 test machine
   4. Execute payload in background on target
   5. Wait for agent checkin
@@ -91,15 +90,16 @@ def run(ctx) -> None:
 
     Raises:
         AssertionError with a descriptive message on any test failure.
-        ScenarioSkipped when no Windows target is configured or when the
-        Archon payload build fails (agent not yet diverged from Demon).
+        ScenarioSkipped when no Windows target is configured or when Archon
+        is not enabled in ``agents.available``.
     """
     if ctx.windows is None:
         raise ScenarioSkipped("ctx.windows is None — no Windows target configured")
+    available_agents = set(ctx.env.get("agents", {}).get("available", ["demon"]))
+    if "archon" not in available_agents:
+        raise ScenarioSkipped("'archon' not listed in agents.available")
 
     from lib.cli import (
-        AgentNotSupportedError,
-        CliError,
         agent_exec,
         agent_kill,
         agent_list,
@@ -146,19 +146,12 @@ def run(ctx) -> None:
     try:
         # ── Step 2: Build Archon payload ─────────────────────────────────────
         # Archon payloads are produced by the teamserver using the same
-        # Makefile-based toolchain as Demon.  If the teamserver does not yet
-        # recognise "archon" as a valid agent type, CliError is raised and the
-        # scenario is skipped — not failed.
+        # Makefile-based toolchain as Demon. Once Archon is configured as
+        # available, any build failure is a hard test failure.
         print("  [archon][payload] building archon exe x64 for Windows target")
-        try:
-            raw = payload_build_and_fetch(
-                cli, listener=listener_name, arch="x64", fmt="exe", agent="archon"
-            )
-        except (CliError, AgentNotSupportedError) as exc:
-            raise ScenarioSkipped(
-                f"Archon payload build failed — Archon has not yet diverged from "
-                f"Demon or is not registered as a distinct agent type: {exc}"
-            )
+        raw = payload_build_and_fetch(
+            cli, listener=listener_name, arch="x64", fmt="exe", agent="archon"
+        )
         assert len(raw) > 0, "Archon payload is empty"
         print(f"  [archon][payload] built ({len(raw)} bytes)")
 

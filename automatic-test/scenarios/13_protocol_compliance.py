@@ -468,16 +468,8 @@ def _run_get_job_check(base_url: str, agent_id: int, key: bytes, iv: bytes) -> N
     _check("GET_JOB response empty (no jobs)", len(body) == 0, f"body has {len(body)} bytes")
 
 
-def _run_wrong_endian_check(cli, base_url: str) -> int:
-    """Negative test: DEMON_INIT with UTF-16-BE process_path registers but garbles the path.
-
-    The teamserver accepts the packet (the binary structure is valid), but
-    because it decodes process_path as UTF-16-LE, the BE-encoded bytes produce
-    a garbled string.  We verify the agent registers (HTTP 200) and then
-    confirm the stored process_path does NOT match the original ASCII form.
-
-    Returns the agent_id so the caller can clean it up.
-    """
+def _run_wrong_endian_check(base_url: str) -> None:
+    """Negative test: wrong-endian DEMON_INIT metadata must be rejected."""
     agent_id = int.from_bytes(os.urandom(4), "big")
     while agent_id == 0:
         agent_id = int.from_bytes(os.urandom(4), "big")
@@ -488,23 +480,11 @@ def _run_wrong_endian_check(cli, base_url: str) -> int:
     print(f"  [check] DEMON_INIT with UTF-16-BE process_path (negative test, agent_id=0x{agent_id:08X})")
     packet = _build_demon_init_packet_wrong_endian(agent_id, key, iv)
     status, body = _post_raw(base_url, packet)
-    _check("BE-encoded DEMON_INIT accepted (HTTP 200)", status == 200, f"got HTTP {status}")
-    _check("BE-encoded DEMON_INIT ACK non-empty", len(body) > 0, "empty response body")
-
-    # The server registered the agent — wait for it to appear and verify the path is garbled.
-    agent_id_hex = f"{agent_id:08X}"
-    from lib.cli import wait_for_agent_id
-    info = wait_for_agent_id(cli, agent_id_hex, timeout=10)
-    stored_path = info.get("process_path", "")
-    # The correct path is "C:\probe\agent.exe".  With BE→LE byte swap every
-    # code-unit is wrong, so the stored path must NOT contain the original.
     _check(
-        "BE process_path is garbled (not readable as original)",
-        "probe" not in stored_path.lower(),
-        f"stored path {stored_path!r} unexpectedly contains original text",
+        "BE-encoded DEMON_INIT rejected",
+        status == 404,
+        f"got HTTP {status} with {len(body)} response bytes",
     )
-
-    return agent_id
 
 
 # ── Main entry point ─────────────────────────────────────────────────────────
@@ -541,8 +521,6 @@ def run(ctx):
     agent_id = None
     key = None
     iv = None
-    be_agent_id = None
-
     try:
         # Phase 1: rejection checks (no valid agent registered yet)
         print("  [phase 1] rejection checks")
@@ -562,14 +540,14 @@ def run(ctx):
 
         # Phase 5: negative test — UTF-16-BE process_path produces garbled data
         print("  [phase 5] wrong-endian UTF-16-BE process_path (negative test)")
-        be_agent_id = _run_wrong_endian_check(cli, base_url)
+        _run_wrong_endian_check(base_url)
 
         print("  [result] all protocol compliance checks passed")
 
     finally:
-        # Kill the synthetic agents registered during phases 2 and 5 so they
-        # do not pollute the DB and confuse wait_for_agent() in later scenarios.
-        for aid in (agent_id, be_agent_id):
+        # Kill the synthetic agent registered during phase 2 so it does not
+        # pollute the DB and confuse wait_for_agent() in later scenarios.
+        for aid in (agent_id,):
             if aid is not None:
                 aid_hex = f"{aid:08X}"
                 print(f"  [cleanup] killing synthetic agent {aid_hex}")

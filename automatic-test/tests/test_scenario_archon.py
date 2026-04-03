@@ -45,38 +45,27 @@ class TestRunSkipsWhenNoWindows(unittest.TestCase):
         self.assertIn("ctx.windows is None", str(cm.exception))
 
 
-class TestRunSkipsWhenPayloadBuildFails(unittest.TestCase):
-    """Scenario must skip (not fail) when the teamserver rejects agent='archon'."""
+class TestRunArchonAvailabilityGate(unittest.TestCase):
+    def test_missing_archon_in_available_agents_raises_scenario_skipped(self) -> None:
+        ctx = _make_ctx(env={"agents": {"available": ["demon"]}})
+        with self.assertRaises(ScenarioSkipped) as cm:
+            _mod.run(ctx)
+        self.assertIn("'archon' not listed", str(cm.exception))
 
-    def test_cli_error_on_payload_build_raises_scenario_skipped(self) -> None:
+    def test_build_failure_is_not_converted_to_skip(self) -> None:
         from lib.cli import CliError
 
-        ctx = _make_ctx()
+        ctx = _make_ctx(env={"agents": {"available": ["demon", "archon"]}})
 
         with patch("lib.cli.agent_list", return_value=[]), \
              patch("lib.cli.listener_create"), \
              patch("lib.cli.listener_start"), \
              patch("lib.cli.listener_stop"), \
              patch("lib.cli.listener_delete"), \
-             patch("lib.cli.payload_build", side_effect=CliError("UNKNOWN_AGENT", "unknown agent type: archon", 1)):
-            with self.assertRaises(ScenarioSkipped) as cm:
+             patch("lib.cli.payload_build_and_fetch", side_effect=CliError("UNKNOWN_AGENT", "unknown agent type: archon", 1)):
+            with self.assertRaises(CliError) as cm:
                 _mod.run(ctx)
-        self.assertIn("Archon payload build failed", str(cm.exception))
-
-    def test_agent_not_supported_error_raises_scenario_skipped(self) -> None:
-        from lib.cli import AgentNotSupportedError
-
-        ctx = _make_ctx()
-
-        with patch("lib.cli.agent_list", return_value=[]), \
-             patch("lib.cli.listener_create"), \
-             patch("lib.cli.listener_start"), \
-             patch("lib.cli.listener_stop"), \
-             patch("lib.cli.listener_delete"), \
-             patch("lib.cli.payload_build", side_effect=AgentNotSupportedError("archon")):
-            with self.assertRaises(ScenarioSkipped) as cm:
-                _mod.run(ctx)
-        self.assertIn("Archon payload build failed", str(cm.exception))
+        self.assertEqual(cm.exception.code, "UNKNOWN_AGENT")
 
 
 class TestRunArchonExtensions(unittest.TestCase):

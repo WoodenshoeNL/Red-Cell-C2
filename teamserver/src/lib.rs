@@ -17,6 +17,7 @@ pub mod payload_builder;
 pub mod plugins;
 pub(crate) mod rate_limiter;
 pub mod rbac;
+mod session_ws;
 pub mod service;
 pub mod shutdown;
 pub mod sockets;

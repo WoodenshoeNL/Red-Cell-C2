@@ -8,9 +8,9 @@ use red_cell_common::demon::{DemonCommand, DemonPivotCommand};
 use crate::error::PhantomError;
 use crate::parser::TaskParser;
 
+use super::PhantomState;
 use super::encode::*;
 use super::types::{PIVOT_MAX_FRAME_SIZE, PendingCallback, PivotConnection};
-use super::PhantomState;
 
 /// Handle `CommandPivot` (ID 2520) — SMB pivot chain management.
 ///

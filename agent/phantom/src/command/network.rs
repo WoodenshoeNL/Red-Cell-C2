@@ -11,6 +11,7 @@ use tokio::net::TcpStream as TokioTcpStream;
 use crate::error::PhantomError;
 use crate::parser::TaskParser;
 
+use super::PhantomState;
 use super::encode::*;
 use super::sysinfo::{
     compatible_computer_list, compatible_dc_list, compatible_share_list, default_net_target,
@@ -18,10 +19,9 @@ use super::sysinfo::{
 };
 use super::types::{
     DownloadTransferState, ManagedSocket, MemFile, PendingCallback, ReversePortForward,
-    ReversePortForwardMode, SocksConnectRequest, SocksProxy, SocksRequestError,
-    SOCKS_COMMAND_CONNECT, SOCKS_METHOD_NOT_ACCEPTABLE, SOCKS_METHOD_NO_AUTH, SOCKS_VERSION,
+    ReversePortForwardMode, SOCKS_COMMAND_CONNECT, SOCKS_METHOD_NO_AUTH,
+    SOCKS_METHOD_NOT_ACCEPTABLE, SOCKS_VERSION, SocksConnectRequest, SocksProxy, SocksRequestError,
 };
-use super::PhantomState;
 
 /// Handle `CommandNet`: domain, logons, sessions, computers, shares, groups, users.
 pub(super) fn execute_network(

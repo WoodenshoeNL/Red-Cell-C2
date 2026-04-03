@@ -17,7 +17,7 @@ use crate::protocol::executable_name;
 
 use super::encode::*;
 use super::types::{MemoryRegion, PendingCallback, ProcessEntry};
-use super::{io_error, PhantomState};
+use super::{PhantomState, io_error};
 
 use super::sysinfo::{
     MEM_COMMIT, MEM_IMAGE, MEM_MAPPED, MEM_PRIVATE, PAGE_EXECUTE, PAGE_EXECUTE_READ,

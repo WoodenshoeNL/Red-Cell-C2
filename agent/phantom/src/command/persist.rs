@@ -4,15 +4,15 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Stdio;
 
-use red_cell_common::demon::PhantomPersistOp;
 use red_cell_common::demon::PhantomPersistMethod;
+use red_cell_common::demon::PhantomPersistOp;
 use tokio::process::Command;
 
 use crate::error::PhantomError;
 use crate::parser::TaskParser;
 
-use super::types::PendingCallback;
 use super::PhantomState;
+use super::types::PendingCallback;
 
 /// Marker appended to every crontab line and shell-rc block managed by Phantom.
 /// Used to identify and remove our entries on request.

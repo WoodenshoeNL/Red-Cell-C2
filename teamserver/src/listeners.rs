@@ -3356,6 +3356,9 @@ fn parse_dns_query(buf: &[u8]) -> Option<ParsedDnsQuery> {
 /// * DoH upload: `["<b32>", "<seq:04x><total:04x>", "<session_hex16>", "u"]`
 /// * DoH ready: `["rdy", "<session_hex16>", "d"]`
 /// * DoH chunk: `["<seq:04x>", "<session_hex16>", "d"]`
+///
+/// DoH session labels are **16 hex digits** (ASCII); case is normalized to lowercase when
+/// matching Specter/Archon (`agent/specter/src/doh_transport.rs`, `TransportDoH.c`).
 fn parse_dns_c2_query(labels: &[String], domain: &str) -> Option<DnsC2Query> {
     let domain_labels: Vec<&str> = domain.split('.').collect();
     let domain_label_count = domain_labels.len();
@@ -3377,20 +3380,22 @@ fn parse_dns_c2_query(labels: &[String], domain: &str) -> Option<DnsC2Query> {
             let seqtotal = c2_labels.get(1)?;
             let session = c2_labels.get(2)?;
             let u = c2_labels.get(3)?;
-            if u != "u" || seqtotal.len() != 8 || !is_session_hex16(session) {
+            if u != "u" || seqtotal.len() != 8 {
                 return None;
             }
             let seq = u16::from_str_radix(&seqtotal[..4], 16).ok()?;
             let total = u16::from_str_radix(&seqtotal[4..], 16).ok()?;
             let data = base32_rfc4648_decode(b32data)?;
-            Some(DnsC2Query::DohUpload { session: session.clone(), seq, total, data })
+            let session = normalize_session_hex16(session)?;
+            Some(DnsC2Query::DohUpload { session, seq, total, data })
         }
         3 => {
             let a = c2_labels.first()?;
             let b = c2_labels.get(1)?;
             let c = c2_labels.get(2)?;
-            if a == "rdy" && c == "d" && is_session_hex16(b) {
-                return Some(DnsC2Query::DohReady { session: b.clone() });
+            if a == "rdy" && c == "d" {
+                let session = normalize_session_hex16(b)?;
+                return Some(DnsC2Query::DohReady { session });
             }
             if c == "up" {
                 let parts: Vec<&str> = b.splitn(3, '-').collect();
@@ -3403,9 +3408,10 @@ fn parse_dns_c2_query(labels: &[String], domain: &str) -> Option<DnsC2Query> {
                 let data = base32hex_decode(a)?;
                 return Some(DnsC2Query::Upload { agent_id, seq, total, data });
             }
-            if c == "d" && is_session_hex16(b) && a.len() == 4 {
+            if c == "d" && a.len() == 4 {
+                let session = normalize_session_hex16(b)?;
                 let seq = u16::from_str_radix(a, 16).ok()?;
-                return Some(DnsC2Query::DohDownload { session: b.clone(), seq });
+                return Some(DnsC2Query::DohDownload { session, seq });
             }
             None
         }
@@ -3427,8 +3433,23 @@ fn parse_dns_c2_query(labels: &[String], domain: &str) -> Option<DnsC2Query> {
     }
 }
 
-fn is_session_hex16(s: &str) -> bool {
-    s.len() == DNS_DOH_SESSION_HEX_LEN && s.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
+/// Normalize a 16-character session id (8 bytes as hex) to lowercase.
+///
+/// Specter and Archon emit lowercase hex, but DNS labels are case-insensitive; callers may
+/// observe uppercase `A`–`F`.  Pending DoH state is keyed by session — canonicalize so lookups
+/// match regardless of wire casing.
+fn normalize_session_hex16(s: &str) -> Option<String> {
+    if s.len() != DNS_DOH_SESSION_HEX_LEN {
+        return None;
+    }
+    let mut out = String::with_capacity(DNS_DOH_SESSION_HEX_LEN);
+    for c in s.chars() {
+        if !c.is_ascii_hexdigit() {
+            return None;
+        }
+        out.push(c.to_ascii_lowercase());
+    }
+    Some(out)
 }
 
 /// Encode bytes as lowercase RFC 4648 base32 (no padding).
@@ -7762,6 +7783,56 @@ mod tests {
         };
         assert_eq!(s, session);
         assert_eq!(seq, 3);
+    }
+
+    /// End-to-end interop: query names built with the same `format!` patterns as
+    /// `agent/specter/src/doh_transport.rs` and `agent/archon/src/core/TransportDoH.c`
+    /// must parse through `parse_dns_query` → `parse_dns_c2_query` (the DNS listener path).
+    #[test]
+    fn doh_interop_specter_archon_wire_names_parse_from_udp_packet() {
+        const C2_DOMAIN: &str = "c2.example.com";
+        let payload = b"demon-packet-bytes";
+        let chunk = base32_rfc4648_encode(payload);
+        let seq = 7u16;
+        let total = 99u16;
+        let session_mixed = "0123456789ABCDEF";
+        let session_lower = "0123456789abcdef";
+
+        // Uplink — one label for `<seq:04x><total:04x>` (not two labels).
+        let uplink_name = format!("{chunk}.{seq:04x}{total:04x}.{session_mixed}.u.{C2_DOMAIN}");
+        let pkt = build_dns_txt_query(0xACE, &uplink_name);
+        let parsed = parse_dns_query(&pkt).expect("wire parse");
+        let q = parse_dns_c2_query(&parsed.labels, C2_DOMAIN).expect("c2 parse uplink");
+        let super::DnsC2Query::DohUpload { session, seq: got_seq, total: got_total, data } = q
+        else {
+            panic!("expected DohUpload, got {q:?}");
+        };
+        assert_eq!(session, session_lower);
+        assert_eq!(got_seq, seq);
+        assert_eq!(got_total, total);
+        assert_eq!(data.as_slice(), payload);
+
+        // Ready poll — `rdy.<session>.d.<domain>`
+        let ready_name = format!("rdy.{session_mixed}.d.{C2_DOMAIN}");
+        let pkt = build_dns_txt_query(0xBEE, &ready_name);
+        let parsed = parse_dns_query(&pkt).expect("wire parse");
+        let q = parse_dns_c2_query(&parsed.labels, C2_DOMAIN).expect("c2 parse ready");
+        let super::DnsC2Query::DohReady { session } = q else {
+            panic!("expected DohReady, got {q:?}");
+        };
+        assert_eq!(session, session_lower);
+
+        // Chunk fetch — `<seq:04x>.<session>.d.<domain>`
+        let fetch_seq = 12u16;
+        let fetch_name = format!("{fetch_seq:04x}.{session_mixed}.d.{C2_DOMAIN}");
+        let pkt = build_dns_txt_query(0xC0D, &fetch_name);
+        let parsed = parse_dns_query(&pkt).expect("wire parse");
+        let q = parse_dns_c2_query(&parsed.labels, C2_DOMAIN).expect("c2 parse fetch");
+        let super::DnsC2Query::DohDownload { session, seq } = q else {
+            panic!("expected DohDownload, got {q:?}");
+        };
+        assert_eq!(session, session_lower);
+        assert_eq!(seq, fetch_seq);
     }
 
     #[test]

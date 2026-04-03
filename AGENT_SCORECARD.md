@@ -5679,3 +5679,15 @@ Build: `cargo check` passed. `cargo clippy -- -D warnings` passed. `cargo test -
 | Cursor | 1 | 0 | Closed `red-cell-c2-0h7q9` (serialized 5 client-cli `*_contract` integration test binaries in `.config/nextest.toml` to fix double-spawn ENOENT). Clean fix matching assembly_dispatch mitigation pattern. |
 
 Build: `cargo check --workspace` passed (1 warning — unused `CallbackSeqError` import in WIP code). Tests/clippy still running at report time (blocked on artifact lock during parallel build). `fka3c` (net_dispatch serial group) and `en1v7` (output_dispatch serial group) remain open — neither was addressed in this period.
+
+### Arch Review — 2026-04-03 23:30 — 7db1572a..60d6b913
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Ubuntu-C2-dev01-claude | 3 | incomplete-feature, clippy | Agent-side seq protection not implemented (red-cell-c2-pt7rr P1); needless lifetime clippy error gates `-D warnings` build (red-cell-c2-jtpjr P2); both block red-cell-c2-pg0al. Unused import (red-cell-c2-asvj8) and expect()-in-production (red-cell-c2-oxylj) were already tracked from prior session. |
+| Codex | 1 | concurrency | TOCTOU race in `add_link` allows pivot cycle creation via concurrent calls, leading to infinite loop DoS in `pivot_chain_depth`/`path_contains` (red-cell-c2-g2i7a P2). Introduced in `a4d0ad98`. |
+| Cursor | 0 | — | No findings. |
+
+Build: `cargo check --workspace` passed. `cargo clippy --workspace -- -D warnings` **failed** — 1 new error: `clippy::needless-lifetimes` in `common/src/callback_seq.rs:92` (red-cell-c2-jtpjr, blocks pg0al). The unused-import error (red-cell-c2-asvj8) was not reached due to upstream failure. `cargo nextest run --workspace` ran 2682/4987 tests before halting on the pre-existing `repeated_wrong_passwords_trigger_rate_limiter_lockout` flake (red-cell-c2-lygl7); 2681 passed, 1 known fail.
+
+Overall codebase health: stable on committed code; WIP seq-protection branch has 3 blocking clippy/correctness issues before it can land.

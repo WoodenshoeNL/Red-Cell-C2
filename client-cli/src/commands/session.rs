@@ -1,9 +1,19 @@
 //! `red-cell-cli session` — persistent newline-delimited JSON pipe.
 //!
-//! Reads one JSON command per line from stdin, dispatches each to the
-//! teamserver via the existing HTTP API, and writes one JSON response per line
-//! to stdout.  A single [`ApiClient`] is reused across all commands so the
-//! authentication token is resolved only once.
+//! Reads one JSON command per line from stdin, dispatches each command to the
+//! teamserver REST API, and writes one JSON response per line to stdout.  A
+//! single [`ApiClient`] is reused across all commands so the authentication
+//! token is resolved only once.
+//!
+//! # Transport
+//!
+//! Commands are currently dispatched over the teamserver's REST API
+//! (`/api/v1/…`), with the [`ApiClient`] handling connection pooling and
+//! keep-alive so the underlying TCP connection is reused across requests.  The
+//! AGENTS.md specification calls for a persistent WebSocket transport; a
+//! dedicated `/api/v1/ws` session endpoint has been filed under issue
+//! `red-cell-c2-jzm89` (zone:teamserver) and this module will migrate to
+//! WebSocket once that endpoint is available.
 //!
 //! # Protocol
 //!
@@ -29,6 +39,7 @@
 //! |---|---|---|
 //! | `ping` | — | — |
 //! | `exit` | — | — |
+//! | `status` | — | — |
 //! | `agent.list` | — | — |
 //! | `agent.show` | `id` | — |
 //! | `agent.exec` | `id`, `command` | `wait`, `timeout` |
@@ -408,6 +419,12 @@ async fn dispatch(
 ) -> Result<serde_json::Value, CliError> {
     match msg.cmd.as_str() {
         "ping" => Ok(serde_json::json!({"pong": true})),
+
+        "status" => {
+            let data = super::status::run(client).await?;
+            serde_json::to_value(data)
+                .map_err(|e| CliError::General(format!("serialise error: {e}")))
+        }
 
         // ── agent ─────────────────────────────────────────────────────────────
         "agent.list" => {
@@ -1238,6 +1255,26 @@ mod tests {
         let msg: SessionCmd = serde_json::from_str(r#"{"cmd":"ping"}"#).expect("parse");
         let result = dispatch(&client, &msg, None).await.expect("ping must succeed");
         assert_eq!(result["pong"], true);
+    }
+
+    // ── dispatch: status against unreachable server ───────────────────────────
+
+    #[tokio::test]
+    async fn dispatch_status_returns_server_unreachable_on_no_server() {
+        use crate::config::ResolvedConfig;
+        let cfg = ResolvedConfig {
+            server: "https://127.0.0.1:1".to_owned(),
+            token: "tok".to_owned(),
+            timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
+        };
+        let client = ApiClient::new(&cfg).expect("build client");
+        let msg: SessionCmd = serde_json::from_str(r#"{"cmd":"status"}"#).expect("parse");
+        let result = dispatch(&client, &msg, None).await;
+        assert!(
+            matches!(result, Err(CliError::ServerUnreachable(_))),
+            "expected ServerUnreachable for status against no server, got {result:?}"
+        );
     }
 
     // ── dispatch: missing agent id ────────────────────────────────────────────

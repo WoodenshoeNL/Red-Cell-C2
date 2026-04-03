@@ -11,9 +11,6 @@ import json
 import os
 import subprocess
 import tempfile
-import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -105,91 +102,6 @@ def _run(cfg: CliConfig, *args: str) -> dict[str, Any]:
     return data.get("data", data)
 
 
-def _api_get(cfg: CliConfig, path: str) -> dict[str, Any]:
-    """Issue a direct authenticated GET to the teamserver REST API."""
-    url = f"{cfg.server.rstrip('/')}/api/v1{path}"
-    request = urllib.request.Request(url, headers={"x-api-key": cfg.token})
-    try:
-        with urllib.request.urlopen(request, timeout=cfg.timeout) as response:
-            raw = response.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace").strip()
-        code = "HTTP_ERROR"
-        message = body or str(exc)
-        try:
-            payload = json.loads(body)
-        except json.JSONDecodeError:
-            payload = None
-        if isinstance(payload, dict):
-            error = payload.get("error")
-            if isinstance(error, dict):
-                code = str(error.get("code") or code)
-                message = str(error.get("message") or message)
-        raise CliError(code, message, exc.code) from exc
-    except urllib.error.URLError as exc:
-        raise CliError("SERVER_UNREACHABLE", str(exc.reason), 4) from exc
-
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise CliError("PARSE_ERROR", f"non-JSON API response: {raw!r}", 1) from exc
-
-
-def _canonical_agent_type(agent: str) -> str:
-    """Return the PascalCase agent type used by payload job status responses."""
-    return {
-        "demon": "Demon",
-        "archon": "Archon",
-        "phantom": "Phantom",
-        "specter": "Specter",
-    }.get(agent.lower(), agent)
-
-
-def _poll_payload_job(cfg: CliConfig, job_id: str, requested_agent: str) -> dict[str, Any]:
-    """Poll a payload build job until completion and validate its agent type."""
-    deadline = time.monotonic() + cfg.timeout
-    expected_agent = _canonical_agent_type(requested_agent)
-
-    while time.monotonic() < deadline:
-        status = _api_get(cfg, f"/payloads/jobs/{job_id}")
-        actual_agent = str(status.get("agent_type") or "")
-        if actual_agent and actual_agent != expected_agent:
-            raise CliError(
-                "UNEXPECTED_AGENT_TYPE",
-                f"build job {job_id} returned agent_type {actual_agent!r}; expected {expected_agent!r}",
-                1,
-            )
-
-        state = status.get("status")
-        if state == "done":
-            payload_id = status.get("payload_id")
-            if not payload_id:
-                raise CliError(
-                    "PAYLOAD_ID_MISSING",
-                    f"build job {job_id} reported done but returned no payload_id",
-                    1,
-                )
-            return {
-                "id": payload_id,
-                "size_bytes": status.get("size_bytes", 0),
-                "agent_type": actual_agent or expected_agent,
-            }
-        if state == "error":
-            raise CliError(
-                "PAYLOAD_BUILD_FAILED",
-                str(status.get("error") or f"build job {job_id} failed"),
-                1,
-            )
-
-        time.sleep(0.25)
-
-    raise CliError(
-        "TIMEOUT",
-        f"build job {job_id} did not complete within {cfg.timeout} seconds",
-        5,
-    )
-
-
 # ── Auth ────────────────────────────────────────────────────────────────────
 
 def login(cfg: CliConfig) -> str:
@@ -243,8 +155,8 @@ def payload_build(cfg: CliConfig, listener: str,
     """Submit a payload build job.
 
     Without ``wait``: returns ``{"job_id": ...}`` immediately.
-    With ``wait=True``: polls until build completes, returns
-    ``{"id": <payload_id>, "size_bytes": N}``.
+    With ``wait=True``: blocks until build completes via the CLI's
+    ``--wait`` flag, returns ``{"id": <payload_id>, "size_bytes": N}``.
 
     """
     args = ["payload", "build",
@@ -254,13 +166,9 @@ def payload_build(cfg: CliConfig, listener: str,
             "--agent", agent]
     if sleep_secs is not None:
         args += ["--sleep", str(sleep_secs)]
-    submitted = _run(cfg, *args)
-    if not wait:
-        return submitted
-    job_id = submitted.get("job_id")
-    if not job_id:
-        raise CliError("JOB_ID_MISSING", "payload build response missing job_id", 1)
-    return _poll_payload_job(cfg, str(job_id), agent)
+    if wait:
+        args.append("--wait")
+    return _run(cfg, *args)
 
 
 def payload_download(cfg: CliConfig, payload_id: str | int, dst: str) -> dict:

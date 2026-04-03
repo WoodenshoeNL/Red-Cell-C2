@@ -342,19 +342,32 @@ timeout = 60
 
     #[test]
     fn resolve_uses_cli_values_directly() {
-        let cfg =
-            resolve(Some("https://ts:40056".to_owned()), Some("tok".to_owned()), None, None, None)
-                .unwrap();
+        // Pass explicit `Some(30)` for timeout so `need_file` is false and no config file is
+        // loaded — otherwise `cli_timeout = None` loads ~/.config/... and makes this test
+        // depend on the developer machine (see `resolve_cli_server_and_token_file_timeout_used_when_flag_omitted`).
+        let cfg = resolve(
+            Some("https://ts:40056".to_owned()),
+            Some("tok".to_owned()),
+            Some(30),
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(cfg.server, "https://ts:40056");
         assert_eq!(cfg.token, "tok");
-        assert_eq!(cfg.timeout, 30, "default timeout is 30 when no flag and no file");
+        assert_eq!(cfg.timeout, 30);
     }
 
     #[test]
     fn resolve_strips_trailing_slash_from_server() {
-        let cfg =
-            resolve(Some("https://ts:40056/".to_owned()), Some("tok".to_owned()), None, None, None)
-                .unwrap();
+        let cfg = resolve(
+            Some("https://ts:40056/".to_owned()),
+            Some("tok".to_owned()),
+            Some(30),
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(cfg.server, "https://ts:40056");
     }
 

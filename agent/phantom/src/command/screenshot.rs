@@ -8,9 +8,9 @@ use tokio::process::Command;
 
 use crate::error::PhantomError;
 
+use super::PhantomState;
 use super::encode::*;
 use super::types::PendingCallback;
-use super::PhantomState;
 
 /// Handle `CommandScreenshot` (ID 2510): capture the Linux desktop.
 ///
@@ -174,7 +174,7 @@ unsafe extern "C" fn x11_error_handler(
 /// Returns [`PhantomError::Screenshot`] if the X11 library cannot be loaded,
 /// `XOpenDisplay` fails (no `DISPLAY` set or Wayland-only session), or
 /// `XGetImage` fails.
-fn capture_x11_native() -> Result<Vec<u8>, PhantomError> {
+pub(super) fn capture_x11_native() -> Result<Vec<u8>, PhantomError> {
     use std::mem::MaybeUninit;
     use std::ptr;
     use std::sync::atomic::Ordering;

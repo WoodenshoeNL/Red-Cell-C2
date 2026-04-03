@@ -15,11 +15,11 @@ use super::encode::{
 };
 use super::types::*;
 
-use super::{
-    connect_ipv4_target, connect_socks_target, pivot_read_frame, pump_stream, raw_socket_error,
-    read_available, send_socks_reply, try_parse_socks_greeting, try_parse_socks_request,
-    write_all_nonblocking,
+use super::network::{
+    connect_ipv4_target, connect_socks_target, pump_stream, raw_socket_error, read_available,
+    send_socks_reply, try_parse_socks_greeting, try_parse_socks_request, write_all_nonblocking,
 };
+use super::pivot::pivot_read_frame;
 
 impl PhantomState {
     pub(crate) async fn poll(&mut self) -> Result<(), PhantomError> {

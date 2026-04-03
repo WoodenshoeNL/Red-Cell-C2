@@ -1,16 +1,15 @@
 //! `CommandFs` (ID 10): filesystem operations.
 
 use std::fs;
-use std::path::PathBuf;
 
 use red_cell_common::demon::{DemonCommand, DemonFilesystemCommand};
 
 use crate::error::PhantomError;
 use crate::parser::TaskParser;
 
+use super::PhantomState;
 use super::encode::*;
 use super::types::{ActiveDownload, DownloadTransferState, PendingCallback};
-use super::PhantomState;
 use super::{io_error, normalize_path};
 
 /// Handle `CommandFs` (ID 10): file system operations.

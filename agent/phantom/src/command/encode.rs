@@ -12,7 +12,7 @@ use time::OffsetDateTime;
 
 use crate::error::PhantomError;
 
-use super::HarvestEntry;
+use super::harvest::HarvestEntry;
 use super::io_error;
 use super::types::{
     ActiveDownload, FilesystemEntry, FilesystemListing, GroupEntry, MemoryRegion, ModifiedTime,

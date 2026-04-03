@@ -7,9 +7,8 @@ use red_cell_common::demon::DemonKerberosCommand;
 use crate::error::PhantomError;
 use crate::parser::TaskParser;
 
-use super::encode::*;
-use super::types::PendingCallback;
 use super::PhantomState;
+use super::types::PendingCallback;
 
 /// Handle `CommandKerberos` (ID 2550): Linux Kerberos operations.
 ///

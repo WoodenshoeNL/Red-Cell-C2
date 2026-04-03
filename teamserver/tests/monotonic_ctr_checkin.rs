@@ -214,7 +214,7 @@ async fn monotonic_ctr_init_and_sequential_callbacks() -> Result<(), Box<dyn std
     assert_eq!(message.packages.len(), 0, "job queue must be empty (no tasks queued)");
 
     // After the GetJob callback: encrypted portion was 4+0=4 bytes → 1 block.
-    let expected_offset_after_cb1 = offset_cb1 + ctr_blocks_for_len(4 + 0); // 1 + 1 = 2
+    let expected_offset_after_cb1 = offset_cb1 + ctr_blocks_for_len(4); // 1 + 1 = 2
     assert_eq!(
         server.agent_registry.ctr_offset(agent_id).await?,
         expected_offset_after_cb1,

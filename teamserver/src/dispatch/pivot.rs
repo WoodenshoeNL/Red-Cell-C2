@@ -933,7 +933,11 @@ mod tests {
         assert!(result.is_ok(), "dispatch_builtin_packages must not fail: {result:?}");
 
         // CommandOutput handler returns None (no response bytes to forward).
-        assert_eq!(result.expect("unwrap"), None, "CommandOutput should not produce response bytes");
+        assert_eq!(
+            result.expect("unwrap"),
+            None,
+            "CommandOutput should not produce response bytes"
+        );
 
         // Verify an AgentResponse event was emitted by the output handler.
         let event = rx.recv().await.expect("should receive AgentResponse event");

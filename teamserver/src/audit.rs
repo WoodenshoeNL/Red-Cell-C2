@@ -1747,7 +1747,15 @@ mod tests {
     async fn seed_diverse_audit_rows(database: &Database) {
         let repo = database.audit_log();
         #[allow(clippy::type_complexity)]
-        let rows: Vec<(&str, &str, &str, &str, Option<&str>, Option<&str>, AuditResultStatus)> = vec![
+        let rows: Vec<(
+            &str,
+            &str,
+            &str,
+            &str,
+            Option<&str>,
+            Option<&str>,
+            AuditResultStatus,
+        )> = vec![
             // (actor, action, target_kind, occurred_at, target_id, command, result_status)
             (
                 "alice",

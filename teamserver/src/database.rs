@@ -2565,11 +2565,21 @@ mod tests {
 
     async fn seed_audit_entries(db: &Database) {
         let repo = db.audit_log();
-        repo.create(&audit_entry("alice", "task.create", "2026-03-01T10:00:00Z")).await.expect("unwrap");
-        repo.create(&audit_entry("bob", "task.create", "2026-03-02T10:00:00Z")).await.expect("unwrap");
-        repo.create(&audit_entry("alice", "task.complete", "2026-03-03T10:00:00Z")).await.expect("unwrap");
-        repo.create(&audit_entry("carol", "agent.checkin", "2026-03-04T10:00:00Z")).await.expect("unwrap");
-        repo.create(&audit_entry("bob", "task.complete", "2026-03-05T10:00:00Z")).await.expect("unwrap");
+        repo.create(&audit_entry("alice", "task.create", "2026-03-01T10:00:00Z"))
+            .await
+            .expect("unwrap");
+        repo.create(&audit_entry("bob", "task.create", "2026-03-02T10:00:00Z"))
+            .await
+            .expect("unwrap");
+        repo.create(&audit_entry("alice", "task.complete", "2026-03-03T10:00:00Z"))
+            .await
+            .expect("unwrap");
+        repo.create(&audit_entry("carol", "agent.checkin", "2026-03-04T10:00:00Z"))
+            .await
+            .expect("unwrap");
+        repo.create(&audit_entry("bob", "task.complete", "2026-03-05T10:00:00Z"))
+            .await
+            .expect("unwrap");
     }
 
     #[tokio::test]
@@ -2722,7 +2732,8 @@ mod tests {
 
         // Unfiltered count.
         let count = repo.count_filtered(&AuditLogFilter::default()).await.expect("unwrap");
-        let results = repo.query_filtered(&AuditLogFilter::default(), 100, 0).await.expect("unwrap");
+        let results =
+            repo.query_filtered(&AuditLogFilter::default(), 100, 0).await.expect("unwrap");
         assert_eq!(count, results.len() as i64);
 
         // Filtered count.
@@ -2755,7 +2766,8 @@ mod tests {
         let repo = db.audit_log();
 
         // No data at all.
-        let result = repo.latest_timestamps_by_actor_for_actions(&["task.create"]).await.expect("unwrap");
+        let result =
+            repo.latest_timestamps_by_actor_for_actions(&["task.create"]).await.expect("unwrap");
         assert!(result.is_empty());
     }
 
@@ -2793,7 +2805,8 @@ mod tests {
         seed_audit_entries(&db).await;
         let repo = db.audit_log();
 
-        let result = repo.latest_timestamps_by_actor_for_actions(&["agent.checkin"]).await.expect("unwrap");
+        let result =
+            repo.latest_timestamps_by_actor_for_actions(&["agent.checkin"]).await.expect("unwrap");
         assert_eq!(result.len(), 1);
         assert_eq!(result.get("carol").map(String::as_str), Some("2026-03-04T10:00:00Z"));
     }
@@ -2804,8 +2817,10 @@ mod tests {
         seed_audit_entries(&db).await;
         let repo = db.audit_log();
 
-        let result =
-            repo.latest_timestamps_by_actor_for_actions(&["nonexistent.action"]).await.expect("unwrap");
+        let result = repo
+            .latest_timestamps_by_actor_for_actions(&["nonexistent.action"])
+            .await
+            .expect("unwrap");
         assert!(result.is_empty());
     }
 
@@ -2995,9 +3010,18 @@ mod tests {
 
     #[test]
     fn listener_status_try_from_str_valid_values() {
-        assert_eq!(ListenerStatus::try_from_str("created").expect("unwrap"), ListenerStatus::Created);
-        assert_eq!(ListenerStatus::try_from_str("running").expect("unwrap"), ListenerStatus::Running);
-        assert_eq!(ListenerStatus::try_from_str("stopped").expect("unwrap"), ListenerStatus::Stopped);
+        assert_eq!(
+            ListenerStatus::try_from_str("created").expect("unwrap"),
+            ListenerStatus::Created
+        );
+        assert_eq!(
+            ListenerStatus::try_from_str("running").expect("unwrap"),
+            ListenerStatus::Running
+        );
+        assert_eq!(
+            ListenerStatus::try_from_str("stopped").expect("unwrap"),
+            ListenerStatus::Stopped
+        );
         assert_eq!(ListenerStatus::try_from_str("error").expect("unwrap"), ListenerStatus::Error);
     }
 
@@ -3282,7 +3306,8 @@ mod tests {
 
         repo.create_full(&agent, "https-listener", 42, true).await.expect("unwrap");
 
-        let persisted = repo.get_persisted(0xAA).await.expect("unwrap").expect("agent should exist");
+        let persisted =
+            repo.get_persisted(0xAA).await.expect("unwrap").expect("agent should exist");
         assert_eq!(persisted.listener_name, "https-listener");
         assert_eq!(persisted.ctr_block_offset, 42);
         assert!(persisted.legacy_ctr);
@@ -3316,7 +3341,8 @@ mod tests {
         // Toggle legacy_ctr from true → false.
         repo.set_legacy_ctr(0xBB, false).await.expect("unwrap");
 
-        let persisted = repo.get_persisted(0xBB).await.expect("unwrap").expect("agent should exist");
+        let persisted =
+            repo.get_persisted(0xBB).await.expect("unwrap").expect("agent should exist");
         assert!(!persisted.legacy_ctr, "legacy_ctr should now be false");
         // Other transport fields must be unchanged.
         assert_eq!(persisted.listener_name, "smb-pipe");
@@ -3338,7 +3364,8 @@ mod tests {
         // Mark agent as inactive with a reason.
         repo.set_status(0xCC, false, "timed out").await.expect("unwrap");
 
-        let persisted = repo.get_persisted(0xCC).await.expect("unwrap").expect("agent should exist");
+        let persisted =
+            repo.get_persisted(0xCC).await.expect("unwrap").expect("agent should exist");
         assert!(!persisted.info.active, "active should be false after set_status");
         assert_eq!(persisted.info.reason, "timed out");
         // Other fields must be unchanged.
@@ -3687,7 +3714,8 @@ mod tests {
         assert_eq!(fetched_b.status, "stale");
 
         // The dns-backup build must be untouched.
-        let fetched_other = repo.get("inv-other").await.expect("unwrap").expect("inv-other should exist");
+        let fetched_other =
+            repo.get("inv-other").await.expect("unwrap").expect("inv-other should exist");
         assert_eq!(fetched_other.status, "done");
     }
 
@@ -3714,7 +3742,8 @@ mod tests {
             .expect("unwrap");
         assert_eq!(count, 0, "no done records exist — nothing should be invalidated");
 
-        let fetched_pend = repo.get("inv-pend").await.expect("unwrap").expect("inv-pend should exist");
+        let fetched_pend =
+            repo.get("inv-pend").await.expect("unwrap").expect("inv-pend should exist");
         assert_eq!(fetched_pend.status, "pending");
 
         let fetched_err = repo.get("inv-err").await.expect("unwrap").expect("inv-err should exist");

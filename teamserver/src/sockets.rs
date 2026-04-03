@@ -3022,9 +3022,13 @@ mod tests {
 
         let job = write_job.expect("unwrap");
         // Payload layout: [subcmd:4][socket_id:4][len:4][data:len]
-        let job_socket_id = u32::from_le_bytes(job.payload[4..8].try_into().expect("fixed-size slice for try_into"));
+        let job_socket_id = u32::from_le_bytes(
+            job.payload[4..8].try_into().expect("fixed-size slice for try_into"),
+        );
         assert_eq!(job_socket_id, socket_id, "job must target the correct socket_id");
-        let data_len = u32::from_le_bytes(job.payload[8..12].try_into().expect("fixed-size slice for try_into")) as usize;
+        let data_len = u32::from_le_bytes(
+            job.payload[8..12].try_into().expect("fixed-size slice for try_into"),
+        ) as usize;
         assert_eq!(data_len, client_payload.len());
         assert_eq!(
             &job.payload[12..12 + data_len],

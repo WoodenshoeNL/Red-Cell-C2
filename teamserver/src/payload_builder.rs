@@ -4745,8 +4745,8 @@ mod tests {
 
     #[test]
     fn compute_cache_key_ext_matches_format() {
-        let key_exe =
-            compute_cache_key("demon", Architecture::X64, OutputFormat::Exe, b"c", None).expect("unwrap");
+        let key_exe = compute_cache_key("demon", Architecture::X64, OutputFormat::Exe, b"c", None)
+            .expect("unwrap");
         let key_bin =
             compute_cache_key("demon", Architecture::X64, OutputFormat::Shellcode, b"c", None)
                 .expect("unwrap");
@@ -4771,7 +4771,8 @@ mod tests {
             replace_strings_x86: std::collections::BTreeMap::new(),
         };
         let key_none =
-            compute_cache_key("demon", Architecture::X64, OutputFormat::Exe, b"cfg", None).expect("unwrap");
+            compute_cache_key("demon", Architecture::X64, OutputFormat::Exe, b"cfg", None)
+                .expect("unwrap");
         let key_some =
             compute_cache_key("demon", Architecture::X64, OutputFormat::Exe, b"cfg", Some(&patch))
                 .expect("unwrap");
@@ -6021,7 +6022,8 @@ mod tests {
         cache.put(&pre_key, b"existing-data").await;
 
         // Make the directory read-only.
-        std::fs::set_permissions(&cache_dir, std::fs::Permissions::from_mode(0o555)).expect("unwrap");
+        std::fs::set_permissions(&cache_dir, std::fs::Permissions::from_mode(0o555))
+            .expect("unwrap");
 
         // Writing to a read-only directory should fail gracefully (no panic).
         let key = test_cache_key("readonly01", ".bin");
@@ -6038,7 +6040,8 @@ mod tests {
         assert_eq!(got, b"existing-data");
 
         // Restore permissions so TempDir cleanup succeeds.
-        std::fs::set_permissions(&cache_dir, std::fs::Permissions::from_mode(0o755)).expect("unwrap");
+        std::fs::set_permissions(&cache_dir, std::fs::Permissions::from_mode(0o755))
+            .expect("unwrap");
     }
 
     #[tokio::test]
@@ -6876,14 +6879,16 @@ mod tests {
 
     #[test]
     fn required_u32_parses_string_value() -> Result<(), PayloadBuildError> {
-        let config = serde_json::from_value::<Map<String, Value>>(json!({"val": "42"})).expect("unwrap");
+        let config =
+            serde_json::from_value::<Map<String, Value>>(json!({"val": "42"})).expect("unwrap");
         assert_eq!(required_u32(&config, "val")?, 42);
         Ok(())
     }
 
     #[test]
     fn required_u32_parses_number_value() -> Result<(), PayloadBuildError> {
-        let config = serde_json::from_value::<Map<String, Value>>(json!({"val": 42})).expect("unwrap");
+        let config =
+            serde_json::from_value::<Map<String, Value>>(json!({"val": 42})).expect("unwrap");
         assert_eq!(required_u32(&config, "val")?, 42);
         Ok(())
     }
@@ -6898,7 +6903,8 @@ mod tests {
 
     #[test]
     fn required_u32_rejects_non_numeric_string() {
-        let config = serde_json::from_value::<Map<String, Value>>(json!({"val": "abc"})).expect("unwrap");
+        let config =
+            serde_json::from_value::<Map<String, Value>>(json!({"val": "abc"})).expect("unwrap");
         let err = required_u32(&config, "val").expect_err("non-numeric should fail");
         assert!(matches!(err, PayloadBuildError::InvalidRequest { .. }));
     }

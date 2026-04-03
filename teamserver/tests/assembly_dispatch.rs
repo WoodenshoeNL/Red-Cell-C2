@@ -654,7 +654,7 @@ async fn bof_exception_callback_broadcasts_error_with_details()
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
 
     let exception_code = 0xC000_0005_u32;
-    let exception_addr = 0x00007FFE_1234_5678_u64;
+    let exception_addr = 0x0000_7FFE_1234_5678_u64;
     let payload = bof_exception_payload(exception_code, exception_addr);
     client
         .post(format!("http://127.0.0.1:{listener_port}/"))

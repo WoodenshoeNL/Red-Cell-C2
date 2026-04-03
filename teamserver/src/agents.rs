@@ -2693,7 +2693,8 @@ mod tests {
         let rejected_job = sample_job(rejected_request_id);
 
         // Attempt one more — must be rejected.
-        let err = registry.enqueue_job(agent.agent_id, rejected_job).await.expect_err("expected Err");
+        let err =
+            registry.enqueue_job(agent.agent_id, rejected_job).await.expect_err("expected Err");
         assert!(matches!(err, TeamserverError::QueueFull { .. }), "expected QueueFull, got: {err}");
 
         // The rejected job must not leave a stale request context behind.

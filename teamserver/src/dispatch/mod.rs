@@ -2754,10 +2754,8 @@ mod tests {
         assert_eq!(response, None);
 
         // First event: AgentUpdate (mark) for the disconnected child.
-        let event = receiver
-            .recv()
-            .await
-            .ok_or("expected AgentUpdate event for disconnected child")?;
+        let event =
+            receiver.recv().await.ok_or("expected AgentUpdate event for disconnected child")?;
         let OperatorMessage::AgentUpdate(mark_msg) = event else {
             return Err(format!("expected AgentUpdate (mark), got {event:?}").into());
         };
@@ -2765,8 +2763,7 @@ mod tests {
         assert_eq!(mark_msg.info.marked, "Dead", "disconnected agent must be marked Dead");
 
         // Second event: AgentResponse with Info about successful disconnect.
-        let event =
-            receiver.recv().await.ok_or("expected AgentResponse event after disconnect")?;
+        let event = receiver.recv().await.ok_or("expected AgentResponse event after disconnect")?;
         let OperatorMessage::AgentResponse(resp_msg) = event else {
             return Err(format!("expected AgentResponse, got {event:?}").into());
         };

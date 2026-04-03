@@ -2383,7 +2383,7 @@ async fn link_repository_rejects_duplicate_insert() -> Result<(), TeamserverErro
     agents.create(&child).await?;
 
     let link = LinkRecord { parent_agent_id: parent.agent_id, link_agent_id: child.agent_id };
-    links.create(link.clone()).await?;
+    links.create(link).await?;
 
     let error = links.create(link).await.expect_err("duplicate link insert should fail");
 

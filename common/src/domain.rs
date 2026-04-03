@@ -2028,7 +2028,10 @@ mod tests {
             validate_kill_date(Some("2026-03-09 20:00:00")).expect("unwrap"),
             Some("1773086400".to_string())
         );
-        assert_eq!(validate_kill_date(Some("1773086400")).expect("unwrap"), Some("1773086400".to_string()));
+        assert_eq!(
+            validate_kill_date(Some("1773086400")).expect("unwrap"),
+            Some("1773086400".to_string())
+        );
     }
 
     #[test]

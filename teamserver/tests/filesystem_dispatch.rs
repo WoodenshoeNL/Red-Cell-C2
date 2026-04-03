@@ -37,6 +37,7 @@ fn le_bytes(b: &[u8]) -> Vec<u8> {
 ///     utf16 path | u32 file_count | u32 dir_count | u64 total_size (if !list_only)
 ///     then per item (file_count + dir_count entries):
 ///       utf16 name | u32 is_dir | u64 size | u32 day | u32 month | u32 year | u32 minute | u32 hour
+#[allow(clippy::type_complexity)]
 fn dir_payload(
     root_path: &str,
     entries: &[(&str, &[(&str, bool, u64, (u32, u32, u32, u32, u32))])],

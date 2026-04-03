@@ -1511,11 +1511,7 @@ async fn dns_listener_duplicate_chunk_retransmission_is_idempotent()
 
     // Send chunks in order but retransmit chunk 0 and chunk 1 after their
     // initial delivery: [0, 1, 0, 1, 2, 3, ..., N-1].
-    let mut send_order: Vec<usize> = Vec::new();
-    send_order.push(0);
-    send_order.push(1);
-    send_order.push(0); // retransmit chunk 0
-    send_order.push(1); // retransmit chunk 1
+    let mut send_order: Vec<usize> = vec![0, 1, 0, 1]; // duplicate retransmits of 0 and 1
     for i in 2..num_chunks {
         send_order.push(i);
     }

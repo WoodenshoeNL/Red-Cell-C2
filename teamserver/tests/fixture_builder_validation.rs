@@ -86,7 +86,9 @@ fn init_body_payload_starts_with_demon_init_command() {
     let envelope = DemonEnvelope::from_bytes(&bytes).expect("envelope parse");
 
     // First 4 bytes of payload = command ID (DemonInit = 99)
-    let command_id = u32::from_be_bytes(envelope.payload[..4].try_into().expect("fixed-size slice for try_into"));
+    let command_id = u32::from_be_bytes(
+        envelope.payload[..4].try_into().expect("fixed-size slice for try_into"),
+    );
     assert_eq!(command_id, u32::from(DemonCommand::DemonInit));
 }
 
@@ -100,7 +102,9 @@ fn init_body_payload_contains_request_id_seven() {
     let envelope = DemonEnvelope::from_bytes(&bytes).expect("envelope parse");
 
     // Bytes 4..8 = request ID, hardcoded to 7
-    let request_id = u32::from_be_bytes(envelope.payload[4..8].try_into().expect("fixed-size slice for try_into"));
+    let request_id = u32::from_be_bytes(
+        envelope.payload[4..8].try_into().expect("fixed-size slice for try_into"),
+    );
     assert_eq!(request_id, 7);
 }
 
@@ -139,7 +143,9 @@ fn init_body_encrypted_metadata_decrypts_to_expected_fields() {
     let mut cursor = 0;
 
     // agent_id (4 bytes BE)
-    let decoded_agent_id = u32::from_be_bytes(plaintext[cursor..cursor + 4].try_into().expect("fixed-size slice for try_into"));
+    let decoded_agent_id = u32::from_be_bytes(
+        plaintext[cursor..cursor + 4].try_into().expect("fixed-size slice for try_into"),
+    );
     assert_eq!(decoded_agent_id, agent_id);
     cursor += 4;
 
@@ -161,7 +167,7 @@ fn init_body_encrypted_metadata_decrypts_to_expected_fields() {
 
     // process path: UTF-16 LE null-terminated "C:\Windows\explorer.exe"
     let process_raw = read_lp_bytes(&plaintext, &mut cursor);
-    let decoded = decode_utf16_le_null_terminated(&process_raw);
+    let decoded = decode_utf16_le_null_terminated(process_raw);
     assert_eq!(decoded, r"C:\Windows\explorer.exe");
 
     // PID = 1337
@@ -226,8 +232,12 @@ fn callback_body_carries_correct_command_and_request_ids() {
         common::valid_demon_callback_body(agent_id, key, iv, 0, command_id, request_id, b"data");
     let envelope = DemonEnvelope::from_bytes(&bytes).expect("envelope parse");
 
-    let decoded_cmd = u32::from_be_bytes(envelope.payload[..4].try_into().expect("fixed-size slice for try_into"));
-    let decoded_req = u32::from_be_bytes(envelope.payload[4..8].try_into().expect("fixed-size slice for try_into"));
+    let decoded_cmd = u32::from_be_bytes(
+        envelope.payload[..4].try_into().expect("fixed-size slice for try_into"),
+    );
+    let decoded_req = u32::from_be_bytes(
+        envelope.payload[4..8].try_into().expect("fixed-size slice for try_into"),
+    );
     assert_eq!(decoded_cmd, command_id);
     assert_eq!(decoded_req, request_id);
 }
@@ -257,7 +267,8 @@ fn callback_body_encrypted_payload_decrypts_to_original() {
         .expect("callback decryption must succeed");
 
     // Decrypted layout: 4-byte BE length prefix + payload
-    let len = u32::from_be_bytes(plaintext[..4].try_into().expect("fixed-size slice for try_into")) as usize;
+    let len = u32::from_be_bytes(plaintext[..4].try_into().expect("fixed-size slice for try_into"))
+        as usize;
     assert_eq!(len, original_payload.len());
     assert_eq!(&plaintext[4..4 + len], original_payload);
 }
@@ -293,7 +304,9 @@ fn callback_body_respects_nonzero_ctr_offset() {
     let correct_plaintext = decrypt_agent_data_at_offset(&key, &iv, ctr_offset, ciphertext)
         .expect("decryption at correct offset");
 
-    let len = u32::from_be_bytes(correct_plaintext[..4].try_into().expect("fixed-size slice for try_into")) as usize;
+    let len = u32::from_be_bytes(
+        correct_plaintext[..4].try_into().expect("fixed-size slice for try_into"),
+    ) as usize;
     assert_eq!(len, payload.len());
     assert_eq!(&correct_plaintext[4..4 + len], payload);
 
@@ -324,10 +337,14 @@ fn reconnect_body_carries_demon_init_command_with_empty_metadata() {
     let bytes = common::valid_demon_reconnect_body(agent_id);
     let envelope = DemonEnvelope::from_bytes(&bytes).expect("envelope parse");
 
-    let command_id = u32::from_be_bytes(envelope.payload[..4].try_into().expect("fixed-size slice for try_into"));
+    let command_id = u32::from_be_bytes(
+        envelope.payload[..4].try_into().expect("fixed-size slice for try_into"),
+    );
     assert_eq!(command_id, u32::from(DemonCommand::DemonInit));
 
-    let request_id = u32::from_be_bytes(envelope.payload[4..8].try_into().expect("fixed-size slice for try_into"));
+    let request_id = u32::from_be_bytes(
+        envelope.payload[4..8].try_into().expect("fixed-size slice for try_into"),
+    );
     assert_eq!(request_id, 7);
 
     // Reconnect body has NO encrypted metadata — payload is exactly command_id + request_id
@@ -362,7 +379,9 @@ fn reconnect_body_differs_from_init_body() {
 
 /// Read a BE-length-prefixed byte slice from `data` at `cursor`, advancing cursor.
 fn read_lp_bytes<'a>(data: &'a [u8], cursor: &mut usize) -> &'a [u8] {
-    let len = u32::from_be_bytes(data[*cursor..*cursor + 4].try_into().expect("fixed-size slice for try_into")) as usize;
+    let len = u32::from_be_bytes(
+        data[*cursor..*cursor + 4].try_into().expect("fixed-size slice for try_into"),
+    ) as usize;
     *cursor += 4;
     let value = &data[*cursor..*cursor + len];
     *cursor += len;
@@ -371,14 +390,18 @@ fn read_lp_bytes<'a>(data: &'a [u8], cursor: &mut usize) -> &'a [u8] {
 
 /// Read a BE u32 from `data` at `cursor`, advancing cursor.
 fn read_u32_be(data: &[u8], cursor: &mut usize) -> u32 {
-    let value = u32::from_be_bytes(data[*cursor..*cursor + 4].try_into().expect("fixed-size slice for try_into"));
+    let value = u32::from_be_bytes(
+        data[*cursor..*cursor + 4].try_into().expect("fixed-size slice for try_into"),
+    );
     *cursor += 4;
     value
 }
 
 /// Read a BE u64 from `data` at `cursor`, advancing cursor.
 fn read_u64_be(data: &[u8], cursor: &mut usize) -> u64 {
-    let value = u64::from_be_bytes(data[*cursor..*cursor + 8].try_into().expect("fixed-size slice for try_into"));
+    let value = u64::from_be_bytes(
+        data[*cursor..*cursor + 8].try_into().expect("fixed-size slice for try_into"),
+    );
     *cursor += 8;
     value
 }

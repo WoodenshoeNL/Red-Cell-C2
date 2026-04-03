@@ -1,0 +1,20 @@
+# Serializes selected `red-cell` integration test binaries under cargo-nextest.
+#
+# Under highly parallel `cargo nextest run --workspace`, nextest can occasionally
+# fail with "failed to exec test binary (ENOENT)" ([double-spawn]) when spawning
+# the same integration test binary concurrently (artifact lock / race). Per-binary
+# groups with `max-threads = 1` avoid concurrent exec of that binary.
+#
+# Add binaries here if they show the same intermittent ENOENT (see red-cell-c2-b6i4g).
+
+[test-groups]
+assembly-dispatch-serial = { max-threads = 1 }
+service-bridge-serial = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'package(red-cell) & binary(assembly_dispatch)'
+test-group = 'assembly-dispatch-serial'
+
+[[profile.default.overrides]]
+filter = 'package(red-cell) & binary(service_bridge)'
+test-group = 'service-bridge-serial'

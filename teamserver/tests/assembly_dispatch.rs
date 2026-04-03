@@ -1,3 +1,9 @@
+//! Integration tests for Demon assembly / BOF / `ps_import` callback dispatch.
+//!
+//! These tests are serialized under cargo-nextest via `.config/nextest.toml` (filter
+//! `binary(assembly_dispatch)`, test group `assembly-dispatch-serial`) to avoid intermittent
+//! `ENOENT` when nextest execs this integration test binary under heavy parallel workspace runs.
+
 mod common;
 
 use red_cell::{

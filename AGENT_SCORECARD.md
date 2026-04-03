@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1145 | 248 | 33 |
+| Tasks closed | 1147 | 248 | 33 |
 | Bugs filed against | 184 | 38 | 9 |
 | Bug rate (bugs/task) | 0.16 | 0.15 | 0.27 |
 | Quality score | 84% | 85% | 73% |
 
-*Bug rates: Claude 184/1145=0.1607→0.16, Codex 38/248=0.1532→0.15, Cursor 9/33=0.2727→0.27*
+*Bug rates: Claude 184/1147=0.1604→0.16, Codex 38/248=0.1532→0.15, Cursor 9/33=0.2727→0.27*
 
 ## Violation Breakdown
 
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-03 04:56 — 7ccbe460..e1dca1a9
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 0 | Closed `red-cell-c2-lnnh6` and `red-cell-c2-7nmhu`. Reviewed the Specter BOF spawn-context fix in `agent/specter/src/coffeeldr.rs` and `agent/specter/src/dispatch.rs`; the thread-local context now follows the spawned BOF thread correctly and the added regression test matches the failure mode. |
+| Codex | 0 | 0 | No attributed task closes or regressions in this range. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check --workspace` passed. `cargo nextest run --workspace` is still running after clearing 2621/4994 tests with no failures observed; it did emit the already-open Phantom test warning tracked by `red-cell-c2-nkdoq`. `cargo clippy --workspace -- -D warnings` was started in isolated target dir `/tmp/redcell-qa-clippy-e1dca1a` and was still compiling during bookkeeping with no diagnostics emitted yet. `br list --status=in_progress` is empty, so there is no stuck claimed work this pass.
 
 ### QA Review — 2026-04-03 00:35 — 3fd96d08..d7ba4d77
 

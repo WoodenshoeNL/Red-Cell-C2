@@ -743,7 +743,7 @@ async fn dispatch(cli: Cli) -> i32 {
 
         Commands::Audit { action } => commands::audit::run(&api_client, &fmt, action).await,
 
-        Commands::Session { agent } => commands::session::run(&api_client, agent.as_deref()).await,
+        Commands::Session { agent } => commands::session::run(&resolved, agent.as_deref()).await,
 
         Commands::Operator { action } => commands::operator::run(&api_client, &fmt, action).await,
 

@@ -1,19 +1,25 @@
-//! `red-cell-cli session` — persistent newline-delimited JSON pipe.
+//! `red-cell-cli session` — persistent NDJSON WebSocket pipe.
 //!
-//! Reads one JSON command per line from stdin, dispatches each command to the
-//! teamserver REST API, and writes one JSON response per line to stdout.  A
-//! single [`ApiClient`] is reused across all commands so the authentication
-//! token is resolved only once.
+//! Establishes a single authenticated WebSocket connection to the teamserver's
+//! `/api/v1/ws` endpoint and relays newline-delimited JSON between stdin and
+//! the server.  Each command sent on stdin produces exactly one response line
+//! on stdout.
+//!
+//! # Authentication
+//!
+//! The operator API token is injected into the `x-api-key` header of the HTTP
+//! upgrade request.  This is the same token used by the REST API — no separate
+//! login step is required.
 //!
 //! # Transport
 //!
-//! Commands are currently dispatched over the teamserver's REST API
-//! (`/api/v1/…`), with the [`ApiClient`] handling connection pooling and
-//! keep-alive so the underlying TCP connection is reused across requests.  The
-//! AGENTS.md specification calls for a persistent WebSocket transport; a
-//! dedicated `/api/v1/ws` session endpoint has been filed under issue
-//! `red-cell-c2-jzm89` (zone:teamserver) and this module will migrate to
-//! WebSocket once that endpoint is available.
+//! A single WebSocket connection is opened at session start and kept alive for
+//! the lifetime of the session.  All commands travel over this one connection,
+//! preserving connection semantics (authentication, rate limiting) and
+//! eliminating per-command TCP/TLS overhead.
+//!
+//! The teamserver session endpoint is tracked in issue `red-cell-c2-9ebj4`
+//! (zone:teamserver).
 //!
 //! # Protocol
 //!
@@ -31,957 +37,519 @@
 //! The session terminates on:
 //! - EOF on stdin
 //! - `{"cmd": "exit"}`
+//! - Server closing the WebSocket connection
 //! - Ctrl-C
 //!
-//! # Supported commands
+//! # Locally handled commands
 //!
-//! | `cmd` | Required fields | Optional fields |
-//! |---|---|---|
-//! | `ping` | — | — |
-//! | `exit` | — | — |
-//! | `status` | — | — |
-//! | `agent.list` | — | — |
-//! | `agent.show` | `id` | — |
-//! | `agent.exec` | `id`, `command` | `wait`, `timeout` |
-//! | `agent.output` | `id` | `since` |
-//! | `agent.kill` | `id` | `wait`, `timeout` |
-//! | `agent.upload` | `id`, `src`, `dst` | — |
-//! | `agent.download` | `id`, `src` | `dst` |
-//! | `listener.list` | — | — |
-//! | `listener.show` | `name` | — |
-//! | `listener.create` | `name`, `type` | `port`, `host`, `domain`, `pipe_name`, `endpoint`, `secure`, `config_json` |
-//! | `listener.start` | `name` | — |
-//! | `listener.stop` | `name` | — |
-//! | `listener.delete` | `name` | — |
-//! | `operator.list` | — | — |
-//! | `operator.create` | `username`, `password`, `role` | — |
-//! | `operator.delete` | `username` | — |
-//! | `operator.set-role` | `username`, `role` | — |
-//! | `payload.list` | — | — |
-//! | `payload.build` | `listener`, `arch`, `format` | `sleep`, `wait`, `timeout` |
-//! | `payload.download` | `id`, `dst` | — |
-//! | `log.list` | — | `operator`, `action`, `since`, `id` (agent filter), `limit` |
-//! | `log.tail` | — | — |
+//! | `cmd`  | Behaviour                                  |
+//! |--------|--------------------------------------------|
+//! | `ping` | Answered immediately; no server round-trip |
+//! | `exit` | Sends WS close frame and exits cleanly     |
+//!
+//! All other commands are forwarded to the server unchanged.
+//!
+//! # Default agent
+//!
+//! When `--agent <id>` is passed to `red-cell-cli session`, the session injects
+//! the agent id into any incoming command that has no `"id"` field before
+//! forwarding it to the server.
 
-use std::path::Path;
-use std::time::{Duration, Instant};
+use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
+use futures_util::{SinkExt as _, StreamExt as _};
 use tokio::io::AsyncBufReadExt as _;
-use tokio::time::sleep;
+use tokio_tungstenite::tungstenite::Message;
 use tracing::instrument;
 
-use super::agent::{RawAgent, TaskQueuedResponse};
-use super::listener::{RawListenerSummary, build_create_body};
-use super::operator::validate_role;
-use crate::client::ApiClient;
+use crate::config::{ResolvedConfig, TlsMode};
 use crate::error::{CliError, EXIT_GENERAL, EXIT_SUCCESS};
 
-/// Default timeout for `agent.exec` with `"wait": true`, in seconds.
-const DEFAULT_EXEC_TIMEOUT_SECS: u64 = 60;
-/// Default timeout for `payload.build` with `"wait": true`, in seconds.
-const DEFAULT_BUILD_TIMEOUT_SECS: u64 = 300;
-/// Default number of entries returned by `log.list` when `limit` is not set.
-const DEFAULT_LOG_LIMIT: u32 = 50;
-/// Number of entries fetched by `log.tail`.
-const LOG_TAIL_LIMIT: u32 = 20;
-/// Polling interval for wait loops.
-const POLL_INTERVAL: Duration = Duration::from_millis(1_000);
-/// Polling interval for build wait loops.
-const BUILD_POLL_INTERVAL: Duration = Duration::from_millis(2_000);
+/// HTTP header name used by the teamserver for API-key authentication.
+const API_KEY_HEADER: &str = "x-api-key";
 
-/// Session-mode `since` value.
+// ── URL helpers ──────────────────────────────────────────────────────────────
+
+/// Convert an HTTP(S) server URL to its WebSocket equivalent.
 ///
-/// `agent.output` uses a numeric output-entry cursor, while `log.list` uses an
-/// RFC 3339 timestamp. Session mode accepts either shape and validates it per
-/// command.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(untagged)]
-enum SessionSince {
-    Cursor(i64),
-    Timestamp(String),
-}
-
-// ── inbound message shape ─────────────────────────────────────────────────────
-
-/// A single command message read from stdin.
+/// - `https://…` → `wss://…`
+/// - `http://…`  → `ws://…`
+/// - Other forms → `ws://…` (safe fallback for bare host:port strings)
 ///
-/// Fields are unioned — a given command only uses the fields relevant to it.
-/// Unknown fields are silently ignored.
-#[derive(Debug, Deserialize)]
-struct SessionCmd {
-    /// Command name (e.g. `"agent.exec"`, `"ping"`, `"exit"`).
-    cmd: String,
-    /// Agent or resource identifier (agent ID, payload ID for `payload.download`).
-    #[serde(default)]
-    id: Option<String>,
-    /// Shell command string for `agent.exec`.
-    #[serde(default)]
-    command: Option<String>,
-    /// Block until completion for `agent.exec`, `agent.kill`, or `payload.build`.
-    #[serde(default)]
-    wait: Option<bool>,
-    /// Timeout in seconds for `*wait=true` commands.
-    #[serde(default)]
-    timeout: Option<u64>,
-    /// Only return output newer than this numeric entry cursor
-    /// (`agent.output`) or ISO-8601 timestamp (`log.list`).
-    #[serde(default)]
-    since: Option<SessionSince>,
-    /// Listener name for `listener.show/start/stop/delete`.
-    #[serde(default)]
-    name: Option<String>,
-
-    // ── listener.create ───────────────────────────────────────────────────────
-    /// Listener protocol type: `"http"`, `"https"`, `"dns"`, `"smb"`, `"external"`.
-    #[serde(rename = "type", default)]
-    listener_type: Option<String>,
-    /// Port to bind for `listener.create`.
-    #[serde(default)]
-    port: Option<u16>,
-    /// Host/interface to bind for `listener.create` (default `"0.0.0.0"`).
-    #[serde(default)]
-    host: Option<String>,
-    /// DNS domain for `listener.create --type dns`.
-    #[serde(default)]
-    domain: Option<String>,
-    /// Named-pipe name for `listener.create --type smb`.
-    #[serde(default)]
-    pipe_name: Option<String>,
-    /// Bridge endpoint for `listener.create --type external`.
-    #[serde(default)]
-    endpoint: Option<String>,
-    /// Enable TLS for `listener.create --type http`.
-    #[serde(default)]
-    secure: bool,
-    /// Raw inner-config JSON for `listener.create` (overrides all other flags).
-    #[serde(default)]
-    config_json: Option<String>,
-
-    // ── operator commands ─────────────────────────────────────────────────────
-    /// Operator username for `operator.create/delete/set-role`.
-    #[serde(default)]
-    username: Option<String>,
-    /// Operator password for `operator.create`.
-    #[serde(default)]
-    password: Option<String>,
-    /// Operator role for `operator.create/set-role` (`"admin"`, `"operator"`, `"analyst"`).
-    #[serde(default)]
-    role: Option<String>,
-
-    // ── payload commands ──────────────────────────────────────────────────────
-    /// Listener name to embed in the payload (`payload.build`).
-    #[serde(default)]
-    listener: Option<String>,
-    /// CPU architecture for `payload.build` (e.g. `"x86_64"`, `"x86"`).
-    #[serde(default)]
-    arch: Option<String>,
-    /// Payload format for `payload.build`: `"exe"`, `"dll"`, or `"bin"`.
-    #[serde(default)]
-    format: Option<String>,
-    /// Agent type for `payload.build` (e.g. `"demon"`, `"phantom"`).
-    #[serde(default)]
-    agent: Option<String>,
-    /// Sleep interval in seconds to bake into the payload (`payload.build`).
-    #[serde(default)]
-    sleep: Option<u64>,
-    /// Destination / local file path for `payload.download` and `agent.download`.
-    #[serde(default)]
-    dst: Option<String>,
-    /// Source / local file path for `agent.upload`, or remote path for
-    /// `agent.download`.
-    #[serde(default)]
-    src: Option<String>,
-
-    // ── log commands ──────────────────────────────────────────────────────────
-    /// Operator name filter for `log.list`.
-    #[serde(default)]
-    operator: Option<String>,
-    /// Action filter for `log.list`.
-    #[serde(default)]
-    action: Option<String>,
-    /// Maximum number of entries to return for `log.list`.
-    #[serde(default)]
-    limit: Option<u32>,
-}
-
-// ── local raw API response shapes for new commands ────────────────────────────
-
-use super::types::{OutputPage, output_url};
-
-/// Minimal operator record returned by `GET /operators` and `POST /operators`.
-#[derive(Debug, Deserialize, Serialize)]
-struct RawOperator {
-    username: String,
-    role: String,
-    online: bool,
-    last_seen: Option<String>,
-}
-
-/// Response from `POST /operators`.
-#[derive(Debug, Deserialize, Serialize)]
-struct RawOperatorCreate {
-    username: String,
-    role: String,
-}
-
-/// Minimal payload record returned by `GET /payloads`.
-#[derive(Debug, Deserialize, Serialize)]
-struct RawPayload {
-    id: String,
-    name: String,
-    arch: String,
-    format: String,
-    built_at: String,
-    #[serde(default)]
-    size_bytes: Option<u64>,
-}
-
-/// Response from `POST /payloads/build`.
-#[derive(Debug, Deserialize)]
-struct BuildSubmitted {
-    job_id: String,
-}
-
-/// Status response from `GET /payloads/jobs/{job_id}`.
-#[derive(Debug, Deserialize)]
-struct BuildStatus {
-    job_id: String,
-    /// `"pending"` | `"running"` | `"done"` | `"error"`
-    status: String,
-    payload_id: Option<String>,
-    size_bytes: Option<u64>,
-    error: Option<String>,
-}
-
-/// A single audit record returned by `GET /audit`.
+/// # Examples
 ///
-/// Subset of `teamserver::audit::AuditRecord` — the server also sends `id`
-/// and `parameters` which are silently ignored by serde.
-#[derive(Debug, Deserialize, Serialize)]
-struct RawAuditRecord {
-    actor: String,
-    action: String,
-    agent_id: Option<String>,
-    occurred_at: String,
+/// ```
+/// assert_eq!(server_to_ws_url("https://ts.example.com:40056"), "wss://ts.example.com:40056");
+/// assert_eq!(server_to_ws_url("http://localhost:8080"), "ws://localhost:8080");
+/// ```
+fn server_to_ws_url(server: &str) -> String {
+    if let Some(rest) = server.strip_prefix("https://") {
+        format!("wss://{rest}")
+    } else if let Some(rest) = server.strip_prefix("http://") {
+        format!("ws://{rest}")
+    } else {
+        format!("ws://{server}")
+    }
 }
 
-/// Paged audit response from `GET /audit`.
+// ── TLS helpers ──────────────────────────────────────────────────────────────
+
+/// SHA-256 fingerprint of a DER-encoded certificate (lowercase hex).
+fn cert_fingerprint(cert_der: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let hash = Sha256::digest(cert_der);
+    hash.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Certificate verifier that accepts any cert whose SHA-256 fingerprint
+/// matches a pinned value.  Used for `TlsMode::Fingerprint`.
+#[derive(Debug)]
+struct FingerprintVerifier {
+    expected: String,
+    provider: rustls::crypto::CryptoProvider,
+}
+
+impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        let actual = cert_fingerprint(end_entity.as_ref());
+        if actual == self.expected {
+            Ok(rustls::client::danger::ServerCertVerified::assertion())
+        } else {
+            Err(rustls::Error::General(format!(
+                "certificate fingerprint mismatch: expected {}, got {actual}",
+                self.expected
+            )))
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.provider.signature_verification_algorithms.supported_schemes()
+    }
+}
+
+/// Build a `tokio_tungstenite::Connector` for the given TLS mode.
 ///
-/// Pagination metadata (`total`, `limit`, `offset`) is silently ignored by serde.
-#[derive(Debug, Deserialize)]
-struct RawAuditPage {
-    items: Vec<RawAuditRecord>,
-}
+/// For `wss://` URLs the connector is used to perform the TLS handshake.
+/// For `ws://` URLs pass `Connector::Plain` so tungstenite skips TLS.
+fn build_connector(
+    tls_mode: &TlsMode,
+    is_tls: bool,
+) -> Result<tokio_tungstenite::Connector, CliError> {
+    if !is_tls {
+        return Ok(tokio_tungstenite::Connector::Plain);
+    }
 
-impl SessionCmd {
-    /// Resolve the numeric output cursor used by `agent.output`.
-    fn output_since(&self) -> Result<Option<i64>, CliError> {
-        match self.since.as_ref() {
-            None => Ok(None),
-            Some(SessionSince::Cursor(cursor)) => Ok(Some(*cursor)),
-            Some(SessionSince::Timestamp(_)) => {
-                Err(CliError::InvalidArgs("agent.output requires numeric \"since\"".to_owned()))
+    match tls_mode {
+        TlsMode::SystemRoots => {
+            // System roots are handled by the rustls-tls-webpki-roots feature
+            // baked into tokio-tungstenite; return Plain so connect_async uses
+            // the crate's own default TLS stack.
+            Ok(tokio_tungstenite::Connector::Plain)
+        }
+
+        TlsMode::CustomCa(path) => {
+            let pem = std::fs::read(path).map_err(|e| {
+                CliError::General(format!("failed to read CA cert {}: {e}", path.display()))
+            })?;
+
+            let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
+                rustls_pemfile::certs(&mut &pem[..]).filter_map(|r| r.ok()).collect();
+
+            if certs.is_empty() {
+                return Err(CliError::General(format!(
+                    "no valid certificates found in CA file {}",
+                    path.display()
+                )));
             }
-        }
-    }
 
-    /// Resolve the timestamp cursor used by `log.list`.
-    fn log_since(&self) -> Result<Option<&str>, CliError> {
-        match self.since.as_ref() {
-            None => Ok(None),
-            Some(SessionSince::Timestamp(ts)) => Ok(Some(ts.as_str())),
-            Some(SessionSince::Cursor(_)) => Err(CliError::InvalidArgs(
-                "log.list requires string \"since\" timestamp".to_owned(),
-            )),
+            let mut root_store = rustls::RootCertStore::empty();
+            for cert in certs {
+                root_store
+                    .add(cert)
+                    .map_err(|e| CliError::General(format!("failed to add CA certificate: {e}")))?;
+            }
+
+            let config = rustls::ClientConfig::builder()
+                .with_root_certificates(root_store)
+                .with_no_client_auth();
+
+            Ok(tokio_tungstenite::Connector::Rustls(Arc::new(config)))
+        }
+
+        TlsMode::Fingerprint(hex) => {
+            let provider = rustls::crypto::ring::default_provider();
+            let verifier = Arc::new(FingerprintVerifier {
+                expected: hex.to_ascii_lowercase(),
+                provider: provider.clone(),
+            });
+            let config = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
+                .with_safe_default_protocol_versions()
+                .map_err(|e| CliError::General(format!("TLS protocol version error: {e}")))?
+                .dangerous()
+                .with_custom_certificate_verifier(verifier)
+                .with_no_client_auth();
+
+            Ok(tokio_tungstenite::Connector::Rustls(Arc::new(config)))
         }
     }
 }
 
-// ── entry point ───────────────────────────────────────────────────────────────
+// ── WebSocket connection ──────────────────────────────────────────────────────
 
-/// Run the session loop.
+/// Map a tungstenite error to a [`CliError`].
+fn map_ws_error(e: tokio_tungstenite::tungstenite::Error, url: &str) -> CliError {
+    use tokio_tungstenite::tungstenite::Error as WsErr;
+    match e {
+        WsErr::Io(io_err) if io_err.kind() == std::io::ErrorKind::ConnectionRefused => {
+            CliError::ServerUnreachable(format!("cannot connect to {url}: connection refused"))
+        }
+        WsErr::Io(io_err) => {
+            CliError::ServerUnreachable(format!("network error connecting to {url}: {io_err}"))
+        }
+        WsErr::Tls(_) => CliError::AuthFailure(format!("TLS handshake failed for {url}: {e}")),
+        WsErr::Http(ref resp) if resp.status().as_u16() == 401 || resp.status().as_u16() == 403 => {
+            CliError::AuthFailure(format!("WebSocket upgrade rejected: {}", resp.status()))
+        }
+        _ => CliError::ServerUnreachable(format!("failed to connect WebSocket at {url}: {e}")),
+    }
+}
+
+/// Open an authenticated WebSocket connection to the teamserver session endpoint.
 ///
-/// Reads newline-delimited JSON from stdin, dispatches each command to the
-/// teamserver, and writes a JSON response line to stdout for each.
+/// Converts the configured HTTP(S) server URL to a WS(S) URL, builds the
+/// appropriate TLS connector, and performs the HTTP upgrade with the
+/// `x-api-key` header set.
+#[instrument(skip(config), fields(server = %config.server))]
+async fn connect_websocket(
+    config: &ResolvedConfig,
+) -> Result<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    CliError,
+> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+
+    let ws_base = server_to_ws_url(&config.server);
+    let ws_url = format!("{ws_base}/api/v1/ws");
+    let is_tls = ws_url.starts_with("wss://");
+
+    let mut request = ws_url
+        .as_str()
+        .into_client_request()
+        .map_err(|e| CliError::General(format!("invalid WebSocket URL '{ws_url}': {e}")))?;
+
+    request.headers_mut().insert(
+        API_KEY_HEADER,
+        config
+            .token
+            .parse()
+            .map_err(|e| CliError::General(format!("invalid token header value: {e}")))?,
+    );
+
+    let connector = build_connector(&config.tls_mode, is_tls)?;
+
+    // Use connect_async for SystemRoots (lets the crate's built-in TLS stack
+    // run) and connect_async_tls_with_config for custom connectors.
+    let (ws, _response) = match connector {
+        tokio_tungstenite::Connector::Plain if is_tls => {
+            // SystemRoots: delegate to crate default (webpki-roots feature).
+            tokio_tungstenite::connect_async(request).await.map_err(|e| map_ws_error(e, &ws_url))?
+        }
+        connector => {
+            tokio_tungstenite::connect_async_tls_with_config(request, None, false, Some(connector))
+                .await
+                .map_err(|e| map_ws_error(e, &ws_url))?
+        }
+    };
+
+    Ok(ws)
+}
+
+// ── session loop ─────────────────────────────────────────────────────────────
+
+/// Run the session.
 ///
-/// `default_agent` is used as the agent `id` when a command does not include
-/// an `"id"` field.
+/// Connects to the teamserver WebSocket session endpoint and relays NDJSON
+/// between stdin and the connection.
 ///
-/// Returns `EXIT_SUCCESS` on clean EOF or `{"cmd":"exit"}`, or `EXIT_GENERAL`
-/// on a fatal stdin I/O error.
-pub async fn run(client: &ApiClient, default_agent: Option<&str>) -> i32 {
+/// Returns an exit code:
+/// - [`EXIT_SUCCESS`] on clean EOF, `{"cmd":"exit"}`, or server-initiated close
+/// - [`EXIT_GENERAL`] on fatal I/O or WebSocket errors
+pub async fn run(config: &ResolvedConfig, default_agent: Option<&str>) -> i32 {
+    let ws = match connect_websocket(config).await {
+        Ok(ws) => ws,
+        Err(e) => {
+            emit_error_to(&mut std::io::stdout(), "", &e).ok();
+            return e.exit_code();
+        }
+    };
+
     let stdin = tokio::io::stdin();
     let reader = tokio::io::BufReader::new(stdin);
     let mut stdout = std::io::stdout();
 
     tokio::select! {
-        code = run_with_io(reader, &mut stdout, client, default_agent) => code,
+        code = run_with_io(reader, &mut stdout, ws, default_agent) => code,
         _ = tokio::signal::ctrl_c() => EXIT_SUCCESS,
     }
 }
 
-/// Inner session loop — reads from `reader`, writes to `writer`.
+/// Inner session loop — reads from `reader`, relays via `ws`, writes to `writer`.
 ///
-/// Extracted from [`run`] so that tests can inject a `BufReader<&[u8]>` for
-/// stdin and a `Vec<u8>` for stdout without touching real file descriptors.
-async fn run_with_io<R, W>(
+/// Extracted so tests can inject a `BufReader<&[u8]>` for stdin and a `Vec<u8>`
+/// for stdout without touching real file descriptors, and a mock WebSocket
+/// stream without needing a real teamserver.
+async fn run_with_io<R, W, S>(
     reader: R,
     writer: &mut W,
-    client: &ApiClient,
+    ws: tokio_tungstenite::WebSocketStream<S>,
     default_agent: Option<&str>,
 ) -> i32
 where
     R: tokio::io::AsyncBufRead + Unpin,
     W: std::io::Write,
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
+    let (mut sink, mut stream) = ws.split();
     let mut lines = reader.lines();
 
     loop {
-        match lines.next_line().await {
-            Err(e) => {
-                // Fatal I/O error on stdin.
-                emit_error_to(writer, "", &CliError::General(format!("stdin read error: {e}")))
-                    .ok();
-                return EXIT_GENERAL;
-            }
-            Ok(None) => {
-                // Clean EOF — exit normally.
-                return EXIT_SUCCESS;
-            }
-            Ok(Some(line)) => {
-                let line = line.trim().to_owned();
-                if line.is_empty() {
-                    continue;
+        tokio::select! {
+            line_result = lines.next_line() => {
+                match process_stdin_line(line_result, writer, &mut sink, default_agent).await {
+                    LoopControl::Continue => {}
+                    LoopControl::Exit(code) => return code,
+                    LoopControl::StdinEof => {
+                        // Stdin reached EOF and we sent a WS close frame.
+                        // Drain any remaining WebSocket messages (e.g. in-flight
+                        // server responses) before exiting so we don't silently
+                        // drop responses that arrived after our last send.
+                        while let Some(msg) = stream.next().await {
+                            match process_ws_message(Some(msg), writer) {
+                                LoopControl::Continue | LoopControl::StdinEof => {}
+                                LoopControl::Exit(code) => return code,
+                            }
+                        }
+                        return EXIT_SUCCESS;
+                    }
                 }
+            }
 
-                match serde_json::from_str::<SessionCmd>(&line) {
-                    Err(e) => {
-                        if emit_error_to(
-                            writer,
-                            "",
-                            &CliError::General(format!("invalid JSON: {e}")),
-                        )
-                        .is_err()
-                        {
-                            return EXIT_GENERAL;
-                        }
-                    }
-                    Ok(msg) => {
-                        let cmd_name = msg.cmd.clone();
-                        if cmd_name == "exit" {
-                            return EXIT_SUCCESS;
-                        }
-                        let result = dispatch(client, &msg, default_agent).await;
-                        let write_result = match result {
-                            Ok(data) => emit_ok_to(writer, &cmd_name, data),
-                            Err(e) => emit_error_to(writer, &cmd_name, &e),
-                        };
-                        if write_result.is_err() {
-                            return EXIT_GENERAL;
-                        }
-                    }
+            ws_msg = stream.next() => {
+                match process_ws_message(ws_msg, writer) {
+                    LoopControl::Continue | LoopControl::StdinEof => {}
+                    LoopControl::Exit(code) => return code,
                 }
             }
         }
     }
 }
 
-// ── command dispatcher ────────────────────────────────────────────────────────
-
-/// Resolve an agent ID from the message or the session default.
-fn agent_id<'a>(msg: &'a SessionCmd, default_agent: Option<&'a str>) -> Result<&'a str, CliError> {
-    msg.id.as_deref().or(default_agent).ok_or_else(|| {
-        CliError::InvalidArgs("command requires an agent id (set \"id\" or --agent)".to_owned())
-    })
+/// Control flow token returned by the per-event handlers.
+enum LoopControl {
+    Continue,
+    Exit(i32),
+    /// Stdin reached EOF; the outer loop should drain remaining WebSocket
+    /// messages before exiting.
+    StdinEof,
 }
 
-/// Percent-encode characters that are not safe in query-string values.
-fn percent_encode(s: &str) -> String {
-    s.bytes()
-        .flat_map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b':' => {
-                vec![b as char]
-            }
-            other => format!("%{other:02X}").chars().collect::<Vec<_>>(),
-        })
-        .collect()
-}
-
-/// Dispatch a parsed command to the appropriate API call.
+/// Handle one line read from stdin.
 ///
-/// Returns the data payload to be included in the `"data"` field of the
-/// success envelope, or a [`CliError`] to be turned into an error envelope.
-async fn dispatch(
-    client: &ApiClient,
-    msg: &SessionCmd,
+/// - Empty lines are skipped.
+/// - Invalid JSON produces a local error response and continues.
+/// - `{"cmd":"ping"}` is answered immediately without a server round-trip.
+/// - `{"cmd":"exit"}` sends a WebSocket close frame and exits cleanly.
+/// - All other commands have the default agent id injected (if applicable) and
+///   are forwarded to the server as a WebSocket text frame.
+async fn process_stdin_line<W, Si>(
+    line_result: std::io::Result<Option<String>>,
+    writer: &mut W,
+    sink: &mut Si,
     default_agent: Option<&str>,
-) -> Result<serde_json::Value, CliError> {
-    match msg.cmd.as_str() {
-        "ping" => Ok(serde_json::json!({"pong": true})),
-
-        "status" => {
-            let data = super::status::run(client).await?;
-            serde_json::to_value(data)
-                .map_err(|e| CliError::General(format!("serialise error: {e}")))
+) -> LoopControl
+where
+    W: std::io::Write,
+    Si: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+{
+    match line_result {
+        Err(e) => {
+            emit_error_to(writer, "", &CliError::General(format!("stdin read error: {e}"))).ok();
+            LoopControl::Exit(EXIT_GENERAL)
         }
 
-        // ── agent ─────────────────────────────────────────────────────────────
-        "agent.list" => {
-            let agents: Vec<RawAgent> = client.get("/agents").await?;
-            Ok(serde_json::to_value(agents)
-                .map_err(|e| CliError::General(format!("serialise error: {e}")))?)
+        Ok(None) => {
+            // Clean EOF — send WS close frame and signal the outer loop to
+            // drain any in-flight server responses before exiting.
+            let _ = sink.close().await;
+            LoopControl::StdinEof
         }
 
-        "agent.show" => {
-            let id = agent_id(msg, default_agent)?;
-            let agent: RawAgent = client.get(&format!("/agents/{id}")).await?;
-            Ok(serde_json::to_value(agent)
-                .map_err(|e| CliError::General(format!("serialise error: {e}")))?)
-        }
-
-        "agent.exec" => {
-            let id = agent_id(msg, default_agent)?;
-            let command = msg.command.as_deref().ok_or_else(|| {
-                CliError::InvalidArgs("agent.exec requires a \"command\" field".to_owned())
-            })?;
-            let wait = msg.wait.unwrap_or(false);
-            let timeout_secs = msg.timeout.unwrap_or(DEFAULT_EXEC_TIMEOUT_SECS);
-            exec(client, id, command, wait, timeout_secs).await
-        }
-
-        "agent.output" => {
-            let id = agent_id(msg, default_agent)?;
-            let page: OutputPage = client.get(&output_url(id, msg.output_since()?)).await?;
-            let entries: Vec<serde_json::Value> = page
-                .entries
-                .into_iter()
-                .map(|e| {
-                    serde_json::json!({
-                        "id": e.id,
-                        "task_id": e.task_id,
-                        "command": e.command_line,
-                        "output": if e.output.is_empty() { e.message } else { e.output },
-                        "received_at": e.received_at,
-                    })
-                })
-                .collect();
-            Ok(serde_json::json!(entries))
-        }
-
-        "agent.kill" => {
-            let id = agent_id(msg, default_agent)?;
-            let wait = msg.wait.unwrap_or(false);
-            let timeout_secs = msg.timeout.unwrap_or(DEFAULT_EXEC_TIMEOUT_SECS);
-            kill(client, id, wait, timeout_secs).await
-        }
-
-        "agent.upload" => {
-            let id = agent_id(msg, default_agent)?;
-            let src = msg.src.as_deref().ok_or_else(|| {
-                CliError::InvalidArgs("agent.upload requires a \"src\" field".to_owned())
-            })?;
-            let dst = msg.dst.as_deref().ok_or_else(|| {
-                CliError::InvalidArgs("agent.upload requires a \"dst\" field".to_owned())
-            })?;
-
-            use base64::Engine;
-            use base64::engine::general_purpose::STANDARD as BASE64;
-
-            let file_bytes = tokio::fs::read(src)
-                .await
-                .map_err(|e| CliError::General(format!("failed to read local file {src}: {e}")))?;
-            let content = BASE64.encode(&file_bytes);
-
-            #[derive(Serialize)]
-            struct Body<'a> {
-                remote_path: &'a str,
-                content: &'a str,
+        Ok(Some(line)) => {
+            let line = line.trim().to_owned();
+            if line.is_empty() {
+                return LoopControl::Continue;
             }
 
-            let resp: TaskQueuedResponse = client
-                .post(
-                    &format!("/agents/{id}/upload"),
-                    &Body { remote_path: dst, content: &content },
-                )
-                .await?;
+            let mut val: serde_json::Value = match serde_json::from_str(&line) {
+                Err(e) => {
+                    if emit_error_to(writer, "", &CliError::General(format!("invalid JSON: {e}")))
+                        .is_err()
+                    {
+                        return LoopControl::Exit(EXIT_GENERAL);
+                    }
+                    return LoopControl::Continue;
+                }
+                Ok(v) => v,
+            };
 
-            Ok(serde_json::json!({
-                "agent_id": id,
-                "job_id": resp.task_id,
-                "local_path": src,
-                "remote_path": dst
-            }))
-        }
+            let cmd = val.get("cmd").and_then(|c| c.as_str()).unwrap_or("").to_owned();
 
-        "agent.download" => {
-            let id = agent_id(msg, default_agent)?;
-            let src = msg.src.as_deref().ok_or_else(|| {
-                CliError::InvalidArgs(
-                    "agent.download requires a \"src\" field (remote path)".to_owned(),
-                )
-            })?;
-
-            #[derive(Serialize)]
-            struct Body<'a> {
-                remote_path: &'a str,
+            // ── locally handled commands ──────────────────────────────────
+            if cmd == "ping" {
+                if emit_ok_to(writer, "ping", serde_json::json!({"pong": true})).is_err() {
+                    return LoopControl::Exit(EXIT_GENERAL);
+                }
+                return LoopControl::Continue;
             }
 
-            let resp: TaskQueuedResponse =
-                client.post(&format!("/agents/{id}/download"), &Body { remote_path: src }).await?;
+            if cmd == "exit" {
+                let _ = sink.close().await;
+                return LoopControl::Exit(EXIT_SUCCESS);
+            }
 
-            Ok(serde_json::json!({
-                "agent_id": id,
-                "job_id": resp.task_id,
-                "remote_path": src,
-                "local_path": msg.dst.as_deref().unwrap_or("")
-            }))
-        }
+            // ── default-agent injection ───────────────────────────────────
+            if let Some(da) = default_agent {
+                let id_absent = val.get("id").is_none_or(|v| v.is_null());
+                if id_absent {
+                    if let Some(obj) = val.as_object_mut() {
+                        obj.insert("id".to_owned(), serde_json::json!(da));
+                    }
+                }
+            }
 
-        // ── listener ──────────────────────────────────────────────────────────
-        "listener.list" => {
-            let listeners: Vec<RawListenerSummary> = client.get("/listeners").await?;
-            Ok(serde_json::to_value(listeners)
-                .map_err(|e| CliError::General(format!("serialise error: {e}")))?)
-        }
+            // ── forward to server ─────────────────────────────────────────
+            let text = match serde_json::to_string(&val) {
+                Ok(s) => s,
+                Err(e) => {
+                    if emit_error_to(
+                        writer,
+                        &cmd,
+                        &CliError::General(format!("serialise error: {e}")),
+                    )
+                    .is_err()
+                    {
+                        return LoopControl::Exit(EXIT_GENERAL);
+                    }
+                    return LoopControl::Continue;
+                }
+            };
 
-        "listener.show" => {
-            let name = msg.name.as_deref().ok_or_else(|| {
-                CliError::InvalidArgs("listener.show requires a \"name\" field".to_owned())
-            })?;
-            let listener: RawListenerSummary = client.get(&format!("/listeners/{name}")).await?;
-            Ok(serde_json::to_value(listener)
-                .map_err(|e| CliError::General(format!("serialise error: {e}")))?)
-        }
-
-        "listener.create" => {
-            let name = msg.name.as_deref().ok_or_else(|| {
-                CliError::InvalidArgs("listener.create requires a \"name\" field".to_owned())
-            })?;
-            let listener_type = msg.listener_type.as_deref().ok_or_else(|| {
-                CliError::InvalidArgs("listener.create requires a \"type\" field".to_owned())
-            })?;
-            let host = msg.host.as_deref().unwrap_or("0.0.0.0");
-            let body = build_create_body(
-                name,
-                listener_type,
-                msg.port,
-                host,
-                msg.domain.as_deref(),
-                msg.pipe_name.as_deref(),
-                msg.endpoint.as_deref(),
-                msg.secure,
-                msg.config_json.as_deref(),
-            )?;
-            let raw: RawListenerSummary = client.post("/listeners", &body).await?;
-            Ok(serde_json::to_value(raw)
-                .map_err(|e| CliError::General(format!("serialise error: {e}")))?)
-        }
-
-        "listener.start" => {
-            let name = msg.name.as_deref().ok_or_else(|| {
-                CliError::InvalidArgs("listener.start requires a \"name\" field".to_owned())
-            })?;
-            listener_set_state(client, name, "start").await
-        }
-
-        "listener.stop" => {
-            let name = msg.name.as_deref().ok_or_else(|| {
-                CliError::InvalidArgs("listener.stop requires a \"name\" field".to_owned())
-            })?;
-            listener_set_state(client, name, "stop").await
-        }
-
-        "listener.delete" => {
-            let name = msg.name.as_deref().ok_or_else(|| {
-                CliError::InvalidArgs("listener.delete requires a \"name\" field".to_owned())
-            })?;
-            client.delete_no_body(&format!("/listeners/{name}")).await?;
-            Ok(serde_json::json!({"name": name, "deleted": true}))
-        }
-
-        // ── operator ──────────────────────────────────────────────────────────
-        "operator.list" => {
-            let operators: Vec<RawOperator> = client.get("/operators").await?;
-            Ok(serde_json::to_value(operators)
-                .map_err(|e| CliError::General(format!("serialise error: {e}")))?)
-        }
-
-        "operator.create" => {
-            let username = msg.username.as_deref().ok_or_else(|| {
-                CliError::InvalidArgs("operator.create requires a \"username\" field".to_owned())
-            })?;
-            let password = msg.password.as_deref().ok_or_else(|| {
-                CliError::InvalidArgs("operator.create requires a \"password\" field".to_owned())
-            })?;
-            let role = msg.role.as_deref().ok_or_else(|| {
-                CliError::InvalidArgs("operator.create requires a \"role\" field".to_owned())
-            })?;
-            validate_role(role)?;
-            let body =
-                serde_json::json!({ "username": username, "password": password, "role": role });
-            let raw: RawOperatorCreate = client.post("/operators", &body).await?;
-            Ok(serde_json::to_value(raw)
-                .map_err(|e| CliError::General(format!("serialise error: {e}")))?)
-        }
-
-        "operator.delete" => {
-            let username = msg.username.as_deref().ok_or_else(|| {
-                CliError::InvalidArgs("operator.delete requires a \"username\" field".to_owned())
-            })?;
-            client.delete_no_body(&format!("/operators/{username}")).await?;
-            Ok(serde_json::json!({"username": username, "deleted": true}))
-        }
-
-        "operator.set-role" => {
-            let username = msg.username.as_deref().ok_or_else(|| {
-                CliError::InvalidArgs("operator.set-role requires a \"username\" field".to_owned())
-            })?;
-            let role = msg.role.as_deref().ok_or_else(|| {
-                CliError::InvalidArgs("operator.set-role requires a \"role\" field".to_owned())
-            })?;
-            validate_role(role)?;
-            let body = serde_json::json!({ "role": role });
-            let raw: RawOperator =
-                client.put(&format!("/operators/{username}/role"), &body).await?;
-            Ok(serde_json::to_value(raw)
-                .map_err(|e| CliError::General(format!("serialise error: {e}")))?)
-        }
-
-        // ── payload ───────────────────────────────────────────────────────────
-        "payload.list" => {
-            let payloads: Vec<RawPayload> = client.get("/payloads").await?;
-            Ok(serde_json::to_value(payloads)
-                .map_err(|e| CliError::General(format!("serialise error: {e}")))?)
-        }
-
-        "payload.build" => {
-            let listener = msg.listener.as_deref().ok_or_else(|| {
-                CliError::InvalidArgs("payload.build requires a \"listener\" field".to_owned())
-            })?;
-            let arch = msg.arch.as_deref().ok_or_else(|| {
-                CliError::InvalidArgs("payload.build requires an \"arch\" field".to_owned())
-            })?;
-            let format = msg.format.as_deref().ok_or_else(|| {
-                CliError::InvalidArgs("payload.build requires a \"format\" field".to_owned())
-            })?;
-            super::payload::validate_format(format)?;
-            let agent = msg.agent.as_deref().unwrap_or("demon");
-            let wait = msg.wait.unwrap_or(false);
-            let timeout_secs = msg.timeout.unwrap_or(DEFAULT_BUILD_TIMEOUT_SECS);
-            payload_build(client, listener, arch, format, agent, msg.sleep, wait, timeout_secs)
-                .await
-        }
-
-        "payload.download" => {
-            let id = msg.id.as_deref().ok_or_else(|| {
-                CliError::InvalidArgs("payload.download requires an \"id\" field".to_owned())
-            })?;
-            let dst = msg.dst.as_deref().ok_or_else(|| {
-                CliError::InvalidArgs("payload.download requires a \"dst\" field".to_owned())
-            })?;
-            payload_download(client, id, dst).await
-        }
-
-        // ── log ───────────────────────────────────────────────────────────────
-        "log.list" => {
-            let limit = msg.limit.unwrap_or(DEFAULT_LOG_LIMIT);
-            log_list(
-                client,
-                limit,
-                msg.log_since()?,
-                msg.operator.as_deref(),
-                msg.id.as_deref(),
-                msg.action.as_deref(),
-            )
-            .await
-        }
-
-        "log.tail" => log_list(client, LOG_TAIL_LIMIT, None, None, None, None).await,
-
-        unknown => Err(CliError::InvalidArgs(format!("unknown session command: {unknown:?}"))),
-    }
-}
-
-// ── command implementations ───────────────────────────────────────────────────
-
-/// Execute a shell command on an agent, optionally waiting for completion.
-///
-/// Submits the command via `POST /agents/{id}/task` using the Demon
-/// `AgentTaskInfo` wire format.
-///
-/// With `wait=true`, polls `GET /agents/{id}/output` until an entry matching
-/// the submitted task appears, or the timeout expires.
-#[instrument(skip(client))]
-async fn exec(
-    client: &ApiClient,
-    agent_id: &str,
-    command: &str,
-    wait: bool,
-    timeout_secs: u64,
-) -> Result<serde_json::Value, CliError> {
-    #[derive(Serialize)]
-    struct Body<'a> {
-        #[serde(rename = "CommandLine")]
-        command_line: &'a str,
-        #[serde(rename = "CommandID")]
-        command_id: &'static str,
-        #[serde(rename = "DemonID")]
-        demon_id: &'a str,
-        #[serde(rename = "TaskID")]
-        task_id: &'static str,
-    }
-
-    let resp: TaskQueuedResponse = client
-        .post(
-            &format!("/agents/{agent_id}/task"),
-            &Body { command_line: command, command_id: "21", demon_id: agent_id, task_id: "" },
-        )
-        .await?;
-
-    if !wait {
-        return Ok(serde_json::json!({"job_id": resp.task_id}));
-    }
-
-    // Poll the output endpoint for the task's result.
-    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
-    let mut cursor: Option<i64> = None;
-
-    loop {
-        if Instant::now() >= deadline {
-            return Err(CliError::Timeout(format!(
-                "timed out waiting for output from task {} after {timeout_secs}s",
-                resp.task_id
-            )));
-        }
-
-        sleep(POLL_INTERVAL).await;
-
-        let page: OutputPage = client.get(&output_url(agent_id, cursor)).await?;
-
-        for entry in &page.entries {
-            cursor = Some(entry.id);
-            if entry.task_id.as_deref() == Some(resp.task_id.as_str()) {
-                let output = if entry.output.is_empty() { &entry.message } else { &entry.output };
-                return Ok(serde_json::json!({
-                    "job_id": resp.task_id,
-                    "output": output,
-                    "exit_code": serde_json::Value::Null
-                }));
+            if let Err(e) = sink.send(Message::Text(text.into())).await {
+                emit_error_to(writer, &cmd, &CliError::ServerUnreachable(e.to_string())).ok();
+                LoopControl::Exit(EXIT_GENERAL)
+            } else {
+                LoopControl::Continue
             }
         }
     }
 }
 
-/// Send a kill command to an agent, optionally waiting until it is dead.
+/// Handle one message received from the WebSocket.
 ///
-/// Issues `DELETE /agents/{id}` which the server interprets as a
-/// `CommandExit` task queued on the agent.
-#[instrument(skip(client))]
-async fn kill(
-    client: &ApiClient,
-    agent_id: &str,
-    wait: bool,
-    timeout_secs: u64,
-) -> Result<serde_json::Value, CliError> {
-    client.delete_no_body(&format!("/agents/{agent_id}")).await?;
+/// - Text frames are written verbatim to stdout as a line.
+/// - Close frames terminate the session cleanly.
+/// - Binary / Ping / Pong frames are silently ignored.
+/// - A closed stream (`None`) or an error terminates the session.
+fn process_ws_message<W>(
+    msg: Option<Result<Message, tokio_tungstenite::tungstenite::Error>>,
+    writer: &mut W,
+) -> LoopControl
+where
+    W: std::io::Write,
+{
+    match msg {
+        // Server closed the stream.
+        None => LoopControl::Exit(EXIT_SUCCESS),
 
-    if !wait {
-        return Ok(serde_json::json!({"agent_id": agent_id, "status": "kill_sent"}));
-    }
-
-    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
-
-    loop {
-        if Instant::now() >= deadline {
-            return Err(CliError::Timeout(format!(
-                "timed out waiting for agent {agent_id} to die after {timeout_secs}s"
-            )));
-        }
-
-        let raw: RawAgent = client.get(&format!("/agents/{agent_id}")).await?;
-        if raw.status == "dead" {
-            return Ok(serde_json::json!({"agent_id": agent_id, "status": raw.status}));
-        }
-
-        sleep(POLL_INTERVAL).await;
-    }
-}
-
-/// Transition a listener to a new state (`"start"` or `"stop"`).
-///
-/// Issues `PUT /listeners/{name}/{action}`.  Handles idempotent responses:
-/// if the server reports `listener_already_running` or `listener_not_running`
-/// the current state is fetched and returned with `"already_in_state": true`.
-#[instrument(skip(client))]
-async fn listener_set_state(
-    client: &ApiClient,
-    name: &str,
-    action: &str,
-) -> Result<serde_json::Value, CliError> {
-    let already_in_state = match client
-        .put_empty::<RawListenerSummary>(&format!("/listeners/{name}/{action}"))
-        .await
-    {
-        Ok(raw) => {
-            return Ok(serde_json::json!({
-                "name": name,
-                "status": raw.state.status,
-                "already_in_state": false,
-            }));
-        }
-        Err(CliError::General(msg))
-            if msg.contains("listener_already_running") || msg.contains("listener_not_running") =>
-        {
-            true
-        }
-        Err(e) => return Err(e),
-    };
-
-    let raw: RawListenerSummary = client.get(&format!("/listeners/{name}")).await?;
-    Ok(serde_json::json!({
-        "name": name,
-        "status": raw.state.status,
-        "already_in_state": already_in_state,
-    }))
-}
-
-/// Submit a payload build job, optionally waiting for completion.
-///
-/// With `wait=true`, polls `GET /payloads/jobs/{job_id}` until the build
-/// finishes or `timeout_secs` elapse.
-#[instrument(skip(client))]
-async fn payload_build(
-    client: &ApiClient,
-    listener: &str,
-    arch: &str,
-    format: &str,
-    agent: &str,
-    sleep_secs: Option<u64>,
-    wait: bool,
-    timeout_secs: u64,
-) -> Result<serde_json::Value, CliError> {
-    let mut body = serde_json::json!({
-        "listener": listener,
-        "arch": arch,
-        "format": format,
-        "agent": agent,
-    });
-    if let Some(s) = sleep_secs {
-        body["sleep"] = serde_json::json!(s);
-    }
-
-    let submitted: BuildSubmitted = client.post("/payloads/build", &body).await?;
-
-    if !wait {
-        return Ok(serde_json::json!({"job_id": submitted.job_id}));
-    }
-
-    // Poll until done or timeout.
-    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
-    let job_path = format!("/payloads/jobs/{}", submitted.job_id);
-
-    loop {
-        if Instant::now() > deadline {
-            return Err(CliError::Timeout(format!(
-                "payload build job {} did not complete within {timeout_secs}s",
-                submitted.job_id
-            )));
-        }
-
-        let status: BuildStatus = client.get(&job_path).await?;
-
-        match status.status.as_str() {
-            "done" => {
-                let payload_id = status.payload_id.ok_or_else(|| {
-                    CliError::General(format!(
-                        "build job {} reported done but returned no payload_id",
-                        status.job_id
-                    ))
-                })?;
-                return Ok(serde_json::json!({
-                    "id": payload_id,
-                    "size_bytes": status.size_bytes.unwrap_or(0),
-                }));
+        Some(Err(e)) => {
+            use tokio_tungstenite::tungstenite::error::ProtocolError;
+            use tokio_tungstenite::tungstenite::Error as WsErr;
+            // Connection-closed variants indicate the server has ended the
+            // session — treat them as a clean exit rather than an error.
+            match &e {
+                WsErr::ConnectionClosed | WsErr::AlreadyClosed => LoopControl::Exit(EXIT_SUCCESS),
+                WsErr::Io(io_err)
+                    if io_err.kind() == std::io::ErrorKind::ConnectionReset
+                        || io_err.kind() == std::io::ErrorKind::UnexpectedEof
+                        || io_err.kind() == std::io::ErrorKind::BrokenPipe =>
+                {
+                    LoopControl::Exit(EXIT_SUCCESS)
+                }
+                // TCP was torn down before the WS close handshake completed —
+                // this is normal when the server drops the connection quickly.
+                WsErr::Protocol(ProtocolError::ResetWithoutClosingHandshake) => {
+                    LoopControl::Exit(EXIT_SUCCESS)
+                }
+                _ => {
+                    emit_error_to(
+                        writer,
+                        "",
+                        &CliError::ServerUnreachable(format!("websocket error: {e}")),
+                    )
+                    .ok();
+                    LoopControl::Exit(EXIT_GENERAL)
+                }
             }
-            "error" => {
-                let msg = status.error.unwrap_or_else(|| "unknown build error".to_owned());
-                return Err(CliError::General(format!(
-                    "build job {} failed: {msg}",
-                    status.job_id
-                )));
+        }
+
+        Some(Ok(Message::Text(text))) => {
+            if writeln!(writer, "{text}").is_err() {
+                LoopControl::Exit(EXIT_GENERAL)
+            } else {
+                LoopControl::Continue
             }
-            // "pending" | "running" — keep polling
-            _ => {}
         }
 
-        sleep(BUILD_POLL_INTERVAL).await;
-    }
-}
+        Some(Ok(Message::Close(_))) => LoopControl::Exit(EXIT_SUCCESS),
 
-/// Download a payload binary and write it to disk.
-///
-/// Calls `GET /payloads/{id}/download`, then writes the raw bytes to `dst`,
-/// creating any missing parent directories.
-#[instrument(skip(client))]
-async fn payload_download(
-    client: &ApiClient,
-    id: &str,
-    dst: &str,
-) -> Result<serde_json::Value, CliError> {
-    let bytes = client.get_raw_bytes(&format!("/payloads/{id}/download")).await?;
-    let size_bytes = bytes.len() as u64;
-
-    let dst_path = Path::new(dst);
-    if let Some(parent) = dst_path.parent() {
-        if !parent.as_os_str().is_empty() && !parent.exists() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                CliError::General(format!("failed to create destination directory: {e}"))
-            })?;
-        }
+        // Binary, Ping, Pong — ignore.
+        Some(Ok(_)) => LoopControl::Continue,
     }
-
-    std::fs::write(dst_path, &bytes)
-        .map_err(|e| CliError::General(format!("failed to write payload to {dst}: {e}")))?;
-
-    Ok(serde_json::json!({
-        "id": id,
-        "dst": dst,
-        "size_bytes": size_bytes,
-    }))
-}
-
-/// Fetch audit log entries with optional filters.
-///
-/// Entries are returned newest-first.  The `agent_id` filter uses the `id`
-/// field in the session message (consistent with other agent-targeting
-/// commands).
-#[instrument(skip(client))]
-async fn log_list(
-    client: &ApiClient,
-    limit: u32,
-    since: Option<&str>,
-    operator: Option<&str>,
-    agent_id: Option<&str>,
-    action: Option<&str>,
-) -> Result<serde_json::Value, CliError> {
-    let mut params: Vec<String> = vec![format!("limit={limit}")];
-    if let Some(s) = since {
-        params.push(format!("since={}", percent_encode(s)));
-    }
-    if let Some(op) = operator {
-        params.push(format!("operator={}", percent_encode(op)));
-    }
-    if let Some(aid) = agent_id {
-        params.push(format!("agent_id={}", percent_encode(aid)));
-    }
-    if let Some(act) = action {
-        params.push(format!("action={}", percent_encode(act)));
-    }
-
-    let path = format!("/audit?{}", params.join("&"));
-    let page: RawAuditPage = client.get(&path).await?;
-    serde_json::to_value(page.items).map_err(|e| CliError::General(format!("serialise error: {e}")))
 }
 
 // ── output helpers ────────────────────────────────────────────────────────────
@@ -1001,8 +569,8 @@ fn emit_ok_to(
 
 /// Write an error response line to `writer`.
 ///
-/// In session mode all output (including errors) goes to the same stream so
-/// the consuming process reads a single coherent NDJSON stream.
+/// In session mode all output (including errors) goes to stdout so the
+/// consuming process reads a single coherent NDJSON stream.
 fn emit_error_to(
     writer: &mut impl std::io::Write,
     cmd: &str,
@@ -1026,1299 +594,387 @@ fn emit_error_to(
 mod tests {
     use super::*;
 
-    // ── SessionCmd deserialisation ─────────────────────────────────────────────
+    // ── server_to_ws_url ───────────────────────────────────────────────────────
 
     #[test]
-    fn ping_deserialises() {
-        let msg: SessionCmd = serde_json::from_str(r#"{"cmd":"ping"}"#).expect("parse ping");
-        assert_eq!(msg.cmd, "ping");
-        assert!(msg.id.is_none());
+    fn https_becomes_wss() {
+        assert_eq!(server_to_ws_url("https://ts.example.com:40056"), "wss://ts.example.com:40056");
     }
 
     #[test]
-    fn exit_deserialises() {
-        let msg: SessionCmd = serde_json::from_str(r#"{"cmd":"exit"}"#).expect("parse exit");
-        assert_eq!(msg.cmd, "exit");
+    fn http_becomes_ws() {
+        assert_eq!(server_to_ws_url("http://localhost:8080"), "ws://localhost:8080");
     }
 
     #[test]
-    fn agent_exec_deserialises_all_fields() {
-        let json =
-            r#"{"cmd":"agent.exec","id":"abc123","command":"whoami","wait":true,"timeout":30}"#;
-        let msg: SessionCmd = serde_json::from_str(json).expect("parse agent.exec");
-        assert_eq!(msg.cmd, "agent.exec");
-        assert_eq!(msg.id.as_deref(), Some("abc123"));
-        assert_eq!(msg.command.as_deref(), Some("whoami"));
-        assert_eq!(msg.wait, Some(true));
-        assert_eq!(msg.timeout, Some(30));
+    fn bare_host_gets_ws_scheme() {
+        assert_eq!(server_to_ws_url("localhost:8080"), "ws://localhost:8080");
     }
 
-    #[test]
-    fn agent_output_with_since_deserialises() {
-        let json = r#"{"cmd":"agent.output","id":"abc","since":42}"#;
-        let msg: SessionCmd = serde_json::from_str(json).expect("parse agent.output");
-        assert_eq!(msg.since, Some(SessionSince::Cursor(42)));
-    }
-
-    #[test]
-    fn agent_output_with_string_since_is_rejected() {
-        let msg: SessionCmd =
-            serde_json::from_str(r#"{"cmd":"agent.output","id":"abc","since":"job_xyz"}"#)
-                .expect("parse agent.output");
-        assert!(
-            matches!(msg.output_since(), Err(CliError::InvalidArgs(_))),
-            "string output cursor must be rejected"
-        );
-    }
-
-    #[test]
-    fn listener_show_deserialises_name() {
-        let json = r#"{"cmd":"listener.show","name":"http1"}"#;
-        let msg: SessionCmd = serde_json::from_str(json).expect("parse listener.show");
-        assert_eq!(msg.name.as_deref(), Some("http1"));
-    }
-
-    #[test]
-    fn listener_create_deserialises_all_fields() {
-        let json = r#"{"cmd":"listener.create","name":"http1","type":"http","port":443,"host":"0.0.0.0","secure":true}"#;
-        let msg: SessionCmd = serde_json::from_str(json).expect("parse listener.create");
-        assert_eq!(msg.name.as_deref(), Some("http1"));
-        assert_eq!(msg.listener_type.as_deref(), Some("http"));
-        assert_eq!(msg.port, Some(443));
-        assert!(msg.secure);
-    }
-
-    #[test]
-    fn operator_create_deserialises_all_fields() {
-        let json =
-            r#"{"cmd":"operator.create","username":"alice","password":"s3cr3t","role":"operator"}"#;
-        let msg: SessionCmd = serde_json::from_str(json).expect("parse operator.create");
-        assert_eq!(msg.username.as_deref(), Some("alice"));
-        assert_eq!(msg.password.as_deref(), Some("s3cr3t"));
-        assert_eq!(msg.role.as_deref(), Some("operator"));
-    }
-
-    #[test]
-    fn payload_build_deserialises_all_fields() {
-        let json = r#"{"cmd":"payload.build","listener":"http1","arch":"x86_64","format":"exe","sleep":5,"wait":true,"timeout":120}"#;
-        let msg: SessionCmd = serde_json::from_str(json).expect("parse payload.build");
-        assert_eq!(msg.listener.as_deref(), Some("http1"));
-        assert_eq!(msg.arch.as_deref(), Some("x86_64"));
-        assert_eq!(msg.format.as_deref(), Some("exe"));
-        assert_eq!(msg.sleep, Some(5));
-        assert_eq!(msg.wait, Some(true));
-        assert_eq!(msg.timeout, Some(120));
-    }
-
-    #[test]
-    fn log_list_deserialises_all_fields() {
-        let json = r#"{"cmd":"log.list","operator":"alice","action":"agent.exec","id":"agent1","since":"2026-01-01T00:00:00Z","limit":25}"#;
-        let msg: SessionCmd = serde_json::from_str(json).expect("parse log.list");
-        assert_eq!(msg.operator.as_deref(), Some("alice"));
-        assert_eq!(msg.action.as_deref(), Some("agent.exec"));
-        assert_eq!(msg.id.as_deref(), Some("agent1"));
-        assert_eq!(msg.since, Some(SessionSince::Timestamp("2026-01-01T00:00:00Z".to_owned())));
-        assert_eq!(msg.limit, Some(25));
-    }
-
-    #[test]
-    fn log_list_with_numeric_since_is_rejected() {
-        let msg: SessionCmd =
-            serde_json::from_str(r#"{"cmd":"log.list","since":42}"#).expect("parse log.list");
-        assert!(
-            matches!(msg.log_since(), Err(CliError::InvalidArgs(_))),
-            "numeric audit cursor must be rejected"
-        );
-    }
-
-    #[test]
-    fn unknown_fields_are_ignored() {
-        let json = r#"{"cmd":"ping","totally_unknown_field":42}"#;
-        let msg: SessionCmd = serde_json::from_str(json).expect("unknown fields must not error");
-        assert_eq!(msg.cmd, "ping");
-    }
-
-    // ── agent_id resolution ────────────────────────────────────────────────────
-
-    #[test]
-    fn agent_id_prefers_message_field_over_default() {
-        let msg: SessionCmd =
-            serde_json::from_str(r#"{"cmd":"agent.show","id":"from-msg"}"#).expect("parse");
-        let resolved = agent_id(&msg, Some("from-default")).expect("resolve");
-        assert_eq!(resolved, "from-msg");
-    }
-
-    #[test]
-    fn agent_id_falls_back_to_default() {
-        let msg: SessionCmd = serde_json::from_str(r#"{"cmd":"agent.show"}"#).expect("parse");
-        let resolved = agent_id(&msg, Some("default-agent")).expect("resolve");
-        assert_eq!(resolved, "default-agent");
-    }
-
-    #[test]
-    fn agent_id_errors_when_neither_present() {
-        let msg: SessionCmd = serde_json::from_str(r#"{"cmd":"agent.show"}"#).expect("parse");
-        let result = agent_id(&msg, None);
-        assert!(
-            matches!(result, Err(CliError::InvalidArgs(_))),
-            "expected InvalidArgs, got {result:?}"
-        );
-    }
-
-    // ── percent_encode ─────────────────────────────────────────────────────────
-
-    #[test]
-    fn percent_encode_leaves_safe_chars_unchanged() {
-        assert_eq!(percent_encode("abc123"), "abc123");
-    }
-
-    #[test]
-    fn percent_encode_encodes_space() {
-        assert_eq!(percent_encode("hello world"), "hello%20world");
-    }
-
-    #[test]
-    fn percent_encode_iso8601_timestamp_unchanged() {
-        assert_eq!(percent_encode("2026-01-01T00:00:00Z"), "2026-01-01T00:00:00Z");
-    }
-
-    // ── emit_ok / emit_error output shape ─────────────────────────────────────
+    // ── emit_ok_to / emit_error_to ─────────────────────────────────────────────
 
     #[test]
     fn emit_ok_produces_valid_json_envelope() {
-        // We capture via serde_json directly rather than stdout.
-        let data = serde_json::json!({"pong": true});
-        let envelope = serde_json::json!({"ok": true, "cmd": "ping", "data": data});
-        assert_eq!(envelope["ok"], true);
-        assert_eq!(envelope["cmd"], "ping");
-        assert_eq!(envelope["data"]["pong"], true);
+        let mut buf = Vec::new();
+        emit_ok_to(&mut buf, "ping", serde_json::json!({"pong": true})).expect("write");
+        let line = String::from_utf8(buf).expect("utf8");
+        let val: serde_json::Value = serde_json::from_str(line.trim()).expect("json");
+        assert_eq!(val["ok"], true);
+        assert_eq!(val["cmd"], "ping");
+        assert_eq!(val["data"]["pong"], true);
     }
 
     #[test]
     fn emit_error_produces_valid_json_envelope() {
+        let mut buf = Vec::new();
         let err = CliError::NotFound("agent xyz".to_owned());
-        let envelope = serde_json::json!({
-            "ok": false,
-            "cmd": "agent.show",
-            "error": err.error_code(),
-            "message": err.to_string(),
+        emit_error_to(&mut buf, "agent.show", &err).expect("write");
+        let line = String::from_utf8(buf).expect("utf8");
+        let val: serde_json::Value = serde_json::from_str(line.trim()).expect("json");
+        assert_eq!(val["ok"], false);
+        assert_eq!(val["cmd"], "agent.show");
+        assert_eq!(val["error"], "NOT_FOUND");
+        assert!(val["message"].as_str().is_some_and(|m| m.contains("not found")));
+    }
+
+    // ── run_with_io via mock WebSocket server ──────────────────────────────────
+
+    /// Spin up a local plain-text WebSocket server and return the listening
+    /// address.  The `handler` closure is invoked once per accepted connection.
+    async fn mock_ws_server<F, Fut>(handler: F) -> std::net::SocketAddr
+    where
+        F: Fn(tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                let ws = tokio_tungstenite::accept_async(stream).await.expect("ws accept");
+                handler(ws).await;
+            }
         });
-        assert_eq!(envelope["ok"], false);
-        assert_eq!(envelope["error"], "NOT_FOUND");
-        assert!(envelope["message"].as_str().is_some_and(|m| m.contains("not found")));
+        addr
     }
 
-    #[test]
-    fn emit_error_for_invalid_args() {
-        let err = CliError::InvalidArgs("missing id".to_owned());
-        let envelope = serde_json::json!({
-            "ok": false,
-            "cmd": "agent.exec",
-            "error": err.error_code(),
-            "message": err.to_string(),
-        });
-        assert_eq!(envelope["error"], "INVALID_ARGS");
+    /// Connect to a `ws://` server and return the client WebSocket stream.
+    async fn ws_connect(
+        addr: std::net::SocketAddr,
+        api_key: &str,
+    ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
+    {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+        let url = format!("ws://{addr}/api/v1/ws");
+        let mut req = url.as_str().into_client_request().expect("build request");
+        req.headers_mut().insert(API_KEY_HEADER, api_key.parse().expect("header value"));
+        tokio_tungstenite::connect_async(req).await.expect("connect").0
     }
 
-    // ── dispatch: unknown command ──────────────────────────────────────────────
-
+    /// `{"cmd":"ping"}` must be answered locally — no message reaches the server.
     #[tokio::test]
-    async fn dispatch_unknown_command_returns_invalid_args() {
-        use crate::config::ResolvedConfig;
-        let cfg = ResolvedConfig {
-            server: "https://127.0.0.1:1".to_owned(),
-            token: "tok".to_owned(),
-            timeout: 1,
-            tls_mode: crate::config::TlsMode::SystemRoots,
-        };
-        let client = ApiClient::new(&cfg).expect("build client");
-        let msg: SessionCmd = serde_json::from_str(r#"{"cmd":"does.not.exist"}"#).expect("parse");
-        let result = dispatch(&client, &msg, None).await;
-        assert!(
-            matches!(result, Err(CliError::InvalidArgs(_))),
-            "expected InvalidArgs for unknown command, got {result:?}"
-        );
-    }
-
-    // ── dispatch: ping (no network) ───────────────────────────────────────────
-
-    #[tokio::test]
-    async fn dispatch_ping_returns_pong_without_network() {
-        use crate::config::ResolvedConfig;
-        let cfg = ResolvedConfig {
-            server: "https://127.0.0.1:1".to_owned(),
-            token: "tok".to_owned(),
-            timeout: 1,
-            tls_mode: crate::config::TlsMode::SystemRoots,
-        };
-        let client = ApiClient::new(&cfg).expect("build client");
-        let msg: SessionCmd = serde_json::from_str(r#"{"cmd":"ping"}"#).expect("parse");
-        let result = dispatch(&client, &msg, None).await.expect("ping must succeed");
-        assert_eq!(result["pong"], true);
-    }
-
-    // ── dispatch: status against unreachable server ───────────────────────────
-
-    #[tokio::test]
-    async fn dispatch_status_returns_server_unreachable_on_no_server() {
-        use crate::config::ResolvedConfig;
-        let cfg = ResolvedConfig {
-            server: "https://127.0.0.1:1".to_owned(),
-            token: "tok".to_owned(),
-            timeout: 1,
-            tls_mode: crate::config::TlsMode::SystemRoots,
-        };
-        let client = ApiClient::new(&cfg).expect("build client");
-        let msg: SessionCmd = serde_json::from_str(r#"{"cmd":"status"}"#).expect("parse");
-        let result = dispatch(&client, &msg, None).await;
-        assert!(
-            matches!(result, Err(CliError::ServerUnreachable(_))),
-            "expected ServerUnreachable for status against no server, got {result:?}"
-        );
-    }
-
-    // ── dispatch: missing agent id ────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn dispatch_agent_show_without_id_returns_invalid_args() {
-        use crate::config::ResolvedConfig;
-        let cfg = ResolvedConfig {
-            server: "https://127.0.0.1:1".to_owned(),
-            token: "tok".to_owned(),
-            timeout: 1,
-            tls_mode: crate::config::TlsMode::SystemRoots,
-        };
-        let client = ApiClient::new(&cfg).expect("build client");
-        let msg: SessionCmd = serde_json::from_str(r#"{"cmd":"agent.show"}"#).expect("parse");
-        let result = dispatch(&client, &msg, None).await;
-        assert!(
-            matches!(result, Err(CliError::InvalidArgs(_))),
-            "expected InvalidArgs when id missing, got {result:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn dispatch_agent_exec_without_command_returns_invalid_args() {
-        use crate::config::ResolvedConfig;
-        let cfg = ResolvedConfig {
-            server: "https://127.0.0.1:1".to_owned(),
-            token: "tok".to_owned(),
-            timeout: 1,
-            tls_mode: crate::config::TlsMode::SystemRoots,
-        };
-        let client = ApiClient::new(&cfg).expect("build client");
-        let msg: SessionCmd =
-            serde_json::from_str(r#"{"cmd":"agent.exec","id":"abc"}"#).expect("parse");
-        let result = dispatch(&client, &msg, None).await;
-        assert!(
-            matches!(result, Err(CliError::InvalidArgs(_))),
-            "expected InvalidArgs when command missing, got {result:?}"
-        );
-    }
-
-    // ── dispatch: agent.exec with wait=true against unreachable server ────────
-
-    #[tokio::test]
-    async fn dispatch_agent_exec_wait_returns_server_unreachable() {
-        use crate::config::ResolvedConfig;
-        let cfg = ResolvedConfig {
-            server: "https://127.0.0.1:1".to_owned(),
-            token: "tok".to_owned(),
-            timeout: 1,
-            tls_mode: crate::config::TlsMode::SystemRoots,
-        };
-        let client = ApiClient::new(&cfg).expect("build client");
-        let msg: SessionCmd = serde_json::from_str(
-            r#"{"cmd":"agent.exec","id":"abc","command":"whoami","wait":true}"#,
-        )
-        .expect("parse");
-        let result = dispatch(&client, &msg, None).await;
-        assert!(
-            matches!(result, Err(CliError::ServerUnreachable(_))),
-            "expected ServerUnreachable for agent.exec with wait=true against no server, got {result:?}"
-        );
-    }
-
-    // ── dispatch: network commands return ServerUnreachable (port 1 is closed) ─
-
-    #[tokio::test]
-    async fn dispatch_agent_list_returns_server_unreachable_on_no_server() {
-        use crate::config::ResolvedConfig;
-        let cfg = ResolvedConfig {
-            server: "https://127.0.0.1:1".to_owned(),
-            token: "tok".to_owned(),
-            timeout: 1,
-            tls_mode: crate::config::TlsMode::SystemRoots,
-        };
-        let client = ApiClient::new(&cfg).expect("build client");
-        let msg: SessionCmd = serde_json::from_str(r#"{"cmd":"agent.list"}"#).expect("parse");
-        let result = dispatch(&client, &msg, None).await;
-        assert!(
-            matches!(result, Err(CliError::ServerUnreachable(_))),
-            "expected ServerUnreachable, got {result:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn dispatch_listener_list_returns_server_unreachable_on_no_server() {
-        use crate::config::ResolvedConfig;
-        let cfg = ResolvedConfig {
-            server: "https://127.0.0.1:1".to_owned(),
-            token: "tok".to_owned(),
-            timeout: 1,
-            tls_mode: crate::config::TlsMode::SystemRoots,
-        };
-        let client = ApiClient::new(&cfg).expect("build client");
-        let msg: SessionCmd = serde_json::from_str(r#"{"cmd":"listener.list"}"#).expect("parse");
-        let result = dispatch(&client, &msg, None).await;
-        assert!(
-            matches!(result, Err(CliError::ServerUnreachable(_))),
-            "expected ServerUnreachable, got {result:?}"
-        );
-    }
-
-    // ── dispatch: agent.output against unreachable server ───────────────────
-
-    #[tokio::test]
-    async fn dispatch_agent_output_without_since_returns_server_unreachable() {
-        use crate::config::ResolvedConfig;
-        let cfg = ResolvedConfig {
-            server: "https://127.0.0.1:1".to_owned(),
-            token: "tok".to_owned(),
-            timeout: 1,
-            tls_mode: crate::config::TlsMode::SystemRoots,
-        };
-        let client = ApiClient::new(&cfg).expect("build client");
-        let msg: SessionCmd =
-            serde_json::from_str(r#"{"cmd":"agent.output","id":"agent1"}"#).expect("parse");
-        let result = dispatch(&client, &msg, None).await;
-        assert!(
-            matches!(result, Err(CliError::ServerUnreachable(_))),
-            "expected ServerUnreachable for agent.output against no server, got {result:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn dispatch_agent_output_with_since_returns_server_unreachable() {
-        use crate::config::ResolvedConfig;
-        let cfg = ResolvedConfig {
-            server: "https://127.0.0.1:1".to_owned(),
-            token: "tok".to_owned(),
-            timeout: 1,
-            tls_mode: crate::config::TlsMode::SystemRoots,
-        };
-        let client = ApiClient::new(&cfg).expect("build client");
-        let msg: SessionCmd =
-            serde_json::from_str(r#"{"cmd":"agent.output","id":"agent1","since":42}"#)
-                .expect("parse");
-        let result = dispatch(&client, &msg, None).await;
-        assert!(
-            matches!(result, Err(CliError::ServerUnreachable(_))),
-            "expected ServerUnreachable for agent.output against no server, got {result:?}"
-        );
-    }
-
-    // ── dispatch: agent.upload / agent.download — validation errors ──────────
-
-    #[tokio::test]
-    async fn dispatch_agent_upload_requires_src_field() {
-        use crate::config::ResolvedConfig;
-        let cfg = ResolvedConfig {
-            server: "https://127.0.0.1:1".to_owned(),
-            token: "tok".to_owned(),
-            timeout: 1,
-            tls_mode: crate::config::TlsMode::SystemRoots,
-        };
-        let client = ApiClient::new(&cfg).expect("build client");
-        let msg: SessionCmd =
-            serde_json::from_str(r#"{"cmd":"agent.upload","id":"agent1"}"#).expect("parse");
-        let result = dispatch(&client, &msg, None).await;
-        assert!(
-            matches!(result, Err(CliError::InvalidArgs(_))),
-            "agent.upload without src must return InvalidArgs, got {result:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn dispatch_agent_download_requires_src_field() {
-        use crate::config::ResolvedConfig;
-        let cfg = ResolvedConfig {
-            server: "https://127.0.0.1:1".to_owned(),
-            token: "tok".to_owned(),
-            timeout: 1,
-            tls_mode: crate::config::TlsMode::SystemRoots,
-        };
-        let client = ApiClient::new(&cfg).expect("build client");
-        let msg: SessionCmd =
-            serde_json::from_str(r#"{"cmd":"agent.download","id":"agent1"}"#).expect("parse");
-        let result = dispatch(&client, &msg, None).await;
-        assert!(
-            matches!(result, Err(CliError::InvalidArgs(_))),
-            "agent.download without src must return InvalidArgs, got {result:?}"
-        );
-    }
-
-    // ── dispatch: listener.show ───────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn dispatch_listener_show_with_name_hits_server() {
-        use crate::config::ResolvedConfig;
-        let cfg = ResolvedConfig {
-            server: "https://127.0.0.1:1".to_owned(),
-            token: "tok".to_owned(),
-            timeout: 1,
-            tls_mode: crate::config::TlsMode::SystemRoots,
-        };
-        let client = ApiClient::new(&cfg).expect("build client");
-        let msg: SessionCmd =
-            serde_json::from_str(r#"{"cmd":"listener.show","name":"http1"}"#).expect("parse");
-        let result = dispatch(&client, &msg, None).await;
-        assert!(
-            matches!(result, Err(CliError::ServerUnreachable(_))),
-            "expected ServerUnreachable for listener.show with name, got {result:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn dispatch_listener_show_without_name_returns_invalid_args() {
-        use crate::config::ResolvedConfig;
-        let cfg = ResolvedConfig {
-            server: "https://127.0.0.1:1".to_owned(),
-            token: "tok".to_owned(),
-            timeout: 1,
-            tls_mode: crate::config::TlsMode::SystemRoots,
-        };
-        let client = ApiClient::new(&cfg).expect("build client");
-        let msg: SessionCmd = serde_json::from_str(r#"{"cmd":"listener.show"}"#).expect("parse");
-        let result = dispatch(&client, &msg, None).await;
-        assert!(
-            matches!(result, Err(CliError::InvalidArgs(_))),
-            "expected InvalidArgs when name missing, got {result:?}"
-        );
-    }
-
-    // ── dispatch: listener.create ─────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn dispatch_listener_create_without_name_returns_invalid_args() {
-        use crate::config::ResolvedConfig;
-        let cfg = ResolvedConfig {
-            server: "https://127.0.0.1:1".to_owned(),
-            token: "tok".to_owned(),
-            timeout: 1,
-            tls_mode: crate::config::TlsMode::SystemRoots,
-        };
-        let client = ApiClient::new(&cfg).expect("build client");
-        let msg: SessionCmd =
-            serde_json::from_str(r#"{"cmd":"listener.create","type":"http"}"#).expect("parse");
-        let result = dispatch(&client, &msg, None).await;
-        assert!(
-            matches!(result, Err(CliError::InvalidArgs(_))),
-            "expected InvalidArgs when name missing, got {result:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn dispatch_listener_create_without_type_returns_invalid_args() {
-        use crate::config::ResolvedConfig;
-        let cfg = ResolvedConfig {
-            server: "https://127.0.0.1:1".to_owned(),
-            token: "tok".to_owned(),
-            timeout: 1,
-            tls_mode: crate::config::TlsMode::SystemRoots,
-        };
-        let client = ApiClient::new(&cfg).expect("build client");
-        let msg: SessionCmd =
-            serde_json::from_str(r#"{"cmd":"listener.create","name":"http1"}"#).expect("parse");
-        let result = dispatch(&client, &msg, None).await;
-        assert!(
-            matches!(result, Err(CliError::InvalidArgs(_))),
-            "expected InvalidArgs when type missing, got {result:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn dispatch_listener_create_with_valid_args_hits_server() {
-        use crate::config::ResolvedConfig;
-        let cfg = ResolvedConfig {
-            server: "https://127.0.0.1:1".to_owned(),
-            token: "tok".to_owned(),
-            timeout: 1,
-            tls_mode: crate::config::TlsMode::SystemRoots,
-        };
-        let client = ApiClient::new(&cfg).expect("build client");
-        let msg: SessionCmd = serde_json::from_str(
-            r#"{"cmd":"listener.create","name":"http1","type":"http","port":443}"#,
-        )
-        .expect("parse");
-        let result = dispatch(&client, &msg, None).await;
-        assert!(
-            matches!(result, Err(CliError::ServerUnreachable(_))),
-            "expected ServerUnreachable when server not running, got {result:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn dispatch_listener_create_with_unknown_type_returns_invalid_args() {
-        use crate::config::ResolvedConfig;
-        let cfg = ResolvedConfig {
-            server: "https://127.0.0.1:1".to_owned(),
-            token: "tok".to_owned(),
-            timeout: 1,
-            tls_mode: crate::config::TlsMode::SystemRoots,
-        };
-        let client = ApiClient::new(&cfg).expect("build client");
-        let msg: SessionCmd =
-            serde_json::from_str(r#"{"cmd":"listener.create","name":"x","type":"ftp"}"#)
-                .expect("parse");
-        let result = dispatch(&client, &msg, None).await;
-        assert!(
-            matches!(result, Err(CliError::InvalidArgs(_))),
-            "expected InvalidArgs for unknown listener type, got {result:?}"
-        );
-    }
-
-    // ── dispatch: listener.start / listener.stop ──────────────────────────────
-
-    #[tokio::test]
-    async fn dispatch_listener_start_without_name_returns_invalid_args() {
-        use crate::config::ResolvedConfig;
-        let cfg = ResolvedConfig {
-            server: "https://127.0.0.1:1".to_owned(),
-            token: "tok".to_owned(),
-            timeout: 1,
-            tls_mode: crate::config::TlsMode::SystemRoots,
-        };
-        let client = ApiClient::new(&cfg).expect("build client");
-        let msg: SessionCmd = serde_json::from_str(r#"{"cmd":"listener.start"}"#).expect("parse");
-        let result = dispatch(&client, &msg, None).await;
-        assert!(
-            matches!(result, Err(CliError::InvalidArgs(_))),
-            "expected InvalidArgs when name missing, got {result:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn dispatch_listener_stop_without_name_returns_invalid_args() {
-        use crate::config::ResolvedConfig;
-        let cfg = ResolvedConfig {
-            server: "https://127.0.0.1:1".to_owned(),
-            token: "tok".to_owned(),
-            timeout: 1,
-            tls_mode: crate::config::TlsMode::SystemRoots,
-        };
-        let client = ApiClient::new(&cfg).expect("build client");
-        let msg: SessionCmd = serde_json::from_str(r#"{"cmd":"listener.stop"}"#).expect("parse");
-        let result = dispatch(&client, &msg, None).await;
-        assert!(
-            matches!(result, Err(CliError::InvalidArgs(_))),
-            "expected InvalidArgs when name missing, got {result:?}"
-        );
-    }
-
-    // ── dispatch: listener.delete ─────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn dispatch_listener_delete_without_name_returns_invalid_args() {
-        use crate::config::ResolvedConfig;
-        let cfg = ResolvedConfig {
-            server: "https://127.0.0.1:1".to_owned(),
-            token: "tok".to_owned(),
-            timeout: 1,
-            tls_mode: crate::config::TlsMode::SystemRoots,
-        };
-        let client = ApiClient::new(&cfg).expect("build client");
-        let msg: SessionCmd = serde_json::from_str(r#"{"cmd":"listener.delete"}"#).expect("parse");
-        let result = dispatch(&client, &msg, None).await;
-        assert!(
-            matches!(result, Err(CliError::InvalidArgs(_))),
-            "expected InvalidArgs when name missing, got {result:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn dispatch_listener_delete_with_name_hits_server() {
-        use crate::config::ResolvedConfig;
-        let cfg = ResolvedConfig {
-            server: "https://127.0.0.1:1".to_owned(),
-            token: "tok".to_owned(),
-            timeout: 1,
-            tls_mode: crate::config::TlsMode::SystemRoots,
-        };
-        let client = ApiClient::new(&cfg).expect("build client");
-        let msg: SessionCmd =
-            serde_json::from_str(r#"{"cmd":"listener.delete","name":"http1"}"#).expect("parse");
-        let result = dispatch(&client, &msg, None).await;
-        assert!(
-            matches!(result, Err(CliError::ServerUnreachable(_))),
-            "expected ServerUnreachable when server not running, got {result:?}"
-        );
-    }
-
-    // ── dispatch: operator commands ───────────────────────────────────────────
-
-    #[tokio::test]
-    async fn dispatch_operator_list_hits_server() {
-        use crate::config::ResolvedConfig;
-        let cfg = ResolvedConfig {
-            server: "https://127.0.0.1:1".to_owned(),
-            token: "tok".to_owned(),
-            timeout: 1,
-            tls_mode: crate::config::TlsMode::SystemRoots,
-        };
-        let client = ApiClient::new(&cfg).expect("build client");
-        let msg: SessionCmd = serde_json::from_str(r#"{"cmd":"operator.list"}"#).expect("parse");
-        let result = dispatch(&client, &msg, None).await;
-        assert!(
-            matches!(result, Err(CliError::ServerUnreachable(_))),
-            "expected ServerUnreachable, got {result:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn dispatch_operator_create_without_username_returns_invalid_args() {
-        use crate::config::ResolvedConfig;
-        let cfg = ResolvedConfig {
-            server: "https://127.0.0.1:1".to_owned(),
-            token: "tok".to_owned(),
-            timeout: 1,
-            tls_mode: crate::config::TlsMode::SystemRoots,
-        };
-        let client = ApiClient::new(&cfg).expect("build client");
-        let msg: SessionCmd =
-            serde_json::from_str(r#"{"cmd":"operator.create","password":"p","role":"operator"}"#)
-                .expect("parse");
-        let result = dispatch(&client, &msg, None).await;
-        assert!(
-            matches!(result, Err(CliError::InvalidArgs(_))),
-            "expected InvalidArgs when username missing, got {result:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn dispatch_operator_create_without_password_returns_invalid_args() {
-        use crate::config::ResolvedConfig;
-        let cfg = ResolvedConfig {
-            server: "https://127.0.0.1:1".to_owned(),
-            token: "tok".to_owned(),
-            timeout: 1,
-            tls_mode: crate::config::TlsMode::SystemRoots,
-        };
-        let client = ApiClient::new(&cfg).expect("build client");
-        let msg: SessionCmd = serde_json::from_str(
-            r#"{"cmd":"operator.create","username":"alice","role":"operator"}"#,
-        )
-        .expect("parse");
-        let result = dispatch(&client, &msg, None).await;
-        assert!(
-            matches!(result, Err(CliError::InvalidArgs(_))),
-            "expected InvalidArgs when password missing, got {result:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn dispatch_operator_create_without_role_returns_invalid_args() {
-        use crate::config::ResolvedConfig;
-        let cfg = ResolvedConfig {
-            server: "https://127.0.0.1:1".to_owned(),
-            token: "tok".to_owned(),
-            timeout: 1,
-            tls_mode: crate::config::TlsMode::SystemRoots,
-        };
-        let client = ApiClient::new(&cfg).expect("build client");
-        let msg: SessionCmd =
-            serde_json::from_str(r#"{"cmd":"operator.create","username":"alice","password":"p"}"#)
-                .expect("parse");
-        let result = dispatch(&client, &msg, None).await;
-        assert!(
-            matches!(result, Err(CliError::InvalidArgs(_))),
-            "expected InvalidArgs when role missing, got {result:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn dispatch_operator_create_with_bad_role_returns_invalid_args() {
-        use crate::config::ResolvedConfig;
-        let cfg = ResolvedConfig {
-            server: "https://127.0.0.1:1".to_owned(),
-            token: "tok".to_owned(),
-            timeout: 1,
-            tls_mode: crate::config::TlsMode::SystemRoots,
-        };
-        let client = ApiClient::new(&cfg).expect("build client");
-        let msg: SessionCmd = serde_json::from_str(
-            r#"{"cmd":"operator.create","username":"alice","password":"p","role":"superuser"}"#,
-        )
-        .expect("parse");
-        let result = dispatch(&client, &msg, None).await;
-        assert!(
-            matches!(result, Err(CliError::InvalidArgs(_))),
-            "expected InvalidArgs for unknown role, got {result:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn dispatch_operator_delete_without_username_returns_invalid_args() {
-        use crate::config::ResolvedConfig;
-        let cfg = ResolvedConfig {
-            server: "https://127.0.0.1:1".to_owned(),
-            token: "tok".to_owned(),
-            timeout: 1,
-            tls_mode: crate::config::TlsMode::SystemRoots,
-        };
-        let client = ApiClient::new(&cfg).expect("build client");
-        let msg: SessionCmd = serde_json::from_str(r#"{"cmd":"operator.delete"}"#).expect("parse");
-        let result = dispatch(&client, &msg, None).await;
-        assert!(
-            matches!(result, Err(CliError::InvalidArgs(_))),
-            "expected InvalidArgs when username missing, got {result:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn dispatch_operator_set_role_without_username_returns_invalid_args() {
-        use crate::config::ResolvedConfig;
-        let cfg = ResolvedConfig {
-            server: "https://127.0.0.1:1".to_owned(),
-            token: "tok".to_owned(),
-            timeout: 1,
-            tls_mode: crate::config::TlsMode::SystemRoots,
-        };
-        let client = ApiClient::new(&cfg).expect("build client");
-        let msg: SessionCmd =
-            serde_json::from_str(r#"{"cmd":"operator.set-role","role":"admin"}"#).expect("parse");
-        let result = dispatch(&client, &msg, None).await;
-        assert!(
-            matches!(result, Err(CliError::InvalidArgs(_))),
-            "expected InvalidArgs when username missing, got {result:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn dispatch_operator_set_role_without_role_returns_invalid_args() {
-        use crate::config::ResolvedConfig;
-        let cfg = ResolvedConfig {
-            server: "https://127.0.0.1:1".to_owned(),
-            token: "tok".to_owned(),
-            timeout: 1,
-            tls_mode: crate::config::TlsMode::SystemRoots,
-        };
-        let client = ApiClient::new(&cfg).expect("build client");
-        let msg: SessionCmd =
-            serde_json::from_str(r#"{"cmd":"operator.set-role","username":"alice"}"#)
-                .expect("parse");
-        let result = dispatch(&client, &msg, None).await;
-        assert!(
-            matches!(result, Err(CliError::InvalidArgs(_))),
-            "expected InvalidArgs when role missing, got {result:?}"
-        );
-    }
-
-    // ── dispatch: payload commands ────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn dispatch_payload_list_hits_server() {
-        use crate::config::ResolvedConfig;
-        let cfg = ResolvedConfig {
-            server: "https://127.0.0.1:1".to_owned(),
-            token: "tok".to_owned(),
-            timeout: 1,
-            tls_mode: crate::config::TlsMode::SystemRoots,
-        };
-        let client = ApiClient::new(&cfg).expect("build client");
-        let msg: SessionCmd = serde_json::from_str(r#"{"cmd":"payload.list"}"#).expect("parse");
-        let result = dispatch(&client, &msg, None).await;
-        assert!(
-            matches!(result, Err(CliError::ServerUnreachable(_))),
-            "expected ServerUnreachable, got {result:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn dispatch_payload_build_without_listener_returns_invalid_args() {
-        use crate::config::ResolvedConfig;
-        let cfg = ResolvedConfig {
-            server: "https://127.0.0.1:1".to_owned(),
-            token: "tok".to_owned(),
-            timeout: 1,
-            tls_mode: crate::config::TlsMode::SystemRoots,
-        };
-        let client = ApiClient::new(&cfg).expect("build client");
-        let msg: SessionCmd =
-            serde_json::from_str(r#"{"cmd":"payload.build","arch":"x86_64","format":"exe"}"#)
-                .expect("parse");
-        let result = dispatch(&client, &msg, None).await;
-        assert!(
-            matches!(result, Err(CliError::InvalidArgs(_))),
-            "expected InvalidArgs when listener missing, got {result:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn dispatch_payload_build_without_arch_returns_invalid_args() {
-        use crate::config::ResolvedConfig;
-        let cfg = ResolvedConfig {
-            server: "https://127.0.0.1:1".to_owned(),
-            token: "tok".to_owned(),
-            timeout: 1,
-            tls_mode: crate::config::TlsMode::SystemRoots,
-        };
-        let client = ApiClient::new(&cfg).expect("build client");
-        let msg: SessionCmd =
-            serde_json::from_str(r#"{"cmd":"payload.build","listener":"http1","format":"exe"}"#)
-                .expect("parse");
-        let result = dispatch(&client, &msg, None).await;
-        assert!(
-            matches!(result, Err(CliError::InvalidArgs(_))),
-            "expected InvalidArgs when arch missing, got {result:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn dispatch_payload_build_without_format_returns_invalid_args() {
-        use crate::config::ResolvedConfig;
-        let cfg = ResolvedConfig {
-            server: "https://127.0.0.1:1".to_owned(),
-            token: "tok".to_owned(),
-            timeout: 1,
-            tls_mode: crate::config::TlsMode::SystemRoots,
-        };
-        let client = ApiClient::new(&cfg).expect("build client");
-        let msg: SessionCmd =
-            serde_json::from_str(r#"{"cmd":"payload.build","listener":"http1","arch":"x86_64"}"#)
-                .expect("parse");
-        let result = dispatch(&client, &msg, None).await;
-        assert!(
-            matches!(result, Err(CliError::InvalidArgs(_))),
-            "expected InvalidArgs when format missing, got {result:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn dispatch_payload_build_with_bad_format_returns_invalid_args() {
-        use crate::config::ResolvedConfig;
-        let cfg = ResolvedConfig {
-            server: "https://127.0.0.1:1".to_owned(),
-            token: "tok".to_owned(),
-            timeout: 1,
-            tls_mode: crate::config::TlsMode::SystemRoots,
-        };
-        let client = ApiClient::new(&cfg).expect("build client");
-        let msg: SessionCmd = serde_json::from_str(
-            r#"{"cmd":"payload.build","listener":"http1","arch":"x86_64","format":"zip"}"#,
-        )
-        .expect("parse");
-        let result = dispatch(&client, &msg, None).await;
-        assert!(
-            matches!(result, Err(CliError::InvalidArgs(_))),
-            "expected InvalidArgs for unknown format, got {result:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn dispatch_payload_download_without_id_returns_invalid_args() {
-        use crate::config::ResolvedConfig;
-        let cfg = ResolvedConfig {
-            server: "https://127.0.0.1:1".to_owned(),
-            token: "tok".to_owned(),
-            timeout: 1,
-            tls_mode: crate::config::TlsMode::SystemRoots,
-        };
-        let client = ApiClient::new(&cfg).expect("build client");
-        let msg: SessionCmd =
-            serde_json::from_str(r#"{"cmd":"payload.download","dst":"/tmp/out.exe"}"#)
-                .expect("parse");
-        let result = dispatch(&client, &msg, None).await;
-        assert!(
-            matches!(result, Err(CliError::InvalidArgs(_))),
-            "expected InvalidArgs when id missing, got {result:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn dispatch_payload_download_without_dst_returns_invalid_args() {
-        use crate::config::ResolvedConfig;
-        let cfg = ResolvedConfig {
-            server: "https://127.0.0.1:1".to_owned(),
-            token: "tok".to_owned(),
-            timeout: 1,
-            tls_mode: crate::config::TlsMode::SystemRoots,
-        };
-        let client = ApiClient::new(&cfg).expect("build client");
-        let msg: SessionCmd =
-            serde_json::from_str(r#"{"cmd":"payload.download","id":"abc123"}"#).expect("parse");
-        let result = dispatch(&client, &msg, None).await;
-        assert!(
-            matches!(result, Err(CliError::InvalidArgs(_))),
-            "expected InvalidArgs when dst missing, got {result:?}"
-        );
-    }
-
-    // ── dispatch: log commands ────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn dispatch_log_list_hits_server() {
-        use crate::config::ResolvedConfig;
-        let cfg = ResolvedConfig {
-            server: "https://127.0.0.1:1".to_owned(),
-            token: "tok".to_owned(),
-            timeout: 1,
-            tls_mode: crate::config::TlsMode::SystemRoots,
-        };
-        let client = ApiClient::new(&cfg).expect("build client");
-        let msg: SessionCmd = serde_json::from_str(r#"{"cmd":"log.list"}"#).expect("parse");
-        let result = dispatch(&client, &msg, None).await;
-        assert!(
-            matches!(result, Err(CliError::ServerUnreachable(_))),
-            "expected ServerUnreachable, got {result:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn dispatch_log_tail_hits_server() {
-        use crate::config::ResolvedConfig;
-        let cfg = ResolvedConfig {
-            server: "https://127.0.0.1:1".to_owned(),
-            token: "tok".to_owned(),
-            timeout: 1,
-            tls_mode: crate::config::TlsMode::SystemRoots,
-        };
-        let client = ApiClient::new(&cfg).expect("build client");
-        let msg: SessionCmd = serde_json::from_str(r#"{"cmd":"log.tail"}"#).expect("parse");
-        let result = dispatch(&client, &msg, None).await;
-        assert!(
-            matches!(result, Err(CliError::ServerUnreachable(_))),
-            "expected ServerUnreachable, got {result:?}"
-        );
-    }
-
-    // ── exec / kill polling paths (using wiremock) ────────────────────────────
-
-    /// Helper: build a `ResolvedConfig` pointing at the given mock server URI.
-    fn mock_cfg(server_uri: &str) -> crate::config::ResolvedConfig {
-        crate::config::ResolvedConfig {
-            server: server_uri.to_owned(),
-            token: "test-token".to_owned(),
-            timeout: 5,
-            tls_mode: crate::config::TlsMode::SystemRoots,
-        }
-    }
-
-    /// Helper: a minimal JSON object that deserialises as [`RawAgent`].
-    /// Build a minimal `ApiAgentInfo`-shaped JSON value (PascalCase fields).
-    ///
-    /// `active` should be `false` to simulate a dead agent (status="dead")
-    /// and `true` for a live agent (status="alive").
-    fn raw_agent_json(active: bool) -> serde_json::Value {
-        serde_json::json!({
-            "AgentID": 1,
-            "Hostname": "host1",
-            "Username": "user1",
-            "DomainName": "LAB",
-            "ExternalIP": "1.2.3.4",
-            "InternalIP": "10.0.0.1",
-            "ProcessName": "demon.exe",
-            "ProcessPath": "C:\\demon.exe",
-            "BaseAddress": 0,
-            "ProcessPID": 1000,
-            "ProcessTID": 1001,
-            "ProcessPPID": 500,
-            "ProcessArch": "x64",
-            "Elevated": false,
-            "OSVersion": "Linux",
-            "OSBuild": 0,
-            "OSArch": "x64",
-            "SleepDelay": 5,
-            "SleepJitter": 10,
-            "KillDate": null,
-            "WorkingHours": null,
-            "FirstCallIn": "2026-01-01T00:00:00Z",
-            "LastCallIn": "2026-01-01T00:00:00Z",
-            "Active": active,
-            "Reason": "http",
-            "Note": ""
+    async fn ping_is_handled_locally_without_server_roundtrip() {
+        let addr = mock_ws_server(|mut ws| async move {
+            // Receive any message — if ping is forwarded, this succeeds and the
+            // test would pass without the local-handling assertion.
+            // We just need to keep the connection alive long enough.
+            while let Some(Ok(Message::Close(_))) = ws.next().await {}
         })
-    }
+        .await;
 
-    /// `exec wait=false` — POST task, return task_id immediately without polling.
-    #[tokio::test]
-    async fn exec_wait_false_returns_job_id_without_polling() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/api/v1/agents/agent1/task"))
-            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
-                "agent_id": "AGENT1",
-                "task_id": "TASK-ABC",
-                "queued_jobs": 1
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let client = ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
-        let result = exec(&client, "agent1", "whoami", false, 60).await.expect("exec must succeed");
-
-        assert_eq!(result["job_id"], "TASK-ABC");
-    }
-
-    /// `exec wait=true` — submits the task then fails because the server is
-    /// unreachable.
-    #[tokio::test]
-    async fn exec_wait_true_returns_server_unreachable() {
-        use crate::config::ResolvedConfig;
-        let cfg = ResolvedConfig {
-            server: "https://127.0.0.1:1".to_owned(),
-            token: "tok".to_owned(),
-            timeout: 1,
-            tls_mode: crate::config::TlsMode::SystemRoots,
-        };
-        let client = ApiClient::new(&cfg).expect("build client");
-        let result = exec(&client, "agent1", "whoami", true, 60).await;
-
-        assert!(
-            matches!(result, Err(CliError::ServerUnreachable(_))),
-            "exec wait=true must return ServerUnreachable against no server, got {result:?}"
-        );
-    }
-
-    /// `kill wait=false` — DELETE /agents/{id}, return `kill_sent` immediately.
-    #[tokio::test]
-    async fn kill_wait_false_returns_kill_sent_without_polling() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-        Mock::given(method("DELETE"))
-            .and(path("/api/v1/agents/agent1"))
-            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
-                "agent_id": "AGENT1",
-                "task_id": "KILL-TASK",
-                "queued_jobs": 1
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let client = ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
-        let result =
-            kill(&client, "agent1", false, 60).await.expect("kill wait=false must succeed");
-
-        assert_eq!(result["agent_id"], "agent1");
-        assert_eq!(result["status"], "kill_sent");
-    }
-
-    /// `kill wait=true` — DELETE then poll until agent status is `"dead"`.
-    #[tokio::test]
-    async fn kill_wait_true_returns_success_when_agent_dies() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-        Mock::given(method("DELETE"))
-            .and(path("/api/v1/agents/agent1"))
-            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
-                "agent_id": "AGENT1",
-                "task_id": "KILL-TASK",
-                "queued_jobs": 1
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        Mock::given(method("GET"))
-            .and(path("/api/v1/agents/agent1"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(raw_agent_json(false)))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let client = ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
-        let result = kill(&client, "agent1", true, 60).await.expect("kill wait=true must succeed");
-
-        assert_eq!(result["agent_id"], "agent1");
-        assert_eq!(result["status"], "dead");
-    }
-
-    /// `kill wait=true, timeout=0` — deadline is already expired on first loop
-    /// iteration → returns `CliError::Timeout` without polling the agent status.
-    #[tokio::test]
-    async fn kill_wait_true_timeout_zero_returns_cli_timeout() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-        Mock::given(method("DELETE"))
-            .and(path("/api/v1/agents/agent1"))
-            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
-                "agent_id": "AGENT1",
-                "task_id": "KILL-TASK",
-                "queued_jobs": 1
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let client = ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
-        let result = kill(&client, "agent1", true, 0).await;
-
-        assert!(
-            matches!(result, Err(CliError::Timeout(_))),
-            "expected Timeout with timeout_secs=0, got {result:?}"
-        );
-    }
-
-    // ── run_with_io: stdin-loop paths ─────────────────────────────────────────
-
-    /// Build a no-network `ApiClient` for loop tests.
-    fn loop_client() -> ApiClient {
-        ApiClient::new(&crate::config::ResolvedConfig {
-            server: "https://127.0.0.1:1".to_owned(),
-            token: "tok".to_owned(),
-            timeout: 1,
-            tls_mode: crate::config::TlsMode::SystemRoots,
-        })
-        .expect("build client")
-    }
-
-    /// Parse all NDJSON lines from `buf` into a `Vec<serde_json::Value>`.
-    fn parse_lines(buf: &[u8]) -> Vec<serde_json::Value> {
-        std::str::from_utf8(buf)
-            .expect("utf8 output")
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .map(|l| serde_json::from_str(l).expect("valid JSON line"))
-            .collect()
-    }
-
-    /// Happy path: `{"cmd":"ping"}` → loop emits `{"ok":true,...,"pong":true}`.
-    #[tokio::test]
-    async fn run_loop_ping_emits_pong_response() {
+        let ws = ws_connect(addr, "test-token").await;
         let input = b"{\"cmd\":\"ping\"}\n";
-        let reader = tokio::io::BufReader::new(input.as_ref());
-        let client = loop_client();
-        let mut out: Vec<u8> = Vec::new();
+        let reader = tokio::io::BufReader::new(input.as_slice());
+        let mut output: Vec<u8> = Vec::new();
 
-        let code = run_with_io(reader, &mut out, &client, None).await;
+        let code = run_with_io(reader, &mut output, ws, None).await;
 
-        assert_eq!(code, EXIT_SUCCESS);
-        let lines = parse_lines(&out);
-        assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0]["ok"], true);
-        assert_eq!(lines[0]["cmd"], "ping");
-        assert_eq!(lines[0]["data"]["pong"], true);
+        // `ping` is locally handled — code 0 (EOF after ping)
+        assert_eq!(code, EXIT_SUCCESS, "ping then EOF must exit cleanly");
+
+        let line = String::from_utf8(output).expect("utf8");
+        let val: serde_json::Value = serde_json::from_str(line.trim()).expect("json");
+        assert_eq!(val["ok"], true, "ping must produce ok:true");
+        assert_eq!(val["data"]["pong"], true, "ping must include pong:true");
     }
 
-    /// Exit command: `{"cmd":"exit"}` → returns EXIT_SUCCESS, no output line.
+    /// `{"cmd":"exit"}` must send a close frame and exit with code 0.
     #[tokio::test]
-    async fn run_loop_exit_cmd_terminates_with_success() {
+    async fn exit_command_closes_connection_cleanly() {
+        let addr = mock_ws_server(|mut ws| async move {
+            // Expect a close frame.
+            while let Some(msg) = ws.next().await {
+                if let Ok(Message::Close(_)) = msg {
+                    break;
+                }
+            }
+        })
+        .await;
+
+        let ws = ws_connect(addr, "test-token").await;
         let input = b"{\"cmd\":\"exit\"}\n";
-        let reader = tokio::io::BufReader::new(input.as_ref());
-        let client = loop_client();
-        let mut out: Vec<u8> = Vec::new();
+        let reader = tokio::io::BufReader::new(input.as_slice());
+        let mut output: Vec<u8> = Vec::new();
 
-        let code = run_with_io(reader, &mut out, &client, None).await;
-
-        assert_eq!(code, EXIT_SUCCESS);
-        // exit must not emit any response line
-        assert!(parse_lines(&out).is_empty());
+        let code = run_with_io(reader, &mut output, ws, None).await;
+        assert_eq!(code, EXIT_SUCCESS, "exit command must exit with code 0");
+        assert!(output.is_empty(), "exit must not produce any output");
     }
 
-    /// Invalid JSON: loop emits `{"ok":false,"error":"GENERAL",...}` then continues.
+    /// Non-`ping`/`exit` commands are forwarded to the server; the server
+    /// response is written verbatim to stdout.
     #[tokio::test]
-    async fn run_loop_invalid_json_emits_error_and_continues() {
-        // Invalid line first, then a valid ping so we can confirm the loop continues.
-        let input = b"{not valid json}\n{\"cmd\":\"ping\"}\n";
-        let reader = tokio::io::BufReader::new(input.as_ref());
-        let client = loop_client();
-        let mut out: Vec<u8> = Vec::new();
+    async fn command_is_forwarded_and_response_relayed() {
+        let addr = mock_ws_server(|mut ws| async move {
+            if let Some(Ok(Message::Text(text))) = ws.next().await {
+                // Echo back a canned response.
+                let val: serde_json::Value =
+                    serde_json::from_str(&text).expect("parse forwarded cmd");
+                let cmd = val["cmd"].as_str().unwrap_or("").to_owned();
+                let resp = serde_json::json!({"ok": true, "cmd": cmd, "data": []});
+                ws.send(Message::Text(serde_json::to_string(&resp).expect("ser").into()))
+                    .await
+                    .expect("server send");
+            }
+            // Explicit close so the client receives a clean Close frame rather
+            // than an abrupt TCP reset.
+            let _ = ws.close(None).await;
+        })
+        .await;
 
-        let code = run_with_io(reader, &mut out, &client, None).await;
+        let ws = ws_connect(addr, "test-token").await;
+        let input = b"{\"cmd\":\"agent.list\"}\n";
+        let reader = tokio::io::BufReader::new(input.as_slice());
+        let mut output: Vec<u8> = Vec::new();
 
-        assert_eq!(code, EXIT_SUCCESS);
-        let lines = parse_lines(&out);
-        // First line: error for invalid JSON — CliError::General maps to "ERROR"
-        assert_eq!(lines[0]["ok"], false);
-        assert_eq!(lines[0]["error"], "ERROR");
-        // Second line: successful ping response (proves loop continued)
-        assert_eq!(lines[1]["ok"], true);
-        assert_eq!(lines[1]["data"]["pong"], true);
+        let code = run_with_io(reader, &mut output, ws, None).await;
+        assert_eq!(code, EXIT_SUCCESS, "clean server close must exit 0");
+
+        let line = String::from_utf8(output).expect("utf8");
+        let val: serde_json::Value = serde_json::from_str(line.trim()).expect("parse relay");
+        assert_eq!(val["ok"], true, "relayed response must be ok:true");
+        assert_eq!(val["cmd"], "agent.list");
     }
 
-    /// Empty lines are skipped; the ping between them is still dispatched.
+    /// Invalid JSON on stdin must produce a local error line and continue
+    /// rather than crashing or exiting.
     #[tokio::test]
-    async fn run_loop_empty_lines_skipped_valid_command_still_dispatched() {
-        let input = b"\n   \n{\"cmd\":\"ping\"}\n\n";
-        let reader = tokio::io::BufReader::new(input.as_ref());
-        let client = loop_client();
-        let mut out: Vec<u8> = Vec::new();
+    async fn invalid_json_produces_local_error_and_continues() {
+        // The server stays alive until the client closes — it does not respond
+        // to anything.  Both bad-JSON and ping are handled locally by the
+        // client and never reach the server, so the server just waits for the
+        // close frame that arrives when stdin reaches EOF.
+        let addr = mock_ws_server(|mut ws| async move {
+            while let Some(Ok(msg)) = ws.next().await {
+                if let Message::Close(_) = msg {
+                    break;
+                }
+            }
+            let _ = ws.close(None).await;
+        })
+        .await;
 
-        let code = run_with_io(reader, &mut out, &client, None).await;
+        let ws = ws_connect(addr, "test-token").await;
+        // First line: bad JSON; second line: ping (handled locally, no forward).
+        let input = b"not json at all\n{\"cmd\":\"ping\"}\n";
+        let reader = tokio::io::BufReader::new(input.as_slice());
+        let mut output: Vec<u8> = Vec::new();
 
-        assert_eq!(code, EXIT_SUCCESS);
-        let lines = parse_lines(&out);
-        // Only the ping response; empty lines must produce no output.
-        assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0]["data"]["pong"], true);
+        let code = run_with_io(reader, &mut output, ws, None).await;
+        assert_eq!(code, EXIT_SUCCESS, "invalid json must not cause non-zero exit");
+
+        let text = String::from_utf8(output).expect("utf8");
+        let mut lines = text.lines();
+
+        let error_line: serde_json::Value =
+            serde_json::from_str(lines.next().expect("error line")).expect("json");
+        assert_eq!(error_line["ok"], false, "bad JSON must produce ok:false");
+        assert!(
+            error_line["message"].as_str().is_some_and(|m| m.contains("invalid JSON")),
+            "error message must mention invalid JSON, got: {}",
+            error_line["message"]
+        );
+
+        let ping_line: serde_json::Value =
+            serde_json::from_str(lines.next().expect("ping line")).expect("json");
+        assert_eq!(ping_line["ok"], true);
+        assert_eq!(ping_line["data"]["pong"], true);
     }
 
-    /// Clean EOF on an empty stdin → EXIT_SUCCESS, no output.
+    /// Empty lines on stdin must be silently skipped.
     #[tokio::test]
-    async fn run_loop_clean_eof_returns_success() {
+    async fn empty_lines_are_skipped() {
+        let addr = mock_ws_server(|mut ws| async move {
+            // Should only receive a close — no forwarded commands.
+            while let Some(Ok(Message::Close(_))) = ws.next().await {}
+        })
+        .await;
+
+        let ws = ws_connect(addr, "test-token").await;
+        let input = b"\n   \n\t\n";
+        let reader = tokio::io::BufReader::new(input.as_slice());
+        let mut output: Vec<u8> = Vec::new();
+
+        let code = run_with_io(reader, &mut output, ws, None).await;
+        assert_eq!(code, EXIT_SUCCESS, "whitespace-only stdin must exit 0");
+        assert!(output.is_empty(), "empty lines must not produce any output");
+    }
+
+    /// When `default_agent` is set and the command has no `"id"` field, the
+    /// agent id is injected before forwarding.
+    #[tokio::test]
+    async fn default_agent_is_injected_when_id_absent() {
+        let addr = mock_ws_server(|mut ws| async move {
+            if let Some(Ok(Message::Text(text))) = ws.next().await {
+                let val: serde_json::Value = serde_json::from_str(&text).expect("parse forwarded");
+                let resp = serde_json::json!({
+                    "ok": true,
+                    "cmd": "agent.show",
+                    "data": {"received_id": val["id"]}
+                });
+                ws.send(Message::Text(serde_json::to_string(&resp).expect("ser").into()))
+                    .await
+                    .expect("server send");
+            }
+            let _ = ws.close(None).await;
+        })
+        .await;
+
+        let ws = ws_connect(addr, "test-token").await;
+        // Command has no "id" field.
+        let input = b"{\"cmd\":\"agent.show\"}\n";
+        let reader = tokio::io::BufReader::new(input.as_slice());
+        let mut output: Vec<u8> = Vec::new();
+
+        run_with_io(reader, &mut output, ws, Some("default-agent-123")).await;
+
+        let text = String::from_utf8(output).expect("utf8");
+        let val: serde_json::Value = serde_json::from_str(text.trim()).expect("parse response");
+        assert_eq!(
+            val["data"]["received_id"], "default-agent-123",
+            "default agent must be injected when id is absent"
+        );
+    }
+
+    /// When `default_agent` is set but the command already has an `"id"` field,
+    /// the existing id is NOT overwritten.
+    #[tokio::test]
+    async fn default_agent_does_not_overwrite_explicit_id() {
+        let addr = mock_ws_server(|mut ws| async move {
+            if let Some(Ok(Message::Text(text))) = ws.next().await {
+                let val: serde_json::Value = serde_json::from_str(&text).expect("parse");
+                let resp = serde_json::json!({
+                    "ok": true,
+                    "cmd": "agent.show",
+                    "data": {"received_id": val["id"]}
+                });
+                ws.send(Message::Text(serde_json::to_string(&resp).expect("ser").into()))
+                    .await
+                    .expect("server send");
+            }
+            let _ = ws.close(None).await;
+        })
+        .await;
+
+        let ws = ws_connect(addr, "test-token").await;
+        let input = b"{\"cmd\":\"agent.show\",\"id\":\"explicit-id\"}\n";
+        let reader = tokio::io::BufReader::new(input.as_slice());
+        let mut output: Vec<u8> = Vec::new();
+
+        run_with_io(reader, &mut output, ws, Some("default-agent-123")).await;
+
+        let text = String::from_utf8(output).expect("utf8");
+        let val: serde_json::Value = serde_json::from_str(text.trim()).expect("parse");
+        assert_eq!(
+            val["data"]["received_id"], "explicit-id",
+            "explicit id must not be overwritten by default_agent"
+        );
+    }
+
+    /// Server-initiated close must exit cleanly with code 0.
+    #[tokio::test]
+    async fn server_close_exits_cleanly() {
+        let addr = mock_ws_server(|mut ws| async move {
+            // Immediately close.
+            let _ = ws.close(None).await;
+        })
+        .await;
+
+        let ws = ws_connect(addr, "test-token").await;
+        // Infinite stdin — the server close should terminate the loop.
         let input: &[u8] = b"";
         let reader = tokio::io::BufReader::new(input);
-        let client = loop_client();
-        let mut out: Vec<u8> = Vec::new();
+        let mut output: Vec<u8> = Vec::new();
 
-        let code = run_with_io(reader, &mut out, &client, None).await;
-
-        assert_eq!(code, EXIT_SUCCESS);
-        assert!(parse_lines(&out).is_empty());
+        let code = run_with_io(reader, &mut output, ws, None).await;
+        assert_eq!(code, EXIT_SUCCESS, "server close must exit 0");
     }
 
-    // ── broken-pipe propagation ───────────────────────────────────────────────
-
-    /// A writer that always returns a broken-pipe error.
-    struct BrokenPipeWriter;
-
-    impl std::io::Write for BrokenPipeWriter {
-        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
-            Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "broken pipe"))
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn emit_ok_to_returns_err_on_broken_pipe() {
-        let mut broken = BrokenPipeWriter;
-        let result = emit_ok_to(&mut broken, "ping", serde_json::json!({"pong": true}));
-        assert!(result.is_err(), "broken pipe must be propagated by emit_ok_to");
-    }
-
-    #[test]
-    fn emit_error_to_returns_err_on_broken_pipe() {
-        let mut broken = BrokenPipeWriter;
-        let err = CliError::General("test error".to_owned());
-        let result = emit_error_to(&mut broken, "ping", &err);
-        assert!(result.is_err(), "broken pipe must be propagated by emit_error_to");
-    }
-
-    /// Broken output writer → run_with_io exits non-zero.
+    /// Multiple commands in sequence are each forwarded and their responses
+    /// relayed to stdout in order.
     #[tokio::test]
-    async fn run_loop_broken_pipe_exits_general() {
-        // Send a valid ping so the loop tries to write a response.
-        let input: &[u8] = b"{\"cmd\":\"ping\"}\n";
-        let reader = tokio::io::BufReader::new(input);
-        let client = loop_client();
-        let mut broken = BrokenPipeWriter;
+    async fn multiple_commands_are_relayed_in_order() {
+        let addr = mock_ws_server(|mut ws| async move {
+            let mut seq = 0u32;
+            while let Some(Ok(msg)) = ws.next().await {
+                match msg {
+                    Message::Text(text) => {
+                        let val: serde_json::Value = serde_json::from_str(&text).expect("parse");
+                        let cmd = val["cmd"].as_str().unwrap_or("").to_owned();
+                        seq += 1;
+                        let resp =
+                            serde_json::json!({"ok": true, "cmd": cmd, "data": {"seq": seq}});
+                        ws.send(Message::Text(serde_json::to_string(&resp).expect("ser").into()))
+                            .await
+                            .expect("server send");
+                    }
+                    Message::Close(_) => break,
+                    _ => {}
+                }
+            }
+            let _ = ws.close(None).await;
+        })
+        .await;
 
-        let code = run_with_io(reader, &mut broken, &client, None).await;
+        let ws = ws_connect(addr, "test-token").await;
+        // Use stdin EOF (no "exit" command) so the client enters the drain loop
+        // and reads both server responses before exiting.  Using an explicit
+        // "exit" command would cause the client to close the WebSocket before
+        // the in-flight server responses are received.
+        let input = b"{\"cmd\":\"agent.list\"}\n{\"cmd\":\"listener.list\"}\n";
+        let reader = tokio::io::BufReader::new(input.as_slice());
+        let mut output: Vec<u8> = Vec::new();
 
-        assert_eq!(code, EXIT_GENERAL, "broken pipe must yield non-zero exit");
+        let code = run_with_io(reader, &mut output, ws, None).await;
+        assert_eq!(code, EXIT_SUCCESS);
+
+        let text = String::from_utf8(output).expect("utf8");
+        let responses: Vec<serde_json::Value> = text
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| serde_json::from_str(l).expect("json"))
+            .collect();
+
+        assert_eq!(responses.len(), 2, "must have two responses for two forwarded commands");
+        assert_eq!(responses[0]["cmd"], "agent.list");
+        assert_eq!(responses[0]["data"]["seq"], 1);
+        assert_eq!(responses[1]["cmd"], "listener.list");
+        assert_eq!(responses[1]["data"]["seq"], 2);
+    }
+
+    /// `connect_websocket` against an unreachable address must return
+    /// `CliError::ServerUnreachable`.
+    #[tokio::test]
+    async fn connect_websocket_returns_server_unreachable_on_refused() {
+        let cfg = crate::config::ResolvedConfig {
+            server: "http://127.0.0.1:1".to_owned(),
+            token: "tok".to_owned(),
+            timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
+        };
+        let result = connect_websocket(&cfg).await;
+        assert!(
+            matches!(result, Err(CliError::ServerUnreachable(_))),
+            "unreachable server must return ServerUnreachable, got {result:?}"
+        );
     }
 }

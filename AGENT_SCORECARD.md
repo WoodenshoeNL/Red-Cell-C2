@@ -25,7 +25,7 @@ Each loop run updates the running totals and appends a review entry.
 | Clippy warnings | 10 | 0 | 1 |
 | Protocol errors | 30 | 32 | 3 |
 | Security issues | 57 | 39 | 0 |
-| Architecture drift | 24 | 25 | 0 |
+| Architecture drift | 25 | 25 | 0 |
 | Memory / resource leaks | 11 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 9 | 0 |
 | Test infrastructure / flakiness | 43 | 4 | 0 |
@@ -40,6 +40,18 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-04-03 17:28
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 1 | architecture drift (maintainability) | Filed `red-cell-c2-v4wx2` — split mega-modules (`listeners.rs`, `specter/dispatch.rs`, `phantom/command.rs`) |
+| Codex | 0 | — | No new Codex-attributed findings this review |
+| Cursor | 0 | — | No new Cursor-attributed findings this review |
+
+Overall codebase health: **on track** — `cargo check --workspace`, `cargo nextest run --workspace` (or `cargo test`), and `cargo clippy --workspace -- -D warnings` all clean; no `todo!`/`unimplemented!` in Rust; Demon crypto path documents CTR offset discipline, HKDF session derivation, and constant-time key comparison on re-init.
+
+Biggest blindspot: **monolithic source files** (~8–10k+ LOC) in hot paths — harder to audit and higher merge-conflict cost; tracked as a single cross-zone refactor task.
 
 ### QA Review — 2026-04-03 17:45 — 354406fb..9f9c4f31
 

@@ -166,6 +166,81 @@ static void SimJobRemove( DWORD JobID )
 }
 
 /* -------------------------------------------------------------------------
+ * SimJobRemoveReal — removes the node from g_jobs AND increments counter.
+ * Used by the new sweep-cleanup tests; the existing stub (SimJobRemove)
+ * is kept for backwards-compatibility with tests that only count calls.
+ * ---------------------------------------------------------------------- */
+static void SimJobRemoveReal( DWORD JobID )
+{
+    g_job_remove_calls++;
+
+    PJOB_DATA Prev = NULL;
+    PJOB_DATA Cur  = g_jobs;
+    while ( Cur )
+    {
+        if ( Cur->JobID == JobID )
+        {
+            if ( Prev )
+                Prev->Next = Cur->Next;
+            else
+                g_jobs = Cur->Next;
+            free( Cur );
+            return;
+        }
+        Prev = Cur;
+        Cur  = Cur->Next;
+    }
+}
+
+/* -------------------------------------------------------------------------
+ * SimJobCheckList — simulates the fixed JobCheckList sweep for
+ * JOB_TYPE_THREADPOOL entries.  Mirrors the do/continue pattern in
+ * the real Jobs.c implementation so the test validates the same logic.
+ * ---------------------------------------------------------------------- */
+static void SimJobCheckList( void )
+{
+    PJOB_DATA JobList = g_jobs;
+    do {
+        if ( !JobList )
+            break;
+
+        if ( JobList->Type  == JOB_TYPE_THREADPOOL &&
+             JobList->State == JOB_STATE_DEAD )
+        {
+            PJOB_DATA Next = JobList->Next;
+            SimJobRemoveReal( JobList->JobID );
+            JobList = Next;
+            continue;
+        }
+
+        JobList = JobList->Next;
+    } while ( 1 );
+}
+
+/* -------------------------------------------------------------------------
+ * AddJob / CountJobs — helpers for list-manipulation tests
+ * ---------------------------------------------------------------------- */
+static void AddJob( DWORD id, int state )
+{
+    PJOB_DATA j = calloc( 1, sizeof( JOB_DATA ) );
+    j->JobID  = id;
+    j->Type   = JOB_TYPE_THREADPOOL;
+    j->State  = state;
+    if ( !g_jobs ) { g_jobs = j; return; }
+    PJOB_DATA cur = g_jobs;
+    while ( cur->Next ) cur = cur->Next;
+    cur->Next = j;
+}
+
+static int CountJobs( void )
+{
+    int count = 0;
+    PJOB_DATA j = g_jobs;
+    while ( j ) { count++; j = j->Next; }
+    return count;
+}
+
+/* -------------------------------------------------------------------------
  * Simulated RtlExitUserThread
  * ---------------------------------------------------------------------- */
 static void SimRtlExitUserThread( int code )
@@ -493,6 +568,82 @@ TEST( test_work_alone_leaks_thread_counter )
 }
 
 /* =========================================================================
+ * Test 8: Regression — job list does not grow after repeated submissions.
+ * Five threadpool jobs are submitted, all complete (state → DEAD), then
+ * JobCheckList sweeps the list.  After the sweep the list must be empty.
+ * ======================================================================= */
+TEST( test_job_list_does_not_grow_unbounded )
+{
+    reset_state();
+
+    /* Add five running threadpool jobs */
+    for ( DWORD i = 1; i <= 5; i++ )
+        AddJob( i, JOB_STATE_RUNNING );
+
+    ASSERT( CountJobs() == 5 );
+
+    /* Simulate all five completing — TpJobCallback marks each dead */
+    PJOB_DATA j = g_jobs;
+    while ( j ) { j->State = JOB_STATE_DEAD; j = j->Next; }
+
+    /* List still has five entries before the sweep */
+    ASSERT( CountJobs() == 5 );
+
+    /* Run the sweep */
+    SimJobCheckList();
+
+    /* After the sweep all dead entries must have been removed */
+    ASSERT( CountJobs() == 0 );
+    ASSERT( g_jobs == NULL );
+
+    /* JobRemove was called exactly once per job */
+    ASSERT( g_job_remove_calls == 5 );
+}
+
+/* =========================================================================
+ * Test 9: Regression — sweep removes only dead entries, leaves running ones.
+ * Three running + two dead.  After the sweep only the three running jobs
+ * remain in the list.
+ * ======================================================================= */
+TEST( test_sweep_removes_only_dead_entries )
+{
+    reset_state();
+
+    AddJob( 10, JOB_STATE_RUNNING );
+    AddJob( 20, JOB_STATE_DEAD    );
+    AddJob( 30, JOB_STATE_RUNNING );
+    AddJob( 40, JOB_STATE_DEAD    );
+    AddJob( 50, JOB_STATE_RUNNING );
+
+    ASSERT( CountJobs() == 5 );
+
+    SimJobCheckList();
+
+    /* Only the three running jobs must remain */
+    ASSERT( CountJobs() == 3 );
+    ASSERT( g_job_remove_calls == 2 );
+
+    /* Verify the correct IDs are still present */
+    bool found_10 = false, found_30 = false, found_50 = false;
+    PJOB_DATA cur = g_jobs;
+    while ( cur )
+    {
+        if ( cur->JobID == 10 ) found_10 = true;
+        if ( cur->JobID == 30 ) found_30 = true;
+        if ( cur->JobID == 50 ) found_50 = true;
+        cur = cur->Next;
+    }
+    ASSERT( found_10 );
+    ASSERT( found_30 );
+    ASSERT( found_50 );
+
+    /* Free the remaining nodes to avoid leaks in valgrind runs */
+    cur = g_jobs;
+    while ( cur ) { PJOB_DATA next = cur->Next; free( cur ); cur = next; }
+    g_jobs = NULL;
+}
+
+/* =========================================================================
  * Main
  * ======================================================================= */
 int main( void )
@@ -506,6 +657,8 @@ int main( void )
     run_test_work_handles_null_entry();
     run_test_fallback_to_dedicated_thread_cleans_up();
     run_test_work_alone_leaks_thread_counter();
+    run_test_job_list_does_not_grow_unbounded();
+    run_test_sweep_removes_only_dead_entries();
 
     printf( "\n%d / %d tests passed\n", tests_passed, tests_run );
     return ( tests_passed == tests_run ) ? 0 : 1;

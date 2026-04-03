@@ -101,11 +101,18 @@ VOID JobCheckList()
             }
 
             /* ARC-09: threadpool work items have no thread handle to query.
-             * The wrapper callback marks the job dead on completion.
-             * No action needed here — dead entries are harmless and are
-             * cleaned up by JobKill or when the next job reuses the slot. */
+             * TpJobCallback marks the job JOB_STATE_DEAD when the work
+             * function returns.  Reclaim the entry here so the list does
+             * not accumulate stale records after repeated submissions. */
             case JOB_TYPE_THREADPOOL:
             {
+                if ( JobList->State == JOB_STATE_DEAD )
+                {
+                    PJOB_DATA Next = JobList->Next;
+                    JobRemove( JobList->JobID );
+                    JobList = Next;
+                    continue;
+                }
                 break;
             }
 
@@ -482,7 +489,7 @@ static VOID NTAPI TpJobCallback( PVOID Instance_, PVOID Context, PVOID Work )
         ( (LPTHREAD_START_ROUTINE) Ctx->Entry )( Ctx->Arg );
     }
 
-    /* mark the tracked job as dead so JobCheckList cleans it up */
+    /* mark the tracked job as dead; JobCheckList will reclaim it on the next sweep */
     PJOB_DATA JobList = Instance->Jobs;
     while ( JobList )
     {

@@ -916,12 +916,16 @@ pub(crate) async fn execute(
             execute_harvest(package.request_id, state).await?;
         }
         // Windows-only commands: return explicit not-supported errors.
+        // CommandKerberos uses Windows LSA (LUID/klist/purge/PTT); Linux krb5
+        // support (ccache enumeration, ticket purge, keytab ops) is tracked
+        // separately.
         command @ (DemonCommand::CommandToken
         | DemonCommand::CommandInlineExecute
         | DemonCommand::CommandJob
         | DemonCommand::CommandPsImport
         | DemonCommand::CommandAssemblyInlineExecute
-        | DemonCommand::CommandAssemblyListVersions) => {
+        | DemonCommand::CommandAssemblyListVersions
+        | DemonCommand::CommandKerberos) => {
             state.queue_callback(PendingCallback::Error {
                 request_id: package.request_id,
                 text: format!("command {command:?} is not supported on Linux"),

@@ -1303,9 +1303,9 @@ mod tests {
             "Head": { "Type": HEAD_REGISTER },
             "Body": { "Success": true },
         });
-        let head_type = response["Head"]["Type"].as_str().unwrap();
+        let head_type = response["Head"]["Type"].as_str().expect("unwrap");
         assert_eq!(head_type, "Register");
-        assert!(response["Body"]["Success"].as_bool().unwrap());
+        assert!(response["Body"]["Success"].as_bool().expect("unwrap"));
     }
 
     #[tokio::test]
@@ -2446,7 +2446,7 @@ mod tests {
         let result = auth_handle.await.expect("join");
         assert!(result.is_err(), "authenticate should return Err");
         assert!(
-            matches!(result.unwrap_err(), ServiceBridgeError::AuthenticationFailed),
+            matches!(result.expect_err("expected Err"), ServiceBridgeError::AuthenticationFailed),
             "expected AuthenticationFailed error"
         );
     }
@@ -2468,7 +2468,7 @@ mod tests {
         let result = auth_handle.await.expect("join");
         assert!(result.is_err(), "malformed JSON should fail");
         assert!(
-            matches!(result.unwrap_err(), ServiceBridgeError::Json(_)),
+            matches!(result.expect_err("expected Err"), ServiceBridgeError::Json(_)),
             "expected Json parse error"
         );
     }
@@ -2494,7 +2494,7 @@ mod tests {
         let result = auth_handle.await.expect("join");
         assert!(result.is_err(), "non-Register type should fail");
         assert!(
-            matches!(result.unwrap_err(), ServiceBridgeError::AuthenticationFailed),
+            matches!(result.expect_err("expected Err"), ServiceBridgeError::AuthenticationFailed),
             "expected AuthenticationFailed error"
         );
     }
@@ -2812,7 +2812,7 @@ mod tests {
         let result = authenticate(&mut server_ws, &server_verifier, &rate_limiter, ip).await;
         assert!(result.is_err(), "should be rate limited");
         assert!(
-            matches!(result.unwrap_err(), ServiceBridgeError::RateLimited),
+            matches!(result.expect_err("expected Err"), ServiceBridgeError::RateLimited),
             "expected RateLimited error"
         );
     }
@@ -2833,7 +2833,7 @@ mod tests {
         let (mut server_ws, _client_ws) = ws_pair().await;
         let result =
             authenticate(&mut server_ws, &server_verifier, &rate_limiter, blocked_ip).await;
-        assert!(matches!(result.unwrap_err(), ServiceBridgeError::RateLimited));
+        assert!(matches!(result.expect_err("expected Err"), ServiceBridgeError::RateLimited));
 
         // allowed_ip should still work (correct password).
         let (mut server_ws2, mut client_ws2) = ws_pair().await;
@@ -2905,7 +2905,7 @@ mod tests {
         let result = auth_handle.await.expect("join");
         assert!(result.is_err(), "binary frame should fail auth");
         assert!(
-            matches!(result.unwrap_err(), ServiceBridgeError::AuthenticationFailed),
+            matches!(result.expect_err("expected Err"), ServiceBridgeError::AuthenticationFailed),
             "expected AuthenticationFailed for binary frame"
         );
     }
@@ -2932,7 +2932,7 @@ mod tests {
         let result = auth_handle.await.expect("join");
         assert!(result.is_err(), "close frame should fail auth");
         assert!(
-            matches!(result.unwrap_err(), ServiceBridgeError::AuthenticationFailed),
+            matches!(result.expect_err("expected Err"), ServiceBridgeError::AuthenticationFailed),
             "expected AuthenticationFailed for close frame"
         );
     }

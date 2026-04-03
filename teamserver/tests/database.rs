@@ -1948,7 +1948,7 @@ async fn agent_update_nonexistent_returns_agent_not_found() -> Result<(), Teamse
 
     let result = repository.update(&phantom).await;
     assert!(result.is_err(), "updating a non-existent agent must fail");
-    let err = result.unwrap_err();
+    let err = result.expect_err("expected Err");
     assert!(
         matches!(err, TeamserverError::AgentNotFound { agent_id } if agent_id == 0xDEAD_0001),
         "expected AgentNotFound, got: {err:?}",
@@ -1989,7 +1989,7 @@ async fn agent_list_with_corrupt_base64_aes_key_returns_error() -> Result<(), Te
 
     let result = repository.list().await;
     assert!(result.is_err(), "list() must fail when a row has invalid base64 aes_key");
-    let err = result.unwrap_err();
+    let err = result.expect_err("expected Err");
     assert!(
         matches!(&err, TeamserverError::InvalidPersistedValue { field, .. } if *field == "aes_key"),
         "expected InvalidPersistedValue for aes_key, got: {err:?}",
@@ -2014,7 +2014,7 @@ async fn agent_list_with_corrupt_base64_aes_iv_returns_error() -> Result<(), Tea
 
     let result = repository.list().await;
     assert!(result.is_err(), "list() must fail when a row has invalid base64 aes_iv");
-    let err = result.unwrap_err();
+    let err = result.expect_err("expected Err");
     assert!(
         matches!(&err, TeamserverError::InvalidPersistedValue { field, .. } if *field == "aes_iv"),
         "expected InvalidPersistedValue for aes_iv, got: {err:?}",
@@ -2039,7 +2039,7 @@ async fn agent_get_with_corrupt_base64_returns_error() -> Result<(), TeamserverE
 
     let result = repository.get(agent.agent_id).await;
     assert!(result.is_err(), "get() must fail when the row has invalid base64 aes_key");
-    let err = result.unwrap_err();
+    let err = result.expect_err("expected Err");
     assert!(
         matches!(&err, TeamserverError::InvalidPersistedValue { field, .. } if *field == "aes_key"),
         "expected InvalidPersistedValue for aes_key, got: {err:?}",
@@ -2068,7 +2068,7 @@ async fn agent_get_persisted_with_corrupt_aes_key_returns_error() -> Result<(), 
 
     let result = repository.get_persisted(agent.agent_id).await;
     assert!(result.is_err(), "get_persisted() must fail on invalid base64 aes_key");
-    let err = result.unwrap_err();
+    let err = result.expect_err("expected Err");
     assert!(
         matches!(&err, TeamserverError::InvalidPersistedValue { field, .. } if *field == "aes_key"),
         "expected InvalidPersistedValue for aes_key, got: {err:?}",
@@ -2093,7 +2093,7 @@ async fn agent_list_persisted_with_corrupt_aes_iv_returns_error() -> Result<(), 
 
     let result = repository.list_persisted().await;
     assert!(result.is_err(), "list_persisted() must fail on invalid base64 aes_iv");
-    let err = result.unwrap_err();
+    let err = result.expect_err("expected Err");
     assert!(
         matches!(&err, TeamserverError::InvalidPersistedValue { field, .. } if *field == "aes_iv"),
         "expected InvalidPersistedValue for aes_iv, got: {err:?}",
@@ -2119,7 +2119,7 @@ async fn agent_reload_with_negative_ctr_block_offset_returns_error() -> Result<(
 
     let result = repository.get_persisted(agent.agent_id).await;
     assert!(result.is_err(), "get_persisted() must fail on negative ctr_block_offset");
-    let err = result.unwrap_err();
+    let err = result.expect_err("expected Err");
     assert!(
         matches!(&err, TeamserverError::InvalidPersistedValue { field, .. } if *field == "ctr_block_offset"),
         "expected InvalidPersistedValue for ctr_block_offset, got: {err:?}",
@@ -2144,7 +2144,7 @@ async fn agent_reload_with_negative_process_pid_returns_error() -> Result<(), Te
 
     let result = repository.get(agent.agent_id).await;
     assert!(result.is_err(), "get() must fail on negative process_pid");
-    let err = result.unwrap_err();
+    let err = result.expect_err("expected Err");
     assert!(
         matches!(&err, TeamserverError::InvalidPersistedValue { field, .. } if *field == "process_pid"),
         "expected InvalidPersistedValue for process_pid, got: {err:?}",
@@ -2171,7 +2171,7 @@ async fn agent_reload_with_overflowed_os_build_returns_error() -> Result<(), Tea
 
     let result = repository.get(agent.agent_id).await;
     assert!(result.is_err(), "get() must fail on overflowed os_build");
-    let err = result.unwrap_err();
+    let err = result.expect_err("expected Err");
     assert!(
         matches!(&err, TeamserverError::InvalidPersistedValue { field, .. } if *field == "os_build"),
         "expected InvalidPersistedValue for os_build, got: {err:?}",
@@ -2196,7 +2196,7 @@ async fn listener_get_with_unsupported_protocol_returns_error() -> Result<(), Te
 
     let result = repository.get(listener.name()).await;
     assert!(result.is_err(), "get() must fail on unsupported protocol 'QUIC'");
-    let err = result.unwrap_err();
+    let err = result.expect_err("expected Err");
     assert!(
         matches!(&err, TeamserverError::InvalidPersistedValue { field, .. } if *field == "protocol"),
         "expected InvalidPersistedValue for protocol, got: {err:?}",
@@ -2221,7 +2221,7 @@ async fn listener_list_with_unsupported_status_returns_error() -> Result<(), Tea
 
     let result = repository.list().await;
     assert!(result.is_err(), "list() must fail on unsupported listener status 'exploded'");
-    let err = result.unwrap_err();
+    let err = result.expect_err("expected Err");
     assert!(
         matches!(&err, TeamserverError::InvalidListenerState { state } if state == "exploded"),
         "expected InvalidListenerState for 'exploded', got: {err:?}",
@@ -2250,7 +2250,7 @@ async fn operator_get_with_unsupported_role_returns_error() -> Result<(), Teamse
 
     let result = repository.get(&operator.username).await;
     assert!(result.is_err(), "get() must fail on unsupported operator role 'Superuser'");
-    let err = result.unwrap_err();
+    let err = result.expect_err("expected Err");
     assert!(
         matches!(&err, TeamserverError::InvalidPersistedValue { field, .. } if *field == "ts_runtime_operators.role"),
         "expected InvalidPersistedValue for role, got: {err:?}",
@@ -2279,7 +2279,7 @@ async fn operator_list_with_unsupported_role_returns_error() -> Result<(), Teams
 
     let result = repository.list().await;
     assert!(result.is_err(), "list() must fail on unsupported operator role 'Root'");
-    let err = result.unwrap_err();
+    let err = result.expect_err("expected Err");
     assert!(
         matches!(&err, TeamserverError::InvalidPersistedValue { field, .. } if *field == "ts_runtime_operators.role"),
         "expected InvalidPersistedValue for role, got: {err:?}",
@@ -2304,7 +2304,7 @@ async fn listener_get_with_corrupt_config_json_returns_error() -> Result<(), Tea
 
     let result = repository.get(listener.name()).await;
     assert!(result.is_err(), "get() must fail on corrupt config JSON");
-    let err = result.unwrap_err();
+    let err = result.expect_err("expected Err");
     assert!(
         matches!(&err, TeamserverError::Json(_)),
         "expected Json error for corrupt config, got: {err:?}",
@@ -2330,7 +2330,7 @@ async fn agent_list_active_with_corrupt_row_returns_error() -> Result<(), Teamse
 
     let result = repository.list_active().await;
     assert!(result.is_err(), "list_active() must fail on negative base_address");
-    let err = result.unwrap_err();
+    let err = result.expect_err("expected Err");
     assert!(
         matches!(&err, TeamserverError::InvalidPersistedValue { field, .. } if *field == "base_address"),
         "expected InvalidPersistedValue for base_address, got: {err:?}",

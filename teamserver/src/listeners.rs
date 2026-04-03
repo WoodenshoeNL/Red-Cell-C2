@@ -8960,7 +8960,7 @@ mod tests {
         let state =
             manager.external_state_for_path("/rate").await.expect("state must be registered");
 
-        let peer: SocketAddr = "10.0.0.1:5000".parse().unwrap();
+        let peer: SocketAddr = "10.0.0.1:5000".parse().expect("unwrap");
 
         // Exhaust the allowed DEMON_INIT budget for this IP.
         for attempt in 0..MAX_DEMON_INIT_ATTEMPTS_PER_IP {
@@ -9004,7 +9004,7 @@ mod tests {
         // Initiate shutdown before issuing a request.
         manager.shutdown_controller().initiate();
 
-        let peer: SocketAddr = "10.0.0.2:6000".parse().unwrap();
+        let peer: SocketAddr = "10.0.0.2:6000".parse().expect("unwrap");
         let body = valid_demon_init_body(0xDEAD_0001, test_key(0x33), test_iv(0x44));
         let result = handle_external_request(&state, peer, &body).await;
         assert_eq!(
@@ -9545,7 +9545,7 @@ mod tests {
         let key = test_key(0x81);
         let iv = test_iv(0x54);
         let agent_id = 0xEEFF_0001_u32;
-        let peer: SocketAddr = "10.0.0.50:7000".parse().unwrap();
+        let peer: SocketAddr = "10.0.0.50:7000".parse().expect("unwrap");
 
         let body = valid_demon_init_body(agent_id, key, iv);
         let result: Result<Vec<u8>, StatusCode> =
@@ -9585,7 +9585,7 @@ mod tests {
         let key = test_key(0x91);
         let iv = test_iv(0x64);
         let agent_id = 0xEEFF_0002_u32;
-        let peer: SocketAddr = "10.0.0.51:8000".parse().unwrap();
+        let peer: SocketAddr = "10.0.0.51:8000".parse().expect("unwrap");
 
         // Register agent via DEMON_INIT.
         let init_body = valid_demon_init_body(agent_id, key, iv);

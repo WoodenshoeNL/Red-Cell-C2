@@ -547,7 +547,7 @@ mod tests {
         let result =
             handle_sleep_callback(&registry, &events, AGENT_ID, REQUEST_ID, &payload).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
+        assert_eq!(result.expect("unwrap"), None);
 
         let agent = registry.get(AGENT_ID).await.expect("agent must exist");
         assert_eq!(agent.sleep_delay, 60);
@@ -665,7 +665,7 @@ mod tests {
         )
         .await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
+        assert_eq!(result.expect("unwrap"), None);
 
         let agent = registry.get(AGENT_ID).await.expect("agent must exist");
         assert!(!agent.active, "agent should be marked dead");
@@ -2043,7 +2043,7 @@ mod tests {
         )
         .await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
+        assert_eq!(result.expect("unwrap"), None);
 
         // First broadcast: AgentResponse with correct message format.
         let msg = rx.recv().await.expect("should receive agent response");
@@ -2075,7 +2075,7 @@ mod tests {
         )
         .await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
+        assert_eq!(result.expect("unwrap"), None);
 
         // No broadcast should have occurred.
         drop(events);

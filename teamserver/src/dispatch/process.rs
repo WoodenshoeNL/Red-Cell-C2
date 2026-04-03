@@ -881,7 +881,7 @@ mod tests {
         // path (UTF-16 LE, null-terminated, length-prefixed)
         let mut encoded: Vec<u8> = path.encode_utf16().flat_map(u16::to_le_bytes).collect();
         encoded.extend_from_slice(&[0, 0]); // null terminator
-        buf.extend_from_slice(&u32::try_from(encoded.len()).unwrap().to_le_bytes());
+        buf.extend_from_slice(&u32::try_from(encoded.len()).expect("unwrap").to_le_bytes());
         buf.extend_from_slice(&encoded);
         // pid, success, piped, verbose
         buf.extend_from_slice(&pid.to_le_bytes());
@@ -1032,7 +1032,7 @@ mod tests {
     fn add_utf16(buf: &mut Vec<u8>, value: &str) {
         let mut encoded: Vec<u8> = value.encode_utf16().flat_map(u16::to_le_bytes).collect();
         encoded.extend_from_slice(&[0, 0]); // null terminator
-        buf.extend_from_slice(&u32::try_from(encoded.len()).unwrap().to_le_bytes());
+        buf.extend_from_slice(&u32::try_from(encoded.len()).expect("unwrap").to_le_bytes());
         buf.extend_from_slice(&encoded);
     }
 
@@ -1077,7 +1077,7 @@ mod tests {
     }
 
     async fn test_registry() -> AgentRegistry {
-        let db = crate::Database::connect(temp_db_path()).await.unwrap();
+        let db = crate::Database::connect(temp_db_path()).await.expect("unwrap");
         AgentRegistry::new(db)
     }
 
@@ -1125,7 +1125,7 @@ mod tests {
         let mut rx = events.subscribe();
         let agent_id = 0xABCD_0001;
         let agent = sample_agent(agent_id);
-        registry.insert(agent).await.unwrap();
+        registry.insert(agent).await.expect("unwrap");
 
         let payload = build_ppid_spoof_payload(9999);
         handle_proc_ppid_spoof_callback(&registry, &events, agent_id, 1, &payload)
@@ -1205,7 +1205,7 @@ mod tests {
 
         let result = handle_process_list_callback(&events, 0xAA, 1, &payload).await;
         assert!(result.is_ok());
-        assert!(result.unwrap().is_none());
+        assert!(result.expect("unwrap").is_none());
 
         let event = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
             .await
@@ -1241,7 +1241,7 @@ mod tests {
 
         let result = handle_process_list_callback(&events, 0xBB, 2, &payload).await;
         assert!(result.is_ok());
-        assert!(result.unwrap().is_none());
+        assert!(result.expect("unwrap").is_none());
 
         let timeout_result =
             tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;
@@ -1599,7 +1599,7 @@ mod tests {
 
     fn add_string(buf: &mut Vec<u8>, value: &str) {
         let bytes = value.as_bytes();
-        add_u32(buf, u32::try_from(bytes.len()).unwrap());
+        add_u32(buf, u32::try_from(bytes.len()).expect("unwrap"));
         buf.extend_from_slice(bytes);
     }
 
@@ -1681,7 +1681,7 @@ mod tests {
     // ── handle_process_command_callback — Grep branch ───────────────────────
 
     fn add_bytes_raw(buf: &mut Vec<u8>, data: &[u8]) {
-        add_u32(buf, u32::try_from(data.len()).unwrap());
+        add_u32(buf, u32::try_from(data.len()).expect("unwrap"));
         buf.extend_from_slice(data);
     }
 

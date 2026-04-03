@@ -1632,7 +1632,7 @@ mod tests {
             download_loot.is_some(),
             "expected a 'download' loot record; got: {loot_records:?}"
         );
-        let loot = download_loot.unwrap();
+        let loot = download_loot.expect("unwrap");
         assert_eq!(loot.name, "data.txt", "loot name should be the filename");
         assert_eq!(
             loot.data.as_deref(),
@@ -1686,7 +1686,7 @@ mod tests {
 
     #[tokio::test]
     async fn beacon_file_open_truncated_header_returns_error() {
-        let database = Database::connect_in_memory().await.unwrap();
+        let database = Database::connect_in_memory().await.expect("unwrap");
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let downloads = DownloadTracker::new(1024 * 1024);

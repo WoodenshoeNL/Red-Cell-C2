@@ -4709,10 +4709,10 @@ mod tests {
         let config_bytes = b"config";
         let key_x64 =
             compute_cache_key("demon", Architecture::X64, OutputFormat::Exe, config_bytes, None)
-                .unwrap();
+                .expect("unwrap");
         let key_x86 =
             compute_cache_key("demon", Architecture::X86, OutputFormat::Exe, config_bytes, None)
-                .unwrap();
+                .expect("unwrap");
         assert_ne!(key_x64.hex, key_x86.hex, "x64 and x86 must produce different cache keys");
     }
 
@@ -4721,10 +4721,10 @@ mod tests {
         let config_bytes = b"config";
         let key_exe =
             compute_cache_key("demon", Architecture::X64, OutputFormat::Exe, config_bytes, None)
-                .unwrap();
+                .expect("unwrap");
         let key_dll =
             compute_cache_key("demon", Architecture::X64, OutputFormat::Dll, config_bytes, None)
-                .unwrap();
+                .expect("unwrap");
         assert_ne!(key_exe.hex, key_dll.hex, "Exe and Dll must produce different cache keys");
     }
 
@@ -4732,10 +4732,10 @@ mod tests {
     fn compute_cache_key_differs_by_config_bytes() {
         let key_a =
             compute_cache_key("demon", Architecture::X64, OutputFormat::Exe, b"config-a", None)
-                .unwrap();
+                .expect("unwrap");
         let key_b =
             compute_cache_key("demon", Architecture::X64, OutputFormat::Exe, b"config-b", None)
-                .unwrap();
+                .expect("unwrap");
         assert_ne!(
             key_a.hex, key_b.hex,
             "different config bytes must produce different cache keys"
@@ -4745,10 +4745,10 @@ mod tests {
     #[test]
     fn compute_cache_key_ext_matches_format() {
         let key_exe =
-            compute_cache_key("demon", Architecture::X64, OutputFormat::Exe, b"c", None).unwrap();
+            compute_cache_key("demon", Architecture::X64, OutputFormat::Exe, b"c", None).expect("unwrap");
         let key_bin =
             compute_cache_key("demon", Architecture::X64, OutputFormat::Shellcode, b"c", None)
-                .unwrap();
+                .expect("unwrap");
         assert_eq!(key_exe.ext, ".exe");
         assert_eq!(key_bin.ext, ".bin");
     }
@@ -4756,9 +4756,9 @@ mod tests {
     #[test]
     fn compute_cache_key_deterministic() {
         let a = compute_cache_key("demon", Architecture::X64, OutputFormat::Exe, b"same", None)
-            .unwrap();
+            .expect("unwrap");
         let b = compute_cache_key("demon", Architecture::X64, OutputFormat::Exe, b"same", None)
-            .unwrap();
+            .expect("unwrap");
         assert_eq!(a.hex, b.hex, "identical inputs must produce the same cache key");
     }
 
@@ -4770,10 +4770,10 @@ mod tests {
             replace_strings_x86: std::collections::BTreeMap::new(),
         };
         let key_none =
-            compute_cache_key("demon", Architecture::X64, OutputFormat::Exe, b"cfg", None).unwrap();
+            compute_cache_key("demon", Architecture::X64, OutputFormat::Exe, b"cfg", None).expect("unwrap");
         let key_some =
             compute_cache_key("demon", Architecture::X64, OutputFormat::Exe, b"cfg", Some(&patch))
-                .unwrap();
+                .expect("unwrap");
         assert_ne!(
             key_none.hex, key_some.hex,
             "present vs absent binary_patch must produce different cache keys"
@@ -4799,7 +4799,7 @@ mod tests {
             b"cfg",
             Some(&patch_a),
         )
-        .unwrap();
+        .expect("unwrap");
         let key_b = compute_cache_key(
             "demon",
             Architecture::X64,
@@ -4807,7 +4807,7 @@ mod tests {
             b"cfg",
             Some(&patch_b),
         )
-        .unwrap();
+        .expect("unwrap");
         assert_ne!(
             key_a.hex, key_b.hex,
             "different binary_patch content must produce different cache keys"
@@ -4845,7 +4845,7 @@ mod tests {
             b"cfg",
             Some(&patch_a),
         )
-        .unwrap();
+        .expect("unwrap");
         let key_b = compute_cache_key(
             "demon",
             Architecture::X64,
@@ -4853,7 +4853,7 @@ mod tests {
             b"cfg",
             Some(&patch_b),
         )
-        .unwrap();
+        .expect("unwrap");
         assert_ne!(
             key_a.hex, key_b.hex,
             "different header magic_mz_x64 must produce different cache keys"
@@ -4891,7 +4891,7 @@ mod tests {
             b"cfg",
             Some(&patch_a),
         )
-        .unwrap();
+        .expect("unwrap");
         let key_b = compute_cache_key(
             "demon",
             Architecture::X64,
@@ -4899,7 +4899,7 @@ mod tests {
             b"cfg",
             Some(&patch_b),
         )
-        .unwrap();
+        .expect("unwrap");
         assert_ne!(
             key_a.hex, key_b.hex,
             "different header compile_time must produce different cache keys"
@@ -4937,7 +4937,7 @@ mod tests {
             b"cfg",
             Some(&patch_a),
         )
-        .unwrap();
+        .expect("unwrap");
         let key_b = compute_cache_key(
             "demon",
             Architecture::X64,
@@ -4945,7 +4945,7 @@ mod tests {
             b"cfg",
             Some(&patch_b),
         )
-        .unwrap();
+        .expect("unwrap");
         assert_ne!(
             key_a.hex, key_b.hex,
             "different header image_size_x64 must produce different cache keys"
@@ -4971,7 +4971,7 @@ mod tests {
             b"cfg",
             Some(&patch_a),
         )
-        .unwrap();
+        .expect("unwrap");
         let key_b = compute_cache_key(
             "demon",
             Architecture::X64,
@@ -4979,7 +4979,7 @@ mod tests {
             b"cfg",
             Some(&patch_b),
         )
-        .unwrap();
+        .expect("unwrap");
         assert_ne!(
             key_a.hex, key_b.hex,
             "different replace_strings_x86 must produce different cache keys"
@@ -5003,10 +5003,10 @@ mod tests {
         };
         let key_1 =
             compute_cache_key("demon", Architecture::X64, OutputFormat::Exe, b"cfg", Some(&patch))
-                .unwrap();
+                .expect("unwrap");
         let key_2 =
             compute_cache_key("demon", Architecture::X64, OutputFormat::Exe, b"cfg", Some(&patch))
-                .unwrap();
+                .expect("unwrap");
         assert_eq!(
             key_1.hex, key_2.hex,
             "identical binary_patch configs must produce identical cache keys"
@@ -5028,18 +5028,18 @@ mod tests {
         let keys: Vec<String> = vec![
             // baseline
             compute_cache_key("demon", Architecture::X64, OutputFormat::Exe, config, None)
-                .unwrap()
+                .expect("unwrap")
                 .hex,
             // vary arch
             compute_cache_key("demon", Architecture::X86, OutputFormat::Exe, config, None)
-                .unwrap()
+                .expect("unwrap")
                 .hex,
             // vary format
             compute_cache_key("demon", Architecture::X64, OutputFormat::Dll, config, None)
-                .unwrap()
+                .expect("unwrap")
                 .hex,
             compute_cache_key("demon", Architecture::X64, OutputFormat::ServiceExe, config, None)
-                .unwrap()
+                .expect("unwrap")
                 .hex,
             compute_cache_key(
                 "demon",
@@ -5048,10 +5048,10 @@ mod tests {
                 config,
                 None,
             )
-            .unwrap()
+            .expect("unwrap")
             .hex,
             compute_cache_key("demon", Architecture::X64, OutputFormat::Shellcode, config, None)
-                .unwrap()
+                .expect("unwrap")
                 .hex,
             compute_cache_key(
                 "demon",
@@ -5060,18 +5060,18 @@ mod tests {
                 config,
                 None,
             )
-            .unwrap()
+            .expect("unwrap")
             .hex,
             compute_cache_key("demon", Architecture::X64, OutputFormat::RawShellcode, config, None)
-                .unwrap()
+                .expect("unwrap")
                 .hex,
             // vary config bytes
             compute_cache_key("demon", Architecture::X64, OutputFormat::Exe, b"other", None)
-                .unwrap()
+                .expect("unwrap")
                 .hex,
             // vary binary_patch
             compute_cache_key("demon", Architecture::X64, OutputFormat::Exe, config, Some(&patch))
-                .unwrap()
+                .expect("unwrap")
                 .hex,
         ];
 
@@ -5090,10 +5090,10 @@ mod tests {
         let config_bytes = b"config";
         let key_demon =
             compute_cache_key("demon", Architecture::X64, OutputFormat::Exe, config_bytes, None)
-                .unwrap();
+                .expect("unwrap");
         let key_archon =
             compute_cache_key("archon", Architecture::X64, OutputFormat::Exe, config_bytes, None)
-                .unwrap();
+                .expect("unwrap");
         assert_ne!(
             key_demon.hex, key_archon.hex,
             "demon and archon must produce different cache keys for identical other inputs"
@@ -5805,7 +5805,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_returns_none_for_absent_key() {
-        let temp = TempDir::new().unwrap();
+        let temp = TempDir::new().expect("unwrap");
         let cache = PayloadCache::new(temp.path().to_path_buf());
         let key = test_cache_key("nonexistent", ".exe");
         assert!(cache.get(&key).await.is_none());
@@ -5813,7 +5813,7 @@ mod tests {
 
     #[tokio::test]
     async fn put_then_get_round_trips_bytes() {
-        let temp = TempDir::new().unwrap();
+        let temp = TempDir::new().expect("unwrap");
         let cache = PayloadCache::new(temp.path().to_path_buf());
         let key = test_cache_key("deadbeef", ".dll");
         let payload = b"MZ\x90\x00payload-bytes";
@@ -5826,7 +5826,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_returns_none_when_cache_dir_missing() {
-        let temp = TempDir::new().unwrap();
+        let temp = TempDir::new().expect("unwrap");
         // Point at a sub-directory that does not exist.
         let cache = PayloadCache::new(temp.path().join("does-not-exist"));
         let key = test_cache_key("abc", ".bin");
@@ -5835,7 +5835,7 @@ mod tests {
 
     #[tokio::test]
     async fn flush_then_get_returns_none() {
-        let temp = TempDir::new().unwrap();
+        let temp = TempDir::new().expect("unwrap");
         let cache = PayloadCache::new(temp.path().to_path_buf());
         let key = test_cache_key("flushme", ".exe");
 
@@ -5848,7 +5848,7 @@ mod tests {
 
     #[tokio::test]
     async fn put_creates_cache_dir_if_absent() {
-        let temp = TempDir::new().unwrap();
+        let temp = TempDir::new().expect("unwrap");
         let nested = temp.path().join("sub/dir");
         let cache = PayloadCache::new(nested.clone());
         let key = test_cache_key("cafebabe", ".bin");
@@ -5862,7 +5862,7 @@ mod tests {
 
     #[tokio::test]
     async fn distinct_keys_do_not_collide() {
-        let temp = TempDir::new().unwrap();
+        let temp = TempDir::new().expect("unwrap");
         let cache = PayloadCache::new(temp.path().to_path_buf());
         let k1 = test_cache_key("samehex", ".exe");
         let k2 = test_cache_key("samehex", ".dll");
@@ -5870,8 +5870,8 @@ mod tests {
         cache.put(&k1, b"exe-bytes").await;
         cache.put(&k2, b"dll-bytes").await;
 
-        assert_eq!(cache.get(&k1).await.unwrap(), b"exe-bytes");
-        assert_eq!(cache.get(&k2).await.unwrap(), b"dll-bytes");
+        assert_eq!(cache.get(&k1).await.expect("unwrap"), b"exe-bytes");
+        assert_eq!(cache.get(&k2).await.expect("unwrap"), b"dll-bytes");
     }
 
     // ---- PayloadBuilderService::cache accessor tests ----
@@ -5899,7 +5899,7 @@ mod tests {
 
     #[tokio::test]
     async fn cache_accessor_observes_external_mutations() {
-        let temp = TempDir::new().unwrap();
+        let temp = TempDir::new().expect("unwrap");
         let cache_dir = temp.path().join("payload-cache");
         let svc = PayloadBuilderService::with_paths_for_tests(
             Toolchain {
@@ -5970,7 +5970,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_returns_truncated_bytes_from_corrupted_cache_entry() {
-        let temp = TempDir::new().unwrap();
+        let temp = TempDir::new().expect("unwrap");
         let cache = PayloadCache::new(temp.path().to_path_buf());
         let key = test_cache_key("corrupt01", ".exe");
 
@@ -5982,7 +5982,7 @@ mod tests {
         // Manually truncate the cached file to simulate corruption.
         let path = cache.artifact_path(&key);
         let truncated = &original[..4]; // only the MZ header stub
-        tokio::fs::write(&path, truncated).await.unwrap();
+        tokio::fs::write(&path, truncated).await.expect("unwrap");
 
         // `get` performs no integrity validation — it returns whatever bytes
         // are on disk, even if they are shorter than the original artifact.
@@ -5993,13 +5993,13 @@ mod tests {
 
     #[tokio::test]
     async fn get_returns_empty_bytes_for_zero_length_cache_file() {
-        let temp = TempDir::new().unwrap();
+        let temp = TempDir::new().expect("unwrap");
         let cache = PayloadCache::new(temp.path().to_path_buf());
         let key = test_cache_key("empty01", ".bin");
 
         // Create a zero-length file (worst-case truncation).
-        tokio::fs::create_dir_all(temp.path()).await.unwrap();
-        tokio::fs::write(cache.artifact_path(&key), b"").await.unwrap();
+        tokio::fs::create_dir_all(temp.path()).await.expect("unwrap");
+        tokio::fs::write(cache.artifact_path(&key), b"").await.expect("unwrap");
 
         let got = cache.get(&key).await.expect("file exists, so get returns Some");
         assert!(got.is_empty(), "zero-length cached file should return empty bytes");
@@ -6010,9 +6010,9 @@ mod tests {
     async fn put_succeeds_gracefully_when_cache_dir_is_read_only() {
         use std::os::unix::fs::PermissionsExt;
 
-        let temp = TempDir::new().unwrap();
+        let temp = TempDir::new().expect("unwrap");
         let cache_dir = temp.path().join("readonly-cache");
-        std::fs::create_dir_all(&cache_dir).unwrap();
+        std::fs::create_dir_all(&cache_dir).expect("unwrap");
 
         // Pre-populate one entry so we can verify reads still work.
         let pre_key = test_cache_key("preexist", ".exe");
@@ -6020,7 +6020,7 @@ mod tests {
         cache.put(&pre_key, b"existing-data").await;
 
         // Make the directory read-only.
-        std::fs::set_permissions(&cache_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        std::fs::set_permissions(&cache_dir, std::fs::Permissions::from_mode(0o555)).expect("unwrap");
 
         // Writing to a read-only directory should fail gracefully (no panic).
         let key = test_cache_key("readonly01", ".bin");
@@ -6037,12 +6037,12 @@ mod tests {
         assert_eq!(got, b"existing-data");
 
         // Restore permissions so TempDir cleanup succeeds.
-        std::fs::set_permissions(&cache_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&cache_dir, std::fs::Permissions::from_mode(0o755)).expect("unwrap");
     }
 
     #[tokio::test]
     async fn concurrent_puts_with_same_key_both_succeed() {
-        let temp = TempDir::new().unwrap();
+        let temp = TempDir::new().expect("unwrap");
         let cache = PayloadCache::new(temp.path().to_path_buf());
         let key_hex = "racekey01";
         let ext = ".dll";
@@ -6080,7 +6080,7 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_put_and_get_does_not_panic() {
-        let temp = TempDir::new().unwrap();
+        let temp = TempDir::new().expect("unwrap");
         let cache = PayloadCache::new(temp.path().to_path_buf());
         let key_hex = "racerw01";
         let ext = ".exe";
@@ -6182,17 +6182,17 @@ mod tests {
 
     #[test]
     fn sleep_jump_bypass_returns_zero_when_obfuscation_disabled() {
-        assert_eq!(sleep_jump_bypass(0, Some("jmp rax")).unwrap(), 0);
-        assert_eq!(sleep_jump_bypass(0, Some("jmp rbx")).unwrap(), 0);
-        assert_eq!(sleep_jump_bypass(0, None).unwrap(), 0);
+        assert_eq!(sleep_jump_bypass(0, Some("jmp rax")).expect("unwrap"), 0);
+        assert_eq!(sleep_jump_bypass(0, Some("jmp rbx")).expect("unwrap"), 0);
+        assert_eq!(sleep_jump_bypass(0, None).expect("unwrap"), 0);
     }
 
     #[test]
     fn sleep_jump_bypass_maps_gadgets_when_obfuscation_enabled() {
-        assert_eq!(sleep_jump_bypass(1, Some("jmp rax")).unwrap(), 1);
-        assert_eq!(sleep_jump_bypass(1, Some("jmp rbx")).unwrap(), 2);
-        assert_eq!(sleep_jump_bypass(1, None).unwrap(), 0);
-        assert_eq!(sleep_jump_bypass(1, Some("unknown")).unwrap(), 0);
+        assert_eq!(sleep_jump_bypass(1, Some("jmp rax")).expect("unwrap"), 1);
+        assert_eq!(sleep_jump_bypass(1, Some("jmp rbx")).expect("unwrap"), 2);
+        assert_eq!(sleep_jump_bypass(1, None).expect("unwrap"), 0);
+        assert_eq!(sleep_jump_bypass(1, Some("unknown")).expect("unwrap"), 0);
     }
 
     #[test]
@@ -6336,7 +6336,7 @@ mod tests {
             "Alloc": "Win32",
             "Execute": "Native/Syscall"
         }))
-        .unwrap();
+        .expect("unwrap");
         assert_eq!(injection_mode(&config, "Alloc")?, 1);
         assert_eq!(injection_mode(&config, "Execute")?, 2);
         Ok(())
@@ -6347,7 +6347,7 @@ mod tests {
         let config = serde_json::from_value::<Map<String, Value>>(json!({
             "Alloc": "Unknown"
         }))
-        .unwrap();
+        .expect("unwrap");
         assert_eq!(injection_mode(&config, "Alloc")?, 0);
         Ok(())
     }
@@ -6356,15 +6356,15 @@ mod tests {
 
     #[test]
     fn architecture_parse_accepts_x64_case_insensitive() {
-        assert_eq!(Architecture::parse("x64").unwrap(), Architecture::X64);
-        assert_eq!(Architecture::parse("X64").unwrap(), Architecture::X64);
-        assert_eq!(Architecture::parse(" x64 ").unwrap(), Architecture::X64);
+        assert_eq!(Architecture::parse("x64").expect("unwrap"), Architecture::X64);
+        assert_eq!(Architecture::parse("X64").expect("unwrap"), Architecture::X64);
+        assert_eq!(Architecture::parse(" x64 ").expect("unwrap"), Architecture::X64);
     }
 
     #[test]
     fn architecture_parse_accepts_x86_case_insensitive() {
-        assert_eq!(Architecture::parse("x86").unwrap(), Architecture::X86);
-        assert_eq!(Architecture::parse("X86").unwrap(), Architecture::X86);
+        assert_eq!(Architecture::parse("x86").expect("unwrap"), Architecture::X86);
+        assert_eq!(Architecture::parse("X86").expect("unwrap"), Architecture::X86);
     }
 
     #[test]
@@ -6438,7 +6438,7 @@ mod tests {
                 "Spawn32": "b"
             }
         }))
-        .unwrap();
+        .expect("unwrap");
         let listener = http_listener_with_method(None);
         let err = pack_config(&listener, &config).expect_err("jitter > 100 should be rejected");
         assert!(matches!(
@@ -6875,21 +6875,21 @@ mod tests {
 
     #[test]
     fn required_u32_parses_string_value() -> Result<(), PayloadBuildError> {
-        let config = serde_json::from_value::<Map<String, Value>>(json!({"val": "42"})).unwrap();
+        let config = serde_json::from_value::<Map<String, Value>>(json!({"val": "42"})).expect("unwrap");
         assert_eq!(required_u32(&config, "val")?, 42);
         Ok(())
     }
 
     #[test]
     fn required_u32_parses_number_value() -> Result<(), PayloadBuildError> {
-        let config = serde_json::from_value::<Map<String, Value>>(json!({"val": 42})).unwrap();
+        let config = serde_json::from_value::<Map<String, Value>>(json!({"val": 42})).expect("unwrap");
         assert_eq!(required_u32(&config, "val")?, 42);
         Ok(())
     }
 
     #[test]
     fn required_u32_rejects_missing_key() {
-        let config = serde_json::from_value::<Map<String, Value>>(json!({})).unwrap();
+        let config = serde_json::from_value::<Map<String, Value>>(json!({})).expect("unwrap");
         let err = required_u32(&config, "missing").expect_err("missing key should fail");
         assert!(matches!(err, PayloadBuildError::InvalidRequest { message }
             if message.contains("missing")));
@@ -6897,7 +6897,7 @@ mod tests {
 
     #[test]
     fn required_u32_rejects_non_numeric_string() {
-        let config = serde_json::from_value::<Map<String, Value>>(json!({"val": "abc"})).unwrap();
+        let config = serde_json::from_value::<Map<String, Value>>(json!({"val": "abc"})).expect("unwrap");
         let err = required_u32(&config, "val").expect_err("non-numeric should fail");
         assert!(matches!(err, PayloadBuildError::InvalidRequest { .. }));
     }

@@ -450,7 +450,7 @@ mod tests {
     fn format_token_list_empty() {
         let buf = Vec::new();
         let mut parser = CallbackParser::new(&buf, 0);
-        let output = super::format_token_list(&mut parser).unwrap();
+        let output = super::format_token_list(&mut parser).expect("unwrap");
         assert_eq!(output, "\nThe token vault is empty");
     }
 
@@ -466,7 +466,7 @@ mod tests {
         push_u32(&mut buf, 1); // impersonating
 
         let mut parser = CallbackParser::new(&buf, 0);
-        let output = super::format_token_list(&mut parser).unwrap();
+        let output = super::format_token_list(&mut parser).expect("unwrap");
         assert!(output.contains("stolen"), "expected 'stolen' in output: {output}");
         assert!(output.contains("Yes"), "expected 'Yes' for impersonating");
         assert!(output.contains("CORP\\admin"));
@@ -483,7 +483,7 @@ mod tests {
         push_u32(&mut buf, 0); // not impersonating
 
         let mut parser = CallbackParser::new(&buf, 0);
-        let output = super::format_token_list(&mut parser).unwrap();
+        let output = super::format_token_list(&mut parser).expect("unwrap");
         assert!(output.contains("make (local)"));
         assert!(output.contains("No"));
     }
@@ -499,7 +499,7 @@ mod tests {
         push_u32(&mut buf, 0);
 
         let mut parser = CallbackParser::new(&buf, 0);
-        let output = super::format_token_list(&mut parser).unwrap();
+        let output = super::format_token_list(&mut parser).expect("unwrap");
         assert!(output.contains("make (network)"));
     }
 
@@ -514,7 +514,7 @@ mod tests {
         push_u32(&mut buf, 0);
 
         let mut parser = CallbackParser::new(&buf, 0);
-        let output = super::format_token_list(&mut parser).unwrap();
+        let output = super::format_token_list(&mut parser).expect("unwrap");
         assert!(output.contains("unknown"));
     }
 
@@ -539,7 +539,7 @@ mod tests {
         push_u32(&mut buf, 99);
 
         let mut parser = CallbackParser::new(&buf, 0);
-        let output = super::format_token_privs_list(&mut parser).unwrap();
+        let output = super::format_token_privs_list(&mut parser).expect("unwrap");
         assert!(output.contains("SeDebugPrivilege :: Enabled"));
         assert!(output.contains("SeBackupPrivilege :: Adjusted"));
         assert!(output.contains("SeShutdownPrivilege :: Disabled"));
@@ -550,7 +550,7 @@ mod tests {
     fn format_token_privs_list_empty() {
         let buf = Vec::new();
         let mut parser = CallbackParser::new(&buf, 0);
-        let output = super::format_token_privs_list(&mut parser).unwrap();
+        let output = super::format_token_privs_list(&mut parser).expect("unwrap");
         assert_eq!(output, "\n");
     }
 
@@ -560,7 +560,7 @@ mod tests {
         push_string(&mut buf, "SeDebugPrivilege");
         push_u32(&mut buf, 3);
         let mut parser = CallbackParser::new(&buf, 0);
-        let output = super::format_token_privs_list(&mut parser).unwrap();
+        let output = super::format_token_privs_list(&mut parser).expect("unwrap");
         assert_eq!(output, "\n SeDebugPrivilege :: Enabled\n");
     }
 
@@ -570,7 +570,7 @@ mod tests {
         push_string(&mut buf, "SeBackupPrivilege");
         push_u32(&mut buf, 2);
         let mut parser = CallbackParser::new(&buf, 0);
-        let output = super::format_token_privs_list(&mut parser).unwrap();
+        let output = super::format_token_privs_list(&mut parser).expect("unwrap");
         assert_eq!(output, "\n SeBackupPrivilege :: Adjusted\n");
     }
 
@@ -580,7 +580,7 @@ mod tests {
         push_string(&mut buf, "SeShutdownPrivilege");
         push_u32(&mut buf, 0);
         let mut parser = CallbackParser::new(&buf, 0);
-        let output = super::format_token_privs_list(&mut parser).unwrap();
+        let output = super::format_token_privs_list(&mut parser).expect("unwrap");
         assert_eq!(output, "\n SeShutdownPrivilege :: Disabled\n");
     }
 
@@ -590,7 +590,7 @@ mod tests {
         push_string(&mut buf, "SeImpersonatePrivilege");
         push_u32(&mut buf, 1);
         let mut parser = CallbackParser::new(&buf, 0);
-        let output = super::format_token_privs_list(&mut parser).unwrap();
+        let output = super::format_token_privs_list(&mut parser).expect("unwrap");
         assert_eq!(output, "\n SeImpersonatePrivilege :: Unknown\n");
     }
 
@@ -600,7 +600,7 @@ mod tests {
         push_string(&mut buf, "SeLoadDriverPrivilege");
         push_u32(&mut buf, 255);
         let mut parser = CallbackParser::new(&buf, 0);
-        let output = super::format_token_privs_list(&mut parser).unwrap();
+        let output = super::format_token_privs_list(&mut parser).expect("unwrap");
         assert_eq!(output, "\n SeLoadDriverPrivilege :: Unknown\n");
     }
 
@@ -614,7 +614,7 @@ mod tests {
         push_string(&mut buf, "SeBackupPrivilege");
         push_u32(&mut buf, 2);
         let mut parser = CallbackParser::new(&buf, 0);
-        let output = super::format_token_privs_list(&mut parser).unwrap();
+        let output = super::format_token_privs_list(&mut parser).expect("unwrap");
         assert_eq!(
             output,
             "\n SeDebugPrivilege :: Enabled\n SeShutdownPrivilege :: Disabled\n SeBackupPrivilege :: Adjusted\n"
@@ -654,7 +654,7 @@ mod tests {
     fn format_found_tokens_integrity_0x0000_is_low() {
         let buf = build_found_token_payload(0x0000);
         let mut parser = CallbackParser::new(&buf, 0);
-        let output = super::format_found_tokens(&mut parser).unwrap();
+        let output = super::format_found_tokens(&mut parser).expect("unwrap");
         assert_eq!(get_integrity_from_output(&output), "Low");
     }
 
@@ -662,7 +662,7 @@ mod tests {
     fn format_found_tokens_integrity_0x1000_is_low() {
         let buf = build_found_token_payload(0x1000);
         let mut parser = CallbackParser::new(&buf, 0);
-        let output = super::format_found_tokens(&mut parser).unwrap();
+        let output = super::format_found_tokens(&mut parser).expect("unwrap");
         assert_eq!(get_integrity_from_output(&output), "Low");
     }
 
@@ -672,7 +672,7 @@ mod tests {
         // and falls through all range checks to the else branch ("Low").
         let buf = build_found_token_payload(0x1001);
         let mut parser = CallbackParser::new(&buf, 0);
-        let output = super::format_found_tokens(&mut parser).unwrap();
+        let output = super::format_found_tokens(&mut parser).expect("unwrap");
         assert_eq!(get_integrity_from_output(&output), "Low");
     }
 
@@ -680,7 +680,7 @@ mod tests {
     fn format_found_tokens_integrity_0x1fff_falls_through_to_low() {
         let buf = build_found_token_payload(0x1FFF);
         let mut parser = CallbackParser::new(&buf, 0);
-        let output = super::format_found_tokens(&mut parser).unwrap();
+        let output = super::format_found_tokens(&mut parser).expect("unwrap");
         assert_eq!(get_integrity_from_output(&output), "Low");
     }
 
@@ -688,7 +688,7 @@ mod tests {
     fn format_found_tokens_integrity_0x2000_is_medium() {
         let buf = build_found_token_payload(0x2000);
         let mut parser = CallbackParser::new(&buf, 0);
-        let output = super::format_found_tokens(&mut parser).unwrap();
+        let output = super::format_found_tokens(&mut parser).expect("unwrap");
         assert_eq!(get_integrity_from_output(&output), "Medium");
     }
 
@@ -696,7 +696,7 @@ mod tests {
     fn format_found_tokens_integrity_0x2fff_is_medium() {
         let buf = build_found_token_payload(0x2FFF);
         let mut parser = CallbackParser::new(&buf, 0);
-        let output = super::format_found_tokens(&mut parser).unwrap();
+        let output = super::format_found_tokens(&mut parser).expect("unwrap");
         assert_eq!(get_integrity_from_output(&output), "Medium");
     }
 
@@ -704,7 +704,7 @@ mod tests {
     fn format_found_tokens_integrity_0x3000_is_high() {
         let buf = build_found_token_payload(0x3000);
         let mut parser = CallbackParser::new(&buf, 0);
-        let output = super::format_found_tokens(&mut parser).unwrap();
+        let output = super::format_found_tokens(&mut parser).expect("unwrap");
         assert_eq!(get_integrity_from_output(&output), "High");
     }
 
@@ -712,7 +712,7 @@ mod tests {
     fn format_found_tokens_integrity_0x3fff_is_high() {
         let buf = build_found_token_payload(0x3FFF);
         let mut parser = CallbackParser::new(&buf, 0);
-        let output = super::format_found_tokens(&mut parser).unwrap();
+        let output = super::format_found_tokens(&mut parser).expect("unwrap");
         assert_eq!(get_integrity_from_output(&output), "High");
     }
 
@@ -720,7 +720,7 @@ mod tests {
     fn format_found_tokens_integrity_0x4000_is_system() {
         let buf = build_found_token_payload(0x4000);
         let mut parser = CallbackParser::new(&buf, 0);
-        let output = super::format_found_tokens(&mut parser).unwrap();
+        let output = super::format_found_tokens(&mut parser).expect("unwrap");
         assert_eq!(get_integrity_from_output(&output), "System");
     }
 
@@ -729,7 +729,7 @@ mod tests {
         let mut buf = Vec::new();
         push_u32(&mut buf, 0); // num_tokens = 0
         let mut parser = CallbackParser::new(&buf, 0);
-        let output = super::format_found_tokens(&mut parser).unwrap();
+        let output = super::format_found_tokens(&mut parser).expect("unwrap");
         assert_eq!(output, "\nNo tokens found");
     }
 
@@ -745,7 +745,7 @@ mod tests {
         push_u32(&mut buf, 1); // token_type = Primary
 
         let mut parser = CallbackParser::new(&buf, 0);
-        let output = super::format_found_tokens(&mut parser).unwrap();
+        let output = super::format_found_tokens(&mut parser).expect("unwrap");
         assert!(output.contains("Primary"), "expected 'Primary' in output: {output}");
         assert!(output.contains("N/A"), "expected 'N/A' impersonation for Primary");
     }
@@ -771,7 +771,7 @@ mod tests {
             push_u32(&mut buf, 2); // Impersonation token type
 
             let mut parser = CallbackParser::new(&buf, 0);
-            let output = super::format_found_tokens(&mut parser).unwrap();
+            let output = super::format_found_tokens(&mut parser).expect("unwrap");
             assert!(
                 output.contains(expected_label),
                 "imp_level={imp_level}: expected '{expected_label}' in output: {output}"
@@ -799,7 +799,7 @@ mod tests {
         push_u32(&mut buf, 1);
 
         let mut parser = CallbackParser::new(&buf, 0);
-        let output = super::format_token_list(&mut parser).unwrap();
+        let output = super::format_token_list(&mut parser).expect("unwrap");
 
         // The header "Domain\User" is 11 chars. The long name is 35 chars,
         // so max_user should be 35 and columns should expand accordingly.
@@ -843,7 +843,7 @@ mod tests {
         push_u32(&mut buf, 2); // Impersonation token
 
         let mut parser = CallbackParser::new(&buf, 0);
-        let output = super::format_found_tokens(&mut parser).unwrap();
+        let output = super::format_found_tokens(&mut parser).expect("unwrap");
 
         assert!(output.contains("LONGCORP\\very_long_username_here"));
         assert!(output.contains("X\\Y"));
@@ -868,7 +868,7 @@ mod tests {
         // 0x0FFF is <= LOW_RID (0x1000), so it's "Low"
         let buf = build_found_token_payload(0x0FFF);
         let mut parser = CallbackParser::new(&buf, 0);
-        let output = super::format_found_tokens(&mut parser).unwrap();
+        let output = super::format_found_tokens(&mut parser).expect("unwrap");
         assert_eq!(get_integrity_from_output(&output), "Low");
     }
 
@@ -884,7 +884,7 @@ mod tests {
         push_u32(&mut buf, 99); // unknown token_type_raw
 
         let mut parser = CallbackParser::new(&buf, 0);
-        let output = super::format_found_tokens(&mut parser).unwrap();
+        let output = super::format_found_tokens(&mut parser).expect("unwrap");
         assert!(output.contains("?"), "expected '?' for unknown token type: {output}");
         assert!(output.contains("Unknown"), "expected 'Unknown' impersonation for unknown type");
     }
@@ -905,7 +905,7 @@ mod tests {
         push_u32(&mut buf, 2); // Impersonation token type
 
         let mut parser = CallbackParser::new(&buf, 0);
-        let output = super::format_found_tokens(&mut parser).unwrap();
+        let output = super::format_found_tokens(&mut parser).expect("unwrap");
 
         // Should still produce a valid table with the 1 token we did provide.
         assert!(output.contains("CORP\\admin"), "expected the single token in output: {output}");
@@ -932,7 +932,7 @@ mod tests {
         push_u32(&mut buf, 5); // num_tokens = 5 (but no entries follow)
 
         let mut parser = CallbackParser::new(&buf, 0);
-        let output = super::format_found_tokens(&mut parser).unwrap();
+        let output = super::format_found_tokens(&mut parser).expect("unwrap");
         assert_eq!(output, "\nNo tokens found");
     }
 
@@ -948,7 +948,7 @@ mod tests {
         push_u32(&mut buf, 2); // Impersonation token
 
         let mut parser = CallbackParser::new(&buf, 0);
-        let output = super::format_found_tokens(&mut parser).unwrap();
+        let output = super::format_found_tokens(&mut parser).expect("unwrap");
         // For delegation (impersonation_level=3), remote_auth should be "Yes"
         // The table has: LocalAuth=Yes, RemoteAuth=Yes
         // Count "Yes" occurrences — should appear for both LocalAuth and RemoteAuth
@@ -1027,7 +1027,7 @@ mod tests {
 
         let (result, msg) = call_and_recv(&payload).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
+        assert_eq!(result.expect("unwrap"), None);
         let msg = msg.expect("should broadcast");
         assert_response(&msg, "Good", "Successfully impersonated CORP\\admin");
     }
@@ -1307,7 +1307,7 @@ mod tests {
         let events = EventBus::default();
         let result = handle_token_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
         assert!(result.is_err());
-        let err = result.unwrap_err();
+        let err = result.expect_err("expected Err");
         let err_str = err.to_string();
         assert!(
             err_str.contains("0x00000028"), // CommandToken = 40 = 0x28
@@ -1459,7 +1459,7 @@ mod tests {
             let _rx = events.subscribe();
             let result = handle_token_callback(&events, AGENT_ID, REQUEST_ID, payload).await;
             assert!(result.is_ok(), "case {i} should succeed");
-            assert_eq!(result.unwrap(), None, "case {i} should return None");
+            assert_eq!(result.expect("unwrap"), None, "case {i} should return None");
         }
     }
 }

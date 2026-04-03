@@ -484,7 +484,7 @@ async fn create_duplicate_name_returns_error_and_preserves_original()
     let result = manager.create(http_config("lc-dup", port_b)).await;
     assert!(result.is_err(), "duplicate create must return an error");
 
-    let err = result.unwrap_err();
+    let err = result.expect_err("expected Err");
     assert!(
         matches!(err, ListenerManagerError::DuplicateListener { .. }),
         "error must be DuplicateListener, got: {err}"

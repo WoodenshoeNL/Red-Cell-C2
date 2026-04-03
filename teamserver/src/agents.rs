@@ -1558,7 +1558,7 @@ mod tests {
         registry.insert(agent.clone()).await?;
         registry.set_note(agent.agent_id, "do not lose this target").await?;
         let original_first_call_in =
-            registry.get(agent.agent_id).await.unwrap().first_call_in.clone();
+            registry.get(agent.agent_id).await.expect("unwrap").first_call_in.clone();
 
         let mut updated = sample_agent(0xBEEF_0002);
         updated.first_call_in = "2099-01-01T00:00:00Z".to_owned(); // should be ignored
@@ -2656,7 +2656,7 @@ mod tests {
         let err = registry
             .enqueue_job(agent.agent_id, sample_job(MAX_JOB_QUEUE_DEPTH as u32))
             .await
-            .unwrap_err();
+            .expect_err("expected Err");
         assert!(
             matches!(
                 err,
@@ -2693,7 +2693,7 @@ mod tests {
         let rejected_job = sample_job(rejected_request_id);
 
         // Attempt one more — must be rejected.
-        let err = registry.enqueue_job(agent.agent_id, rejected_job).await.unwrap_err();
+        let err = registry.enqueue_job(agent.agent_id, rejected_job).await.expect_err("expected Err");
         assert!(matches!(err, TeamserverError::QueueFull { .. }), "expected QueueFull, got: {err}");
 
         // The rejected job must not leave a stale request context behind.
@@ -3627,13 +3627,13 @@ mod tests {
     fn next_ctr_offset_succeeds_at_maximum_non_overflowing_value() {
         // u64::MAX - 1 + 1 block = u64::MAX, which is representable.
         let result = super::next_ctr_offset(u64::MAX - 1, 16);
-        assert_eq!(result.unwrap(), u64::MAX);
+        assert_eq!(result.expect("unwrap"), u64::MAX);
     }
 
     #[test]
     fn next_ctr_offset_zero_payload_does_not_advance() {
         let result = super::next_ctr_offset(u64::MAX, 0);
-        assert_eq!(result.unwrap(), u64::MAX, "zero-length payload must not advance");
+        assert_eq!(result.expect("unwrap"), u64::MAX, "zero-length payload must not advance");
     }
 
     #[tokio::test]
@@ -4032,7 +4032,7 @@ mod tests {
         let err = registry
             .enqueue_job(child.agent_id, sample_job(MAX_JOB_QUEUE_DEPTH as u32))
             .await
-            .unwrap_err();
+            .expect_err("expected Err");
 
         assert!(
             matches!(

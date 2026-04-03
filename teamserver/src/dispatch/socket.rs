@@ -765,7 +765,7 @@ mod tests {
         // the handler must not panic or return Err on a refused-connection payload.
         let (result, _msg) = call_and_recv(&payload).await;
         assert!(result.is_ok());
-        assert!(result.unwrap().is_none());
+        assert!(result.expect("unwrap").is_none());
     }
 
     // ── SocksProxyAdd ──────────────────────────────────────────────────────

@@ -584,7 +584,7 @@ mod tests {
     fn add_utf16_le(buf: &mut Vec<u8>, value: &str) {
         let mut encoded: Vec<u8> = value.encode_utf16().flat_map(u16::to_le_bytes).collect();
         encoded.extend_from_slice(&[0, 0]); // null terminator
-        buf.extend_from_slice(&u32::try_from(encoded.len()).unwrap().to_le_bytes());
+        buf.extend_from_slice(&u32::try_from(encoded.len()).expect("unwrap").to_le_bytes());
         buf.extend_from_slice(&encoded);
     }
 
@@ -896,7 +896,7 @@ mod tests {
         bytes.extend_from_slice(&1024u32.to_be_bytes());
         bytes.extend_from_slice(b"C:\\flag.txt");
 
-        let (file_id, size, path) = parse_file_open_header(CMD_ID, &bytes).unwrap();
+        let (file_id, size, path) = parse_file_open_header(CMD_ID, &bytes).expect("unwrap");
         assert_eq!(file_id, 7);
         assert_eq!(size, 1024);
         assert_eq!(path, "C:\\flag.txt");
@@ -909,7 +909,7 @@ mod tests {
         bytes.extend_from_slice(&0u32.to_be_bytes());
         bytes.extend_from_slice(b"path\0");
 
-        let (_, _, path) = parse_file_open_header(CMD_ID, &bytes).unwrap();
+        let (_, _, path) = parse_file_open_header(CMD_ID, &bytes).expect("unwrap");
         assert_eq!(path, "path");
     }
 
@@ -920,7 +920,7 @@ mod tests {
         bytes.extend_from_slice(&42u32.to_be_bytes());
         bytes.extend_from_slice(&99u32.to_be_bytes());
 
-        let (file_id, size, path) = parse_file_open_header(CMD_ID, &bytes).unwrap();
+        let (file_id, size, path) = parse_file_open_header(CMD_ID, &bytes).expect("unwrap");
         assert_eq!(file_id, 42);
         assert_eq!(size, 99);
         assert_eq!(path, "");
@@ -929,7 +929,7 @@ mod tests {
     #[test]
     fn parse_file_open_header_too_short_returns_error() {
         let bytes = [0u8; 7];
-        let err = parse_file_open_header(CMD_ID, &bytes).unwrap_err();
+        let err = parse_file_open_header(CMD_ID, &bytes).expect_err("expected Err");
         assert!(
             matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
             "expected InvalidCallbackPayload, got {err:?}"
@@ -938,7 +938,7 @@ mod tests {
 
     #[test]
     fn parse_file_open_header_empty_slice_returns_error() {
-        let err = parse_file_open_header(CMD_ID, &[]).unwrap_err();
+        let err = parse_file_open_header(CMD_ID, &[]).expect_err("expected Err");
         assert!(matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }));
     }
 
@@ -950,7 +950,7 @@ mod tests {
         bytes.extend_from_slice(&5u32.to_be_bytes());
         bytes.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
 
-        let (file_id, chunk) = parse_file_chunk(CMD_ID, &bytes).unwrap();
+        let (file_id, chunk) = parse_file_chunk(CMD_ID, &bytes).expect("unwrap");
         assert_eq!(file_id, 5);
         assert_eq!(chunk, &[0xDE, 0xAD, 0xBE, 0xEF]);
     }
@@ -959,7 +959,7 @@ mod tests {
     fn parse_file_chunk_empty_chunk_data() {
         // Exactly 4 bytes — file_id only, empty chunk
         let bytes = 3u32.to_be_bytes();
-        let (file_id, chunk) = parse_file_chunk(CMD_ID, &bytes).unwrap();
+        let (file_id, chunk) = parse_file_chunk(CMD_ID, &bytes).expect("unwrap");
         assert_eq!(file_id, 3);
         assert!(chunk.is_empty());
     }
@@ -967,13 +967,13 @@ mod tests {
     #[test]
     fn parse_file_chunk_too_short_returns_error() {
         let bytes = [0u8; 3];
-        let err = parse_file_chunk(CMD_ID, &bytes).unwrap_err();
+        let err = parse_file_chunk(CMD_ID, &bytes).expect_err("expected Err");
         assert!(matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }));
     }
 
     #[test]
     fn parse_file_chunk_empty_slice_returns_error() {
-        let err = parse_file_chunk(CMD_ID, &[]).unwrap_err();
+        let err = parse_file_chunk(CMD_ID, &[]).expect_err("expected Err");
         assert!(matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }));
     }
 
@@ -982,7 +982,7 @@ mod tests {
     #[test]
     fn parse_file_close_happy_path() {
         let bytes = 0xDEAD_u32.to_be_bytes();
-        let file_id = parse_file_close(CMD_ID, &bytes).unwrap();
+        let file_id = parse_file_close(CMD_ID, &bytes).expect("unwrap");
         assert_eq!(file_id, 0xDEAD);
     }
 
@@ -991,20 +991,20 @@ mod tests {
         // More than 4 bytes is fine — only first 4 matter
         let mut bytes = 0x0000_0001u32.to_be_bytes().to_vec();
         bytes.extend_from_slice(&[0xFF, 0xFF]);
-        let file_id = parse_file_close(CMD_ID, &bytes).unwrap();
+        let file_id = parse_file_close(CMD_ID, &bytes).expect("unwrap");
         assert_eq!(file_id, 1);
     }
 
     #[test]
     fn parse_file_close_too_short_returns_error() {
         let bytes = [0u8; 3];
-        let err = parse_file_close(CMD_ID, &bytes).unwrap_err();
+        let err = parse_file_close(CMD_ID, &bytes).expect_err("expected Err");
         assert!(matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }));
     }
 
     #[test]
     fn parse_file_close_empty_slice_returns_error() {
-        let err = parse_file_close(CMD_ID, &[]).unwrap_err();
+        let err = parse_file_close(CMD_ID, &[]).expect_err("expected Err");
         assert!(matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }));
     }
 
@@ -1028,7 +1028,7 @@ mod tests {
         let agent_id = 0xAAAA_BBBB;
         let file_id = 42;
 
-        let err = tracker.append(agent_id, file_id, b"chunk data").await.unwrap_err();
+        let err = tracker.append(agent_id, file_id, b"chunk data").await.expect_err("expected Err");
         assert!(
             matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
             "expected InvalidCallbackPayload for append without start, got {err:?}"
@@ -1086,7 +1086,7 @@ mod tests {
             .expect("start should succeed");
         let _ = tracker.finish(agent_id, file_id).await;
 
-        let err = tracker.append(agent_id, file_id, b"late chunk").await.unwrap_err();
+        let err = tracker.append(agent_id, file_id, b"late chunk").await.expect_err("expected Err");
         assert!(
             matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
             "append after finish should fail, got {err:?}"
@@ -1777,7 +1777,7 @@ mod tests {
         add_bool_le(&mut buf, success);
         // read_string = read_bytes (u32 LE len + raw bytes)
         let raw = output.as_bytes();
-        add_u32_le(&mut buf, u32::try_from(raw.len()).unwrap());
+        add_u32_le(&mut buf, u32::try_from(raw.len()).expect("unwrap"));
         buf.extend_from_slice(raw);
         buf
     }
@@ -2393,7 +2393,7 @@ mod tests {
             &build_download_write_payload(file_id, &overflow_chunk),
         )
         .await
-        .unwrap_err();
+        .expect_err("expected Err");
         assert!(
             matches!(err, CommandDispatchError::DownloadTooLarge { .. }),
             "expected DownloadTooLarge, got {err:?}"
@@ -2510,7 +2510,7 @@ mod tests {
             &build_download_write_payload(file_id, &[0xEE]),
         )
         .await
-        .unwrap_err();
+        .expect_err("expected Err");
         assert!(
             matches!(err, CommandDispatchError::DownloadTooLarge { .. }),
             "expected DownloadTooLarge for 1 byte over limit, got {err:?}"
@@ -2552,7 +2552,7 @@ mod tests {
             &build_download_write_payload(file_id, &huge_chunk),
         )
         .await
-        .unwrap_err();
+        .expect_err("expected Err");
         assert!(
             matches!(err, CommandDispatchError::DownloadTooLarge { .. }),
             "expected DownloadTooLarge for oversized single chunk, got {err:?}"

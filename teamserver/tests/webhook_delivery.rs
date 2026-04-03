@@ -272,7 +272,7 @@ async fn webhook_retries_on_transient_server_failure() -> Result<(), Box<dyn std
     assert!(second.is_ok(), "second audit event must arrive after retry");
 
     // Verify the payloads have the correct embed structure.
-    for payload in [first.unwrap(), second.unwrap()] {
+    for payload in [first.expect("unwrap"), second.expect("unwrap")] {
         assert_eq!(payload["embeds"][0]["fields"][0]["name"], "Actor");
         assert_eq!(payload["embeds"][0]["fields"][0]["value"], "operator");
     }

@@ -809,7 +809,7 @@ async fn external_listener_pipeline_rejects_duplicate_endpoint_path()
     // Attempt to register listener B on the same `/shared` path — must fail.
     let result = server.listeners.create(external_listener("ext-shared-b", "/shared")).await;
     assert!(result.is_err(), "duplicate endpoint path must be rejected");
-    let err_msg = result.unwrap_err().to_string();
+    let err_msg = result.expect_err("expected Err").to_string();
     assert!(
         err_msg.contains("/shared"),
         "error must mention the conflicting endpoint path, got: {err_msg}"

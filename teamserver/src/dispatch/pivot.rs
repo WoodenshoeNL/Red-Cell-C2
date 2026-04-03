@@ -851,7 +851,7 @@ mod tests {
         let result = handle_pivot_command_callback(context, AGENT_ID, &mut parser).await;
         assert!(result.is_err(), "non-callback envelope must return an error");
 
-        let error = result.unwrap_err();
+        let error = result.expect_err("expected Err");
         assert!(
             matches!(error, CommandDispatchError::InvalidCallbackPayload { .. }),
             "expected InvalidCallbackPayload, got {error:?}"
@@ -889,7 +889,7 @@ mod tests {
         let result = handle_pivot_command_callback(context, AGENT_ID, &mut parser).await;
         assert!(result.is_err(), "truncated inner data must return an error");
 
-        let error = result.unwrap_err();
+        let error = result.expect_err("expected Err");
         assert!(
             matches!(error, CommandDispatchError::InvalidCallbackPayload { .. }),
             "expected InvalidCallbackPayload, got {error:?}"
@@ -933,7 +933,7 @@ mod tests {
         assert!(result.is_ok(), "dispatch_builtin_packages must not fail: {result:?}");
 
         // CommandOutput handler returns None (no response bytes to forward).
-        assert_eq!(result.unwrap(), None, "CommandOutput should not produce response bytes");
+        assert_eq!(result.expect("unwrap"), None, "CommandOutput should not produce response bytes");
 
         // Verify an AgentResponse event was emitted by the output handler.
         let event = rx.recv().await.expect("should receive AgentResponse event");
@@ -987,7 +987,7 @@ mod tests {
         assert!(result.is_err(), "dispatch at max depth must fail");
         assert!(
             matches!(
-                result.unwrap_err(),
+                result.expect_err("expected Err"),
                 CommandDispatchError::PivotDispatchDepthExceeded {
                     depth,
                     max_depth,
@@ -1591,7 +1591,7 @@ mod tests {
         .await;
         assert!(result.is_err(), "invalid init metadata must return an error");
 
-        let error = result.unwrap_err();
+        let error = result.expect_err("expected Err");
         assert!(
             matches!(error, CommandDispatchError::InvalidCallbackPayload { .. }),
             "expected InvalidCallbackPayload, got {error:?}"
@@ -1645,7 +1645,7 @@ mod tests {
         .await;
         assert!(result.is_err(), "non-DemonInit inner command must be rejected");
 
-        let error = result.unwrap_err();
+        let error = result.expect_err("expected Err");
         assert!(
             matches!(error, CommandDispatchError::InvalidCallbackPayload { .. }),
             "expected InvalidCallbackPayload, got {error:?}"

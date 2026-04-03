@@ -321,7 +321,7 @@ mod tests {
         let payload = net_payload(DemonNetCommand::Domain, &encode_string("CORP.LOCAL"));
         let (result, msg) = call_and_recv(&payload).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
+        assert_eq!(result.expect("unwrap"), None);
         let msg = msg.expect("should broadcast");
         let output = assert_agent_response(&msg, "Good", "Domain for this Host: CORP.LOCAL");
         assert!(output.is_empty());
@@ -332,7 +332,7 @@ mod tests {
         let payload = net_payload(DemonNetCommand::Domain, &encode_string(""));
         let (result, msg) = call_and_recv(&payload).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
+        assert_eq!(result.expect("unwrap"), None);
         let msg = msg.expect("should broadcast");
         assert_agent_response(&msg, "Good", "The machine does not seem to be joined to a domain");
     }
@@ -347,7 +347,7 @@ mod tests {
         let payload = net_payload(DemonNetCommand::Logons, &rest);
         let (result, msg) = call_and_recv(&payload).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
+        assert_eq!(result.expect("unwrap"), None);
         let msg = msg.expect("should broadcast");
         let output = assert_agent_response(&msg, "Info", "Logged on users at SERVER01 [2]: ");
         assert!(output.contains("alice"));
@@ -361,7 +361,7 @@ mod tests {
         let payload = net_payload(DemonNetCommand::Logons, &rest);
         let (result, msg) = call_and_recv(&payload).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
+        assert_eq!(result.expect("unwrap"), None);
         let msg = msg.expect("should broadcast");
         let output = assert_agent_response(&msg, "Info", "Logged on users at SERVER01 [0]: ");
         // Output should contain the header but no user entries
@@ -398,7 +398,7 @@ mod tests {
         let payload = net_payload(DemonNetCommand::Sessions, &rest);
         let (result, msg) = call_and_recv(&payload).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
+        assert_eq!(result.expect("unwrap"), None);
         let msg = msg.expect("should broadcast");
         let output = assert_agent_response(&msg, "Info", "Sessions for DC01 [0]: ");
         // format_net_sessions returns empty string for empty slice
@@ -458,7 +458,7 @@ mod tests {
         let payload = net_payload(DemonNetCommand::Computer, &rest);
         let (result, msg) = call_and_recv(&payload).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
+        assert_eq!(result.expect("unwrap"), None);
         let msg = msg.expect("should broadcast");
         let output = assert_agent_response(&msg, "Info", "Computers for CORP.LOCAL [3]: ");
         assert!(output.contains("Computer"));
@@ -487,7 +487,7 @@ mod tests {
         let payload = net_payload(DemonNetCommand::DcList, &rest);
         let (result, msg) = call_and_recv(&payload).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
+        assert_eq!(result.expect("unwrap"), None);
         let msg = msg.expect("should broadcast");
         let output = assert_agent_response(&msg, "Info", "Domain controllers for CORP.LOCAL [2]: ");
         assert!(output.contains("Domain Controller"));
@@ -530,7 +530,7 @@ mod tests {
         let payload = net_payload(DemonNetCommand::Share, &rest);
         let (result, msg) = call_and_recv(&payload).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
+        assert_eq!(result.expect("unwrap"), None);
         let msg = msg.expect("should broadcast");
         let output = assert_agent_response(&msg, "Info", "Shares for FILESERV [0]: ");
         // format_net_shares returns empty string for empty slice
@@ -563,7 +563,7 @@ mod tests {
         let payload = net_payload(DemonNetCommand::LocalGroup, &rest);
         let (result, msg) = call_and_recv(&payload).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
+        assert_eq!(result.expect("unwrap"), None);
         let msg = msg.expect("should broadcast");
         let output = assert_agent_response(&msg, "Info", "Local Groups for WORKSTATION: ");
         // format_net_group_descriptions returns empty string for empty slice
@@ -592,7 +592,7 @@ mod tests {
         let payload = net_payload(DemonNetCommand::Group, &rest);
         let (result, msg) = call_and_recv(&payload).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
+        assert_eq!(result.expect("unwrap"), None);
         let msg = msg.expect("should broadcast");
         let output = assert_agent_response(&msg, "Info", "List groups on DC01: ");
         // format_net_group_descriptions returns empty string for empty slice
@@ -630,7 +630,7 @@ mod tests {
         let payload = net_payload(DemonNetCommand::Users, &rest);
         let (result, msg) = call_and_recv(&payload).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
+        assert_eq!(result.expect("unwrap"), None);
         let msg = msg.expect("should broadcast");
         let output = assert_agent_response(&msg, "Info", "Users on HOST01: ");
         assert!(output.is_empty());

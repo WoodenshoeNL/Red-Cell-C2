@@ -452,14 +452,14 @@ mod tests {
         use red_cell_common::demon::{DemonCommand, DemonEnvelope};
 
         fn add_len_prefixed(buf: &mut Vec<u8>, data: &[u8]) {
-            buf.extend_from_slice(&u32::try_from(data.len()).unwrap().to_be_bytes());
+            buf.extend_from_slice(&u32::try_from(data.len()).expect("unwrap").to_be_bytes());
             buf.extend_from_slice(data);
         }
 
         fn add_len_prefixed_utf16(buf: &mut Vec<u8>, s: &str) {
             let utf16: Vec<u16> = s.encode_utf16().collect();
             let byte_len = utf16.len() * 2;
-            buf.extend_from_slice(&u32::try_from(byte_len).unwrap().to_be_bytes());
+            buf.extend_from_slice(&u32::try_from(byte_len).expect("unwrap").to_be_bytes());
             for code_unit in &utf16 {
                 buf.extend_from_slice(&code_unit.to_le_bytes());
             }

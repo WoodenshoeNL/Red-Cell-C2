@@ -4752,7 +4752,7 @@ async fn command_output_credential_pattern_creates_loot_record()
         "expected a 'credential' loot record; got kinds: {:?}",
         loot_records.iter().map(|r| &r.kind).collect::<Vec<_>>()
     );
-    let cred_record = loot_records.iter().find(|r| r.kind == "credential").unwrap();
+    let cred_record = loot_records.iter().find(|r| r.kind == "credential").expect("unwrap");
     assert_eq!(cred_record.agent_id, agent_id);
     let data_str = std::str::from_utf8(cred_record.data.as_deref().unwrap_or_default())
         .unwrap_or("<invalid utf8>");
@@ -4845,7 +4845,7 @@ async fn command_output_pwdump_hash_creates_loot_record() -> Result<(), Box<dyn 
         loot_records.iter().any(|r| r.kind == "credential"),
         "expected a 'credential' loot record; got: {loot_records:?}"
     );
-    let cred_record = loot_records.iter().find(|r| r.kind == "credential").unwrap();
+    let cred_record = loot_records.iter().find(|r| r.kind == "credential").expect("unwrap");
     let data_str = std::str::from_utf8(cred_record.data.as_deref().unwrap_or_default())
         .unwrap_or("<invalid utf8>");
     assert!(

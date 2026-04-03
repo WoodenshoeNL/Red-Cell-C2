@@ -228,7 +228,7 @@ async fn remove_socks_server_stops_listener() -> Result<(), Box<dyn std::error::
     let result =
         timeout(Duration::from_millis(200), TcpStream::connect(format!("127.0.0.1:{port}"))).await;
     assert!(
-        result.is_err() || result.unwrap().is_err(),
+        result.is_err() || result.expect("unwrap").is_err(),
         "port should no longer accept connections after remove"
     );
     Ok(())
@@ -1005,7 +1005,7 @@ async fn socket_read_callback_delivers_data_to_socks_client()
     read_payload.extend_from_slice(&u32::from(DemonSocketType::ReverseProxy).to_le_bytes());
     read_payload.extend_from_slice(&1_u32.to_le_bytes()); // success=1
     // Length-prefixed data (LE u32 length followed by bytes).
-    read_payload.extend_from_slice(&u32::try_from(relay_data.len()).unwrap().to_le_bytes());
+    read_payload.extend_from_slice(&u32::try_from(relay_data.len()).expect("unwrap").to_le_bytes());
     read_payload.extend_from_slice(relay_data);
 
     client

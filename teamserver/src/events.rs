@@ -310,7 +310,7 @@ mod tests {
     fn poison_history(bus: &EventBus) {
         let mutex = Arc::clone(&bus.recent_teamserver_logs);
         let handle = std::thread::spawn(move || {
-            let _guard = mutex.lock().unwrap();
+            let _guard = mutex.lock().expect("unwrap");
             panic!("intentional panic to poison mutex");
         });
         // The thread panicked — join returns Err but the mutex is now poisoned.

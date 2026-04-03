@@ -740,7 +740,7 @@ mod tests {
         let result = handle_checkin(&registry, &events, &database, None, agent_id, &payload).await;
 
         assert!(result.is_err(), "weak AES key must be rejected");
-        match result.unwrap_err() {
+        match result.expect_err("expected Err") {
             CommandDispatchError::InvalidCallbackPayload { message, .. } => {
                 assert!(message.contains("key"), "error should mention key: {message}");
             }
@@ -779,7 +779,7 @@ mod tests {
         let result = handle_checkin(&registry, &events, &database, None, agent_id, &payload).await;
 
         assert!(result.is_err(), "weak AES IV must be rejected");
-        match result.unwrap_err() {
+        match result.expect_err("expected Err") {
             CommandDispatchError::InvalidCallbackPayload { message, .. } => {
                 assert!(message.contains("IV"), "error should mention IV: {message}");
             }

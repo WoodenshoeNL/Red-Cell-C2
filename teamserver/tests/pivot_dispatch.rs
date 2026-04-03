@@ -34,7 +34,7 @@ fn pivot_connect_success_payload(
     payload.extend_from_slice(&u32::from(DemonPivotCommand::SmbConnect).to_le_bytes());
     payload.extend_from_slice(&1_u32.to_le_bytes()); // success = 1
     // read_bytes reads a u32 length prefix followed by that many bytes
-    payload.extend_from_slice(&u32::try_from(inner.len()).unwrap().to_le_bytes());
+    payload.extend_from_slice(&u32::try_from(inner.len()).expect("unwrap").to_le_bytes());
     payload.extend_from_slice(&inner);
     payload
 }
@@ -61,7 +61,7 @@ fn pivot_connect_non_init_inner_payload(child_agent_id: u32) -> Vec<u8> {
     let mut payload = Vec::new();
     payload.extend_from_slice(&u32::from(DemonPivotCommand::SmbConnect).to_le_bytes());
     payload.extend_from_slice(&1_u32.to_le_bytes()); // success = 1
-    payload.extend_from_slice(&u32::try_from(inner.len()).unwrap().to_le_bytes());
+    payload.extend_from_slice(&u32::try_from(inner.len()).expect("unwrap").to_le_bytes());
     payload.extend_from_slice(&inner);
     payload
 }
@@ -73,7 +73,7 @@ fn pivot_connect_malformed_inner_payload() -> Vec<u8> {
     let mut payload = Vec::new();
     payload.extend_from_slice(&u32::from(DemonPivotCommand::SmbConnect).to_le_bytes());
     payload.extend_from_slice(&1_u32.to_le_bytes()); // success = 1
-    payload.extend_from_slice(&u32::try_from(garbage.len()).unwrap().to_le_bytes());
+    payload.extend_from_slice(&u32::try_from(garbage.len()).expect("unwrap").to_le_bytes());
     payload.extend_from_slice(&garbage);
     payload
 }

@@ -217,7 +217,7 @@ mod tests {
         )
         .await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
+        assert_eq!(result.expect("unwrap"), None);
 
         // First broadcast: loot-new event.
         let msg1 = rx.recv().await.expect("should receive loot-new event");
@@ -236,12 +236,12 @@ mod tests {
         assert_eq!(resp.info.extra.get("MiscType").and_then(Value::as_str), Some("screenshot"),);
 
         // Verify base64-encoded MiscData round-trips to original bytes.
-        let misc_data = resp.info.extra.get("MiscData").and_then(Value::as_str).unwrap();
+        let misc_data = resp.info.extra.get("MiscData").and_then(Value::as_str).expect("unwrap");
         let decoded = BASE64_STANDARD.decode(misc_data).expect("valid base64");
         assert_eq!(decoded, png);
 
         // Verify MiscData2 is a Desktop_*.png filename.
-        let misc_data2 = resp.info.extra.get("MiscData2").and_then(Value::as_str).unwrap();
+        let misc_data2 = resp.info.extra.get("MiscData2").and_then(Value::as_str).expect("unwrap");
         assert!(
             misc_data2.starts_with("Desktop_") && misc_data2.ends_with(".png"),
             "expected Desktop_*.png filename, got {misc_data2}"
@@ -269,7 +269,7 @@ mod tests {
         )
         .await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
+        assert_eq!(result.expect("unwrap"), None);
 
         // Should receive exactly one error broadcast.
         let msg = rx.recv().await.expect("should receive error event");
@@ -296,7 +296,7 @@ mod tests {
         )
         .await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
+        assert_eq!(result.expect("unwrap"), None);
 
         // Should receive exactly one error broadcast.
         let msg = rx.recv().await.expect("should receive error event");
@@ -407,7 +407,7 @@ mod tests {
         )
         .await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
+        assert_eq!(result.expect("unwrap"), None);
 
         // Drain the two expected broadcasts (loot-new + screenshot response).
         let _msg1 = rx.recv().await.expect("loot-new event");
@@ -462,7 +462,7 @@ mod tests {
 
         // Must still succeed despite plugin error.
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
+        assert_eq!(result.expect("unwrap"), None);
 
         // Drain expected broadcasts.
         let _msg1 = rx.recv().await.expect("loot-new event");

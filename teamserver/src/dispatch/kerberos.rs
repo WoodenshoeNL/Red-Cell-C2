@@ -1281,7 +1281,7 @@ mod tests {
 
         let result = handle_kerberos_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
         assert!(result.is_err(), "invalid subcommand should return Err");
-        match result.unwrap_err() {
+        match result.expect_err("expected Err") {
             CommandDispatchError::InvalidCallbackPayload { command_id, .. } => {
                 assert_eq!(
                     command_id,
@@ -1356,7 +1356,7 @@ mod tests {
         push_u32(&mut payload, MAX_KERBEROS_LIST_ITEMS + 1);
 
         let mut parser = CallbackParser::new(&payload, u32::from(DemonCommand::CommandKerberos));
-        let err = format_kerberos_klist(&mut parser).unwrap_err();
+        let err = format_kerberos_klist(&mut parser).expect_err("expected Err");
         assert!(
             matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
             "expected InvalidCallbackPayload, got {err:?}"
@@ -1386,7 +1386,7 @@ mod tests {
         );
 
         let mut parser = CallbackParser::new(&payload, u32::from(DemonCommand::CommandKerberos));
-        let err = format_kerberos_klist(&mut parser).unwrap_err();
+        let err = format_kerberos_klist(&mut parser).expect_err("expected Err");
         assert!(
             matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
             "expected InvalidCallbackPayload, got {err:?}"
@@ -1401,7 +1401,7 @@ mod tests {
         push_u32(&mut payload, MAX_KERBEROS_LIST_ITEMS);
 
         let mut parser = CallbackParser::new(&payload, u32::from(DemonCommand::CommandKerberos));
-        let err = format_kerberos_klist(&mut parser).unwrap_err();
+        let err = format_kerberos_klist(&mut parser).expect_err("expected Err");
         // Should fail on truncated data, NOT on the bounds check
         assert!(
             matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
@@ -1415,7 +1415,7 @@ mod tests {
         push_u32(&mut payload, u32::MAX);
 
         let mut parser = CallbackParser::new(&payload, u32::from(DemonCommand::CommandKerberos));
-        let err = format_kerberos_klist(&mut parser).unwrap_err();
+        let err = format_kerberos_klist(&mut parser).expect_err("expected Err");
         assert!(
             matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
             "expected InvalidCallbackPayload, got {err:?}"

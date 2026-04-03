@@ -1767,12 +1767,12 @@ mod tests {
         assert!(!packages.is_empty(), "must supply at least one package");
         let (first_cmd, first_req, first_payload) = packages[0];
         let mut buf = Vec::new();
-        buf.extend_from_slice(&u32_be(u32::try_from(first_payload.len()).unwrap()));
+        buf.extend_from_slice(&u32_be(u32::try_from(first_payload.len()).expect("unwrap")));
         buf.extend_from_slice(first_payload);
         for &(cmd, req, payload) in &packages[1..] {
             buf.extend_from_slice(&u32_be(cmd));
             buf.extend_from_slice(&u32_be(req));
-            buf.extend_from_slice(&u32_be(u32::try_from(payload.len()).unwrap()));
+            buf.extend_from_slice(&u32_be(u32::try_from(payload.len()).expect("unwrap")));
             buf.extend_from_slice(payload);
         }
         (first_cmd, first_req, buf)

@@ -4353,7 +4353,7 @@ mod tests {
             (make_digest(0xBB), make_identity("key-b")),
         ];
         let result = ApiRuntime::lookup_key_ct(&keys, &make_digest(0xBB));
-        assert_eq!(result.unwrap().key_id, "key-b");
+        assert_eq!(result.expect("unwrap").key_id, "key-b");
     }
 
     #[test]
@@ -4377,7 +4377,7 @@ mod tests {
         let keys = vec![(digest, make_identity("first")), (digest, make_identity("second"))];
         let result = ApiRuntime::lookup_key_ct(&keys, &digest);
         // Always visits every entry; last match wins.
-        assert_eq!(result.unwrap().key_id, "second");
+        assert_eq!(result.expect("unwrap").key_id, "second");
     }
 
     #[tokio::test]
@@ -9351,7 +9351,7 @@ mod tests {
             api.check_rate_limit(&subject).await.expect("should be allowed");
         }
 
-        let err = api.check_rate_limit(&subject).await.unwrap_err();
+        let err = api.check_rate_limit(&subject).await.expect_err("expected Err");
         assert!(
             matches!(err, ApiAuthError::RateLimited { retry_after_seconds: 60 }),
             "4th request must be rate-limited, got {err:?}"

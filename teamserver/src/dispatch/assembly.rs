@@ -344,7 +344,7 @@ mod tests {
                     Some(&serde_json::Value::String("Error".to_owned())),
                     "BOF_EXCEPTION should produce Type=Error"
                 );
-                let message = extra.get("Message").unwrap().as_str().unwrap();
+                let message = extra.get("Message").expect("unwrap").as_str().expect("unwrap");
                 assert!(
                     message.contains("C0000005"),
                     "expected exception code 0xC0000005 in message, got {message:?}"
@@ -396,7 +396,7 @@ mod tests {
                     Some(&serde_json::Value::String("Error".to_owned())),
                     "BOF_SYMBOL_NOT_FOUND should produce Type=Error"
                 );
-                let message = extra.get("Message").unwrap().as_str().unwrap();
+                let message = extra.get("Message").expect("unwrap").as_str().expect("unwrap");
                 assert!(
                     message.contains("kernel32.dll!SomeExport"),
                     "expected symbol name in message, got {message:?}"
@@ -442,7 +442,7 @@ mod tests {
                     Some(&serde_json::Value::String("Error".to_owned())),
                     "BOF_COULD_NOT_RUN should produce Type=Error"
                 );
-                let message = extra.get("Message").unwrap().as_str().unwrap();
+                let message = extra.get("Message").expect("unwrap").as_str().expect("unwrap");
                 assert!(
                     message.contains("Failed"),
                     "expected 'Failed' in message, got {message:?}"
@@ -513,7 +513,7 @@ mod tests {
             OperatorMessage::AgentResponse(resp) => {
                 let extra = &resp.info.extra;
                 assert_eq!(extra.get("Type"), Some(&serde_json::Value::String("Info".to_owned())),);
-                let message = extra.get("Message").unwrap().as_str().unwrap();
+                let message = extra.get("Message").expect("unwrap").as_str().expect("unwrap");
                 assert!(
                     message.contains("Amsi/Etw"),
                     "expected patched message to mention Amsi/Etw, got {message:?}"
@@ -540,7 +540,7 @@ mod tests {
             OperatorMessage::AgentResponse(resp) => {
                 let extra = &resp.info.extra;
                 assert_eq!(extra.get("Type"), Some(&serde_json::Value::String("Info".to_owned())),);
-                let message = extra.get("Message").unwrap().as_str().unwrap();
+                let message = extra.get("Message").expect("unwrap").as_str().expect("unwrap");
                 assert!(
                     message.contains("v4.0.30319"),
                     "expected CLR version in message, got {message:?}"
@@ -567,7 +567,7 @@ mod tests {
             OperatorMessage::AgentResponse(resp) => {
                 let extra = &resp.info.extra;
                 assert_eq!(extra.get("Type"), Some(&serde_json::Value::String("Good".to_owned())),);
-                let message = extra.get("Message").unwrap().as_str().unwrap();
+                let message = extra.get("Message").expect("unwrap").as_str().expect("unwrap");
                 assert!(
                     message.contains("1337"),
                     "expected thread id 1337 in message, got {message:?}"
@@ -615,7 +615,7 @@ mod tests {
             OperatorMessage::AgentResponse(resp) => {
                 let extra = &resp.info.extra;
                 assert_eq!(extra.get("Type"), Some(&serde_json::Value::String("Good".to_owned())),);
-                let message = extra.get("Message").unwrap().as_str().unwrap();
+                let message = extra.get("Message").expect("unwrap").as_str().expect("unwrap");
                 assert!(
                     message.contains("Finished"),
                     "expected 'Finished' in message, got {message:?}"
@@ -641,7 +641,7 @@ mod tests {
             OperatorMessage::AgentResponse(resp) => {
                 let extra = &resp.info.extra;
                 assert_eq!(extra.get("Type"), Some(&serde_json::Value::String("Error".to_owned())),);
-                let message = extra.get("Message").unwrap().as_str().unwrap();
+                let message = extra.get("Message").expect("unwrap").as_str().expect("unwrap");
                 assert!(
                     message.contains("Failed"),
                     "expected 'Failed' in message, got {message:?}"
@@ -681,7 +681,7 @@ mod tests {
             OperatorMessage::AgentResponse(resp) => {
                 let extra = &resp.info.extra;
                 assert_eq!(extra.get("Type"), Some(&serde_json::Value::String("Good".to_owned())));
-                let message = extra.get("Message").unwrap().as_str().unwrap();
+                let message = extra.get("Message").expect("unwrap").as_str().expect("unwrap");
                 assert!(
                     message.contains("Invoke-Mimikatz.ps1"),
                     "expected output text in message, got {message:?}"
@@ -706,7 +706,7 @@ mod tests {
             OperatorMessage::AgentResponse(resp) => {
                 let extra = &resp.info.extra;
                 assert_eq!(extra.get("Type"), Some(&serde_json::Value::String("Good".to_owned())));
-                let message = extra.get("Message").unwrap().as_str().unwrap();
+                let message = extra.get("Message").expect("unwrap").as_str().expect("unwrap");
                 assert!(
                     message.contains("PowerShell"),
                     "expected default PowerShell message, got {message:?}"

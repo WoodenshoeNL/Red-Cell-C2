@@ -3108,11 +3108,11 @@ mod tests {
         // The rotation must be refused: CTR offset preserved, original key still active.
         assert_eq!(registry.ctr_offset(agent_id).await?, advanced_offset);
         assert_eq!(
-            registry.get(agent_id).await.unwrap().encryption.aes_key.as_slice(),
+            registry.get(agent_id).await.expect("unwrap").encryption.aes_key.as_slice(),
             original_key.as_slice()
         );
         assert_eq!(
-            registry.get(agent_id).await.unwrap().encryption.aes_iv.as_slice(),
+            registry.get(agent_id).await.expect("unwrap").encryption.aes_iv.as_slice(),
             original_iv.as_slice()
         );
 

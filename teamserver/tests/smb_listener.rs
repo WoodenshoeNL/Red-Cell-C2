@@ -726,7 +726,7 @@ async fn smb_listener_stop_closes_named_pipe() -> Result<(), Box<dyn std::error:
     sleep(Duration::from_millis(50)).await;
     let result = timeout(Duration::from_millis(200), connect_smb(&pipe_name)).await;
     assert!(
-        result.is_err() || result.unwrap().is_err(),
+        result.is_err() || result.expect("unwrap").is_err(),
         "named pipe must not accept connections after listener is stopped"
     );
 

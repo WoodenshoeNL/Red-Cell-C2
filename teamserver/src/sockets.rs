@@ -1361,7 +1361,7 @@ mod tests {
 
         assert!(result.is_err(), "negotiate_socks5 should return an error for version=4");
         assert_eq!(
-            result.unwrap_err().kind(),
+            result.expect_err("expected Err").kind(),
             io::ErrorKind::InvalidData,
             "error kind should be InvalidData for wrong SOCKS version"
         );
@@ -1421,7 +1421,7 @@ mod tests {
             "negotiate_socks5 should return an error when no-auth is not offered"
         );
         assert_eq!(
-            result.unwrap_err().kind(),
+            result.expect_err("expected Err").kind(),
             io::ErrorKind::PermissionDenied,
             "error kind should be PermissionDenied when only auth methods are offered"
         );
@@ -1458,7 +1458,7 @@ mod tests {
             "negotiate_socks5 should return an error when zero methods are advertised"
         );
         assert_eq!(
-            result.unwrap_err().kind(),
+            result.expect_err("expected Err").kind(),
             io::ErrorKind::PermissionDenied,
             "error kind should be PermissionDenied when no methods are advertised"
         );
@@ -1506,7 +1506,7 @@ mod tests {
 
         assert!(result.is_err(), "BIND command should be rejected");
         assert_eq!(
-            result.unwrap_err().kind(),
+            result.expect_err("expected Err").kind(),
             io::ErrorKind::Unsupported,
             "error kind should be Unsupported for non-CONNECT command"
         );
@@ -1554,7 +1554,7 @@ mod tests {
 
         assert!(result.is_err(), "unknown atyp should be rejected");
         assert_eq!(
-            result.unwrap_err().kind(),
+            result.expect_err("expected Err").kind(),
             io::ErrorKind::InvalidData,
             "error kind should be InvalidData for unknown address type"
         );
@@ -1586,7 +1586,7 @@ mod tests {
         let result = super::read_socks_connect_request(&mut server).await;
 
         assert!(result.is_ok(), "IPv6 CONNECT request should succeed: {:?}", result.err());
-        let req = result.unwrap();
+        let req = result.expect("unwrap");
         assert_eq!(req.atyp, super::SOCKS_ATYP_IPV6, "atyp should be IPv6");
         assert_eq!(req.address, ipv6_addr, "address should be the full 16-byte IPv6 address");
         assert_eq!(req.port, port, "port should match");
@@ -1610,7 +1610,7 @@ mod tests {
                 super::SOCKS_COMMAND_CONNECT,
                 0,
                 super::SOCKS_ATYP_DOMAIN,
-                u8::try_from(domain.len()).unwrap(),
+                u8::try_from(domain.len()).expect("unwrap"),
             ];
             request.extend_from_slice(domain);
             request.extend_from_slice(&port.to_be_bytes());
@@ -1620,7 +1620,7 @@ mod tests {
         let result = super::read_socks_connect_request(&mut server).await;
 
         assert!(result.is_ok(), "DOMAIN CONNECT request should succeed: {:?}", result.err());
-        let req = result.unwrap();
+        let req = result.expect("unwrap");
         assert_eq!(req.atyp, super::SOCKS_ATYP_DOMAIN, "atyp should be DOMAIN");
         assert_eq!(req.address, domain.to_vec(), "address should be the domain bytes");
         assert_eq!(req.port, port, "port should match");
@@ -1653,7 +1653,7 @@ mod tests {
         let result = super::read_socks_connect_request(&mut server).await;
 
         assert!(result.is_ok(), "zero-length DOMAIN request should not panic: {:?}", result.err());
-        let req = result.unwrap();
+        let req = result.expect("unwrap");
         assert_eq!(req.atyp, super::SOCKS_ATYP_DOMAIN, "atyp should be DOMAIN");
         assert!(req.address.is_empty(), "address should be empty for zero-length domain");
         assert_eq!(req.port, port, "port should match");
@@ -1677,7 +1677,7 @@ mod tests {
         let result = super::negotiate_socks5(&mut server).await;
 
         assert!(result.is_err(), "should error on truncated handshake (version only)");
-        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(result.expect_err("expected Err").kind(), io::ErrorKind::UnexpectedEof);
 
         let _ = client_task.await;
         Ok(())
@@ -1698,7 +1698,7 @@ mod tests {
         let result = super::negotiate_socks5(&mut server).await;
 
         assert!(result.is_err(), "should error when method list is shorter than method_count");
-        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(result.expect_err("expected Err").kind(), io::ErrorKind::UnexpectedEof);
 
         let _ = client_task.await;
         Ok(())
@@ -1719,7 +1719,7 @@ mod tests {
         let result = super::read_socks_connect_request(&mut server).await;
 
         assert!(result.is_err(), "should error on truncated request header");
-        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(result.expect_err("expected Err").kind(), io::ErrorKind::UnexpectedEof);
 
         let _ = client_task.await;
         Ok(())
@@ -1749,7 +1749,7 @@ mod tests {
         let result = super::read_socks_connect_request(&mut server).await;
 
         assert!(result.is_err(), "should error on truncated IPv4 address");
-        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(result.expect_err("expected Err").kind(), io::ErrorKind::UnexpectedEof);
 
         let _ = client_task.await;
         Ok(())
@@ -1781,7 +1781,7 @@ mod tests {
         let result = super::read_socks_connect_request(&mut server).await;
 
         assert!(result.is_err(), "should error on truncated IPv6 address");
-        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(result.expect_err("expected Err").kind(), io::ErrorKind::UnexpectedEof);
 
         let _ = client_task.await;
         Ok(())
@@ -1813,7 +1813,7 @@ mod tests {
         let result = super::read_socks_connect_request(&mut server).await;
 
         assert!(result.is_err(), "should error on truncated domain body");
-        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(result.expect_err("expected Err").kind(), io::ErrorKind::UnexpectedEof);
 
         let _ = client_task.await;
         Ok(())
@@ -1846,7 +1846,7 @@ mod tests {
         let result = super::read_socks_connect_request(&mut server).await;
 
         assert!(result.is_err(), "should error when port bytes are missing");
-        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(result.expect_err("expected Err").kind(), io::ErrorKind::UnexpectedEof);
 
         let _ = client_task.await;
         Ok(())
@@ -1864,7 +1864,7 @@ mod tests {
         let result = super::negotiate_socks5(&mut server).await;
 
         assert!(result.is_err(), "should error on empty stream");
-        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(result.expect_err("expected Err").kind(), io::ErrorKind::UnexpectedEof);
 
         let _ = client_task.await;
         Ok(())
@@ -1897,7 +1897,7 @@ mod tests {
         let result = super::read_socks_connect_request(&mut server).await;
 
         assert!(result.is_err(), "should error when only 1 of 2 port bytes are sent");
-        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(result.expect_err("expected Err").kind(), io::ErrorKind::UnexpectedEof);
 
         let _ = client_task.await;
         Ok(())
@@ -3021,11 +3021,11 @@ mod tests {
         });
         assert!(write_job.is_some(), "expected a SOCKET_COMMAND_WRITE job in the agent queue");
 
-        let job = write_job.unwrap();
+        let job = write_job.expect("unwrap");
         // Payload layout: [subcmd:4][socket_id:4][len:4][data:len]
-        let job_socket_id = u32::from_le_bytes(job.payload[4..8].try_into().unwrap());
+        let job_socket_id = u32::from_le_bytes(job.payload[4..8].try_into().expect("fixed-size slice for try_into"));
         assert_eq!(job_socket_id, socket_id, "job must target the correct socket_id");
-        let data_len = u32::from_le_bytes(job.payload[8..12].try_into().unwrap()) as usize;
+        let data_len = u32::from_le_bytes(job.payload[8..12].try_into().expect("fixed-size slice for try_into")) as usize;
         assert_eq!(data_len, client_payload.len());
         assert_eq!(
             &job.payload[12..12 + data_len],

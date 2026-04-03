@@ -9,20 +9,20 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1171 | 249 | 41 |
-| Bugs filed against | 188 | 40 | 10 |
+| Tasks closed | 1172 | 249 | 42 |
+| Bugs filed against | 190 | 40 | 10 |
 | Bug rate (bugs/task) | 0.16 | 0.16 | 0.24 |
 | Quality score | 84% | 84% | 76% |
 
-*Bug rates: Claude 188/1171=0.1605→0.16, Codex 40/249=0.1606→0.16, Cursor 10/41=0.2439→0.24*
+*Bug rates: Claude 190/1172=0.1621→0.16, Codex 40/249=0.1606→0.16, Cursor 10/42=0.2381→0.24*
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
-| unwrap / expect in production | 9 | 0 | 0 |
+| unwrap / expect in production | 11 | 0 | 0 |
 | Missing tests / stale tests | 70 | 19 | 5 |
-| Clippy warnings | 10 | 0 | 1 |
+| Clippy warnings | 11 | 0 | 1 |
 | Protocol errors | 30 | 32 | 3 |
 | Security issues | 57 | 39 | 0 |
 | Architecture drift | 25 | 25 | 1 |
@@ -5669,3 +5669,13 @@ Build: passed — `cargo check`, `cargo clippy -- -D warnings`, and `cargo nexte
 | Cursor | 0 | 1 | Claimed `red-cell-c2-v4wx2` (split mega-modules). WIP module split left untracked files that delete committed `listeners.rs` and break `cargo test` with 123 private-access errors (`red-cell-c2-w1kli`). |
 
 Build: `cargo check` passed. `cargo clippy -- -D warnings` passed. `cargo test --workspace` **failed** — 123 compilation errors in teamserver test target due to Cursor's untracked `teamserver/src/listeners/{mod.rs,dns.rs,tests.rs}` replacing committed `listeners.rs`. Tests access private fields/methods across sibling modules. Filed `red-cell-c2-w1kli` (P1). 1 task in_progress (`red-cell-c2-v4wx2`).
+
+### QA Review — 2026-04-03 23:00 — 983d431a..7db1572a
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 2 | Closed `red-cell-c2-la31d` (phantom command/mod.rs split into 10 focused submodules; 197 tests pass; zero clippy warnings). Filed `red-cell-c2-oxylj` (P2): two `expect()` calls in production paths in WIP pg0al code (`callback_seq.rs:102`, `demon.rs:389`). Filed `red-cell-c2-asvj8` (P2): unused `CallbackSeqError` import in `demon.rs:374` causes `clippy -D warnings` failure. Both bugs block pg0al. |
+| Codex | 0 | 0 | No activity in range. |
+| Cursor | 1 | 0 | Closed `red-cell-c2-0h7q9` (serialized 5 client-cli `*_contract` integration test binaries in `.config/nextest.toml` to fix double-spawn ENOENT). Clean fix matching assembly_dispatch mitigation pattern. |
+
+Build: `cargo check --workspace` passed (1 warning — unused `CallbackSeqError` import in WIP code). Tests/clippy still running at report time (blocked on artifact lock during parallel build). `fka3c` (net_dispatch serial group) and `en1v7` (output_dispatch serial group) remain open — neither was addressed in this period.

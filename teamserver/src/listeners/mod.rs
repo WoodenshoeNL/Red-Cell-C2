@@ -75,6 +75,9 @@ const MAX_DEMON_INIT_ATTEMPT_WINDOWS: usize = 10_000;
 const MAX_UNKNOWN_CALLBACK_PROBE_AUDITS_PER_SOURCE: u32 = 1;
 const UNKNOWN_CALLBACK_PROBE_AUDIT_WINDOW_DURATION: Duration = Duration::from_secs(60);
 const MAX_UNKNOWN_CALLBACK_PROBE_AUDIT_WINDOWS: usize = 10_000;
+const MAX_RECONNECT_PROBES_PER_AGENT: u32 = 10;
+const RECONNECT_PROBE_WINDOW_DURATION: Duration = Duration::from_secs(60);
+const MAX_RECONNECT_PROBE_WINDOWS: usize = 10_000;
 const EXTRA_METHOD: &str = "Method";
 const EXTRA_BEHIND_REDIRECTOR: &str = "BehindRedirector";
 const EXTRA_TRUSTED_PROXY_PEERS: &str = "TrustedProxyPeers";
@@ -121,6 +124,54 @@ impl DemonInitRateLimiter {
 
     #[cfg(test)]
     async fn tracked_ip_count(&self) -> usize {
+        self.windows.lock().await.len()
+    }
+}
+
+/// Per-agent-ID sliding-window rate limiter for reconnect probes.
+///
+/// An empty `DEMON_INIT` payload is a lightweight reconnect probe.  Unlike full
+/// registrations (gated by [`DemonInitRateLimiter`] per source IP), probes are
+/// keyed by `agent_id` so that spamming from many IPs with the same agent ID is
+/// still throttled.  Exceeding the limit results in an HTTP 429 response, making
+/// the DoS signal visible to operators while avoiding the SQLite write that a
+/// successful probe would trigger.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ReconnectProbeRateLimiter {
+    windows: Arc<Mutex<HashMap<u32, AttemptWindow>>>,
+}
+
+impl ReconnectProbeRateLimiter {
+    #[must_use]
+    fn new() -> Self {
+        Self::default()
+    }
+
+    async fn allow(&self, agent_id: u32) -> bool {
+        let mut windows = self.windows.lock().await;
+        let now = Instant::now();
+
+        prune_expired_windows(&mut windows, RECONNECT_PROBE_WINDOW_DURATION, now);
+        if !windows.contains_key(&agent_id) && windows.len() >= MAX_RECONNECT_PROBE_WINDOWS {
+            evict_oldest_windows(&mut windows, MAX_RECONNECT_PROBE_WINDOWS / 2);
+        }
+
+        let window = windows.entry(agent_id).or_default();
+        if now.duration_since(window.window_start) >= RECONNECT_PROBE_WINDOW_DURATION {
+            window.attempts = 0;
+            window.window_start = now;
+        }
+
+        if window.attempts >= MAX_RECONNECT_PROBES_PER_AGENT {
+            return false;
+        }
+
+        window.attempts += 1;
+        true
+    }
+
+    #[cfg(test)]
+    async fn tracked_agent_count(&self) -> usize {
         self.windows.lock().await.len()
     }
 }
@@ -465,6 +516,7 @@ pub struct ListenerManager {
     downloads: DownloadTracker,
     demon_init_rate_limiter: DemonInitRateLimiter,
     unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
+    reconnect_probe_rate_limiter: ReconnectProbeRateLimiter,
     shutdown: ShutdownController,
     active_handles: Arc<RwLock<BTreeMap<String, JoinHandle<()>>>>,
     operations: Arc<Mutex<()>>,
@@ -536,6 +588,7 @@ impl ListenerManager {
             downloads,
             demon_init_rate_limiter: DemonInitRateLimiter::new(),
             unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter::new(),
+            reconnect_probe_rate_limiter: ReconnectProbeRateLimiter::new(),
             shutdown: ShutdownController::new(),
             active_handles: Arc::new(RwLock::new(BTreeMap::new())),
             operations: Arc::new(Mutex::new(())),
@@ -947,6 +1000,7 @@ struct HttpListenerState {
     dispatcher: CommandDispatcher,
     demon_init_rate_limiter: DemonInitRateLimiter,
     unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
+    reconnect_probe_rate_limiter: ReconnectProbeRateLimiter,
     method: Method,
     required_headers: Vec<ExpectedHeader>,
     response_headers: Vec<(HeaderName, HeaderValue)>,
@@ -982,6 +1036,7 @@ struct SmbListenerState {
     events: EventBus,
     dispatcher: CommandDispatcher,
     unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
+    reconnect_probe_rate_limiter: ReconnectProbeRateLimiter,
     shutdown: ShutdownController,
 }
 
@@ -1002,6 +1057,7 @@ pub struct ExternalListenerState {
     /// `handle_smb_connection`).
     demon_init_rate_limiter: DemonInitRateLimiter,
     unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
+    reconnect_probe_rate_limiter: ReconnectProbeRateLimiter,
     shutdown: ShutdownController,
 }
 
@@ -1046,6 +1102,7 @@ enum DemonTransportKind {
 enum DemonHttpDisposition {
     Ok,
     Fake404,
+    TooManyRequests,
 }
 
 impl HttpListenerState {
@@ -1060,6 +1117,7 @@ impl HttpListenerState {
         downloads: DownloadTracker,
         demon_init_rate_limiter: DemonInitRateLimiter,
         unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
+        reconnect_probe_rate_limiter: ReconnectProbeRateLimiter,
         shutdown: ShutdownController,
         init_secret: Option<Vec<u8>>,
         allow_legacy_ctr: bool,
@@ -1107,6 +1165,7 @@ impl HttpListenerState {
             events,
             demon_init_rate_limiter,
             unknown_callback_probe_audit_limiter,
+            reconnect_probe_rate_limiter,
             method,
             required_headers,
             response_headers,
@@ -1151,6 +1210,7 @@ impl SmbListenerState {
         plugins: Option<PluginRuntime>,
         downloads: DownloadTracker,
         unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
+        reconnect_probe_rate_limiter: ReconnectProbeRateLimiter,
         shutdown: ShutdownController,
         init_secret: Option<Vec<u8>>,
         allow_legacy_ctr: bool,
@@ -1163,6 +1223,7 @@ impl SmbListenerState {
                 .with_allow_legacy_ctr(allow_legacy_ctr),
             events: events.clone(),
             unknown_callback_probe_audit_limiter,
+            reconnect_probe_rate_limiter,
             shutdown,
             dispatcher: CommandDispatcher::with_builtin_handlers_and_downloads(
                 registry.clone(),
@@ -1434,6 +1495,7 @@ async fn spawn_http_listener_runtime(
     downloads: DownloadTracker,
     demon_init_rate_limiter: DemonInitRateLimiter,
     unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
+    reconnect_probe_rate_limiter: ReconnectProbeRateLimiter,
     shutdown: ShutdownController,
     init_secret: Option<Vec<u8>>,
     allow_legacy_ctr: bool,
@@ -1448,6 +1510,7 @@ async fn spawn_http_listener_runtime(
         downloads,
         demon_init_rate_limiter,
         unknown_callback_probe_audit_limiter,
+        reconnect_probe_rate_limiter,
         shutdown,
         init_secret,
         allow_legacy_ctr,
@@ -1517,6 +1580,7 @@ async fn process_demon_transport(
     events: &EventBus,
     dispatcher: &CommandDispatcher,
     unknown_callback_probe_audit_limiter: &UnknownCallbackProbeAuditLimiter,
+    reconnect_probe_rate_limiter: &ReconnectProbeRateLimiter,
     body: &[u8],
     external_ip: String,
 ) -> Result<ProcessedDemonResponse, ListenerManagerError> {
@@ -1640,6 +1704,22 @@ async fn process_demon_transport(
             })
         }
         Ok(ParsedDemonPacket::Reconnect { header, .. }) => {
+            if !reconnect_probe_rate_limiter.allow(header.agent_id).await {
+                warn!(
+                    listener = listener_name,
+                    agent_id = format_args!("{:08X}", header.agent_id),
+                    external_ip,
+                    max_probes = MAX_RECONNECT_PROBES_PER_AGENT,
+                    window_seconds = RECONNECT_PROBE_WINDOW_DURATION.as_secs(),
+                    "reconnect probe rate limit exceeded — possible probe spam"
+                );
+                return Ok(ProcessedDemonResponse {
+                    agent_id: header.agent_id,
+                    payload: Vec::new(),
+                    http_disposition: DemonHttpDisposition::TooManyRequests,
+                });
+            }
+
             let (payload, http_disposition) = if registry.get(header.agent_id).await.is_some() {
                 build_reconnect_ack(registry, header.agent_id)
                     .await
@@ -1873,6 +1953,7 @@ async fn spawn_smb_listener_runtime(
     plugins: Option<PluginRuntime>,
     downloads: DownloadTracker,
     unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
+    reconnect_probe_rate_limiter: ReconnectProbeRateLimiter,
     shutdown: ShutdownController,
     init_secret: Option<Vec<u8>>,
     allow_legacy_ctr: bool,
@@ -1886,6 +1967,7 @@ async fn spawn_smb_listener_runtime(
         plugins,
         downloads,
         unknown_callback_probe_audit_limiter,
+        reconnect_probe_rate_limiter,
         shutdown,
         init_secret,
         allow_legacy_ctr,
@@ -1984,13 +2066,16 @@ async fn handle_smb_connection(state: Arc<SmbListenerState>, mut stream: LocalSo
             &state.events,
             &state.dispatcher,
             &state.unknown_callback_probe_audit_limiter,
+            &state.reconnect_probe_rate_limiter,
             &frame.payload,
             client_ip.to_string(),
         )
         .await
         {
             Ok(response) => {
-                if response.http_disposition == DemonHttpDisposition::Fake404 {
+                if response.http_disposition == DemonHttpDisposition::Fake404
+                    || response.http_disposition == DemonHttpDisposition::TooManyRequests
+                {
                     continue;
                 }
 
@@ -2103,6 +2188,7 @@ fn spawn_external_listener_runtime(
     downloads: DownloadTracker,
     demon_init_rate_limiter: DemonInitRateLimiter,
     unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
+    reconnect_probe_rate_limiter: ReconnectProbeRateLimiter,
     shutdown: ShutdownController,
     external_endpoints: Arc<RwLock<BTreeMap<String, Arc<ExternalListenerState>>>>,
     init_secret: Option<Vec<u8>>,
@@ -2117,6 +2203,7 @@ fn spawn_external_listener_runtime(
         events: events.clone(),
         demon_init_rate_limiter,
         unknown_callback_probe_audit_limiter,
+        reconnect_probe_rate_limiter,
         shutdown,
         dispatcher: CommandDispatcher::with_builtin_handlers_and_downloads(
             registry.clone(),
@@ -2187,12 +2274,16 @@ pub async fn handle_external_request(
         &state.events,
         &state.dispatcher,
         &state.unknown_callback_probe_audit_limiter,
+        &state.reconnect_probe_rate_limiter,
         body,
         peer.ip().to_string(),
     )
     .await;
 
     match result {
+        Ok(response) if response.http_disposition == DemonHttpDisposition::TooManyRequests => {
+            Err(StatusCode::TOO_MANY_REQUESTS)
+        }
         Ok(response) if response.http_disposition == DemonHttpDisposition::Fake404 => {
             Err(StatusCode::NOT_FOUND)
         }
@@ -2226,6 +2317,7 @@ impl ListenerManager {
                     self.downloads.clone(),
                     self.demon_init_rate_limiter.clone(),
                     self.unknown_callback_probe_audit_limiter.clone(),
+                    self.reconnect_probe_rate_limiter.clone(),
                     self.shutdown.clone(),
                     self.demon_init_secret.clone(),
                     self.demon_allow_legacy_ctr,
@@ -2242,6 +2334,7 @@ impl ListenerManager {
                     self.plugins.clone(),
                     self.downloads.clone(),
                     self.unknown_callback_probe_audit_limiter.clone(),
+                    self.reconnect_probe_rate_limiter.clone(),
                     self.shutdown.clone(),
                     self.demon_init_secret.clone(),
                     self.demon_allow_legacy_ctr,
@@ -2259,6 +2352,7 @@ impl ListenerManager {
                     self.downloads.clone(),
                     self.demon_init_rate_limiter.clone(),
                     self.unknown_callback_probe_audit_limiter.clone(),
+                    self.reconnect_probe_rate_limiter.clone(),
                     self.shutdown.clone(),
                     self.demon_init_secret.clone(),
                     self.demon_allow_legacy_ctr,
@@ -2275,6 +2369,7 @@ impl ListenerManager {
                 self.downloads.clone(),
                 self.demon_init_rate_limiter.clone(),
                 self.unknown_callback_probe_audit_limiter.clone(),
+                self.reconnect_probe_rate_limiter.clone(),
                 self.shutdown.clone(),
                 self.external_endpoints.clone(),
                 self.demon_init_secret.clone(),
@@ -2454,11 +2549,15 @@ async fn http_listener_handler(
         &state.events,
         &state.dispatcher,
         &state.unknown_callback_probe_audit_limiter,
+        &state.reconnect_probe_rate_limiter,
         &body,
         external_ip.to_string(),
     )
     .await
     {
+        Ok(response) if response.http_disposition == DemonHttpDisposition::TooManyRequests => {
+            StatusCode::TOO_MANY_REQUESTS.into_response()
+        }
         Ok(response) if response.http_disposition == DemonHttpDisposition::Fake404 => {
             state.fake_404_response()
         }

@@ -1388,9 +1388,9 @@ async fn concurrent_reconnect_probes_preserve_ctr_offset() -> Result<(), Box<dyn
 
     let offset_before = harness.server.agent_registry.ctr_offset(agent_id).await?;
 
-    // Fire 20 concurrent reconnect probes.
+    // Fire 8 concurrent reconnect probes (below the 10/min per-agent rate limit).
     let mut join_set = tokio::task::JoinSet::new();
-    for _ in 0..20 {
+    for _ in 0..8 {
         let body = common::valid_demon_reconnect_body(agent_id);
         let url = format!("http://127.0.0.1:{listener_port}/");
         join_set.spawn(async move {
@@ -1419,7 +1419,7 @@ async fn concurrent_reconnect_probes_preserve_ctr_offset() -> Result<(), Box<dyn
         );
         ack_count += 1;
     }
-    assert_eq!(ack_count, 20);
+    assert_eq!(ack_count, 8);
 
     // CTR offset must be unchanged.
     let offset_after = harness.server.agent_registry.ctr_offset(agent_id).await?;

@@ -19,11 +19,12 @@ use super::dns::{
 use super::{
     DEMON_INIT_WINDOW_DURATION, DemonInitRateLimiter, DownloadTracker, ListenerEventAction,
     ListenerManager, ListenerManagerError, ListenerStatus, ListenerSummary, MAX_AGENT_MESSAGE_LEN,
-    MAX_DEMON_INIT_ATTEMPT_WINDOWS, MAX_DEMON_INIT_ATTEMPTS_PER_IP, MAX_SMB_FRAME_PAYLOAD_LEN,
-    MAX_UNKNOWN_CALLBACK_PROBE_AUDITS_PER_SOURCE, TrustedProxyPeer,
-    UNKNOWN_CALLBACK_PROBE_AUDIT_WINDOW_DURATION, UnknownCallbackProbeAuditLimiter,
-    action_from_mark, collect_body_with_magic_precheck, extract_external_ip,
-    handle_external_request, is_past_kill_date, listener_config_from_operator,
+    MAX_DEMON_INIT_ATTEMPT_WINDOWS, MAX_DEMON_INIT_ATTEMPTS_PER_IP, MAX_RECONNECT_PROBE_WINDOWS,
+    MAX_RECONNECT_PROBES_PER_AGENT, MAX_SMB_FRAME_PAYLOAD_LEN,
+    MAX_UNKNOWN_CALLBACK_PROBE_AUDITS_PER_SOURCE, RECONNECT_PROBE_WINDOW_DURATION,
+    ReconnectProbeRateLimiter, TrustedProxyPeer, UNKNOWN_CALLBACK_PROBE_AUDIT_WINDOW_DURATION,
+    UnknownCallbackProbeAuditLimiter, action_from_mark, collect_body_with_magic_precheck,
+    extract_external_ip, handle_external_request, is_past_kill_date, listener_config_from_operator,
     listener_error_event, listener_event_for_action, listener_removed_event,
     operator_protocol_name, operator_requests_start, parse_trusted_proxy_peer,
     profile_listener_configs, read_smb_frame, smb_local_socket_name, spawn_managed_listener_task,
@@ -272,6 +273,81 @@ async fn unknown_callback_probe_audit_limiter_prunes_expired_windows() {
     assert!(!windows.contains_key(&stale_source));
     drop(windows);
     assert_eq!(limiter.tracked_source_count().await, 1);
+}
+
+#[tokio::test]
+async fn reconnect_probe_rate_limiter_blocks_after_threshold() {
+    let limiter = ReconnectProbeRateLimiter::new();
+    let agent_id = 0xDEAD_BEEF_u32;
+
+    for _ in 0..MAX_RECONNECT_PROBES_PER_AGENT {
+        assert!(limiter.allow(agent_id).await);
+    }
+
+    // 11th probe in the same window must be blocked.
+    assert!(!limiter.allow(agent_id).await);
+    // A different agent_id must still be allowed.
+    assert!(limiter.allow(agent_id.wrapping_add(1)).await);
+}
+
+#[tokio::test]
+async fn reconnect_probe_rate_limiter_resets_after_window_expires() {
+    let limiter = ReconnectProbeRateLimiter::new();
+    let agent_id = 0xAAAA_BBBB_u32;
+
+    // Exhaust the window by injecting a stale entry directly.
+    {
+        let mut windows = limiter.windows.lock().await;
+        windows.insert(
+            agent_id,
+            crate::rate_limiter::AttemptWindow {
+                attempts: MAX_RECONNECT_PROBES_PER_AGENT,
+                window_start: Instant::now()
+                    - RECONNECT_PROBE_WINDOW_DURATION
+                    - Duration::from_secs(1),
+            },
+        );
+    }
+
+    // The window has expired: allow() must reset the counter and permit the probe.
+    assert!(limiter.allow(agent_id).await, "probe must be allowed after window expiry");
+}
+
+#[tokio::test]
+async fn reconnect_probe_rate_limiter_evicts_oldest_when_at_capacity() {
+    let limiter = ReconnectProbeRateLimiter::new();
+    let base_instant = Instant::now() - Duration::from_secs(MAX_RECONNECT_PROBE_WINDOWS as u64 + 1);
+
+    {
+        let mut windows = limiter.windows.lock().await;
+        for i in 0u32..MAX_RECONNECT_PROBE_WINDOWS as u32 {
+            windows.insert(
+                i,
+                crate::rate_limiter::AttemptWindow {
+                    attempts: 1,
+                    window_start: base_instant + Duration::from_secs(u64::from(i)),
+                },
+            );
+        }
+    }
+
+    let oldest_agent_id: u32 = 0; // window_start == base_instant
+    assert!(limiter.windows.lock().await.contains_key(&oldest_agent_id));
+
+    let new_agent_id: u32 = MAX_RECONNECT_PROBE_WINDOWS as u32 + 1;
+    assert!(limiter.allow(new_agent_id).await, "allow must succeed for new agent_id");
+
+    let count = limiter.tracked_agent_count().await;
+    assert!(
+        count <= MAX_RECONNECT_PROBE_WINDOWS / 2 + 1,
+        "expected at most {} entries after eviction, got {}",
+        MAX_RECONNECT_PROBE_WINDOWS / 2 + 1,
+        count
+    );
+    assert!(
+        !limiter.windows.lock().await.contains_key(&oldest_agent_id),
+        "oldest agent_id must have been evicted"
+    );
 }
 
 #[test]
@@ -1802,6 +1878,65 @@ async fn http_listener_unknown_reconnect_probe_is_rate_limited_before_auditing()
 }
 
 #[tokio::test]
+async fn http_listener_reconnect_probe_returns_429_after_per_agent_limit()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = Database::connect_in_memory().await?;
+    let registry = AgentRegistry::new(database.clone());
+    let events = EventBus::default();
+    let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+    let manager = ListenerManager::new(database.clone(), registry, events, sockets, None)
+        .with_demon_allow_legacy_ctr(true);
+    let port = available_port()?;
+    let client = Client::new();
+    let agent_id = 0xCAFE_BABE_u32;
+
+    manager.create(http_listener("edge-http-probe-limit", port)).await?;
+    manager.start("edge-http-probe-limit").await?;
+    wait_for_listener(port, false).await?;
+
+    // Send MAX_RECONNECT_PROBES_PER_AGENT probes — all must succeed (404, unknown agent).
+    for i in 0..MAX_RECONNECT_PROBES_PER_AGENT {
+        let resp = client
+            .post(format!("http://127.0.0.1:{port}/"))
+            .body(valid_demon_request_body(agent_id))
+            .send()
+            .await?;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "probe {i} should return 404 (unknown agent)"
+        );
+    }
+
+    // The (MAX+1)-th probe must be rate-limited with 429.
+    let limited = client
+        .post(format!("http://127.0.0.1:{port}/"))
+        .body(valid_demon_request_body(agent_id))
+        .send()
+        .await?;
+    assert_eq!(
+        limited.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "probe exceeding per-agent limit must return 429"
+    );
+
+    // A different agent_id must still be allowed (limit is per agent_id).
+    let other = client
+        .post(format!("http://127.0.0.1:{port}/"))
+        .body(valid_demon_request_body(agent_id.wrapping_add(1)))
+        .send()
+        .await?;
+    assert_eq!(
+        other.status(),
+        StatusCode::NOT_FOUND,
+        "probe for a different agent_id must still be allowed"
+    );
+
+    manager.stop("edge-http-probe-limit").await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn http_listener_serializes_all_queued_jobs_for_get_job()
 -> Result<(), Box<dyn std::error::Error>> {
     let database = Database::connect_in_memory().await?;
@@ -3018,6 +3153,7 @@ async fn dns_state(name: &str) -> DnsListenerState {
         DownloadTracker::from_max_download_bytes(crate::DEFAULT_MAX_DOWNLOAD_BYTES),
         DemonInitRateLimiter::new(),
         UnknownCallbackProbeAuditLimiter::new(),
+        ReconnectProbeRateLimiter::new(),
         ShutdownController::new(),
         None,
         true,
@@ -3041,6 +3177,7 @@ async fn spawn_test_dns_listener(
         DownloadTracker::from_max_download_bytes(crate::DEFAULT_MAX_DOWNLOAD_BYTES),
         DemonInitRateLimiter::new(),
         UnknownCallbackProbeAuditLimiter::new(),
+        ReconnectProbeRateLimiter::new(),
         ShutdownController::new(),
         None,
         true,
@@ -3071,6 +3208,7 @@ async fn spawn_test_smb_runtime(
         None,
         DownloadTracker::from_max_download_bytes(crate::DEFAULT_MAX_DOWNLOAD_BYTES),
         UnknownCallbackProbeAuditLimiter::new(),
+        ReconnectProbeRateLimiter::new(),
         shutdown,
         None,
         true,
@@ -3562,6 +3700,7 @@ async fn dns_listener_runtime_exits_when_shutdown_started_before_first_poll() {
         DownloadTracker::from_max_download_bytes(crate::DEFAULT_MAX_DOWNLOAD_BYTES),
         DemonInitRateLimiter::new(),
         UnknownCallbackProbeAuditLimiter::new(),
+        ReconnectProbeRateLimiter::new(),
         shutdown.clone(),
         None,
         true,
@@ -3935,6 +4074,7 @@ async fn dns_listener_start_rejects_unsupported_record_types() {
         DownloadTracker::from_max_download_bytes(crate::DEFAULT_MAX_DOWNLOAD_BYTES),
         DemonInitRateLimiter::new(),
         UnknownCallbackProbeAuditLimiter::new(),
+        ReconnectProbeRateLimiter::new(),
         ShutdownController::new(),
         None,
         false,

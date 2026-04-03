@@ -16,7 +16,7 @@ use crate::{
 };
 
 use super::{
-    DemonInitRateLimiter, ListenerManagerError, ListenerRuntimeFuture,
+    DemonInitRateLimiter, ListenerManagerError, ListenerRuntimeFuture, ReconnectProbeRateLimiter,
     UnknownCallbackProbeAuditLimiter, allow_demon_init_for_ip, is_valid_demon_callback_request,
     process_demon_transport,
 };
@@ -182,6 +182,7 @@ pub(crate) struct DnsListenerState {
     pub(crate) dispatcher: CommandDispatcher,
     pub(crate) demon_init_rate_limiter: DemonInitRateLimiter,
     pub(crate) unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
+    pub(crate) reconnect_probe_rate_limiter: ReconnectProbeRateLimiter,
     pub(crate) shutdown: ShutdownController,
     /// Pending uploads keyed by agent ID.
     pub(crate) uploads: Mutex<HashMap<u32, DnsPendingUpload>>,
@@ -205,6 +206,7 @@ impl DnsListenerState {
         downloads: DownloadTracker,
         demon_init_rate_limiter: DemonInitRateLimiter,
         unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
+        reconnect_probe_rate_limiter: ReconnectProbeRateLimiter,
         shutdown: ShutdownController,
         init_secret: Option<Vec<u8>>,
         allow_legacy_ctr: bool,
@@ -227,6 +229,7 @@ impl DnsListenerState {
             ),
             demon_init_rate_limiter,
             unknown_callback_probe_audit_limiter,
+            reconnect_probe_rate_limiter,
             shutdown,
             uploads: Mutex::new(HashMap::new()),
             responses: Mutex::new(HashMap::new()),
@@ -374,6 +377,7 @@ impl DnsListenerState {
             &self.events,
             &self.dispatcher,
             &self.unknown_callback_probe_audit_limiter,
+            &self.reconnect_probe_rate_limiter,
             &assembled,
             peer_ip.to_string(),
         )
@@ -670,6 +674,7 @@ impl DnsListenerState {
             &self.events,
             &self.dispatcher,
             &self.unknown_callback_probe_audit_limiter,
+            &self.reconnect_probe_rate_limiter,
             &assembled,
             peer_ip.to_string(),
         )
@@ -1438,6 +1443,7 @@ pub(crate) async fn spawn_dns_listener_runtime(
     downloads: DownloadTracker,
     demon_init_rate_limiter: DemonInitRateLimiter,
     unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
+    reconnect_probe_rate_limiter: ReconnectProbeRateLimiter,
     shutdown: ShutdownController,
     init_secret: Option<Vec<u8>>,
     allow_legacy_ctr: bool,
@@ -1462,6 +1468,7 @@ pub(crate) async fn spawn_dns_listener_runtime(
         downloads,
         demon_init_rate_limiter,
         unknown_callback_probe_audit_limiter,
+        reconnect_probe_rate_limiter,
         shutdown,
         init_secret,
         allow_legacy_ctr,

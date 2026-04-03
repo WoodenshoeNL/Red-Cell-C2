@@ -22,6 +22,22 @@ class CliError(Exception):
         self.exit_code = exit_code
 
 
+class AgentNotSupportedError(Exception):
+    """Raised when a payload build is requested for an agent type that is not
+    yet supported by the current CLI / teamserver build.
+
+    The CLI ``--agent`` flag is not yet implemented; until it is, only
+    ``"demon"`` can be built.  See red-cell-c2-iyl94.
+    """
+
+    def __init__(self, agent: str) -> None:
+        super().__init__(
+            f"payload build for agent {agent!r} is not yet supported — "
+            f"CLI --agent flag not implemented (see red-cell-c2-iyl94)"
+        )
+        self.agent = agent
+
+
 @dataclass
 class CliConfig:
     server: str
@@ -115,6 +131,7 @@ def listener_delete(cfg: CliConfig, name: str) -> dict:
 
 def payload_build(cfg: CliConfig, listener: str,
                   arch: str = "x64", fmt: str = "exe",
+                  agent: str = "demon",
                   sleep_secs: int | None = None,
                   wait: bool = False) -> dict:
     """Submit a payload build job.
@@ -122,7 +139,15 @@ def payload_build(cfg: CliConfig, listener: str,
     Without ``wait``: returns ``{"job_id": ...}`` immediately.
     With ``wait=True``: polls until build completes, returns
     ``{"id": <payload_id>, "size_bytes": N}``.
+
+    Args:
+        agent: Agent type to build.  Only ``"demon"`` is currently supported;
+               passing any other value raises :exc:`AgentNotSupportedError`
+               until the CLI ``--agent`` flag is implemented
+               (see red-cell-c2-iyl94).
     """
+    if agent != "demon":
+        raise AgentNotSupportedError(agent)
     args = ["payload", "build",
             "--listener", listener,
             "--arch", arch,
@@ -141,17 +166,24 @@ def payload_download(cfg: CliConfig, payload_id: str | int, dst: str) -> dict:
 
 def payload_build_and_fetch(cfg: CliConfig, listener: str,
                             arch: str = "x64", fmt: str = "exe",
+                            agent: str = "demon",
                             sleep_secs: int | None = None) -> bytes:
     """Build a payload (blocking) and return the raw bytes.
 
     Combines ``payload build --wait`` with ``payload download`` into a
     single call.  A temporary file is used to receive the download and
     is deleted before returning.
+
+    Args:
+        agent: Agent type to build.  Only ``"demon"`` is currently supported;
+               passing any other value raises :exc:`AgentNotSupportedError`
+               until the CLI ``--agent`` flag is implemented
+               (see red-cell-c2-iyl94).
     """
     import tempfile as _tempfile
 
     result = payload_build(cfg, listener=listener, arch=arch, fmt=fmt,
-                           sleep_secs=sleep_secs, wait=True)
+                           agent=agent, sleep_secs=sleep_secs, wait=True)
     payload_id = result["id"]
 
     with _tempfile.NamedTemporaryFile(delete=False, suffix=f".{fmt}") as tmp:

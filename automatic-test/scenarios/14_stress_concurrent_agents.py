@@ -296,7 +296,7 @@ def _run_stress_for_agent(
         # ── Step 2: Build one payload ─────────────────────────────────────────
         print(f"  [{agent_type}][payload] building {agent_type} {fmt} x64 for listener {listener_name!r}")
         raw = payload_build_and_fetch(
-            cli, listener=listener_name, arch="x64", fmt=fmt
+            cli, listener=listener_name, arch="x64", fmt=fmt, agent=agent_type
         )
         assert len(raw) > 0, "payload is empty"
         print(f"  [{agent_type}][payload] built ({len(raw)} bytes)")

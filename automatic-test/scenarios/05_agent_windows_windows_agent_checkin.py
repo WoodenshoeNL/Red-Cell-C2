@@ -85,7 +85,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
         # ── Step 2: Build agent payload ──────────────────────────────────────
         print(f"  [{agent_type}][payload] building {agent_type} {fmt} x64 for Windows target")
         raw = payload_build_and_fetch(
-            cli, listener=listener_name, arch="x64", fmt=fmt
+            cli, listener=listener_name, arch="x64", fmt=fmt, agent=agent_type
         )
         assert len(raw) > 0, "payload is empty"
         print(f"  [{agent_type}][payload] built ({len(raw)} bytes)")

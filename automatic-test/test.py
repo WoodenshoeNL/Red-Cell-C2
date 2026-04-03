@@ -69,23 +69,40 @@ def make_target(cfg: dict) -> TargetConfig:
 
 # ── Toolchain pre-flight ─────────────────────────────────────────────────────
 
-# Scenario IDs that require payload-build toolchain tools.
-_PAYLOAD_SCENARIOS = {"03"}
-
 _TOOLCHAIN_TOOLS = [
     ("x86_64-w64-mingw32-gcc", ["x86_64-w64-mingw32-gcc", "--version"]),
     ("nasm",                   ["nasm", "--version"]),
 ]
 
 
-def check_toolchain(selected_ids: set[str]) -> bool:
+def _payload_scenario_ids(scenarios_dir: Path) -> frozenset[str]:
+    """Return IDs of every scenario file that calls payload_build_and_fetch.
+
+    Scans scenario source text so the set stays accurate automatically as new
+    payload-building scenarios are added without requiring manual updates here.
+    """
+    ids: set[str] = set()
+    for p in sorted(scenarios_dir.glob("[0-9][0-9]_*.py")):
+        if "payload_build_and_fetch" in p.read_text(encoding="utf-8"):
+            ids.add(p.stem[:2])
+    return frozenset(ids)
+
+
+def check_toolchain(selected_ids: set[str], scenarios_dir: Path | None = None) -> bool:
     """Return True if all required toolchain tools are present.
 
-    Only checks when at least one payload scenario is selected.  Prints a
-    clear, actionable error for each missing tool so the operator knows
-    exactly what to install before retrying.
+    Only checks when at least one payload-building scenario is selected.
+    Prints a clear, actionable error for each missing tool so the operator
+    knows exactly what to install before retrying.
+
+    *scenarios_dir* defaults to the ``scenarios/`` directory next to this
+    file; pass an explicit path in tests to point at a temporary directory.
     """
-    if not (selected_ids & _PAYLOAD_SCENARIOS):
+    if scenarios_dir is None:
+        scenarios_dir = Path(__file__).parent / "scenarios"
+
+    payload_scenarios = _payload_scenario_ids(scenarios_dir)
+    if not (selected_ids & payload_scenarios):
         return True  # no payload scenarios selected — nothing to check
 
     print(f"\n{'─' * 60}")
@@ -99,7 +116,7 @@ def check_toolchain(selected_ids: set[str]) -> bool:
             print(
                 f"  ✗ {name}: not found\n"
                 f"    Install it with: apt install {_install}\n"
-                f"    Payload builds (scenario 03) will fail without this tool."
+                f"    Payload builds will fail without this tool."
             )
             all_ok = False
             continue

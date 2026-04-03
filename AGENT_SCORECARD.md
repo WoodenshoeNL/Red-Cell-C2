@@ -10,7 +10,7 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 1171 | 249 | 38 |
-| Bugs filed against | 188 | 38 | 9 |
+| Bugs filed against | 188 | 39 | 9 |
 | Bug rate (bugs/task) | 0.16 | 0.15 | 0.24 |
 | Quality score | 84% | 85% | 76% |
 
@@ -21,14 +21,14 @@ Each loop run updates the running totals and appends a review entry.
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 9 | 0 | 0 |
-| Missing tests / stale tests | 70 | 18 | 5 |
+| Missing tests / stale tests | 70 | 19 | 5 |
 | Clippy warnings | 10 | 0 | 1 |
 | Protocol errors | 30 | 32 | 3 |
 | Security issues | 57 | 39 | 0 |
 | Architecture drift | 24 | 25 | 0 |
 | Memory / resource leaks | 11 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 9 | 0 |
-| Test infrastructure / flakiness | 43 | 2 | 0 |
+| Test infrastructure / flakiness | 43 | 3 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 4 | 5 | 0 |
 | Correctness / pagination | 64 | 8 | 1 |
@@ -40,6 +40,18 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-04-03 14:30
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 0 | — | No new Claude-attributed issues this review |
+| Codex | 1 | stale test, env-dependent unit test | `resolve_uses_cli_values_directly` does not isolate cwd/global config after timeout-resolution change (`red-cell-c2-1uxkp`) |
+| Cursor | 0 | — | No new Cursor-attributed issues this review |
+
+Overall codebase health: on track — `cargo check` and `cargo clippy -D warnings` clean; `cargo test --workspace` surfaced one environment-dependent failure in client-cli config tests.
+
+Biggest blindspot: **unit tests that call `resolve()` without an isolated working directory** pick up real `~/.config/red-cell-cli/config.toml` values, masking defaults and breaking CI or developer machines differently.
 
 ### QA Review — 2026-04-03 16:15 — d1e4060c..31c19e90
 
@@ -5559,3 +5571,13 @@ Biggest blindspot: cross-component transport features are landing without real i
 | Cursor | 1 | 0 | Closed `red-cell-c2-xrwgz` (unwrap_used clippy fixes in tests) via `15c3ce99`. Clean work. |
 
 Build: passed — `cargo check`, `cargo clippy -- -D warnings`, and `cargo nextest run` (4975 tests, all pass; 1 flake from concurrent clippy compilation, confirmed pass on re-run).
+
+### QA Review — 2026-04-03 16:45 — ca195af3..354406fb
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | No dev commits — only prior QA checkpoint. |
+| Codex | 0 | 0 | No activity in this range. |
+| Cursor | 0 | 0 | No activity in this range. |
+
+Build: skipped — no product-code changes in review range. 1 open bug (`red-cell-c2-1uxkp`, P2, client-cli config test isolation) remains ready for pickup. No issues stuck in_progress.

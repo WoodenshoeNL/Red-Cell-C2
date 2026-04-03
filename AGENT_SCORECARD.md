@@ -5476,3 +5476,14 @@ Build: the reviewed range contains only the prior QA checkpoint/scorecard commit
 | Cursor | 0 | 0 | No activity in this range. |
 
 Build: `cargo check --workspace` passed on `03070796` in isolated worktree `/tmp/red-cell-qa-review-RZSmc0`. `cargo nextest run --workspace` is still running with no failures observed; the only diagnostics emitted so far are the already-open Phantom unused-import warnings tracked by `red-cell-c2-nkdoq`. `CARGO_TARGET_DIR=$(mktemp -d /tmp/red-cell-qa-clippy-XXXXXX) cargo clippy --workspace -- -D warnings` is still compiling with no diagnostics emitted so far. `br list --status=in_progress` shows `red-cell-c2-n5euj` still in progress, which is consistent with the unresolved session-mode WebSocket work. Filed `red-cell-c2-ciamf` for the new `loop.py` active-worktree cleanup regression introduced by the unattributed `360c3e4d` commit.
+
+### Arch Review — 2026-04-03 10:16
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 0 | — | No new Claude-attributed findings this review. |
+| Codex | 0 | — | No new Codex-attributed findings this review. |
+| Cursor | 0 | — | No new Cursor-attributed findings this review. |
+
+Overall codebase health: drifting
+Biggest blindspot: cross-component transport features are landing without real interoperability coverage, which left the current Specter/Archon DoH query grammar incompatible with the teamserver DNS listener while still looking implemented in unit-level checks.

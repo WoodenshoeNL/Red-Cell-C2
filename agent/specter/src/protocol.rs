@@ -74,7 +74,7 @@ pub fn build_init_packet(
     crypto: &AgentCryptoMaterial,
     metadata: &AgentMetadata,
 ) -> Result<Vec<u8>, SpecterError> {
-    let plaintext = serialize_init_metadata(agent_id, metadata);
+    let plaintext = serialize_init_metadata(agent_id, metadata)?;
     let encrypted = encrypt_agent_data(&crypto.key, &crypto.iv, &plaintext)?;
 
     // Payload = command_id + request_id + key + iv + encrypted_metadata
@@ -230,20 +230,20 @@ const INIT_EXT_MONOTONIC_CTR: u32 = 1 << 0;
 /// Specter appends a trailing `u32` extension flags field after the standard metadata,
 /// requesting monotonic CTR mode.  Legacy Demon agents omit this field; the teamserver
 /// defaults to legacy mode when it is absent.
-fn serialize_init_metadata(agent_id: u32, m: &AgentMetadata) -> Vec<u8> {
+fn serialize_init_metadata(agent_id: u32, m: &AgentMetadata) -> Result<Vec<u8>, SpecterError> {
     let mut buf = Vec::with_capacity(256);
 
     // Agent ID (duplicate for validation)
     buf.extend_from_slice(&agent_id.to_be_bytes());
 
     // Length-prefixed UTF-8 strings
-    write_length_prefixed_string(&mut buf, &m.hostname);
-    write_length_prefixed_string(&mut buf, &m.username);
-    write_length_prefixed_string(&mut buf, &m.domain_name);
-    write_length_prefixed_string(&mut buf, &m.internal_ip);
+    write_length_prefixed_string(&mut buf, &m.hostname)?;
+    write_length_prefixed_string(&mut buf, &m.username)?;
+    write_length_prefixed_string(&mut buf, &m.domain_name)?;
+    write_length_prefixed_string(&mut buf, &m.internal_ip)?;
 
     // Process path as length-prefixed UTF-16LE
-    write_length_prefixed_utf16le(&mut buf, &m.process_path);
+    write_length_prefixed_utf16le(&mut buf, &m.process_path)?;
 
     // Fixed-width fields (all big-endian)
     buf.extend_from_slice(&m.process_pid.to_be_bytes());
@@ -266,28 +266,46 @@ fn serialize_init_metadata(agent_id: u32, m: &AgentMetadata) -> Vec<u8> {
     // Specter extension: request monotonic CTR mode.
     buf.extend_from_slice(&INIT_EXT_MONOTONIC_CTR.to_be_bytes());
 
-    buf
+    Ok(buf)
 }
 
 /// Write a length-prefixed UTF-8 string (4-byte BE length + raw bytes).
-fn write_length_prefixed_string(buf: &mut Vec<u8>, s: &str) {
+fn write_length_prefixed_string(buf: &mut Vec<u8>, s: &str) -> Result<(), SpecterError> {
     let bytes = s.as_bytes();
-    #[allow(clippy::cast_possible_truncation)]
-    let len = bytes.len() as u32;
+    let len = u32::try_from(bytes.len()).map_err(|_| {
+        SpecterError::Protocol(red_cell_common::demon::DemonProtocolError::LengthOverflow {
+            context: "length-prefixed string field",
+            length: bytes.len(),
+        })
+    })?;
     buf.extend_from_slice(&len.to_be_bytes());
     buf.extend_from_slice(bytes);
+    Ok(())
 }
 
 /// Write a length-prefixed UTF-16LE string (4-byte BE length of byte payload + UTF-16LE bytes).
-fn write_length_prefixed_utf16le(buf: &mut Vec<u8>, s: &str) {
+fn write_length_prefixed_utf16le(buf: &mut Vec<u8>, s: &str) -> Result<(), SpecterError> {
     let utf16: Vec<u16> = s.encode_utf16().collect();
-    let byte_len = utf16.len() * 2;
-    #[allow(clippy::cast_possible_truncation)]
-    let len = byte_len as u32;
+    let byte_len = utf16
+        .len()
+        .checked_mul(2)
+        .ok_or(SpecterError::Protocol(
+            red_cell_common::demon::DemonProtocolError::LengthOverflow {
+                context: "UTF-16LE field byte length overflow",
+                length: utf16.len(),
+            },
+        ))?;
+    let len = u32::try_from(byte_len).map_err(|_| {
+        SpecterError::Protocol(red_cell_common::demon::DemonProtocolError::LengthOverflow {
+            context: "UTF-16LE length-prefixed field",
+            length: byte_len,
+        })
+    })?;
     buf.extend_from_slice(&len.to_be_bytes());
     for code_unit in &utf16 {
         buf.extend_from_slice(&code_unit.to_le_bytes());
     }
+    Ok(())
 }
 
 /// Calculate the number of CTR blocks consumed by `byte_len` bytes.
@@ -385,7 +403,7 @@ mod tests {
     fn init_metadata_hostname_round_trips() {
         let agent_id = 0x1111_2222;
         let metadata = test_metadata();
-        let buf = serialize_init_metadata(agent_id, &metadata);
+        let buf = serialize_init_metadata(agent_id, &metadata).expect("serialize");
 
         // Skip agent_id (4 bytes), read hostname length-prefixed string
         let hostname_len = u32::from_be_bytes(buf[4..8].try_into().expect("len")) as usize;
@@ -481,7 +499,7 @@ mod tests {
     #[test]
     fn utf16le_encoding_matches_havoc_format() {
         let mut buf = Vec::new();
-        write_length_prefixed_utf16le(&mut buf, "A");
+        write_length_prefixed_utf16le(&mut buf, "A").expect("write");
         // 'A' = U+0041 → UTF-16LE = [0x41, 0x00], length = 2 bytes
         assert_eq!(&buf[0..4], &2_u32.to_be_bytes());
         assert_eq!(&buf[4..6], &[0x41, 0x00]);

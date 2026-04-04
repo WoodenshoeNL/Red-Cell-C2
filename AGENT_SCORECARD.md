@@ -9,19 +9,19 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1172 | 249 | 42 |
-| Bugs filed against | 191 | 40 | 10 |
+| Tasks closed | 1173 | 249 | 42 |
+| Bugs filed against | 192 | 40 | 10 |
 | Bug rate (bugs/task) | 0.16 | 0.16 | 0.24 |
 | Quality score | 84% | 84% | 76% |
 
-*Bug rates: Claude 191/1172=0.1630→0.16, Codex 40/249=0.1606→0.16, Cursor 10/42=0.2381→0.24*
+*Bug rates: Claude 192/1173=0.1637→0.16, Codex 40/249=0.1606→0.16, Cursor 10/42=0.2381→0.24*
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 11 | 0 | 0 |
-| Missing tests / stale tests | 70 | 19 | 5 |
+| Missing tests / stale tests | 71 | 19 | 5 |
 | Clippy warnings | 11 | 0 | 1 |
 | Protocol errors | 30 | 32 | 3 |
 | Security issues | 58 | 39 | 0 |
@@ -5715,3 +5715,13 @@ Overall codebase health: stable on committed code; WIP seq-protection branch has
 | Cursor | 0 | 0 | No activity in review range. |
 
 Build: `cargo check --workspace` passed. `cargo clippy --workspace -- -D warnings` passed (needless_lifetimes auto-fixed by linter in callback_seq.rs). `cargo nextest run --workspace` 4999/4999 passed (1 pre-existing flaky timeout in rate_limiter_lockout test, known as red-cell-c2-lygl7). WIP uncommitted changes (callback_seq module + agents/database/demon.rs additions) compile and test clean — blocked on pt7rr (agent side) and 6ae3y (TOCTOU) before pg0al can land.
+
+### QA Review — 2026-04-04 10:15 — aaf2621c..2c5b62be
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 1 | Closed `red-cell-c2-1ohf5` — surface download limit failures to agent and audit log. Commit `2c5b62be` adds concurrent-limit, size-limit, and aggregate-limit error surfacing in both filesystem and beacon-output paths, with audit entries. Filed `red-cell-c2-ho0n2` (P3, zone:teamserver): missing dispatch-level integration test for `DownloadConcurrentLimitExceeded` error event path (only unit-tested at `DownloadTracker` level; analogous tests for `DownloadTooLarge` exist at dispatch level). |
+| Codex | 0 | 0 | No activity in range. |
+| Cursor | 0 | 0 | No activity in range. |
+
+Build: `cargo check --workspace` passed. `cargo clippy --workspace -- -D warnings` passed. `cargo nextest run --workspace` could not be completed cleanly — dev agent working on `red-cell-c2-i7vz3` (GET /health endpoint) has partially modified `TeamserverState` in-flight; `client-cli/tests/agent_api_contract.rs` and `client-cli/tests/audit_api_contract.rs` miss the new fields, causing test-compilation failures. Pre-existing bug `red-cell-c2-l3aw2` (P1) covers this. Committed code at HEAD is clean.

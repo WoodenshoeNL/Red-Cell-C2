@@ -21,14 +21,14 @@ Each loop run updates the running totals and appends a review entry.
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 11 | 0 | 0 |
-| Missing tests / stale tests | 71 | 19 | 5 |
+| Missing tests / stale tests | 73 | 19 | 5 |
 | Clippy warnings | 11 | 0 | 1 |
 | Protocol errors | 30 | 32 | 3 |
 | Security issues | 58 | 39 | 0 |
 | Architecture drift | 25 | 25 | 1 |
 | Memory / resource leaks | 11 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 9 | 0 |
-| Test infrastructure / flakiness | 45 | 5 | 1 |
+| Test infrastructure / flakiness | 47 | 5 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 4 | 5 | 0 |
 | Correctness / pagination | 65 | 8 | 1 |
@@ -5745,3 +5745,15 @@ Build: cargo check passed; cargo nextest failed (pre-existing test compilation b
 | Cursor | 0 | 0 | No activity in review range. |
 
 Build: `cargo check --workspace` passed. `cargo clippy --workspace -- -D warnings` passed. `cargo nextest run --workspace` fails to compile — 4 client-cli test files missing `started_at`/`plugins_loaded`/`plugins_failed` in `TeamserverState` initializers (pre-existing, tracked as red-cell-c2-l3aw2 + red-cell-c2-v23y3). No new bugs filed. 1 issue in-progress: red-cell-c2-t5fq2 (HMAC/AEAD on WebSocket frames) with active stash from dev agent.
+
+### Arch Review — 2026-04-04 12:00
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 2 | test infrastructure | `red-cell-c2-q562w` — websocket.rs working-tree changes (in-progress red-cell-c2-t5fq2) import WsEnvelope/seal_ws_frame/open_ws_frame/derive_ws_hmac_key from common::crypto which don't exist, causing 53 test compilation errors in `red-cell (lib test)`. `red-cell-c2-ql5pp` — 3 additional client-cli test files (operator_api_contract.rs:55, audit_api_contract.rs:52, session_api_contract.rs:77, e2e_roundtrip.rs:292) missing started_at/plugins_loaded/plugins_failed in TeamserverState initializers; not covered by red-cell-c2-v23y3 (payload only). |
+| Codex | 0 | — | No Codex-attributed findings. |
+| Cursor | 0 | — | No Cursor-attributed findings. |
+
+Overall codebase health: **drifting** — `cargo check --workspace` and `cargo clippy --workspace -- -D warnings` pass clean; `cargo nextest run --workspace` fails to compile for both teamserver tests (53 errors from in-progress HMAC WS feature) and client-cli tests (4 test files with missing TeamserverState fields). Core crypto path (CTR advance, HKDF, weak-key rejection, constant-time comparisons) remains sound. No `todo!`/`unimplemented!` in any production Rust code. Auth: Argon2id with OWASP params, constant-time token lookup, dummy verifier prevents timing oracle. Rate limiting present at all attack surfaces (login, demon init, reconnect probes). DNS listener is substantively implemented (not skeletal). Pivot depth cap prevents recursive envelope attacks.
+
+Biggest blindspot: **broken test suite compilation** (two distinct root causes) — zero regression coverage while both are open.

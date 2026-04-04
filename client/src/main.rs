@@ -185,7 +185,7 @@ enum LootTab {
 }
 
 /// Persistent UI state for the Loot panel.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct LootPanelState {
     /// Currently active sub-tab.
     active_tab: LootTab,
@@ -195,6 +195,66 @@ struct LootPanelState {
     cred_sort_column: CredentialSortColumn,
     /// Whether the credential sort is descending.
     cred_sort_desc: bool,
+    /// Cached indices into `AppState::loot` matching the current filter state.
+    filtered_loot: Vec<usize>,
+    /// Set whenever filters change so the cached index list can be rebuilt lazily.
+    filter_dirty: bool,
+    /// Loot revision used to populate `filtered_loot`.
+    cached_loot_revision: u64,
+}
+
+impl LootPanelState {
+    fn mark_filter_dirty(&mut self) {
+        self.filter_dirty = true;
+    }
+
+    fn refresh_filtered_loot(
+        &mut self,
+        state: &AppState,
+        cred_filter: CredentialSubFilter,
+        file_filter: FileSubFilter,
+        agent_filter: &str,
+        since_filter: &str,
+        until_filter: &str,
+        text_filter: &str,
+    ) {
+        if !self.filter_dirty && self.cached_loot_revision == state.loot_revision {
+            return;
+        }
+
+        let type_filter = match self.active_tab {
+            LootTab::Credentials => LootTypeFilter::Credentials,
+            LootTab::Screenshots => LootTypeFilter::Screenshots,
+            LootTab::Files => LootTypeFilter::Files,
+        };
+
+        self.filtered_loot = build_filtered_loot_indices(
+            &state.loot,
+            type_filter,
+            cred_filter,
+            file_filter,
+            agent_filter,
+            since_filter,
+            until_filter,
+            text_filter,
+        );
+        self.cached_loot_revision = state.loot_revision;
+        self.filter_dirty = false;
+    }
+}
+
+impl Default for LootPanelState {
+    fn default() -> Self {
+        Self {
+            active_tab: LootTab::default(),
+            selected_screenshot: None,
+            cred_sort_column: CredentialSortColumn::default(),
+            cred_sort_desc: false,
+            filtered_loot: Vec::new(),
+            filter_dirty: true,
+            cached_loot_revision: 0,
+        }
+    }
 }
 
 /// Columns available for sorting in the credential table.
@@ -1842,18 +1902,20 @@ impl ClientApp {
                 };
                 if frame.show(ui, |ui| ui.label(text)).response.clicked() {
                     self.session_panel.loot_panel.active_tab = tab;
+                    self.session_panel.loot_panel.mark_filter_dirty();
                 }
             }
         });
         ui.separator();
 
         // ── Common filter bar ──────────────────────────────────────────
+        let mut filters_changed = false;
         ui.horizontal_wrapped(|ui| {
             // Show sub-filter only when relevant to the active tab.
             match self.session_panel.loot_panel.active_tab {
                 LootTab::Credentials => {
                     ui.label("Category");
-                    egui::ComboBox::from_id_salt("loot-cred-filter")
+                    let response = egui::ComboBox::from_id_salt("loot-cred-filter")
                         .selected_text(match self.session_panel.loot_cred_filter {
                             CredentialSubFilter::All => "All",
                             CredentialSubFilter::NtlmHash => "NTLM Hash",
@@ -1870,10 +1932,11 @@ impl ClientApp {
                                 );
                             }
                         });
+                    filters_changed |= response.response.changed();
                 }
                 LootTab::Files => {
                     ui.label("Category");
-                    egui::ComboBox::from_id_salt("loot-file-filter")
+                    let response = egui::ComboBox::from_id_salt("loot-file-filter")
                         .selected_text(match self.session_panel.loot_file_filter {
                             FileSubFilter::All => "All",
                             FileSubFilter::Document => "Document",
@@ -1889,33 +1952,46 @@ impl ClientApp {
                                 );
                             }
                         });
+                    filters_changed |= response.response.changed();
                 }
                 LootTab::Screenshots => {}
             }
 
             ui.label("Agent");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.session_panel.loot_agent_filter)
-                    .desired_width(84.0)
-                    .hint_text("ABCD1234"),
-            );
+            filters_changed |= ui
+                .add(
+                    egui::TextEdit::singleline(&mut self.session_panel.loot_agent_filter)
+                        .desired_width(84.0)
+                        .hint_text("ABCD1234"),
+                )
+                .changed();
             ui.label("Since");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.session_panel.loot_since_filter)
-                    .desired_width(100.0)
-                    .hint_text("2026-03-01"),
-            );
+            filters_changed |= ui
+                .add(
+                    egui::TextEdit::singleline(&mut self.session_panel.loot_since_filter)
+                        .desired_width(100.0)
+                        .hint_text("2026-03-01"),
+                )
+                .changed();
             ui.label("Until");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.session_panel.loot_until_filter)
-                    .desired_width(100.0)
-                    .hint_text("2026-03-31"),
-            );
+            filters_changed |= ui
+                .add(
+                    egui::TextEdit::singleline(&mut self.session_panel.loot_until_filter)
+                        .desired_width(100.0)
+                        .hint_text("2026-03-31"),
+                )
+                .changed();
         });
-        ui.add(
-            egui::TextEdit::singleline(&mut self.session_panel.loot_text_filter)
-                .hint_text("Search name, path, source, preview"),
-        );
+        filters_changed |= ui
+            .add(
+                egui::TextEdit::singleline(&mut self.session_panel.loot_text_filter)
+                    .hint_text("Search name, path, source, preview"),
+            )
+            .changed();
+
+        if filters_changed {
+            self.session_panel.loot_panel.mark_filter_dirty();
+        }
 
         if let Some(message) = &self.session_panel.loot_status_message {
             ui.add_space(4.0);
@@ -1923,38 +1999,26 @@ impl ClientApp {
         }
         ui.add_space(4.0);
 
-        // ── Build the type filter matching the active tab ──────────────
-        let type_filter = match self.session_panel.loot_panel.active_tab {
-            LootTab::Credentials => LootTypeFilter::Credentials,
-            LootTab::Screenshots => LootTypeFilter::Screenshots,
-            LootTab::Files => LootTypeFilter::Files,
-        };
-
-        let filtered_loot: Vec<_> = state
-            .loot
-            .iter()
-            .filter(|item| {
-                loot_matches_filters(
-                    item,
-                    type_filter,
-                    self.session_panel.loot_cred_filter,
-                    self.session_panel.loot_file_filter,
-                    &self.session_panel.loot_agent_filter,
-                    &self.session_panel.loot_since_filter,
-                    &self.session_panel.loot_until_filter,
-                    &self.session_panel.loot_text_filter,
-                )
-            })
-            .collect();
+        self.session_panel.loot_panel.refresh_filtered_loot(
+            state,
+            self.session_panel.loot_cred_filter,
+            self.session_panel.loot_file_filter,
+            &self.session_panel.loot_agent_filter,
+            &self.session_panel.loot_since_filter,
+            &self.session_panel.loot_until_filter,
+            &self.session_panel.loot_text_filter,
+        );
 
         // ── Export bar ─────────────────────────────────────────────────
         ui.horizontal(|ui| {
-            ui.label(format!("{} item(s)", filtered_loot.len()));
+            ui.label(format!("{} item(s)", self.session_panel.loot_panel.filtered_loot.len()));
             if ui.button("Export CSV").clicked() {
+                let filtered_loot = self.filtered_loot_items(state);
                 self.session_panel.loot_status_message =
                     Some(export_loot_csv(&filtered_loot).unwrap_or_else(|e| e));
             }
             if ui.button("Export JSON").clicked() {
+                let filtered_loot = self.filtered_loot_items(state);
                 self.session_panel.loot_status_message =
                     Some(export_loot_json(&filtered_loot).unwrap_or_else(|e| e));
             }
@@ -1963,23 +2027,28 @@ impl ClientApp {
 
         // ── Tab content ────────────────────────────────────────────────
         match self.session_panel.loot_panel.active_tab {
-            LootTab::Credentials => self.render_loot_credentials(ui, &filtered_loot),
-            LootTab::Screenshots => self.render_loot_screenshots(ui, &filtered_loot),
-            LootTab::Files => self.render_loot_files(ui, &filtered_loot),
+            LootTab::Credentials => self.render_loot_credentials(ui, state),
+            LootTab::Screenshots => {
+                let filtered_loot = self.filtered_loot_items(state);
+                self.render_loot_screenshots(ui, &filtered_loot);
+            }
+            LootTab::Files => self.render_loot_files(ui, state),
         }
     }
 
     /// Render the credential table inside the Loot panel.
-    fn render_loot_credentials(&mut self, ui: &mut egui::Ui, items: &[&LootItem]) {
-        if items.is_empty() {
+    fn render_loot_credentials(&mut self, ui: &mut egui::Ui, state: &AppState) {
+        if self.session_panel.loot_panel.filtered_loot.is_empty() {
             ui.label("No credentials collected yet.");
             return;
         }
 
         // Sort items according to selected column.
-        let mut sorted: Vec<&LootItem> = items.to_vec();
+        let mut sorted = self.session_panel.loot_panel.filtered_loot.clone();
         let desc = self.session_panel.loot_panel.cred_sort_desc;
         sorted.sort_by(|a, b| {
+            let a = &state.loot[*a];
+            let b = &state.loot[*b];
             let ordering = match self.session_panel.loot_panel.cred_sort_column {
                 CredentialSortColumn::Name => a.name.cmp(&b.name),
                 CredentialSortColumn::Agent => a.agent_id.cmp(&b.agent_id),
@@ -1992,77 +2061,24 @@ impl ClientApp {
             if desc { ordering.reverse() } else { ordering }
         });
 
-        let header_color = Color32::from_rgb(180, 180, 190);
-        let row_bg_a = Color32::from_rgb(30, 30, 46);
-        let row_bg_b = Color32::from_rgb(36, 36, 52);
+        render_loot_credential_header(
+            ui,
+            &mut self.session_panel.loot_panel,
+            Color32::from_rgb(180, 180, 190),
+        );
+        ui.separator();
 
-        egui::ScrollArea::both().show(ui, |ui| {
-            egui::Grid::new("loot-cred-table")
+        let row_height = loot_table_row_height(ui);
+        egui::ScrollArea::vertical().show_rows(ui, row_height, sorted.len(), |ui, row_range| {
+            egui::Grid::new("loot-cred-table-body")
                 .num_columns(6)
                 .striped(false)
                 .min_col_width(60.0)
                 .spacing([8.0, 2.0])
                 .show(ui, |ui| {
-                    // Header row.
-                    let columns = [
-                        (CredentialSortColumn::Name, "Name"),
-                        (CredentialSortColumn::Category, "Type"),
-                        (CredentialSortColumn::Agent, "Agent"),
-                        (CredentialSortColumn::Source, "Source"),
-                        (CredentialSortColumn::Time, "Collected"),
-                    ];
-                    for (col, label) in columns {
-                        let active = self.session_panel.loot_panel.cred_sort_column == col;
-                        let arrow = if active {
-                            if self.session_panel.loot_panel.cred_sort_desc { " v" } else { " ^" }
-                        } else {
-                            ""
-                        };
-                        let text =
-                            RichText::new(format!("{label}{arrow}")).strong().color(header_color);
-                        if ui.label(text).clicked() {
-                            if self.session_panel.loot_panel.cred_sort_column == col {
-                                self.session_panel.loot_panel.cred_sort_desc =
-                                    !self.session_panel.loot_panel.cred_sort_desc;
-                            } else {
-                                self.session_panel.loot_panel.cred_sort_column = col;
-                                self.session_panel.loot_panel.cred_sort_desc = false;
-                            }
-                        }
-                    }
-                    // Value column is not sortable.
-                    ui.label(RichText::new("Value / Preview").strong().color(header_color));
-                    ui.end_row();
-
-                    // Data rows.
-                    for (index, item) in sorted.iter().enumerate() {
-                        let bg = if index % 2 == 0 { row_bg_a } else { row_bg_b };
-                        let _ = bg; // Row striping via frame below.
-                        ui.label(&item.name);
-                        ui.label(
-                            RichText::new(loot_sub_category_label(item))
-                                .small()
-                                .color(credential_category_color(item)),
-                        );
-                        ui.monospace(&item.agent_id);
-                        ui.label(&item.source);
-                        ui.label(blank_if_empty(&item.collected_at, "-"));
-                        // Preview / value (monospace, truncated).
-                        if let Some(preview) = &item.preview {
-                            let display = if preview.len() > 80 {
-                                format!("{}...", &preview[..77])
-                            } else {
-                                preview.clone()
-                            };
-                            ui.label(
-                                RichText::new(display)
-                                    .monospace()
-                                    .color(Color32::from_rgb(110, 199, 141)),
-                            );
-                        } else {
-                            ui.label("-");
-                        }
-                        ui.end_row();
+                    for index in row_range {
+                        let item = &state.loot[sorted[index]];
+                        render_loot_credential_row(ui, item);
                     }
                 });
         });
@@ -2180,51 +2196,58 @@ impl ClientApp {
     }
 
     /// Render the file downloads table inside the Loot panel.
-    fn render_loot_files(&mut self, ui: &mut egui::Ui, items: &[&LootItem]) {
-        if items.is_empty() {
+    fn render_loot_files(&mut self, ui: &mut egui::Ui, state: &AppState) {
+        if self.session_panel.loot_panel.filtered_loot.is_empty() {
             ui.label("No files downloaded yet.");
             return;
         }
 
-        let header_color = Color32::from_rgb(180, 180, 190);
+        egui::Grid::new("loot-files-table-header")
+            .num_columns(7)
+            .striped(false)
+            .min_col_width(50.0)
+            .spacing([8.0, 2.0])
+            .show(ui, |ui| {
+                for label in ["Name", "Category", "Agent", "Path", "Size", "Collected", ""] {
+                    ui.label(RichText::new(label).strong().color(Color32::from_rgb(180, 180, 190)));
+                }
+                ui.end_row();
+            });
+        ui.separator();
 
-        egui::ScrollArea::both().show(ui, |ui| {
-            egui::Grid::new("loot-files-table")
-                .num_columns(7)
-                .striped(false)
-                .min_col_width(50.0)
-                .spacing([8.0, 2.0])
-                .show(ui, |ui| {
-                    // Header.
-                    for label in ["Name", "Category", "Agent", "Path", "Size", "Collected", ""] {
-                        ui.label(RichText::new(label).strong().color(header_color));
-                    }
-                    ui.end_row();
-
-                    // Rows.
-                    for item in items {
-                        ui.label(&item.name);
-                        ui.label(
-                            RichText::new(loot_sub_category_label(item))
-                                .small()
-                                .color(Color32::GRAY),
-                        );
-                        ui.monospace(&item.agent_id);
-                        ui.label(item.file_path.as_deref().unwrap_or("-"));
-                        ui.label(item.size_bytes.map(human_size).unwrap_or_else(|| "-".to_owned()));
-                        ui.label(blank_if_empty(&item.collected_at, "-"));
-                        if loot_is_downloadable(item) {
-                            if ui.button("Save").clicked() {
-                                self.session_panel.loot_status_message =
-                                    Some(download_loot_item(item).unwrap_or_else(|e| e));
-                            }
-                        } else {
-                            ui.label("");
+        let filtered_indices = self.session_panel.loot_panel.filtered_loot.clone();
+        let row_height = loot_table_row_height(ui);
+        egui::ScrollArea::vertical().show_rows(
+            ui,
+            row_height,
+            filtered_indices.len(),
+            |ui, row_range| {
+                egui::Grid::new("loot-files-table-body")
+                    .num_columns(7)
+                    .striped(false)
+                    .min_col_width(50.0)
+                    .spacing([8.0, 2.0])
+                    .show(ui, |ui| {
+                        for index in row_range {
+                            let item = &state.loot[filtered_indices[index]];
+                            render_loot_file_row(
+                                ui,
+                                item,
+                                &mut self.session_panel.loot_status_message,
+                            );
                         }
-                        ui.end_row();
-                    }
-                });
-        });
+                    });
+            },
+        );
+    }
+
+    fn filtered_loot_items<'a>(&self, state: &'a AppState) -> Vec<&'a LootItem> {
+        self.session_panel
+            .loot_panel
+            .filtered_loot
+            .iter()
+            .map(|index| &state.loot[*index])
+            .collect()
     }
 
     /// Decode and cache a screenshot texture for the given loot item.
@@ -6920,6 +6943,109 @@ fn ellipsize(value: &str, max_chars: usize) -> String {
     output
 }
 
+fn build_filtered_loot_indices(
+    loot: &[LootItem],
+    type_filter: LootTypeFilter,
+    cred_filter: CredentialSubFilter,
+    file_filter: FileSubFilter,
+    agent_filter: &str,
+    since_filter: &str,
+    until_filter: &str,
+    text_filter: &str,
+) -> Vec<usize> {
+    loot.iter()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            loot_matches_filters(
+                item,
+                type_filter,
+                cred_filter,
+                file_filter,
+                agent_filter,
+                since_filter,
+                until_filter,
+                text_filter,
+            )
+            .then_some(index)
+        })
+        .collect()
+}
+
+fn loot_table_row_height(ui: &egui::Ui) -> f32 {
+    ui.text_style_height(&egui::TextStyle::Body) + 6.0
+}
+
+fn render_loot_credential_header(
+    ui: &mut egui::Ui,
+    panel: &mut LootPanelState,
+    header_color: Color32,
+) {
+    egui::Grid::new("loot-cred-table-header")
+        .num_columns(6)
+        .striped(false)
+        .min_col_width(60.0)
+        .spacing([8.0, 2.0])
+        .show(ui, |ui| {
+            let columns = [
+                (CredentialSortColumn::Name, "Name"),
+                (CredentialSortColumn::Category, "Type"),
+                (CredentialSortColumn::Agent, "Agent"),
+                (CredentialSortColumn::Source, "Source"),
+                (CredentialSortColumn::Time, "Collected"),
+            ];
+            for (col, label) in columns {
+                let active = panel.cred_sort_column == col;
+                let arrow =
+                    if active { if panel.cred_sort_desc { " v" } else { " ^" } } else { "" };
+                let text = RichText::new(format!("{label}{arrow}")).strong().color(header_color);
+                if ui.label(text).clicked() {
+                    if panel.cred_sort_column == col {
+                        panel.cred_sort_desc = !panel.cred_sort_desc;
+                    } else {
+                        panel.cred_sort_column = col;
+                        panel.cred_sort_desc = false;
+                    }
+                }
+            }
+            ui.label(RichText::new("Value / Preview").strong().color(header_color));
+            ui.end_row();
+        });
+}
+
+fn render_loot_credential_row(ui: &mut egui::Ui, item: &LootItem) {
+    ui.label(&item.name);
+    ui.label(
+        RichText::new(loot_sub_category_label(item)).small().color(credential_category_color(item)),
+    );
+    ui.monospace(&item.agent_id);
+    ui.label(&item.source);
+    ui.label(blank_if_empty(&item.collected_at, "-"));
+    if let Some(preview) = &item.preview {
+        let display = ellipsize(preview, 80);
+        ui.label(RichText::new(display).monospace().color(Color32::from_rgb(110, 199, 141)));
+    } else {
+        ui.label("-");
+    }
+    ui.end_row();
+}
+
+fn render_loot_file_row(ui: &mut egui::Ui, item: &LootItem, status_message: &mut Option<String>) {
+    ui.label(&item.name);
+    ui.label(RichText::new(loot_sub_category_label(item)).small().color(Color32::GRAY));
+    ui.monospace(&item.agent_id);
+    ui.label(item.file_path.as_deref().unwrap_or("-"));
+    ui.label(item.size_bytes.map(human_size).unwrap_or_else(|| "-".to_owned()));
+    ui.label(blank_if_empty(&item.collected_at, "-"));
+    if loot_is_downloadable(item) {
+        if ui.button("Save").clicked() {
+            *status_message = Some(download_loot_item(item).unwrap_or_else(|e| e));
+        }
+    } else {
+        ui.label("");
+    }
+    ui.end_row();
+}
+
 fn loot_matches_filters(
     item: &LootItem,
     type_filter: LootTypeFilter,
@@ -11183,6 +11309,67 @@ mod tests {
         assert_eq!(state.active_tab, LootTab::Credentials);
         assert!(state.selected_screenshot.is_none());
         assert!(!state.cred_sort_desc);
+        assert!(state.filter_dirty);
+        assert!(state.filtered_loot.is_empty());
+    }
+
+    #[test]
+    fn build_filtered_loot_indices_returns_matching_positions() {
+        let loot = vec![
+            make_loot_item(LootKind::Credential, "alice hash", "AA", "2026-03-10T12:00:00Z"),
+            make_loot_item(LootKind::File, "report.pdf", "BB", "2026-03-11T12:00:00Z"),
+            make_loot_item(LootKind::Credential, "bob hash", "BB", "2026-03-12T12:00:00Z"),
+        ];
+
+        let indices = build_filtered_loot_indices(
+            &loot,
+            LootTypeFilter::Credentials,
+            CredentialSubFilter::All,
+            FileSubFilter::All,
+            "bb",
+            "",
+            "",
+            "hash",
+        );
+
+        assert_eq!(indices, vec![2]);
+    }
+
+    #[test]
+    fn loot_panel_refresh_filtered_loot_rebuilds_when_revision_changes() {
+        let mut panel = LootPanelState { active_tab: LootTab::Files, ..LootPanelState::default() };
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+        state.loot.push(make_loot_item(LootKind::File, "report.pdf", "AA", "2026-03-10T12:00:00Z"));
+        state.loot_revision = 1;
+
+        panel.refresh_filtered_loot(
+            &state,
+            CredentialSubFilter::All,
+            FileSubFilter::Document,
+            "",
+            "",
+            "",
+            "",
+        );
+        assert_eq!(panel.filtered_loot, vec![0]);
+        assert!(!panel.filter_dirty);
+
+        state.loot.push(make_loot_item(LootKind::File, "backup.zip", "AA", "2026-03-11T12:00:00Z"));
+        state.loot[1].file_path = Some("C:\\Temp\\backup.zip".to_owned());
+        state.loot_revision += 1;
+
+        panel.refresh_filtered_loot(
+            &state,
+            CredentialSubFilter::All,
+            FileSubFilter::Archive,
+            "",
+            "",
+            "",
+            "",
+        );
+
+        assert_eq!(panel.filtered_loot, vec![1]);
+        assert_eq!(panel.cached_loot_revision, state.loot_revision);
     }
 
     #[test]

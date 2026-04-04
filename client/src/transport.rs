@@ -528,6 +528,7 @@ pub(crate) struct AppState {
     pub(crate) process_lists: BTreeMap<String, AgentProcessListState>,
     pub(crate) listeners: Vec<ListenerSummary>,
     pub(crate) loot: Vec<LootItem>,
+    pub(crate) loot_revision: u64,
     /// Persistent notification / chat log with per-entry read tracking.
     pub(crate) event_log: EventLog,
     /// Usernames of operators currently seen online (used by the chat panel).
@@ -559,6 +560,7 @@ impl AppState {
             process_lists: BTreeMap::new(),
             listeners: Vec::new(),
             loot: Vec::new(),
+            loot_revision: 0,
             event_log: EventLog::new(DEFAULT_EVENT_LOG_MAX),
             online_operators: BTreeSet::new(),
             connected_operators: BTreeMap::new(),
@@ -1041,15 +1043,20 @@ impl AppState {
             Some(existing) => *existing = loot_item,
             None => self.loot.push(loot_item),
         }
+        self.loot_revision = self.loot_revision.wrapping_add(1);
     }
 
     fn remove_loot_matching(&mut self, info: &FlatInfo, fallback_kind: LootKind) {
         if let Some(item) = loot_item_from_flat_info(info, fallback_kind) {
+            let initial_len = self.loot.len();
             self.loot.retain(|existing| {
                 !(existing.kind == item.kind
                     && existing.agent_id == item.agent_id
                     && existing.name == item.name)
             });
+            if self.loot.len() != initial_len {
+                self.loot_revision = self.loot_revision.wrapping_add(1);
+            }
         }
     }
 

@@ -10,11 +10,11 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 1186 | 249 | 42 |
-| Bugs filed against | 202 | 40 | 10 |
+| Bugs filed against | 203 | 40 | 10 |
 | Bug rate (bugs/task) | 0.17 | 0.16 | 0.24 |
 | Quality score | 83% | 84% | 76% |
 
-*Bug rates: Claude 202/1186=0.1703→0.17, Codex 40/249=0.1606→0.16, Cursor 10/42=0.2381→0.24*
+*Bug rates: Claude 203/1186=0.1711→0.17, Codex 40/249=0.1606→0.16, Cursor 10/42=0.2381→0.24*
 
 ## Violation Breakdown
 
@@ -28,7 +28,7 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 26 | 25 | 1 |
 | Memory / resource leaks | 11 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 9 | 0 |
-| Test infrastructure / flakiness | 48 | 5 | 1 |
+| Test infrastructure / flakiness | 49 | 5 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 4 | 5 | 0 |
 | Correctness / pagination | 65 | 8 | 1 |
@@ -40,6 +40,28 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-04-04 16:00
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 1 | test infrastructure | Filed `red-cell-c2-0og72` (P1) — `specter/tests/e2e_integration.rs::MockCrypto::decrypt_callback` (line 99-119) reads `decrypted[0..4]` as BE u32 `payload_len`, but commit `8ce2f536` prefixed callbacks with 8-byte LE `seq_num` in both Specter and Phantom. The phantom twin (`red-cell-c2-1mw3m`) was filed previously; the specter copy was missed. Panic: index-out-of-range with computed `payload_len = 16,777,216` from `[0x01, 0x00, 0x00, 0x00]` (seq=1 LE interpreted as BE). Affects all specter e2e_integration scenarios. |
+| Codex | 0 | — | No Codex-attributed findings this review. |
+| Cursor | 0 | — | No Cursor-attributed findings this review. |
+
+Stale open P1 issues confirmed fixed in code (not yet closed in tracker): `red-cell-c2-asvj8` (CallbackSeqError import already removed), `red-cell-c2-l3aw2` (TeamserverState fields added to `service.rs` helper), `red-cell-c2-q562w` (WsEnvelope / `seal_ws_frame` / `open_ws_frame` / `derive_ws_hmac_key` now implemented in `common/src/crypto.rs`). Recommend closing these.
+
+Test suite status (packages tested individually to avoid nextest group-kill false positives):
+- `cargo check --workspace`: PASS
+- `cargo clippy --workspace -- -D warnings`: PASS
+- `red-cell-cli` (392 tests): **392 passed, 0 failed**
+- `red-cell` (2279 tests): **2275 passed, 4 failed** — 3× `webhook_delivery` + 1× `service_bridge_rate_limiter_is_independent_from_operator_ws`; all root-caused to `red-cell-c2-g2c7j` (WsEnvelope test-helper regression)
+- `phantom` (198 tests): **191 passed, 7 failed** — 6× `e2e_integration` (`red-cell-c2-1mw3m`), 1× `init_callback_flow` (`red-cell-c2-g2c7j`)
+- `specter` (516+ tests): still running at review close; `e2e_integration` failures expected for same reasons (`red-cell-c2-0og72`, `red-cell-c2-g2c7j`)
+
+Overall codebase health: **degraded** — no production-code defects found beyond already-tracked issues; two P1 test-infra regressions (`red-cell-c2-g2c7j` WsEnvelope wrapper, `red-cell-c2-1mw3m`/`red-cell-c2-0og72` seq_num prefix) block the integration suite for teamserver, phantom, and specter. Core AES-256-CTR/HKDF/Argon2id/WsEnvelope-HMAC path remains structurally sound. No `todo!`/`unimplemented!` in production Rust code. Clippy clean. DoH transport (760 LOC) and DNS listener (1529 LOC) both fully implemented.
+
+Biggest blindspot: **seq_num protocol rollout** (`red-cell-c2-1mw3m`, `red-cell-c2-0og72`) — same commit broke both agent test harnesses; e2e coverage for all agent commands is dark until fixed.
 
 ### Arch Review — 2026-04-04 09:00
 

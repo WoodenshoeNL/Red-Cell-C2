@@ -151,8 +151,28 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: PayloadCommands
             }
         },
 
-        PayloadCommands::Build { listener, arch, format, agent, sleep: sleep_secs, wait } => {
-            match build(client, &listener, &arch, &format, &agent, sleep_secs, wait).await {
+        PayloadCommands::Build {
+            listener,
+            arch,
+            format,
+            agent,
+            sleep: sleep_secs,
+            wait,
+            wait_timeout,
+        } => {
+            let build_timeout_secs = wait_timeout.unwrap_or(DEFAULT_BUILD_TIMEOUT_SECS);
+            match build(
+                client,
+                &listener,
+                &arch,
+                &format,
+                &agent,
+                sleep_secs,
+                wait,
+                build_timeout_secs,
+            )
+            .await
+            {
                 Ok(outcome) => match outcome {
                     BuildOutcome::Submitted(job) => match print_success(fmt, &job) {
                         Ok(()) => EXIT_SUCCESS,
@@ -247,6 +267,7 @@ async fn build(
     agent: &str,
     sleep_secs: Option<u64>,
     wait: bool,
+    timeout_secs: u64,
 ) -> Result<BuildOutcome, CliError> {
     validate_format(format)?;
 
@@ -268,7 +289,7 @@ async fn build(
     }
 
     // Poll until done or timeout.
-    let deadline = Instant::now() + Duration::from_secs(DEFAULT_BUILD_TIMEOUT_SECS);
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     let job_path = format!("/payloads/jobs/{}", submitted.job_id);
     let mut backoff = Backoff::new();
 
@@ -276,7 +297,7 @@ async fn build(
         if Instant::now() > deadline {
             return Err(CliError::Timeout(format!(
                 "build job {} did not complete within {} seconds",
-                submitted.job_id, DEFAULT_BUILD_TIMEOUT_SECS
+                submitted.job_id, timeout_secs
             )));
         }
 
@@ -511,7 +532,7 @@ mod tests {
         };
         let client = crate::client::ApiClient::new(&cfg).expect("client");
 
-        let result = build(&client, "http1", "x64", "exe", "phantom", None, false).await;
+        let result = build(&client, "http1", "x64", "exe", "phantom", None, false, DEFAULT_BUILD_TIMEOUT_SECS).await;
         assert!(result.is_ok(), "build must succeed: {result:?}");
 
         // Verify the request body contained the agent field.
@@ -548,7 +569,7 @@ mod tests {
         };
         let client = crate::client::ApiClient::new(&cfg).expect("client");
 
-        let _ = build(&client, "http1", "x64", "exe", "demon", None, false).await;
+        let _ = build(&client, "http1", "x64", "exe", "demon", None, false, DEFAULT_BUILD_TIMEOUT_SECS).await;
 
         let requests = server.received_requests().await.expect("requests");
         let body: serde_json::Value =

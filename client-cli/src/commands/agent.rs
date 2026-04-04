@@ -368,8 +368,8 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) 
             }
         },
 
-        AgentCommands::Exec { id, cmd, wait, timeout } => {
-            let timeout_secs = timeout.unwrap_or(DEFAULT_WAIT_TIMEOUT_SECS);
+        AgentCommands::Exec { id, cmd, wait, wait_timeout } => {
+            let timeout_secs = wait_timeout.unwrap_or(DEFAULT_WAIT_TIMEOUT_SECS);
             if wait {
                 match exec_wait(client, &id, &cmd, timeout_secs).await {
                     Ok(data) => match print_success(fmt, &data) {

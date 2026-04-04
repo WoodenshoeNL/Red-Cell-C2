@@ -224,7 +224,7 @@ pub enum AgentCommands {
     ///
     /// Examples:
     ///   red-cell-cli agent exec abc123 --cmd "whoami"
-    ///   red-cell-cli agent exec abc123 --cmd "ipconfig /all" --wait --timeout 30
+    ///   red-cell-cli agent exec abc123 --cmd "ipconfig /all" --wait --wait-timeout 30
     #[command(verbatim_doc_comment)]
     Exec {
         /// Agent ID
@@ -235,9 +235,10 @@ pub enum AgentCommands {
         /// Block until the agent returns output
         #[arg(long)]
         wait: bool,
-        /// Seconds to wait before returning exit code 5 (default: 60)
+        /// End-to-end seconds to wait for output before returning exit code 5 (default: 60).
+        /// Controls the polling loop budget, not the per-request HTTP timeout (--timeout).
         #[arg(long)]
-        timeout: Option<u64>,
+        wait_timeout: Option<u64>,
     },
 
     /// Retrieve pending task output from an agent.
@@ -449,6 +450,10 @@ pub enum PayloadCommands {
         /// Block until the build finishes (polls for completion)
         #[arg(long)]
         wait: bool,
+        /// End-to-end seconds to wait for the build before returning exit code 5 (default: 300).
+        /// Controls the polling loop budget, not the per-request HTTP timeout (--timeout).
+        #[arg(long)]
+        wait_timeout: Option<u64>,
     },
 
     /// List previously built payloads.
@@ -1111,6 +1116,103 @@ mod tests {
         match cli.command {
             Some(Commands::Payload { action: PayloadCommands::Build { agent, .. } }) => {
                 assert_eq!(agent, "phantom")
+            }
+            other => panic!("expected Payload::Build, got {other:?}"),
+        }
+    }
+
+    // ── --wait-timeout flags ─────────────────────────────────────────────────
+
+    #[test]
+    fn agent_exec_wait_timeout_is_captured() {
+        let cli = Cli::try_parse_from([
+            "red-cell-cli",
+            "agent",
+            "exec",
+            "abc123",
+            "--cmd",
+            "whoami",
+            "--wait",
+            "--wait-timeout",
+            "120",
+        ])
+        .expect("agent exec --wait --wait-timeout must parse");
+        match cli.command {
+            Some(Commands::Agent { action: AgentCommands::Exec { wait_timeout, .. } }) => {
+                assert_eq!(wait_timeout, Some(120));
+            }
+            other => panic!("expected Agent::Exec, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_exec_wait_timeout_defaults_to_none_when_omitted() {
+        let cli = Cli::try_parse_from([
+            "red-cell-cli",
+            "agent",
+            "exec",
+            "abc123",
+            "--cmd",
+            "whoami",
+            "--wait",
+        ])
+        .expect("agent exec --wait without --wait-timeout must parse");
+        match cli.command {
+            Some(Commands::Agent { action: AgentCommands::Exec { wait_timeout, .. } }) => {
+                assert!(
+                    wait_timeout.is_none(),
+                    "omitting --wait-timeout must yield None (default applied in handler)"
+                );
+            }
+            other => panic!("expected Agent::Exec, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn payload_build_wait_timeout_is_captured() {
+        let cli = Cli::try_parse_from([
+            "red-cell-cli",
+            "payload",
+            "build",
+            "--listener",
+            "http1",
+            "--arch",
+            "x86_64",
+            "--format",
+            "exe",
+            "--wait",
+            "--wait-timeout",
+            "600",
+        ])
+        .expect("payload build --wait --wait-timeout must parse");
+        match cli.command {
+            Some(Commands::Payload { action: PayloadCommands::Build { wait_timeout, .. } }) => {
+                assert_eq!(wait_timeout, Some(600));
+            }
+            other => panic!("expected Payload::Build, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn payload_build_wait_timeout_defaults_to_none_when_omitted() {
+        let cli = Cli::try_parse_from([
+            "red-cell-cli",
+            "payload",
+            "build",
+            "--listener",
+            "http1",
+            "--arch",
+            "x86_64",
+            "--format",
+            "exe",
+        ])
+        .expect("payload build without --wait-timeout must parse");
+        match cli.command {
+            Some(Commands::Payload { action: PayloadCommands::Build { wait_timeout, .. } }) => {
+                assert!(
+                    wait_timeout.is_none(),
+                    "omitting --wait-timeout must yield None (default applied in handler)"
+                );
             }
             other => panic!("expected Payload::Build, got {other:?}"),
         }

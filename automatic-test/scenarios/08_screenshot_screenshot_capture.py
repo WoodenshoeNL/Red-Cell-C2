@@ -94,6 +94,11 @@ def run(ctx):
             "no suitable screenshot target configured — "
             "need Windows target or Linux with DISPLAY/Xvfb"
         )
+    from lib.deploy import DeployError, preflight_ssh
+    try:
+        preflight_ssh(target)
+    except DeployError as exc:
+        raise ScenarioSkipped(str(exc)) from exc
 
     from lib.cli import (
         CliError,

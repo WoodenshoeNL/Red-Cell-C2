@@ -461,8 +461,13 @@ def run(ctx):
     """
     ran_any = False
     available_agents = set(ctx.env.get("agents", {}).get("available", ["demon"]))
+    from lib.deploy import DeployError, preflight_ssh
 
     if ctx.linux is not None:
+        try:
+            preflight_ssh(ctx.linux)
+        except DeployError as exc:
+            raise ScenarioSkipped(str(exc)) from exc
         ran_any = True
         # ── Demon pass (primary Linux baseline) ─────────────────────────────
         print("\n  === Agent pass: demon (Linux) ===")
@@ -478,6 +483,10 @@ def run(ctx):
         print("  [skip] ctx.linux is None — skipping Linux agent passes")
 
     if ctx.windows is not None:
+        try:
+            preflight_ssh(ctx.windows)
+        except DeployError as exc:
+            raise ScenarioSkipped(str(exc)) from exc
         ran_any = True
         # ── Demon Windows pass ───────────────────────────────────────────────
         print("\n  === Agent pass: demon (Windows) ===")

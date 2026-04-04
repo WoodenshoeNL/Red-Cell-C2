@@ -133,6 +133,62 @@ def check_toolchain(selected_ids: set[str], scenarios_dir: Path | None = None) -
     return all_ok
 
 
+# ── SSH target pre-flight ────────────────────────────────────────────────────
+
+def _ssh_deploy_scenario_ids(scenarios_dir: Path) -> frozenset[str]:
+    """Return IDs of every scenario that deploys payloads via SSH.
+
+    Scans scenario source text for ``from lib.deploy import`` so the set stays
+    accurate automatically as new deploy scenarios are added.
+    """
+    ids: set[str] = set()
+    for p in sorted(scenarios_dir.glob("[0-9][0-9]_*.py")):
+        if "from lib.deploy import" in p.read_text(encoding="utf-8"):
+            ids.add(p.stem[:2])
+    return frozenset(ids)
+
+
+def check_ssh_targets(
+    targets: list,
+    selected_ids: set,
+    scenarios_dir: Path | None = None,
+) -> None:
+    """Run SSH pre-flight connectivity checks for all configured targets.
+
+    Only checks when at least one SSH-deploy scenario is selected.
+    Prints a pass/fail line per target but does NOT abort — individual
+    scenarios raise :class:`lib.ScenarioSkipped` when a target is unreachable.
+
+    *targets* is a list of ``(label, TargetConfig | None)`` pairs.
+    *scenarios_dir* defaults to the ``scenarios/`` directory next to this
+    file; pass an explicit path in tests to point at a temporary directory.
+    """
+    if scenarios_dir is None:
+        scenarios_dir = Path(__file__).parent / "scenarios"
+
+    deploy_scenarios = _ssh_deploy_scenario_ids(scenarios_dir)
+    if not (selected_ids & deploy_scenarios):
+        return
+
+    from lib.deploy import DeployError, preflight_ssh
+
+    print(f"\n{'─' * 60}")
+    print("  SSH target pre-flight")
+    print(f"{'─' * 60}")
+
+    for label, target in targets:
+        if target is None:
+            print(f"  - {label}: not configured")
+            continue
+        try:
+            preflight_ssh(target)
+            print(f"  ✓ {label} ({target.host}): reachable")
+        except DeployError as exc:
+            print(f"  ✗ {label} ({target.host}): {exc}")
+        except Exception as exc:
+            print(f"  ✗ {label} ({target.host}): unexpected error — {exc}")
+
+
 # ── Unit tests ───────────────────────────────────────────────────────────────
 
 TESTS_DIR = Path(__file__).parent / "tests"
@@ -328,6 +384,21 @@ def main():
                 "tools listed above and retry."
             )
             sys.exit(1)
+
+    # Pre-flight: check SSH connectivity for all configured targets upfront so
+    # unreachable hosts are reported before any scenario begins.  This does not
+    # abort the run — scenarios raise ScenarioSkipped individually when a target
+    # they need is unreachable.
+    if not ctx.dry_run:
+        selected_ids = {sid for sid, _ in selected}
+        check_ssh_targets(
+            [
+                ("linux", linux_target),
+                ("windows", windows_target),
+                ("windows2", windows2_target),
+            ],
+            selected_ids,
+        )
 
     passed = failed = skipped = 0
     for sid, path in selected:

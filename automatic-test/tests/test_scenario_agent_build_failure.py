@@ -101,7 +101,8 @@ class TestScenario04(unittest.TestCase):
         ctx = _linux_ctx()
         # phantom not in available_agents; mock _run_for_agent so demon pass
         # succeeds without network.
-        with patch.object(self.mod, "_run_for_agent") as mock_run:
+        with patch("lib.deploy.preflight_ssh"), \
+             patch.object(self.mod, "_run_for_agent") as mock_run:
             self.mod.run(ctx)
         # _run_for_agent called exactly once — for the demon pass only.
         mock_run.assert_called_once()
@@ -126,7 +127,8 @@ class TestScenario05(unittest.TestCase):
 
     def test_specter_skipped_when_not_in_available(self) -> None:
         ctx = _windows_ctx()
-        with patch.object(self.mod, "_run_for_agent") as mock_run:
+        with patch("lib.deploy.preflight_ssh"), \
+             patch.object(self.mod, "_run_for_agent") as mock_run:
             self.mod.run(ctx)
         agent_types = [c.kwargs["agent_type"] for c in mock_run.call_args_list]
         self.assertIn("demon", agent_types)
@@ -157,7 +159,8 @@ class TestScenario06(unittest.TestCase):
     def test_phantom_skipped_when_not_in_available_linux(self) -> None:
         ctx = _linux_ctx()
         ctx.windows = None
-        with patch.object(self.mod, "_run_for_agent") as mock_run, \
+        with patch("lib.deploy.preflight_ssh"), \
+             patch.object(self.mod, "_run_for_agent") as mock_run, \
              patch.object(self.mod, "_run_for_agent_windows"):
             self.mod.run(ctx)
         agent_types = [c.kwargs["agent_type"] for c in mock_run.call_args_list]
@@ -166,7 +169,8 @@ class TestScenario06(unittest.TestCase):
     def test_specter_skipped_when_not_in_available_windows(self) -> None:
         ctx = _windows_ctx()
         ctx.linux = None
-        with patch.object(self.mod, "_run_for_agent"), \
+        with patch("lib.deploy.preflight_ssh"), \
+             patch.object(self.mod, "_run_for_agent"), \
              patch.object(self.mod, "_run_for_agent_windows") as mock_run:
             self.mod.run(ctx)
         agent_types = [c.kwargs["agent_type"] for c in mock_run.call_args_list]
@@ -197,7 +201,8 @@ class TestScenario07(unittest.TestCase):
     def test_phantom_skipped_when_not_in_available_linux(self) -> None:
         ctx = _linux_ctx()
         ctx.windows = None
-        with patch.object(self.mod, "_run_for_agent") as mock_run, \
+        with patch("lib.deploy.preflight_ssh"), \
+             patch.object(self.mod, "_run_for_agent") as mock_run, \
              patch.object(self.mod, "_run_for_agent_windows"):
             self.mod.run(ctx)
         agent_types = [c.kwargs["agent_type"] for c in mock_run.call_args_list]
@@ -206,7 +211,8 @@ class TestScenario07(unittest.TestCase):
     def test_specter_skipped_when_not_in_available_windows(self) -> None:
         ctx = _windows_ctx()
         ctx.linux = None
-        with patch.object(self.mod, "_run_for_agent"), \
+        with patch("lib.deploy.preflight_ssh"), \
+             patch.object(self.mod, "_run_for_agent"), \
              patch.object(self.mod, "_run_for_agent_windows") as mock_run:
             self.mod.run(ctx)
         agent_types = [c.kwargs["agent_type"] for c in mock_run.call_args_list]
@@ -255,7 +261,8 @@ class TestScenario15(unittest.TestCase):
 
     def test_phantom_skipped_when_not_in_available(self) -> None:
         ctx = _linux_ctx()
-        with patch.object(self.mod, "_run_for_agent") as mock_run:
+        with patch("lib.deploy.preflight_ssh"), \
+             patch.object(self.mod, "_run_for_agent") as mock_run:
             self.mod.run(ctx)
         agent_types = [c.kwargs["agent_type"] for c in mock_run.call_args_list]
         self.assertIn("demon", agent_types)

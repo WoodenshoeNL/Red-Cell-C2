@@ -4,14 +4,16 @@ tests/test_deploy.py — Unit tests for lib/deploy.py.
 Run with:  python3 -m unittest discover -s automatic-test/tests
 """
 
+import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 # Make lib/ importable when running from the automatic-test directory or repo root.
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from lib.deploy import TargetConfig, _quote_posix, _quote_powershell, _scp_args, _ssh_args
+from lib.deploy import DeployError, TargetConfig, _quote_posix, _quote_powershell, _scp_args, _ssh_args, preflight_ssh
 
 
 def _make_target(**kwargs) -> TargetConfig:
@@ -190,6 +192,76 @@ class TestQuotePowerShell(unittest.TestCase):
 
     def test_empty_path(self) -> None:
         self.assertEqual(_quote_powershell(""), "''")
+
+
+class TestPreflightSsh(unittest.TestCase):
+    """Tests for preflight_ssh connectivity check."""
+
+    def setUp(self) -> None:
+        self.target = _make_target(host="10.0.0.1", key="/home/user/.ssh/test_key")
+
+    def _make_completed(self, returncode: int, stderr: str = "") -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(
+            args=[], returncode=returncode, stdout="", stderr=stderr
+        )
+
+    def test_success_does_not_raise(self) -> None:
+        """preflight_ssh must not raise when ssh returns exit code 0."""
+        with patch("subprocess.run", return_value=self._make_completed(0)):
+            preflight_ssh(self.target)  # must not raise
+
+    def test_failure_raises_deploy_error(self) -> None:
+        """preflight_ssh must raise DeployError when ssh returns a non-zero exit code."""
+        with patch("subprocess.run", return_value=self._make_completed(255, "Connection refused")):
+            with self.assertRaises(DeployError) as ctx:
+                preflight_ssh(self.target)
+            self.assertIn("10.0.0.1", str(ctx.exception))
+            self.assertIn("not reachable via SSH", str(ctx.exception))
+            self.assertIn("targets.toml", str(ctx.exception))
+
+    def test_error_message_contains_host(self) -> None:
+        """DeployError message must identify the unreachable host."""
+        target = _make_target(host="192.168.99.5", key="/tmp/key")
+        with patch("subprocess.run", return_value=self._make_completed(1)):
+            with self.assertRaises(DeployError) as ctx:
+                preflight_ssh(target)
+            self.assertIn("192.168.99.5", str(ctx.exception))
+
+    def test_uses_connect_timeout_5(self) -> None:
+        """preflight_ssh must use ConnectTimeout=5, not the longer default."""
+        with patch("subprocess.run", return_value=self._make_completed(0)) as mock_run:
+            preflight_ssh(self.target)
+        call_args = mock_run.call_args[0][0]  # first positional arg is the command list
+        self.assertIn("ConnectTimeout=5", call_args)
+
+    def test_uses_batch_mode(self) -> None:
+        """preflight_ssh must always use BatchMode=yes."""
+        with patch("subprocess.run", return_value=self._make_completed(0)) as mock_run:
+            preflight_ssh(self.target)
+        call_args = mock_run.call_args[0][0]
+        self.assertIn("BatchMode=yes", call_args)
+
+    def test_runs_true_command(self) -> None:
+        """preflight_ssh must run 'true' on the remote host — no side-effects."""
+        with patch("subprocess.run", return_value=self._make_completed(0)) as mock_run:
+            preflight_ssh(self.target)
+        call_args = mock_run.call_args[0][0]
+        self.assertEqual(call_args[-1], "true")
+
+    def test_custom_port(self) -> None:
+        """preflight_ssh must pass the target's SSH port."""
+        target = _make_target(port=2222, key="/tmp/key")
+        with patch("subprocess.run", return_value=self._make_completed(0)) as mock_run:
+            preflight_ssh(target)
+        call_args = mock_run.call_args[0][0]
+        idx = call_args.index("-p")
+        self.assertEqual(call_args[idx + 1], "2222")
+
+    def test_timeout_error_bubbles_up(self) -> None:
+        """A subprocess.TimeoutExpired must propagate (not be swallowed)."""
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="ssh", timeout=10)):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                preflight_ssh(self.target)
 
 
 if __name__ == "__main__":

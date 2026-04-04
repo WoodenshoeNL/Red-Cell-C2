@@ -60,6 +60,38 @@ class DeployError(Exception):
     pass
 
 
+def preflight_ssh(target: TargetConfig) -> None:
+    """Check that the target host is reachable via SSH before deploying.
+
+    Uses a short ConnectTimeout (5 s) so that an unreachable host is detected
+    quickly instead of surfacing as a cryptic error after a full payload build.
+    Call this at the start of any scenario that deploys a payload via SSH.
+
+    Raises:
+        DeployError: if the SSH connection cannot be established.
+    """
+    result = subprocess.run(
+        [
+            "ssh",
+            "-p", str(target.port),
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=5",
+            "-i", target.key,
+            f"{target.user}@{target.host}",
+            "true",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if result.returncode != 0:
+        raise DeployError(
+            f"target {target.host} not reachable via SSH — "
+            "check targets.toml and network"
+        )
+
+
 def run_remote(target: TargetConfig, command: str, timeout: int = 30) -> str:
     """Run a shell command on the target via SSH and return stdout."""
     result = subprocess.run(

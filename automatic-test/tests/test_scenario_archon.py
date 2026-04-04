@@ -57,7 +57,8 @@ class TestRunArchonAvailabilityGate(unittest.TestCase):
 
         ctx = _make_ctx(env={"agents": {"available": ["demon", "archon"]}})
 
-        with patch("lib.cli.agent_list", return_value=[]), \
+        with patch("lib.deploy.preflight_ssh"), \
+             patch("lib.cli.agent_list", return_value=[]), \
              patch("lib.cli.listener_create"), \
              patch("lib.cli.listener_start"), \
              patch("lib.cli.listener_stop"), \

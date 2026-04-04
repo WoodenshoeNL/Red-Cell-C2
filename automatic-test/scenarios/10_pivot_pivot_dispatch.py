@@ -110,6 +110,13 @@ def run(ctx):
     if ctx.windows2 is None:
         raise ScenarioSkipped(_SKIP_NO_WINDOWS2)
 
+    from lib.deploy import DeployError, preflight_ssh
+    for _target in (ctx.windows, ctx.windows2):
+        try:
+            preflight_ssh(_target)
+        except DeployError as exc:
+            raise ScenarioSkipped(str(exc)) from exc
+
     # Both Windows slots are present — run the full SMB pivot chain.
     _run_smb_pivot(ctx, parent_target=ctx.windows, child_target=ctx.windows2)
 

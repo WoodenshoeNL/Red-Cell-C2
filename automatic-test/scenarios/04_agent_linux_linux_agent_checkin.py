@@ -204,6 +204,11 @@ def run(ctx):
     """
     if ctx.linux is None:
         raise ScenarioSkipped("ctx.linux is None — no Linux target configured")
+    from lib.deploy import DeployError, preflight_ssh
+    try:
+        preflight_ssh(ctx.linux)
+    except DeployError as exc:
+        raise ScenarioSkipped(str(exc)) from exc
 
     # ── Demon pass (primary baseline) ───────────────────────────────────────
     print("\n  === Agent pass: demon ===")

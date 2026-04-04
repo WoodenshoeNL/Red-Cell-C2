@@ -98,6 +98,11 @@ def run(ctx) -> None:
     available_agents = set(ctx.env.get("agents", {}).get("available", ["demon"]))
     if "archon" not in available_agents:
         raise ScenarioSkipped("'archon' not listed in agents.available")
+    from lib.deploy import DeployError, preflight_ssh
+    try:
+        preflight_ssh(ctx.windows)
+    except DeployError as exc:
+        raise ScenarioSkipped(str(exc)) from exc
 
     from lib.cli import (
         agent_exec,

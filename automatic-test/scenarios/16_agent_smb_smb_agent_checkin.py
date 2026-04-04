@@ -220,6 +220,11 @@ def run(ctx):
     """
     if ctx.windows is None:
         raise ScenarioSkipped("ctx.windows is None — no Windows target configured")
+    from lib.deploy import DeployError, preflight_ssh
+    try:
+        preflight_ssh(ctx.windows)
+    except DeployError as exc:
+        raise ScenarioSkipped(str(exc)) from exc
 
     # ── Demon pass (primary baseline) ───────────────────────────────────────
     print("\n  === SMB agent pass: demon ===")

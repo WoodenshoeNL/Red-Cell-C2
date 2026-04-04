@@ -435,19 +435,21 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) 
             }
         },
 
-        AgentCommands::Upload { id, src, dst } => match upload(client, &id, &src, &dst).await {
-            Ok(data) => match print_success(fmt, &data) {
-                Ok(()) => EXIT_SUCCESS,
+        AgentCommands::Upload { id, src, dst, max_upload_mb } => {
+            match upload(client, &id, &src, &dst, max_upload_mb).await {
+                Ok(data) => match print_success(fmt, &data) {
+                    Ok(()) => EXIT_SUCCESS,
+                    Err(e) => {
+                        print_error(&e).ok();
+                        e.exit_code()
+                    }
+                },
                 Err(e) => {
                     print_error(&e).ok();
                     e.exit_code()
                 }
-            },
-            Err(e) => {
-                print_error(&e).ok();
-                e.exit_code()
             }
-        },
+        }
 
         AgentCommands::Download { id, src, dst } => match download(client, &id, &src, &dst).await {
             Ok(data) => match print_success(fmt, &data) {
@@ -775,8 +777,13 @@ async fn kill(client: &ApiClient, id: &str, wait: bool) -> Result<KillResult, Cl
 /// Reads the local file at `src`, base64-encodes it, and POSTs to
 /// `POST /agents/{id}/upload` with `{ remote_path, content }`.
 ///
+/// The `max_upload_mb` parameter sets the upper bound on file size (in
+/// mebibytes) before the file is read into memory.  Files exceeding that
+/// limit are rejected early with [`CliError::InvalidArgs`].
+///
 /// # Errors
 ///
+/// Returns [`CliError::InvalidArgs`] if the file exceeds `max_upload_mb`.
 /// Returns [`CliError::General`] if the local file cannot be read, or
 /// propagates HTTP errors from the server.
 #[instrument(skip(client))]
@@ -785,9 +792,20 @@ async fn upload(
     id: &str,
     src: &str,
     dst: &str,
+    max_upload_mb: u64,
 ) -> Result<TransferResult, CliError> {
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD as BASE64;
+
+    let limit_bytes = max_upload_mb * 1024 * 1024;
+    let metadata = tokio::fs::metadata(src)
+        .await
+        .map_err(|e| CliError::General(format!("failed to stat local file {src}: {e}")))?;
+    if metadata.len() > limit_bytes {
+        return Err(CliError::InvalidArgs(format!(
+            "file too large for single upload ({max_upload_mb} MB limit); use chunked transfer",
+        )));
+    }
 
     let file_bytes = tokio::fs::read(src)
         .await
@@ -1609,6 +1627,59 @@ mod tests {
             exit_code,
             crate::error::EXIT_SUCCESS,
             "watch_output must exit with non-zero code when server is unreachable"
+        );
+    }
+
+    // ── upload size-limit ─────────────────────────────────────────────────────
+
+    /// A file that exceeds the limit must be rejected before any bytes are read.
+    /// We use limit = 0 MB (0 bytes) so even a 2-byte file triggers the guard.
+    #[tokio::test]
+    async fn upload_rejects_file_exceeding_size_limit() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut f = NamedTempFile::new().expect("tempfile");
+        f.write_all(b"ab").expect("write");
+        let path = f.path().to_str().expect("path utf-8").to_owned();
+
+        let cfg = mock_cfg("http://127.0.0.1:1");
+        let client = crate::client::ApiClient::new(&cfg).expect("build client");
+
+        let err = upload(&client, "agent1", &path, "/dst", 0)
+            .await
+            .expect_err("should reject oversized file");
+
+        assert!(matches!(err, CliError::InvalidArgs(_)), "expected InvalidArgs, got {err:?}");
+        assert!(err.to_string().contains("too large"), "message must mention 'too large': {err}");
+        assert!(
+            err.to_string().contains("chunked transfer"),
+            "message must mention 'chunked transfer': {err}"
+        );
+    }
+
+    /// A file within the limit must not be rejected by the size check; the
+    /// error must come from the HTTP layer (server unreachable), not from us.
+    #[tokio::test]
+    async fn upload_accepts_file_at_or_below_size_limit() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut f = NamedTempFile::new().expect("tempfile");
+        f.write_all(b"x").expect("write");
+        let path = f.path().to_str().expect("path utf-8").to_owned();
+
+        let cfg = mock_cfg("http://127.0.0.1:1");
+        let client = crate::client::ApiClient::new(&cfg).expect("build client");
+
+        let err = upload(&client, "agent1", &path, "/dst", 1)
+            .await
+            .expect_err("should fail on HTTP, not size check");
+
+        // The size guard must NOT have fired — only the HTTP layer failed.
+        assert!(
+            !matches!(err, CliError::InvalidArgs(_)),
+            "should not reject file within size limit, got {err:?}"
         );
     }
 }

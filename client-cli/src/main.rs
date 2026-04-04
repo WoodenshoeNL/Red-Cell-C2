@@ -286,6 +286,11 @@ pub enum AgentCommands {
         /// Destination path on the remote agent
         #[arg(long)]
         dst: String,
+        /// Maximum upload size in mebibytes (default: 100 MiB).
+        /// Uploads exceeding this limit are rejected before reading the file.
+        /// For larger files use chunked transfer.
+        #[arg(long, default_value_t = 100)]
+        max_upload_mb: u64,
     },
 
     /// Download a file from an agent to local disk.

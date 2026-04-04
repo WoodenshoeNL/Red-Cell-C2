@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1173 | 249 | 42 |
-| Bugs filed against | 192 | 40 | 10 |
-| Bug rate (bugs/task) | 0.16 | 0.16 | 0.24 |
-| Quality score | 84% | 84% | 76% |
+| Tasks closed | 1175 | 249 | 42 |
+| Bugs filed against | 194 | 40 | 10 |
+| Bug rate (bugs/task) | 0.17 | 0.16 | 0.24 |
+| Quality score | 83% | 84% | 76% |
 
-*Bug rates: Claude 192/1173=0.1637→0.16, Codex 40/249=0.1606→0.16, Cursor 10/42=0.2381→0.24*
+*Bug rates: Claude 194/1175=0.1651→0.17, Codex 40/249=0.1606→0.16, Cursor 10/42=0.2381→0.24*
 
 ## Violation Breakdown
 
@@ -28,10 +28,10 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 25 | 25 | 1 |
 | Memory / resource leaks | 11 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 9 | 0 |
-| Test infrastructure / flakiness | 44 | 5 | 1 |
+| Test infrastructure / flakiness | 45 | 5 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 4 | 5 | 0 |
-| Correctness / pagination | 64 | 8 | 1 |
+| Correctness / pagination | 65 | 8 | 1 |
 | Workflow / close-hygiene | 32 | 0 | 0 |
 | Code reuse / duplication | 10 | 0 | 0 |
 
@@ -5725,3 +5725,13 @@ Build: `cargo check --workspace` passed. `cargo clippy --workspace -- -D warning
 | Cursor | 0 | 0 | No activity in range. |
 
 Build: `cargo check --workspace` passed. `cargo clippy --workspace -- -D warnings` passed. `cargo nextest run --workspace` could not be completed cleanly — dev agent working on `red-cell-c2-i7vz3` (GET /health endpoint) has partially modified `TeamserverState` in-flight; `client-cli/tests/agent_api_contract.rs` and `client-cli/tests/audit_api_contract.rs` miss the new fields, causing test-compilation failures. Pre-existing bug `red-cell-c2-l3aw2` (P1) covers this. Committed code at HEAD is clean.
+
+### QA Review — 2026-04-04 — 3eacaf6d..32b9980d
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 2 | Closed red-cell-c2-6jvm7 (file download progress UI) and red-cell-c2-0ehc5 (Python custom tabs). Bugs: red-cell-c2-v23y3 (client-cli/tests/payload_api_contract.rs missing TeamserverState fields — test suite fails to compile), red-cell-c2-npqbj (save_completed_download silently drops write errors — operator gets no feedback on failure). |
+| Codex | 0 | 0 | No activity this review period. |
+| Cursor | 0 | 0 | No activity this review period. |
+
+Build: cargo check passed; cargo nextest failed (pre-existing test compilation break in client-cli, red-cell-c2-v23y3); clippy clean.

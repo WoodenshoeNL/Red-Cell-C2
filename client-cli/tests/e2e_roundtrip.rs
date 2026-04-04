@@ -310,6 +310,9 @@ async fn spawn_server() -> TestHarness {
         login_rate_limiter: LoginRateLimiter::new(),
         shutdown: ShutdownController::new(),
         service_bridge: None,
+        started_at: std::time::Instant::now(),
+        plugins_loaded: 0,
+        plugins_failed: 0,
     };
 
     let tcp = TcpListener::bind("127.0.0.1:0").await.expect("bind ephemeral port");

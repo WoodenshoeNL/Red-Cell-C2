@@ -628,7 +628,7 @@ async fn fetch_output(
             job_id: e.task_id.unwrap_or_else(|| e.id.to_string()),
             command: e.command_line,
             output: if e.output.is_empty() { e.message } else { e.output },
-            exit_code: None,
+            exit_code: e.exit_code,
             created_at: e.received_at,
         })
         .collect())

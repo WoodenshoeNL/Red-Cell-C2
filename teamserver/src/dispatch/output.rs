@@ -32,6 +32,16 @@ pub(super) async fn handle_command_output_callback(
     if output.is_empty() {
         return Ok(None);
     }
+    // The Red Cell Specter agent appends a trailing i32 (LE) exit code after
+    // the length-prefixed output string.  Original Havoc demons do not send
+    // this field, so we read it only when bytes remain in the payload.
+    let mut extra = BTreeMap::new();
+    if !parser.is_empty() {
+        if let Ok(raw) = parser.read_u32("command exit code") {
+            #[allow(clippy::cast_possible_wrap)]
+            extra.insert("ExitCode".to_owned(), serde_json::Value::Number((raw as i32).into()));
+        }
+    }
     let context = loot_context(registry, agent_id, request_id).await;
     broadcast_and_persist_agent_response(
         database,
@@ -42,7 +52,7 @@ pub(super) async fn handle_command_output_callback(
             request_id,
             kind: "Good".to_owned(),
             message: format!("Received Output [{} bytes]:", output.len()),
-            extra: BTreeMap::new(),
+            extra,
             output: output.clone(),
         },
         &context,
@@ -2097,5 +2107,59 @@ mod tests {
             matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
             "expected InvalidCallbackPayload, got {err:?}"
         );
+    }
+
+    /// Build a payload with a trailing i32 LE exit code appended after the
+    /// length-prefixed output string (Specter agent extended format).
+    fn output_payload_with_exit_code(text: &str, exit_code: i32) -> Vec<u8> {
+        let mut buf = output_payload(text);
+        buf.extend_from_slice(&exit_code.to_le_bytes());
+        buf
+    }
+
+    #[tokio::test]
+    async fn command_output_stores_exit_code_from_extended_payload() {
+        let (registry, database, events) = setup_with_db().await;
+        let text = "error output";
+        let payload = output_payload_with_exit_code(text, 42);
+
+        let result = handle_command_output_callback(
+            &registry, &database, &events, None, AGENT_ID, REQUEST_ID, &payload,
+        )
+        .await;
+        assert!(result.is_ok());
+
+        let records =
+            database.agent_responses().list_for_agent(AGENT_ID).await.expect("list records");
+        assert_eq!(records.len(), 1);
+        let extra = records[0].extra.as_ref().expect("extra must be present");
+        let stored_exit_code =
+            extra.get("ExitCode").and_then(Value::as_i64).expect("ExitCode key must exist");
+        assert_eq!(stored_exit_code, 42, "exit code must be 42");
+    }
+
+    #[tokio::test]
+    async fn command_output_without_exit_code_stores_no_exit_code_in_extra() {
+        let (registry, database, events) = setup_with_db().await;
+        let text = "normal output";
+        // Payload without trailing exit code — simulates legacy Havoc demon.
+        let payload = output_payload(text);
+
+        let result = handle_command_output_callback(
+            &registry, &database, &events, None, AGENT_ID, REQUEST_ID, &payload,
+        )
+        .await;
+        assert!(result.is_ok());
+
+        let records =
+            database.agent_responses().list_for_agent(AGENT_ID).await.expect("list records");
+        assert_eq!(records.len(), 1);
+        // extra may be present (carries Type/Message/RequestID) but must not have ExitCode.
+        if let Some(extra) = &records[0].extra {
+            assert!(
+                extra.get("ExitCode").is_none(),
+                "ExitCode must not be present when payload has no trailing exit code"
+            );
+        }
     }
 }

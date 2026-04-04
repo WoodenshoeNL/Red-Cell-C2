@@ -23,6 +23,46 @@ pub(crate) struct OutputWireEntry {
     pub(crate) output: String,
     pub(crate) command_line: Option<String>,
     pub(crate) received_at: String,
+    /// Process exit code surfaced by the teamserver when the agent reported one.
+    #[serde(default)]
+    pub(crate) exit_code: Option<i32>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `OutputWireEntry` deserialises `exit_code` when the server sends it.
+    #[test]
+    fn output_wire_entry_deserialises_exit_code() {
+        let json = serde_json::json!({
+            "id": 42,
+            "task_id": "t1",
+            "message": "Received Output [3 bytes]:",
+            "output": "err",
+            "command_line": "exit 1",
+            "received_at": "2026-04-04T00:00:00Z",
+            "exit_code": 1
+        });
+        let entry: OutputWireEntry = serde_json::from_value(json).expect("deserialise");
+        assert_eq!(entry.exit_code, Some(1));
+    }
+
+    /// `OutputWireEntry` sets `exit_code` to `None` when the field is absent
+    /// (legacy Havoc demon responses do not include it).
+    #[test]
+    fn output_wire_entry_defaults_exit_code_to_none_when_absent() {
+        let json = serde_json::json!({
+            "id": 7,
+            "task_id": null,
+            "message": "Received Output [2 bytes]:",
+            "output": "ok",
+            "command_line": null,
+            "received_at": "2026-04-04T00:00:00Z"
+        });
+        let entry: OutputWireEntry = serde_json::from_value(json).expect("deserialise");
+        assert_eq!(entry.exit_code, None);
+    }
 }
 
 /// Build the output polling URL with an optional numeric cursor.

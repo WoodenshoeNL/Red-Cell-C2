@@ -641,6 +641,12 @@ struct AgentOutputEntry {
     operator: Option<String>,
     /// Response timestamp string.
     received_at: String,
+    /// Process exit code, when the agent reported one.
+    ///
+    /// Present for Red Cell Specter/Phantom shell command responses.
+    /// `None` for entries from legacy Havoc demons or non-shell callbacks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exit_code: Option<i32>,
 }
 
 /// Paginated agent output response.
@@ -1627,17 +1633,26 @@ async fn get_agent_output(
 
     let entries: Vec<AgentOutputEntry> = records
         .into_iter()
-        .map(|r| AgentOutputEntry {
-            id: r.id.unwrap_or(0),
-            task_id: r.task_id,
-            command_id: r.command_id,
-            request_id: r.request_id,
-            response_type: r.response_type,
-            message: r.message,
-            output: r.output,
-            command_line: r.command_line,
-            operator: r.operator,
-            received_at: r.received_at,
+        .map(|r| {
+            let exit_code = r
+                .extra
+                .as_ref()
+                .and_then(|v| v.get("ExitCode"))
+                .and_then(serde_json::Value::as_i64)
+                .map(|c| c as i32);
+            AgentOutputEntry {
+                id: r.id.unwrap_or(0),
+                task_id: r.task_id,
+                command_id: r.command_id,
+                request_id: r.request_id,
+                response_type: r.response_type,
+                message: r.message,
+                output: r.output,
+                command_line: r.command_line,
+                operator: r.operator,
+                received_at: r.received_at,
+                exit_code,
+            }
         })
         .collect();
 
@@ -11150,6 +11165,98 @@ mod tests {
         let body = read_json(response).await;
         assert_eq!(body["total"], 1);
         assert_eq!(body["entries"][0]["task_id"], "t2");
+    }
+
+    #[tokio::test]
+    async fn get_agent_output_surfaces_exit_code_from_extra() {
+        let database = Database::connect_in_memory().await.expect("database");
+        let agent_id = 0xDEAD_0004u32;
+
+        let (app, registry, _) = test_router_with_database(
+            database.clone(),
+            Some((60, "reader", "secret-reader", OperatorRole::Operator)),
+        )
+        .await;
+        registry.insert(sample_agent(agent_id)).await.expect("insert");
+
+        let record = crate::database::AgentResponseRecord {
+            id: None,
+            agent_id,
+            command_id: u32::from(red_cell_common::demon::DemonCommand::CommandOutput),
+            request_id: 7,
+            response_type: "Good".to_owned(),
+            message: "Received Output [3 bytes]:".to_owned(),
+            output: "err".to_owned(),
+            command_line: Some("exit 1".to_owned()),
+            task_id: Some("task-exit1".to_owned()),
+            operator: None,
+            received_at: "2026-04-04T00:00:00Z".to_owned(),
+            extra: Some(serde_json::json!({"ExitCode": 1})),
+        };
+        database.agent_responses().create(&record).await.expect("create response");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/agents/DEAD0004/output")
+                    .header(API_KEY_HEADER, "secret-reader")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["total"], 1);
+        assert_eq!(body["entries"][0]["exit_code"], 1);
+        assert_eq!(body["entries"][0]["task_id"], "task-exit1");
+    }
+
+    #[tokio::test]
+    async fn get_agent_output_omits_exit_code_when_absent() {
+        let database = Database::connect_in_memory().await.expect("database");
+        let agent_id = 0xDEAD_0005u32;
+
+        let (app, registry, _) = test_router_with_database(
+            database.clone(),
+            Some((60, "reader", "secret-reader", OperatorRole::Operator)),
+        )
+        .await;
+        registry.insert(sample_agent(agent_id)).await.expect("insert");
+
+        let record = crate::database::AgentResponseRecord {
+            id: None,
+            agent_id,
+            command_id: u32::from(red_cell_common::demon::DemonCommand::CommandOutput),
+            request_id: 8,
+            response_type: "Good".to_owned(),
+            message: "Received Output [2 bytes]:".to_owned(),
+            output: "ok".to_owned(),
+            command_line: Some("whoami".to_owned()),
+            task_id: Some("task-legacy".to_owned()),
+            operator: None,
+            received_at: "2026-04-04T00:00:00Z".to_owned(),
+            extra: None,
+        };
+        database.agent_responses().create(&record).await.expect("create response");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/agents/DEAD0005/output")
+                    .header(API_KEY_HEADER, "secret-reader")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["total"], 1);
+        // `exit_code` must be absent when not known (skip_serializing_if = "Option::is_none").
+        assert!(body["entries"][0].get("exit_code").is_none());
     }
 
     #[tokio::test]

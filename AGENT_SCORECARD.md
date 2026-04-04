@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1178 | 249 | 42 |
-| Bugs filed against | 198 | 40 | 10 |
+| Tasks closed | 1181 | 249 | 42 |
+| Bugs filed against | 200 | 40 | 10 |
 | Bug rate (bugs/task) | 0.17 | 0.16 | 0.24 |
 | Quality score | 83% | 84% | 76% |
 
-*Bug rates: Claude 198/1178=0.1681→0.17, Codex 40/249=0.1606→0.16, Cursor 10/42=0.2381→0.24*
+*Bug rates: Claude 200/1181=0.1694→0.17, Codex 40/249=0.1606→0.16, Cursor 10/42=0.2381→0.24*
 
 ## Violation Breakdown
 
@@ -25,14 +25,14 @@ Each loop run updates the running totals and appends a review entry.
 | Clippy warnings | 11 | 0 | 1 |
 | Protocol errors | 30 | 32 | 3 |
 | Security issues | 59 | 39 | 0 |
-| Architecture drift | 25 | 25 | 1 |
+| Architecture drift | 26 | 25 | 1 |
 | Memory / resource leaks | 11 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 9 | 0 |
 | Test infrastructure / flakiness | 48 | 5 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 4 | 5 | 0 |
 | Correctness / pagination | 65 | 8 | 1 |
-| Workflow / close-hygiene | 32 | 0 | 0 |
+| Workflow / close-hygiene | 33 | 0 | 0 |
 | Code reuse / duplication | 10 | 0 | 0 |
 
 ---
@@ -5781,3 +5781,13 @@ Biggest blindspot: **broken test suite compilation** (two distinct root causes) 
 | Cursor | 0 | 0 | No activity in range. |
 
 Build: `cargo check --workspace` passed. `cargo clippy --workspace -- -D warnings` passed. `cargo nextest run --workspace` failed — pre-existing test compilation break in `client-cli/tests/` (missing `started_at`/`plugins_loaded`/`plugins_failed` in `TeamserverState` initializers; tracked as `red-cell-c2-l3aw2`, `red-cell-c2-v23y3`, `red-cell-c2-ql5pp`). Fix is ready in dev agent stash. Issue `red-cell-c2-q562w` (unimplemented crypto functions) is now stale — the functions were implemented in `bfb13938` and should be closed.
+
+### QA Review — 2026-04-04 15:30 — 099046ca..9d3451ba
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 3 | 2 | Closed `red-cell-c2-ua2ex` (exit_code propagation through Specter→teamserver→client-cli), `red-cell-c2-cs5ai` (screenshot routing), `red-cell-c2-umhx3` (HTTP 429 backoff). Filed `red-cell-c2-obts8` (P2, zone:client-cli): `EXIT_RATE_LIMITED=6` adds an undocumented exit code not in the AGENTS.md spec (spec only defines 0–5). Filed `red-cell-c2-0q8cv` (P1, zone:client-cli): screenshot case-insensitive fix was closed in issues.jsonl only (`3f2edd15`) — actual code change is sitting in stash@{0} on the dev VM, never committed; bug is still present in HEAD. |
+| Codex | 0 | 0 | No activity in range. |
+| Cursor | 0 | 0 | No activity in range. |
+
+Build: `cargo check --workspace` passed. `cargo clippy --workspace -- -D warnings` passed (clean). `cargo nextest run --workspace` — client-cli bin tests 299/299 passed; teamserver `agent_deletion_cleanup` (4 tests) and specter `init_callback_flow` (1 test) fail with `missing field 'Head'` — pre-existing, tracked as `red-cell-c2-g2c7j` (WsEnvelope unwrapping not implemented in test helpers). No new build or clippy issues introduced in this range.

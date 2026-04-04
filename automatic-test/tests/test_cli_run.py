@@ -1,10 +1,11 @@
 """
-Unit tests for lib.cli._run — stderr structured-error parsing.
+Unit tests for lib.cli._run — stderr structured-error parsing and subprocess timeout.
 """
 
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -114,6 +115,59 @@ class TestRunStderrStructuredError(unittest.TestCase):
         with self._patch_run(result):
             data = _run(_CFG, "status")
         self.assertEqual(data, {"status": "running"})
+
+
+class TestRunSubprocessTimeout(unittest.TestCase):
+    """_run must raise CliError(SUBPROCESS_TIMEOUT) when the subprocess hangs."""
+
+    def _patch_run_timeout(self):
+        return patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="red-cell-cli", timeout=40))
+
+    def test_timeout_raises_cli_error(self) -> None:
+        with self._patch_run_timeout():
+            with self.assertRaises(CliError) as ctx:
+                _run(_CFG, "status")
+        exc = ctx.exception
+        self.assertEqual(exc.code, "SUBPROCESS_TIMEOUT")
+        self.assertIn("did not exit within", exc.message)
+
+    def test_timeout_message_includes_timeout_value(self) -> None:
+        cfg = CliConfig(server="https://127.0.0.1:40056", token="tok", timeout=30)
+        # subprocess_timeout = min(30 + 10, 120) = 40
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="red-cell-cli", timeout=40)):
+            with self.assertRaises(CliError) as ctx:
+                _run(cfg, "status")
+        self.assertIn("40s", ctx.exception.message)
+
+    def test_subprocess_timeout_derived_from_cfg_timeout_plus_buffer(self) -> None:
+        """subprocess.run must be called with timeout = min(cfg.timeout + 10, max_subprocess_secs)."""
+        cfg = CliConfig(server="https://127.0.0.1:40056", token="tok", timeout=25, max_subprocess_secs=120)
+        result = _make_result(
+            stdout=json.dumps({"ok": True, "data": {}}),
+            returncode=0,
+        )
+        with patch("subprocess.run", return_value=result) as mock_run:
+            _run(cfg, "status")
+        _, kwargs = mock_run.call_args
+        self.assertEqual(kwargs["timeout"], 35)  # 25 + 10
+
+    def test_subprocess_timeout_capped_by_max_subprocess_secs(self) -> None:
+        """subprocess_timeout must not exceed max_subprocess_secs."""
+        cfg = CliConfig(server="https://127.0.0.1:40056", token="tok", timeout=200, max_subprocess_secs=60)
+        result = _make_result(
+            stdout=json.dumps({"ok": True, "data": {}}),
+            returncode=0,
+        )
+        with patch("subprocess.run", return_value=result) as mock_run:
+            _run(cfg, "status")
+        _, kwargs = mock_run.call_args
+        self.assertEqual(kwargs["timeout"], 60)  # capped at max_subprocess_secs
+
+    def test_timeout_exit_code_is_minus_one(self) -> None:
+        with self._patch_run_timeout():
+            with self.assertRaises(CliError) as ctx:
+                _run(_CFG, "status")
+        self.assertEqual(ctx.exception.exit_code, -1)
 
 
 if __name__ == "__main__":

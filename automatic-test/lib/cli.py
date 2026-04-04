@@ -45,6 +45,9 @@ class CliConfig:
     token: str
     binary: str = "red-cell-cli"
     timeout: int = 30
+    #: Hard ceiling on subprocess wall-clock time (seconds).  The per-invocation
+    #: timeout is ``min(timeout + 10, max_subprocess_secs)``.
+    max_subprocess_secs: int = 120
     extra_env: dict[str, str] = field(default_factory=dict)
 
 
@@ -54,12 +57,26 @@ def _run(cfg: CliConfig, *args: str) -> dict[str, Any]:
     env["RC_TOKEN"] = cfg.token
     env.update(cfg.extra_env)
 
+    # The CLI's --timeout flag controls how long the binary waits for a server
+    # response.  We add a 10-second buffer so the subprocess is killed only
+    # after the CLI has had a chance to time out gracefully.  The result is
+    # capped by max_subprocess_secs so runaway --timeout values can't block
+    # the test suite indefinitely.
+    subprocess_timeout = min(cfg.timeout + 10, cfg.max_subprocess_secs)
+
     try:
         result = subprocess.run(
             [cfg.binary, "--output", "json", "--timeout", str(cfg.timeout), *args],
             capture_output=True,
             text=True,
             env=env,
+            timeout=subprocess_timeout,
+        )
+    except subprocess.TimeoutExpired:
+        raise CliError(
+            "SUBPROCESS_TIMEOUT",
+            f"CLI subprocess did not exit within expected timeout ({subprocess_timeout}s)",
+            -1,
         )
     except FileNotFoundError:
         raise CliError(

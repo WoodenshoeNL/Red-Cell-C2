@@ -33,8 +33,10 @@ def _resolve_api_key(env: dict) -> str:
 
 def make_cli_config(env: dict) -> CliConfig:
     """Build the CLI wrapper config from env.toml."""
+    timeouts = env.get("timeouts", {})
     return CliConfig(
         server=_resolve_cli_server(env),
         token=_resolve_api_key(env),
-        timeout=env.get("timeouts", {}).get("command_output", 30),
+        timeout=timeouts.get("command_output", 30),
+        max_subprocess_secs=timeouts.get("max_cli_subprocess_secs", 120),
     )

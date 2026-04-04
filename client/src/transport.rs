@@ -433,12 +433,23 @@ pub(crate) struct DownloadProgress {
     pub(crate) state: String,
 }
 
+/// Holds the content of a completed agent file download, ready to be saved to disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CompletedDownload {
+    /// Remote path the file was downloaded from.
+    pub(crate) remote_path: String,
+    /// Raw file bytes.
+    pub(crate) data: Vec<u8>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct AgentFileBrowserState {
     pub(crate) current_dir: Option<String>,
     pub(crate) directories: BTreeMap<String, Vec<FileBrowserEntry>>,
     pub(crate) downloads: BTreeMap<String, DownloadProgress>,
     pub(crate) status_message: Option<String>,
+    /// Completed downloads awaiting a save-to-disk dialog, keyed by file_id.
+    pub(crate) completed_downloads: BTreeMap<String, CompletedDownload>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1053,7 +1064,24 @@ impl AppState {
                         }
                     }
                 }
-                "download" | "loot-new" => {
+                "download" => {
+                    if let Some(file_id) = extra_string(&info.extra, "FileID") {
+                        browser.downloads.remove(&file_id);
+                        // Capture completed download data for the save-to-disk dialog.
+                        if let Some(encoded) = extra_string(&info.extra, "MiscData") {
+                            if let Ok(data) =
+                                base64::engine::general_purpose::STANDARD.decode(encoded.trim())
+                            {
+                                let remote_path =
+                                    extra_string(&info.extra, "FileName").unwrap_or_default();
+                                browser
+                                    .completed_downloads
+                                    .insert(file_id, CompletedDownload { remote_path, data });
+                            }
+                        }
+                    }
+                }
+                "loot-new" => {
                     if let Some(file_id) = extra_string(&info.extra, "FileID") {
                         browser.downloads.remove(&file_id);
                     }
@@ -2973,6 +3001,64 @@ mod tests {
             state.file_browsers.get("ABCD1234").unwrap_or_else(|| panic!("browser state"));
         assert_eq!(browser.downloads.len(), 1);
         assert_eq!(browser.downloads["0000002A"].current_size, 512);
+    }
+
+    #[test]
+    fn completed_download_stores_data_and_removes_in_progress_entry() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+
+        // Seed an in-progress download entry.
+        let mut progress_extra = BTreeMap::new();
+        progress_extra.insert(
+            "MiscType".to_owned(),
+            serde_json::Value::String("download-progress".to_owned()),
+        );
+        progress_extra
+            .insert("FileID".to_owned(), serde_json::Value::String("DEADBEEF".to_owned()));
+        progress_extra
+            .insert("FileName".to_owned(), serde_json::Value::String("C:\\secret.txt".to_owned()));
+        progress_extra.insert("CurrentSize".to_owned(), serde_json::Value::String("4".to_owned()));
+        progress_extra.insert("ExpectedSize".to_owned(), serde_json::Value::String("4".to_owned()));
+        progress_extra
+            .insert("State".to_owned(), serde_json::Value::String("InProgress".to_owned()));
+        state.apply_operator_message(OperatorMessage::AgentResponse(Message {
+            head: head(EventCode::Session),
+            info: AgentResponseInfo {
+                demon_id: "abcd1234".to_owned(),
+                command_id: u32::from(DemonCommand::CommandFs).to_string(),
+                output: String::new(),
+                command_line: Some("download C:\\secret.txt".to_owned()),
+                extra: progress_extra,
+            },
+        }));
+
+        // Now send the completion event (MiscType = "download") with file content.
+        let content_bytes = b"data";
+        let content_b64 = base64::engine::general_purpose::STANDARD.encode(content_bytes);
+        let mut done_extra = BTreeMap::new();
+        done_extra.insert("MiscType".to_owned(), serde_json::Value::String("download".to_owned()));
+        done_extra.insert("FileID".to_owned(), serde_json::Value::String("DEADBEEF".to_owned()));
+        done_extra
+            .insert("FileName".to_owned(), serde_json::Value::String("C:\\secret.txt".to_owned()));
+        done_extra.insert("MiscData".to_owned(), serde_json::Value::String(content_b64.clone()));
+        state.apply_operator_message(OperatorMessage::AgentResponse(Message {
+            head: head(EventCode::Session),
+            info: AgentResponseInfo {
+                demon_id: "abcd1234".to_owned(),
+                command_id: u32::from(DemonCommand::CommandFs).to_string(),
+                output: String::new(),
+                command_line: None,
+                extra: done_extra,
+            },
+        }));
+
+        let browser = state.file_browsers.get("ABCD1234").expect("browser state should exist");
+        // In-progress entry must be removed.
+        assert!(browser.downloads.is_empty(), "in-progress entry should be removed on completion");
+        // Completed download must be stored.
+        let completed = browser.completed_downloads.get("DEADBEEF").expect("completed download");
+        assert_eq!(completed.remote_path, "C:\\secret.txt");
+        assert_eq!(completed.data, content_bytes);
     }
 
     #[test]

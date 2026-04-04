@@ -233,6 +233,9 @@ struct AgentFileBrowserUiState {
     selected_path: Option<String>,
     pending_dirs: BTreeSet<String>,
     status_message: Option<String>,
+    /// File IDs of completed downloads that have been saved or dismissed by the operator.
+    /// Entries here are hidden from the "completed downloads" list.
+    dismissed_downloads: BTreeSet<String>,
 }
 
 #[derive(Debug, Default)]
@@ -3656,21 +3659,7 @@ impl ClientApp {
 
             // ── Downloads progress ────────────────────────────────
             if let Some(browser) = browser {
-                if !browser.downloads.is_empty() {
-                    ui.add_space(8.0);
-                    ui.separator();
-                    ui.label(RichText::new("Downloads").strong());
-                    for progress in browser.downloads.values() {
-                        let denominator = progress.expected_size.max(1) as f32;
-                        let fraction = (progress.current_size as f32 / denominator).clamp(0.0, 1.0);
-                        ui.add(egui::ProgressBar::new(fraction).text(format!(
-                            "{} [{} / {}]",
-                            progress.remote_path,
-                            human_size(progress.current_size),
-                            human_size(progress.expected_size)
-                        )));
-                    }
-                }
+                self.render_download_progress_section(ui, agent_id, browser);
             }
         });
     }
@@ -4048,22 +4037,126 @@ impl ClientApp {
                 ui.label("Request the current working directory to initialize the browser.");
             }
 
-            if !browser.downloads.is_empty() {
-                ui.add_space(8.0);
-                ui.label(RichText::new("Downloads").strong());
-                for progress in browser.downloads.values() {
-                    let denominator = progress.expected_size.max(1) as f32;
-                    let fraction = (progress.current_size as f32 / denominator).clamp(0.0, 1.0);
-                    ui.add(egui::ProgressBar::new(fraction).text(format!(
-                        "{} [{} / {}]",
-                        progress.remote_path,
-                        human_size(progress.current_size),
-                        human_size(progress.expected_size)
-                    )));
-                }
-            }
+            self.render_download_progress_section(ui, agent_id, browser);
         } else {
             ui.label("No filesystem state has been received for this agent yet.");
+        }
+    }
+
+    /// Renders the downloads-in-progress section of the file browser.
+    ///
+    /// For each in-progress download:
+    /// - Shows a status icon (⏳ in progress, ❌ stopped).
+    /// - Shows a progress bar with bytes-received / total-bytes.
+    /// - Shows a "Cancel" button while the download is running.
+    ///
+    /// For each completed download:
+    /// - Shows a ✅ icon with the file path and size.
+    /// - Shows a "Save" button that opens a native save-file dialog.
+    /// - Remembers which ones have been dismissed so they are not shown again.
+    fn render_download_progress_section(
+        &mut self,
+        ui: &mut egui::Ui,
+        agent_id: &str,
+        browser: &AgentFileBrowserState,
+    ) {
+        // Compute the set of non-dismissed completed downloads before borrowing self mutably.
+        let pending_completed: Vec<(String, String, Vec<u8>)> = browser
+            .completed_downloads
+            .iter()
+            .filter(|(file_id, _)| {
+                !self
+                    .session_panel
+                    .file_browser_state
+                    .get(agent_id)
+                    .is_some_and(|s| s.dismissed_downloads.contains(file_id.as_str()))
+            })
+            .map(|(id, c)| (id.clone(), c.remote_path.clone(), c.data.clone()))
+            .collect();
+
+        let has_active = !browser.downloads.is_empty();
+        let has_completed = !pending_completed.is_empty();
+
+        if !has_active && !has_completed {
+            return;
+        }
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.label(RichText::new("Downloads").strong());
+
+        // ── In-progress downloads ──────────────────────────────────
+        let mut cancel_file_ids: Vec<String> = Vec::new();
+
+        for progress in browser.downloads.values() {
+            let denominator = progress.expected_size.max(1) as f32;
+            let fraction = (progress.current_size as f32 / denominator).clamp(0.0, 1.0);
+
+            let is_running = progress.state.eq_ignore_ascii_case("InProgress")
+                || progress.state.eq_ignore_ascii_case("Started")
+                || progress.state.eq_ignore_ascii_case("Running");
+            let is_stopped = progress.state.eq_ignore_ascii_case("Stopped");
+
+            let icon = if is_stopped { "❌" } else { "⏳" };
+
+            ui.horizontal(|ui| {
+                ui.label(icon);
+                ui.add(egui::ProgressBar::new(fraction).text(format!(
+                    "{} [{} / {}]",
+                    progress.remote_path,
+                    human_size(progress.current_size),
+                    human_size(progress.expected_size),
+                )));
+                if is_running
+                    && ui
+                        .add(egui::Button::new("Cancel").small())
+                        .on_hover_text("Stop this download")
+                        .clicked()
+                {
+                    cancel_file_ids.push(progress.file_id.clone());
+                }
+            });
+        }
+
+        // Send cancel messages outside the immutable borrow of `browser`.
+        for file_id in cancel_file_ids {
+            self.queue_file_browser_download_cancel(agent_id, &file_id);
+        }
+
+        // ── Completed downloads awaiting save ──────────────────────
+        if !pending_completed.is_empty() {
+            ui.add_space(4.0);
+            ui.label(RichText::new("Completed — click Save to write to disk:").weak());
+        }
+
+        let mut to_dismiss: Vec<String> = Vec::new();
+        for (file_id, remote_path, data) in &pending_completed {
+            ui.horizontal(|ui| {
+                ui.label("✅");
+                ui.label(
+                    RichText::new(format!("{} ({})", remote_path, human_size(data.len() as u64)))
+                        .monospace(),
+                );
+                if ui.button("Save").clicked() {
+                    save_completed_download(remote_path, data);
+                    to_dismiss.push(file_id.clone());
+                }
+                if ui
+                    .add(egui::Button::new("Dismiss").small())
+                    .on_hover_text("Remove from the list without saving")
+                    .clicked()
+                {
+                    to_dismiss.push(file_id.clone());
+                }
+            });
+        }
+
+        // Mark dismissed entries so they are hidden on future renders.
+        if !to_dismiss.is_empty() {
+            let ui_state = self.session_panel.file_browser_state_mut(agent_id);
+            for file_id in to_dismiss {
+                ui_state.dismissed_downloads.insert(file_id);
+            }
         }
     }
 
@@ -4936,6 +5029,18 @@ impl ClientApp {
         }
     }
 
+    fn queue_file_browser_download_cancel(&mut self, agent_id: &str, file_id: &str) {
+        let operator = self.current_operator_username();
+        if let Some(message) = build_transfer_stop_task(agent_id, file_id, &operator) {
+            self.session_panel.file_browser_state_mut(agent_id).status_message =
+                Some(format!("Queued cancel for download {file_id}."));
+            self.session_panel.pending_messages.push(message);
+        } else {
+            self.session_panel.file_browser_state_mut(agent_id).status_message =
+                Some(format!("Could not build cancel message: invalid file ID {file_id}."));
+        }
+    }
+
     fn flush_pending_messages(&mut self) {
         if self.session_panel.pending_messages.is_empty() {
             return;
@@ -5796,6 +5901,44 @@ fn build_file_browser_upload_task(
             ..AgentTaskInfo::default()
         },
     )
+}
+
+/// Builds a `CommandTransfer` stop task to cancel an in-progress download.
+///
+/// The binary payload `[stop_subcommand_u32_le, file_id_u32_le]` is pre-encoded as
+/// `PayloadBase64` so the teamserver forwards it verbatim to the agent.  This avoids
+/// adding transfer-command encoding logic to the teamserver's `task_payload` function.
+///
+/// Returns `None` if `file_id_hex` cannot be parsed as a hexadecimal `u32`.
+fn build_transfer_stop_task(
+    agent_id: &str,
+    file_id_hex: &str,
+    operator: &str,
+) -> Option<OperatorMessage> {
+    let file_id = u32::from_str_radix(file_id_hex.trim(), 16).ok().or_else(|| {
+        // Handle 64-bit hex file IDs by taking the lower 32 bits.
+        u64::from_str_radix(file_id_hex.trim(), 16).ok().map(|v| v as u32)
+    })?;
+    // Binary payload: [DEMON_COMMAND_TRANSFER_STOP=1 as u32 LE, file_id as u32 LE]
+    let mut payload = Vec::with_capacity(8);
+    payload.extend_from_slice(&1u32.to_le_bytes());
+    payload.extend_from_slice(&file_id.to_le_bytes());
+    let payload_b64 = base64::engine::general_purpose::STANDARD.encode(&payload);
+    Some(build_agent_task(
+        operator,
+        AgentTaskInfo {
+            demon_id: agent_id.to_owned(),
+            task_id: format!("{:08X}", next_task_id()),
+            command_id: u32::from(red_cell_common::demon::DemonCommand::CommandTransfer)
+                .to_string(),
+            command_line: format!("transfer stop {file_id_hex}"),
+            extra: BTreeMap::from([(
+                "PayloadBase64".to_owned(),
+                serde_json::Value::String(payload_b64),
+            )]),
+            ..AgentTaskInfo::default()
+        },
+    ))
 }
 
 fn build_console_task(
@@ -6989,6 +7132,25 @@ fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
 
 fn loot_is_downloadable(item: &LootItem) -> bool {
     matches!(item.kind, LootKind::File | LootKind::Screenshot) && item.content_base64.is_some()
+}
+
+/// Opens a native save-file dialog for a completed file-browser download.
+///
+/// The suggested file name is derived from `remote_path`.  If the user accepts, the
+/// bytes are written to the chosen path.  Status messages are shown via the OS dialog.
+fn save_completed_download(remote_path: &str, data: &[u8]) {
+    let file_name = std::path::Path::new(remote_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(sanitize_file_name)
+        .unwrap_or_else(|| "download.bin".to_owned());
+
+    let Some(destination) = FileDialog::new().set_file_name(&file_name).save_file() else {
+        return;
+    };
+
+    // Ignore the error — the OS dialog already shows write errors to the user.
+    let _ = std::fs::write(destination, data);
 }
 
 fn download_loot_item(item: &LootItem) -> std::result::Result<String, String> {
@@ -9027,8 +9189,7 @@ mod tests {
         AgentFileBrowserState {
             current_dir: Some("/home".to_owned()),
             directories: dirs,
-            downloads: std::collections::BTreeMap::new(),
-            status_message: None,
+            ..AgentFileBrowserState::default()
         }
     }
 
@@ -9660,6 +9821,46 @@ mod tests {
         let info = filesystem_transfer_task("DEAD0006", &format!("cat {path}"), "cat", path);
         let expected = base64::engine::general_purpose::STANDARD.encode(path.as_bytes());
         assert_eq!(info.arguments.as_deref(), Some(expected.as_str()));
+    }
+
+    // -- build_transfer_stop_task --
+
+    #[test]
+    fn build_transfer_stop_task_encodes_correct_payload() {
+        let msg = build_transfer_stop_task("DEAD0007", "0000002A", "operator")
+            .expect("should build for valid hex");
+        let (_, info) = unwrap_agent_task(msg);
+        assert_eq!(
+            info.command_id,
+            u32::from(red_cell_common::demon::DemonCommand::CommandTransfer).to_string()
+        );
+        assert_eq!(info.command_line, "transfer stop 0000002A");
+
+        // Verify the binary payload: [1u32_le, 0x2Au32_le]
+        let b64 = info
+            .extra
+            .get("PayloadBase64")
+            .and_then(|v| v.as_str())
+            .expect("PayloadBase64 must be present");
+        let payload = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
+        assert_eq!(payload.len(), 8);
+        assert_eq!(&payload[..4], &1u32.to_le_bytes()); // stop subcommand
+        assert_eq!(&payload[4..], &0x0000_002Au32.to_le_bytes()); // file_id
+    }
+
+    #[test]
+    fn build_transfer_stop_task_rejects_invalid_hex() {
+        assert!(build_transfer_stop_task("DEAD0008", "not_hex", "operator").is_none());
+    }
+
+    #[test]
+    fn build_transfer_stop_task_handles_8digit_hex() {
+        let msg = build_transfer_stop_task("DEAD0009", "DEADBEEF", "operator")
+            .expect("should parse 8-digit hex");
+        let (_, info) = unwrap_agent_task(msg);
+        let b64 = info.extra["PayloadBase64"].as_str().unwrap();
+        let payload = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
+        assert_eq!(&payload[4..], &0xDEADBEEFu32.to_le_bytes());
     }
 
     // -- build_file_browser_pwd_task --

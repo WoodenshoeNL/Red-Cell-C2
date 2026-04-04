@@ -21,7 +21,7 @@ Each loop run updates the running totals and appends a review entry.
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 12 | 0 | 0 |
-| Missing tests / stale tests | 73 | 19 | 5 |
+| Missing tests / stale tests | 74 | 19 | 5 |
 | Clippy warnings | 11 | 0 | 1 |
 | Protocol errors | 30 | 32 | 3 |
 | Security issues | 59 | 39 | 0 |
@@ -5801,3 +5801,13 @@ Build: `cargo check --workspace` passed. `cargo clippy --workspace -- -D warning
 | Cursor | 0 | 0 | No activity in range. |
 
 Build: `cargo check --workspace` passed. `cargo clippy --workspace -- -D warnings` passed (clean). `cargo nextest run --workspace` — 328 passed, 1 failed: `phantom::init_callback_flow::phantom_agent_init_and_checkin_stay_ctr_synchronised` (`missing field 'Head'`) — pre-existing, tracked as `red-cell-c2-g2c7j`. No new failures introduced by this review range. Code in this range is clean: proper error types, tests for all new paths, no unwrap/expect in production code.
+
+### QA Review — 2026-04-04 17:15 — f31b2fb0..d7213fae
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 3 | 1 | Closed: `753d1494` (fix client-cli --wait-timeout), `8ce2f536` (INIT_EXT_SEQ_PROTECTED for Specter/Phantom), `d7213fae` (autotest fail-fast build failure tests). Filed `red-cell-c2-1mw3m` (P1, zone:phantom): `8ce2f536` added 8-byte seq_num prefix to callback plaintext but did not update `decrypt_callback` helper in `agent/phantom/tests/e2e_integration.rs` — 6 phantom e2e tests now panic with OOB slice index. |
+| Codex | 0 | 0 | No activity in range. |
+| Cursor | 0 | 0 | No activity in range. |
+
+Build: `cargo check --workspace` passed. `cargo clippy --workspace -- -D warnings` passed (clean). `cargo nextest run --workspace` — 7 tests failed: 6 new regressions in `phantom::e2e_integration` (OOB in `decrypt_callback` due to seq_num protocol change, tracked `red-cell-c2-1mw3m`) + 1 pre-existing `phantom::init_callback_flow` (`missing field 'Head'`, tracked `red-cell-c2-g2c7j`). New autotest Python tests (16 tests) all pass via `python3 -m unittest discover`. Pre-existing open issue `red-cell-c2-5f3qj` (cli.py still uses `--timeout` for agent exec instead of `--wait-timeout`) confirmed still unfixed.

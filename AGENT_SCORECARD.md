@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1181 | 249 | 42 |
-| Bugs filed against | 200 | 40 | 10 |
+| Tasks closed | 1183 | 249 | 42 |
+| Bugs filed against | 201 | 40 | 10 |
 | Bug rate (bugs/task) | 0.17 | 0.16 | 0.24 |
 | Quality score | 83% | 84% | 76% |
 
-*Bug rates: Claude 200/1181=0.1694→0.17, Codex 40/249=0.1606→0.16, Cursor 10/42=0.2381→0.24*
+*Bug rates: Claude 201/1183=0.1699→0.17, Codex 40/249=0.1606→0.16, Cursor 10/42=0.2381→0.24*
 
 ## Violation Breakdown
 
@@ -5791,3 +5791,13 @@ Build: `cargo check --workspace` passed. `cargo clippy --workspace -- -D warning
 | Cursor | 0 | 0 | No activity in range. |
 
 Build: `cargo check --workspace` passed. `cargo clippy --workspace -- -D warnings` passed (clean). `cargo nextest run --workspace` — client-cli bin tests 299/299 passed; teamserver `agent_deletion_cleanup` (4 tests) and specter `init_callback_flow` (1 test) fail with `missing field 'Head'` — pre-existing, tracked as `red-cell-c2-g2c7j` (WsEnvelope unwrapping not implemented in test helpers). No new build or clippy issues introduced in this range.
+
+### QA Review — 2026-04-04 16:10 — 8197f754..f31b2fb0
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 1 | Closed `red-cell-c2-l9h20` (file size guard on agent upload) and `red-cell-c2-xx8pr` is in-progress (end-to-end --wait-timeout). Filed `red-cell-c2-5f3qj` (P1, zone:autotest): in-progress rename of `--timeout`→`--wait-timeout` on `agent exec` will break `automatic-test/lib/cli.py:255` and `docs/test-plan.md:162`; blocked on xx8pr. |
+| Codex | 0 | 0 | No activity in range. |
+| Cursor | 0 | 0 | No activity in range. |
+
+Build: `cargo check --workspace` passed. `cargo clippy --workspace -- -D warnings` passed (clean). `cargo nextest run --workspace` — 328 passed, 1 failed: `phantom::init_callback_flow::phantom_agent_init_and_checkin_stay_ctr_synchronised` (`missing field 'Head'`) — pre-existing, tracked as `red-cell-c2-g2c7j`. No new failures introduced by this review range. Code in this range is clean: proper error types, tests for all new paths, no unwrap/expect in production code.

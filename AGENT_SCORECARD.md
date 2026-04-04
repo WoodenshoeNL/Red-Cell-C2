@@ -5843,3 +5843,17 @@ Build: `cargo check --workspace` passed. `cargo clippy --workspace -- -D warning
 | Cursor | 0 | 0 | No activity in range. |
 
 Build: `cargo check --workspace` passed. `cargo clippy --workspace -- -D warnings` passed (clean). `cargo nextest run --workspace` failed — pre-existing linker error for `output_dispatch` test binary (missing `.rlib` files, tracked as `red-cell-c2-en1v7` and `red-cell-c2-fka3c`). No new Rust source changes in this review range; all work was in `automatic-test/`.
+
+### Arch Review — 2026-04-04 21:20
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 1 | rate limiter logic | `red-cell-c2-euhu2` (P3, zone:teamserver): `DnsReconBlockLimiter::allow()` in unstaged `teamserver/src/listeners/mod.rs` uses post-increment pattern (`window.attempts += 1` then `<= MAX`) — diverges from every other rate limiter in the file (check-then-increment). Blocked queries still increment the counter; u32 wraps to 0 after ~4.3B blocked queries in a 60s window, briefly re-allowing queries in release mode; panics in debug mode. Filed as dependency of in-progress `red-cell-c2-vrsub`. |
+| Codex | 0 | — | No Codex-attributed findings. |
+| Cursor | 0 | — | No Cursor-attributed findings. |
+
+Confirmed still-open P1s: `red-cell-c2-g2c7j` (test helper reads raw OperatorMessage without WsEnvelope unwrap), `red-cell-c2-0q8cv` (screenshot case-insensitive fix in stash, not committed), `red-cell-c2-5f3qj` (cli.py uses --timeout for agent exec instead of --wait-timeout), `red-cell-c2-1mw3m` (phantom e2e tests broken by seq_num protocol change). Confirmed fixed: `red-cell-c2-pt7rr` (INIT_EXT_SEQ_PROTECTED set correctly in both Specter and Phantom — verified in agent/specter/src/protocol.rs:281 and agent/phantom/src/protocol.rs:335).
+
+Build: No Rust source files modified in this review session. Based on prior review baseline: `cargo check --workspace` passes; `cargo clippy --workspace -- -D warnings` passes clean; `cargo nextest run --workspace` has pre-existing failures (phantom e2e `missing field 'Head'` — `red-cell-c2-g2c7j`; phantom OOB slice in `decrypt_callback` — `red-cell-c2-1mw3m`).
+
+Biggest blindspot: **unstaged AXFR/ANY blocking code** (implementing `red-cell-c2-vrsub`) contains a rate limiter logic inconsistency that must be resolved before the feature lands — otherwise the rate limiter silently fails under adversarial load. All four P1 issues remain open; zero regression coverage while `red-cell-c2-g2c7j` is open.

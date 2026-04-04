@@ -63,7 +63,7 @@ use std::sync::Arc;
 
 use futures_util::{SinkExt as _, StreamExt as _};
 use tokio::io::AsyncBufReadExt as _;
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{Message, protocol::CloseFrame};
 use tracing::instrument;
 
 use crate::config::{ResolvedConfig, TlsMode};
@@ -386,6 +386,7 @@ where
 
     loop {
         tokio::select! {
+            biased;
             line_result = lines.next_line() => {
                 match process_stdin_line(line_result, stdout, stderr, &mut sink, default_agent).await {
                     LoopControl::Continue => {}
@@ -396,7 +397,7 @@ where
                         // server responses) before exiting so we don't silently
                         // drop responses that arrived after our last send.
                         while let Some(msg) = stream.next().await {
-                            match process_ws_message(Some(msg), stdout, stderr) {
+                            match process_ws_message(Some(msg), stdout, stderr, false) {
                                 LoopControl::Continue | LoopControl::StdinEof => {}
                                 LoopControl::Exit(code) => return code,
                             }
@@ -407,7 +408,7 @@ where
             }
 
             ws_msg = stream.next() => {
-                match process_ws_message(ws_msg, stdout, stderr) {
+                match process_ws_message(ws_msg, stdout, stderr, true) {
                     LoopControl::Continue | LoopControl::StdinEof => {}
                     LoopControl::Exit(code) => return code,
                 }
@@ -423,6 +424,13 @@ enum LoopControl {
     /// Stdin reached EOF; the outer loop should drain remaining WebSocket
     /// messages before exiting.
     StdinEof,
+}
+
+/// Diagnostic emitted to stdout when the server ends the session.
+struct SessionClosedEvent {
+    reason: &'static str,
+    code: Option<u16>,
+    close_reason: Option<String>,
 }
 
 /// Handle one line read from stdin.
@@ -538,13 +546,23 @@ fn process_ws_message<Out, ErrOut>(
     msg: Option<Result<Message, tokio_tungstenite::tungstenite::Error>>,
     stdout: &mut Out,
     stderr: &mut ErrOut,
+    emit_close_event: bool,
 ) -> LoopControl
 where
     Out: std::io::Write,
     ErrOut: std::io::Write,
 {
+    let emit_disconnect_event = |stdout: &mut Out, event: SessionClosedEvent| {
+        emit_session_closed_to(stdout, event)
+            .map_or(LoopControl::Exit(EXIT_GENERAL), |_| LoopControl::Exit(EXIT_SUCCESS))
+    };
+
     match msg {
         // Server closed the stream.
+        None if emit_close_event => emit_disconnect_event(
+            stdout,
+            SessionClosedEvent { reason: "connection_lost", code: None, close_reason: None },
+        ),
         None => LoopControl::Exit(EXIT_SUCCESS),
 
         Some(Err(e)) => {
@@ -553,18 +571,50 @@ where
             // Connection-closed variants indicate the server has ended the
             // session — treat them as a clean exit rather than an error.
             match &e {
+                WsErr::ConnectionClosed | WsErr::AlreadyClosed if emit_close_event => {
+                    emit_disconnect_event(
+                        stdout,
+                        SessionClosedEvent {
+                            reason: "connection_lost",
+                            code: None,
+                            close_reason: None,
+                        },
+                    )
+                }
                 WsErr::ConnectionClosed | WsErr::AlreadyClosed => LoopControl::Exit(EXIT_SUCCESS),
                 WsErr::Io(io_err)
                     if io_err.kind() == std::io::ErrorKind::ConnectionReset
                         || io_err.kind() == std::io::ErrorKind::UnexpectedEof
                         || io_err.kind() == std::io::ErrorKind::BrokenPipe =>
                 {
-                    LoopControl::Exit(EXIT_SUCCESS)
+                    if emit_close_event {
+                        emit_disconnect_event(
+                            stdout,
+                            SessionClosedEvent {
+                                reason: "connection_lost",
+                                code: None,
+                                close_reason: None,
+                            },
+                        )
+                    } else {
+                        LoopControl::Exit(EXIT_SUCCESS)
+                    }
                 }
                 // TCP was torn down before the WS close handshake completed —
                 // this is normal when the server drops the connection quickly.
                 WsErr::Protocol(ProtocolError::ResetWithoutClosingHandshake) => {
-                    LoopControl::Exit(EXIT_SUCCESS)
+                    if emit_close_event {
+                        emit_disconnect_event(
+                            stdout,
+                            SessionClosedEvent {
+                                reason: "connection_lost",
+                                code: None,
+                                close_reason: None,
+                            },
+                        )
+                    } else {
+                        LoopControl::Exit(EXIT_SUCCESS)
+                    }
                 }
                 _ => {
                     emit_error_to(
@@ -589,6 +639,9 @@ where
             }
         }
 
+        Some(Ok(Message::Close(frame))) if emit_close_event => {
+            emit_disconnect_event(stdout, SessionClosedEvent::from_close_frame(frame.as_ref()))
+        }
         Some(Ok(Message::Close(_))) => LoopControl::Exit(EXIT_SUCCESS),
 
         // Binary, Ping, Pong — ignore.
@@ -629,6 +682,30 @@ fn emit_error_to(
     }
 }
 
+/// Write a session-close diagnostic line to `writer`.
+fn emit_session_closed_to(
+    writer: &mut impl std::io::Write,
+    event: SessionClosedEvent,
+) -> std::io::Result<()> {
+    let mut envelope = serde_json::json!({
+        "event": "session_closed",
+        "reason": event.reason,
+    });
+
+    if let Some(code) = event.code {
+        envelope["code"] = serde_json::json!(code);
+    }
+
+    if let Some(close_reason) = event.close_reason {
+        envelope["close_reason"] = serde_json::json!(close_reason);
+    }
+
+    match serde_json::to_string(&envelope) {
+        Ok(s) => writeln!(writer, "{s}"),
+        Err(_) => writeln!(writer, r#"{{"event":"session_closed","reason":"{}"}}"#, event.reason),
+    }
+}
+
 /// Return `true` when a server text frame is a structured error envelope.
 ///
 /// Session mode preserves the CLI-wide stream contract:
@@ -639,6 +716,19 @@ fn response_is_error_envelope(text: &str) -> bool {
         .ok()
         .and_then(|value| value.get("ok").and_then(serde_json::Value::as_bool))
         == Some(false)
+}
+
+impl SessionClosedEvent {
+    fn from_close_frame(frame: Option<&CloseFrame>) -> Self {
+        match frame {
+            Some(frame) => Self {
+                reason: "server_close",
+                code: Some(u16::from(frame.code)),
+                close_reason: (!frame.reason.is_empty()).then(|| frame.reason.to_string()),
+            },
+            None => Self { reason: "server_close", code: None, close_reason: None },
+        }
+    }
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -688,6 +778,27 @@ mod tests {
         assert_eq!(val["cmd"], "agent.show");
         assert_eq!(val["error"], "NOT_FOUND");
         assert!(val["message"].as_str().is_some_and(|m| m.contains("not found")));
+    }
+
+    #[test]
+    fn emit_session_closed_produces_valid_json_envelope() {
+        let mut buf = Vec::new();
+        emit_session_closed_to(
+            &mut buf,
+            SessionClosedEvent {
+                reason: "server_close",
+                code: Some(1000),
+                close_reason: Some("normal".to_owned()),
+            },
+        )
+        .expect("write");
+
+        let line = String::from_utf8(buf).expect("utf8");
+        let val: serde_json::Value = serde_json::from_str(line.trim()).expect("json");
+        assert_eq!(val["event"], "session_closed");
+        assert_eq!(val["reason"], "server_close");
+        assert_eq!(val["code"], 1000);
+        assert_eq!(val["close_reason"], "normal");
     }
 
     #[test]
@@ -974,16 +1085,75 @@ mod tests {
         .await;
 
         let ws = ws_connect(addr, "test-token").await;
-        // Infinite stdin — the server close should terminate the loop.
-        let input: &[u8] = b"";
-        let reader = tokio::io::BufReader::new(input);
+        let (_stdin_tx, stdin_rx) = tokio::io::duplex(64);
+        let reader = tokio::io::BufReader::new(stdin_rx);
         let mut stdout: Vec<u8> = Vec::new();
         let mut stderr: Vec<u8> = Vec::new();
 
         let code = run_with_io(reader, &mut stdout, &mut stderr, ws, None).await;
         assert_eq!(code, EXIT_SUCCESS, "server close must exit 0");
-        assert!(stdout.is_empty(), "server close must not produce stdout");
+        let line = String::from_utf8(stdout).expect("utf8");
+        let val: serde_json::Value = serde_json::from_str(line.trim()).expect("json");
+        assert_eq!(val["event"], "session_closed");
+        assert_eq!(val["reason"], "server_close");
+        assert_eq!(val["code"], 1000);
         assert!(stderr.is_empty(), "server close must not produce stderr");
+    }
+
+    /// Server close frames with a reason phrase must be surfaced to stdout.
+    #[tokio::test]
+    async fn server_close_reason_phrase_is_emitted() {
+        let addr = mock_ws_server(|mut ws| async move {
+            let _ = ws
+                .close(Some(CloseFrame {
+                    code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Away,
+                    reason: "maintenance".into(),
+                }))
+                .await;
+        })
+        .await;
+
+        let ws = ws_connect(addr, "test-token").await;
+        let (_stdin_tx, stdin_rx) = tokio::io::duplex(64);
+        let reader = tokio::io::BufReader::new(stdin_rx);
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+
+        let code = run_with_io(reader, &mut stdout, &mut stderr, ws, None).await;
+        assert_eq!(code, EXIT_SUCCESS, "server close with reason must exit 0");
+
+        let line = String::from_utf8(stdout).expect("utf8");
+        let val: serde_json::Value = serde_json::from_str(line.trim()).expect("json");
+        assert_eq!(val["event"], "session_closed");
+        assert_eq!(val["reason"], "server_close");
+        assert_eq!(val["code"], 1001);
+        assert_eq!(val["close_reason"], "maintenance");
+        assert!(stderr.is_empty(), "close diagnostics must stay on stdout");
+    }
+
+    /// Abrupt disconnects without a close frame must be surfaced as connection loss.
+    #[tokio::test]
+    async fn abrupt_disconnect_emits_connection_lost_diagnostic() {
+        let addr = mock_ws_server(|ws| async move {
+            drop(ws);
+        })
+        .await;
+
+        let ws = ws_connect(addr, "test-token").await;
+        let (_stdin_tx, stdin_rx) = tokio::io::duplex(64);
+        let reader = tokio::io::BufReader::new(stdin_rx);
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+
+        let code = run_with_io(reader, &mut stdout, &mut stderr, ws, None).await;
+        assert_eq!(code, EXIT_SUCCESS, "abrupt disconnect must still exit 0");
+
+        let line = String::from_utf8(stdout).expect("utf8");
+        let val: serde_json::Value = serde_json::from_str(line.trim()).expect("json");
+        assert_eq!(val["event"], "session_closed");
+        assert_eq!(val["reason"], "connection_lost");
+        assert!(val.get("code").is_none(), "abrupt disconnect must not include a close code");
+        assert!(stderr.is_empty(), "disconnect diagnostics must stay on stdout");
     }
 
     /// Multiple commands in sequence are each forwarded and their responses

@@ -726,7 +726,10 @@ impl SessionClosedEvent {
                 code: Some(u16::from(frame.code)),
                 close_reason: (!frame.reason.is_empty()).then(|| frame.reason.to_string()),
             },
-            None => Self { reason: "server_close", code: None, close_reason: None },
+            // Tungstenite may surface a clean close without frame details as
+            // `Message::Close(None)`. Treat that as the WebSocket normal-close
+            // status code so session diagnostics remain stable.
+            None => Self { reason: "server_close", code: Some(1000), close_reason: None },
         }
     }
 }

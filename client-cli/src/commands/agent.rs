@@ -23,13 +23,11 @@ use tracing::instrument;
 use crate::AgentCommands;
 use crate::backoff::Backoff;
 use crate::client::ApiClient;
+use crate::defaults::AGENT_EXEC_WAIT_TIMEOUT_SECS;
 use crate::error::{CliError, EXIT_SUCCESS};
 use crate::output::{
     OutputFormat, TextRender, TextRow, print_error, print_stream_entry, print_success,
 };
-
-/// Default polling timeout for `--wait` operations, in seconds.
-const DEFAULT_WAIT_TIMEOUT_SECS: u64 = 60;
 /// Default sleep duration (seconds) when the server returns HTTP 429 without
 /// a `Retry-After` header.
 const RATE_LIMIT_DEFAULT_WAIT_SECS: u64 = 10;
@@ -369,7 +367,7 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) 
         },
 
         AgentCommands::Exec { id, cmd, wait, wait_timeout } => {
-            let timeout_secs = wait_timeout.unwrap_or(DEFAULT_WAIT_TIMEOUT_SECS);
+            let timeout_secs = wait_timeout.unwrap_or(AGENT_EXEC_WAIT_TIMEOUT_SECS);
             if wait {
                 match exec_wait(client, &id, &cmd, timeout_secs).await {
                     Ok(data) => match print_success(fmt, &data) {
@@ -742,14 +740,14 @@ async fn kill(client: &ApiClient, id: &str, wait: bool) -> Result<KillResult, Cl
         return Ok(KillResult { agent_id: id.to_owned(), status: "kill_sent".to_owned() });
     }
 
-    let deadline = Instant::now() + Duration::from_secs(DEFAULT_WAIT_TIMEOUT_SECS);
+    let deadline = Instant::now() + Duration::from_secs(AGENT_EXEC_WAIT_TIMEOUT_SECS);
     let mut backoff = Backoff::new();
 
     loop {
         if Instant::now() >= deadline {
             return Err(CliError::Timeout(format!(
                 "timed out waiting for agent {id} to die after {}s",
-                DEFAULT_WAIT_TIMEOUT_SECS
+                AGENT_EXEC_WAIT_TIMEOUT_SECS
             )));
         }
 

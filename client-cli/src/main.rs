@@ -8,6 +8,7 @@ mod backoff;
 mod client;
 mod commands;
 mod config;
+mod defaults;
 mod error;
 mod output;
 
@@ -235,9 +236,7 @@ pub enum AgentCommands {
         /// Block until the agent returns output
         #[arg(long)]
         wait: bool,
-        /// End-to-end seconds to wait for output before returning exit code 5 (default: 60).
-        /// Controls the polling loop budget, not the per-request HTTP timeout (--timeout).
-        #[arg(long)]
+        #[arg(long, help = crate::defaults::agent_exec_wait_timeout_help())]
         wait_timeout: Option<u64>,
     },
 
@@ -450,9 +449,7 @@ pub enum PayloadCommands {
         /// Block until the build finishes (polls for completion)
         #[arg(long)]
         wait: bool,
-        /// End-to-end seconds to wait for the build before returning exit code 5 (default: 300).
-        /// Controls the polling loop budget, not the per-request HTTP timeout (--timeout).
-        #[arg(long)]
+        #[arg(long, help = crate::defaults::payload_build_wait_timeout_help())]
         wait_timeout: Option<u64>,
     },
 
@@ -617,8 +614,7 @@ pub enum AuditCommands {
     ///   red-cell-cli log tail --follow
     #[command(verbatim_doc_comment)]
     Tail {
-        /// Stream new entries as they arrive (prints JSON lines until Ctrl-C)
-        #[arg(long)]
+        #[arg(long, help = crate::defaults::audit_tail_follow_help())]
         follow: bool,
     },
 }
@@ -1169,6 +1165,21 @@ mod tests {
     }
 
     #[test]
+    fn agent_exec_help_mentions_default_wait_timeout() {
+        let mut cmd = Cli::command();
+        let help = cmd
+            .find_subcommand_mut("agent")
+            .expect("agent subcommand")
+            .find_subcommand_mut("exec")
+            .expect("agent exec subcommand")
+            .render_long_help()
+            .to_string();
+
+        assert!(help.contains("default: 60"), "agent exec help must mention the default timeout");
+        assert!(help.contains("--wait-timeout"), "agent exec help must mention the override flag");
+    }
+
+    #[test]
     fn payload_build_wait_timeout_is_captured() {
         let cli = Cli::try_parse_from([
             "red-cell-cli",
@@ -1216,5 +1227,44 @@ mod tests {
             }
             other => panic!("expected Payload::Build, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn payload_build_help_mentions_default_wait_timeout() {
+        let mut cmd = Cli::command();
+        let help = cmd
+            .find_subcommand_mut("payload")
+            .expect("payload subcommand")
+            .find_subcommand_mut("build")
+            .expect("payload build subcommand")
+            .render_long_help()
+            .to_string();
+
+        assert!(
+            help.contains("default: 300"),
+            "payload build help must mention the default timeout"
+        );
+        assert!(
+            help.contains("--wait-timeout"),
+            "payload build help must mention the override flag"
+        );
+    }
+
+    #[test]
+    fn audit_tail_help_mentions_default_poll_interval() {
+        let mut cmd = Cli::command();
+        let help = cmd
+            .find_subcommand_mut("log")
+            .expect("log subcommand")
+            .find_subcommand_mut("tail")
+            .expect("log tail subcommand")
+            .render_long_help()
+            .to_string();
+
+        assert!(
+            help.contains("default: 1"),
+            "log tail help must mention the default poll interval"
+        );
+        assert!(help.contains("Polls every 1 second"), "log tail help must mention polling");
     }
 }

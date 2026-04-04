@@ -18,11 +18,9 @@ use tracing::instrument;
 use crate::PayloadCommands;
 use crate::backoff::Backoff;
 use crate::client::ApiClient;
+use crate::defaults::PAYLOAD_BUILD_WAIT_TIMEOUT_SECS;
 use crate::error::{CliError, EXIT_SUCCESS};
 use crate::output::{OutputFormat, TextRender, TextRow, print_error, print_success};
-
-/// Default polling timeout for `--wait` builds, in seconds.
-const DEFAULT_BUILD_TIMEOUT_SECS: u64 = 300;
 /// Default sleep duration (seconds) when the server returns HTTP 429 without
 /// a `Retry-After` header.
 const RATE_LIMIT_DEFAULT_WAIT_SECS: u64 = 10;
@@ -160,7 +158,7 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: PayloadCommands
             wait,
             wait_timeout,
         } => {
-            let build_timeout_secs = wait_timeout.unwrap_or(DEFAULT_BUILD_TIMEOUT_SECS);
+            let build_timeout_secs = wait_timeout.unwrap_or(PAYLOAD_BUILD_WAIT_TIMEOUT_SECS);
             match build(
                 client,
                 &listener,
@@ -540,7 +538,7 @@ mod tests {
             "phantom",
             None,
             false,
-            DEFAULT_BUILD_TIMEOUT_SECS,
+            PAYLOAD_BUILD_WAIT_TIMEOUT_SECS,
         )
         .await;
         assert!(result.is_ok(), "build must succeed: {result:?}");
@@ -579,9 +577,17 @@ mod tests {
         };
         let client = crate::client::ApiClient::new(&cfg).expect("client");
 
-        let _ =
-            build(&client, "http1", "x64", "exe", "demon", None, false, DEFAULT_BUILD_TIMEOUT_SECS)
-                .await;
+        let _ = build(
+            &client,
+            "http1",
+            "x64",
+            "exe",
+            "demon",
+            None,
+            false,
+            PAYLOAD_BUILD_WAIT_TIMEOUT_SECS,
+        )
+        .await;
 
         let requests = server.received_requests().await.expect("requests");
         let body: serde_json::Value =

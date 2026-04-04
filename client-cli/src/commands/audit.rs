@@ -18,6 +18,7 @@ use tracing::instrument;
 use crate::AuditCommands;
 use crate::backoff::Backoff;
 use crate::client::ApiClient;
+use crate::defaults::AUDIT_TAIL_FOLLOW_POLL_INTERVAL_SECS;
 use crate::error::{CliError, EXIT_SUCCESS};
 use crate::output::{OutputFormat, TextRow, print_error, print_stream_entry, print_success};
 
@@ -215,7 +216,7 @@ async fn tail_follow(client: &ApiClient, fmt: &OutputFormat) -> i32 {
         }
     };
 
-    let mut backoff = Backoff::new();
+    let mut backoff = Backoff::with_initial_delay(AUDIT_TAIL_FOLLOW_POLL_INTERVAL_SECS);
 
     // Poll for new entries using the cursor timestamp.
     loop {

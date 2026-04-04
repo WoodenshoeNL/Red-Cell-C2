@@ -137,16 +137,6 @@ enum LootTypeFilter {
     Screenshots,
 }
 
-impl LootTypeFilter {
-    #[allow(dead_code)]
-    const ALL: [(Self, &'static str); 4] = [
-        (Self::All, "All"),
-        (Self::Credentials, "Credentials"),
-        (Self::Files, "Files"),
-        (Self::Screenshots, "Screenshots"),
-    ];
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum CredentialSubFilter {
     #[default]
@@ -473,8 +463,6 @@ struct SessionPanelState {
     graph_state: SessionGraphState,
     pending_messages: Vec<OperatorMessage>,
     status_message: Option<String>,
-    #[allow(dead_code)]
-    loot_type_filter: LootTypeFilter,
     loot_cred_filter: CredentialSubFilter,
     loot_file_filter: FileSubFilter,
     loot_agent_filter: String,

@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1189 | 251 | 42 |
-| Bugs filed against | 205 | 41 | 10 |
-| Bug rate (bugs/task) | 0.17 | 0.16 | 0.24 |
-| Quality score | 83% | 84% | 76% |
+| Tasks closed | 1189 | 253 | 42 |
+| Bugs filed against | 205 | 43 | 10 |
+| Bug rate (bugs/task) | 0.17 | 0.17 | 0.24 |
+| Quality score | 83% | 83% | 76% |
 
-*Bug rates: Claude 205/1189=0.1724→0.17, Codex 41/251=0.1633→0.16, Cursor 10/42=0.2381→0.24*
+*Bug rates: Claude 205/1189=0.1724→0.17, Codex 43/253=0.1700→0.17, Cursor 10/42=0.2381→0.24*
 
 ## Violation Breakdown
 
@@ -34,12 +34,22 @@ Each loop run updates the running totals and appends a review entry.
 | Correctness / pagination | 65 | 8 | 1 |
 | Workflow / close-hygiene | 33 | 1 | 0 |
 | Code reuse / duplication | 11 | 0 | 0 |
+| Incomplete commits (stranded work) | 0 | 2 | 0 |
 
 ---
 
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-05 00:30 — 9be8dba8..7e32ca73
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Codex | 2 | 2 | `red-cell-c2-mkthw` (centralise polling defaults), `red-cell-c2-bw55e` (TOFU doc). Both introduced compile errors: spurious `frame_metrics` line in `assert!` (pebfp, P1) and missing `Backoff::with_initial_delay` method (go1s5, P1). |
+| Claude | 0 | 0 | QA checkpoint only. |
+
+Build: **FAILED** — two confirmed compile errors in committed code: `client/src/main.rs:9021` (struct-field expression injected into `assert!`), `client-cli/src/commands/audit.rs` (calls `Backoff::with_initial_delay` not in committed `backoff.rs`). Also noted: stash contains ~627 lines of uncommitted Codex work (FrameMetrics, backoff method, DNS recon limiter, teamserver listener changes) consistent with existing `red-cell-c2-rbskj` (P0).
 
 ### Arch Review — 2026-04-04 16:00
 

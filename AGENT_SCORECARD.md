@@ -28,7 +28,7 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 25 | 25 | 1 |
 | Memory / resource leaks | 11 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 9 | 0 |
-| Test infrastructure / flakiness | 43 | 5 | 1 |
+| Test infrastructure / flakiness | 44 | 5 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 4 | 5 | 0 |
 | Correctness / pagination | 64 | 8 | 1 |
@@ -40,6 +40,20 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-04-04 08:00
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 1 | test infrastructure | Filed `red-cell-c2-l3aw2` — `TeamserverState` gained 3 new fields (`started_at`, `plugins_loaded`, `plugins_failed`) in unstaged working-tree changes, but 2 test helper functions were not updated: `test_router_with_database` in `api.rs:6493` and `test_state_with_bridge` in `service.rs:2970`. Test suite fails to compile in test mode. |
+| Codex | 0 | — | No Codex-attributed findings this review. |
+| Cursor | 0 | — | No Cursor-attributed findings this review. |
+
+Existing tracked: `red-cell-c2-pt7rr` (P1, zone:phantom + zone:specter) — Specter/Phantom don't set `INIT_EXT_SEQ_PROTECTED` in DEMON_INIT. Still open, not yet fixed.
+
+Overall codebase health: **drifting** — `cargo check --workspace` and `cargo clippy --workspace -- -D warnings` pass clean; `cargo test --workspace` / `cargo nextest run --workspace` fail to compile (2 test helpers missing fields). Core crypto path (CTR advance, HKDF, weak-key rejection, constant-time comparisons) remains sound. No `todo!`/`unimplemented!` in production Rust code. Auth: constant-time token lookup, Argon2id with OWASP params, dummy verifier to prevent timing oracle.
+
+Biggest blindspot: **broken test suite compilation** (`red-cell-c2-l3aw2`) — the entire in-memory test run is gated on this fix; no regression coverage until it lands.
 
 ### Arch Review — 2026-04-03 20:00
 

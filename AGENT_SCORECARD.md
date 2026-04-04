@@ -27,8 +27,8 @@ Each loop run updates the running totals and appends a review entry.
 | Security issues | 60 | 39 | 0 |
 | Architecture drift | 26 | 25 | 1 |
 | Memory / resource leaks | 11 | 11 | 1 |
-| Startup / lifecycle regressions | 4 | 9 | 0 |
-| Test infrastructure / flakiness | 49 | 5 | 1 |
+| Startup / lifecycle regressions | 4 | 10 | 0 |
+| Test infrastructure / flakiness | 49 | 6 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 4 | 5 | 0 |
 | Correctness / pagination | 65 | 8 | 1 |
@@ -41,6 +41,22 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-04-05 01:00
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Codex | 2 | startup/lifecycle regression, test infrastructure | Confirmed `red-cell-c2-go1s5` (P1) — `Backoff::with_initial_delay` called in `client-cli/src/commands/audit.rs:219` but method not in `backoff.rs`; introduced in `d95dd822`. Confirmed `red-cell-c2-pebfp` (P1) — `frame_metrics: FrameMetrics::default()` struct-field syntax injected into `assert!` at `client/src/main.rs:9021`; introduced in `7e32ca73`. Both already filed by QA review; violation counts incremented above. |
+| Claude | 0 | — | No Claude-attributed production-code defects found. Closed 4 stale P1/P2 issues confirmed fixed: `red-cell-c2-l3aw2` (TeamserverState test fields), `red-cell-c2-q562w` (WsEnvelope functions), `red-cell-c2-t5fq2` (client WsEnvelope usage), `red-cell-c2-asvj8` (CallbackSeqError import). |
+| Cursor | 0 | — | No Cursor-attributed findings. |
+
+Build: **FAILED** — `cargo check --workspace` fails on `red-cell-cli` (`Backoff::with_initial_delay` not in `backoff.rs`, `go1s5`) and on `client` tests (struct field injected into `assert!`, `pebfp`). Both Codex-attributed, introduced in the two commits since the last arch review.
+
+Core security path (AES-256-CTR monotonic offset, HKDF-SHA256, Argon2id, WsEnvelope HMAC, constant-time comparisons, weak-key rejection) structurally sound. No `todo!`/`unimplemented!` in production Rust. P1 test-infra regressions `red-cell-c2-g2c7j`/`red-cell-c2-1mw3m`/`red-cell-c2-0og72` from prior review remain unresolved.
+
+Overall codebase health: **concerning** — workspace does not compile.
+
+Biggest blindspot: **two Codex compile errors** (`go1s5`, `pebfp`) block all downstream CI and testing; the workspace must be green before any other regression detection is possible.
 
 ### QA Review — 2026-04-05 00:30 — 9be8dba8..7e32ca73
 

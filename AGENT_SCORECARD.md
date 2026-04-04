@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1189 | 249 | 42 |
+| Tasks closed | 1189 | 251 | 42 |
 | Bugs filed against | 205 | 40 | 10 |
 | Bug rate (bugs/task) | 0.17 | 0.16 | 0.24 |
 | Quality score | 83% | 84% | 76% |
 
-*Bug rates: Claude 205/1189=0.1724→0.17, Codex 40/249=0.1606→0.16, Cursor 10/42=0.2381→0.24*
+*Bug rates: Claude 205/1189=0.1724→0.17, Codex 40/251=0.1594→0.16, Cursor 10/42=0.2381→0.24*
 
 ## Violation Breakdown
 
@@ -5867,3 +5867,13 @@ Biggest blindspot: **unstaged AXFR/ANY blocking code** (implementing `red-cell-c
 | Cursor | 0 | 0 | No activity in range. |
 
 Build: `cargo check --workspace` ✅. `cargo clippy --workspace -- -D warnings` ✅ (clean). `cargo nextest run --workspace` ❌ — build artifact collision from concurrent parallel builds (incremental `.o` file missing due to parallel cargo check + nextest runs); separate serial `cargo test --no-run -p red-cell-client` confirmed code itself compiles cleanly. No new code to review; no new issues filed.
+
+### QA Review — 2026-04-04 22:20 — 5094d17a..fa8d1355
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | QA checkpoint only |
+| Codex | 2 | 0 | Closed red-cell-c2-8iswz (sanitize loot fields) and red-cell-c2-xq3sm (route session errors to stderr) |
+| Cursor | 0 | 0 | — |
+
+Build: skipped — build directory locked by active dev agent (red-cell-c2-v9jrt in progress)

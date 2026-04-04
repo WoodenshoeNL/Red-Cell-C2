@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1186 | 249 | 42 |
-| Bugs filed against | 203 | 40 | 10 |
+| Tasks closed | 1189 | 249 | 42 |
+| Bugs filed against | 205 | 40 | 10 |
 | Bug rate (bugs/task) | 0.17 | 0.16 | 0.24 |
 | Quality score | 83% | 84% | 76% |
 
-*Bug rates: Claude 203/1186=0.1711→0.17, Codex 40/249=0.1606→0.16, Cursor 10/42=0.2381→0.24*
+*Bug rates: Claude 205/1189=0.1724→0.17, Codex 40/249=0.1606→0.16, Cursor 10/42=0.2381→0.24*
 
 ## Violation Breakdown
 
@@ -24,7 +24,7 @@ Each loop run updates the running totals and appends a review entry.
 | Missing tests / stale tests | 74 | 19 | 5 |
 | Clippy warnings | 11 | 0 | 1 |
 | Protocol errors | 30 | 32 | 3 |
-| Security issues | 59 | 39 | 0 |
+| Security issues | 60 | 39 | 0 |
 | Architecture drift | 26 | 25 | 1 |
 | Memory / resource leaks | 11 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 9 | 0 |
@@ -33,7 +33,7 @@ Each loop run updates the running totals and appends a review entry.
 | Availability / timeout regressions | 4 | 5 | 0 |
 | Correctness / pagination | 65 | 8 | 1 |
 | Workflow / close-hygiene | 33 | 0 | 0 |
-| Code reuse / duplication | 10 | 0 | 0 |
+| Code reuse / duplication | 11 | 0 | 0 |
 
 ---
 
@@ -5833,3 +5833,13 @@ Build: `cargo check --workspace` passed. `cargo clippy --workspace -- -D warning
 | Cursor | 0 | 0 | No activity in range. |
 
 Build: `cargo check --workspace` passed. `cargo clippy --workspace -- -D warnings` passed (clean). `cargo nextest run --workspace` — 7 tests failed: 6 new regressions in `phantom::e2e_integration` (OOB in `decrypt_callback` due to seq_num protocol change, tracked `red-cell-c2-1mw3m`) + 1 pre-existing `phantom::init_callback_flow` (`missing field 'Head'`, tracked `red-cell-c2-g2c7j`). New autotest Python tests (16 tests) all pass via `python3 -m unittest discover`. Pre-existing open issue `red-cell-c2-5f3qj` (cli.py still uses `--timeout` for agent exec instead of `--wait-timeout`) confirmed still unfixed.
+
+### QA Review — 2026-04-04 — 6a2313ca..3a4ab8af
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 3 | 2 | Closed `red-cell-c2-gresp` (extract deploy-and-checkin helper), `red-cell-c2-daxaq` (DNS resolution preflight), `red-cell-c2-tmygg` (replace sleep with TCP retry loop). Filed `red-cell-c2-fv5m5` (P3, zone:autotest): `preflight_dns` interpolates `domain` into a remote SSH shell string with single-quote quoting — a malicious or misconfigured env.toml can inject remote shell commands. Filed `red-cell-c2-b43vj` (P4, zone:autotest): redundant `assert _port_open(...)` in scenario 02 after `wait_for_port` returns — the assert is always True at that point and is dead code. |
+| Codex | 0 | 0 | No activity in range. |
+| Cursor | 0 | 0 | No activity in range. |
+
+Build: `cargo check --workspace` passed. `cargo clippy --workspace -- -D warnings` passed (clean). `cargo nextest run --workspace` failed — pre-existing linker error for `output_dispatch` test binary (missing `.rlib` files, tracked as `red-cell-c2-en1v7` and `red-cell-c2-fka3c`). No new Rust source changes in this review range; all work was in `automatic-test/`.

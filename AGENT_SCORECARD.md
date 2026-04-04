@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1175 | 249 | 42 |
+| Tasks closed | 1178 | 249 | 42 |
 | Bugs filed against | 194 | 40 | 10 |
-| Bug rate (bugs/task) | 0.17 | 0.16 | 0.24 |
-| Quality score | 83% | 84% | 76% |
+| Bug rate (bugs/task) | 0.16 | 0.16 | 0.24 |
+| Quality score | 84% | 84% | 76% |
 
-*Bug rates: Claude 194/1175=0.1651→0.17, Codex 40/249=0.1606→0.16, Cursor 10/42=0.2381→0.24*
+*Bug rates: Claude 194/1178=0.1647→0.16, Codex 40/249=0.1606→0.16, Cursor 10/42=0.2381→0.24*
 
 ## Violation Breakdown
 
@@ -5735,3 +5735,13 @@ Build: `cargo check --workspace` passed. `cargo clippy --workspace -- -D warning
 | Cursor | 0 | 0 | No activity this review period. |
 
 Build: cargo check passed; cargo nextest failed (pre-existing test compilation break in client-cli, red-cell-c2-v23y3); clippy clean.
+
+### QA Review — 2026-04-04 — 58259fbf..0d108144
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 3 | 0 | Closed red-cell-c2-183bj (event_kind_filter — already implemented), red-cell-c2-itmrh (process injection dialog — already implemented), red-cell-c2-kezei (removed dead loot_type_filter field and ALL const array). All closures verified correct. |
+| Codex | 0 | 0 | No activity in review range. |
+| Cursor | 0 | 0 | No activity in review range. |
+
+Build: `cargo check --workspace` passed. `cargo clippy --workspace -- -D warnings` passed. `cargo nextest run --workspace` fails to compile — 4 client-cli test files missing `started_at`/`plugins_loaded`/`plugins_failed` in `TeamserverState` initializers (pre-existing, tracked as red-cell-c2-l3aw2 + red-cell-c2-v23y3). No new bugs filed. 1 issue in-progress: red-cell-c2-t5fq2 (HMAC/AEAD on WebSocket frames) with active stash from dev agent.

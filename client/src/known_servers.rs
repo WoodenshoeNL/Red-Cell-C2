@@ -3,6 +3,13 @@
 //! Persists trusted teamserver certificate fingerprints keyed by `host:port`,
 //! similar to SSH's `known_hosts` file. The store is loaded from and saved to
 //! `~/.config/red-cell-client/known_servers.toml`.
+//!
+//! Security note: the file is created with mode `0600` on Unix, but the pinned
+//! fingerprints remain plaintext on disk. Treat the file as sensitive operator
+//! trust material: protect operator workstations with full-disk encryption and
+//! verify first-use fingerprints over a separate trusted channel before calling
+//! [`KnownServersStore::trust`]. See `client/OPERATOR_SECURITY.md` for the
+//! operator-facing setup guidance and current TOFU limitations.
 
 use std::collections::BTreeMap;
 use std::fs;

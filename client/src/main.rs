@@ -9018,6 +9018,7 @@ mod tests {
                 );
                 assert!(
                     login_state.error_message.as_deref().unwrap().contains("Connection closed"),
+            frame_metrics: FrameMetrics::default(),
                     "error should contain the disconnect reason"
                 );
             }

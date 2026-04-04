@@ -3647,6 +3647,8 @@ mod tests {
                 port: 40056,
                 plugins_dir: None,
                 max_download_bytes: None,
+                max_concurrent_downloads_per_agent: None,
+                max_aggregate_download_bytes: None,
                 max_registered_agents: None,
                 drain_timeout_secs: None,
                 agent_timeout_secs: None,

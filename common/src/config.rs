@@ -395,6 +395,14 @@ pub struct TeamserverConfig {
     /// Maximum in-memory size of a single agent download before the server drops it.
     #[serde(rename = "MaxDownloadBytes", default)]
     pub max_download_bytes: Option<u64>,
+    /// Maximum number of simultaneous in-progress downloads per agent.
+    /// Defaults to 32 when absent.
+    #[serde(rename = "MaxConcurrentDownloadsPerAgent", default)]
+    pub max_concurrent_downloads_per_agent: Option<usize>,
+    /// Aggregate in-memory cap across all active downloads (all agents combined).
+    /// Defaults to 4× `MaxDownloadBytes` when absent.
+    #[serde(rename = "MaxAggregateDownloadBytes", default)]
+    pub max_aggregate_download_bytes: Option<u64>,
     /// Maximum number of registered agents retained in memory and SQLite.
     #[serde(rename = "MaxRegisteredAgents", default)]
     pub max_registered_agents: Option<usize>,

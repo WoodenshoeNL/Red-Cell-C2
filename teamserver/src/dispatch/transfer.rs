@@ -5,7 +5,11 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tracing::warn;
 
-use crate::{AgentRegistry, Database, EventBus, PluginRuntime};
+use crate::{
+    AgentRegistry, AuditResultStatus, Database, EventBus, PluginRuntime, audit_details,
+    parameter_object, record_operator_action,
+};
+use serde_json::Value;
 
 use super::filesystem::{
     download_complete_event, download_progress_event, parse_file_chunk, parse_file_close,
@@ -306,7 +310,7 @@ pub(super) async fn handle_beacon_output_callback(
             let (file_id, expected_size, remote_path) =
                 parse_file_open_header(u32::from(DemonCommand::BeaconOutput), &bytes)?;
             let started_at = OffsetDateTime::now_utc().format(&Rfc3339)?;
-            downloads
+            match downloads
                 .start(
                     agent_id,
                     file_id,
@@ -318,32 +322,156 @@ pub(super) async fn handle_beacon_output_callback(
                         started_at,
                     },
                 )
-                .await?;
-            events.broadcast(download_progress_event(
-                agent_id,
-                u32::from(DemonCommand::BeaconOutput),
-                request_id,
-                file_id,
-                &remote_path,
-                0,
-                expected_size,
-                "Started",
-            )?);
+                .await
+            {
+                Ok(()) => {
+                    events.broadcast(download_progress_event(
+                        agent_id,
+                        u32::from(DemonCommand::BeaconOutput),
+                        request_id,
+                        file_id,
+                        &remote_path,
+                        0,
+                        expected_size,
+                        "Started",
+                    )?);
+                }
+                Err(
+                    ref error @ CommandDispatchError::DownloadConcurrentLimitExceeded {
+                        max_concurrent,
+                        ..
+                    },
+                ) => {
+                    let msg = format!(
+                        "download rejected: concurrent limit exceeded \
+                         (file=0x{file_id:08x}, path={remote_path}, limit={max_concurrent})"
+                    );
+                    warn!(
+                        agent_id = format_args!("{agent_id:08X}"),
+                        file_id = format_args!("{file_id:08X}"),
+                        %remote_path,
+                        max_concurrent,
+                        "download rejected: per-agent concurrent download limit exceeded"
+                    );
+                    if let Err(audit_error) = record_operator_action(
+                        database,
+                        "teamserver",
+                        "download.rejected",
+                        "agent",
+                        Some(format!("{agent_id:08X}")),
+                        audit_details(
+                            AuditResultStatus::Failure,
+                            Some(agent_id),
+                            Some("download"),
+                            Some(parameter_object([
+                                ("limit_type", Value::String("concurrent".to_owned())),
+                                ("file_id", Value::String(format!("{file_id:08X}"))),
+                                ("file_path", Value::String(remote_path.clone())),
+                                ("max_concurrent", Value::Number(max_concurrent.into())),
+                                ("error", Value::String(error.to_string())),
+                            ])),
+                        ),
+                    )
+                    .await
+                    {
+                        warn!(
+                            agent_id = format_args!("{agent_id:08X}"),
+                            %audit_error,
+                            "failed to persist download.rejected audit entry"
+                        );
+                    }
+                    events.broadcast(agent_response_event(
+                        agent_id,
+                        u32::from(DemonCommand::BeaconOutput),
+                        request_id,
+                        "Error",
+                        &msg,
+                        None,
+                    )?);
+                }
+                Err(error) => return Err(error),
+            }
         }
         DemonCallback::FileWrite => {
             let bytes = parser.read_bytes("beacon file write")?;
             let (file_id, chunk) = parse_file_chunk(u32::from(DemonCommand::BeaconOutput), &bytes)?;
-            let state = downloads.append(agent_id, file_id, &chunk).await?;
-            events.broadcast(download_progress_event(
-                agent_id,
-                u32::from(DemonCommand::BeaconOutput),
-                state.request_id,
-                file_id,
-                &state.remote_path,
-                state.data.len() as u64,
-                state.expected_size,
-                "InProgress",
-            )?);
+            match downloads.append(agent_id, file_id, &chunk).await {
+                Ok(state) => {
+                    events.broadcast(download_progress_event(
+                        agent_id,
+                        u32::from(DemonCommand::BeaconOutput),
+                        state.request_id,
+                        file_id,
+                        &state.remote_path,
+                        state.data.len() as u64,
+                        state.expected_size,
+                        "InProgress",
+                    )?);
+                }
+                Err(
+                    ref error @ (CommandDispatchError::DownloadTooLarge {
+                        max_download_bytes, ..
+                    }
+                    | CommandDispatchError::DownloadAggregateTooLarge {
+                        max_total_download_bytes: max_download_bytes,
+                        ..
+                    }),
+                ) => {
+                    let limit_type =
+                        if matches!(error, CommandDispatchError::DownloadTooLarge { .. }) {
+                            "per_download"
+                        } else {
+                            "aggregate"
+                        };
+                    let msg = format!(
+                        "download rejected: size limit exceeded \
+                         (file=0x{file_id:08x}, limit_type={limit_type}, \
+                         max_bytes={max_download_bytes})"
+                    );
+                    warn!(
+                        agent_id = format_args!("{agent_id:08X}"),
+                        file_id = format_args!("{file_id:08X}"),
+                        limit_type,
+                        max_download_bytes,
+                        "download rejected: download size limit exceeded"
+                    );
+                    if let Err(audit_error) = record_operator_action(
+                        database,
+                        "teamserver",
+                        "download.rejected",
+                        "agent",
+                        Some(format!("{agent_id:08X}")),
+                        audit_details(
+                            AuditResultStatus::Failure,
+                            Some(agent_id),
+                            Some("download"),
+                            Some(parameter_object([
+                                ("limit_type", Value::String(limit_type.to_owned())),
+                                ("file_id", Value::String(format!("{file_id:08X}"))),
+                                ("max_bytes", Value::Number(max_download_bytes.into())),
+                                ("error", Value::String(error.to_string())),
+                            ])),
+                        ),
+                    )
+                    .await
+                    {
+                        warn!(
+                            agent_id = format_args!("{agent_id:08X}"),
+                            %audit_error,
+                            "failed to persist download.rejected audit entry"
+                        );
+                    }
+                    events.broadcast(agent_response_event(
+                        agent_id,
+                        u32::from(DemonCommand::BeaconOutput),
+                        request_id,
+                        "Error",
+                        &msg,
+                        None,
+                    )?);
+                }
+                Err(error) => return Err(error),
+            }
         }
         DemonCallback::FileClose => {
             let bytes = parser.read_bytes("beacon file close")?;

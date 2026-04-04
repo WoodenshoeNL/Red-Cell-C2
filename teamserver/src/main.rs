@@ -64,7 +64,7 @@ async fn main() -> Result<()> {
     )
     .await
     .context("failed to initialize embedded Python runtime")?;
-    let listeners = ListenerManager::with_max_download_bytes(
+    let mut listeners = ListenerManager::with_max_download_bytes(
         database.clone(),
         agent_registry.clone(),
         events.clone(),
@@ -74,6 +74,12 @@ async fn main() -> Result<()> {
     )
     .with_demon_init_secret(profile.demon.init_secret.as_deref().map(|s| s.as_bytes().to_vec()))
     .with_demon_allow_legacy_ctr(profile.demon.allow_legacy_ctr);
+    if let Some(limit) = profile.teamserver.max_concurrent_downloads_per_agent {
+        listeners = listeners.with_max_concurrent_downloads_per_agent(limit);
+    }
+    if let Some(limit) = profile.teamserver.max_aggregate_download_bytes {
+        listeners = listeners.with_max_aggregate_download_bytes(limit);
+    }
     plugins.attach_listener_manager(listeners.clone()).await;
     let payload_builder = PayloadBuilderService::from_profile(&profile)
         .context("failed to validate Demon build toolchain")?;

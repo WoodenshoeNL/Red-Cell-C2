@@ -598,6 +598,25 @@ impl ListenerManager {
         }
     }
 
+    /// Override the per-agent concurrent download limit.
+    ///
+    /// Must be called before any listeners are started.
+    #[must_use]
+    pub fn with_max_concurrent_downloads_per_agent(mut self, limit: usize) -> Self {
+        self.downloads = self.downloads.with_max_concurrent_per_agent(limit);
+        self
+    }
+
+    /// Override the aggregate in-memory download cap across all active downloads.
+    ///
+    /// Must be called before any listeners are started.
+    #[must_use]
+    pub fn with_max_aggregate_download_bytes(mut self, limit: u64) -> Self {
+        let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+        self.downloads = self.downloads.with_max_aggregate_bytes(limit);
+        self
+    }
+
     /// Set the HKDF server secret used by all listener packet parsers.
     ///
     /// Call this before any listeners are spawned.  All clones of this manager

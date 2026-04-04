@@ -1000,6 +1000,26 @@ impl DownloadTracker {
         }
     }
 
+    /// Override the per-agent concurrent download limit.
+    ///
+    /// Must be called before any downloads are tracked.
+    #[must_use]
+    pub(crate) fn with_max_concurrent_per_agent(mut self, limit: usize) -> Self {
+        self.max_concurrent_downloads_per_agent = limit;
+        self
+    }
+
+    /// Override the aggregate in-memory cap across all active downloads.
+    ///
+    /// The value is clamped to at least `max_download_bytes` so a single
+    /// download can always make progress up to its per-download limit.
+    /// Must be called before any downloads are tracked.
+    #[must_use]
+    pub(crate) fn with_max_aggregate_bytes(mut self, limit: usize) -> Self {
+        self.max_total_download_bytes = limit.max(self.max_download_bytes);
+        self
+    }
+
     async fn start(
         &self,
         agent_id: u32,
@@ -4795,7 +4815,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn builtin_filesystem_download_handler_drops_downloads_over_limit()
+    async fn builtin_filesystem_download_handler_surfaces_over_limit_as_error_event()
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::connect_in_memory().await?;
         let registry = AgentRegistry::new(database.clone());
@@ -4821,24 +4841,18 @@ mod tests {
         add_utf16(&mut open, "C:\\Temp\\oversized.bin");
         dispatcher.dispatch(0xABCD_EF31, u32::from(DemonCommand::CommandFs), 0x99, &open).await?;
 
+        // Chunk that exceeds the 4-byte cap — must succeed (not propagate error).
         let mut write = Vec::new();
         add_u32(&mut write, u32::from(DemonFilesystemCommand::Download));
         add_u32(&mut write, 1);
         add_u32(&mut write, file_id);
         add_bytes(&mut write, b"12345");
-        let error = dispatcher
+        dispatcher
             .dispatch(0xABCD_EF31, u32::from(DemonCommand::CommandFs), 0x99, &write)
             .await
-            .expect_err("oversized download should be rejected");
-        assert!(matches!(
-            error,
-            crate::CommandDispatchError::DownloadTooLarge {
-                agent_id: 0xABCD_EF31,
-                file_id: 0x91,
-                max_download_bytes: 4,
-            }
-        ));
+            .expect("oversized chunk should not propagate as dispatch error");
 
+        // Open event (download-progress "Started").
         let open_event = receiver.recv().await.ok_or("missing open event")?;
         let OperatorMessage::AgentResponse(open_message) = open_event else {
             panic!("expected download open response");
@@ -4847,12 +4861,30 @@ mod tests {
             open_message.info.extra.get("MiscType"),
             Some(&Value::String("download-progress".to_owned()))
         );
+
+        // Error event surfaced to operator.
+        let error_event = receiver.recv().await.ok_or("missing error event")?;
+        let OperatorMessage::AgentResponse(error_message) = error_event else {
+            panic!("expected AgentResponse error event");
+        };
+        assert_eq!(error_message.info.extra.get("Type"), Some(&Value::String("Error".to_owned())));
+        let msg = error_message.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
         assert!(
-            timeout(Duration::from_millis(50), receiver.recv()).await.is_err(),
-            "oversized download should not emit progress or completion events"
+            msg.contains("limit exceeded"),
+            "error message should mention limit exceeded: {msg}"
         );
+
+        // Audit log must have a download.rejected entry.
+        let audit_rows = database.audit_log().list().await?;
+        assert!(
+            audit_rows.iter().any(|r| r.action == "download.rejected"),
+            "audit log must contain a download.rejected entry"
+        );
+
+        // No loot must have been persisted.
         assert!(database.loot().list_for_agent(0xABCD_EF31).await?.is_empty());
 
+        // Close packet is harmless (download already removed from tracker).
         let mut close = Vec::new();
         add_u32(&mut close, u32::from(DemonFilesystemCommand::Download));
         add_u32(&mut close, 2);
@@ -5465,7 +5497,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn builtin_beacon_file_callbacks_drop_downloads_over_limit()
+    async fn builtin_beacon_file_callbacks_surface_over_limit_as_error_event()
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::connect_in_memory().await?;
         let registry = AgentRegistry::new(database.clone());
@@ -5494,25 +5526,19 @@ mod tests {
             .dispatch(0xABCD_EF41, u32::from(DemonCommand::BeaconOutput), 0x77, &open)
             .await?;
 
+        // Chunk that exceeds the 4-byte cap — must succeed (not propagate error).
         let mut chunk = Vec::new();
         chunk.extend_from_slice(&file_id.to_be_bytes());
         chunk.extend_from_slice(b"12345");
         let mut write = Vec::new();
         add_u32(&mut write, u32::from(DemonCallback::FileWrite));
         add_bytes(&mut write, &chunk);
-        let error = dispatcher
+        dispatcher
             .dispatch(0xABCD_EF41, u32::from(DemonCommand::BeaconOutput), 0x77, &write)
             .await
-            .expect_err("oversized beacon download should be rejected");
-        assert!(matches!(
-            error,
-            crate::CommandDispatchError::DownloadTooLarge {
-                agent_id: 0xABCD_EF41,
-                file_id: 0x92,
-                max_download_bytes: 4,
-            }
-        ));
+            .expect("oversized beacon chunk should not propagate as dispatch error");
 
+        // Open event (download-progress "Started").
         let open_event = receiver.recv().await.ok_or("missing beacon open event")?;
         let OperatorMessage::AgentResponse(open_message) = open_event else {
             panic!("expected beacon open response");
@@ -5521,12 +5547,30 @@ mod tests {
             open_message.info.extra.get("MiscType"),
             Some(&Value::String("download-progress".to_owned()))
         );
+
+        // Error event surfaced to operator.
+        let error_event = receiver.recv().await.ok_or("missing error event")?;
+        let OperatorMessage::AgentResponse(error_message) = error_event else {
+            panic!("expected AgentResponse error event");
+        };
+        assert_eq!(error_message.info.extra.get("Type"), Some(&Value::String("Error".to_owned())));
+        let msg = error_message.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
         assert!(
-            timeout(Duration::from_millis(50), receiver.recv()).await.is_err(),
-            "oversized beacon download should not emit progress or completion events"
+            msg.contains("limit exceeded"),
+            "error message should mention limit exceeded: {msg}"
         );
+
+        // Audit log must have a download.rejected entry.
+        let audit_rows = database.audit_log().list().await?;
+        assert!(
+            audit_rows.iter().any(|r| r.action == "download.rejected"),
+            "audit log must contain a download.rejected entry"
+        );
+
+        // No loot must have been persisted.
         assert!(database.loot().list_for_agent(0xABCD_EF41).await?.is_empty());
 
+        // Close packet is harmless (download already removed from tracker).
         let mut close = Vec::new();
         add_u32(&mut close, u32::from(DemonCallback::FileClose));
         add_bytes(&mut close, &file_id.to_be_bytes());
@@ -5636,26 +5680,18 @@ mod tests {
         add_utf16(&mut open, "C:\\Temp\\big.bin");
         dispatcher.dispatch(0xABCD_EF61, u32::from(DemonCommand::CommandFs), 0x99, &open).await?;
 
-        // Write chunk that exceeds ceiling (9 bytes > 8)
+        // Write chunk that exceeds ceiling (9 bytes > 8) — must succeed, error surfaced as event.
         let mut write = Vec::new();
         add_u32(&mut write, u32::from(DemonFilesystemCommand::Download));
         add_u32(&mut write, 1);
         add_u32(&mut write, file_id);
         add_bytes(&mut write, b"123456789");
-        let error = dispatcher
+        dispatcher
             .dispatch(0xABCD_EF61, u32::from(DemonCommand::CommandFs), 0x99, &write)
             .await
-            .expect_err("download exceeding ceiling should be rejected");
-        assert!(matches!(
-            error,
-            crate::CommandDispatchError::DownloadTooLarge {
-                agent_id: 0xABCD_EF61,
-                file_id: 0xA2,
-                max_download_bytes: 8,
-            }
-        ));
+            .expect("oversized chunk should not propagate as dispatch error");
 
-        // Subsequent write for the same file_id should also fail (download was dropped)
+        // Subsequent write for the same file_id hits InvalidCallbackPayload (download dropped).
         let mut write2 = Vec::new();
         add_u32(&mut write2, u32::from(DemonFilesystemCommand::Download));
         add_u32(&mut write2, 1);
@@ -5664,13 +5700,26 @@ mod tests {
         let error2 = dispatcher
             .dispatch(0xABCD_EF61, u32::from(DemonCommand::CommandFs), 0x99, &write2)
             .await;
-        assert!(error2.is_err(), "writes after drop should be rejected");
+        assert!(error2.is_err(), "writes after drop should be rejected with protocol error");
 
-        // Drain the open event, then confirm no further events
+        // Drain: open event, then error event for the oversized chunk.
         let _open_event = receiver.recv().await.ok_or("missing open event")?;
+        let error_event = receiver.recv().await.ok_or("missing error event")?;
+        let OperatorMessage::AgentResponse(error_msg) = error_event else {
+            panic!("expected AgentResponse error event");
+        };
+        assert_eq!(error_msg.info.extra.get("Type"), Some(&Value::String("Error".to_owned())));
+        // No further events (write2 errors without events).
         assert!(
             timeout(Duration::from_millis(50), receiver.recv()).await.is_err(),
-            "oversized download should not emit progress or completion events"
+            "no further events after drop"
+        );
+
+        // Audit log must contain a download.rejected entry.
+        let audit_rows = database.audit_log().list().await?;
+        assert!(
+            audit_rows.iter().any(|r| r.action == "download.rejected"),
+            "audit log must contain a download.rejected entry"
         );
         assert!(database.loot().list_for_agent(0xABCD_EF61).await?.is_empty());
         Ok(())
@@ -5705,30 +5754,30 @@ mod tests {
         add_utf16(&mut open, "C:\\Temp\\zero.bin");
         dispatcher.dispatch(0xABCD_EF62, u32::from(DemonCommand::CommandFs), 0x99, &open).await?;
 
-        // Even a single byte write should be rejected with ceiling=0
+        // Even a single byte write should be surfaced as error event with ceiling=0.
         let mut write = Vec::new();
         add_u32(&mut write, u32::from(DemonFilesystemCommand::Download));
         add_u32(&mut write, 1);
         add_u32(&mut write, file_id);
         add_bytes(&mut write, b"x");
-        let error = dispatcher
+        dispatcher
             .dispatch(0xABCD_EF62, u32::from(DemonCommand::CommandFs), 0x99, &write)
             .await
-            .expect_err("any write should be rejected with zero ceiling");
-        assert!(matches!(
-            error,
-            crate::CommandDispatchError::DownloadTooLarge {
-                agent_id: 0xABCD_EF62,
-                file_id: 0xA3,
-                max_download_bytes: 0,
-            }
-        ));
+            .expect("zero-ceiling write should not propagate as dispatch error");
 
-        // Drain the open event, confirm no loot persisted
+        // Drain: open event, then error event.
         let _open_event = receiver.recv().await.ok_or("missing open event")?;
+        let error_event = receiver.recv().await.ok_or("missing error event")?;
+        let OperatorMessage::AgentResponse(error_msg) = error_event else {
+            panic!("expected AgentResponse error event");
+        };
+        assert_eq!(error_msg.info.extra.get("Type"), Some(&Value::String("Error".to_owned())));
+
+        // Audit log must contain a download.rejected entry.
+        let audit_rows = database.audit_log().list().await?;
         assert!(
-            timeout(Duration::from_millis(50), receiver.recv()).await.is_err(),
-            "zero-ceiling download should not emit progress events"
+            audit_rows.iter().any(|r| r.action == "download.rejected"),
+            "audit log must contain a download.rejected entry"
         );
         assert!(database.loot().list_for_agent(0xABCD_EF62).await?.is_empty());
         Ok(())

@@ -8,7 +8,10 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tracing::warn;
 
-use crate::{AgentRegistry, Database, EventBus, LootRecord, PluginRuntime};
+use crate::{
+    AgentRegistry, AuditResultStatus, Database, EventBus, LootRecord, PluginRuntime, audit_details,
+    parameter_object, record_operator_action,
+};
 
 use super::transfer::byte_count;
 use super::{
@@ -176,7 +179,7 @@ pub(super) async fn handle_filesystem_callback(
                     let expected_size = parser.read_u64("filesystem download size")?;
                     let remote_path = parser.read_utf16("filesystem download path")?;
                     let started_at = OffsetDateTime::now_utc().format(&Rfc3339)?;
-                    downloads
+                    match downloads
                         .start(
                             agent_id,
                             file_id,
@@ -188,31 +191,156 @@ pub(super) async fn handle_filesystem_callback(
                                 started_at,
                             },
                         )
-                        .await?;
-                    events.broadcast(download_progress_event(
-                        agent_id,
-                        u32::from(DemonCommand::CommandFs),
-                        request_id,
-                        file_id,
-                        &remote_path,
-                        0,
-                        expected_size,
-                        "Started",
-                    )?);
+                        .await
+                    {
+                        Ok(()) => {
+                            events.broadcast(download_progress_event(
+                                agent_id,
+                                u32::from(DemonCommand::CommandFs),
+                                request_id,
+                                file_id,
+                                &remote_path,
+                                0,
+                                expected_size,
+                                "Started",
+                            )?);
+                        }
+                        Err(
+                            ref error @ CommandDispatchError::DownloadConcurrentLimitExceeded {
+                                max_concurrent,
+                                ..
+                            },
+                        ) => {
+                            let msg = format!(
+                                "download rejected: concurrent limit exceeded \
+                                 (file=0x{file_id:08x}, path={remote_path}, limit={max_concurrent})"
+                            );
+                            warn!(
+                                agent_id = format_args!("{agent_id:08X}"),
+                                file_id = format_args!("{file_id:08X}"),
+                                %remote_path,
+                                max_concurrent,
+                                "download rejected: per-agent concurrent download limit exceeded"
+                            );
+                            if let Err(audit_error) = record_operator_action(
+                                database,
+                                "teamserver",
+                                "download.rejected",
+                                "agent",
+                                Some(format!("{agent_id:08X}")),
+                                audit_details(
+                                    AuditResultStatus::Failure,
+                                    Some(agent_id),
+                                    Some("download"),
+                                    Some(parameter_object([
+                                        ("limit_type", Value::String("concurrent".to_owned())),
+                                        ("file_id", Value::String(format!("{file_id:08X}"))),
+                                        ("file_path", Value::String(remote_path.clone())),
+                                        ("max_concurrent", Value::Number(max_concurrent.into())),
+                                        ("error", Value::String(error.to_string())),
+                                    ])),
+                                ),
+                            )
+                            .await
+                            {
+                                warn!(
+                                    agent_id = format_args!("{agent_id:08X}"),
+                                    %audit_error,
+                                    "failed to persist download.rejected audit entry"
+                                );
+                            }
+                            events.broadcast(agent_response_event(
+                                agent_id,
+                                u32::from(DemonCommand::CommandFs),
+                                request_id,
+                                "Error",
+                                &msg,
+                                None,
+                            )?);
+                        }
+                        Err(error) => return Err(error),
+                    }
                 }
                 1 => {
                     let chunk = parser.read_bytes("filesystem download chunk")?;
-                    let state = downloads.append(agent_id, file_id, &chunk).await?;
-                    events.broadcast(download_progress_event(
-                        agent_id,
-                        u32::from(DemonCommand::CommandFs),
-                        state.request_id,
-                        file_id,
-                        &state.remote_path,
-                        state.data.len() as u64,
-                        state.expected_size,
-                        "InProgress",
-                    )?);
+                    match downloads.append(agent_id, file_id, &chunk).await {
+                        Ok(state) => {
+                            events.broadcast(download_progress_event(
+                                agent_id,
+                                u32::from(DemonCommand::CommandFs),
+                                state.request_id,
+                                file_id,
+                                &state.remote_path,
+                                state.data.len() as u64,
+                                state.expected_size,
+                                "InProgress",
+                            )?);
+                        }
+                        Err(
+                            ref error @ (CommandDispatchError::DownloadTooLarge {
+                                max_download_bytes,
+                                ..
+                            }
+                            | CommandDispatchError::DownloadAggregateTooLarge {
+                                max_total_download_bytes: max_download_bytes,
+                                ..
+                            }),
+                        ) => {
+                            let limit_type =
+                                if matches!(error, CommandDispatchError::DownloadTooLarge { .. }) {
+                                    "per_download"
+                                } else {
+                                    "aggregate"
+                                };
+                            let msg = format!(
+                                "download rejected: size limit exceeded \
+                                 (file=0x{file_id:08x}, limit_type={limit_type}, \
+                                 max_bytes={max_download_bytes})"
+                            );
+                            warn!(
+                                agent_id = format_args!("{agent_id:08X}"),
+                                file_id = format_args!("{file_id:08X}"),
+                                limit_type,
+                                max_download_bytes,
+                                "download rejected: download size limit exceeded"
+                            );
+                            if let Err(audit_error) = record_operator_action(
+                                database,
+                                "teamserver",
+                                "download.rejected",
+                                "agent",
+                                Some(format!("{agent_id:08X}")),
+                                audit_details(
+                                    AuditResultStatus::Failure,
+                                    Some(agent_id),
+                                    Some("download"),
+                                    Some(parameter_object([
+                                        ("limit_type", Value::String(limit_type.to_owned())),
+                                        ("file_id", Value::String(format!("{file_id:08X}"))),
+                                        ("max_bytes", Value::Number(max_download_bytes.into())),
+                                        ("error", Value::String(error.to_string())),
+                                    ])),
+                                ),
+                            )
+                            .await
+                            {
+                                warn!(
+                                    agent_id = format_args!("{agent_id:08X}"),
+                                    %audit_error,
+                                    "failed to persist download.rejected audit entry"
+                                );
+                            }
+                            events.broadcast(agent_response_event(
+                                agent_id,
+                                u32::from(DemonCommand::CommandFs),
+                                request_id,
+                                "Error",
+                                &msg,
+                                None,
+                            )?);
+                        }
+                        Err(error) => return Err(error),
+                    }
                 }
                 2 => {
                     let reason = parser.read_u32("filesystem download close reason")?;
@@ -2344,8 +2472,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn download_exceeding_memory_limit_returns_error() {
+    async fn download_exceeding_memory_limit_surfaces_error_event() {
         let (registry, db, events, downloads) = small_limit_test_deps(64).await;
+        let mut receiver = events.subscribe();
         let agent_id = 0xFA10;
         let file_id = 0xA1;
         let request_id = 0xC1;
@@ -2381,8 +2510,9 @@ mod tests {
         .expect("first chunk within limit should succeed");
 
         // Append a chunk that pushes past the 64-byte limit (32 + 48 = 80 > 64).
+        // Must return Ok(None) — limit failure is surfaced as an operator event + audit entry.
         let overflow_chunk = vec![0xBB; 48];
-        let err = handle_filesystem_callback(
+        handle_filesystem_callback(
             &registry,
             &db,
             &events,
@@ -2393,15 +2523,31 @@ mod tests {
             &build_download_write_payload(file_id, &overflow_chunk),
         )
         .await
-        .expect_err("expected Err");
-        assert!(
-            matches!(err, CommandDispatchError::DownloadTooLarge { .. }),
-            "expected DownloadTooLarge, got {err:?}"
-        );
+        .expect("overflow chunk should not propagate as dispatch error");
 
         // The download should have been removed after exceeding the limit.
-        let finished = downloads.finish(agent_id, file_id).await;
-        assert!(finished.is_none(), "download should be removed after limit exceeded");
+        assert!(downloads.finish(agent_id, file_id).await.is_none(), "download should be removed");
+
+        // Drain: open-progress event, write-progress event, then error event.
+        let _open_ev = receiver.recv().await.expect("open event");
+        let _write_ev = receiver.recv().await.expect("write event");
+        use red_cell_common::operator::OperatorMessage;
+        let error_ev = receiver.recv().await.expect("error event");
+        let OperatorMessage::AgentResponse(error_msg) = error_ev else {
+            panic!("expected AgentResponse error event");
+        };
+        assert_eq!(
+            error_msg.info.extra.get("Type").and_then(|v| v.as_str()),
+            Some("Error"),
+            "limit event must be Error type"
+        );
+
+        // Audit log must record the rejection.
+        let audit_rows = db.audit_log().list().await.expect("audit list");
+        assert!(
+            audit_rows.iter().any(|r| r.action == "download.rejected"),
+            "audit log must contain a download.rejected entry"
+        );
     }
 
     #[tokio::test]
@@ -2462,8 +2608,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn download_one_byte_over_limit_returns_error() {
+    async fn download_one_byte_over_limit_surfaces_error_event() {
         let (registry, db, events, downloads) = small_limit_test_deps(64).await;
+        let mut receiver = events.subscribe();
         let agent_id = 0xFA12;
         let file_id = 0xA3;
         let request_id = 0xC3;
@@ -2498,8 +2645,8 @@ mod tests {
         .await
         .expect("filling to exact limit should succeed");
 
-        // One more byte should fail.
-        let err = handle_filesystem_callback(
+        // One more byte — must return Ok(None) with error surfaced as event.
+        handle_filesystem_callback(
             &registry,
             &db,
             &events,
@@ -2510,16 +2657,25 @@ mod tests {
             &build_download_write_payload(file_id, &[0xEE]),
         )
         .await
-        .expect_err("expected Err");
-        assert!(
-            matches!(err, CommandDispatchError::DownloadTooLarge { .. }),
-            "expected DownloadTooLarge for 1 byte over limit, got {err:?}"
-        );
+        .expect("one-byte-over write should not propagate as dispatch error");
+
+        // Drain: open event, write event, error event.
+        let _open_ev = receiver.recv().await.expect("open event");
+        let _write_ev = receiver.recv().await.expect("write event");
+        use red_cell_common::operator::OperatorMessage;
+        let error_ev = receiver.recv().await.expect("error event");
+        let OperatorMessage::AgentResponse(error_msg) = error_ev else {
+            panic!("expected AgentResponse error event");
+        };
+        assert_eq!(error_msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Error"),);
+        let audit_rows = db.audit_log().list().await.expect("audit list");
+        assert!(audit_rows.iter().any(|r| r.action == "download.rejected"));
     }
 
     #[tokio::test]
-    async fn download_single_chunk_exceeding_limit_returns_error() {
+    async fn download_single_chunk_exceeding_limit_surfaces_error_event() {
         let (registry, db, events, downloads) = small_limit_test_deps(16).await;
+        let mut receiver = events.subscribe();
         let agent_id = 0xFA13;
         let file_id = 0xA4;
         let request_id = 0xC4;
@@ -2539,9 +2695,9 @@ mod tests {
         .await
         .expect("open should succeed");
 
-        // A single chunk larger than the limit should fail immediately.
+        // A single chunk larger than the limit must return Ok(None).
         let huge_chunk = vec![0xFF; 32];
-        let err = handle_filesystem_callback(
+        handle_filesystem_callback(
             &registry,
             &db,
             &events,
@@ -2552,14 +2708,21 @@ mod tests {
             &build_download_write_payload(file_id, &huge_chunk),
         )
         .await
-        .expect_err("expected Err");
-        assert!(
-            matches!(err, CommandDispatchError::DownloadTooLarge { .. }),
-            "expected DownloadTooLarge for oversized single chunk, got {err:?}"
-        );
+        .expect("oversized single chunk should not propagate as dispatch error");
 
         // Download should be removed.
         assert!(downloads.finish(agent_id, file_id).await.is_none());
+
+        // Drain: open event, then error event.
+        let _open_ev = receiver.recv().await.expect("open event");
+        use red_cell_common::operator::OperatorMessage;
+        let error_ev = receiver.recv().await.expect("error event");
+        let OperatorMessage::AgentResponse(error_msg) = error_ev else {
+            panic!("expected AgentResponse error event");
+        };
+        assert_eq!(error_msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Error"),);
+        let audit_rows = db.audit_log().list().await.expect("audit list");
+        assert!(audit_rows.iter().any(|r| r.action == "download.rejected"));
     }
 
     #[tokio::test]

@@ -5,9 +5,9 @@ Runs two passes:
   - Demon: 10 concurrent agents (full stress baseline)
   - Phantom: 5 concurrent agents (Rust Linux agent stability check)
 
-The Phantom pass is skipped with a warning if the payload build fails
-(e.g. Phantom not yet fully implemented), so the Demon pass still counts
-as coverage.
+The Phantom pass runs only when ``"phantom"`` is listed in
+``agents.available`` in env.toml; if it is listed and the payload build
+fails, the scenario fails so the regression is caught.
 
 Skip if ctx.linux is None.
 

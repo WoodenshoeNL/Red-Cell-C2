@@ -350,6 +350,8 @@ enum DockTab {
     FileBrowser(String),
     /// Per-agent process list viewer (standalone tab).
     ProcessList(String),
+    /// Python-script-registered custom tab (title is the normalized tab name).
+    CustomTab(String),
 }
 
 impl DockTab {
@@ -364,6 +366,7 @@ impl DockTab {
             Self::AgentConsole(id) => format!("[{id}]"),
             Self::FileBrowser(id) => format!("[{id}] File Explorer"),
             Self::ProcessList(id) => format!("Process: [{id}]"),
+            Self::CustomTab(title) => title.clone(),
         }
     }
 
@@ -378,6 +381,7 @@ impl DockTab {
             Self::AgentConsole(_) => Color32::from_rgb(140, 120, 220), // purple
             Self::FileBrowser(_) => Color32::from_rgb(80, 180, 140), // teal
             Self::ProcessList(_) => Color32::from_rgb(255, 85, 85),  // red/salmon
+            Self::CustomTab(_) => Color32::from_rgb(100, 200, 120),  // green (plugin)
         }
     }
 
@@ -2694,6 +2698,7 @@ impl ClientApp {
 
     /// Bottom dock panel — tabbed like Havoc with closeable tabs.
     fn render_dock_panel(&mut self, ui: &mut egui::Ui, state: &AppState) {
+        self.sync_custom_dock_tabs();
         self.session_panel.dock.ensure_selected();
 
         // ── Tab bar ─────────────────────────────────────────────────
@@ -2788,6 +2793,10 @@ impl ClientApp {
                 let agent_id = agent_id.clone();
                 self.render_process_list_tab(ui, state, &agent_id);
             }
+            Some(DockTab::CustomTab(ref title)) => {
+                let title = title.clone();
+                self.render_custom_tab_content(ui, &title);
+            }
             None => {
                 ui.centered_and_justified(|ui| {
                     ui.label(
@@ -2797,6 +2806,99 @@ impl ClientApp {
                 });
             }
         }
+    }
+
+    /// Synchronise the dock panel's `CustomTab` entries with currently registered script tabs.
+    ///
+    /// Opens a `CustomTab` for each newly registered script tab and closes any `CustomTab`
+    /// whose backing script tab has been removed (e.g. after a script unload).
+    fn sync_custom_dock_tabs(&mut self) {
+        let Some(runtime) = self.python_runtime.clone() else {
+            // Remove any stale custom tabs that remained after the runtime was torn down.
+            let stale: Vec<DockTab> = self
+                .session_panel
+                .dock
+                .open_tabs
+                .iter()
+                .filter(|t| matches!(t, DockTab::CustomTab(_)))
+                .cloned()
+                .collect();
+            for tab in stale {
+                self.session_panel.dock.close_tab(&tab);
+            }
+            return;
+        };
+
+        let registered: Vec<String> = runtime.script_tabs().into_iter().map(|d| d.title).collect();
+
+        // Close tabs that are no longer registered.
+        let to_close: Vec<DockTab> = self
+            .session_panel
+            .dock
+            .open_tabs
+            .iter()
+            .filter(|t| {
+                if let DockTab::CustomTab(title) = t { !registered.contains(title) } else { false }
+            })
+            .cloned()
+            .collect();
+        for tab in to_close {
+            self.session_panel.dock.close_tab(&tab);
+        }
+
+        // Open tabs that are newly registered, preserving the current selection.
+        let current_selected = self.session_panel.dock.selected.clone();
+        for title in &registered {
+            let tab = DockTab::CustomTab(title.clone());
+            if !self.session_panel.dock.open_tabs.contains(&tab) {
+                self.session_panel.dock.open_tabs.push(tab);
+            }
+        }
+        // Restore selection so opening new tabs doesn't hijack the view.
+        if current_selected.is_some() {
+            self.session_panel.dock.selected = current_selected;
+        }
+    }
+
+    /// Render the content area for a Python-script-registered custom dock tab.
+    fn render_custom_tab_content(&mut self, ui: &mut egui::Ui, title: &str) {
+        let Some(runtime) = self.python_runtime.clone() else {
+            ui.label("Python runtime is not available.");
+            return;
+        };
+
+        let tabs = runtime.script_tabs();
+        let Some(tab) = tabs.iter().find(|t| t.title == title) else {
+            ui.centered_and_justified(|ui| {
+                ui.label(RichText::new("This script tab is no longer available.").weak());
+            });
+            return;
+        };
+
+        ui.horizontal_wrapped(|ui| {
+            ui.monospace(&tab.script_name);
+            if tab.has_callback && ui.button("Refresh").clicked() {
+                let result = runtime.activate_tab(title);
+                self.session_panel.script_manager.status_message = Some(match result {
+                    Ok(()) => format!("Refreshed tab {title}."),
+                    Err(e) => format!("Failed to refresh tab {title}: {e}"),
+                });
+            }
+        });
+        ui.add_space(4.0);
+
+        egui::Frame::group(ui.style()).inner_margin(egui::Margin::same(8)).show(ui, |ui| {
+            egui::ScrollArea::vertical().id_salt(("custom-dock-tab-layout", title)).show(
+                ui,
+                |ui| {
+                    if tab.layout.trim().is_empty() {
+                        ui.label("This tab has not published any layout yet.");
+                    } else {
+                        ui.label(RichText::new(&tab.layout).monospace());
+                    }
+                },
+            );
+        });
     }
 
     fn render_session_table_header(&mut self, ui: &mut egui::Ui) {

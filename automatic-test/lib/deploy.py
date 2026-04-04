@@ -14,6 +14,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from lib import ScenarioSkipped
+
 
 @dataclass
 class TargetConfig:
@@ -89,6 +91,51 @@ def preflight_ssh(target: TargetConfig) -> None:
         raise DeployError(
             f"target {target.host} not reachable via SSH — "
             "check targets.toml and network"
+        )
+
+
+def preflight_dns(target: TargetConfig, domain: str, expected_ip: str) -> None:
+    """Check that ``domain`` resolves to ``expected_ip`` on the target machine.
+
+    Runs ``python3 -c "import socket; print(socket.gethostbyname(domain))"``
+    on the remote target via SSH and compares the result to ``expected_ip``.
+
+    DNS listener scenarios (15, 20) require the C2 domain to resolve to the
+    teamserver IP on the target's resolver before the agent can check in.
+    If the setup is missing the agent silently fails to connect and the scenario
+    times out with no indication of the root cause.
+
+    Args:
+        target:      SSH target to probe DNS resolution from.
+        domain:      C2 domain to resolve (e.g. ``"c2.test.local"``).
+        expected_ip: Teamserver IP the domain must map to.
+
+    Raises:
+        ScenarioSkipped: if resolution fails or returns an unexpected address,
+            with an actionable message describing the required ``/etc/hosts``
+            entry.
+    """
+    probe = (
+        f"python3 -c \"import socket; print(socket.gethostbyname('{domain}'))\""
+    )
+    result = subprocess.run(
+        _ssh_args(target) + [probe],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    if result.returncode != 0:
+        raise ScenarioSkipped(
+            f"DNS for {domain!r} on {target.host} could not be resolved "
+            f"(probe failed: {result.stderr.strip()}); "
+            f"add entry to /etc/hosts: '{expected_ip}  {domain}'"
+        )
+    actual_ip = result.stdout.strip()
+    if actual_ip != expected_ip:
+        raise ScenarioSkipped(
+            f"DNS for {domain!r} on {target.host} resolves to {actual_ip!r} "
+            f"not {expected_ip!r}; "
+            f"add entry to /etc/hosts: '{expected_ip}  {domain}'"
         )
 
 

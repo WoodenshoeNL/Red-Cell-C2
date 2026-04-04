@@ -270,7 +270,10 @@ def _download_response_via_doh_grammar(host: str, port: int, domain: str, sessio
 
 
 def run(ctx):
+    from urllib.parse import urlparse
+
     from lib.cli import agent_kill, listener_create, listener_delete, listener_start, listener_stop
+    from lib.deploy import preflight_dns
 
     if not _listener_source_supports_doh_grammar():
         raise ScenarioSkipped(
@@ -283,6 +286,14 @@ def run(ctx):
     server_host = "127.0.0.1"
     dns_port = listeners_cfg.get("dns_port", 15353)
     dns_domain = listeners_cfg.get("dns_domain", "c2.test.local")
+
+    if ctx.linux is not None:
+        server_url = (
+            ctx.env.get("server", {}).get("rest_url")
+            or ctx.env.get("server", {}).get("url", "")
+        )
+        teamserver_ip = urlparse(server_url).hostname or "127.0.0.1"
+        preflight_dns(ctx.linux, dns_domain, teamserver_ip)
     listener_name = f"test-doh-dns-{_short_id()}"
     scenario13 = _load_protocol_probe_module()
 

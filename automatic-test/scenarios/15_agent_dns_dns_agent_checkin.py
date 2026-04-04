@@ -178,11 +178,21 @@ def run(ctx):
     """
     if ctx.linux is None:
         raise ScenarioSkipped("ctx.linux is None — no Linux target configured")
-    from lib.deploy import DeployError, preflight_ssh
+    from urllib.parse import urlparse
+    from lib.deploy import DeployError, preflight_dns, preflight_ssh
     try:
         preflight_ssh(ctx.linux)
     except DeployError as exc:
         raise ScenarioSkipped(str(exc)) from exc
+
+    dns_cfg = ctx.env.get("listeners", {})
+    dns_domain = dns_cfg.get("dns_domain", "c2.test.local")
+    server_url = (
+        ctx.env.get("server", {}).get("rest_url")
+        or ctx.env.get("server", {}).get("url", "")
+    )
+    teamserver_ip = urlparse(server_url).hostname or "127.0.0.1"
+    preflight_dns(ctx.linux, dns_domain, teamserver_ip)
 
     # ── Demon pass (primary baseline) ───────────────────────────────────────
     print("\n  === DNS agent pass: demon ===")

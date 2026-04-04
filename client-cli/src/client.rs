@@ -410,9 +410,35 @@ fn parse_retry_after(response: &reqwest::Response) -> Option<u64> {
         .and_then(|s| s.trim().parse::<u64>().ok())
 }
 
+/// Returns `true` when any error in `e`'s [`std::error::Error::source`] chain
+/// contains TLS certificate validation keywords in its `Display` output.
+///
+/// `reqwest` does not expose a typed TLS predicate, so this inspects the
+/// human-readable representation of each layer.  The wording matches rustls
+/// certificate error messages as they propagate through reqwest's error chain.
+fn error_chain_mentions_cert(e: &dyn std::error::Error) -> bool {
+    let mut src: Option<&dyn std::error::Error> = Some(e);
+    while let Some(err) = src {
+        let msg = err.to_string();
+        if msg.contains("certificate") || msg.contains("unknown issuer") {
+            return true;
+        }
+        src = err.source();
+    }
+    false
+}
+
 fn map_reqwest_error(e: reqwest::Error, url: &str) -> CliError {
     if e.is_timeout() {
         CliError::Timeout(format!("request to {url} timed out"))
+    } else if error_chain_mentions_cert(&e) {
+        // TLS certificate errors are connectivity/trust problems, not auth failures.
+        // Give a specific message so callers do not confuse them with bad credentials.
+        CliError::ServerUnreachable(format!(
+            "TLS certificate trust failure for {url}: {e} \
+             — verify the server certificate or configure \
+             --tls-ca / --tls-fingerprint"
+        ))
     } else if e.is_connect() {
         CliError::ServerUnreachable(format!("cannot connect to {url}: {e}"))
     } else {
@@ -809,6 +835,43 @@ mod tests {
             matches!(mapped, CliError::ServerUnreachable(_)),
             "else branch must map to ServerUnreachable, got: {mapped:?}",
         );
+    }
+
+    // ── error_chain_mentions_cert ────────────────────────────────────────────
+
+    /// A synthetic error type used to construct test error chains without
+    /// needing a live HTTP connection.
+    #[derive(Debug)]
+    struct SimpleErr(String);
+    impl std::fmt::Display for SimpleErr {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{}", self.0)
+        }
+    }
+    impl std::error::Error for SimpleErr {}
+
+    #[test]
+    fn error_chain_mentions_cert_detects_certificate_keyword() {
+        let e = SimpleErr("invalid certificate: expired".to_owned());
+        assert!(error_chain_mentions_cert(&e));
+    }
+
+    #[test]
+    fn error_chain_mentions_cert_detects_unknown_issuer() {
+        let e = SimpleErr("unknown issuer".to_owned());
+        assert!(error_chain_mentions_cert(&e));
+    }
+
+    #[test]
+    fn error_chain_mentions_cert_returns_false_for_connection_refused() {
+        let e = SimpleErr("connection refused".to_owned());
+        assert!(!error_chain_mentions_cert(&e));
+    }
+
+    #[test]
+    fn error_chain_mentions_cert_returns_false_for_timeout_message() {
+        let e = SimpleErr("request timed out after 30s".to_owned());
+        assert!(!error_chain_mentions_cert(&e));
     }
 
     // ── certificate_fingerprint ──────────────────────────────────────────────

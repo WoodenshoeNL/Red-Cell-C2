@@ -231,6 +231,23 @@ fn build_connector(
 
 // ── WebSocket connection ──────────────────────────────────────────────────────
 
+/// Returns `true` when `tls_err` is a TLS certificate validation failure
+/// (unknown issuer, expired cert, name mismatch, etc.) as opposed to a
+/// protocol or configuration error.
+///
+/// Only [`tokio_tungstenite::tungstenite::error::TlsError::Rustls`] is
+/// inspected because this crate uses the `rustls-tls-webpki-roots` feature
+/// exclusively.
+fn is_tls_cert_failure(tls_err: &tokio_tungstenite::tungstenite::error::TlsError) -> bool {
+    use tokio_tungstenite::tungstenite::error::TlsError;
+    matches!(
+        tls_err,
+        TlsError::Rustls(
+            rustls::Error::InvalidCertificate(_) | rustls::Error::NoCertificatesPresented
+        )
+    )
+}
+
 /// Map a tungstenite error to a [`CliError`].
 fn map_ws_error(e: tokio_tungstenite::tungstenite::Error, url: &str) -> CliError {
     use tokio_tungstenite::tungstenite::Error as WsErr;
@@ -241,7 +258,20 @@ fn map_ws_error(e: tokio_tungstenite::tungstenite::Error, url: &str) -> CliError
         WsErr::Io(io_err) => {
             CliError::ServerUnreachable(format!("network error connecting to {url}: {io_err}"))
         }
-        WsErr::Tls(_) => CliError::AuthFailure(format!("TLS handshake failed for {url}: {e}")),
+        WsErr::Tls(tls_err) => {
+            // TLS errors are connectivity/trust problems, not authentication failures.
+            // Give a more specific message for certificate validation failures so
+            // callers do not confuse them with bad credentials (exit code 3).
+            if is_tls_cert_failure(&tls_err) {
+                CliError::ServerUnreachable(format!(
+                    "TLS certificate trust failure for {url}: {tls_err} \
+                     — verify the server certificate or configure \
+                     --tls-ca / --tls-fingerprint"
+                ))
+            } else {
+                CliError::ServerUnreachable(format!("TLS handshake failed for {url}: {tls_err}"))
+            }
+        }
         WsErr::Http(ref resp) if resp.status().as_u16() == 401 || resp.status().as_u16() == 403 => {
             CliError::AuthFailure(format!("WebSocket upgrade rejected: {}", resp.status()))
         }
@@ -976,5 +1006,89 @@ mod tests {
             matches!(result, Err(CliError::ServerUnreachable(_))),
             "unreachable server must return ServerUnreachable, got {result:?}"
         );
+    }
+
+    // ── map_ws_error / is_tls_cert_failure ───────────────────────────────────
+
+    /// A rustls `InvalidCertificate` error must be classified as a cert failure.
+    #[test]
+    fn is_tls_cert_failure_detects_invalid_certificate() {
+        use tokio_tungstenite::tungstenite::error::TlsError;
+        let tls_err =
+            TlsError::Rustls(rustls::Error::InvalidCertificate(rustls::CertificateError::Expired));
+        assert!(is_tls_cert_failure(&tls_err));
+    }
+
+    /// `UnknownIssuer` is a certificate validation failure.
+    #[test]
+    fn is_tls_cert_failure_detects_unknown_issuer() {
+        use tokio_tungstenite::tungstenite::error::TlsError;
+        let tls_err = TlsError::Rustls(rustls::Error::InvalidCertificate(
+            rustls::CertificateError::UnknownIssuer,
+        ));
+        assert!(is_tls_cert_failure(&tls_err));
+    }
+
+    /// `NoCertificatesPresented` is a certificate validation failure.
+    #[test]
+    fn is_tls_cert_failure_detects_no_certificates_presented() {
+        use tokio_tungstenite::tungstenite::error::TlsError;
+        let tls_err = TlsError::Rustls(rustls::Error::NoCertificatesPresented);
+        assert!(is_tls_cert_failure(&tls_err));
+    }
+
+    /// A protocol error (e.g. no shared cipher suites) is NOT a cert failure.
+    #[test]
+    fn is_tls_cert_failure_returns_false_for_protocol_error() {
+        use tokio_tungstenite::tungstenite::error::TlsError;
+        let tls_err = TlsError::Rustls(rustls::Error::DecryptError);
+        assert!(!is_tls_cert_failure(&tls_err));
+    }
+
+    /// A TLS certificate error must map to `ServerUnreachable`, not `AuthFailure`.
+    #[test]
+    fn map_ws_error_tls_cert_error_is_server_unreachable_not_auth_failure() {
+        use tokio_tungstenite::tungstenite::Error as WsErr;
+        use tokio_tungstenite::tungstenite::error::TlsError;
+        let err = WsErr::Tls(TlsError::Rustls(rustls::Error::InvalidCertificate(
+            rustls::CertificateError::UnknownIssuer,
+        )));
+        let mapped = map_ws_error(err, "wss://ts.example.com");
+        assert!(
+            matches!(mapped, CliError::ServerUnreachable(_)),
+            "TLS cert error must be ServerUnreachable, got {mapped:?}"
+        );
+        // Exit code must be 4 (server unreachable), not 3 (auth failure).
+        assert_eq!(mapped.exit_code(), crate::error::EXIT_SERVER_UNREACHABLE);
+    }
+
+    /// The `ServerUnreachable` message for a cert failure must mention TLS trust.
+    #[test]
+    fn map_ws_error_tls_cert_error_message_mentions_trust() {
+        use tokio_tungstenite::tungstenite::Error as WsErr;
+        use tokio_tungstenite::tungstenite::error::TlsError;
+        let err = WsErr::Tls(TlsError::Rustls(rustls::Error::InvalidCertificate(
+            rustls::CertificateError::Expired,
+        )));
+        let mapped = map_ws_error(err, "wss://ts.example.com");
+        let msg = mapped.to_string();
+        assert!(
+            msg.contains("trust") || msg.contains("certificate"),
+            "message must mention trust/certificate, got: {msg}"
+        );
+    }
+
+    /// A non-cert TLS error must still map to `ServerUnreachable` (not `AuthFailure`).
+    #[test]
+    fn map_ws_error_non_cert_tls_error_is_server_unreachable() {
+        use tokio_tungstenite::tungstenite::Error as WsErr;
+        use tokio_tungstenite::tungstenite::error::TlsError;
+        let err = WsErr::Tls(TlsError::Rustls(rustls::Error::DecryptError));
+        let mapped = map_ws_error(err, "wss://ts.example.com");
+        assert!(
+            matches!(mapped, CliError::ServerUnreachable(_)),
+            "non-cert TLS error must be ServerUnreachable, got {mapped:?}"
+        );
+        assert_eq!(mapped.exit_code(), crate::error::EXIT_SERVER_UNREACHABLE);
     }
 }

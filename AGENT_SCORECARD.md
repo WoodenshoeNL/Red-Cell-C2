@@ -10,11 +10,11 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 1178 | 249 | 42 |
-| Bugs filed against | 196 | 40 | 10 |
+| Bugs filed against | 198 | 40 | 10 |
 | Bug rate (bugs/task) | 0.17 | 0.16 | 0.24 |
 | Quality score | 83% | 84% | 76% |
 
-*Bug rates: Claude 196/1178=0.1664→0.17, Codex 40/249=0.1606→0.16, Cursor 10/42=0.2381→0.24*
+*Bug rates: Claude 198/1178=0.1681→0.17, Codex 40/249=0.1606→0.16, Cursor 10/42=0.2381→0.24*
 
 ## Violation Breakdown
 
@@ -24,11 +24,11 @@ Each loop run updates the running totals and appends a review entry.
 | Missing tests / stale tests | 73 | 19 | 5 |
 | Clippy warnings | 11 | 0 | 1 |
 | Protocol errors | 30 | 32 | 3 |
-| Security issues | 58 | 39 | 0 |
+| Security issues | 59 | 39 | 0 |
 | Architecture drift | 25 | 25 | 1 |
 | Memory / resource leaks | 11 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 9 | 0 |
-| Test infrastructure / flakiness | 47 | 5 | 1 |
+| Test infrastructure / flakiness | 48 | 5 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 4 | 5 | 0 |
 | Correctness / pagination | 65 | 8 | 1 |
@@ -40,6 +40,20 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-04-04 09:00
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 2 | test infrastructure, security | Filed `red-cell-c2-g2c7j` (P1) — `read_operator_message` in `teamserver/tests/common/mod.rs:143-155` deserialises raw `OperatorMessage` but commit `bfb13938` wrapped all post-login server frames in `WsEnvelope`; 15+ integration tests fail with `missing field 'Head'`. Filed `red-cell-c2-1ln26` (P3) — `decode_hex_tag` in `common/src/crypto.rs:428-433` silently maps non-hex / non-UTF-8 bytes to `0x00`, masking malformed HMAC tags instead of returning an error. |
+| Codex | 0 | — | No Codex-attributed findings this review. |
+| Cursor | 0 | — | No Cursor-attributed findings this review. |
+
+Existing tracked: `red-cell-c2-pt7rr` (P1) — Specter/Phantom don't set `INIT_EXT_SEQ_PROTECTED` in DEMON_INIT. Still open.
+
+Overall codebase health: **degraded** — `cargo check --workspace` and `cargo clippy --workspace -- -D warnings` pass clean; `cargo nextest run --workspace` produces 15+ integration-test failures due to `WsEnvelope` wrapper regression (`red-cell-c2-g2c7j`). Core AES-256-CTR/HKDF/Argon2id crypto path remains structurally sound. No `todo!`/`unimplemented!` in production Rust code.
+
+Biggest blindspot: **`WsEnvelope` test infra regression** (`red-cell-c2-g2c7j`) — all post-login integration tests are broken; no regression coverage for checkin, output dispatch, RBAC, or agent lifecycle until the test helper is updated.
 
 ### Arch Review — 2026-04-04 08:00
 

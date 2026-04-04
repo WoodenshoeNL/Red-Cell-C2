@@ -28,9 +28,13 @@
 //! {"cmd": "agent.exec", "id": "abc123", "command": "whoami", "wait": true}
 //! ```
 //!
-//! **stdout** — one JSON object per line:
+//! **stdout** — success responses, one JSON object per line:
 //! ```json
 //! {"ok": true,  "cmd": "agent.exec", "data": {"output": "DOMAIN\\user", "exit_code": 0}}
+//! ```
+//!
+//! **stderr** — error responses, one JSON object per line:
+//! ```json
 //! {"ok": false, "cmd": "agent.exec", "error": "NOT_FOUND", "message": "agent not found"}
 //! ```
 //!
@@ -343,7 +347,7 @@ pub async fn run(config: &ResolvedConfig, default_agent: Option<&str>) -> i32 {
     let ws = match connect_websocket(config).await {
         Ok(ws) => ws,
         Err(e) => {
-            emit_error_to(&mut std::io::stdout(), "", &e).ok();
+            emit_error_to(&mut std::io::stderr(), "", &e).ok();
             return e.exit_code();
         }
     };
@@ -351,9 +355,10 @@ pub async fn run(config: &ResolvedConfig, default_agent: Option<&str>) -> i32 {
     let stdin = tokio::io::stdin();
     let reader = tokio::io::BufReader::new(stdin);
     let mut stdout = std::io::stdout();
+    let mut stderr = std::io::stderr();
 
     tokio::select! {
-        code = run_with_io(reader, &mut stdout, ws, default_agent) => code,
+        code = run_with_io(reader, &mut stdout, &mut stderr, ws, default_agent) => code,
         _ = tokio::signal::ctrl_c() => EXIT_SUCCESS,
     }
 }
@@ -363,15 +368,17 @@ pub async fn run(config: &ResolvedConfig, default_agent: Option<&str>) -> i32 {
 /// Extracted so tests can inject a `BufReader<&[u8]>` for stdin and a `Vec<u8>`
 /// for stdout without touching real file descriptors, and a mock WebSocket
 /// stream without needing a real teamserver.
-async fn run_with_io<R, W, S>(
+async fn run_with_io<R, Out, ErrOut, S>(
     reader: R,
-    writer: &mut W,
+    stdout: &mut Out,
+    stderr: &mut ErrOut,
     ws: tokio_tungstenite::WebSocketStream<S>,
     default_agent: Option<&str>,
 ) -> i32
 where
     R: tokio::io::AsyncBufRead + Unpin,
-    W: std::io::Write,
+    Out: std::io::Write,
+    ErrOut: std::io::Write,
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     let (mut sink, mut stream) = ws.split();
@@ -380,7 +387,7 @@ where
     loop {
         tokio::select! {
             line_result = lines.next_line() => {
-                match process_stdin_line(line_result, writer, &mut sink, default_agent).await {
+                match process_stdin_line(line_result, stdout, stderr, &mut sink, default_agent).await {
                     LoopControl::Continue => {}
                     LoopControl::Exit(code) => return code,
                     LoopControl::StdinEof => {
@@ -389,7 +396,7 @@ where
                         // server responses) before exiting so we don't silently
                         // drop responses that arrived after our last send.
                         while let Some(msg) = stream.next().await {
-                            match process_ws_message(Some(msg), writer) {
+                            match process_ws_message(Some(msg), stdout, stderr) {
                                 LoopControl::Continue | LoopControl::StdinEof => {}
                                 LoopControl::Exit(code) => return code,
                             }
@@ -400,7 +407,7 @@ where
             }
 
             ws_msg = stream.next() => {
-                match process_ws_message(ws_msg, writer) {
+                match process_ws_message(ws_msg, stdout, stderr) {
                     LoopControl::Continue | LoopControl::StdinEof => {}
                     LoopControl::Exit(code) => return code,
                 }
@@ -426,19 +433,21 @@ enum LoopControl {
 /// - `{"cmd":"exit"}` sends a WebSocket close frame and exits cleanly.
 /// - All other commands have the default agent id injected (if applicable) and
 ///   are forwarded to the server as a WebSocket text frame.
-async fn process_stdin_line<W, Si>(
+async fn process_stdin_line<Out, ErrOut, Si>(
     line_result: std::io::Result<Option<String>>,
-    writer: &mut W,
+    stdout: &mut Out,
+    stderr: &mut ErrOut,
     sink: &mut Si,
     default_agent: Option<&str>,
 ) -> LoopControl
 where
-    W: std::io::Write,
+    Out: std::io::Write,
+    ErrOut: std::io::Write,
     Si: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
 {
     match line_result {
         Err(e) => {
-            emit_error_to(writer, "", &CliError::General(format!("stdin read error: {e}"))).ok();
+            emit_error_to(stderr, "", &CliError::General(format!("stdin read error: {e}"))).ok();
             LoopControl::Exit(EXIT_GENERAL)
         }
 
@@ -457,7 +466,7 @@ where
 
             let mut val: serde_json::Value = match serde_json::from_str(&line) {
                 Err(e) => {
-                    if emit_error_to(writer, "", &CliError::General(format!("invalid JSON: {e}")))
+                    if emit_error_to(stderr, "", &CliError::General(format!("invalid JSON: {e}")))
                         .is_err()
                     {
                         return LoopControl::Exit(EXIT_GENERAL);
@@ -471,7 +480,7 @@ where
 
             // ── locally handled commands ──────────────────────────────────
             if cmd == "ping" {
-                if emit_ok_to(writer, "ping", serde_json::json!({"pong": true})).is_err() {
+                if emit_ok_to(stdout, "ping", serde_json::json!({"pong": true})).is_err() {
                     return LoopControl::Exit(EXIT_GENERAL);
                 }
                 return LoopControl::Continue;
@@ -497,7 +506,7 @@ where
                 Ok(s) => s,
                 Err(e) => {
                     if emit_error_to(
-                        writer,
+                        stderr,
                         &cmd,
                         &CliError::General(format!("serialise error: {e}")),
                     )
@@ -510,7 +519,7 @@ where
             };
 
             if let Err(e) = sink.send(Message::Text(text.into())).await {
-                emit_error_to(writer, &cmd, &CliError::ServerUnreachable(e.to_string())).ok();
+                emit_error_to(stderr, &cmd, &CliError::ServerUnreachable(e.to_string())).ok();
                 LoopControl::Exit(EXIT_GENERAL)
             } else {
                 LoopControl::Continue
@@ -525,12 +534,14 @@ where
 /// - Close frames terminate the session cleanly.
 /// - Binary / Ping / Pong frames are silently ignored.
 /// - A closed stream (`None`) or an error terminates the session.
-fn process_ws_message<W>(
+fn process_ws_message<Out, ErrOut>(
     msg: Option<Result<Message, tokio_tungstenite::tungstenite::Error>>,
-    writer: &mut W,
+    stdout: &mut Out,
+    stderr: &mut ErrOut,
 ) -> LoopControl
 where
-    W: std::io::Write,
+    Out: std::io::Write,
+    ErrOut: std::io::Write,
 {
     match msg {
         // Server closed the stream.
@@ -557,7 +568,7 @@ where
                 }
                 _ => {
                     emit_error_to(
-                        writer,
+                        stderr,
                         "",
                         &CliError::ServerUnreachable(format!("websocket error: {e}")),
                     )
@@ -568,7 +579,10 @@ where
         }
 
         Some(Ok(Message::Text(text))) => {
-            if writeln!(writer, "{text}").is_err() {
+            let target: &mut dyn std::io::Write =
+                if response_is_error_envelope(&text) { stderr } else { stdout };
+
+            if writeln!(target, "{text}").is_err() {
                 LoopControl::Exit(EXIT_GENERAL)
             } else {
                 LoopControl::Continue
@@ -598,9 +612,6 @@ fn emit_ok_to(
 }
 
 /// Write an error response line to `writer`.
-///
-/// In session mode all output (including errors) goes to stdout so the
-/// consuming process reads a single coherent NDJSON stream.
 fn emit_error_to(
     writer: &mut impl std::io::Write,
     cmd: &str,
@@ -616,6 +627,18 @@ fn emit_error_to(
         Ok(s) => writeln!(writer, "{s}"),
         Err(_) => writeln!(writer, r#"{{"ok":false,"cmd":"{cmd}","error":"ERROR"}}"#),
     }
+}
+
+/// Return `true` when a server text frame is a structured error envelope.
+///
+/// Session mode preserves the CLI-wide stream contract:
+/// - success responses on stdout
+/// - structured errors on stderr
+fn response_is_error_envelope(text: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|value| value.get("ok").and_then(serde_json::Value::as_bool))
+        == Some(false)
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -667,6 +690,17 @@ mod tests {
         assert!(val["message"].as_str().is_some_and(|m| m.contains("not found")));
     }
 
+    #[test]
+    fn response_is_error_envelope_detects_ok_false_json() {
+        assert!(response_is_error_envelope(
+            r#"{"ok":false,"cmd":"agent.show","error":"NOT_FOUND","message":"missing"}"#
+        ));
+        assert!(!response_is_error_envelope(
+            r#"{"ok":true,"cmd":"agent.show","data":{"id":"abc"}}"#
+        ));
+        assert!(!response_is_error_envelope("not json"));
+    }
+
     // ── run_with_io via mock WebSocket server ──────────────────────────────────
 
     /// Spin up a local plain-text WebSocket server and return the listening
@@ -714,14 +748,16 @@ mod tests {
         let ws = ws_connect(addr, "test-token").await;
         let input = b"{\"cmd\":\"ping\"}\n";
         let reader = tokio::io::BufReader::new(input.as_slice());
-        let mut output: Vec<u8> = Vec::new();
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
 
-        let code = run_with_io(reader, &mut output, ws, None).await;
+        let code = run_with_io(reader, &mut stdout, &mut stderr, ws, None).await;
 
         // `ping` is locally handled — code 0 (EOF after ping)
         assert_eq!(code, EXIT_SUCCESS, "ping then EOF must exit cleanly");
 
-        let line = String::from_utf8(output).expect("utf8");
+        assert!(stderr.is_empty(), "ping must not write to stderr");
+        let line = String::from_utf8(stdout).expect("utf8");
         let val: serde_json::Value = serde_json::from_str(line.trim()).expect("json");
         assert_eq!(val["ok"], true, "ping must produce ok:true");
         assert_eq!(val["data"]["pong"], true, "ping must include pong:true");
@@ -743,11 +779,13 @@ mod tests {
         let ws = ws_connect(addr, "test-token").await;
         let input = b"{\"cmd\":\"exit\"}\n";
         let reader = tokio::io::BufReader::new(input.as_slice());
-        let mut output: Vec<u8> = Vec::new();
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
 
-        let code = run_with_io(reader, &mut output, ws, None).await;
+        let code = run_with_io(reader, &mut stdout, &mut stderr, ws, None).await;
         assert_eq!(code, EXIT_SUCCESS, "exit command must exit with code 0");
-        assert!(output.is_empty(), "exit must not produce any output");
+        assert!(stdout.is_empty(), "exit must not produce stdout");
+        assert!(stderr.is_empty(), "exit must not produce stderr");
     }
 
     /// Non-`ping`/`exit` commands are forwarded to the server; the server
@@ -774,12 +812,14 @@ mod tests {
         let ws = ws_connect(addr, "test-token").await;
         let input = b"{\"cmd\":\"agent.list\"}\n";
         let reader = tokio::io::BufReader::new(input.as_slice());
-        let mut output: Vec<u8> = Vec::new();
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
 
-        let code = run_with_io(reader, &mut output, ws, None).await;
+        let code = run_with_io(reader, &mut stdout, &mut stderr, ws, None).await;
         assert_eq!(code, EXIT_SUCCESS, "clean server close must exit 0");
 
-        let line = String::from_utf8(output).expect("utf8");
+        assert!(stderr.is_empty(), "successful server response must not hit stderr");
+        let line = String::from_utf8(stdout).expect("utf8");
         let val: serde_json::Value = serde_json::from_str(line.trim()).expect("parse relay");
         assert_eq!(val["ok"], true, "relayed response must be ok:true");
         assert_eq!(val["cmd"], "agent.list");
@@ -807,16 +847,14 @@ mod tests {
         // First line: bad JSON; second line: ping (handled locally, no forward).
         let input = b"not json at all\n{\"cmd\":\"ping\"}\n";
         let reader = tokio::io::BufReader::new(input.as_slice());
-        let mut output: Vec<u8> = Vec::new();
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
 
-        let code = run_with_io(reader, &mut output, ws, None).await;
+        let code = run_with_io(reader, &mut stdout, &mut stderr, ws, None).await;
         assert_eq!(code, EXIT_SUCCESS, "invalid json must not cause non-zero exit");
 
-        let text = String::from_utf8(output).expect("utf8");
-        let mut lines = text.lines();
-
-        let error_line: serde_json::Value =
-            serde_json::from_str(lines.next().expect("error line")).expect("json");
+        let stderr_text = String::from_utf8(stderr).expect("utf8");
+        let error_line: serde_json::Value = serde_json::from_str(stderr_text.trim()).expect("json");
         assert_eq!(error_line["ok"], false, "bad JSON must produce ok:false");
         assert!(
             error_line["message"].as_str().is_some_and(|m| m.contains("invalid JSON")),
@@ -824,8 +862,8 @@ mod tests {
             error_line["message"]
         );
 
-        let ping_line: serde_json::Value =
-            serde_json::from_str(lines.next().expect("ping line")).expect("json");
+        let stdout_text = String::from_utf8(stdout).expect("utf8");
+        let ping_line: serde_json::Value = serde_json::from_str(stdout_text.trim()).expect("json");
         assert_eq!(ping_line["ok"], true);
         assert_eq!(ping_line["data"]["pong"], true);
     }
@@ -842,11 +880,13 @@ mod tests {
         let ws = ws_connect(addr, "test-token").await;
         let input = b"\n   \n\t\n";
         let reader = tokio::io::BufReader::new(input.as_slice());
-        let mut output: Vec<u8> = Vec::new();
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
 
-        let code = run_with_io(reader, &mut output, ws, None).await;
+        let code = run_with_io(reader, &mut stdout, &mut stderr, ws, None).await;
         assert_eq!(code, EXIT_SUCCESS, "whitespace-only stdin must exit 0");
-        assert!(output.is_empty(), "empty lines must not produce any output");
+        assert!(stdout.is_empty(), "empty lines must not produce stdout");
+        assert!(stderr.is_empty(), "empty lines must not produce stderr");
     }
 
     /// When `default_agent` is set and the command has no `"id"` field, the
@@ -873,11 +913,13 @@ mod tests {
         // Command has no "id" field.
         let input = b"{\"cmd\":\"agent.show\"}\n";
         let reader = tokio::io::BufReader::new(input.as_slice());
-        let mut output: Vec<u8> = Vec::new();
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
 
-        run_with_io(reader, &mut output, ws, Some("default-agent-123")).await;
+        run_with_io(reader, &mut stdout, &mut stderr, ws, Some("default-agent-123")).await;
 
-        let text = String::from_utf8(output).expect("utf8");
+        assert!(stderr.is_empty(), "successful response must not hit stderr");
+        let text = String::from_utf8(stdout).expect("utf8");
         let val: serde_json::Value = serde_json::from_str(text.trim()).expect("parse response");
         assert_eq!(
             val["data"]["received_id"], "default-agent-123",
@@ -908,11 +950,13 @@ mod tests {
         let ws = ws_connect(addr, "test-token").await;
         let input = b"{\"cmd\":\"agent.show\",\"id\":\"explicit-id\"}\n";
         let reader = tokio::io::BufReader::new(input.as_slice());
-        let mut output: Vec<u8> = Vec::new();
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
 
-        run_with_io(reader, &mut output, ws, Some("default-agent-123")).await;
+        run_with_io(reader, &mut stdout, &mut stderr, ws, Some("default-agent-123")).await;
 
-        let text = String::from_utf8(output).expect("utf8");
+        assert!(stderr.is_empty(), "successful response must not hit stderr");
+        let text = String::from_utf8(stdout).expect("utf8");
         let val: serde_json::Value = serde_json::from_str(text.trim()).expect("parse");
         assert_eq!(
             val["data"]["received_id"], "explicit-id",
@@ -933,10 +977,13 @@ mod tests {
         // Infinite stdin — the server close should terminate the loop.
         let input: &[u8] = b"";
         let reader = tokio::io::BufReader::new(input);
-        let mut output: Vec<u8> = Vec::new();
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
 
-        let code = run_with_io(reader, &mut output, ws, None).await;
+        let code = run_with_io(reader, &mut stdout, &mut stderr, ws, None).await;
         assert_eq!(code, EXIT_SUCCESS, "server close must exit 0");
+        assert!(stdout.is_empty(), "server close must not produce stdout");
+        assert!(stderr.is_empty(), "server close must not produce stderr");
     }
 
     /// Multiple commands in sequence are each forwarded and their responses
@@ -972,12 +1019,14 @@ mod tests {
         // the in-flight server responses are received.
         let input = b"{\"cmd\":\"agent.list\"}\n{\"cmd\":\"listener.list\"}\n";
         let reader = tokio::io::BufReader::new(input.as_slice());
-        let mut output: Vec<u8> = Vec::new();
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
 
-        let code = run_with_io(reader, &mut output, ws, None).await;
+        let code = run_with_io(reader, &mut stdout, &mut stderr, ws, None).await;
         assert_eq!(code, EXIT_SUCCESS);
 
-        let text = String::from_utf8(output).expect("utf8");
+        assert!(stderr.is_empty(), "successful responses must not hit stderr");
+        let text = String::from_utf8(stdout).expect("utf8");
         let responses: Vec<serde_json::Value> = text
             .lines()
             .filter(|l| !l.is_empty())
@@ -989,6 +1038,41 @@ mod tests {
         assert_eq!(responses[0]["data"]["seq"], 1);
         assert_eq!(responses[1]["cmd"], "listener.list");
         assert_eq!(responses[1]["data"]["seq"], 2);
+    }
+
+    /// Server-provided error envelopes must be routed to stderr, not stdout.
+    #[tokio::test]
+    async fn server_error_response_is_relayed_to_stderr() {
+        let addr = mock_ws_server(|mut ws| async move {
+            if let Some(Ok(Message::Text(_))) = ws.next().await {
+                let resp = serde_json::json!({
+                    "ok": false,
+                    "cmd": "agent.show",
+                    "error": "NOT_FOUND",
+                    "message": "agent not found"
+                });
+                ws.send(Message::Text(serde_json::to_string(&resp).expect("ser").into()))
+                    .await
+                    .expect("server send");
+            }
+            let _ = ws.close(None).await;
+        })
+        .await;
+
+        let ws = ws_connect(addr, "test-token").await;
+        let input = b"{\"cmd\":\"agent.show\",\"id\":\"missing\"}\n";
+        let reader = tokio::io::BufReader::new(input.as_slice());
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+
+        let code = run_with_io(reader, &mut stdout, &mut stderr, ws, None).await;
+        assert_eq!(code, EXIT_SUCCESS, "server error response must not force non-zero exit");
+        assert!(stdout.is_empty(), "server error response must not hit stdout");
+
+        let line = String::from_utf8(stderr).expect("utf8");
+        let val: serde_json::Value = serde_json::from_str(line.trim()).expect("json");
+        assert_eq!(val["ok"], false);
+        assert_eq!(val["error"], "NOT_FOUND");
     }
 
     /// `connect_websocket` against an unreachable address must return

@@ -27,6 +27,13 @@ pub struct LocalConfig {
     /// SHA-256 fingerprint (hex) of the pinned teamserver certificate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cert_fingerprint: Option<String>,
+    /// Per-invocation timeout (in seconds) for Python script callbacks.
+    ///
+    /// When a callback does not return within this many seconds a
+    /// `KeyboardInterrupt` is injected into the interpreter and an `ERROR`-level
+    /// log message is emitted.  Defaults to 10 seconds when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub python_script_timeout_secs: Option<u64>,
 }
 
 impl LocalConfig {
@@ -147,6 +154,30 @@ mod tests {
         assert_eq!(config.scripts_dir, None);
         assert_eq!(config.ca_cert, None);
         assert_eq!(config.cert_fingerprint, None);
+        assert_eq!(config.python_script_timeout_secs, None);
+    }
+
+    #[test]
+    fn python_script_timeout_secs_round_trips() {
+        let config = LocalConfig { python_script_timeout_secs: Some(30), ..LocalConfig::default() };
+
+        let serialized = toml::to_string_pretty(&config)
+            .unwrap_or_else(|error| panic!("serialization should succeed: {error}"));
+        let deserialized: LocalConfig = toml::from_str(&serialized)
+            .unwrap_or_else(|error| panic!("deserialization should succeed: {error}"));
+
+        assert_eq!(deserialized.python_script_timeout_secs, Some(30));
+    }
+
+    #[test]
+    fn python_script_timeout_secs_absent_when_none() {
+        let config = LocalConfig::default();
+        let serialized = toml::to_string_pretty(&config)
+            .unwrap_or_else(|error| panic!("serialization should succeed: {error}"));
+        assert!(
+            !serialized.contains("python_script_timeout_secs"),
+            "None timeout should not appear in serialized config"
+        );
     }
 
     #[test]
@@ -157,6 +188,7 @@ mod tests {
             scripts_dir: Some(PathBuf::from("/tmp/red-cell-client/scripts")),
             ca_cert: Some(PathBuf::from("/tmp/ca.pem")),
             cert_fingerprint: Some("abcdef0123456789".to_owned()),
+            python_script_timeout_secs: None,
         };
 
         let serialized = toml::to_string_pretty(&config)
@@ -198,6 +230,7 @@ mod tests {
             scripts_dir: Some(dir.path().join("scripts")),
             ca_cert: None,
             cert_fingerprint: None,
+            python_script_timeout_secs: None,
         };
 
         config.save_to(&path).unwrap_or_else(|e| panic!("save_to should succeed: {e}"));
@@ -237,6 +270,7 @@ mod tests {
             scripts_dir: Some(PathBuf::from("/tmp/red-cell-client/scripts")),
             ca_cert: Some(PathBuf::from("/tmp/ca.pem")),
             cert_fingerprint: Some("abcdef0123456789".to_owned()),
+            python_script_timeout_secs: None,
         };
 
         // None path is a documented no-op — must succeed.

@@ -298,6 +298,151 @@ pub fn hash_password_sha3(password: &str) -> String {
     hex_string
 }
 
+// ── WebSocket frame HMAC helpers ─────────────────────────────────────────────
+
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use hmac::{Hmac, Mac};
+type HmacSha256 = Hmac<Sha256>;
+
+/// Wire format for an HMAC-protected operator WebSocket frame.
+///
+/// The envelope wraps the original JSON payload with a monotonic sequence
+/// number and an HMAC-SHA256 tag so that:
+///
+/// * **Integrity** – any tampering with `seq` or `payload` invalidates the tag.
+/// * **Replay prevention** – the receiver rejects any frame whose `seq` is not
+///   strictly greater than the last accepted `seq`.
+///
+/// # Wire encoding
+///
+/// ```json
+/// { "seq": 0, "payload": "<base64 JSON>", "hmac": "<hex HMAC-SHA256>" }
+/// ```
+///
+/// The HMAC input is the ASCII string `"{seq}:{payload}"` where `{payload}`
+/// is the base64-encoded inner JSON.  Binding both fields to the tag prevents
+/// an attacker from substituting a different `seq` value on a captured frame.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WsEnvelope {
+    /// Monotonically increasing frame counter (per direction).
+    pub seq: u64,
+    /// Base64-encoded inner JSON message.
+    pub payload: String,
+    /// Lowercase hex HMAC-SHA256 over `"{seq}:{payload}"`.
+    pub hmac: String,
+}
+
+/// Errors returned when opening (verifying) a [`WsEnvelope`].
+#[derive(Debug)]
+pub enum WsHmacError {
+    /// The HMAC tag did not match the recomputed value.
+    BadHmac,
+    /// The frame's `seq` is not strictly greater than the last accepted `seq`.
+    ReplayedSeq,
+    /// The `payload` field is not valid standard base64.
+    Base64Decode,
+}
+
+impl std::fmt::Display for WsHmacError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BadHmac => write!(f, "HMAC tag mismatch"),
+            Self::ReplayedSeq => write!(f, "replayed or out-of-order sequence number"),
+            Self::Base64Decode => write!(f, "payload base64 decode failed"),
+        }
+    }
+}
+
+/// Derive the 32-byte per-session HMAC key from a session token string.
+///
+/// Uses HKDF-SHA256 with the fixed info label `b"red-cell-ws-hmac-v1"`.
+#[must_use]
+pub fn derive_ws_hmac_key(session_token: &str) -> [u8; 32] {
+    let hk = Hkdf::<Sha256>::new(None, session_token.as_bytes());
+    let mut key = [0u8; 32];
+    hk.expand(b"red-cell-ws-hmac-v1", &mut key)
+        .expect("HKDF expand with 32-byte output must succeed");
+    key
+}
+
+/// Wrap `message_json` in a [`WsEnvelope`] protected by HMAC-SHA256.
+#[must_use]
+pub fn seal_ws_frame(key: &[u8; 32], seq: u64, message_json: &str) -> WsEnvelope {
+    let payload = BASE64_STANDARD.encode(message_json.as_bytes());
+    let input = format!("{seq}:{payload}");
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(input.as_bytes());
+    let tag = mac.finalize().into_bytes();
+    let hmac = tag.iter().fold(String::with_capacity(64), |mut s, b| {
+        use std::fmt::Write;
+        let _ = write!(s, "{b:02x}");
+        s
+    });
+    WsEnvelope { seq, payload, hmac }
+}
+
+/// Verify and unwrap a [`WsEnvelope`], returning the inner JSON string.
+///
+/// `last_seen_seq` is the sequence number of the most recently accepted
+/// frame in this direction.  Pass `None` if no frame has been accepted yet.
+///
+/// # Errors
+///
+/// Returns [`WsHmacError::BadHmac`] on tag mismatch, [`WsHmacError::ReplayedSeq`]
+/// if the sequence number is not strictly increasing, or [`WsHmacError::Base64Decode`]
+/// if the `payload` field is not valid base64.
+pub fn open_ws_frame(
+    key: &[u8; 32],
+    envelope: &WsEnvelope,
+    last_seen_seq: Option<u64>,
+) -> Result<String, WsHmacError> {
+    // Replay check first — cheapest.
+    if let Some(last) = last_seen_seq {
+        if envelope.seq <= last {
+            return Err(WsHmacError::ReplayedSeq);
+        }
+    }
+
+    // Recompute HMAC.
+    let input = format!("{}:{}", envelope.seq, envelope.payload);
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(input.as_bytes());
+    let expected = mac.finalize().into_bytes();
+
+    // Decode provided tag.
+    let provided = decode_hex_tag(&envelope.hmac);
+
+    // Constant-time compare.
+    if !constant_time_eq(&expected, &provided) {
+        return Err(WsHmacError::BadHmac);
+    }
+
+    // Decode payload.
+    BASE64_STANDARD
+        .decode(envelope.payload.as_bytes())
+        .map_err(|_| WsHmacError::Base64Decode)
+        .and_then(|b| String::from_utf8(b).map_err(|_| WsHmacError::Base64Decode))
+}
+
+fn decode_hex_tag(hex: &str) -> Vec<u8> {
+    hex.as_bytes()
+        .chunks(2)
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap_or("00"), 16).unwrap_or(0))
+        .collect()
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 /// Return the number of AES-CTR blocks consumed by `len` bytes of transport data.
 #[must_use]
 pub fn ctr_blocks_for_len(len: usize) -> u64 {

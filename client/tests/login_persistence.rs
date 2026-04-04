@@ -28,6 +28,7 @@ fn persisted_config_populates_login_state_and_message() {
         scripts_dir: Some(tempdir.path().join("scripts")),
         ca_cert: Some(tempdir.path().join("ca.pem")),
         cert_fingerprint: Some("0123456789abcdef".to_owned()),
+        python_script_timeout_secs: None,
     };
 
     persisted.save_to(&config_path).unwrap_or_else(|e| panic!("save_to should succeed: {e}"));
@@ -83,6 +84,7 @@ fn optional_tls_fields_remain_unset_in_persisted_flow() {
         scripts_dir: Some(PathBuf::from("/tmp/scripts")),
         ca_cert: None,
         cert_fingerprint: None,
+        python_script_timeout_secs: None,
     };
 
     persisted.save_to(&config_path).unwrap_or_else(|e| panic!("save_to should succeed: {e}"));

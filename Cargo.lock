@@ -4295,6 +4295,7 @@ dependencies = [
  "hcl-rs",
  "hex-literal",
  "hkdf",
+ "hmac",
  "rcgen 0.14.7",
  "rustls-pemfile",
  "serde",

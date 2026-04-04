@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
@@ -23,6 +24,8 @@ use crate::transport::{AgentSummary, AppState, ListenerSummary, LootItem, Shared
 static ACTIVE_RUNTIME: OnceLock<Mutex<Option<Arc<PythonApiState>>>> = OnceLock::new();
 const MAX_SCRIPT_OUTPUT_ENTRIES: usize = 512;
 const MAX_COMMAND_HISTORY: usize = 100;
+/// Default per-invocation timeout for Python script callbacks (seconds).
+const DEFAULT_SCRIPT_TIMEOUT_SECS: u64 = 10;
 
 fn active_runtime_slot() -> &'static Mutex<Option<Arc<PythonApiState>>> {
     ACTIVE_RUNTIME.get_or_init(|| Mutex::new(None))
@@ -137,6 +140,18 @@ struct PythonApiState {
     task_result_receivers: Mutex<HashMap<String, Receiver<TaskResult>>>,
     /// Per-agent command history, keyed by (agent_id, command_name).
     command_history: Mutex<HashMap<(String, String), VecDeque<String>>>,
+    /// Per-invocation timeout for Python script callbacks (seconds).
+    ///
+    /// A watchdog injects `KeyboardInterrupt` if a callback does not return
+    /// within this many seconds.  Updated atomically so the GUI can adjust it
+    /// without restarting the runtime.
+    script_timeout_secs: AtomicU64,
+    /// `threading.get_ident()` value of the dedicated Python thread.
+    ///
+    /// Stored at thread startup and used by watchdog threads to target
+    /// `ctypes.pythonapi.PyThreadState_SetAsyncExc`.  Zero means the thread
+    /// has not yet stored its identity.
+    python_thread_id: AtomicU64,
 }
 
 /// Result delivered to a `get_task_result` waiter.
@@ -514,6 +529,8 @@ impl PythonApiState {
     }
 
     fn invoke_agent_checkin_callbacks(&self, py: Python<'_>, agent_id: &str) {
+        let timeout = Duration::from_secs(self.script_timeout_secs.load(Ordering::Relaxed));
+        let thread_id = self.python_thread_id.load(Ordering::Relaxed);
         let callbacks = lock_mutex(&self.agent_checkin_callbacks).clone();
         if callbacks.is_empty() {
             return;
@@ -524,10 +541,17 @@ impl PythonApiState {
                 for callback in callbacks {
                     self.begin_script_execution(&callback.script_name);
                     let bound = callback.callback.bind(py);
+                    let watchdog = spawn_script_watchdog(
+                        timeout,
+                        callback.script_name.clone(),
+                        "agent_checkin",
+                        thread_id,
+                    );
                     let call_result = match callback.mode {
                         AgentCheckinCallbackMode::Agent => bound.call1((agent.clone_ref(py),)),
                         AgentCheckinCallbackMode::Identifier => bound.call1((agent_id,)),
                     };
+                    drop(watchdog); // callback completed — cancel the watchdog
                     if let Err(error) = call_result {
                         let message = format!("agent checkin callback failed: {error}\n");
                         let _ = self.push_output(
@@ -553,10 +577,19 @@ impl PythonApiState {
         task_id: &str,
         output: &str,
     ) {
+        let timeout = Duration::from_secs(self.script_timeout_secs.load(Ordering::Relaxed));
+        let thread_id = self.python_thread_id.load(Ordering::Relaxed);
         let callbacks = lock_mutex(&self.command_response_callbacks).clone();
         for callback in callbacks {
             self.begin_script_execution(&callback.script_name);
+            let watchdog = spawn_script_watchdog(
+                timeout,
+                callback.script_name.clone(),
+                "command_response",
+                thread_id,
+            );
             let call_result = callback.callback.bind(py).call1((agent_id, task_id, output));
+            drop(watchdog); // callback completed — cancel the watchdog
             if let Err(error) = call_result {
                 let message = format!("command response callback failed: {error}\n");
                 let _ = self.push_output(
@@ -575,6 +608,8 @@ impl PythonApiState {
         py: Python<'_>,
         loot_item: &crate::transport::LootItem,
     ) {
+        let timeout = Duration::from_secs(self.script_timeout_secs.load(Ordering::Relaxed));
+        let thread_id = self.python_thread_id.load(Ordering::Relaxed);
         let callbacks = lock_mutex(&self.loot_captured_callbacks).clone();
         if callbacks.is_empty() {
             return;
@@ -588,8 +623,15 @@ impl PythonApiState {
         };
         for callback in callbacks {
             self.begin_script_execution(&callback.script_name);
+            let watchdog = spawn_script_watchdog(
+                timeout,
+                callback.script_name.clone(),
+                "loot_captured",
+                thread_id,
+            );
             let call_result =
                 callback.callback.bind(py).call1((&loot_item.agent_id, py_loot.clone_ref(py)));
+            drop(watchdog); // callback completed — cancel the watchdog
             if let Err(error) = call_result {
                 let message = format!("loot captured callback failed: {error}\n");
                 let _ = self.push_output(
@@ -604,10 +646,19 @@ impl PythonApiState {
     }
 
     fn invoke_listener_changed_callbacks(&self, py: Python<'_>, listener_name: &str, action: &str) {
+        let timeout = Duration::from_secs(self.script_timeout_secs.load(Ordering::Relaxed));
+        let thread_id = self.python_thread_id.load(Ordering::Relaxed);
         let callbacks = lock_mutex(&self.listener_changed_callbacks).clone();
         for callback in callbacks {
             self.begin_script_execution(&callback.script_name);
+            let watchdog = spawn_script_watchdog(
+                timeout,
+                callback.script_name.clone(),
+                "listener_changed",
+                thread_id,
+            );
             let call_result = callback.callback.bind(py).call1((listener_name, action));
+            drop(watchdog); // callback completed — cancel the watchdog
             if let Err(error) = call_result {
                 let message = format!("listener changed callback failed: {error}\n");
                 let _ = self.push_output(
@@ -629,6 +680,8 @@ impl PythonApiState {
         command_line: &str,
         arguments: &[String],
     ) -> Result<bool, String> {
+        let timeout = Duration::from_secs(self.script_timeout_secs.load(Ordering::Relaxed));
+        let thread_id = self.python_thread_id.load(Ordering::Relaxed);
         let registered = {
             let commands = lock_mutex(&self.commands);
             commands.get(command_name).cloned()
@@ -667,6 +720,8 @@ impl PythonApiState {
         .map_err(|error| error.to_string())?;
         self.begin_script_execution(&registered.script_name);
         let bound = registered.callback.bind(py);
+        let watchdog =
+            spawn_script_watchdog(timeout, registered.script_name.clone(), "command", thread_id);
         let result = invoke_registered_command_callback(
             self,
             py,
@@ -676,6 +731,7 @@ impl PythonApiState {
             command_context,
             arguments,
         );
+        drop(watchdog); // callback completed — cancel the watchdog
         self.end_script_execution();
         result
     }
@@ -831,6 +887,8 @@ impl PythonRuntime {
             task_result_senders: Mutex::new(HashMap::new()),
             task_result_receivers: Mutex::new(HashMap::new()),
             command_history: Mutex::new(HashMap::new()),
+            script_timeout_secs: AtomicU64::new(DEFAULT_SCRIPT_TIMEOUT_SECS),
+            python_thread_id: AtomicU64::new(0),
         });
         *lock_mutex(active_runtime_slot()) = Some(api_state.clone());
 
@@ -884,6 +942,15 @@ impl PythonRuntime {
     /// Deliver a task result to any Python script blocked in `get_task_result`.
     pub(crate) fn notify_task_result(&self, task_id: String, agent_id: String, output: String) {
         self.inner.api_state.deliver_task_result(&task_id, agent_id, output);
+    }
+
+    /// Override the per-invocation timeout for Python script callbacks.
+    ///
+    /// Any callback that does not return within `secs` seconds will receive a
+    /// `KeyboardInterrupt` and an `ERROR`-level log message will be emitted.
+    /// The default is [`DEFAULT_SCRIPT_TIMEOUT_SECS`] (10 seconds).
+    pub(crate) fn set_script_timeout(&self, secs: u64) {
+        self.inner.api_state.script_timeout_secs.store(secs, Ordering::Relaxed);
     }
 
     /// Run a registered `havocui` tab callback and refresh the tab layout.
@@ -1033,6 +1100,8 @@ impl PythonRuntime {
             task_result_senders: Mutex::new(HashMap::new()),
             task_result_receivers: Mutex::new(HashMap::new()),
             command_history: Mutex::new(HashMap::new()),
+            script_timeout_secs: AtomicU64::new(DEFAULT_SCRIPT_TIMEOUT_SECS),
+            python_thread_id: AtomicU64::new(0),
         });
         let (command_tx, command_rx) = mpsc::channel();
         drop(command_rx);
@@ -1059,6 +1128,71 @@ impl PythonRuntime {
     }
 }
 
+/// Inject a `KeyboardInterrupt` into the Python thread identified by
+/// `thread_id` using `ctypes.pythonapi.PyThreadState_SetAsyncExc`.
+///
+/// CPython releases the GIL every `sys.getswitchinterval()` seconds
+/// (default 5 ms) even during tight pure-Python loops, so the caller
+/// will acquire the GIL at most a few milliseconds after calling this.
+///
+/// Returns `Ok(())` if the interrupt was injected, or a descriptive
+/// error if the `ctypes` call could not be made.
+fn inject_keyboard_interrupt(py: Python<'_>, thread_id: u64) -> PyResult<()> {
+    let ctypes = py.import("ctypes")?;
+    let pythonapi = ctypes.getattr("pythonapi")?;
+    let thread_id_obj = ctypes.getattr("c_ulong")?.call1((thread_id,))?;
+    let exc_type = py.import("builtins")?.getattr("KeyboardInterrupt")?;
+    let exc_obj = ctypes.getattr("py_object")?.call1((exc_type,))?;
+    pythonapi.call_method1("PyThreadState_SetAsyncExc", (thread_id_obj, exc_obj))?;
+    Ok(())
+}
+
+/// Spawn a watchdog `std::thread` that injects `KeyboardInterrupt` into the
+/// Python thread with id `python_thread_id` if the returned `SyncSender` is
+/// not sent-to (or dropped) before `timeout` elapses.
+///
+/// The interrupt is delivered by acquiring the GIL and calling
+/// `ctypes.pythonapi.PyThreadState_SetAsyncExc`.  CPython releases the GIL
+/// periodically even in tight loops, so the watchdog will unblock within a
+/// small multiple of `sys.getswitchinterval()` (≤ 5 ms by default).
+///
+/// Usage pattern:
+/// ```ignore
+/// let watchdog = spawn_script_watchdog(timeout, name.clone(), "agent_checkin", thread_id);
+/// let result = callback.call0();
+/// drop(watchdog); // cancel — callback completed in time
+/// ```
+fn spawn_script_watchdog(
+    timeout: Duration,
+    script_name: String,
+    callback_type: &'static str,
+    python_thread_id: u64,
+) -> mpsc::SyncSender<()> {
+    let (cancel_tx, cancel_rx) = mpsc::sync_channel::<()>(1);
+    thread::spawn(move || match cancel_rx.recv_timeout(timeout) {
+        // Sender dropped or sent — callback completed before the deadline.
+        Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {}
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            tracing::error!(
+                script = %script_name,
+                callback = %callback_type,
+                timeout_secs = timeout.as_secs(),
+                "python script timed out; injecting KeyboardInterrupt",
+            );
+            if python_thread_id != 0 {
+                // Acquire the GIL — CPython releases it periodically so this
+                // will unblock within a few milliseconds even for tight loops.
+                Python::with_gil(|py| {
+                    if let Err(error) = inject_keyboard_interrupt(py, python_thread_id) {
+                        tracing::warn!(%error, "failed to inject KeyboardInterrupt into python thread");
+                    }
+                });
+            }
+        }
+    });
+    cancel_tx
+}
+
 fn python_thread_main(
     api_state: Arc<PythonApiState>,
     scripts_dir: PathBuf,
@@ -1071,6 +1205,18 @@ fn python_thread_main(
             format!("failed to create scripts directory {}: {error}", scripts_dir.display());
         let _ = ready_tx.send(Err(message.clone()));
         return Err(message);
+    }
+
+    // Record this thread's Python identity so watchdog threads can target it
+    // with `ctypes.pythonapi.PyThreadState_SetAsyncExc` when a callback times out.
+    let thread_id_result = Python::with_gil(|py| -> PyResult<u64> {
+        py.import("threading")?.call_method0("get_ident")?.extract()
+    });
+    match thread_id_result {
+        Ok(id) => api_state.python_thread_id.store(id, Ordering::Relaxed),
+        Err(ref error) => {
+            tracing::warn!(%error, "could not determine python thread id; script timeouts will not interrupt running callbacks");
+        }
     }
 
     let init_result = Python::with_gil(|py| -> PyResult<()> {
@@ -4958,5 +5104,126 @@ red_cell.register_command('boom', boom)\n";
             wait_for_output_occurrences(&runtime, "beta:00ABCDEF", 1),
             "beta script output should appear"
         );
+    }
+
+    #[test]
+    fn set_script_timeout_updates_stored_value() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        // Default is 10 s.
+        assert_eq!(
+            runtime.inner.api_state.script_timeout_secs.load(std::sync::atomic::Ordering::Relaxed),
+            DEFAULT_SCRIPT_TIMEOUT_SECS,
+        );
+
+        runtime.set_script_timeout(30);
+        assert_eq!(
+            runtime.inner.api_state.script_timeout_secs.load(std::sync::atomic::Ordering::Relaxed),
+            30,
+        );
+    }
+
+    /// A script containing an infinite loop must be interrupted via
+    /// `KeyboardInterrupt` within the watchdog timeout window.
+    ///
+    /// We set a very short timeout (1 s) so the test finishes quickly.
+    /// The script prints "before" before entering the loop and must NOT
+    /// print "after" (which it would only reach if the loop returned normally).
+    #[test]
+    fn timeout_interrupts_infinite_loop_in_registered_command() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+
+        write_script(
+            &temp_dir.path().join("loopy.py"),
+            "import red_cell, sys\ndef loopy():\n    sys.stdout.write('before\\n')\n    sys.stdout.flush()\n    while True:\n        pass\n    sys.stdout.write('after\\n')\nred_cell.register_command('loopy', loopy)\n",
+        );
+
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        // Set a 1-second timeout so the test is fast.
+        runtime.set_script_timeout(1);
+
+        // Dispatch the command — it should return (interrupted) rather than hang.
+        let started = Instant::now();
+        let result = runtime.execute_registered_command("agent-0", "loopy");
+        let elapsed = started.elapsed();
+
+        // The command must complete well within 5 s (generous upper bound).
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "command dispatch blocked for {elapsed:?}; expected interrupt within 5 s"
+        );
+
+        // The callback raised KeyboardInterrupt so execute_registered_command
+        // returns Err (CommandFailed) — not Ok.
+        assert!(result.is_err(), "expected Err from timed-out callback, got Ok");
+
+        // "before" must have been written; "after" must not.
+        assert!(wait_for_output(&runtime, "before"), "'before' should appear before the loop");
+        let any_after = runtime.script_output().iter().any(|e| e.text.contains("after"));
+        assert!(!any_after, "'after' should not appear — loop must have been interrupted");
+    }
+
+    /// After an agent-checkin callback with an infinite loop is interrupted by
+    /// the watchdog, the Python thread must remain responsive and able to
+    /// process the next event.
+    #[test]
+    fn timeout_interrupts_infinite_loop_in_agent_checkin_callback() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+
+        // Script 1: loops indefinitely in the checkin callback.
+        write_script(
+            &temp_dir.path().join("hang_checkin.py"),
+            "import red_cell, sys\ndef on_checkin(agent_id):\n    sys.stdout.write('checkin_before\\n')\n    sys.stdout.flush()\n    while True:\n        pass\nred_cell.on_agent_checkin(on_checkin)\n",
+        );
+        // Script 2: registers a fast command so we can verify the thread recovers.
+        write_script(
+            &temp_dir.path().join("recover.py"),
+            "import red_cell, sys\ndef ping():\n    sys.stdout.write('pong\\n')\nred_cell.register_command('ping', ping)\n",
+        );
+
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        // 1-second watchdog so this test finishes quickly.
+        runtime.set_script_timeout(1);
+
+        // Dispatch the looping checkin callback (fire-and-forget).
+        runtime
+            .emit_agent_checkin("DEADBEEF".to_owned())
+            .unwrap_or_else(|error| panic!("emit should succeed: {error}"));
+
+        // Wait until the callback has started (written its marker).
+        assert!(
+            wait_for_output(&runtime, "checkin_before"),
+            "'checkin_before' should appear before the loop"
+        );
+
+        // Give the watchdog time to fire (timeout is 1 s; allow 3 s total slack).
+        thread::sleep(Duration::from_millis(1500));
+
+        // The Python thread must now be unblocked — execute a fast command.
+        let result = runtime.execute_registered_command("agent-0", "ping");
+        assert!(
+            result.is_ok(),
+            "Python thread should be responsive after watchdog interrupt; got {result:?}"
+        );
+        assert!(wait_for_output(&runtime, "pong"), "'pong' should appear from recovery command");
     }
 }

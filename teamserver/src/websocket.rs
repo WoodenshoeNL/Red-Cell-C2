@@ -16,6 +16,7 @@ use axum::{
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use red_cell_common::crypto::{WsEnvelope, derive_ws_hmac_key, open_ws_frame, seal_ws_frame};
 use red_cell_common::demon::{
     DemonCommand, DemonFilesystemCommand, DemonInjectWay, DemonKerberosCommand,
     DemonProcessCommand, DemonSocketCommand, DemonTokenCommand,
@@ -376,6 +377,9 @@ where
         "operator authenticated"
     );
 
+    // Derive per-session HMAC key from the session token.
+    let mut ws_session = WsSession::new(&session.token);
+
     let mut event_receiver = event_bus.subscribe();
     if let Err(error) = send_session_snapshot(
         &mut socket,
@@ -383,6 +387,7 @@ where
         &event_bus,
         &ListenerManager::from_ref(&state),
         &AgentRegistry::from_ref(&state),
+        &mut ws_session,
     )
     .await
     {
@@ -411,7 +416,7 @@ where
     let disconnect_kind = 'recv: loop {
         tokio::select! {
             _ = &mut shutdown_signal => {
-                if let Err(e) = send_operator_message(&mut socket, &teamserver_shutdown_event()).await {
+                if let Err(e) = send_hmac_message(&mut socket, &teamserver_shutdown_event(), &mut ws_session).await {
                     debug!(%e, "shutdown: failed to send shutdown event to operator");
                 }
                 if let Err(e) = socket.send(WsMessage::Close(None)).await {
@@ -420,7 +425,7 @@ where
                 break 'recv DisconnectKind::ServerShutdown;
             }
             incoming = socket.recv() => {
-                match handle_incoming_frame(&state, &mut socket, &session, incoming).await {
+                match handle_incoming_frame(&state, &mut socket, &session, incoming, &mut ws_session).await {
                     Ok(SocketLoopControl::Continue) => {}
                     Ok(SocketLoopControl::Break) => break 'recv DisconnectKind::CleanClose,
                     Err(()) => break 'recv DisconnectKind::Error,
@@ -431,7 +436,7 @@ where
                     break 'recv DisconnectKind::ServerShutdown;
                 };
 
-                if send_operator_message(&mut socket, &event).await.is_err() {
+                if send_hmac_message(&mut socket, &event, &mut ws_session).await.is_err() {
                     break 'recv DisconnectKind::Error;
                 }
             }
@@ -667,6 +672,7 @@ async fn handle_incoming_frame<S>(
     socket: &mut WebSocket,
     session: &crate::OperatorSession,
     incoming: Option<Result<WsMessage, axum::Error>>,
+    ws_session: &mut WsSession,
 ) -> Result<SocketLoopControl, ()>
 where
     S: Clone + Send + Sync + 'static,
@@ -685,7 +691,41 @@ where
 
     match frame {
         Ok(WsMessage::Text(payload)) => {
-            let message = match serde_json::from_str::<OperatorMessage>(payload.as_str()) {
+            // Every post-login frame must be a valid WsEnvelope.
+            let inner_json = match serde_json::from_str::<WsEnvelope>(payload.as_str()) {
+                Ok(envelope) => {
+                    match open_ws_frame(&ws_session.key, &envelope, ws_session.recv_seq) {
+                        Ok(json) => {
+                            ws_session.recv_seq = Some(envelope.seq);
+                            json
+                        }
+                        Err(_) => {
+                            warn!(
+                                connection_id = %session.connection_id,
+                                username = %session.username,
+                                "HMAC verification failed on incoming frame — closing connection"
+                            );
+                            if let Err(e) = socket.send(WsMessage::Close(None)).await {
+                                debug!(%e, "failed to send close frame after HMAC failure");
+                            }
+                            return Err(());
+                        }
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        connection_id = %session.connection_id,
+                        username = %session.username,
+                        %error,
+                        "failed to parse HMAC envelope on incoming frame"
+                    );
+                    if let Err(e) = socket.send(WsMessage::Close(None)).await {
+                        debug!(%e, "failed to send close frame after envelope parse error");
+                    }
+                    return Err(());
+                }
+            };
+            let message = match serde_json::from_str::<OperatorMessage>(&inner_json) {
                 Ok(message) => message,
                 Err(error) => {
                     warn!(
@@ -2562,6 +2602,7 @@ async fn send_session_snapshot(
     events: &EventBus,
     listeners: &ListenerManager,
     registry: &AgentRegistry,
+    ws_session: &mut WsSession,
 ) -> Result<(), SnapshotSyncError> {
     let operators = auth
         .operator_inventory()
@@ -2569,26 +2610,31 @@ async fn send_session_snapshot(
         .into_iter()
         .map(|entry| entry.as_operator_info())
         .collect();
-    send_operator_message(socket, &operator_snapshot_event(operators)?).await?;
+    send_hmac_message(socket, &operator_snapshot_event(operators)?, ws_session).await?;
 
     for summary in listeners.list().await?.into_iter() {
-        send_operator_message(
+        send_hmac_message(
             socket,
             &listener_event_for_action("teamserver", &summary, ListenerEventAction::Created),
+            ws_session,
         )
         .await?;
     }
 
     for message in events.recent_teamserver_logs() {
-        send_operator_message(socket, &message).await?;
+        send_hmac_message(socket, &message, ws_session).await?;
     }
 
     for agent in registry.list_active().await {
         let pivots = registry.pivots(agent.agent_id).await;
         let listener_name =
             registry.listener_name(agent.agent_id).await.unwrap_or_else(|| "null".to_owned());
-        send_operator_message(socket, &agent_snapshot_event(&listener_name, &agent, &pivots))
-            .await?;
+        send_hmac_message(
+            socket,
+            &agent_snapshot_event(&listener_name, &agent, &pivots),
+            ws_session,
+        )
+        .await?;
     }
 
     Ok(())
@@ -2743,6 +2789,33 @@ async fn send_operator_message(
     Ok(())
 }
 
+/// Per-connection HMAC state for post-login WebSocket frames.
+struct WsSession {
+    key: [u8; 32],
+    send_seq: u64,
+    recv_seq: Option<u64>,
+}
+
+impl WsSession {
+    fn new(token: &str) -> Self {
+        Self { key: derive_ws_hmac_key(token), send_seq: 0, recv_seq: None }
+    }
+}
+
+/// Send an `OperatorMessage` wrapped in an HMAC `WsEnvelope`.
+async fn send_hmac_message(
+    socket: &mut WebSocket,
+    message: &OperatorMessage,
+    ws_session: &mut WsSession,
+) -> Result<(), SendMessageError> {
+    let inner_json = serde_json::to_string(message)?;
+    let envelope = seal_ws_frame(&ws_session.key, ws_session.send_seq, &inner_json);
+    ws_session.send_seq += 1;
+    let wire = serde_json::to_string(&envelope)?;
+    socket.send(WsMessage::Text(wire.into())).await?;
+    Ok(())
+}
+
 async fn send_login_error(
     socket: &mut WebSocket,
     user: &str,
@@ -2832,7 +2905,9 @@ mod tests {
         EventBus, ListenerManager, PayloadBuilderService, ShutdownController, SocketRelayManager,
         query_audit_log,
     };
-    use red_cell_common::crypto::hash_password_sha3;
+    use red_cell_common::crypto::{
+        WsEnvelope, derive_ws_hmac_key, hash_password_sha3, open_ws_frame, seal_ws_frame,
+    };
     use zeroize::Zeroizing;
 
     #[derive(Clone)]
@@ -2967,6 +3042,110 @@ mod tests {
         }
     }
 
+    // ── Test WebSocket session (HMAC-aware) ───────────────────────────────────
+
+    /// Raw WebSocket stream type used in tests.
+    type RawTestSocket = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    /// Test helper that wraps a raw WebSocket connection with per-session HMAC state.
+    ///
+    /// Pre-login frames (the `Login` message) are sent/received as plain JSON.
+    /// Once `InitConnectionSuccess` is received, the HMAC key is derived from the
+    /// embedded session token, and all subsequent frames are wrapped/unwrapped.
+    struct WsTestSession {
+        socket: RawTestSocket,
+        hmac_key: Option<[u8; 32]>,
+        send_seq: u64,
+        recv_seq: Option<u64>,
+    }
+
+    impl WsTestSession {
+        fn new(socket: RawTestSocket) -> Self {
+            Self { socket, hmac_key: None, send_seq: 0, recv_seq: None }
+        }
+
+        /// Send a pre-serialised JSON string, HMAC-wrapping it if the session key
+        /// is already established (i.e. after a successful login).
+        async fn send_text(&mut self, json: impl Into<String>) {
+            let json = json.into();
+            if let Some(key) = &self.hmac_key {
+                let seq = self.send_seq;
+                self.send_seq += 1;
+                let envelope = seal_ws_frame(key, seq, &json);
+                let wire = serde_json::to_string(&envelope).expect("envelope must serialize");
+                self.socket
+                    .send(ClientMessage::Text(wire.into()))
+                    .await
+                    .expect("send_text should succeed");
+            } else {
+                self.socket
+                    .send(ClientMessage::Text(json.into()))
+                    .await
+                    .expect("send_text should succeed");
+            }
+        }
+
+        /// Send an arbitrary raw WebSocket frame (bypasses HMAC — for pre-login tests).
+        async fn send_frame(&mut self, frame: ClientMessage) {
+            self.socket.send(frame).await.expect("send_frame should succeed");
+        }
+
+        /// Receive the next `OperatorMessage`.
+        ///
+        /// If the session key is set, expects and verifies a `WsEnvelope`.
+        /// If the key is not yet set and the received message is
+        /// `InitConnectionSuccess`, the HMAC key is derived from the embedded
+        /// session token for all future messages.
+        async fn recv_msg(&mut self) -> OperatorMessage {
+            let frame = timeout(Duration::from_secs(30), self.socket.next())
+                .await
+                .expect("socket should yield a frame within 30s")
+                .expect("frame should be present")
+                .expect("frame should decode");
+
+            let text = match frame {
+                ClientMessage::Text(t) => t,
+                other => panic!("unexpected websocket frame type: {other:?}"),
+            };
+
+            if let Some(key) = &self.hmac_key {
+                let envelope: WsEnvelope =
+                    serde_json::from_str(text.as_str()).expect("expected HMAC envelope post-login");
+                let inner_json = open_ws_frame(key, &envelope, self.recv_seq)
+                    .expect("HMAC verification must succeed in tests");
+                self.recv_seq = Some(envelope.seq);
+                serde_json::from_str(&inner_json)
+                    .expect("inner payload must parse as OperatorMessage")
+            } else {
+                let msg: OperatorMessage =
+                    serde_json::from_str(text.as_str()).expect("plain frame must parse");
+                if let OperatorMessage::InitConnectionSuccess(ref m) = msg {
+                    if let Some(token) = m.info.message.split_once("SessionToken=").map(|(_, t)| t)
+                    {
+                        self.hmac_key = Some(derive_ws_hmac_key(token));
+                    }
+                }
+                msg
+            }
+        }
+
+        /// Receive the next raw WebSocket frame without HMAC processing.
+        ///
+        /// Used for low-level tests that need to inspect close/error frames.
+        async fn next_raw_frame(
+            &mut self,
+        ) -> Option<Result<ClientMessage, tokio_tungstenite::tungstenite::Error>> {
+            self.socket.next().await
+        }
+
+        /// Send a clean WebSocket close frame.
+        async fn close(&mut self) {
+            self.socket.close(None).await.expect("close should send");
+        }
+    }
+
     #[tokio::test]
     async fn connection_manager_tracks_registered_and_authenticated_clients() {
         let manager = OperatorConnectionManager::new();
@@ -3004,7 +3183,7 @@ mod tests {
         }))
         .expect("message should serialize");
 
-        socket.send(ClientMessage::Text(non_login.into())).await.expect("message should send");
+        socket.send_frame(ClientMessage::Text(non_login.into())).await;
 
         let response = read_operator_message(&mut socket).await;
         assert!(matches!(response, OperatorMessage::InitConnectionError(_)));
@@ -3019,12 +3198,14 @@ mod tests {
         let connection_registry = state.connections.clone();
         let (mut socket, server) = spawn_server(state).await;
 
-        let frame =
-            timeout(super::AUTHENTICATION_FRAME_TIMEOUT + Duration::from_secs(2), socket.next())
-                .await
-                .expect("socket should close idle unauthenticated connection")
-                .expect("close frame should be present")
-                .expect("close frame should decode");
+        let frame = timeout(
+            super::AUTHENTICATION_FRAME_TIMEOUT + Duration::from_secs(2),
+            socket.next_raw_frame(),
+        )
+        .await
+        .expect("socket should close idle unauthenticated connection")
+        .expect("close frame should be present")
+        .expect("close frame should decode");
         assert!(matches!(frame, ClientMessage::Close(_)));
 
         wait_for_connection_count(&connection_registry, 0).await;
@@ -3041,9 +3222,8 @@ mod tests {
         let (mut socket, server) = spawn_server(state).await;
 
         socket
-            .send(ClientMessage::Text(login_message("operator", "password1234").into()))
-            .await
-            .expect("login should send");
+            .send_frame(ClientMessage::Text(login_message("operator", "password1234").into()))
+            .await;
 
         let response = read_operator_message(&mut socket).await;
         assert!(matches!(response, OperatorMessage::InitConnectionSuccess(_)));
@@ -3066,7 +3246,7 @@ mod tests {
         assert_eq!(event_bus.broadcast(event.clone()), 1);
         assert_eq!(read_operator_message(&mut socket).await, event);
 
-        socket.close(None).await.expect("close should send");
+        socket.close().await;
         wait_for_connection_count(&connection_registry, 0).await;
         assert_eq!(auth.session_count().await, 0);
         server.abort();
@@ -3081,12 +3261,9 @@ mod tests {
         login(&mut socket, "operator", "password1234").await;
 
         let oversized_payload = "x".repeat(super::OPERATOR_MAX_MESSAGE_SIZE + 1);
-        socket
-            .send(ClientMessage::Text(oversized_payload.into()))
-            .await
-            .expect("oversized message should send");
+        socket.send_frame(ClientMessage::Text(oversized_payload.into())).await;
 
-        let frame = timeout(Duration::from_secs(5), socket.next())
+        let frame = timeout(Duration::from_secs(5), socket.next_raw_frame())
             .await
             .expect("socket should react to oversized message")
             .expect("connection should close or error");
@@ -3129,7 +3306,7 @@ mod tests {
         assert_eq!(auth.session_count().await, 1);
 
         // After the client closes, both counts must return to zero.
-        socket.close(None).await.expect("close should send");
+        socket.close().await;
         wait_for_connection_count(&connections, 0).await;
         assert_eq!(connections.authenticated_count().await, 0);
         assert_eq!(auth.session_count().await, 0);
@@ -3147,9 +3324,8 @@ mod tests {
 
         // Send binary garbage as the very first frame — not a valid login message.
         socket
-            .send(ClientMessage::Binary(b"not valid json at all \x00\xff".to_vec().into()))
-            .await
-            .expect("send should succeed");
+            .send_frame(ClientMessage::Binary(b"not valid json at all \x00\xff".to_vec().into()))
+            .await;
 
         // The server must close the connection.
         wait_for_connection_count(&connections, 0).await;
@@ -3171,13 +3347,10 @@ mod tests {
 
         // Send an oversized frame as the very first message (no prior login).
         let oversized = "x".repeat(super::OPERATOR_MAX_MESSAGE_SIZE + 1);
-        socket
-            .send(ClientMessage::Text(oversized.into()))
-            .await
-            .expect("oversized send should succeed at the client side");
+        socket.send_frame(ClientMessage::Text(oversized.into())).await;
 
         // The server must terminate the connection (close frame or transport error).
-        let frame = timeout(Duration::from_secs(5), socket.next())
+        let frame = timeout(Duration::from_secs(5), socket.next_raw_frame())
             .await
             .expect("socket should react to oversized pre-auth frame")
             .expect("connection should close or error");
@@ -3199,9 +3372,8 @@ mod tests {
         let (mut socket, server) = spawn_server(state).await;
 
         socket
-            .send(ClientMessage::Text(login_message("operator", "password1234").into()))
-            .await
-            .expect("login should send");
+            .send_frame(ClientMessage::Text(login_message("operator", "password1234").into()))
+            .await;
 
         let response = read_operator_message(&mut socket).await;
         assert!(matches!(response, OperatorMessage::InitConnectionSuccess(_)));
@@ -3215,7 +3387,7 @@ mod tests {
         };
         assert_eq!(message.info.text, "teamserver shutting down");
 
-        let frame = timeout(Duration::from_secs(5), socket.next())
+        let frame = timeout(Duration::from_secs(5), socket.next_raw_frame())
             .await
             .expect("socket should close")
             .expect("close frame should be present")
@@ -3241,7 +3413,7 @@ mod tests {
         };
         assert_eq!(message.info.user, "analyst");
 
-        second.close(None).await.expect("close should send");
+        second.close().await;
 
         let left = read_operator_message(&mut first).await;
         let OperatorMessage::ChatUserDisconnected(message) = left else {
@@ -3249,7 +3421,7 @@ mod tests {
         };
         assert_eq!(message.info.user, "analyst");
 
-        first.close(None).await.expect("close should send");
+        first.close().await;
         server.abort();
     }
 
@@ -3264,10 +3436,7 @@ mod tests {
         login(&mut observer, "analyst", "readonly").await;
         let _presence = read_operator_message(&mut sender).await;
 
-        sender
-            .send(ClientMessage::Text(chat_message("operator", "hello team").into()))
-            .await
-            .expect("chat should send");
+        sender.send_text(chat_message("operator", "hello team")).await;
 
         let message = read_operator_message(&mut observer).await;
         let OperatorMessage::ChatMessage(message) = message else {
@@ -3280,8 +3449,8 @@ mod tests {
             Some(&Value::String("hello team".to_owned()))
         );
 
-        sender.close(None).await.expect("close should send");
-        observer.close(None).await.expect("close should send");
+        sender.close().await;
+        observer.close().await;
         server.abort();
     }
 
@@ -3291,10 +3460,7 @@ mod tests {
         let (mut sender, server) = spawn_server(state.clone()).await;
 
         login(&mut sender, "operator", "password1234").await;
-        sender
-            .send(ClientMessage::Text(chat_message("operator", "hello team").into()))
-            .await
-            .expect("chat should send");
+        sender.send_text(chat_message("operator", "hello team")).await;
         let _broadcast = read_operator_message(&mut sender).await;
 
         let page = query_audit_log(
@@ -3319,7 +3485,7 @@ mod tests {
             Some("hello team")
         );
 
-        sender.close(None).await.expect("close should send");
+        sender.close().await;
         server.abort();
     }
 
@@ -3360,7 +3526,7 @@ mod tests {
         let encoded = serde_json::to_value(&message.info).expect("agent snapshot should serialize");
         assert!(encoded.get("Encryption").is_none());
 
-        socket.close(None).await.expect("close should send");
+        socket.close().await;
         server.abort();
     }
 
@@ -3375,9 +3541,8 @@ mod tests {
         let (mut socket, server) = spawn_server(state).await;
 
         socket
-            .send(ClientMessage::Text(login_message("operator", "password1234").into()))
-            .await
-            .expect("login should send");
+            .send_frame(ClientMessage::Text(login_message("operator", "password1234").into()))
+            .await;
         let response = read_operator_message(&mut socket).await;
         assert!(matches!(response, OperatorMessage::InitConnectionSuccess(_)));
 
@@ -3416,7 +3581,7 @@ mod tests {
             ]
         );
 
-        socket.close(None).await.expect("close should send");
+        socket.close().await;
         server.abort();
     }
 
@@ -3447,7 +3612,7 @@ mod tests {
         assert_eq!(child_message.info.pivots.parent.as_deref(), Some("01020304"));
         assert_eq!(child_message.info.pivot_parent, "01020304");
 
-        socket.close(None).await.expect("close should send");
+        socket.close().await;
         server.abort();
     }
 
@@ -3470,7 +3635,7 @@ mod tests {
         assert_eq!(message.info.name.as_deref(), Some("offline-alpha"));
         assert_eq!(message.info.status.as_deref(), Some("Offline"));
 
-        socket.close(None).await.expect("close should send");
+        socket.close().await;
         server.abort();
     }
 
@@ -3480,10 +3645,7 @@ mod tests {
         let connection_registry = state.connections.clone();
         let (mut socket, server) = spawn_server(state).await;
 
-        socket
-            .send(ClientMessage::Text(login_message("analyst", "readonly").into()))
-            .await
-            .expect("login should send");
+        socket.send_frame(ClientMessage::Text(login_message("analyst", "readonly").into())).await;
         let response = read_operator_message(&mut socket).await;
         assert!(matches!(response, OperatorMessage::InitConnectionSuccess(_)));
         let _snapshot = read_operator_snapshot(&mut socket).await;
@@ -3510,9 +3672,9 @@ mod tests {
         }))
         .expect("task should serialize");
 
-        socket.send(ClientMessage::Text(task.into())).await.expect("task should send");
+        socket.send_text(task).await;
 
-        let close_frame = timeout(Duration::from_secs(2), socket.next())
+        let close_frame = timeout(Duration::from_secs(2), socket.next_raw_frame())
             .await
             .expect("socket should close")
             .expect("close frame should be present")
@@ -3540,21 +3702,17 @@ mod tests {
         assert!(matches!(snapshot, OperatorMessage::AgentNew(_)));
 
         sender
-            .send(ClientMessage::Text(
-                agent_task_message(
-                    "operator",
-                    AgentTaskInfo {
-                        task_id: "2A".to_owned(),
-                        command_line: "checkin".to_owned(),
-                        demon_id: "DEADBEEF".to_owned(),
-                        command_id: u32::from(DemonCommand::CommandCheckin).to_string(),
-                        ..AgentTaskInfo::default()
-                    },
-                )
-                .into(),
+            .send_text(agent_task_message(
+                "operator",
+                AgentTaskInfo {
+                    task_id: "2A".to_owned(),
+                    command_line: "checkin".to_owned(),
+                    demon_id: "DEADBEEF".to_owned(),
+                    command_id: u32::from(DemonCommand::CommandCheckin).to_string(),
+                    ..AgentTaskInfo::default()
+                },
             ))
-            .await
-            .expect("task should send");
+            .await;
 
         let event = read_operator_message(&mut observer).await;
         let OperatorMessage::AgentTask(message) = event else {
@@ -3569,8 +3727,8 @@ mod tests {
         assert_eq!(queued[0].request_id, 0x2A);
         assert_eq!(queued[0].command_line, "checkin");
 
-        sender.close(None).await.expect("close should send");
-        observer.close(None).await.expect("close should send");
+        sender.close().await;
+        observer.close().await;
         server.abort();
     }
 
@@ -4283,12 +4441,12 @@ mod tests {
         login(&mut observer, "operator", "password1234").await;
 
         sender
-            .send(ClientMessage::Text(
-                listener_new_message("operator", sample_listener_info("alpha", "Online", 0), false)
-                    .into(),
+            .send_text(listener_new_message(
+                "operator",
+                sample_listener_info("alpha", "Online", 0),
+                false,
             ))
-            .await
-            .expect("listener create should send");
+            .await;
 
         let created = read_operator_message(&mut observer).await;
         let OperatorMessage::ListenerNew(message) = created else {
@@ -4308,10 +4466,7 @@ mod tests {
             crate::ListenerStatus::Running
         );
 
-        sender
-            .send(ClientMessage::Text(listener_mark_message("operator", "alpha", "stopped").into()))
-            .await
-            .expect("listener stop should send");
+        sender.send_text(listener_mark_message("operator", "alpha", "stopped")).await;
 
         let stopped = read_operator_message(&mut observer).await;
         let OperatorMessage::ListenerMark(message) = stopped else {
@@ -4324,10 +4479,7 @@ mod tests {
             crate::ListenerStatus::Stopped
         );
 
-        sender
-            .send(ClientMessage::Text(listener_remove_message("operator", "alpha").into()))
-            .await
-            .expect("listener delete should send");
+        sender.send_text(listener_remove_message("operator", "alpha")).await;
 
         let removed = read_operator_message(&mut observer).await;
         let OperatorMessage::ListenerRemove(message) = removed else {
@@ -4336,8 +4488,8 @@ mod tests {
         assert_eq!(message.info.name, "alpha");
         assert!(listeners.summary("alpha").await.is_err());
 
-        sender.close(None).await.expect("close should send");
-        observer.close(None).await.expect("close should send");
+        sender.close().await;
+        observer.close().await;
         server.abort();
     }
 
@@ -4350,20 +4502,17 @@ mod tests {
         login(&mut socket, "operator", "password1234").await;
 
         socket
-            .send(ClientMessage::Text(
-                listener_new_message("operator", sample_listener_info("beta", "Online", 0), false)
-                    .into(),
+            .send_text(listener_new_message(
+                "operator",
+                sample_listener_info("beta", "Online", 0),
+                false,
             ))
-            .await
-            .expect("listener create should send");
+            .await;
 
         let _created = read_operator_message(&mut socket).await;
         let _started = read_operator_message(&mut socket).await;
 
-        socket
-            .send(ClientMessage::Text(listener_remove_message("operator", "beta").into()))
-            .await
-            .expect("listener delete should send");
+        socket.send_text(listener_remove_message("operator", "beta")).await;
 
         let _removed = read_operator_message(&mut socket).await;
 
@@ -4381,7 +4530,7 @@ mod tests {
         assert_eq!(entry.target_id.as_deref(), Some("beta"));
         assert_eq!(entry.result_status, AuditResultStatus::Success);
 
-        socket.close(None).await.expect("close should send");
+        socket.close().await;
         server.abort();
     }
 
@@ -4393,10 +4542,7 @@ mod tests {
 
         login(&mut socket, "operator", "password1234").await;
 
-        socket
-            .send(ClientMessage::Text(listener_remove_message("operator", "ghost").into()))
-            .await
-            .expect("listener delete should send");
+        socket.send_text(listener_remove_message("operator", "ghost")).await;
 
         let _error_msg = read_operator_message(&mut socket).await;
 
@@ -4413,7 +4559,7 @@ mod tests {
         assert_eq!(entry.target_kind, "listener");
         assert_eq!(entry.result_status, AuditResultStatus::Failure);
 
-        socket.close(None).await.expect("close should send");
+        socket.close().await;
         server.abort();
     }
 
@@ -4426,16 +4572,12 @@ mod tests {
         login(&mut socket, "operator", "password1234").await;
 
         socket
-            .send(ClientMessage::Text(
-                listener_new_message(
-                    "operator",
-                    sample_listener_info("gamma", "Online", 8443),
-                    false,
-                )
-                .into(),
+            .send_text(listener_new_message(
+                "operator",
+                sample_listener_info("gamma", "Online", 8443),
+                false,
             ))
-            .await
-            .expect("listener create should send");
+            .await;
 
         let _created = read_operator_message(&mut socket).await;
         let _started = read_operator_message(&mut socket).await;
@@ -4443,10 +4585,7 @@ mod tests {
         let mut updated = sample_listener_info("gamma", "Online", 9443);
         updated.headers = Some("X-Test: updated".to_owned());
 
-        socket
-            .send(ClientMessage::Text(listener_edit_message("operator", updated).into()))
-            .await
-            .expect("listener edit should send");
+        socket.send_text(listener_edit_message("operator", updated)).await;
 
         let _updated = read_operator_message(&mut socket).await;
 
@@ -4464,7 +4603,7 @@ mod tests {
         assert_eq!(entry.target_id.as_deref(), Some("gamma"));
         assert_eq!(entry.result_status, AuditResultStatus::Success);
 
-        socket.close(None).await.expect("close should send");
+        socket.close().await;
         server.abort();
     }
 
@@ -4477,12 +4616,11 @@ mod tests {
         login(&mut socket, "operator", "password1234").await;
 
         socket
-            .send(ClientMessage::Text(
-                listener_edit_message("operator", sample_listener_info("ghost", "Online", 9443))
-                    .into(),
+            .send_text(listener_edit_message(
+                "operator",
+                sample_listener_info("ghost", "Online", 9443),
             ))
-            .await
-            .expect("listener edit should send");
+            .await;
 
         let _error_msg = read_operator_message(&mut socket).await;
 
@@ -4500,7 +4638,7 @@ mod tests {
         assert_eq!(entry.target_id.as_deref(), Some("ghost"));
         assert_eq!(entry.result_status, AuditResultStatus::Failure);
 
-        socket.close(None).await.expect("close should send");
+        socket.close().await;
         server.abort();
     }
 
@@ -4514,23 +4652,19 @@ mod tests {
         login(&mut socket, "operator", "password1234").await;
 
         socket
-            .send(ClientMessage::Text(
-                agent_task_message(
-                    "operator",
-                    AgentTaskInfo {
-                        task_id: "2B".to_owned(),
-                        command_line: "note tracked through vpn".to_owned(),
-                        demon_id: "DEADBEEF".to_owned(),
-                        command_id: "Teamserver".to_owned(),
-                        command: Some("note".to_owned()),
-                        arguments: Some("tracked through vpn".to_owned()),
-                        ..AgentTaskInfo::default()
-                    },
-                )
-                .into(),
+            .send_text(agent_task_message(
+                "operator",
+                AgentTaskInfo {
+                    task_id: "2B".to_owned(),
+                    command_line: "note tracked through vpn".to_owned(),
+                    demon_id: "DEADBEEF".to_owned(),
+                    command_id: "Teamserver".to_owned(),
+                    command: Some("note".to_owned()),
+                    arguments: Some("tracked through vpn".to_owned()),
+                    ..AgentTaskInfo::default()
+                },
             ))
-            .await
-            .expect("note should send");
+            .await;
 
         timeout(Duration::from_secs(2), async {
             loop {
@@ -4547,7 +4681,7 @@ mod tests {
         let updated = registry.get(0xDEAD_BEEF).await.expect("agent should exist");
         assert_eq!(updated.note, "tracked through vpn");
 
-        socket.close(None).await.expect("close should send");
+        socket.close().await;
         server.abort();
     }
 
@@ -4565,17 +4699,14 @@ mod tests {
         let snapshot = read_operator_message(&mut socket).await;
         assert!(matches!(snapshot, OperatorMessage::AgentNew(_)));
 
-        socket
-            .send(ClientMessage::Text(agent_remove_message("admin", "DEADBEEF").into()))
-            .await
-            .expect("remove should send");
+        socket.send_text(agent_remove_message("admin", "DEADBEEF")).await;
 
         let event = read_operator_message(&mut socket).await;
         assert!(matches!(event, OperatorMessage::AgentRemove(_)));
         assert!(registry.get(0xDEAD_BEEF).await.is_none());
         assert_eq!(sockets.list_socks_servers(0xDEAD_BEEF).await, "No active SOCKS5 servers");
 
-        socket.close(None).await.expect("close should send");
+        socket.close().await;
         server.abort();
     }
 
@@ -4590,10 +4721,7 @@ mod tests {
         login(&mut socket, "admin", "adminpass").await;
         let _snapshot = read_operator_message(&mut socket).await;
 
-        socket
-            .send(ClientMessage::Text(agent_remove_message("admin", "DEADBEEF").into()))
-            .await
-            .expect("remove should send");
+        socket.send_text(agent_remove_message("admin", "DEADBEEF")).await;
 
         let _event = read_operator_message(&mut socket).await;
 
@@ -4614,7 +4742,7 @@ mod tests {
         assert_eq!(entry.command.as_deref(), Some("delete"));
         assert_eq!(entry.result_status, AuditResultStatus::Success);
 
-        socket.close(None).await.expect("close should send");
+        socket.close().await;
         server.abort();
     }
 
@@ -4626,10 +4754,7 @@ mod tests {
 
         login(&mut socket, "admin", "adminpass").await;
 
-        socket
-            .send(ClientMessage::Text(agent_remove_message("admin", "DEADBEEF").into()))
-            .await
-            .expect("remove should send");
+        socket.send_text(agent_remove_message("admin", "DEADBEEF")).await;
 
         let _error = read_operator_message(&mut socket).await;
 
@@ -4654,7 +4779,7 @@ mod tests {
         assert_eq!(parameters.get("agent_id"), Some(&Value::String("DEADBEEF".to_owned())));
         assert!(parameters.get("error").is_some(), "failure audit should include error details");
 
-        socket.close(None).await.expect("close should send");
+        socket.close().await;
         server.abort();
     }
 
@@ -4666,21 +4791,17 @@ mod tests {
         login(&mut socket, "operator", "password1234").await;
 
         socket
-            .send(ClientMessage::Text(
-                agent_task_message(
-                    "operator",
-                    AgentTaskInfo {
-                        task_id: "2C".to_owned(),
-                        command_line: "checkin".to_owned(),
-                        demon_id: "DEADBEEF".to_owned(),
-                        command_id: u32::from(DemonCommand::CommandCheckin).to_string(),
-                        ..AgentTaskInfo::default()
-                    },
-                )
-                .into(),
+            .send_text(agent_task_message(
+                "operator",
+                AgentTaskInfo {
+                    task_id: "2C".to_owned(),
+                    command_line: "checkin".to_owned(),
+                    demon_id: "DEADBEEF".to_owned(),
+                    command_id: u32::from(DemonCommand::CommandCheckin).to_string(),
+                    ..AgentTaskInfo::default()
+                },
             ))
-            .await
-            .expect("task should send");
+            .await;
 
         let event = read_operator_message(&mut socket).await;
         let OperatorMessage::TeamserverLog(message) = event else {
@@ -4688,18 +4809,11 @@ mod tests {
         };
         assert!(message.info.text.contains("not found"));
 
-        socket.close(None).await.expect("close should send");
+        socket.close().await;
         server.abort();
     }
 
-    async fn spawn_server(
-        state: TestState,
-    ) -> (
-        tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
-        tokio::task::JoinHandle<()>,
-    ) {
+    async fn spawn_server(state: TestState) -> (WsTestSession, tokio::task::JoinHandle<()>) {
         let app = routes::<TestState>().with_state(state);
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener should bind");
         let addr = listener.local_addr().expect("listener should expose addr");
@@ -4714,34 +4828,15 @@ mod tests {
         let (socket, _) =
             connect_async(format!("ws://{addr}/")).await.expect("websocket should connect");
 
-        (socket, server)
+        (WsTestSession::new(socket), server)
     }
 
-    async fn read_operator_message(
-        socket: &mut tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
-    ) -> OperatorMessage {
-        let frame = timeout(Duration::from_secs(30), socket.next())
-            .await
-            .expect("socket should yield a frame")
-            .expect("frame should be present")
-            .expect("frame should decode");
-
-        match frame {
-            ClientMessage::Text(payload) => {
-                serde_json::from_str(payload.as_str()).expect("message should parse")
-            }
-            other => panic!("unexpected frame: {other:?}"),
-        }
+    async fn read_operator_message(session: &mut WsTestSession) -> OperatorMessage {
+        session.recv_msg().await
     }
 
-    async fn read_operator_snapshot(
-        socket: &mut tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
-    ) -> Vec<OperatorInfo> {
-        let message = read_operator_message(socket).await;
+    async fn read_operator_snapshot(session: &mut WsTestSession) -> Vec<OperatorInfo> {
+        let message = read_operator_message(session).await;
         let OperatorMessage::InitConnectionInfo(message) = message else {
             panic!("expected operator snapshot event");
         };
@@ -4904,20 +4999,11 @@ mod tests {
         .expect("chat should serialize")
     }
 
-    async fn login(
-        socket: &mut tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
-        user: &str,
-        password: &str,
-    ) {
-        socket
-            .send(ClientMessage::Text(login_message(user, password).into()))
-            .await
-            .expect("login should send");
-        let response = read_operator_message(socket).await;
+    async fn login(session: &mut WsTestSession, user: &str, password: &str) {
+        session.send_frame(ClientMessage::Text(login_message(user, password).into())).await;
+        let response = session.recv_msg().await;
         assert!(matches!(response, OperatorMessage::InitConnectionSuccess(_)));
-        let _snapshot = read_operator_snapshot(socket).await;
+        let _snapshot = read_operator_snapshot(session).await;
     }
 
     fn sample_agent(agent_id: u32) -> red_cell_common::AgentRecord {
@@ -5178,11 +5264,10 @@ mod tests {
         let (mut socket, server) = spawn_server(state).await;
 
         socket
-            .send(ClientMessage::Text(login_message("operator", "password1234").into()))
-            .await
-            .expect("send should succeed");
+            .send_frame(ClientMessage::Text(login_message("operator", "password1234").into()))
+            .await;
 
-        let frame = timeout(Duration::from_secs(3), socket.next())
+        let frame = timeout(Duration::from_secs(3), socket.next_raw_frame())
             .await
             .expect("should receive a frame")
             .expect("frame should exist")
@@ -5219,7 +5304,7 @@ mod tests {
         login(&mut socket, "operator", "password1234").await;
 
         // Send a clean close frame.
-        socket.close(None).await.expect("close should send");
+        socket.close().await;
         wait_for_connection_count(&connections, 0).await;
 
         let page = query_audit_log(
@@ -5328,20 +5413,16 @@ mod tests {
 
         // Send a listener-create command — analysts only have Read permission.
         socket
-            .send(ClientMessage::Text(
-                listener_new_message(
-                    "analyst",
-                    red_cell_common::operator::ListenerInfo {
-                        name: Some("test-listener".to_owned()),
-                        protocol: Some("Http".to_owned()),
-                        ..Default::default()
-                    },
-                    false,
-                )
-                .into(),
+            .send_text(listener_new_message(
+                "analyst",
+                red_cell_common::operator::ListenerInfo {
+                    name: Some("test-listener".to_owned()),
+                    protocol: Some("Http".to_owned()),
+                    ..Default::default()
+                },
+                false,
             ))
-            .await
-            .expect("send should succeed");
+            .await;
 
         // Server closes after rejecting the unauthorized command.
         wait_for_connection_count(&connections, 0).await;

@@ -1040,7 +1040,12 @@ impl ClientApp {
             app_state.clone(),
             path.clone(),
         ) {
-            Ok(runtime) => Some(runtime),
+            Ok(runtime) => {
+                if let Some(secs) = self.local_config.python_script_timeout_secs {
+                    runtime.set_script_timeout(secs);
+                }
+                Some(runtime)
+            }
             Err(error) => {
                 tracing::warn!(error = %error, "failed to initialize client python runtime");
                 None

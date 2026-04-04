@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::BufReader;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -8,6 +9,7 @@ use base64::Engine;
 use eframe::egui;
 use futures_util::{SinkExt, StreamExt};
 use red_cell_common::OperatorInfo;
+use red_cell_common::crypto::{WsEnvelope, derive_ws_hmac_key, open_ws_frame, seal_ws_frame};
 use red_cell_common::demon::DemonCommand;
 use red_cell_common::operator::{
     AgentResponseInfo, ChatUserInfo, FlatInfo, ListenerInfo, ListenerMarkInfo, Message,
@@ -41,6 +43,14 @@ use url::Url;
 
 use crate::login::{TlsFailure, TlsFailureKind};
 use crate::python::PythonRuntime;
+
+/// Per-session HMAC key shared between the send and receive loops.
+type WsHmacKey = Arc<tokio::sync::Mutex<Option<[u8; 32]>>>;
+
+/// Extract the session token embedded in an `InitConnectionSuccess` message.
+fn extract_session_token(message: &str) -> Option<&str> {
+    message.split_once("SessionToken=").map(|(_, token)| token)
+}
 
 /// Default maximum number of events kept in the notification log.
 pub(crate) const DEFAULT_EVENT_LOG_MAX: usize = 500;
@@ -1184,14 +1194,20 @@ async fn run_connection_manager(
                 lock_app_state(&app_state).tls_failure = None;
                 set_connection_status(&app_state, &repaint, ConnectionStatus::Connected);
 
+                // Per-connection HMAC key — reset on every reconnect attempt.
+                let hmac_key: WsHmacKey = Arc::new(tokio::sync::Mutex::new(None));
+                let send_seq = Arc::new(AtomicU64::new(0));
+
                 let (write, read) = socket.split();
                 let mut receive_task = tokio::spawn(run_receive_loop(
                     read,
                     app_state.clone(),
                     repaint.clone(),
                     python_runtime.clone(),
+                    hmac_key.clone(),
                 ));
-                let mut send_task = tokio::spawn(run_send_loop(write, outgoing_rx.clone()));
+                let mut send_task =
+                    tokio::spawn(run_send_loop(write, outgoing_rx.clone(), hmac_key, send_seq));
 
                 let reason = tokio::select! {
                     result = &mut receive_task => join_disconnect_reason(result, "receive task stopped"),
@@ -1366,60 +1382,111 @@ async fn run_receive_loop(
     app_state: SharedAppState,
     repaint: egui::Context,
     python_runtime: Option<PythonRuntime>,
+    hmac_key: WsHmacKey,
 ) -> Result<(), String> {
+    let mut recv_seq: Option<u64> = None;
+
     while let Some(frame) = read.next().await {
         match frame {
             Ok(WebSocketMessage::Text(payload)) => {
-                match serde_json::from_str::<OperatorMessage>(&payload) {
-                    Ok(message) => {
-                        let events = {
-                            let mut state = lock_app_state(&app_state);
-                            state.apply_operator_message(message)
-                        };
-                        if let Some(runtime) = &python_runtime {
-                            for event in events {
-                                match event {
-                                    AppEvent::AgentCheckin(agent_id) => {
-                                        if let Err(error) = runtime.emit_agent_checkin(agent_id) {
-                                            warn!(error = %error, "failed to deliver python agent checkin event");
-                                        }
-                                    }
-                                    AppEvent::AgentTaskResult { task_id, agent_id, output } => {
-                                        runtime.notify_task_result(task_id, agent_id, output);
-                                    }
-                                    AppEvent::CommandResponse { agent_id, task_id, output } => {
-                                        if let Err(error) =
-                                            runtime.emit_command_response(agent_id, task_id, output)
+                let key_snapshot = *hmac_key.lock().await;
+
+                let message: OperatorMessage = if let Some(key) = key_snapshot {
+                    // Post-login: every frame must be a valid WsEnvelope.
+                    match serde_json::from_str::<WsEnvelope>(&payload) {
+                        Ok(envelope) => match open_ws_frame(&key, &envelope, recv_seq) {
+                            Ok(inner_json) => {
+                                recv_seq = Some(envelope.seq);
+                                match serde_json::from_str(&inner_json) {
+                                    Ok(msg) => msg,
+                                    Err(error) => {
+                                        let msg =
+                                            format!("failed to decode inner message: {error}");
                                         {
-                                            warn!(error = %error, "failed to deliver python command response event");
+                                            let mut state = lock_app_state(&app_state);
+                                            state.connection_status =
+                                                ConnectionStatus::Error(msg.clone());
                                         }
-                                    }
-                                    AppEvent::LootCaptured(loot_item) => {
-                                        if let Err(error) = runtime.emit_loot_captured(loot_item) {
-                                            warn!(error = %error, "failed to deliver python loot captured event");
-                                        }
-                                    }
-                                    AppEvent::ListenerChanged { name, action } => {
-                                        if let Err(error) =
-                                            runtime.emit_listener_changed(name, action)
-                                        {
-                                            warn!(error = %error, "failed to deliver python listener changed event");
-                                        }
+                                        repaint.request_repaint();
+                                        continue;
                                     }
                                 }
                             }
+                            Err(_) => {
+                                return Err(
+                                    "HMAC verification failed — possible tampering".to_owned()
+                                );
+                            }
+                        },
+                        Err(error) => {
+                            let msg = format!("failed to decode HMAC envelope: {error}");
+                            {
+                                let mut state = lock_app_state(&app_state);
+                                state.connection_status = ConnectionStatus::Error(msg.clone());
+                            }
+                            repaint.request_repaint();
+                            continue;
                         }
-                        repaint.request_repaint();
                     }
-                    Err(error) => {
-                        let message = format!("failed to decode operator message: {error}");
-                        {
-                            let mut state = lock_app_state(&app_state);
-                            state.connection_status = ConnectionStatus::Error(message.clone());
+                } else {
+                    // Pre-login: plain JSON frame.
+                    match serde_json::from_str::<OperatorMessage>(&payload) {
+                        Ok(msg) => {
+                            if let OperatorMessage::InitConnectionSuccess(ref m) = msg {
+                                if let Some(token) = extract_session_token(&m.info.message) {
+                                    *hmac_key.lock().await = Some(derive_ws_hmac_key(token));
+                                }
+                            }
+                            msg
                         }
-                        repaint.request_repaint();
+                        Err(error) => {
+                            let msg = format!("failed to decode operator message: {error}");
+                            {
+                                let mut state = lock_app_state(&app_state);
+                                state.connection_status = ConnectionStatus::Error(msg.clone());
+                            }
+                            repaint.request_repaint();
+                            continue;
+                        }
+                    }
+                };
+
+                let events = {
+                    let mut state = lock_app_state(&app_state);
+                    state.apply_operator_message(message)
+                };
+                if let Some(runtime) = &python_runtime {
+                    for event in events {
+                        match event {
+                            AppEvent::AgentCheckin(agent_id) => {
+                                if let Err(error) = runtime.emit_agent_checkin(agent_id) {
+                                    warn!(error = %error, "failed to deliver python agent checkin event");
+                                }
+                            }
+                            AppEvent::AgentTaskResult { task_id, agent_id, output } => {
+                                runtime.notify_task_result(task_id, agent_id, output);
+                            }
+                            AppEvent::CommandResponse { agent_id, task_id, output } => {
+                                if let Err(error) =
+                                    runtime.emit_command_response(agent_id, task_id, output)
+                                {
+                                    warn!(error = %error, "failed to deliver python command response event");
+                                }
+                            }
+                            AppEvent::LootCaptured(loot_item) => {
+                                if let Err(error) = runtime.emit_loot_captured(loot_item) {
+                                    warn!(error = %error, "failed to deliver python loot captured event");
+                                }
+                            }
+                            AppEvent::ListenerChanged { name, action } => {
+                                if let Err(error) = runtime.emit_listener_changed(name, action) {
+                                    warn!(error = %error, "failed to deliver python listener changed event");
+                                }
+                            }
+                        }
                     }
                 }
+                repaint.request_repaint();
             }
             Ok(WebSocketMessage::Ping(_)) | Ok(WebSocketMessage::Pong(_)) => {}
             Ok(WebSocketMessage::Close(frame)) => {
@@ -1436,6 +1503,8 @@ async fn run_receive_loop(
 async fn run_send_loop(
     mut write: futures_util::stream::SplitSink<ClientWebSocket, WebSocketMessage>,
     outgoing_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<OperatorMessage>>>,
+    hmac_key: WsHmacKey,
+    send_seq: Arc<AtomicU64>,
 ) -> Result<(), String> {
     loop {
         let next_message = {
@@ -1448,10 +1517,15 @@ async fn run_send_loop(
         };
 
         let payload = serde_json::to_string(&message).map_err(|error| error.to_string())?;
-        write
-            .send(WebSocketMessage::Text(payload.into()))
-            .await
-            .map_err(|error| error.to_string())?;
+        let key_snapshot = *hmac_key.lock().await;
+        let wire = if let Some(key) = key_snapshot {
+            let seq = send_seq.fetch_add(1, Ordering::Relaxed);
+            let envelope = seal_ws_frame(&key, seq, &payload);
+            serde_json::to_string(&envelope).map_err(|e| e.to_string())?
+        } else {
+            payload
+        };
+        write.send(WebSocketMessage::Text(wire.into())).await.map_err(|error| error.to_string())?;
     }
 }
 

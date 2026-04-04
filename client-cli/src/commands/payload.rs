@@ -532,7 +532,17 @@ mod tests {
         };
         let client = crate::client::ApiClient::new(&cfg).expect("client");
 
-        let result = build(&client, "http1", "x64", "exe", "phantom", None, false, DEFAULT_BUILD_TIMEOUT_SECS).await;
+        let result = build(
+            &client,
+            "http1",
+            "x64",
+            "exe",
+            "phantom",
+            None,
+            false,
+            DEFAULT_BUILD_TIMEOUT_SECS,
+        )
+        .await;
         assert!(result.is_ok(), "build must succeed: {result:?}");
 
         // Verify the request body contained the agent field.
@@ -569,7 +579,9 @@ mod tests {
         };
         let client = crate::client::ApiClient::new(&cfg).expect("client");
 
-        let _ = build(&client, "http1", "x64", "exe", "demon", None, false, DEFAULT_BUILD_TIMEOUT_SECS).await;
+        let _ =
+            build(&client, "http1", "x64", "exe", "demon", None, false, DEFAULT_BUILD_TIMEOUT_SECS)
+                .await;
 
         let requests = server.received_requests().await.expect("requests");
         let body: serde_json::Value =

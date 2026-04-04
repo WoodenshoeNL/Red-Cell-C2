@@ -100,19 +100,25 @@ pub fn build_init_packet(
 ///
 /// The encrypted region contains one or more Demon packages:
 /// ```text
-/// [ command_id(4) | request_id(4) | payload_len(4) | payload_bytes ]
+/// [ command_id(4) | request_id(4) | seq_num(8 LE) | payload_len(4) | payload_bytes ]
 /// ```
+///
+/// `seq_num` is the agent's current monotonic sequence number (starts at 1).  It is
+/// prepended to the plaintext before encryption so the teamserver can validate replay
+/// protection without seeing it in the clear.
 pub fn build_callback_packet(
     agent_id: u32,
     crypto: &AgentCryptoMaterial,
     block_offset: u64,
+    seq_num: u64,
     command_id: u32,
     request_id: u32,
     callback_payload: &[u8],
 ) -> Result<Vec<u8>, SpecterError> {
-    // Build the encrypted callback body: payload_len(4) + payload.
+    // Build the encrypted callback body: seq_num(8 LE) + payload_len(4) + payload.
     // The top-level command_id and request_id remain in the clear.
-    let mut plaintext = Vec::with_capacity(4 + callback_payload.len());
+    let mut plaintext = Vec::with_capacity(8 + 4 + callback_payload.len());
+    plaintext.extend_from_slice(&seq_num.to_le_bytes());
     let payload_len = u32::try_from(callback_payload.len()).map_err(|_| {
         SpecterError::Protocol(red_cell_common::demon::DemonProtocolError::LengthOverflow {
             context: "callback payload",
@@ -225,6 +231,14 @@ pub fn parse_tasking_response(
 /// resetting to 0 for each message.
 const INIT_EXT_MONOTONIC_CTR: u32 = 1 << 0;
 
+/// Extension flag: opt in to server-side sequence-number replay protection.
+///
+/// When set, the agent prefixes every callback payload (before encryption) with an
+/// 8-byte little-endian monotonic sequence number.  The teamserver rejects any
+/// callback whose decrypted sequence number is not strictly greater than the last
+/// one it accepted for this agent.
+const INIT_EXT_SEQ_PROTECTED: u32 = 1 << 1;
+
 /// Serialize the init metadata fields to a big-endian byte buffer for encryption.
 ///
 /// Specter appends a trailing `u32` extension flags field after the standard metadata,
@@ -263,8 +277,8 @@ fn serialize_init_metadata(agent_id: u32, m: &AgentMetadata) -> Result<Vec<u8>, 
     buf.extend_from_slice(&m.kill_date.to_be_bytes());
     buf.extend_from_slice(&m.working_hours.to_be_bytes());
 
-    // Specter extension: request monotonic CTR mode.
-    buf.extend_from_slice(&INIT_EXT_MONOTONIC_CTR.to_be_bytes());
+    // Specter extensions: monotonic CTR mode + sequence-number replay protection.
+    buf.extend_from_slice(&(INIT_EXT_MONOTONIC_CTR | INIT_EXT_SEQ_PROTECTED).to_be_bytes());
 
     Ok(buf)
 }
@@ -397,6 +411,19 @@ mod tests {
     }
 
     #[test]
+    fn init_metadata_has_monotonic_ctr_and_seq_protected_flags() {
+        let agent_id = 0x1111_2222;
+        let metadata = test_metadata();
+        let buf = serialize_init_metadata(agent_id, &metadata).expect("serialize");
+
+        // Last 4 bytes are the extension flags.
+        let tail = &buf[buf.len() - 4..];
+        let ext_flags = u32::from_be_bytes(tail.try_into().expect("4 bytes"));
+        assert_ne!(ext_flags & INIT_EXT_MONOTONIC_CTR, 0, "INIT_EXT_MONOTONIC_CTR must be set");
+        assert_ne!(ext_flags & INIT_EXT_SEQ_PROTECTED, 0, "INIT_EXT_SEQ_PROTECTED must be set");
+    }
+
+    #[test]
     fn init_metadata_hostname_round_trips() {
         let agent_id = 0x1111_2222;
         let metadata = test_metadata();
@@ -474,11 +501,19 @@ mod tests {
         let agent_id = 0xAAAA_BBBB;
         let command_id = u32::from(DemonCommand::CommandCheckin);
         let request_id = 42_u32;
+        let seq_num = 7_u64;
         let payload_data = b"hello";
 
-        let packet =
-            build_callback_packet(agent_id, &crypto, 0, command_id, request_id, payload_data)
-                .expect("build");
+        let packet = build_callback_packet(
+            agent_id,
+            &crypto,
+            0,
+            seq_num,
+            command_id,
+            request_id,
+            payload_data,
+        )
+        .expect("build");
 
         let envelope = DemonEnvelope::from_bytes(&packet).expect("parse");
         assert_eq!(envelope.header.agent_id, agent_id);
@@ -487,10 +522,13 @@ mod tests {
         assert_eq!(cmd, command_id);
         assert_eq!(req, request_id);
 
+        // Decrypted layout: seq_num(8 LE) | payload_len(4) | payload_bytes
         let decrypted =
             decrypt_agent_data(&crypto.key, &crypto.iv, &envelope.payload[8..]).expect("decrypt");
-        let plen = u32::from_be_bytes(decrypted[0..4].try_into().expect("len")) as usize;
-        assert_eq!(&decrypted[4..4 + plen], payload_data);
+        let decoded_seq = u64::from_le_bytes(decrypted[0..8].try_into().expect("seq"));
+        assert_eq!(decoded_seq, seq_num);
+        let plen = u32::from_be_bytes(decrypted[8..12].try_into().expect("len")) as usize;
+        assert_eq!(&decrypted[12..12 + plen], payload_data);
     }
 
     #[test]

@@ -37,6 +37,11 @@ pub struct SpecterAgent {
     /// Both encrypt (send) and decrypt (recv) operations use and advance this
     /// single counter, matching the teamserver's `AgentEntry::ctr_block_offset`.
     ctr_offset: u64,
+    /// Monotonic sequence counter for server-side replay protection.
+    ///
+    /// Prepended as 8 LE bytes to every callback payload before encryption.
+    /// Starts at 1; the teamserver rejects any callback with seq ≤ last_seen_seq.
+    callback_seq: u64,
     /// Token vault for impersonation/steal/make operations.
     token_vault: TokenVault,
     /// Active file downloads being streamed back to the teamserver.
@@ -83,6 +88,7 @@ impl SpecterAgent {
             config,
             transport,
             ctr_offset: 0,
+            callback_seq: 1,
             token_vault: TokenVault::new(),
             downloads: DownloadTracker::new(),
             mem_files: HashMap::new(),
@@ -480,6 +486,12 @@ impl SpecterAgent {
         self.ctr_offset
     }
 
+    /// Return the next sequence number that will be used in the next callback packet.
+    #[must_use]
+    pub fn callback_seq(&self) -> u64 {
+        self.callback_seq
+    }
+
     async fn send_callback(
         &mut self,
         command: DemonCommand,
@@ -502,6 +514,7 @@ impl SpecterAgent {
             self.agent_id,
             &self.session_crypto,
             self.ctr_offset,
+            self.callback_seq,
             command_id,
             request_id,
             payload,
@@ -509,9 +522,10 @@ impl SpecterAgent {
         let response = self.transport.send(&packet).await?;
 
         // Monotonic CTR: advance the shared offset by the blocks consumed by the
-        // encrypted portion of the callback packet (payload_len(4) + payload_bytes).
-        let encrypted_len = 4 + payload.len();
+        // encrypted portion: seq_num(8 LE) + payload_len(4) + payload_bytes.
+        let encrypted_len = 8 + 4 + payload.len();
         self.ctr_offset += ctr_blocks_for_len(encrypted_len);
+        self.callback_seq += 1;
 
         Ok(response)
     }
@@ -735,6 +749,12 @@ mod tests {
         agent.ctr_offset = 7;
 
         assert_eq!(agent.ctr_offset(), 7);
+    }
+
+    #[test]
+    fn callback_seq_starts_at_one() {
+        let agent = SpecterAgent::new(SpecterConfig::default()).expect("agent");
+        assert_eq!(agent.callback_seq(), 1);
     }
 
     #[test]

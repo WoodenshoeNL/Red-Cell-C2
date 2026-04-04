@@ -57,6 +57,12 @@ pub(crate) const DEFAULT_EVENT_LOG_MAX: usize = 500;
 const MAX_OPERATOR_ACTIVITY: usize = 20;
 const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
+const MAX_LOOT_NAME_CHARS: usize = 512;
+const MAX_LOOT_AGENT_ID_CHARS: usize = 64;
+const MAX_LOOT_SOURCE_CHARS: usize = 256;
+const MAX_LOOT_TIMESTAMP_CHARS: usize = 128;
+const MAX_LOOT_PATH_CHARS: usize = 512;
+const MAX_LOOT_PREVIEW_CHARS: usize = 1024;
 
 /// Compute the next reconnect delay using exponential backoff.
 ///
@@ -1840,12 +1846,58 @@ fn response_is_loot_notification(info: &red_cell_common::operator::AgentResponse
 fn loot_item_from_response(
     info: &red_cell_common::operator::AgentResponseInfo,
 ) -> Option<LootItem> {
-    let name = extra_string(&info.extra, "LootName")?;
+    let normalized_agent_id = normalize_agent_id(&info.demon_id);
+    let trusted_agent_id = sanitize_loot_required_field(
+        normalized_agent_id.as_str(),
+        "agent_id",
+        normalized_agent_id.clone(),
+        MAX_LOOT_AGENT_ID_CHARS,
+    )?;
+    let name = sanitize_loot_required_field(
+        trusted_agent_id.as_str(),
+        "name",
+        extra_string(&info.extra, "LootName")?,
+        MAX_LOOT_NAME_CHARS,
+    )?;
     let source = extra_string(&info.extra, "LootKind")
         .or_else(|| extra_string(&info.extra, "Operator"))
+        .and_then(|value| {
+            sanitize_loot_optional_field(
+                trusted_agent_id.as_str(),
+                "source",
+                value,
+                MAX_LOOT_SOURCE_CHARS,
+            )
+        })
         .unwrap_or_else(|| "unknown".to_owned());
-    let collected_at = extra_string(&info.extra, "CapturedAt").unwrap_or_default();
-    let file_path = extra_string(&info.extra, "FilePath");
+    let collected_at = extra_string(&info.extra, "CapturedAt")
+        .and_then(|value| {
+            sanitize_loot_optional_field(
+                trusted_agent_id.as_str(),
+                "collected_at",
+                value,
+                MAX_LOOT_TIMESTAMP_CHARS,
+            )
+        })
+        .unwrap_or_default();
+    let file_path = extra_string(&info.extra, "FilePath").and_then(|value| {
+        sanitize_loot_optional_field(
+            trusted_agent_id.as_str(),
+            "file_path",
+            value,
+            MAX_LOOT_PATH_CHARS,
+        )
+    });
+    let preview = extra_string(&info.extra, "Preview")
+        .or_else(|| extra_string(&info.extra, "Message"))
+        .and_then(|value| {
+            sanitize_loot_optional_field(
+                trusted_agent_id.as_str(),
+                "preview",
+                value,
+                MAX_LOOT_PREVIEW_CHARS,
+            )
+        });
     let kind = loot_kind_from_strings(
         extra_string(&info.extra, "LootKind").as_deref(),
         Some(name.as_str()),
@@ -1856,15 +1908,14 @@ fn loot_item_from_response(
         id: extra_i64(&info.extra, "LootID"),
         kind,
         name,
-        agent_id: normalize_agent_id(&info.demon_id),
+        agent_id: trusted_agent_id,
         source,
         collected_at,
         file_path,
         size_bytes: extra_u64(&info.extra, "SizeBytes"),
         content_base64: extra_string(&info.extra, "ContentBase64")
             .or_else(|| extra_string(&info.extra, "Data")),
-        preview: extra_string(&info.extra, "Preview")
-            .or_else(|| extra_string(&info.extra, "Message")),
+        preview,
     })
 }
 
@@ -1916,13 +1967,40 @@ fn extra_i64(extra: &BTreeMap<String, serde_json::Value>, key: &str) -> Option<i
 }
 
 fn loot_item_from_flat_info(info: &FlatInfo, fallback_kind: LootKind) -> Option<LootItem> {
-    let name = flat_info_string(info, &["Name", "FileName", "LootName"])?;
     let agent_id = flat_info_string(info, &["DemonID", "AgentID"])
-        .map(|id| normalize_agent_id(&id))
+        .as_deref()
+        .map(normalize_agent_id)
+        .and_then(|value| {
+            sanitize_loot_optional_field("unknown", "agent_id", value, MAX_LOOT_AGENT_ID_CHARS)
+        })
         .unwrap_or_default();
-    let file_path = flat_info_string(info, &["FilePath", "Path"]);
+    let name = sanitize_loot_required_field(
+        agent_id.as_str(),
+        "name",
+        flat_info_string(info, &["Name", "FileName", "LootName"])?,
+        MAX_LOOT_NAME_CHARS,
+    )?;
+    let file_path = flat_info_string(info, &["FilePath", "Path"]).and_then(|value| {
+        sanitize_loot_optional_field(agent_id.as_str(), "file_path", value, MAX_LOOT_PATH_CHARS)
+    });
     let source = flat_info_string(info, &["Operator", "Pattern", "Kind", "Type"])
+        .and_then(|value| {
+            sanitize_loot_optional_field(agent_id.as_str(), "source", value, MAX_LOOT_SOURCE_CHARS)
+        })
         .unwrap_or_else(|| fallback_kind.label().to_ascii_lowercase());
+    let collected_at = flat_info_string(info, &["CapturedAt", "Time", "Timestamp"])
+        .and_then(|value| {
+            sanitize_loot_optional_field(
+                agent_id.as_str(),
+                "collected_at",
+                value,
+                MAX_LOOT_TIMESTAMP_CHARS,
+            )
+        })
+        .unwrap_or_default();
+    let preview = flat_info_string(info, &["Credential", "Preview", "Message"]).and_then(|value| {
+        sanitize_loot_optional_field(agent_id.as_str(), "preview", value, MAX_LOOT_PREVIEW_CHARS)
+    });
     let kind = loot_kind_from_strings(
         flat_info_string(info, &["Kind", "Type", "LootKind"]).as_deref(),
         Some(name.as_str()),
@@ -1935,13 +2013,79 @@ fn loot_item_from_flat_info(info: &FlatInfo, fallback_kind: LootKind) -> Option<
         name,
         agent_id,
         source,
-        collected_at: flat_info_string(info, &["CapturedAt", "Time", "Timestamp"])
-            .unwrap_or_default(),
+        collected_at,
         file_path,
         size_bytes: flat_info_u64(info, &["SizeBytes", "Size"]),
         content_base64: flat_info_string(info, &["ContentBase64", "Data", "Payload"]),
-        preview: flat_info_string(info, &["Credential", "Preview", "Message"]),
+        preview,
     })
+}
+
+fn sanitize_loot_required_field(
+    agent_id: &str,
+    field_name: &'static str,
+    value: String,
+    max_chars: usize,
+) -> Option<String> {
+    let sanitized = sanitize_loot_field(agent_id, field_name, value, max_chars);
+    if sanitized.is_empty() {
+        warn!(
+            agent_id = display_agent_id(agent_id),
+            loot_field = field_name,
+            "dropping loot item with empty required field after sanitization"
+        );
+        None
+    } else {
+        Some(sanitized)
+    }
+}
+
+fn sanitize_loot_optional_field(
+    agent_id: &str,
+    field_name: &'static str,
+    value: String,
+    max_chars: usize,
+) -> Option<String> {
+    let sanitized = sanitize_loot_field(agent_id, field_name, value, max_chars);
+    (!sanitized.is_empty()).then_some(sanitized)
+}
+
+fn sanitize_loot_field(
+    agent_id: &str,
+    field_name: &'static str,
+    value: String,
+    max_chars: usize,
+) -> String {
+    let original_char_count = value.chars().count();
+    let had_control_chars = value.chars().any(char::is_control);
+    let cleaned = value
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect::<String>()
+        .trim()
+        .to_owned();
+    let cleaned_char_count = cleaned.chars().count();
+    let truncated = cleaned_char_count > max_chars;
+    let sanitized =
+        if truncated { cleaned.chars().take(max_chars).collect::<String>() } else { cleaned };
+
+    if had_control_chars || original_char_count > max_chars {
+        warn!(
+            agent_id = display_agent_id(agent_id),
+            loot_field = field_name,
+            original_chars = original_char_count,
+            sanitized_chars = sanitized.chars().count(),
+            had_control_chars,
+            truncated,
+            "sanitized suspicious loot field"
+        );
+    }
+
+    sanitized
+}
+
+fn display_agent_id(agent_id: &str) -> &str {
+    if agent_id.is_empty() { "unknown" } else { agent_id }
 }
 
 fn flat_info_u64(info: &FlatInfo, keys: &[&str]) -> Option<u64> {
@@ -2939,6 +3083,53 @@ mod tests {
         assert_eq!(state.loot[0].source, "download");
         assert_eq!(state.loot[0].collected_at, "2026-03-10T12:00:00Z");
         assert!(!state.agent_consoles.contains_key("ABCD1234"));
+    }
+
+    #[test]
+    fn loot_item_from_response_sanitizes_control_chars_and_large_fields() {
+        let large_name = "a".repeat(MAX_LOOT_NAME_CHARS + 32);
+        let info = AgentResponseInfo {
+            demon_id: "abcd1234".to_owned(),
+            command_id: "99".to_owned(),
+            output: String::new(),
+            command_line: None,
+            extra: BTreeMap::from([
+                ("LootName".to_owned(), serde_json::Value::String(format!("\t{large_name}\n"))),
+                ("LootKind".to_owned(), serde_json::Value::String("download\tbatch".to_owned())),
+                (
+                    "FilePath".to_owned(),
+                    serde_json::Value::String("C:\\Temp\\loot.txt\r\nnext".to_owned()),
+                ),
+                ("Preview".to_owned(), serde_json::Value::String("alice\tadmin\nhash".to_owned())),
+            ]),
+        };
+
+        let item = loot_item_from_response(&info).unwrap_or_else(|| panic!("loot item expected"));
+
+        assert_eq!(item.agent_id, "ABCD1234");
+        assert_eq!(item.name.len(), MAX_LOOT_NAME_CHARS);
+        assert!(item.name.chars().all(|ch| !ch.is_control()));
+        assert_eq!(item.source, "download batch");
+        assert_eq!(item.file_path.as_deref(), Some("C:\\Temp\\loot.txt  next"));
+        assert_eq!(item.preview.as_deref(), Some("alice admin hash"));
+    }
+
+    #[test]
+    fn loot_item_from_response_uses_transport_agent_id_not_agent_metadata() {
+        let info = AgentResponseInfo {
+            demon_id: "0xface1234".to_owned(),
+            command_id: "99".to_owned(),
+            output: String::new(),
+            command_line: None,
+            extra: BTreeMap::from([
+                ("LootName".to_owned(), serde_json::Value::String("hashdump".to_owned())),
+                ("AgentID".to_owned(), serde_json::Value::String("deadbeef".to_owned())),
+                ("DemonID".to_owned(), serde_json::Value::String("cafebabe".to_owned())),
+            ]),
+        };
+
+        let item = loot_item_from_response(&info).unwrap_or_else(|| panic!("loot item expected"));
+        assert_eq!(item.agent_id, "FACE1234");
     }
 
     #[test]
@@ -5359,6 +5550,26 @@ mod tests {
         let item =
             loot_item_from_flat_info(&info, LootKind::File).expect("should produce a LootItem");
         assert_eq!(item.source, "file");
+    }
+
+    #[test]
+    fn loot_item_from_flat_info_sanitizes_display_fields() {
+        let info = make_flat_info(&[
+            ("Name", Value::String("  creds\tentry\n".to_owned())),
+            ("DemonID", Value::String("aabb1122".to_owned())),
+            ("FilePath", Value::String("/tmp/secrets\tvault\n".to_owned())),
+            ("Operator", Value::String("  sekurlsa\tpwdump\n".to_owned())),
+            ("Credential", Value::String("alice\tadmin\r\nhash".to_owned())),
+        ]);
+
+        let item = loot_item_from_flat_info(&info, LootKind::Credential)
+            .unwrap_or_else(|| panic!("should produce a LootItem"));
+
+        assert_eq!(item.name, "creds entry");
+        assert_eq!(item.agent_id, "AABB1122");
+        assert_eq!(item.file_path.as_deref(), Some("/tmp/secrets vault"));
+        assert_eq!(item.source, "sekurlsa pwdump");
+        assert_eq!(item.preview.as_deref(), Some("alice admin  hash"));
     }
 
     #[test]

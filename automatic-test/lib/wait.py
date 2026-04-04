@@ -4,6 +4,7 @@ lib/wait.py — polling helpers for the test harness.
 
 from __future__ import annotations
 
+import socket
 import time
 from typing import Callable, TypeVar
 
@@ -14,6 +15,25 @@ T = TypeVar("T")
 
 class TimeoutError(Exception):
     pass
+
+
+class ScenarioFailed(Exception):
+    pass
+
+
+def wait_for_port(host: str, port: int, timeout: float = 10.0, interval: float = 0.2) -> None:
+    """Block until *host:port* accepts a TCP connection or *timeout* seconds elapse.
+
+    Raises :class:`ScenarioFailed` when the port does not open in time.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=1.0):
+                return
+        except OSError:
+            time.sleep(interval)
+    raise ScenarioFailed(f"port {host}:{port} did not open within {timeout}s")
 
 
 def poll(

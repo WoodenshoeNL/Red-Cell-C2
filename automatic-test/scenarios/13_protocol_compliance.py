@@ -86,6 +86,8 @@ import urllib.request
 import uuid
 from urllib.parse import urlparse
 
+from lib.wait import wait_for_port
+
 
 # ── Wire format constants ────────────────────────────────────────────────────
 
@@ -318,16 +320,7 @@ def _post_raw(url: str, body: bytes, timeout: int = 10) -> tuple[int, bytes]:
 
 def _wait_for_tcp(host: str, port: int, timeout: int = 15) -> None:
     """Block until `host:port` accepts TCP connections or `timeout` seconds pass."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            with socket.create_connection((host, port), timeout=1):
-                return
-        except OSError:
-            time.sleep(0.25)
-    raise TimeoutError(
-        f"Listener {host}:{port} did not become ready within {timeout}s"
-    )
+    wait_for_port(host, port, timeout=float(timeout))
 
 
 # ── URL helpers ──────────────────────────────────────────────────────────────

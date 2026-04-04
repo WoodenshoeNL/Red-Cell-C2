@@ -18,6 +18,8 @@ import socket
 import time
 import uuid
 
+from lib.wait import wait_for_port
+
 
 def _short_id():
     """Return a short unique hex suffix to avoid name collisions across test runs."""
@@ -86,7 +88,7 @@ def _lifecycle_test(cli, host, name, listener_type, create_kwargs, check_port=No
 
     # Optional TCP connectivity check (HTTP only; DNS is UDP, SMB uses named pipes)
     if check_port is not None:
-        time.sleep(0.3)  # brief settling time for the listener to bind
+        wait_for_port(host, check_port)
         assert _port_open(host, check_port), (
             f"TCP port {check_port} on {host} is not open after starting "
             f"{listener_type} listener"

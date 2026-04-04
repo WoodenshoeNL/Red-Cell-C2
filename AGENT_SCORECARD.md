@@ -10,17 +10,17 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 1178 | 249 | 42 |
-| Bugs filed against | 194 | 40 | 10 |
-| Bug rate (bugs/task) | 0.16 | 0.16 | 0.24 |
-| Quality score | 84% | 84% | 76% |
+| Bugs filed against | 196 | 40 | 10 |
+| Bug rate (bugs/task) | 0.17 | 0.16 | 0.24 |
+| Quality score | 83% | 84% | 76% |
 
-*Bug rates: Claude 194/1178=0.1647→0.16, Codex 40/249=0.1606→0.16, Cursor 10/42=0.2381→0.24*
+*Bug rates: Claude 196/1178=0.1664→0.17, Codex 40/249=0.1606→0.16, Cursor 10/42=0.2381→0.24*
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
-| unwrap / expect in production | 11 | 0 | 0 |
+| unwrap / expect in production | 12 | 0 | 0 |
 | Missing tests / stale tests | 73 | 19 | 5 |
 | Clippy warnings | 11 | 0 | 1 |
 | Protocol errors | 30 | 32 | 3 |
@@ -5757,3 +5757,13 @@ Build: `cargo check --workspace` passed. `cargo clippy --workspace -- -D warning
 Overall codebase health: **drifting** — `cargo check --workspace` and `cargo clippy --workspace -- -D warnings` pass clean; `cargo nextest run --workspace` fails to compile for both teamserver tests (53 errors from in-progress HMAC WS feature) and client-cli tests (4 test files with missing TeamserverState fields). Core crypto path (CTR advance, HKDF, weak-key rejection, constant-time comparisons) remains sound. No `todo!`/`unimplemented!` in any production Rust code. Auth: Argon2id with OWASP params, constant-time token lookup, dummy verifier prevents timing oracle. Rate limiting present at all attack surfaces (login, demon init, reconnect probes). DNS listener is substantively implemented (not skeletal). Pivot depth cap prevents recursive envelope attacks.
 
 Biggest blindspot: **broken test suite compilation** (two distinct root causes) — zero regression coverage while both are open.
+
+### QA Review — 2026-04-04 — 0d108144..099046ca
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 2 | Committed HMAC/AEAD WebSocket integrity (`bfb13938`) — implements `WsEnvelope` in `common/src/crypto.rs`, `WsSession` in `teamserver/src/websocket.rs`, per-session HMAC on client send/receive in `transport.rs`. Also Python script watchdog (`spawn_script_watchdog`) with `KeyboardInterrupt` injection and 3 new tests. Filed `red-cell-c2-hrtlx` (P3, zone:common): 3 `.expect()` calls in production HMAC helpers (`derive_ws_hmac_key`, `seal_ws_frame`, `open_ws_frame`). Filed `red-cell-c2-jtaln` (P2, zone:client): `extract_session_token` uses fragile string-split to extract session token from free-text message — silent `None` return leaves HMAC key unset, causing immediate post-login disconnect with no useful error message. |
+| Codex | 0 | 0 | No activity in range. |
+| Cursor | 0 | 0 | No activity in range. |
+
+Build: `cargo check --workspace` passed. `cargo clippy --workspace -- -D warnings` passed. `cargo nextest run --workspace` failed — pre-existing test compilation break in `client-cli/tests/` (missing `started_at`/`plugins_loaded`/`plugins_failed` in `TeamserverState` initializers; tracked as `red-cell-c2-l3aw2`, `red-cell-c2-v23y3`, `red-cell-c2-ql5pp`). Fix is ready in dev agent stash. Issue `red-cell-c2-q562w` (unimplemented crypto functions) is now stale — the functions were implemented in `bfb13938` and should be closed.

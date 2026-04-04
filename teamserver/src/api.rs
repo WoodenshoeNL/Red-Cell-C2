@@ -1042,6 +1042,7 @@ pub fn api_routes(api: ApiRuntime) -> Router<TeamserverState> {
         .route("/payloads/{id}/download", get(download_payload))
         .route("/payload-cache", post(flush_payload_cache))
         .route("/ws", get(crate::session_ws::session_ws_handler))
+        .route("/health", get(get_health))
         .route_layer(middleware::from_fn_with_state(api, api_auth_middleware));
 
     Router::new()
@@ -1093,6 +1094,7 @@ struct ApiInfoResponse {
 #[openapi(
     paths(
         api_root,
+        get_health,
         list_agents,
         get_agent,
         kill_agent,
@@ -1132,6 +1134,10 @@ struct ApiInfoResponse {
             ApiErrorBody,
             ApiErrorDetail,
             ApiInfoResponse,
+            HealthResponse,
+            HealthAgentCounts,
+            HealthListenerCounts,
+            HealthPluginCounts,
             WebhookStats,
             DiscordWebhookStats,
             FlushPayloadCacheResponse,
@@ -1225,6 +1231,95 @@ async fn api_root(State(api): State<ApiRuntime>) -> Json<ApiInfoResponse> {
         authentication_header: API_KEY_HEADER.to_owned(),
         enabled: api.enabled(),
         rate_limit_per_minute: (!rate_limit.disabled()).then_some(rate_limit.requests_per_minute),
+    })
+}
+
+/// Agent population counts returned by the health endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+struct HealthAgentCounts {
+    /// Number of agents currently marked active.
+    active: u64,
+    /// Total number of agents tracked (active + dead).
+    total: u64,
+}
+
+/// Listener population counts returned by the health endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+struct HealthListenerCounts {
+    /// Number of listeners currently running.
+    running: u64,
+    /// Number of listeners that are stopped, created, or in error state.
+    stopped: u64,
+}
+
+/// Python plugin load counts returned by the health endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+struct HealthPluginCounts {
+    /// Number of plugins successfully loaded at startup.
+    loaded: u32,
+    /// Number of plugins that failed to load at startup.
+    failed: u32,
+}
+
+/// Full health check response body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+struct HealthResponse {
+    /// Overall health status — `"ok"` when all subsystems are healthy.
+    status: String,
+    /// Seconds since the teamserver process started.
+    uptime_secs: u64,
+    /// Agent inventory counts.
+    agents: HealthAgentCounts,
+    /// Listener lifecycle counts.
+    listeners: HealthListenerCounts,
+    /// Database probe result — `"ok"` or `"degraded"`.
+    database: String,
+    /// Python plugin load counts.
+    plugins: HealthPluginCounts,
+}
+
+#[utoipa::path(
+    get,
+    path = "/health",
+    context_path = "/api/v1",
+    tag = "rest",
+    security(("api_key" = [])),
+    responses(
+        (status = 200, description = "Teamserver health snapshot", body = HealthResponse),
+        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
+        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
+        (status = 429, description = "Rate limit exceeded", body = ApiErrorBody)
+    )
+)]
+async fn get_health(
+    State(state): State<TeamserverState>,
+    _identity: ReadApiAccess,
+) -> Json<HealthResponse> {
+    let uptime_secs = state.started_at.elapsed().as_secs();
+
+    let all_agents = state.agent_registry.list().await;
+    let active = all_agents.iter().filter(|a| a.active).count() as u64;
+    let total = all_agents.len() as u64;
+
+    let all_listeners = state.listeners.list().await.unwrap_or_default();
+    let running =
+        all_listeners.iter().filter(|l| l.state.status == crate::ListenerStatus::Running).count()
+            as u64;
+    let stopped =
+        all_listeners.iter().filter(|l| l.state.status != crate::ListenerStatus::Running).count()
+            as u64;
+
+    let db_ok = state.database.probe(std::time::Duration::from_millis(500)).await;
+    let db_status = if db_ok { "ok".to_owned() } else { "degraded".to_owned() };
+    let overall = db_status.clone();
+
+    Json(HealthResponse {
+        status: overall,
+        uptime_secs,
+        agents: HealthAgentCounts { active, total },
+        listeners: HealthListenerCounts { running, stopped },
+        database: db_status,
+        plugins: HealthPluginCounts { loaded: state.plugins_loaded, failed: state.plugins_failed },
     })
 }
 
@@ -5760,6 +5855,9 @@ mod tests {
             login_rate_limiter: crate::LoginRateLimiter::new(),
             shutdown: crate::ShutdownController::new(),
             service_bridge: None,
+            started_at: std::time::Instant::now(),
+            plugins_loaded: 0,
+            plugins_failed: 0,
         });
 
         let response = app
@@ -6505,6 +6603,9 @@ mod tests {
                 login_rate_limiter: crate::LoginRateLimiter::new(),
                 shutdown: crate::ShutdownController::new(),
                 service_bridge: None,
+                started_at: std::time::Instant::now(),
+                plugins_loaded: 0,
+                plugins_failed: 0,
             }),
             agent_registry,
             auth,
@@ -7602,6 +7703,9 @@ mod tests {
             login_rate_limiter: crate::LoginRateLimiter::new(),
             shutdown: crate::ShutdownController::new(),
             service_bridge: None,
+            started_at: std::time::Instant::now(),
+            plugins_loaded: 0,
+            plugins_failed: 0,
         });
 
         let response = app
@@ -8207,6 +8311,9 @@ mod tests {
             login_rate_limiter: crate::LoginRateLimiter::new(),
             shutdown: crate::ShutdownController::new(),
             service_bridge: None,
+            started_at: std::time::Instant::now(),
+            plugins_loaded: 0,
+            plugins_failed: 0,
         });
 
         // Admin creates a listener.

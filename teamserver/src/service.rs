@@ -2990,6 +2990,9 @@ mod tests {
             login_rate_limiter: LoginRateLimiter::new(),
             shutdown: crate::ShutdownController::new(),
             service_bridge: Some(bridge),
+            started_at: std::time::Instant::now(),
+            plugins_loaded: 0,
+            plugins_failed: 0,
         }
     }
 

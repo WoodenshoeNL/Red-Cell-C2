@@ -83,6 +83,9 @@ async fn spawn_api_server(profile: Profile) -> String {
         login_rate_limiter: red_cell::LoginRateLimiter::new(),
         shutdown: red_cell::ShutdownController::new(),
         service_bridge: None,
+        started_at: std::time::Instant::now(),
+        plugins_loaded: 0,
+        plugins_failed: 0,
     };
 
     let tcp = TcpListener::bind("127.0.0.1:0").await.expect("bind");

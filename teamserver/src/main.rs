@@ -90,6 +90,7 @@ async fn main() -> Result<()> {
     listeners.restore_running().await?;
     start_new_profile_listeners(&listeners, &profile).await?;
     let loaded_plugins = plugins.load_plugins().await.context("failed to load Python plugins")?;
+    let plugins_loaded = u32::try_from(loaded_plugins.len()).unwrap_or(u32::MAX);
     if !loaded_plugins.is_empty() {
         info!(count = loaded_plugins.len(), plugins = ?loaded_plugins, "loaded Python plugins");
     }
@@ -123,6 +124,9 @@ async fn main() -> Result<()> {
             .as_ref()
             .map(|sc| red_cell::ServiceBridge::new(sc.clone()))
             .transpose()?,
+        started_at: std::time::Instant::now(),
+        plugins_loaded,
+        plugins_failed: 0,
     };
     let router = build_router(state.clone());
     let handle = Handle::new();
@@ -624,6 +628,9 @@ mod tests {
             login_rate_limiter: LoginRateLimiter::new(),
             shutdown: red_cell::ShutdownController::new(),
             service_bridge: None,
+            started_at: std::time::Instant::now(),
+            plugins_loaded: 0,
+            plugins_failed: 0,
         };
 
         let _ = AuthService::from_ref(&state);
@@ -1401,6 +1408,9 @@ mod tests {
             login_rate_limiter: LoginRateLimiter::new(),
             shutdown: shutdown.clone(),
             service_bridge: None,
+            started_at: std::time::Instant::now(),
+            plugins_loaded: 0,
+            plugins_failed: 0,
         };
 
         (state, shutdown)
@@ -1583,6 +1593,9 @@ mod tests {
             login_rate_limiter: LoginRateLimiter::new(),
             shutdown: shutdown.clone(),
             service_bridge: None,
+            started_at: std::time::Instant::now(),
+            plugins_loaded: 0,
+            plugins_failed: 0,
         };
 
         run_shutdown_sequence(handle, shutdown.clone(), state, Duration::from_secs(5))

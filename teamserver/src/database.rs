@@ -237,6 +237,16 @@ impl Database {
     pub async fn close(&self) {
         self.pool.close().await;
     }
+
+    /// Run a cheap `SELECT 1` query to verify database connectivity.
+    ///
+    /// Returns `true` if the query completes within `timeout`, `false` if it times
+    /// out or returns an error.
+    pub async fn probe(&self, timeout: std::time::Duration) -> bool {
+        tokio::time::timeout(timeout, sqlx::query("SELECT 1").execute(&self.pool))
+            .await
+            .is_ok_and(|result| result.is_ok())
+    }
 }
 
 /// CRUD operations for persisted agents.

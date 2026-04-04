@@ -1,6 +1,7 @@
 //! Shared application state for the Red Cell teamserver.
 
 use std::net::SocketAddr;
+use std::time::Instant;
 
 use axum::{
     Router,
@@ -50,6 +51,12 @@ pub struct TeamserverState {
     pub shutdown: ShutdownController,
     /// Optional service bridge for external tool integration.
     pub service_bridge: Option<ServiceBridge>,
+    /// Instant at which the teamserver was started, used to compute uptime.
+    pub started_at: Instant,
+    /// Number of Python plugins successfully loaded at startup.
+    pub plugins_loaded: u32,
+    /// Number of Python plugins that failed to load at startup.
+    pub plugins_failed: u32,
 }
 
 impl FromRef<TeamserverState> for AuthService {
@@ -243,6 +250,9 @@ mod tests {
             login_rate_limiter: LoginRateLimiter::new(),
             shutdown: ShutdownController::new(),
             service_bridge: None,
+            started_at: Instant::now(),
+            plugins_loaded: 0,
+            plugins_failed: 0,
         }
     }
 

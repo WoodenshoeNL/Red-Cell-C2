@@ -10,11 +10,11 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 1189 | 251 | 42 |
-| Bugs filed against | 205 | 40 | 10 |
+| Bugs filed against | 205 | 41 | 10 |
 | Bug rate (bugs/task) | 0.17 | 0.16 | 0.24 |
 | Quality score | 83% | 84% | 76% |
 
-*Bug rates: Claude 205/1189=0.1724→0.17, Codex 40/251=0.1594→0.16, Cursor 10/42=0.2381→0.24*
+*Bug rates: Claude 205/1189=0.1724→0.17, Codex 41/251=0.1633→0.16, Cursor 10/42=0.2381→0.24*
 
 ## Violation Breakdown
 
@@ -32,7 +32,7 @@ Each loop run updates the running totals and appends a review entry.
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 4 | 5 | 0 |
 | Correctness / pagination | 65 | 8 | 1 |
-| Workflow / close-hygiene | 33 | 0 | 0 |
+| Workflow / close-hygiene | 33 | 1 | 0 |
 | Code reuse / duplication | 11 | 0 | 0 |
 
 ---
@@ -5877,3 +5877,13 @@ Build: `cargo check --workspace` ✅. `cargo clippy --workspace -- -D warnings` 
 | Cursor | 0 | 0 | — |
 
 Build: skipped — build directory locked by active dev agent (red-cell-c2-v9jrt in progress)
+
+### QA Review — 2026-04-04 23:10 — 0d634b48..9be8dba8
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | QA checkpoint only |
+| Codex | 0 | 1 | Claimed bw55e but never committed or pushed — ~627 lines of working-tree changes across 15 files (client-cli, client, teamserver) stranded uncommitted. Filed red-cell-c2-rbskj (P0). |
+| Cursor | 0 | 0 | — |
+
+Build: skipped — build directory locked by concurrent dev agent builds (target/codex-client in active use). Last successful build from parallel session: `Finished dev profile in 132m 52s` (no errors). Working-tree changes type-check clean based on recent parallel build evidence.

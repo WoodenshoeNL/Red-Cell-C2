@@ -10,6 +10,7 @@
 //! | 3    | Auth failure (bad token, insufficient role) |
 //! | 4    | Server unreachable |
 //! | 5    | Timeout |
+//! | 6    | Rate limited (HTTP 429) |
 
 use thiserror::Error;
 
@@ -25,6 +26,8 @@ pub const EXIT_AUTH_FAILURE: i32 = 3;
 pub const EXIT_SERVER_UNREACHABLE: i32 = 4;
 /// Process exit code: request timed out.
 pub const EXIT_TIMEOUT: i32 = 5;
+/// Process exit code: rate limited by the server (HTTP 429).
+pub const EXIT_RATE_LIMITED: i32 = 6;
 
 /// Machine-readable error codes emitted on stderr.
 pub const ERROR_CODE_GENERAL: &str = "ERROR";
@@ -46,6 +49,8 @@ pub const ERROR_CODE_UNSUPPORTED: &str = "UNSUPPORTED";
 pub const ERROR_CODE_SERIALIZE_FAILED: &str = "SERIALIZE_FAILED";
 /// Machine-readable error code for a write failure on stdout/stderr (e.g. broken pipe).
 pub const ERROR_CODE_IO_WRITE_FAILED: &str = "IO_WRITE_FAILED";
+/// Machine-readable error code for server-side rate limiting (HTTP 429).
+pub const ERROR_CODE_RATE_LIMITED: &str = "RATE_LIMITED";
 
 /// All errors that a CLI command can produce.
 #[derive(Debug, Error)]
@@ -91,6 +96,18 @@ pub enum CliError {
     #[error("I/O write failed: {0}")]
     Io(String),
 
+    /// The server returned 429 Too Many Requests.
+    ///
+    /// `retry_after_secs` is populated when the server includes a numeric
+    /// `Retry-After` header; callers should sleep for that duration before
+    /// retrying.  When absent, a sensible default (e.g. 10 s) is appropriate.
+    #[error("rate limited by server (retry after {retry_after_secs:?}s)")]
+    RateLimited {
+        /// Seconds to wait before retrying, parsed from the `Retry-After`
+        /// response header.  `None` when the header is absent or non-numeric.
+        retry_after_secs: Option<u64>,
+    },
+
     /// Any other error not covered above.
     #[error("{0}")]
     General(String),
@@ -105,6 +122,7 @@ impl CliError {
             CliError::ServerUnreachable(_) => EXIT_SERVER_UNREACHABLE,
             CliError::NotFound(_) => EXIT_NOT_FOUND,
             CliError::Timeout(_) => EXIT_TIMEOUT,
+            CliError::RateLimited { .. } => EXIT_RATE_LIMITED,
             CliError::InvalidArgs(_) => EXIT_GENERAL,
             CliError::ServerError(_) => EXIT_GENERAL,
             CliError::Unsupported(_) => EXIT_GENERAL,
@@ -124,6 +142,7 @@ impl CliError {
             CliError::ServerUnreachable(_) => ERROR_CODE_UNREACHABLE,
             CliError::NotFound(_) => ERROR_CODE_NOT_FOUND,
             CliError::Timeout(_) => ERROR_CODE_TIMEOUT,
+            CliError::RateLimited { .. } => ERROR_CODE_RATE_LIMITED,
             CliError::InvalidArgs(_) => ERROR_CODE_INVALID_ARGS,
             CliError::ServerError(_) => ERROR_CODE_SERVER_ERROR,
             CliError::Unsupported(_) => ERROR_CODE_UNSUPPORTED,
@@ -201,6 +220,28 @@ mod tests {
         let err = CliError::General("oops".to_owned());
         assert_eq!(err.exit_code(), EXIT_GENERAL);
         assert_eq!(err.error_code(), ERROR_CODE_GENERAL);
+    }
+
+    #[test]
+    fn rate_limited_with_retry_after_has_correct_exit_and_code() {
+        let err = CliError::RateLimited { retry_after_secs: Some(30) };
+        assert_eq!(err.exit_code(), EXIT_RATE_LIMITED);
+        assert_eq!(err.error_code(), ERROR_CODE_RATE_LIMITED);
+    }
+
+    #[test]
+    fn rate_limited_without_retry_after_has_correct_exit_and_code() {
+        let err = CliError::RateLimited { retry_after_secs: None };
+        assert_eq!(err.exit_code(), EXIT_RATE_LIMITED);
+        assert_eq!(err.error_code(), ERROR_CODE_RATE_LIMITED);
+    }
+
+    #[test]
+    fn rate_limited_exit_code_is_distinct_from_timeout_and_unreachable() {
+        let rl = CliError::RateLimited { retry_after_secs: None };
+        assert_ne!(rl.exit_code(), EXIT_TIMEOUT);
+        assert_ne!(rl.exit_code(), EXIT_SERVER_UNREACHABLE);
+        assert_eq!(rl.exit_code(), EXIT_RATE_LIMITED);
     }
 
     #[test]

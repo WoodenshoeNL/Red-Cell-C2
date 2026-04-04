@@ -16,14 +16,16 @@ use tokio::time::sleep;
 use tracing::instrument;
 
 use crate::PayloadCommands;
+use crate::backoff::Backoff;
 use crate::client::ApiClient;
 use crate::error::{CliError, EXIT_SUCCESS};
 use crate::output::{OutputFormat, TextRender, TextRow, print_error, print_success};
 
 /// Default polling timeout for `--wait` builds, in seconds.
 const DEFAULT_BUILD_TIMEOUT_SECS: u64 = 300;
-/// Polling interval while waiting for a build to complete.
-const POLL_INTERVAL: Duration = Duration::from_millis(2_000);
+/// Default sleep duration (seconds) when the server returns HTTP 429 without
+/// a `Retry-After` header.
+const RATE_LIMIT_DEFAULT_WAIT_SECS: u64 = 10;
 
 // ── raw API response shapes ───────────────────────────────────────────────────
 
@@ -268,6 +270,7 @@ async fn build(
     // Poll until done or timeout.
     let deadline = Instant::now() + Duration::from_secs(DEFAULT_BUILD_TIMEOUT_SECS);
     let job_path = format!("/payloads/jobs/{}", submitted.job_id);
+    let mut backoff = Backoff::new();
 
     loop {
         if Instant::now() > deadline {
@@ -277,31 +280,43 @@ async fn build(
             )));
         }
 
-        let status: BuildJobStatus = client.get(&job_path).await?;
-
-        match status.status.as_str() {
-            "done" => {
-                let payload_id = status.payload_id.ok_or_else(|| {
-                    CliError::General(format!(
-                        "build job {} reported done but returned no payload_id",
-                        status.job_id
-                    ))
-                })?;
-                let size_bytes = status.size_bytes.unwrap_or(0);
-                return Ok(BuildOutcome::Completed(BuildCompleted { id: payload_id, size_bytes }));
+        match client.get::<BuildJobStatus>(&job_path).await {
+            Err(CliError::RateLimited { retry_after_secs }) => {
+                let wait =
+                    Duration::from_secs(retry_after_secs.unwrap_or(RATE_LIMIT_DEFAULT_WAIT_SECS));
+                sleep(wait).await;
             }
-            "error" => {
-                let msg = status.error.unwrap_or_else(|| "unknown build error".to_owned());
-                return Err(CliError::General(format!(
-                    "build job {} failed: {msg}",
-                    status.job_id
-                )));
+            Err(e) => return Err(e),
+            Ok(status) => {
+                match status.status.as_str() {
+                    "done" => {
+                        let payload_id = status.payload_id.ok_or_else(|| {
+                            CliError::General(format!(
+                                "build job {} reported done but returned no payload_id",
+                                status.job_id
+                            ))
+                        })?;
+                        let size_bytes = status.size_bytes.unwrap_or(0);
+                        return Ok(BuildOutcome::Completed(BuildCompleted {
+                            id: payload_id,
+                            size_bytes,
+                        }));
+                    }
+                    "error" => {
+                        let msg = status.error.unwrap_or_else(|| "unknown build error".to_owned());
+                        return Err(CliError::General(format!(
+                            "build job {} failed: {msg}",
+                            status.job_id
+                        )));
+                    }
+                    // "pending" | "running" — keep polling
+                    _ => {
+                        backoff.record_empty();
+                        sleep(backoff.delay()).await;
+                    }
+                }
             }
-            // "pending" | "running" — keep polling
-            _ => {}
         }
-
-        sleep(POLL_INTERVAL).await;
     }
 }
 

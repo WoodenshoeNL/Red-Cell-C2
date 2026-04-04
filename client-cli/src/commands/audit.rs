@@ -16,14 +16,16 @@ use tokio::time::sleep;
 use tracing::instrument;
 
 use crate::AuditCommands;
+use crate::backoff::Backoff;
 use crate::client::ApiClient;
 use crate::error::{CliError, EXIT_SUCCESS};
 use crate::output::{OutputFormat, TextRow, print_error, print_stream_entry, print_success};
 
 /// Number of entries fetched by `log tail` (without --follow).
 const TAIL_LIMIT: u32 = 20;
-/// Polling interval for `log tail --follow`.
-const POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// Default sleep duration (seconds) when the server returns HTTP 429 without
+/// a `Retry-After` header.
+const RATE_LIMIT_DEFAULT_WAIT_SECS: u64 = 10;
 
 // ── raw API response shapes ───────────────────────────────────────────────────
 
@@ -213,32 +215,45 @@ async fn tail_follow(client: &ApiClient, fmt: &OutputFormat) -> i32 {
         }
     };
 
+    let mut backoff = Backoff::new();
+
     // Poll for new entries using the cursor timestamp.
     loop {
-        let sleep_fut = sleep(POLL_INTERVAL);
-        tokio::select! {
-            _ = sleep_fut => {}
-            _ = tokio::signal::ctrl_c() => return EXIT_SUCCESS,
-        }
-
         let poll_result = tokio::select! {
             result = list(client, 100, cursor.since(), None, None, None) => result,
             _ = tokio::signal::ctrl_c() => return EXIT_SUCCESS,
         };
 
-        match poll_result {
+        let sleep_duration = match poll_result {
+            Err(CliError::RateLimited { retry_after_secs }) => {
+                // Treat rate limiting as a transient condition: sleep for the
+                // requested delay then resume polling without exiting.
+                Duration::from_secs(retry_after_secs.unwrap_or(RATE_LIMIT_DEFAULT_WAIT_SECS))
+            }
             Err(e) => {
                 print_error(&e).ok();
                 return e.exit_code();
             }
             Ok(entries) => {
-                for entry in cursor.drain_new_entries(&entries) {
-                    if let Err(e) = print_entry_line(fmt, entry) {
-                        print_error(&e).ok();
-                        return e.exit_code();
+                let fresh = cursor.drain_new_entries(&entries);
+                if fresh.is_empty() {
+                    backoff.record_empty();
+                } else {
+                    backoff.record_non_empty();
+                    for entry in fresh {
+                        if let Err(e) = print_entry_line(fmt, entry) {
+                            print_error(&e).ok();
+                            return e.exit_code();
+                        }
                     }
                 }
+                backoff.delay()
             }
+        };
+
+        tokio::select! {
+            _ = sleep(sleep_duration) => {}
+            _ = tokio::signal::ctrl_c() => return EXIT_SUCCESS,
         }
     }
 }

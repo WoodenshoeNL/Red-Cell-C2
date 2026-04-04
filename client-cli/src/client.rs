@@ -126,6 +126,9 @@ impl ApiClient {
             StatusCode::NOT_FOUND => {
                 Err(CliError::NotFound(format!("{path} does not exist on the server")))
             }
+            StatusCode::TOO_MANY_REQUESTS => {
+                Err(CliError::RateLimited { retry_after_secs: parse_retry_after(&response) })
+            }
             s if s.is_success() => response
                 .bytes()
                 .await
@@ -377,6 +380,9 @@ async fn map_response<T: DeserializeOwned>(
         StatusCode::NOT_FOUND => {
             Err(CliError::NotFound(format!("{path} does not exist on the server")))
         }
+        StatusCode::TOO_MANY_REQUESTS => {
+            Err(CliError::RateLimited { retry_after_secs: parse_retry_after(&response) })
+        }
         s if s.is_success() => response
             .json::<T>()
             .await
@@ -390,6 +396,18 @@ async fn map_response<T: DeserializeOwned>(
             Err(CliError::General(format!("server returned {s}: {body}")))
         }
     }
+}
+
+/// Extract the numeric value of the `Retry-After` response header.
+///
+/// Returns `None` when the header is absent, non-UTF-8, or not a plain
+/// decimal integer (HTTP dates are not parsed).
+fn parse_retry_after(response: &reqwest::Response) -> Option<u64> {
+    response
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
 }
 
 fn map_reqwest_error(e: reqwest::Error, url: &str) -> CliError {
@@ -581,6 +599,115 @@ mod tests {
         let client = ApiClient::new(&cfg).unwrap();
         let result = client.get_raw_bytes("/payload/download").await;
         assert!(matches!(result, Err(CliError::General(_))));
+    }
+
+    #[tokio::test]
+    async fn get_raw_bytes_returns_rate_limited_on_429_without_header() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/payload/download"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&server)
+            .await;
+
+        let cfg = test_config(&server.uri());
+        let client = ApiClient::new(&cfg).unwrap();
+        let result = client.get_raw_bytes("/payload/download").await;
+        assert!(matches!(result, Err(CliError::RateLimited { retry_after_secs: None })));
+    }
+
+    #[tokio::test]
+    async fn get_raw_bytes_returns_rate_limited_on_429_with_retry_after() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/payload/download"))
+            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "42"))
+            .mount(&server)
+            .await;
+
+        let cfg = test_config(&server.uri());
+        let client = ApiClient::new(&cfg).unwrap();
+        let result = client.get_raw_bytes("/payload/download").await;
+        assert!(matches!(result, Err(CliError::RateLimited { retry_after_secs: Some(42) })));
+    }
+
+    // ── map_response 429 (via get) ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn get_returns_rate_limited_on_429_without_header() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/agents"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&server)
+            .await;
+
+        let cfg = test_config(&server.uri());
+        let client = ApiClient::new(&cfg).unwrap();
+        let result: Result<serde_json::Value, _> = client.get("/agents").await;
+        assert!(matches!(result, Err(CliError::RateLimited { retry_after_secs: None })));
+    }
+
+    #[tokio::test]
+    async fn get_returns_rate_limited_on_429_with_retry_after() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/agents"))
+            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "60"))
+            .mount(&server)
+            .await;
+
+        let cfg = test_config(&server.uri());
+        let client = ApiClient::new(&cfg).unwrap();
+        let result: Result<serde_json::Value, _> = client.get("/agents").await;
+        assert!(matches!(result, Err(CliError::RateLimited { retry_after_secs: Some(60) })));
+    }
+
+    // ── parse_retry_after ────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_retry_after_returns_none_for_non_numeric_date() {
+        // HTTP date format should not be parsed as u64 — return None.
+        let resp = reqwest::Response::from(
+            http::Response::builder()
+                .status(429)
+                .header("retry-after", "Wed, 21 Oct 2026 07:28:00 GMT")
+                .body(bytes::Bytes::new())
+                .unwrap(),
+        );
+        assert_eq!(parse_retry_after(&resp), None);
+    }
+
+    #[test]
+    fn parse_retry_after_returns_seconds_for_integer_value() {
+        let resp = reqwest::Response::from(
+            http::Response::builder()
+                .status(429)
+                .header("retry-after", "30")
+                .body(bytes::Bytes::new())
+                .unwrap(),
+        );
+        assert_eq!(parse_retry_after(&resp), Some(30));
+    }
+
+    #[test]
+    fn parse_retry_after_returns_none_when_header_absent() {
+        let resp = reqwest::Response::from(
+            http::Response::builder().status(429).body(bytes::Bytes::new()).unwrap(),
+        );
+        assert_eq!(parse_retry_after(&resp), None);
     }
 
     // ── get_anon ────────────────────────────────────────────────────────────

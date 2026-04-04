@@ -21,6 +21,7 @@ use tokio::time::sleep;
 use tracing::instrument;
 
 use crate::AgentCommands;
+use crate::backoff::Backoff;
 use crate::client::ApiClient;
 use crate::error::{CliError, EXIT_SUCCESS};
 use crate::output::{
@@ -29,8 +30,9 @@ use crate::output::{
 
 /// Default polling timeout for `--wait` operations, in seconds.
 const DEFAULT_WAIT_TIMEOUT_SECS: u64 = 60;
-/// Polling interval for `--wait` and `--watch` operations.
-const POLL_INTERVAL: Duration = Duration::from_millis(1_000);
+/// Default sleep duration (seconds) when the server returns HTTP 429 without
+/// a `Retry-After` header.
+const RATE_LIMIT_DEFAULT_WAIT_SECS: u64 = 10;
 
 // ── raw API response shapes ───────────────────────────────────────────────────
 
@@ -577,6 +579,7 @@ async fn exec_wait(
     // Start with no cursor — the server returns all entries; we advance the
     // cursor by numeric entry_id so subsequent polls only fetch newer rows.
     let mut cursor: Option<i64> = None;
+    let mut backoff = Backoff::new();
 
     loop {
         if Instant::now() >= deadline {
@@ -586,18 +589,31 @@ async fn exec_wait(
             )));
         }
 
-        sleep(POLL_INTERVAL).await;
-
-        let entries = fetch_output(client, id, cursor).await?;
-        for entry in &entries {
-            // Advance the numeric cursor so next poll is incremental.
-            cursor = Some(entry.entry_id);
-            if entry.job_id == submitted.job_id {
-                return Ok(ExecResult {
-                    job_id: entry.job_id.clone(),
-                    output: entry.output.clone(),
-                    exit_code: entry.exit_code,
-                });
+        match fetch_output(client, id, cursor).await {
+            Err(CliError::RateLimited { retry_after_secs }) => {
+                let wait =
+                    Duration::from_secs(retry_after_secs.unwrap_or(RATE_LIMIT_DEFAULT_WAIT_SECS));
+                sleep(wait).await;
+            }
+            Err(e) => return Err(e),
+            Ok(entries) => {
+                if entries.is_empty() {
+                    backoff.record_empty();
+                } else {
+                    backoff.record_non_empty();
+                    for entry in &entries {
+                        // Advance the numeric cursor so next poll is incremental.
+                        cursor = Some(entry.entry_id);
+                        if entry.job_id == submitted.job_id {
+                            return Ok(ExecResult {
+                                job_id: entry.job_id.clone(),
+                                output: entry.output.clone(),
+                                exit_code: entry.exit_code,
+                            });
+                        }
+                    }
+                }
+                sleep(backoff.delay()).await;
             }
         }
     }
@@ -645,6 +661,7 @@ async fn fetch_output(
 /// ```
 async fn watch_output(client: &ApiClient, fmt: &OutputFormat, id: &str, since: Option<i64>) -> i32 {
     let mut cursor: Option<i64> = since;
+    let mut backoff = Backoff::new();
     // Create the ctrl_c future once and pin it so we can reuse the same OS-level
     // signal listener across all loop iterations. Creating a new ctrl_c() future
     // on every iteration registers a new listener each time; after ~64 iterations
@@ -660,28 +677,38 @@ async fn watch_output(client: &ApiClient, fmt: &OutputFormat, id: &str, since: O
             }
         };
 
-        match poll_result {
+        let sleep_duration = match poll_result {
+            Err(CliError::RateLimited { retry_after_secs }) => {
+                // Sleep for the server-specified delay then retry without
+                // advancing the backoff — rate limiting is transient.
+                Duration::from_secs(retry_after_secs.unwrap_or(RATE_LIMIT_DEFAULT_WAIT_SECS))
+            }
             Err(e) => {
                 print_error(&e).ok();
                 return e.exit_code();
             }
             Ok(entries) => {
-                for entry in &entries {
-                    // Advance the numeric cursor so next poll only fetches newer entries.
-                    cursor = Some(entry.entry_id);
-                    if let Err(e) =
-                        print_stream_entry(fmt, entry, &render_output_stream_line(entry))
-                    {
-                        print_error(&e).ok();
-                        return e.exit_code();
+                if entries.is_empty() {
+                    backoff.record_empty();
+                } else {
+                    backoff.record_non_empty();
+                    for entry in &entries {
+                        // Advance the numeric cursor so next poll only fetches newer entries.
+                        cursor = Some(entry.entry_id);
+                        if let Err(e) =
+                            print_stream_entry(fmt, entry, &render_output_stream_line(entry))
+                        {
+                            print_error(&e).ok();
+                            return e.exit_code();
+                        }
                     }
                 }
+                backoff.delay()
             }
-        }
+        };
 
-        let sleep_fut = sleep(POLL_INTERVAL);
         tokio::select! {
-            _ = sleep_fut => {}
+            _ = sleep(sleep_duration) => {}
             _ = &mut ctrl_c => {
                 return EXIT_SUCCESS;
             }
@@ -714,6 +741,7 @@ async fn kill(client: &ApiClient, id: &str, wait: bool) -> Result<KillResult, Cl
     }
 
     let deadline = Instant::now() + Duration::from_secs(DEFAULT_WAIT_TIMEOUT_SECS);
+    let mut backoff = Backoff::new();
 
     loop {
         if Instant::now() >= deadline {
@@ -723,12 +751,21 @@ async fn kill(client: &ApiClient, id: &str, wait: bool) -> Result<KillResult, Cl
             )));
         }
 
-        let raw: RawAgent = client.get(&format!("/agents/{id}")).await?;
-        if raw.status == "dead" {
-            return Ok(KillResult { agent_id: id.to_owned(), status: raw.status });
+        match client.get::<RawAgent>(&format!("/agents/{id}")).await {
+            Err(CliError::RateLimited { retry_after_secs }) => {
+                let wait =
+                    Duration::from_secs(retry_after_secs.unwrap_or(RATE_LIMIT_DEFAULT_WAIT_SECS));
+                sleep(wait).await;
+            }
+            Err(e) => return Err(e),
+            Ok(raw) => {
+                if raw.status == "dead" {
+                    return Ok(KillResult { agent_id: id.to_owned(), status: raw.status });
+                }
+                backoff.record_empty();
+                sleep(backoff.delay()).await;
+            }
         }
-
-        sleep(POLL_INTERVAL).await;
     }
 }
 

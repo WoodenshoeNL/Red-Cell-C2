@@ -41,11 +41,10 @@ raising an exception, so the overall test suite still passes.
 
 DESCRIPTION = "Pivot chain dispatch"
 
-import os
-import tempfile
 import uuid
 
 from lib import ScenarioSkipped
+from lib.deploy_agent import deploy_and_checkin
 
 
 def _short_id() -> str:
@@ -132,18 +131,16 @@ def _run_smb_pivot(ctx, parent_target, child_target):
     from lib.cli import (
         agent_exec,
         agent_kill,
-        agent_list,
         agent_show,
         listener_create,
         listener_delete,
         listener_list,
         listener_start,
         listener_stop,
-        payload_build_and_fetch,
     )
-    from lib.deploy import ensure_work_dir, execute_background, run_remote, upload
+    from lib.deploy import run_remote
     from lib.wait import TimeoutError as WaitTimeout
-    from lib.wait import poll, wait_for_agent
+    from lib.wait import poll
 
     cli = ctx.cli
     uid = _short_id()
@@ -151,19 +148,6 @@ def _run_smb_pivot(ctx, parent_target, child_target):
     pipe_name = f"red_cell_pivot_{uid}"
     pipe_path = f"\\\\.\\pipe\\{pipe_name}"
     listener_port = ctx.env.get("listeners", {}).get("windows_port", 19082)
-    checkin_timeout = ctx.env.get("timeouts", {}).get("agent_checkin", 60)
-
-    remote_parent_payload = f"{parent_target.work_dir}\\agent-parent-{uid}.exe"
-    remote_child_payload = f"{child_target.work_dir}\\agent-child-{uid}.exe"
-    _fd, local_parent = tempfile.mkstemp(suffix=".exe")
-    os.close(_fd)
-    _fd, local_child = tempfile.mkstemp(suffix=".exe")
-    os.close(_fd)
-
-    try:
-        pre_existing_ids = {a["id"] for a in agent_list(cli)}
-    except Exception:
-        pre_existing_ids = set()
 
     parent_agent_id = None
     child_agent_id = None
@@ -176,22 +160,14 @@ def _run_smb_pivot(ctx, parent_target, child_target):
         listener_start(cli, listener_name)
         print("  [step 1] HTTP listener started")
 
-        # ── Step 2: Build Demon EXE for parent host ──────────────────────────
-        print("  [step 2] building Demon EXE (x64) for parent host")
-        raw = payload_build_and_fetch(cli, listener=listener_name, arch="x64", fmt="exe")
-        assert len(raw) > 0, "parent payload is empty"
-        with open(local_parent, "wb") as fh:
-            fh.write(raw)
-        print(f"  [step 2] built ({len(raw)} bytes)")
-
-        # ── Step 3: Deploy + execute on host 1; wait for parent checkin ─────
-        print(f"  [step 3] deploying parent payload to {parent_target.host}")
-        ensure_work_dir(parent_target)
-        upload(parent_target, local_parent, remote_parent_payload)
-        execute_background(parent_target, remote_parent_payload)
-        print(f"  [step 3] waiting up to {checkin_timeout}s for parent agent checkin")
-
-        parent = wait_for_agent(cli, timeout=checkin_timeout, pre_existing_ids=pre_existing_ids)
+        # ── Steps 2-3: Build + deploy parent agent; wait for checkin ─────────
+        print(f"  [step 2-3] deploying parent Demon EXE to {parent_target.host}")
+        parent = deploy_and_checkin(
+            ctx, cli, parent_target,
+            agent_type="demon", fmt="exe",
+            listener_name=listener_name,
+            label="parent",
+        )
         parent_agent_id = parent["id"]
         print(f"  [step 3] parent agent checked in: {parent_agent_id}")
 
@@ -222,25 +198,15 @@ def _run_smb_pivot(ctx, parent_target, child_target):
         smb_listener_name = smb_listeners[0]["name"]
         print(f"  [step 5] SMB pivot listener appeared: {smb_listener_name!r}")
 
-        # ── Step 6: Build Demon EXE linked to SMB pivot listener ─────────────
-        print(f"  [step 6] building Demon EXE (x64) linked to {smb_listener_name!r}")
-        raw = payload_build_and_fetch(
-            cli, listener=smb_listener_name, arch="x64", fmt="exe"
+        # ── Steps 6-7: Build + deploy child agent; wait for checkin ─────────
+        print(f"  [step 6-7] deploying child Demon EXE to {child_target.host} via pivot listener {smb_listener_name!r}")
+        child = deploy_and_checkin(
+            ctx, cli, child_target,
+            agent_type="demon", fmt="exe",
+            listener_name=smb_listener_name,
+            pre_existing_ids={parent_agent_id},
+            label="child",
         )
-        assert len(raw) > 0, "child payload is empty"
-        with open(local_child, "wb") as fh:
-            fh.write(raw)
-        print(f"  [step 6] built ({len(raw)} bytes)")
-
-        # ── Step 7: Deploy + execute on host 2; wait for child checkin ───────
-        all_known_ids = pre_existing_ids | {parent_agent_id}
-        print(f"  [step 7] deploying child payload to {child_target.host}")
-        ensure_work_dir(child_target)
-        upload(child_target, local_child, remote_child_payload)
-        execute_background(child_target, remote_child_payload)
-        print(f"  [step 7] waiting up to {checkin_timeout}s for child agent checkin through pivot")
-
-        child = wait_for_agent(cli, timeout=checkin_timeout, pre_existing_ids=all_known_ids)
         child_agent_id = child["id"]
         print(f"  [step 7] child agent checked in: {child_agent_id}")
 
@@ -316,21 +282,14 @@ def _run_smb_pivot(ctx, parent_target, child_target):
             except Exception:
                 pass
 
-        for target_val, work_dir, local_path in [
-            (parent_target, parent_target.work_dir, local_parent),
-            (child_target, child_target.work_dir, local_child),
-        ]:
+        for target_val in [parent_target, child_target]:
             try:
                 run_remote(
                     target_val,
-                    f'powershell -Command "Remove-Item -Recurse -Force -Path \'{work_dir}\'"',
+                    f'powershell -Command "Remove-Item -Recurse -Force -Path \'{target_val.work_dir}\'"',
                     timeout=15,
                 )
             except Exception as exc:
                 print(f"  [cleanup] work_dir removal on {target_val.host} failed (non-fatal): {exc}")
-            try:
-                os.unlink(local_path)
-            except Exception:
-                pass
 
         print("  [cleanup] done")

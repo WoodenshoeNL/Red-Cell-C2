@@ -23,11 +23,10 @@ Skip conditions:
 
 DESCRIPTION = "Kerberos token ops"
 
-import os
-import tempfile
 import uuid
 
 from lib import ScenarioSkipped
+from lib.deploy_agent import deploy_and_checkin
 
 
 def _short_id() -> str:
@@ -58,31 +57,18 @@ def run(ctx):
         CliError,
         agent_exec,
         agent_kill,
-        agent_list,
         listener_create,
         listener_delete,
         listener_start,
         listener_stop,
-        payload_build_and_fetch,
     )
-    from lib.deploy import ensure_work_dir, execute_background, run_remote, upload
-    from lib.wait import wait_for_agent, TimeoutError as WaitTimeout
+    from lib.deploy import run_remote
 
     cli = ctx.cli
     target = ctx.windows
     uid = _short_id()
     listener_name = f"test-kerberos-{uid}"
     listener_port = ctx.env.get("listeners", {}).get("windows_port", 19082)
-    remote_payload = f"{target.work_dir}\\agent-{uid}.exe"
-
-    # Collect pre-existing agent IDs so we can identify the new checkin.
-    try:
-        pre_existing_ids = {a["id"] for a in agent_list(cli)}
-    except Exception:
-        pre_existing_ids = set()
-
-    _fd, local_payload = tempfile.mkstemp(suffix=".exe")
-    os.close(_fd)
 
     # ── Step 1: Create + start HTTP listener ────────────────────────────────
     print(f"  [listener] creating HTTP listener {listener_name!r} on port {listener_port}")
@@ -92,35 +78,13 @@ def run(ctx):
 
     agent_id = None
     try:
-        # ── Step 2: Build Demon payload ──────────────────────────────────────
-        print("  [payload] building Demon EXE x64 for Windows target")
-        raw = payload_build_and_fetch(
-            cli, listener=listener_name, arch="x64", fmt="exe"
+        # ── Steps 2-5: Build, deploy, exec, wait for checkin ─────────────────
+        agent = deploy_and_checkin(
+            ctx, cli, target,
+            agent_type="demon", fmt="exe",
+            listener_name=listener_name,
         )
-        assert len(raw) > 0, "payload is empty"
-        print(f"  [payload] built ({len(raw)} bytes)")
-
-        with open(local_payload, "wb") as fh:
-            fh.write(raw)
-
-        # ── Step 3: Deploy via SCP ───────────────────────────────────────────
-        print(f"  [deploy] ensuring work dir {target.work_dir!r} on target")
-        ensure_work_dir(target)
-        print(f"  [deploy] uploading payload → {remote_payload}")
-        upload(target, local_payload, remote_payload)
-        print("  [deploy] uploaded")
-
-        # ── Step 4: Execute payload in background ────────────────────────────
-        print("  [exec] launching payload in background on target")
-        execute_background(target, remote_payload)
-
-        # ── Step 5: Wait for agent checkin ───────────────────────────────────
-        checkin_timeout = ctx.env.get("timeouts", {}).get("agent_checkin", 60)
-        print(f"  [wait] waiting up to {checkin_timeout}s for agent checkin")
-
-        agent = wait_for_agent(cli, timeout=checkin_timeout, pre_existing_ids=pre_existing_ids)
         agent_id = agent["id"]
-        print(f"  [wait] agent checked in: {agent_id}")
 
         # ── Step 6: List tokens via whoami /all ──────────────────────────────
         # `whoami /all` returns user info, group memberships, and token
@@ -220,10 +184,5 @@ def run(ctx):
             )
         except Exception as exc:
             print(f"  [cleanup] work_dir removal failed (non-fatal): {exc}")
-
-        try:
-            os.unlink(local_payload)
-        except Exception:
-            pass
 
         print("  [cleanup] done")

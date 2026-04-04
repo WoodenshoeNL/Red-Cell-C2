@@ -27,11 +27,10 @@ Steps:
 
 DESCRIPTION = "Archon agent Windows checkin (Makefile build + Archon extensions)"
 
-import os
-import tempfile
 import uuid
 
 from lib import ScenarioSkipped
+from lib.deploy_agent import deploy_and_checkin
 
 
 def _short_id() -> str:
@@ -107,22 +106,18 @@ def run(ctx) -> None:
     from lib.cli import (
         agent_exec,
         agent_kill,
-        agent_list,
         listener_create,
         listener_delete,
         listener_start,
         listener_stop,
-        payload_build_and_fetch,
     )
-    from lib.deploy import ensure_work_dir, execute_background, run_remote, upload
-    from lib.wait import wait_for_agent
+    from lib.deploy import run_remote
 
     cli = ctx.cli
     target = ctx.windows
     uid = _short_id()
     listener_name = f"test-archon-{uid}"
     listener_port = ctx.env.get("listeners", {}).get("windows_port", 19082)
-    remote_payload = f"{target.work_dir}\\archon-{uid}.exe"
 
     # Archon-specific extension commands from env.toml.
     # Canonical TOML format:  [[archon.extensions]]  (array-of-tables → list[dict])
@@ -132,15 +127,6 @@ def run(ctx) -> None:
         [_ext_raw] if isinstance(_ext_raw, dict) else list(_ext_raw)
     )
 
-    # Collect pre-existing agent IDs so we can identify the new checkin.
-    try:
-        pre_existing_ids = {a["id"] for a in agent_list(cli)}
-    except Exception:
-        pre_existing_ids = set()
-
-    _fd, local_payload = tempfile.mkstemp(suffix=".exe")
-    os.close(_fd)
-
     # ── Step 1: Create + start HTTP listener ────────────────────────────────
     print(f"  [archon][listener] creating HTTP listener {listener_name!r} on port {listener_port}")
     listener_create(cli, listener_name, "http", port=listener_port)
@@ -149,38 +135,14 @@ def run(ctx) -> None:
 
     agent_id = None
     try:
-        # ── Step 2: Build Archon payload ─────────────────────────────────────
-        # Archon payloads are produced by the teamserver using the same
-        # Makefile-based toolchain as Demon. Once Archon is configured as
-        # available, any build failure is a hard test failure.
-        print("  [archon][payload] building archon exe x64 for Windows target")
-        raw = payload_build_and_fetch(
-            cli, listener=listener_name, arch="x64", fmt="exe", agent="archon"
+        # ── Steps 2-5: Build, deploy, exec, wait for checkin ─────────────────
+        agent = deploy_and_checkin(
+            ctx, cli, target,
+            agent_type="archon", fmt="exe",
+            listener_name=listener_name,
+            label="archon",
         )
-        assert len(raw) > 0, "Archon payload is empty"
-        print(f"  [archon][payload] built ({len(raw)} bytes)")
-
-        with open(local_payload, "wb") as fh:
-            fh.write(raw)
-
-        # ── Step 3: Deploy via SCP ───────────────────────────────────────────
-        print(f"  [archon][deploy] ensuring work dir {target.work_dir!r} on target")
-        ensure_work_dir(target)
-        print(f"  [archon][deploy] uploading payload → {remote_payload}")
-        upload(target, local_payload, remote_payload)
-        print("  [archon][deploy] uploaded")
-
-        # ── Step 4: Execute payload in background ────────────────────────────
-        print("  [archon][exec] launching payload in background on target")
-        execute_background(target, remote_payload)
-
-        # ── Step 5: Wait for agent checkin ───────────────────────────────────
-        checkin_timeout = ctx.env.get("timeouts", {}).get("agent_checkin", 60)
-        print(f"  [archon][wait] waiting up to {checkin_timeout}s for agent checkin")
-
-        agent = wait_for_agent(cli, timeout=checkin_timeout, pre_existing_ids=pre_existing_ids)
         agent_id = agent["id"]
-        print(f"  [archon][wait] agent checked in: {agent_id}")
 
         # ── Step 6: Baseline command suite ───────────────────────────────────
 
@@ -247,10 +209,5 @@ def run(ctx) -> None:
             )
         except Exception as exc:
             print(f"  [archon][cleanup] work_dir removal failed (non-fatal): {exc}")
-
-        try:
-            os.unlink(local_payload)
-        except Exception:
-            pass
 
         print("  [archon][cleanup] done")

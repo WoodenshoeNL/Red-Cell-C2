@@ -1,0 +1,122 @@
+"""
+lib/deploy_agent.py — high-level deploy-and-checkin helper for the test harness.
+
+Encapsulates the repeated build → deploy → execute → wait-for-checkin sequence
+so individual scenarios can focus on their unique post-checkin assertions.
+"""
+
+from __future__ import annotations
+
+import os
+import tempfile
+import uuid
+
+from lib.cli import CliConfig, agent_list, payload_build_and_fetch
+from lib.deploy import TargetConfig, ensure_work_dir, execute_background, run_remote, upload
+from lib.wait import wait_for_agent
+
+
+def deploy_and_checkin(
+    ctx,
+    cli: CliConfig,
+    target: TargetConfig,
+    agent_type: str,
+    fmt: str,
+    listener_name: str,
+    checkin_timeout: int = 60,
+    pre_existing_ids: set[str] | None = None,
+    arch: str = "x64",
+    label: str | None = None,
+) -> dict:
+    """Build, deploy, execute, and wait for a single agent checkin.
+
+    Handles the repeated boilerplate across scenarios:
+
+    1. Snapshot pre-existing agent IDs (unless supplied by the caller).
+    2. Build a payload via the CLI.
+    3. Upload to the target via SCP; ``chmod +x`` on Linux targets.
+    4. Execute the payload in the background.
+    5. Wait for the new agent to check in.
+
+    Listener creation / teardown and post-checkin assertions remain the
+    responsibility of the calling scenario.  The local payload temp file is
+    always cleaned up before this function returns (success *or* failure).
+
+    Args:
+        ctx:              RunContext — used to read ``timeouts.agent_checkin``
+                          from env.toml (overrides *checkin_timeout* when set).
+        cli:              CliConfig driving red-cell-cli.
+        target:           TargetConfig for the deployment target.
+        agent_type:       Agent name passed to ``payload build`` (e.g.
+                          ``"demon"``, ``"phantom"``, ``"archon"``).
+        fmt:              Payload format (e.g. ``"bin"``, ``"elf"``, ``"exe"``).
+        listener_name:    Name of the pre-created, pre-started listener.
+        checkin_timeout:  Fallback timeout in seconds; overridden by
+                          ``timeouts.agent_checkin`` in env.toml when present.
+        pre_existing_ids: Agent IDs already present before this call.
+                          Collected automatically when *None*.
+        arch:             Payload architecture (default ``"x64"``).
+        label:            Print-tag prefix, e.g. ``"demon"`` → ``[demon][payload]``.
+                          Defaults to *agent_type* when *None*.
+
+    Returns:
+        The agent dict returned by :func:`~lib.wait.wait_for_agent`.
+
+    Raises:
+        AssertionError: if the built payload is empty.
+        lib.deploy.DeployError: if SCP upload or a remote command fails.
+        lib.wait.TimeoutError: if no new agent checks in within the timeout.
+    """
+    tag = label if label is not None else agent_type
+    timeout = ctx.env.get("timeouts", {}).get("agent_checkin", checkin_timeout)
+
+    # Step 1 — snapshot pre-existing agents so we can identify the new checkin.
+    if pre_existing_ids is None:
+        try:
+            pre_existing_ids = {a["id"] for a in agent_list(cli)}
+        except Exception:
+            pre_existing_ids = set()
+
+    uid = uuid.uuid4().hex[:8]
+    is_windows = target.work_dir.startswith("C:\\") or "\\" in target.work_dir
+    sep = "\\" if is_windows else "/"
+    remote_payload = f"{target.work_dir}{sep}agent-{uid}.{fmt}"
+
+    _fd, local_payload = tempfile.mkstemp(suffix=f".{fmt}")
+    os.close(_fd)
+    try:
+        # Step 2 — build payload.
+        print(f"  [{tag}][payload] building {agent_type} {fmt} {arch}")
+        raw = payload_build_and_fetch(
+            cli, listener=listener_name, arch=arch, fmt=fmt, agent=agent_type
+        )
+        assert len(raw) > 0, f"{agent_type} payload is empty"
+        print(f"  [{tag}][payload] built ({len(raw)} bytes)")
+
+        with open(local_payload, "wb") as fh:
+            fh.write(raw)
+
+        # Step 3 — deploy via SCP.
+        print(f"  [{tag}][deploy] ensuring work dir {target.work_dir!r} on target")
+        ensure_work_dir(target)
+        print(f"  [{tag}][deploy] uploading payload → {remote_payload}")
+        upload(target, local_payload, remote_payload)
+        if not is_windows:
+            run_remote(target, f"chmod +x {remote_payload}")
+        print(f"  [{tag}][deploy] uploaded")
+
+        # Step 4 — execute payload in background.
+        print(f"  [{tag}][exec] launching payload in background on target")
+        execute_background(target, remote_payload)
+
+    finally:
+        try:
+            os.unlink(local_payload)
+        except OSError:
+            pass
+
+    # Step 5 — wait for agent checkin (outside the finally so failure propagates cleanly).
+    print(f"  [{tag}][wait] waiting up to {timeout}s for agent checkin")
+    agent = wait_for_agent(cli, timeout=timeout, pre_existing_ids=pre_existing_ids)
+    print(f"  [{tag}][wait] agent checked in: {agent['id']}")
+    return agent

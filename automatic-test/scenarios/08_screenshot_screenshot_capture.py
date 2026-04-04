@@ -30,6 +30,7 @@ import tempfile
 import uuid
 
 from lib import ScenarioSkipped
+from lib.deploy_agent import deploy_and_checkin
 
 
 # ── image header signatures ──────────────────────────────────────────────────
@@ -104,36 +105,22 @@ def run(ctx):
         CliError,
         agent_exec,
         agent_kill,
-        agent_list,
         listener_create,
         listener_delete,
         listener_start,
         listener_stop,
         loot_download,
         loot_list,
-        payload_build_and_fetch,
     )
-    from lib.deploy import ensure_work_dir, execute_background, run_remote, upload
-    from lib.wait import wait_for_agent, TimeoutError as WaitTimeout
+    from lib.deploy import run_remote
+    from lib.wait import TimeoutError as WaitTimeout, poll
 
     cli = ctx.cli
     uid = _short_id()
-    target_label = "Windows" if is_windows else "Linux"
     listener_name = f"test-screenshot-{uid}"
     listener_port = ctx.env.get("listeners", {}).get(
         "windows_port" if is_windows else "linux_port", 19082 if is_windows else 19081
     )
-
-    if is_windows:
-        remote_payload = f"{target.work_dir}\\agent-{uid}.exe"
-    else:
-        remote_payload = f"{target.work_dir}/agent-{uid}.bin"
-
-    # Snapshot pre-existing agent IDs so we can identify the new checkin.
-    try:
-        pre_existing_ids = {a["id"] for a in agent_list(cli)}
-    except Exception:
-        pre_existing_ids = set()
 
     # Snapshot pre-existing screenshot loot IDs to identify new entries.
     try:
@@ -141,8 +128,6 @@ def run(ctx):
     except Exception:
         pre_existing_loot_ids = set()
 
-    _fd, local_payload = tempfile.mkstemp(suffix="." + payload_fmt)
-    os.close(_fd)
     _fd, local_screenshot = tempfile.mkstemp(suffix=".png")
     os.close(_fd)
 
@@ -154,37 +139,13 @@ def run(ctx):
 
     agent_id = None
     try:
-        # ── Step 2: Build Demon payload ──────────────────────────────────────
-        print(f"  [payload] building Demon {payload_fmt} x64 for {target_label} target")
-        raw = payload_build_and_fetch(
-            cli, listener=listener_name, arch="x64", fmt=payload_fmt
+        # ── Steps 2-5: Build, deploy, exec, wait for checkin ─────────────────
+        agent = deploy_and_checkin(
+            ctx, cli, target,
+            agent_type="demon", fmt=payload_fmt,
+            listener_name=listener_name,
         )
-        assert len(raw) > 0, "payload is empty"
-        print(f"  [payload] built ({len(raw)} bytes)")
-
-        with open(local_payload, "wb") as fh:
-            fh.write(raw)
-
-        # ── Step 3: Deploy via SCP ───────────────────────────────────────────
-        print(f"  [deploy] ensuring work dir {target.work_dir!r} on target")
-        ensure_work_dir(target)
-        print(f"  [deploy] uploading payload → {remote_payload}")
-        upload(target, local_payload, remote_payload)
-        if not is_windows:
-            run_remote(target, f"chmod +x {remote_payload}")
-        print("  [deploy] uploaded")
-
-        # ── Step 4: Execute payload in background ────────────────────────────
-        print("  [exec] launching payload in background on target")
-        execute_background(target, remote_payload)
-
-        # ── Step 5: Wait for agent checkin ───────────────────────────────────
-        checkin_timeout = ctx.env.get("timeouts", {}).get("agent_checkin", 60)
-        print(f"  [wait] waiting up to {checkin_timeout}s for agent checkin")
-
-        agent = wait_for_agent(cli, timeout=checkin_timeout, pre_existing_ids=pre_existing_ids)
         agent_id = agent["id"]
-        print(f"  [wait] agent checked in: {agent_id}")
 
         # ── Step 6: Send screenshot command ─────────────────────────────────
         print("  [screenshot] sending screenshot command via agent exec")
@@ -284,10 +245,9 @@ def run(ctx):
         except Exception as exc:
             print(f"  [cleanup] work_dir removal failed (non-fatal): {exc}")
 
-        for path in (local_payload, local_screenshot):
-            try:
-                os.unlink(path)
-            except Exception:
-                pass
+        try:
+            os.unlink(local_screenshot)
+        except Exception:
+            pass
 
         print("  [cleanup] done")

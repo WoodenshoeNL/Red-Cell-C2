@@ -110,3 +110,56 @@ Recovering one agent's traffic does not expose other agents' sessions.
 - `common::crypto::ctr_blocks_for_len` — helper for computing the block-offset
   increment after encrypting a message of a given length.
 - `common/src/config.rs` — `DemonConfig::allow_legacy_ctr` profile field.
+
+---
+
+## Demon → Specter/Phantom migration guide
+
+> **Deprecation notice:** `AllowLegacyCtr` support will be **removed on 2027-01-01**.
+> Operators still running unmodified Havoc Demon or Archon agents should migrate to
+> Specter (Windows) or Phantom (Linux) before that date.  The teamserver logs a
+> `WARN`-level message at startup until the flag is removed from your profile.
+
+### Why migrate?
+
+Specter (Windows Rust implant) and Phantom (Linux Rust implant) implement the full
+Demon command set but negotiate `INIT_EXT_MONOTONIC_CTR` automatically.  Each packet
+uses a distinct portion of the AES-256-CTR keystream, eliminating the two-time-pad
+vulnerability entirely.  No changes are needed on the listener or teamserver side.
+
+### Migration steps
+
+1. **Keep your existing listener running.** Specter and Phantom connect to the same
+   HTTP(S) listener URL as Demon.  You do not need a new listener.
+
+2. **Build a Specter (Windows) or Phantom (Linux) stager** pointing to the same
+   callback URL your Demon agents use.  The listener URL, sleep, and jitter values
+   can remain identical.
+
+3. **Deploy the new stager** on each target host where a Demon/Archon agent is
+   currently running.  The new agent registers under a fresh agent ID; the old Demon
+   session remains alive until it is manually killed or times out.
+
+4. **Verify** the new agent appears in the operator console and executes tasks
+   correctly before terminating the legacy Demon session.
+
+5. **Remove `AllowLegacyCtr = true`** from the profile once all Demon agents have
+   been replaced.  Restart the teamserver; the `WARN` message will no longer appear.
+   Any new `DEMON_INIT` from an unmodified Demon binary will then be rejected
+   (the safe default).
+
+### Compatibility notes
+
+- **Same listener, multiple agent types.** A single listener can serve both Demon
+  (legacy CTR) and Specter/Phantom (monotonic CTR) agents simultaneously while
+  `AllowLegacyCtr = true`.  The protocol negotiation happens per-session during
+  `DEMON_INIT`.
+
+- **No key rotation needed.** Each agent payload is compiled with its own AES key
+  and IV.  Replacing the agent generates a fresh key, so there is no need to
+  coordinate a key rotation with the teamserver.
+
+- **Canary via dedicated listener.** For high-sensitivity operations, deploy a
+  dedicated listener without `AllowLegacyCtr` for Specter/Phantom and a separate one
+  with `AllowLegacyCtr` only for any remaining Demon agents.  This limits the
+  cryptographic risk to the subset of endpoints that still need it.

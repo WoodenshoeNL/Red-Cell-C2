@@ -861,6 +861,14 @@ pub struct DemonConfig {
     /// monotonic CTR, and only in environments where traffic confidentiality is not a
     /// requirement.
     ///
+    /// # Deprecation
+    ///
+    /// **This field is deprecated.  Support will be removed on 2027-01-01.**
+    /// Migrate Demon/Archon agents to Specter (Windows) or Phantom (Linux) before that
+    /// date.  See `docs/operator-security.md` for the migration procedure.
+    /// The teamserver logs a `WARN`-level deprecation notice at startup when this flag
+    /// is `true`.
+    ///
     /// HCL profile key: `AllowLegacyCtr` (boolean, default `false`).
     #[serde(rename = "AllowLegacyCtr", default)]
     pub allow_legacy_ctr: bool,

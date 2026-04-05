@@ -18,7 +18,7 @@ use red_cell_common::tls::{
 };
 use rustls_pki_types::pem::PemObject;
 use tokio::net::lookup_host;
-use tracing::{info, instrument};
+use tracing::{info, instrument, warn};
 
 mod logging;
 
@@ -43,6 +43,18 @@ async fn main() -> Result<()> {
         .with_context(|| format!("failed to load profile from {}", cli.profile.display()))?;
     let _logging_guard = logging::init_tracing(Some(&profile), cli.debug)
         .map_err(|error| anyhow!("failed to initialize tracing: {error}"))?;
+
+    if profile.demon.allow_legacy_ctr {
+        warn!(
+            "DEPRECATION WARNING: AllowLegacyCtr = true is set in your profile. \
+             Legacy CTR mode resets the AES-CTR keystream to block offset 0 for every \
+             packet, creating a two-time-pad vulnerability (P1 ⊕ P2 = C1 ⊕ C2). \
+             Support for AllowLegacyCtr will be REMOVED on 2027-01-01. \
+             Migrate Demon/Archon agents to Specter (Windows) or Phantom (Linux) before \
+             that date — recompile with the new stager pointing to the same listener URL. \
+             See docs/operator-security.md for the migration procedure."
+        );
+    }
 
     let database_path = resolve_database_path(&cli.profile, cli.database.as_ref());
     let database = Database::connect(&database_path)

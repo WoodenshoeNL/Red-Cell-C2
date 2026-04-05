@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1195 | 253 | 42 |
+| Tasks closed | 1196 | 253 | 42 |
 | Bugs filed against | 211 | 43 | 10 |
 | Bug rate (bugs/task) | 0.18 | 0.17 | 0.24 |
 | Quality score | 82% | 83% | 76% |
 
-*Bug rates: Claude 211/1195=0.1766→0.18, Codex 43/253=0.1700→0.17, Cursor 10/42=0.2381→0.24*
+*Bug rates: Claude 211/1196=0.1764→0.18, Codex 43/253=0.1700→0.17, Cursor 10/42=0.2381→0.24*
 
 ## Violation Breakdown
 
@@ -6049,3 +6049,13 @@ Build: FAILED (pre-existing) — `cargo check --workspace` fails on `red-cell-cl
 | Cursor | 0 | 0 | No activity. |
 
 Build: skipped — competing cargo processes from other agents consuming resources; cargo check killed by timeout. Existing binary `target/debug/red-cell` dated 07:06 indicates prior clean build. API spot-checks confirm no new compile-breaking changes in load_and_chaos.rs. Pre-existing P0 go1s5 (red-cell-cli compile error) still tracked open.
+
+### QA Review — 2026-04-05 09:50 — 8d6bdeb5..17cb3824
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 0 | Closed `red-cell-c2-ho0n2` (`e4a3e1be`): two dispatch-level integration tests for `DownloadConcurrentLimitExceeded` committed to `teamserver/src/dispatch/mod.rs`. Tests follow established patterns, verify Ok(()) returned + error event emitted + audit log entry written + no loot persisted. Code quality clean — no unwrap in production, no todo!/unimplemented!, correct per-agent IDs. Also closed `red-cell-c2-nr6d9` (resolved by the same commit, had been flagged as uncommitted by arch review). |
+| Codex | 0 | 0 | Claimed `red-cell-c2-9ys0j` (agent ID newtype) and `red-cell-c2-ojudf` (breadcrumb bar). Working tree contains fix for P0 `go1s5` (with_initial_delay added to backoff.rs) but not yet committed. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: skipped — build directory lock held by concurrent cargo processes (26 active); cargo check blocked on lock. Pre-existing P0 `go1s5` (Backoff::with_initial_delay, Codex commit d95dd822) still in committed code but fix is in Codex working tree awaiting commit. Pre-existing P1 `pebfp` (frame_metrics in assert!) still open. TLS hot-reload (`e969d`, Claude in progress) has working-tree compile errors in common/src/tls.rs (type inference in validate_tls_not_expired:136) — expected for in-progress work.

@@ -1061,6 +1061,7 @@ pub fn api_routes(api: ApiRuntime) -> Router<TeamserverState> {
         .route("/listeners/{name}/start", put(start_listener))
         .route("/listeners/{name}/stop", put(stop_listener))
         .route("/listeners/{name}/mark", post(mark_listener))
+        .route("/listeners/{name}/tls-cert", post(reload_listener_tls_cert))
         .route("/webhooks/stats", get(get_webhook_stats))
         .route("/payloads", get(list_payloads))
         .route("/payloads/build", post(submit_payload_build))
@@ -1148,6 +1149,7 @@ struct ApiInfoResponse {
         start_listener,
         stop_listener,
         mark_listener,
+        reload_listener_tls_cert,
         get_webhook_stats,
         list_payloads,
         submit_payload_build,
@@ -1204,7 +1206,8 @@ struct ApiInfoResponse {
             red_cell_common::DnsListenerConfig,
             red_cell_common::ListenerTlsConfig,
             red_cell_common::HttpListenerResponseConfig,
-            red_cell_common::HttpListenerProxyConfig
+            red_cell_common::HttpListenerProxyConfig,
+            TlsCertReloadRequest
         )
     ),
     modifiers(&ApiSecurity),
@@ -3247,6 +3250,86 @@ async fn mark_listener(
     .await;
 
     Ok(Json(summary))
+}
+
+/// Request body for hot-reloading a running HTTPS listener's TLS certificate.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, ToSchema)]
+pub struct TlsCertReloadRequest {
+    /// PEM-encoded certificate chain (leaf + intermediates).
+    pub cert_pem: String,
+    /// PEM-encoded private key matching the leaf certificate.
+    pub key_pem: String,
+}
+
+#[utoipa::path(
+    post,
+    path = "/listeners/{name}/tls-cert",
+    context_path = "/api/v1",
+    tag = "listeners",
+    security(("api_key" = [])),
+    params(("name" = String, Path, description = "Listener name")),
+    request_body = TlsCertReloadRequest,
+    responses(
+        (status = 204, description = "Certificate hot-reloaded; new handshakes will use the new cert"),
+        (status = 400, description = "Invalid PEM, expired certificate, or key mismatch", body = ApiErrorBody),
+        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
+        (status = 403, description = "API key role lacks admin permission", body = ApiErrorBody),
+        (status = 404, description = "Listener not found", body = ApiErrorBody),
+        (status = 422, description = "Listener is not a running HTTPS listener", body = ApiErrorBody),
+    )
+)]
+async fn reload_listener_tls_cert(
+    State(state): State<TeamserverState>,
+    identity: AdminApiAccess,
+    Path(name): Path<String>,
+    Json(body): Json<TlsCertReloadRequest>,
+) -> Result<StatusCode, ListenerManagerError> {
+    match state
+        .listeners
+        .reload_tls_cert(&name, body.cert_pem.as_bytes(), body.key_pem.as_bytes())
+        .await
+    {
+        Ok(()) => {}
+        Err(error) => {
+            record_audit_entry(
+                &state.database,
+                &state.webhooks,
+                &identity.key_id,
+                "listener.tls_cert_reload",
+                "listener",
+                Some(name.clone()),
+                audit_details(
+                    AuditResultStatus::Failure,
+                    None,
+                    Some("tls_cert_reload"),
+                    Some(parameter_object([
+                        ("listener", Value::String(name.clone())),
+                        ("error", Value::String(error.to_string())),
+                    ])),
+                ),
+            )
+            .await;
+            return Err(error);
+        }
+    }
+
+    record_audit_entry(
+        &state.database,
+        &state.webhooks,
+        &identity.key_id,
+        "listener.tls_cert_reload",
+        "listener",
+        Some(name.clone()),
+        audit_details(
+            AuditResultStatus::Success,
+            None,
+            Some("tls_cert_reload"),
+            Some(parameter_object([("listener", Value::String(name))])),
+        ),
+    )
+    .await;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn api_not_found() -> Response {

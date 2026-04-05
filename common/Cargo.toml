@@ -30,8 +30,8 @@ time = { version = "0.3", features = ["formatting", "parsing"] }
 tokio-rustls = "0.26.4"
 tracing = "0.1"
 utoipa = "5.4"
+x509-parser = "0.18"
 
 [dev-dependencies]
 hex-literal = "1.0"
 tempfile = "3.20"
-x509-parser = "0.18"

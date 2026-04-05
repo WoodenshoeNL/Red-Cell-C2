@@ -12,9 +12,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use axum::Router;
 use axum::body::{Body, Bytes};
@@ -37,7 +38,8 @@ use red_cell_common::operator::{
     OperatorMessage,
 };
 use red_cell_common::tls::{
-    TlsKeyAlgorithm, install_default_crypto_provider, resolve_tls_identity,
+    TlsKeyAlgorithm, install_default_crypto_provider, load_tls_identity, resolve_tls_identity,
+    validate_tls_not_expired,
 };
 use red_cell_common::{
     DnsListenerConfig, ExternalListenerConfig, HttpListenerConfig, HttpListenerProxyConfig,
@@ -533,6 +535,12 @@ pub enum ListenerManagerError {
     /// An external listener endpoint path is already claimed by another listener.
     #[error("endpoint `{endpoint}` is already registered by listener `{existing_listener}`")]
     DuplicateEndpoint { endpoint: String, existing_listener: String },
+    /// The listener is not a running HTTPS listener; TLS cert hot-reload requires it.
+    #[error("listener `{name}` is not a running HTTPS listener")]
+    NotTlsListener { name: String },
+    /// TLS certificate validation or hot-reload failed.
+    #[error("TLS certificate error: {message}")]
+    TlsCertError { message: String },
 }
 
 impl IntoResponse for ListenerManagerError {
@@ -548,6 +556,8 @@ impl IntoResponse for ListenerManagerError {
             Self::UnsupportedMark { .. } => (StatusCode::BAD_REQUEST, "listener_unsupported_mark"),
             Self::StartFailed { .. } => (StatusCode::UNPROCESSABLE_ENTITY, "listener_start_failed"),
             Self::DuplicateEndpoint { .. } => (StatusCode::CONFLICT, "listener_duplicate_endpoint"),
+            Self::NotTlsListener { .. } => (StatusCode::UNPROCESSABLE_ENTITY, "listener_not_tls"),
+            Self::TlsCertError { .. } => (StatusCode::BAD_REQUEST, "listener_tls_cert_error"),
             Self::Database(_) => (StatusCode::INTERNAL_SERVER_ERROR, "listener_error"),
         };
 
@@ -572,6 +582,18 @@ pub struct ListenerManager {
     operations: Arc<Mutex<()>>,
     /// Active external listener endpoints keyed by path (e.g. `"/bridge"`).
     external_endpoints: Arc<RwLock<BTreeMap<String, Arc<ExternalListenerState>>>>,
+    /// Live `RustlsConfig` handles for running HTTPS listeners, keyed by listener name.
+    ///
+    /// Each entry is a cloneable handle into the running axum-server TLS config.
+    /// Calling `reload_from_pem` on a cloned handle atomically swaps in a new
+    /// certificate for all subsequent TLS handshakes without dropping any existing
+    /// connection.
+    tls_configs: Arc<RwLock<HashMap<String, RustlsConfig>>>,
+    /// Certificate file-watcher task handles for HTTPS listeners with explicit cert paths.
+    ///
+    /// These tasks poll the cert file's mtime and call `reload_from_pem` automatically
+    /// when the file changes.  They are aborted when the associated listener stops.
+    watcher_handles: Arc<RwLock<HashMap<String, JoinHandle<()>>>>,
     /// Optional server secret for HKDF-based session key derivation.
     ///
     /// When set, this secret is passed to every [`DemonPacketParser`] so that
@@ -643,6 +665,8 @@ impl ListenerManager {
             active_handles: Arc::new(RwLock::new(BTreeMap::new())),
             operations: Arc::new(Mutex::new(())),
             external_endpoints: Arc::new(RwLock::new(BTreeMap::new())),
+            tls_configs: Arc::new(RwLock::new(HashMap::new())),
+            watcher_handles: Arc::new(RwLock::new(HashMap::new())),
             demon_init_secret: None,
             demon_allow_legacy_ctr: false,
         }
@@ -867,6 +891,64 @@ impl ListenerManager {
         Ok(self.repository().list().await?.into_iter().map(Into::into).collect())
     }
 
+    /// Hot-reload the TLS certificate for a running HTTPS listener.
+    ///
+    /// The new certificate is validated (PEM parse, key/cert match, expiry check) before
+    /// being swapped in.  All in-flight TLS connections keep their existing certificate;
+    /// only new handshakes after this call will use the replacement.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ListenerManagerError::ListenerNotFound`] if `name` does not exist,
+    /// [`ListenerManagerError::NotTlsListener`] if it is not a running HTTPS listener,
+    /// or [`ListenerManagerError::TlsCertError`] if the supplied PEM data fails validation.
+    #[instrument(skip(self, cert_pem, key_pem), fields(listener_name = %name))]
+    pub async fn reload_tls_cert(
+        &self,
+        name: &str,
+        cert_pem: &[u8],
+        key_pem: &[u8],
+    ) -> Result<(), ListenerManagerError> {
+        // Verify the listener exists and is a running HTTPS listener.
+        let listener = self
+            .repository()
+            .get(name)
+            .await?
+            .ok_or_else(|| ListenerManagerError::ListenerNotFound { name: name.to_owned() })?;
+
+        let is_running_https = matches!(&listener.config, ListenerConfig::Http(c) if c.secure)
+            && listener.state.status == ListenerStatus::Running;
+
+        if !is_running_https {
+            return Err(ListenerManagerError::NotTlsListener { name: name.to_owned() });
+        }
+
+        // Validate: parse PEM, check key/cert compatibility, check expiry.
+        load_tls_identity(cert_pem, key_pem)
+            .map_err(|e| ListenerManagerError::TlsCertError { message: e.to_string() })?;
+
+        validate_tls_not_expired(cert_pem)
+            .map_err(|e| ListenerManagerError::TlsCertError { message: e.to_string() })?;
+
+        // Retrieve the live RustlsConfig handle for this listener.
+        let tls_config = self
+            .tls_configs
+            .read()
+            .await
+            .get(name)
+            .cloned()
+            .ok_or_else(|| ListenerManagerError::NotTlsListener { name: name.to_owned() })?;
+
+        // Atomically swap in the new certificate; existing connections are unaffected.
+        tls_config
+            .reload_from_pem(cert_pem.to_vec(), key_pem.to_vec())
+            .await
+            .map_err(|e| ListenerManagerError::TlsCertError { message: e.to_string() })?;
+
+        info!(listener = name, "TLS certificate hot-reloaded");
+        Ok(())
+    }
+
     /// Reconcile persisted listeners against the YAOTL profile.
     #[instrument(skip(self, profile))]
     pub async fn sync_profile(&self, profile: &Profile) -> Result<(), ListenerManagerError> {
@@ -966,6 +1048,15 @@ impl ListenerManager {
         // Clean up external listener endpoint registry entries that won't get
         // deregistered inside the aborted future.
         self.external_endpoints.write().await.retain(|_, state| state.listener_name() != name);
+
+        // Stop the cert file-watcher task if one was spawned for this listener.
+        if let Some(watcher) = self.watcher_handles.write().await.remove(name) {
+            watcher.abort();
+            let _ = watcher.await;
+        }
+
+        // Remove the live TLS config handle so hot-reload calls are rejected after stop.
+        self.tls_configs.write().await.remove(name);
 
         repository.set_state(name, ListenerStatus::Stopped, None).await?;
         info!(listener = name, "listener stopped");
@@ -1568,6 +1659,8 @@ async fn spawn_http_listener_runtime(
     shutdown: ShutdownController,
     init_secret: Option<Vec<u8>>,
     allow_legacy_ctr: bool,
+    tls_configs: Arc<RwLock<HashMap<String, RustlsConfig>>>,
+    watcher_handles: Arc<RwLock<HashMap<String, JoinHandle<()>>>>,
 ) -> Result<ListenerRuntimeFuture, ListenerManagerError> {
     let state = Arc::new(HttpListenerState::build(
         config,
@@ -1600,6 +1693,21 @@ async fn spawn_http_listener_runtime(
     if config.secure {
         install_default_crypto_provider();
         let tls_config = build_http_tls_config(config).await?;
+
+        // Register the live config handle so hot-reload can reach it later.
+        tls_configs.write().await.insert(config.name.clone(), tls_config.clone());
+
+        // If the cert comes from files, spawn a poller that hot-reloads on change.
+        if let Some(cert_cfg) = &config.cert {
+            let handle = spawn_cert_file_watcher(
+                config.name.clone(),
+                PathBuf::from(&cert_cfg.cert),
+                PathBuf::from(&cert_cfg.key),
+                tls_config.clone(),
+            );
+            watcher_handles.write().await.insert(config.name.clone(), handle);
+        }
+
         let server = axum_server::from_tcp_rustls(std_listener, tls_config).map_err(|error| {
             ListenerManagerError::StartFailed {
                 name: config.name.clone(),
@@ -1630,6 +1738,83 @@ async fn spawn_http_listener_runtime(
                 .map_err(|error| format!("http listener `{listener_name}` exited: {error}"))
         }))
     }
+}
+
+/// Spawn a background task that polls a certificate file for changes and hot-reloads it.
+///
+/// The task checks the cert file's modification time every 30 seconds.  When a change
+/// is detected it reads both files, validates the new cert, and calls
+/// [`RustlsConfig::reload_from_pem`].  Failed reloads are logged as warnings and
+/// the watcher continues running so the next successful write is picked up.
+///
+/// The returned [`JoinHandle`] should be aborted when the listener stops.
+fn spawn_cert_file_watcher(
+    listener_name: String,
+    cert_path: PathBuf,
+    key_path: PathBuf,
+    tls_config: RustlsConfig,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        /// Poll interval for modification-time checks.
+        const POLL_INTERVAL: Duration = Duration::from_secs(30);
+
+        let mut interval = tokio::time::interval(POLL_INTERVAL);
+        // Skip the first (immediate) tick so we don't reload on startup.
+        interval.tick().await;
+
+        let mut last_mtime = cert_mtime(&cert_path);
+
+        loop {
+            interval.tick().await;
+
+            let current_mtime = cert_mtime(&cert_path);
+            if current_mtime == last_mtime {
+                continue;
+            }
+
+            match reload_tls_from_files(&cert_path, &key_path, &tls_config).await {
+                Ok(()) => {
+                    info!(
+                        listener = %listener_name,
+                        path = %cert_path.display(),
+                        "TLS certificate auto-reloaded from file"
+                    );
+                    last_mtime = current_mtime;
+                }
+                Err(message) => {
+                    warn!(
+                        listener = %listener_name,
+                        path = %cert_path.display(),
+                        error = %message,
+                        "TLS certificate auto-reload failed; retaining previous certificate"
+                    );
+                }
+            }
+        }
+    })
+}
+
+/// Read the modification time of a file, returning `None` on any error.
+fn cert_mtime(path: &std::path::Path) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+/// Read cert + key from files, validate, and hot-reload into `tls_config`.
+async fn reload_tls_from_files(
+    cert_path: &std::path::Path,
+    key_path: &std::path::Path,
+    tls_config: &RustlsConfig,
+) -> Result<(), String> {
+    let cert_pem = tokio::fs::read(cert_path)
+        .await
+        .map_err(|e| format!("read {}: {e}", cert_path.display()))?;
+    let key_pem =
+        tokio::fs::read(key_path).await.map_err(|e| format!("read {}: {e}", key_path.display()))?;
+
+    load_tls_identity(&cert_pem, &key_pem).map_err(|e| e.to_string())?;
+    validate_tls_not_expired(&cert_pem).map_err(|e| e.to_string())?;
+
+    tls_config.reload_from_pem(cert_pem, key_pem).await.map_err(|e| e.to_string())
 }
 
 async fn build_callback_response(
@@ -2390,6 +2575,8 @@ impl ListenerManager {
                     self.shutdown.clone(),
                     self.demon_init_secret.clone(),
                     self.demon_allow_legacy_ctr,
+                    self.tls_configs.clone(),
+                    self.watcher_handles.clone(),
                 )
                 .await
             }

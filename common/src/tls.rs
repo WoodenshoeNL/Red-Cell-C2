@@ -15,6 +15,7 @@ use time::OffsetDateTime;
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use x509_parser::prelude::FromDer as _;
 use zeroize::Zeroizing;
 
 use crate::config::HttpListenerCertConfig;
@@ -99,6 +100,66 @@ pub enum TlsError {
     /// rustls rejected the certificate/key combination.
     #[error("failed to build rustls server configuration: {0}")]
     Rustls(#[source] tokio_rustls::rustls::Error),
+    /// Certificate has passed its `notAfter` validity bound.
+    #[error("certificate expired at {not_after}")]
+    CertificateExpired {
+        /// RFC 3339-formatted expiry timestamp.
+        not_after: String,
+    },
+    /// Certificate `notBefore` is in the future.
+    #[error("certificate is not yet valid (valid from {not_before})")]
+    CertificateNotYetValid {
+        /// RFC 3339-formatted validity-start timestamp.
+        not_before: String,
+    },
+    /// The certificate DER could not be parsed for validity checking.
+    #[error("failed to parse certificate for validity check: {0}")]
+    CertificateParse(String),
+}
+
+/// Validate that the leaf certificate in `cert_pem` is currently within its validity window.
+///
+/// Parses the first DER certificate in the PEM block and compares its `notBefore` and
+/// `notAfter` fields against the current UTC clock.  Returns an error if:
+///
+/// - The certificate has already expired ([`TlsError::CertificateExpired`]).
+/// - The certificate is not yet valid ([`TlsError::CertificateNotYetValid`]).
+/// - The PEM could not be parsed ([`TlsError::MissingCertificates`] or
+///   [`TlsError::CertificateParse`]).
+pub fn validate_tls_not_expired(cert_pem: &[u8]) -> Result<(), TlsError> {
+    let mut reader = BufReader::new(cert_pem);
+    let certs: Vec<CertificateDer<'_>> =
+        rustls_pemfile::certs(&mut reader).collect::<Result<_, _>>()?;
+    let cert_der = certs.first().ok_or(TlsError::MissingCertificates)?;
+
+    let (_, cert) = x509_parser::certificate::X509Certificate::from_der(cert_der)
+        .map_err(|e| TlsError::CertificateParse(e.to_string()))?;
+
+    let now = OffsetDateTime::now_utc().unix_timestamp();
+    let not_before_ts = cert.validity().not_before.timestamp();
+    let not_after_ts = cert.validity().not_after.timestamp();
+
+    if now < not_before_ts {
+        let not_before_str = OffsetDateTime::from_unix_timestamp(not_before_ts)
+            .map(|t| {
+                t.format(&time::format_description::well_known::Rfc3339)
+                    .unwrap_or_else(|_| not_before_ts.to_string())
+            })
+            .unwrap_or_else(|_| not_before_ts.to_string());
+        return Err(TlsError::CertificateNotYetValid { not_before: not_before_str });
+    }
+
+    if now > not_after_ts {
+        let not_after_str = OffsetDateTime::from_unix_timestamp(not_after_ts)
+            .map(|t| {
+                t.format(&time::format_description::well_known::Rfc3339)
+                    .unwrap_or_else(|_| not_after_ts.to_string())
+            })
+            .unwrap_or_else(|_| not_after_ts.to_string());
+        return Err(TlsError::CertificateExpired { not_after: not_after_str });
+    }
+
+    Ok(())
 }
 
 /// Install the default rustls crypto provider once for the current process.
@@ -290,7 +351,7 @@ mod tests {
     use super::{
         PersistTlsError, TlsError, TlsIdentity, TlsKeyAlgorithm, generate_self_signed_tls_identity,
         install_default_crypto_provider, load_tls_identity, load_tls_identity_from_files,
-        resolve_or_persist_tls_identity, resolve_tls_identity,
+        resolve_or_persist_tls_identity, resolve_tls_identity, validate_tls_not_expired,
     };
     use crate::config::HttpListenerCertConfig;
 
@@ -1094,6 +1155,80 @@ mod tests {
         assert!(
             matches!(result, Err(PersistTlsError::WriteFile { .. })),
             "write failure should surface as PersistTlsError::WriteFile, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn validate_tls_not_expired_accepts_fresh_self_signed_cert() {
+        install_default_crypto_provider();
+        let identity = generate_self_signed_tls_identity(
+            &["test.local".to_owned()],
+            TlsKeyAlgorithm::EcdsaP256,
+        )
+        .expect("identity generation should succeed");
+
+        let result = validate_tls_not_expired(identity.certificate_pem());
+        assert!(result.is_ok(), "fresh self-signed cert should be valid, got: {result:?}");
+    }
+
+    #[test]
+    fn validate_tls_not_expired_rejects_missing_certificate() {
+        let result = validate_tls_not_expired(b"not a pem at all");
+        assert!(
+            matches!(result, Err(TlsError::MissingCertificates)),
+            "missing cert should return MissingCertificates, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn validate_tls_not_expired_rejects_expired_cert() {
+        use rcgen::{CertificateParams, DistinguishedName, KeyPair};
+        use time::Duration;
+
+        install_default_crypto_provider();
+        let not_before = time::OffsetDateTime::now_utc() - Duration::days(30);
+        let not_after = time::OffsetDateTime::now_utc() - Duration::days(2);
+
+        let key_pair = KeyPair::generate().expect("key pair generation should succeed");
+        let mut params = CertificateParams::new(vec!["expired.local".to_owned()])
+            .expect("params should be created");
+        params.not_before = not_before;
+        params.not_after = not_after;
+        params.distinguished_name = DistinguishedName::new();
+
+        let cert = params.self_signed(&key_pair).expect("self-signed cert should be generated");
+        let cert_pem = cert.pem();
+
+        let result = validate_tls_not_expired(cert_pem.as_bytes());
+        assert!(
+            matches!(result, Err(TlsError::CertificateExpired { .. })),
+            "expired cert should return CertificateExpired, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn validate_tls_not_expired_rejects_not_yet_valid_cert() {
+        use rcgen::{CertificateParams, DistinguishedName, KeyPair};
+        use time::Duration;
+
+        install_default_crypto_provider();
+        let not_before = time::OffsetDateTime::now_utc() + Duration::days(1);
+        let not_after = time::OffsetDateTime::now_utc() + Duration::days(365);
+
+        let key_pair = KeyPair::generate().expect("key pair generation should succeed");
+        let mut params = CertificateParams::new(vec!["future.local".to_owned()])
+            .expect("params should be created");
+        params.not_before = not_before;
+        params.not_after = not_after;
+        params.distinguished_name = DistinguishedName::new();
+
+        let cert = params.self_signed(&key_pair).expect("self-signed cert should be generated");
+        let cert_pem = cert.pem();
+
+        let result = validate_tls_not_expired(cert_pem.as_bytes());
+        assert!(
+            matches!(result, Err(TlsError::CertificateNotYetValid { .. })),
+            "future cert should return CertificateNotYetValid, got: {result:?}"
         );
     }
 }

@@ -121,8 +121,8 @@ pub fn global_config_path() -> Option<PathBuf> {
 /// only files that exist but are malformed return an error.
 ///
 /// On Unix, if the file exists with permissions looser than 0o600, they are
-/// silently tightened to owner-only read/write.  This guards against
-/// accidental exposure of API tokens on shared systems.
+/// tightened to owner-only read/write and a warning is printed to stderr.
+/// This guards against accidental exposure of API tokens on shared systems.
 pub fn load_config_file(path: &Path) -> Result<FileConfig, ConfigError> {
     if !path.is_file() {
         return Ok(FileConfig::default());
@@ -186,13 +186,37 @@ fn write_bytes(path: &Path, data: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// If `mode & 0o777` is not already `0o600`, returns the stderr warning text
+/// (including a trailing newline). Used by [`tighten_permissions`] and unit-tested.
+#[cfg(unix)]
+fn config_permission_tightening_warning(mode: u32) -> Option<String> {
+    let mode = mode & 0o777;
+    if mode == 0o600 {
+        None
+    } else {
+        Some(format!(
+            "warning: config file has insecure permissions ({mode:04o}); tightening to 0600.\n\
+If this is unexpected, your config file may have been modified by another process.\n"
+        ))
+    }
+}
+
 /// Best-effort tighten file permissions to 0o600 on Unix.
 ///
-/// Silently ignores errors (e.g. file owned by another user) so callers
+/// Before tightening, prints a warning to stderr if the mode was not already
+/// `0o600`. Silently ignores errors (e.g. file owned by another user) so callers
 /// never fail due to a permission-hardening attempt.
 #[cfg(unix)]
 fn tighten_permissions(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
+
+    let mode = match std::fs::metadata(path) {
+        Ok(m) => m.permissions().mode(),
+        Err(_) => return,
+    };
+    if let Some(msg) = config_permission_tightening_warning(mode) {
+        eprint!("{msg}");
+    }
     let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
 }
 
@@ -518,6 +542,23 @@ timeout = 120
             cfg.timeout, 120,
             "file timeout (120) must win when --timeout is omitted, even when --server and --token are both supplied"
         );
+    }
+
+    // ── permission tightening warning ──────────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn config_permission_tightening_warning_none_when_already_0600() {
+        assert_eq!(config_permission_tightening_warning(0o600), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_permission_tightening_warning_describes_insecure_mode() {
+        let msg = config_permission_tightening_warning(0o644).expect("expected warning");
+        assert!(msg.contains("(0644)"), "msg={msg:?}");
+        assert!(msg.contains("tightening to 0600"), "msg={msg:?}");
+        assert!(msg.contains("another process"), "msg={msg:?}");
     }
 
     // ── write_config_file ──────────────────────────────────────────────────

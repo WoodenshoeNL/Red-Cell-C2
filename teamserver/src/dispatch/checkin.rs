@@ -50,6 +50,24 @@ pub(super) async fn handle_checkin(
             updated.encryption = existing.encryption.clone();
         }
 
+        // SECURITY: Demon and Archon agents carry no sequence number, timestamp, or
+        // nonce in the COMMAND_CHECKIN payload.  Any captured CHECKIN frame can be
+        // replayed successfully — AES decryption will pass and metadata will be
+        // overwritten with the captured values.  Emit a warning so operators are
+        // alerted when metadata is updated without replay protection.
+        // Specter/Phantom agents are excluded: they carry a monotonic sequence number
+        // (INIT_EXT_SEQ_PROTECTED) and their callbacks are validated by
+        // `common::callback_seq`.  See also `common/src/callback_seq.rs` and
+        // `docs/operator-security.md`.
+        if !registry.is_seq_protected(agent_id).await {
+            warn!(
+                agent_id = format_args!("{agent_id:08X}"),
+                "CHECKIN updated agent metadata without replay protection — \
+                 Demon/Archon agents carry no sequence number; a captured CHECKIN \
+                 frame can be replayed to overwrite hostname/username/IP/PID metadata. \
+                 Migrate to Specter/Phantom to eliminate this risk."
+            );
+        }
         registry.update_agent(updated).await?;
         registry.get(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?
     } else {
@@ -995,6 +1013,78 @@ mod tests {
             "agent.checkin audit entry must be written even when plugin emit fails"
         );
         assert_eq!(page.items[0].action, "agent.checkin");
+
+        Ok(())
+    }
+
+    // -- replay-warning path (seq protection) tests --
+
+    /// For a non-seq-protected (Demon/Archon) agent, a valid CHECKIN with metadata
+    /// must succeed — the replay warning is advisory only and must not block the update.
+    #[tokio::test]
+    async fn handle_checkin_non_seq_protected_agent_metadata_updated_with_warning()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let key = test_key(0xAA);
+        let iv = test_iv(0xBB);
+        let agent_id = 0xDEAD_0060;
+
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+
+        registry.insert(sample_agent(agent_id, key, iv)).await?;
+        // Newly inserted agents default to seq_protected = false (Demon/Archon compatibility).
+        assert!(
+            !registry.is_seq_protected(agent_id).await,
+            "test precondition: agent must not be seq-protected"
+        );
+
+        let payload = make_checkin_payload(agent_id, key, iv);
+        // Must succeed (warning is emitted but does not block the update).
+        handle_checkin(&registry, &events, &database, None, agent_id, &payload).await?;
+
+        let agent = registry.get(agent_id).await.ok_or("agent should still exist")?;
+        // Metadata must have been updated despite the replay-warning path.
+        assert_eq!(
+            agent.hostname, "wkstn-02",
+            "hostname must be updated for non-seq-protected agent"
+        );
+        assert_eq!(
+            agent.username, "svc-op",
+            "username must be updated for non-seq-protected agent"
+        );
+
+        Ok(())
+    }
+
+    /// For a seq-protected (Specter/Phantom) agent, a valid CHECKIN with metadata
+    /// must succeed and the replay-warning code path must not fire.
+    #[tokio::test]
+    async fn handle_checkin_seq_protected_agent_metadata_updated_without_replay_warning()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let key = test_key(0xAA);
+        let iv = test_iv(0xBB);
+        let agent_id = 0xDEAD_0061;
+
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+
+        registry.insert(sample_agent(agent_id, key, iv)).await?;
+        // Mark agent as seq-protected (Specter/Phantom path).
+        registry.set_seq_protected(agent_id, true).await?;
+        assert!(
+            registry.is_seq_protected(agent_id).await,
+            "test precondition: agent must be seq-protected"
+        );
+
+        let payload = make_checkin_payload(agent_id, key, iv);
+        // Must succeed without emitting the replay warning.
+        handle_checkin(&registry, &events, &database, None, agent_id, &payload).await?;
+
+        let agent = registry.get(agent_id).await.ok_or("agent should still exist")?;
+        assert_eq!(agent.hostname, "wkstn-02", "hostname must be updated for seq-protected agent");
+        assert_eq!(agent.username, "svc-op", "username must be updated for seq-protected agent");
 
         Ok(())
     }

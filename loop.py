@@ -40,7 +40,7 @@ DEV_SLEEP_NO_WORK     = 60     # wait when no tasks are ready
 DEV_SLEEP_BETWEEN     = 15     # wait between tasks when --sleep not set
 DEV_SLEEP_TOKEN_LIMIT = 1200   # wait after Claude context limit hit
 DEV_CLEAN_EVERY       = 3      # run build-artifact cleanup every N dev iterations
-DEV_MAX_TURNS         = 100    # max turns per dev session; agent commits WIP and resumes next iteration
+DEV_MAX_TURNS         = 150    # max turns per dev session; agent commits WIP and resumes next iteration
 
 # Valid zone names and their corresponding source paths
 ZONES = {

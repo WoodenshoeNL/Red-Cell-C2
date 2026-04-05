@@ -113,6 +113,81 @@ Recovering one agent's traffic does not expose other agents' sessions.
 
 ---
 
+## CHECKIN replay — Demon/Archon metadata overwrite
+
+**Severity:** Medium — an attacker who captures a single CHECKIN frame can replay it to
+overwrite agent metadata (hostname, username, internal IP, PID, process path, etc.).
+Cryptographic session keys are **not** affected (the session-key rotation guard
+prevents key substitution via replay; see the comment in
+`teamserver/src/dispatch/checkin.rs`).
+
+### Background
+
+The original Demon binary protocol carries no sequence number, timestamp, or
+challenge-response in the `COMMAND_CHECKIN` payload.  Every CHECKIN for the same
+agent is encrypted with the same AES key and a fixed IV, so AES decryption succeeds
+for any captured frame — there is no freshness signal available to the teamserver.
+
+Specter and Phantom agents are **not** affected: they negotiate the
+`INIT_EXT_SEQ_PROTECTED` flag during `DEMON_INIT` and prefix every callback with an
+8-byte monotonic sequence number validated by `common::callback_seq`.
+
+### Attack scenario
+
+1. Adversary records a single CHECKIN HTTP request from a Demon/Archon agent.
+2. Adversary re-sends the identical request to the teamserver listener (from any IP,
+   because the outer HTTP envelope is not authenticated beyond the TLS layer).
+3. The teamserver decrypts the CHECKIN payload successfully and overwrites the stored
+   hostname, username, IP address, PID, and process path for that agent.
+4. Operators see stale metadata and may misidentify the current host or process.
+
+### Teamserver detection
+
+The teamserver emits a `WARN`-level log entry every time metadata is updated for a
+non-seq-protected agent:
+
+```
+WARN agent_id=DEADBEEF CHECKIN updated agent metadata without replay protection — \
+     Demon/Archon agents carry no sequence number; a captured CHECKIN frame can be \
+     replayed to overwrite hostname/username/IP/PID metadata. \
+     Migrate to Specter/Phantom to eliminate this risk.
+```
+
+This warning fires on **every** metadata-bearing CHECKIN for Demon/Archon agents —
+including legitimate ones.  Its purpose is to ensure operators remain aware of the
+limitation.  Future work could suppress the warning once a rate-limit or first-seen
+heuristic is in place.
+
+### Risk assessment
+
+| Context | Risk level | Notes |
+|---|---|---|
+| Lab / isolated test environment | **None** | No real adversary in-path |
+| Production over TLS, short session | **Low** | Attacker must break TLS first; metadata overwrite is cosmetic |
+| Production without TLS | **Medium** | Any passive observer can capture and replay |
+| Long-running implant (days/weeks) | **Medium** | Larger replay window; more captured frames |
+
+### Remediation
+
+- **Short term (implemented):** The teamserver now emits a `WARN` log entry on every
+  metadata-bearing CHECKIN for non-seq-protected agents.  Monitor these entries in
+  your SIEM or log aggregator for unexpected frequencies.
+- **Long term:** Migrate Demon/Archon agents to Specter (Windows) or Phantom (Linux).
+  Both agents implement the full Demon command set and negotiate
+  `INIT_EXT_SEQ_PROTECTED` automatically, eliminating this vulnerability.  See the
+  *Demon → Specter/Phantom migration guide* section below.
+- **Wire-level mitigation:** TLS on the listener limits who can capture CHECKIN
+  frames in transit, raising the practical bar for this attack.
+
+### Relevant code
+
+- `teamserver/src/dispatch/checkin.rs` — metadata update path with the replay warning.
+- `common/src/callback_seq.rs` — monotonic sequence number validation used by
+  Specter/Phantom.
+- `teamserver/src/agents.rs:676` — `is_seq_protected` registry query.
+
+---
+
 ## Demon → Specter/Phantom migration guide
 
 > **Deprecation notice:** `AllowLegacyCtr` support will be **removed on 2027-01-01**.

@@ -639,8 +639,7 @@ impl PluginRuntime {
                 LOADING_PLUGIN.with(|cell| {
                     *cell.borrow_mut() = Some(module_name.clone());
                 });
-                let load_result =
-                    PyModule::from_code(py, &code, &filename, &module_name_cstr);
+                let load_result = PyModule::from_code(py, &code, &filename, &module_name_cstr);
                 LOADING_PLUGIN.with(|cell| {
                     *cell.borrow_mut() = None;
                 });
@@ -840,9 +839,10 @@ impl PluginRuntime {
 
                     // Wrap each invocation in catch_unwind to prevent a Rust panic
                     // inside a callback from aborting the entire dispatch task.
-                    let call_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                        || named_cb.callback.bind(py).call1(py_args.clone()),
-                    ));
+                    let call_result =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            named_cb.callback.bind(py).call1(py_args.clone())
+                        }));
 
                     match call_result {
                         Ok(Ok(_)) => {

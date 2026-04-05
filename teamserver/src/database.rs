@@ -2275,9 +2275,7 @@ impl AgentGroupRepository {
         .bind(group_name)
         .fetch_all(&self.pool)
         .await?;
-        ids.into_iter()
-            .map(|v| u32_from_i64("ts_agent_group_members.agent_id", v))
-            .collect()
+        ids.into_iter().map(|v| u32_from_i64("ts_agent_group_members.agent_id", v)).collect()
     }
 
     /// Add `agent_id` to `group_name`.  The group must already exist.  No-ops
@@ -2304,13 +2302,12 @@ impl AgentGroupRepository {
         agent_id: u32,
         group_name: &str,
     ) -> Result<bool, TeamserverError> {
-        let result = sqlx::query(
-            "DELETE FROM ts_agent_group_members WHERE agent_id = ? AND group_name = ?",
-        )
-        .bind(agent_id as i64)
-        .bind(group_name)
-        .execute(&self.pool)
-        .await?;
+        let result =
+            sqlx::query("DELETE FROM ts_agent_group_members WHERE agent_id = ? AND group_name = ?")
+                .bind(agent_id as i64)
+                .bind(group_name)
+                .execute(&self.pool)
+                .await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -2463,12 +2460,10 @@ impl ListenerAccessRepository {
         operators: &[String],
     ) -> Result<(), TeamserverError> {
         let mut tx = self.pool.begin().await?;
-        sqlx::query(
-            "DELETE FROM ts_listener_allowed_operators WHERE listener_name = ?",
-        )
-        .bind(listener_name)
-        .execute(&mut *tx)
-        .await?;
+        sqlx::query("DELETE FROM ts_listener_allowed_operators WHERE listener_name = ?")
+            .bind(listener_name)
+            .execute(&mut *tx)
+            .await?;
         for username in operators {
             sqlx::query(
                 "INSERT INTO ts_listener_allowed_operators (listener_name, username)
@@ -4190,9 +4185,7 @@ mod tests {
         let db = Database::connect_in_memory().await.expect("db");
         seed_agents(&db, &[0x0000_0001]).await;
         let repo = db.agent_groups();
-        repo.set_agent_groups(0x0000_0001, &["a".to_owned(), "b".to_owned()])
-            .await
-            .expect("set1");
+        repo.set_agent_groups(0x0000_0001, &["a".to_owned(), "b".to_owned()]).await.expect("set1");
         repo.set_agent_groups(0x0000_0001, &["c".to_owned()]).await.expect("set2");
         let fetched = repo.groups_for_agent(0x0000_0001).await.expect("get");
         assert_eq!(fetched, vec!["c"]);
@@ -4259,10 +4252,7 @@ mod tests {
     #[tokio::test]
     async fn listener_access_unrestricted_by_default() {
         let db = Database::connect_in_memory().await.expect("db");
-        db.listeners()
-            .create(&stub_http_listener_for_access("http-main"))
-            .await
-            .expect("create");
+        db.listeners().create(&stub_http_listener_for_access("http-main")).await.expect("create");
         let repo = db.listener_access();
         assert!(repo.allowed_operators("http-main").await.expect("list").is_empty());
         assert!(repo.operator_may_use_listener("anyone", "http-main").await.expect("check"));
@@ -4271,10 +4261,7 @@ mod tests {
     #[tokio::test]
     async fn listener_access_set_and_enforce() {
         let db = Database::connect_in_memory().await.expect("db");
-        db.listeners()
-            .create(&stub_http_listener_for_access("exfil"))
-            .await
-            .expect("create");
+        db.listeners().create(&stub_http_listener_for_access("exfil")).await.expect("create");
         let repo = db.listener_access();
         repo.set_allowed_operators("exfil", &["alice".to_owned()]).await.expect("set");
         assert!(repo.operator_may_use_listener("alice", "exfil").await.expect("alice"));
@@ -4284,10 +4271,7 @@ mod tests {
     #[tokio::test]
     async fn listener_access_set_empty_removes_restrictions() {
         let db = Database::connect_in_memory().await.expect("db");
-        db.listeners()
-            .create(&stub_http_listener_for_access("http-test"))
-            .await
-            .expect("create");
+        db.listeners().create(&stub_http_listener_for_access("http-test")).await.expect("create");
         let repo = db.listener_access();
         repo.set_allowed_operators("http-test", &["alice".to_owned()]).await.expect("set");
         repo.set_allowed_operators("http-test", &[]).await.expect("clear");

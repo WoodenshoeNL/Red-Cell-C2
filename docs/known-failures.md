@@ -77,6 +77,30 @@ cargo test --workspace  # stalls at auth test after Specter tests complete
 
 ---
 
+### red-cell (test "mock_demon_agent_checkin") and (test "load_and_chaos") — lld Bus error (SIGBUS) during linking
+
+**Tests**: `teamserver/tests/mock_demon_agent_checkin.rs`, `teamserver/tests/load_and_chaos.rs`
+
+**Symptom**: `rust-lld` crashes with SIGBUS (signal 7 / Bus error) when linking these large
+test binaries.  The crash occurs inside `llvm::parallelFor` during the link phase.  Root
+cause is OOM: the machine has ~3.8 GB RAM + 3.8 GB swap and the linker exhausts memory
+mapping the combined `.rlib` set (247 object files for the teamserver integration tests).
+
+The failure is **non-deterministic** — it occurs only when available RAM is low (e.g. after
+a full `cargo nextest run --workspace` run that has already exhausted the incremental cache
+budget).  When RAM is plentiful the tests link and run successfully.
+
+**Repro**:
+```bash
+cargo nextest run --workspace   # fails after disk/RAM is ~full from earlier compilation
+```
+
+**Tracking**: needs a beads issue (shell unavailable when first observed 2026-04-05)
+
+**Zone**: teamserver
+
+---
+
 ## Resolved (keep for 7 days, then remove)
 
 ### listener_lifecycle — agent_reconnects_after_listener_restart

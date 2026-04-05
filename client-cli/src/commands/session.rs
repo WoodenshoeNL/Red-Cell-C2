@@ -51,13 +51,24 @@
 //! | `ping` | Answered immediately; no server round-trip |
 //! | `exit` | Sends WS close frame and exits cleanly     |
 //!
-//! All other commands are forwarded to the server unchanged.
+//! Any other `cmd` must match a known session command (same names as the
+//! `red-cell-cli` surface and the teamserver session router).  Unknown
+//! commands produce a single local JSON line on **stdout** and are not sent
+//! to the server:
+//! ```json
+//! {"error": {"code": "unknown_command", "message": "unknown command `…`"}}
+//! ```
+//!
+//! All recognised commands are forwarded to the server unchanged.
 //!
 //! # Default agent
 //!
 //! When `--agent <id>` is passed to `red-cell-cli session`, the session injects
 //! the agent id into any incoming command that has no `"id"` field before
 //! forwarding it to the server.
+
+use std::collections::HashSet;
+use std::sync::LazyLock;
 
 use futures_util::{SinkExt as _, StreamExt as _};
 use tokio::io::AsyncBufReadExt as _;
@@ -71,6 +82,63 @@ use crate::tls::build_fingerprint_client_config;
 
 /// HTTP header name used by the teamserver for API-key authentication.
 const API_KEY_HEADER: &str = "x-api-key";
+
+/// Valid `cmd` values for session NDJSON (keep in sync with teamserver
+/// `build_session_rest_request` in `teamserver/src/api.rs`, plus CLI-stable
+/// aliases for subcommands that callers expect to spell like the CLI).
+static SESSION_KNOWN_COMMANDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    HashSet::from([
+        "status",
+        "agent.list",
+        "agent.show",
+        "agent.exec",
+        "agent.output",
+        "agent.kill",
+        "agent.upload",
+        "agent.download",
+        "agent.groups",
+        "agent.set_groups",
+        "listener.list",
+        "listener.show",
+        "listener.create",
+        "listener.update",
+        "listener.start",
+        "listener.stop",
+        "listener.delete",
+        "listener.mark",
+        "listener.access",
+        "listener.set_access",
+        "operator.list",
+        "operator.create",
+        "operator.delete",
+        "operator.set_role",
+        "operator.show_agent_groups",
+        "operator.set_agent_groups",
+        "audit.list",
+        "log.list",
+        "log.tail",
+        "session_activity.list",
+        "credential.list",
+        "credential.show",
+        "job.list",
+        "job.show",
+        "loot.list",
+        "loot.download",
+        "loot.show",
+        "payload.list",
+        "payload.build",
+        "payload.job",
+        "payload.download",
+        "payload_cache.flush",
+        "payload-cache.flush",
+        "webhooks.stats",
+    ])
+});
+
+#[inline]
+fn is_known_session_command(cmd: &str) -> bool {
+    SESSION_KNOWN_COMMANDS.contains(cmd)
+}
 
 // ── URL helpers ──────────────────────────────────────────────────────────────
 
@@ -358,6 +426,7 @@ struct SessionClosedEvent {
 /// - Invalid JSON produces a local error response and continues.
 /// - `{"cmd":"ping"}` is answered immediately without a server round-trip.
 /// - `{"cmd":"exit"}` sends a WebSocket close frame and exits cleanly.
+/// - Unknown `cmd` values produce a local JSON error on stdout (no forward).
 /// - All other commands have the default agent id injected (if applicable) and
 ///   are forwarded to the server as a WebSocket text frame.
 async fn process_stdin_line<Out, ErrOut, Si>(
@@ -416,6 +485,13 @@ where
             if cmd == "exit" {
                 let _ = sink.close().await;
                 return LoopControl::Exit(EXIT_SUCCESS);
+            }
+
+            if !is_known_session_command(&cmd) {
+                if emit_unknown_command_to_stdout(stdout, &cmd).is_err() {
+                    return LoopControl::Exit(EXIT_GENERAL);
+                }
+                return LoopControl::Continue;
             }
 
             // ── default-agent injection ───────────────────────────────────
@@ -487,6 +563,8 @@ fn command_accepts_agent_id(cmd: &str) -> bool {
             | "agent.kill"
             | "agent.upload"
             | "agent.download"
+            | "agent.groups"
+            | "agent.set_groups"
     )
 }
 
@@ -641,6 +719,26 @@ fn emit_error_to(
     }
 }
 
+/// Emit a local unknown-command error to stdout (session contract for client-side validation).
+fn emit_unknown_command_to_stdout(
+    writer: &mut impl std::io::Write,
+    cmd: &str,
+) -> std::io::Result<()> {
+    let envelope = serde_json::json!({
+        "error": {
+            "code": "unknown_command",
+            "message": format!("unknown command `{cmd}`"),
+        }
+    });
+    match serde_json::to_string(&envelope) {
+        Ok(s) => writeln!(writer, "{s}"),
+        Err(_) => writeln!(
+            writer,
+            r#"{{"error":{{"code":"unknown_command","message":"unknown command"}}}}"#
+        ),
+    }
+}
+
 /// Write a session-close diagnostic line to `writer`.
 fn emit_session_closed_to(
     writer: &mut impl std::io::Write,
@@ -774,6 +872,32 @@ mod tests {
         assert!(!response_is_error_envelope("not json"));
     }
 
+    // ── session command allowlist ──────────────────────────────────────────────
+
+    #[test]
+    fn known_session_commands_match_teamserver_router() {
+        assert!(is_known_session_command("agent.list"));
+        assert!(is_known_session_command("credential.list"));
+        assert!(is_known_session_command("operator.set_role"));
+    }
+
+    #[test]
+    fn unknown_session_commands_rejected_before_forward() {
+        assert!(!is_known_session_command("agent.lst"));
+        assert!(!is_known_session_command("nosuch"));
+        assert!(!is_known_session_command(""));
+    }
+
+    #[test]
+    fn emit_unknown_command_to_stdout_matches_contract() {
+        let mut buf = Vec::new();
+        emit_unknown_command_to_stdout(&mut buf, "agent.lst").expect("write");
+        let val: serde_json::Value =
+            serde_json::from_str(String::from_utf8(buf).expect("utf8").trim()).expect("json");
+        assert_eq!(val["error"]["code"], "unknown_command");
+        assert_eq!(val["error"]["message"].as_str(), Some("unknown command `agent.lst`"));
+    }
+
     // ── run_with_io via mock WebSocket server ──────────────────────────────────
 
     /// Spin up a local plain-text WebSocket server and return the listening
@@ -896,6 +1020,37 @@ mod tests {
         let val: serde_json::Value = serde_json::from_str(line.trim()).expect("parse relay");
         assert_eq!(val["ok"], true, "relayed response must be ok:true");
         assert_eq!(val["cmd"], "agent.list");
+    }
+
+    /// A typo in `cmd` must be rejected locally with no WebSocket text frame.
+    #[tokio::test]
+    async fn unknown_command_is_not_forwarded() {
+        let addr = mock_ws_server(|mut ws| async move {
+            while let Some(msg) = ws.next().await {
+                match msg {
+                    Ok(Message::Text(_)) => panic!("unknown command must not be forwarded as text"),
+                    Ok(Message::Close(_)) => break,
+                    Err(_) => break,
+                    _ => {}
+                }
+            }
+            let _ = ws.close(None).await;
+        })
+        .await;
+
+        let ws = ws_connect(addr, "test-token").await;
+        let input = b"{\"cmd\":\"agent.lst\"}\n";
+        let reader = tokio::io::BufReader::new(input.as_slice());
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+
+        let code = run_with_io(reader, &mut stdout, &mut stderr, ws, None).await;
+        assert_eq!(code, EXIT_SUCCESS);
+
+        assert!(stderr.is_empty(), "local unknown-command error must not hit stderr");
+        let line = String::from_utf8(stdout).expect("utf8");
+        let val: serde_json::Value = serde_json::from_str(line.trim()).expect("json");
+        assert_eq!(val["error"]["code"], "unknown_command");
     }
 
     /// Invalid JSON on stdin must produce a local error line and continue

@@ -18,12 +18,13 @@ use std::time::Duration;
 
 use futures_util::future::join_all;
 use red_cell::{
-    AgentRegistry, DEFAULT_MAX_DOWNLOAD_BYTES, Database, EventBus, ListenerManager,
+    AgentRegistry, DEFAULT_MAX_DOWNLOAD_BYTES, Database, EventBus, EventReceiver, ListenerManager,
     SocketRelayManager,
 };
 use red_cell_common::HttpListenerConfig;
 use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH};
-use red_cell_common::demon::{DemonCommand, DemonEnvelope};
+use red_cell_common::demon::{DemonCommand, DemonEnvelope, DemonFilesystemCommand};
+use red_cell_common::operator::OperatorMessage;
 use reqwest::Client;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -109,6 +110,84 @@ fn key_from_seed(seed: u8) -> [u8; AGENT_KEY_LENGTH] {
 /// Make a test AES IV from a seed byte (non-zero, non-degenerate).
 fn iv_from_seed(seed: u8) -> [u8; AGENT_IV_LENGTH] {
     core::array::from_fn(|i| seed.wrapping_add(i as u8 + 0x10))
+}
+
+// ---------------------------------------------------------------------------
+// Download payload builders (used by download-limit enforcement tests)
+// ---------------------------------------------------------------------------
+
+/// Encode a string as LE-length-prefixed UTF-16 LE bytes.
+fn le_utf16(s: &str) -> Vec<u8> {
+    let utf16_bytes: Vec<u8> = s.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
+    let mut out = (utf16_bytes.len() as u32).to_le_bytes().to_vec();
+    out.extend_from_slice(&utf16_bytes);
+    out
+}
+
+/// Encode a byte slice as LE-length-prefixed bytes.
+fn le_bytes(b: &[u8]) -> Vec<u8> {
+    let mut out = (b.len() as u32).to_le_bytes().to_vec();
+    out.extend_from_slice(b);
+    out
+}
+
+/// Build a `CommandFs` / `Download` mode=0 (start) payload.
+///
+/// Wire layout (all LE): u32 subcommand | u32 mode=0 | u32 file_id | u64 expected_size | utf16 path
+fn download_start_payload(file_id: u32, expected_size: u64, remote_path: &str) -> Vec<u8> {
+    let mut p = u32::from(DemonFilesystemCommand::Download).to_le_bytes().to_vec();
+    p.extend_from_slice(&0_u32.to_le_bytes()); // mode = 0 (start)
+    p.extend_from_slice(&file_id.to_le_bytes());
+    p.extend_from_slice(&expected_size.to_le_bytes());
+    p.extend_from_slice(&le_utf16(remote_path));
+    p
+}
+
+/// Build a `CommandFs` / `Download` mode=1 (chunk) payload.
+///
+/// Wire layout (all LE): u32 subcommand | u32 mode=1 | u32 file_id | bytes chunk
+fn download_chunk_payload(file_id: u32, chunk: &[u8]) -> Vec<u8> {
+    let mut p = u32::from(DemonFilesystemCommand::Download).to_le_bytes().to_vec();
+    p.extend_from_slice(&1_u32.to_le_bytes()); // mode = 1 (chunk)
+    p.extend_from_slice(&file_id.to_le_bytes());
+    p.extend_from_slice(&le_bytes(chunk));
+    p
+}
+
+/// Drain the event bus receiver for up to `deadline`, returning the first
+/// `AgentResponse` event whose `Type` extra field equals `expected_type` and
+/// whose `Message` extra field contains `message_substring`.
+///
+/// Returns `true` if such an event is found before the deadline.
+async fn event_contains_response(
+    rx: &mut EventReceiver,
+    expected_type: &str,
+    message_substring: &str,
+    deadline: tokio::time::Instant,
+) -> bool {
+    loop {
+        match tokio::time::timeout_at(deadline, rx.recv()).await {
+            Ok(Some(OperatorMessage::AgentResponse(msg))) => {
+                let type_match = msg
+                    .info
+                    .extra
+                    .get("Type")
+                    .and_then(|v| v.as_str())
+                    .map_or(false, |t| t == expected_type);
+                let msg_match = msg
+                    .info
+                    .extra
+                    .get("Message")
+                    .and_then(|v| v.as_str())
+                    .map_or(false, |m| m.contains(message_substring));
+                if type_match && msg_match {
+                    return true;
+                }
+            }
+            Ok(Some(_)) => {}                  // skip other event types
+            Ok(None) | Err(_) => return false, // bus closed or timed out
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -430,24 +509,39 @@ async fn mid_post_disconnect_leaves_no_ghost_agent() -> Result<(), Box<dyn std::
 }
 
 /// **Download limit under concurrent load** — configure the listener with a
-/// 1 MiB aggregate download cap, then have multiple agents attempt concurrent
-/// uploads that together exceed the cap.  The listener must reject excess
-/// uploads rather than allocating unbounded memory.
+/// 512 KiB aggregate download cap, then have multiple agents open concurrent
+/// downloads and push 256 KiB chunks each (total 1.25 MiB — well above the cap).
 ///
-/// This verifies that `ListenerManager::with_max_aggregate_download_bytes` is enforced
-/// even under concurrent pressure.
+/// This verifies that `ListenerManager::with_max_aggregate_download_bytes` actually
+/// fires `DownloadAggregateTooLarge` under concurrent pressure.  The previous version
+/// of this test sent raw (unencrypted) packets that failed at the crypto layer before
+/// reaching the download tracker, so the cap was never exercised.
+///
+/// Protocol:
+/// 1. Register N agents (each with their own session key).
+/// 2. Send `CommandFs / Download mode=0 (start)` for every agent — opens the download slot.
+/// 3. Concurrently send `CommandFs / Download mode=1 (chunk)` for every agent with a 256 KiB
+///    chunk.  The aggregate cap (512 KiB) allows at most 2 to succeed; the remaining ≥3 must
+///    be rejected with a `DownloadAggregateTooLarge` error event.
+/// 4. Assert that at least one `AgentResponse{Type=Error, Message∋"aggregate"}` event was
+///    broadcast before a short deadline.
 #[tokio::test]
 async fn download_limit_enforced_under_concurrent_upload() -> Result<(), Box<dyn std::error::Error>>
 {
-    // 512 KiB aggregate cap.
+    // 512 KiB aggregate cap — allows at most 2 of the 256 KiB chunks below.
     const CAP_BYTES: u64 = 512 * 1024;
-    // Each upload is 256 KiB — three concurrent uploads exceed the cap.
-    const UPLOAD_SIZE: usize = 256 * 1024;
+    // Each chunk is 256 KiB — 5 agents × 256 KiB = 1 280 KiB > cap.
+    const CHUNK_SIZE: usize = 256 * 1024;
     const CONCURRENT_AGENTS: u32 = 5;
 
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
+
+    // Subscribe before the EventBus is moved into the ListenerManager so we
+    // receive all events broadcast during the test.
+    let mut event_rx = events.subscribe();
+
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
     let manager = ListenerManager::new(database, registry.clone(), events, sockets, None)
         .with_max_aggregate_download_bytes(CAP_BYTES)
@@ -461,45 +555,74 @@ async fn download_limit_enforced_under_concurrent_upload() -> Result<(), Box<dyn
 
     let client = Arc::new(Client::new());
 
-    // First, register all agents.
+    // Step 1 — register all agents sequentially.
     for i in 1..=CONCURRENT_AGENTS {
         let body = common::valid_demon_init_body(i, key_from_seed(i as u8), iv_from_seed(i as u8));
         let resp = client.post(format!("http://127.0.0.1:{port}/")).body(body).send().await?;
         assert!(resp.status().is_success(), "agent {i} should register; status={}", resp.status());
     }
 
-    // Build an oversized `DemonEnvelope` that reports a large payload.
-    // We use the raw `to_bytes` format: [size(4) | magic(4) | agent_id(4) | payload].
-    // The payload starts with a command word; the rest is ignored since we want the
-    // body-size check to fire.
-    let large_payload: Vec<u8> = vec![0xAA; UPLOAD_SIZE];
+    // Step 2 — open a download slot for every agent (mode=0, sequential).
+    // In legacy CTR mode every packet starts at AES-CTR block 0.
+    for i in 1..=CONCURRENT_AGENTS {
+        let file_id = 0x0100_u32 + i;
+        let start_payload = download_start_payload(
+            file_id,
+            (CHUNK_SIZE * 2) as u64,
+            &format!("C:\\temp\\file_{i}.bin"),
+        );
+        let body = common::valid_demon_callback_body(
+            i,
+            key_from_seed(i as u8),
+            iv_from_seed(i as u8),
+            0, // ctr_offset=0 — legacy mode, never advances
+            u32::from(DemonCommand::CommandFs),
+            i, // request_id
+            &start_payload,
+        );
+        let resp = client.post(format!("http://127.0.0.1:{port}/")).body(body).send().await?;
+        assert!(
+            resp.status().is_success(),
+            "agent {i} download-start should succeed; status={}",
+            resp.status()
+        );
+    }
 
-    // Attempt CONCURRENT_AGENTS concurrent uploads — together they exceed the cap.
+    // Step 3 — push 256 KiB chunks concurrently (total 1 280 KiB > 512 KiB cap).
+    // The DownloadAggregateTooLarge handler emits an AgentResponse{Type=Error} event
+    // rather than returning an HTTP error, so all HTTP responses will be 200 OK — the
+    // aggregate cap is only observable through the event bus.
+    let chunk = vec![0xAA_u8; CHUNK_SIZE];
     let tasks: Vec<_> = (1..=CONCURRENT_AGENTS)
         .map(|i| {
             let client = Arc::clone(&client);
-            let payload_bytes = large_payload.clone();
+            let chunk = chunk.clone();
+            let file_id = 0x0100_u32 + i;
+            let chunk_payload = download_chunk_payload(file_id, &chunk);
+            let body = common::valid_demon_callback_body(
+                i,
+                key_from_seed(i as u8),
+                iv_from_seed(i as u8),
+                0, // ctr_offset=0 — legacy mode, never advances
+                u32::from(DemonCommand::CommandFs),
+                i,
+                &chunk_payload,
+            );
             tokio::spawn(async move {
-                let envelope = DemonEnvelope::new(i, payload_bytes)?;
-                let resp = client
-                    .post(format!("http://127.0.0.1:{port}/"))
-                    .body(envelope.to_bytes())
-                    .send()
-                    .await?;
-                Ok::<_, Box<dyn std::error::Error + Send + Sync>>(resp.status())
+                client.post(format!("http://127.0.0.1:{port}/")).body(body).send().await
             })
         })
         .collect();
+    join_all(tasks).await;
 
-    let statuses: Vec<_> = join_all(tasks).await.into_iter().filter_map(|r| r.ok()?.ok()).collect();
-
-    // At least one request must have been rejected (cap enforced).
-    let rejected = statuses.iter().filter(|s| !s.is_success()).count();
+    // Step 4 — verify the aggregate cap fired at least once.
+    // Allow a short window (300 ms) for async broadcasts to land.
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(300);
     assert!(
-        rejected >= 1,
-        "expected at least one upload to be rejected when aggregate cap ({CAP_BYTES} bytes) is \
-         exceeded, but all {} requests succeeded",
-        statuses.len()
+        event_contains_response(&mut event_rx, "Error", "aggregate", deadline).await,
+        "expected at least one download chunk to trigger the aggregate cap ({CAP_BYTES} bytes) \
+         and broadcast an AgentResponse{{Type=Error, Message∋\"aggregate\"}} event, \
+         but none was observed within the deadline"
     );
 
     Ok(())

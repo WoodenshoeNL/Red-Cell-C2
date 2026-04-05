@@ -25,7 +25,7 @@ Each loop run updates the running totals and appends a review entry.
 | Clippy warnings | 11 | 0 | 1 |
 | Protocol errors | 30 | 32 | 3 |
 | Security issues | 61 | 39 | 0 |
-| Architecture drift | 35 | 25 | 1 |
+| Architecture drift | 38 | 25 | 1 |
 | Memory / resource leaks | 12 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 10 | 0 |
 | Test infrastructure / flakiness | 50 | 6 | 1 |
@@ -41,6 +41,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-04-05 20:30
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 3 | architecture drift (oversized files) | NEW: `agent/specter/src/dispatch/mod.rs` is **10,196 lines** — the single largest source file in the codebase; dev agents burn entire context budget reading it. Needs split into at minimum: filesystem, transfer, process, network, token, kerberos, inject, harvest, assembly, persist submodules. NEW: `agent/phantom/src/command/mod.rs` — 3,074 lines, above 800-line threshold. NEW: `teamserver/src/listeners/mod.rs` — 3,287 lines, above threshold. INFRA: disk full (ENOSPC) — bash completely blocked; `br create`, cargo check, clippy, and tests all impossible this run. NOTE: issues z4n4q/csclv/bxub6/8ovgx/2psqd/666ye/45bqy/x21vb/bzqsv referenced in the 17:45 scorecard entry do NOT exist in the beads database — they were never actually filed; must be created once disk is freed. pfy74 (agent upload body limit) confirmed still open. pso2v (session.rs compile error) appears fixed in-tree via fully-qualified `std::sync::Arc` path — unverifiable without cargo check. |
+| Codex | 0 | — | No new Codex-attributed findings. |
+| Cursor | 0 | — | No new Cursor-attributed findings. |
+
+Overall codebase health: on track
+Biggest blindspot: `agent/specter/src/dispatch/mod.rs` at 10,196 lines is a severe context-budget hazard — it is larger than `teamserver/src/api.rs` (11,765) and `teamserver/src/dispatch/mod.rs` (11,068) combined. Every Specter dev session burns most of its turns just reading the file. The 9 oversized-file issues referenced in the 17:45 review (z4n4q, csclv, etc.) are phantoms — they must be refiled in beads when disk space is recovered.
 
 ### Arch Review — 2026-04-05 17:45
 
@@ -6146,8 +6157,4 @@ Build: passed — `cargo check --workspace` clean. Tests skipped — artifact di
 
 | Agent | Tasks closed | Bugs filed | Notes |
 |-------|-------------|------------|-------|
-| Claude | 0 | 2 | Committed plugin catch_unwind/health-tracking work for red-cell-c2-j82xb (wip: interrupted 66879b3e) — all 4 requirements implemented (catch_unwind, ERROR logging, per-plugin failure counts, /health endpoint). Never closed the issue (filed red-cell-c2-4e2d2, P3, workflow/close-hygiene). New `plugin_health_summary` public function has no unit tests; auto-disable logic also untested (filed red-cell-c2-8p5jn, P2, missing tests). |
-| Codex | 0 | 0 | No activity in range. |
-| Cursor | 2 | 1 | Closed red-cell-c2-0q8cv (9eec5eb4): case-insensitive screenshot routing fix committed. Closed red-cell-c2-k5xbg (391011dc): CLI binary integration tests using std::process::Command + wiremock. Test `missing_required_positional_exits_2` asserts clap default exit 2 for missing arg, violating AGENTS.md spec (exit 1 = argument error, exit 2 = not found). Filed red-cell-c2-o34wl (P2, zone:client-cli). |
-
-Build: passed — `cargo check --workspace` clean (1m 24s). `cargo clippy --workspace -- -D warnings` passed (no warnings). Tests skipped — 8+ concurrent nextest/cargo-test processes from earlier agent sessions hold the build lock (known infra issue red-cell-c2-z10wz).
+| Claude | 0 | 2 | Committed plugin catch_unwind/health-tracking work for red-cell-c2-j82xb (wip: interrupted 66879b3e) — all 4 requirements implemented (catch_unwind, ERROR logging, per-plugin failure counts, /health endpoint). Never closed the issue (filed red-cell-c2-4e2d2, P3, workflow/close-hygiene). New `plugin_health_summary` public functi

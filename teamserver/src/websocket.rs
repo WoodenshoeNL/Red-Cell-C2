@@ -39,9 +39,10 @@ use crate::{
     ListenerManager, PayloadBuildError, PayloadBuilderService, ShutdownController,
     SocketRelayManager, action_from_mark,
     agent_events::agent_new_event,
-    audit_details, authorize_websocket_command, listener_config_from_operator,
-    listener_error_event, listener_event_for_action, listener_removed_event, login_failure_message,
-    login_parameters, login_success_message, operator_requests_start, parameter_object,
+    audit_details, authorize_agent_group_access, authorize_listener_access,
+    authorize_websocket_command, listener_config_from_operator, listener_error_event,
+    listener_event_for_action, listener_removed_event, login_failure_message, login_parameters,
+    login_success_message, operator_requests_start, parameter_object,
     rate_limiter::AttemptWindow,
     rate_limiter::{evict_oldest_windows, prune_expired_windows},
     record_operator_action_with_notifications,
@@ -1396,6 +1397,9 @@ pub(crate) enum AgentCommandError {
     Plugin(#[from] crate::PluginError),
     #[error(transparent)]
     SocketRelay(#[from] crate::SocketRelayError),
+    /// Granular RBAC check (group access or listener access) failed.
+    #[error(transparent)]
+    Authorization(#[from] crate::AuthorizationError),
 }
 
 async fn handle_agent_task(
@@ -1408,6 +1412,15 @@ async fn handle_agent_task(
     message: Message<red_cell_common::operator::AgentTaskInfo>,
 ) -> Result<(), AgentCommandError> {
     let agent_id = parse_agent_id(&message.info.demon_id)?;
+
+    // Granular RBAC: per-operator group restrictions.
+    authorize_agent_group_access(database, &session.username, agent_id).await?;
+
+    // Granular RBAC: per-listener operator allow-list.
+    if let Some(listener_name) = registry.listener_name(agent_id).await {
+        authorize_listener_access(database, &session.username, &listener_name).await?;
+    }
+
     let command = message.info.command.clone().unwrap_or_else(|| message.info.command_line.clone());
     let parameters = serialize_for_audit(&message.info, "agent.task");
     match execute_agent_task(registry, sockets, events, &session.username, session.role, message)

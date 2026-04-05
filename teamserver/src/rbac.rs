@@ -13,6 +13,7 @@ use red_cell_common::operator::OperatorMessage;
 use thiserror::Error;
 
 use crate::auth::{AuthService, OperatorSession};
+use crate::database::Database;
 use crate::json_error_response;
 
 const SESSION_TOKEN_HEADER: &str = "x-session-token";
@@ -66,6 +67,30 @@ pub enum AuthorizationError {
     /// The message is not a valid operator-originated WebSocket command.
     #[error("unsupported operator websocket command")]
     UnsupportedWebSocketCommand,
+    /// The operator is not permitted to task this agent due to group restrictions.
+    #[error(
+        "operator `{username}` is not permitted to task agent 0x{agent_id:08X}: \
+         agent is not in any of the operator's allowed groups"
+    )]
+    AgentGroupDenied {
+        /// Operator username.
+        username: String,
+        /// Agent that was denied.
+        agent_id: u32,
+    },
+    /// The operator is not permitted to use this listener.
+    #[error("operator `{username}` is not permitted to use listener `{listener_name}`")]
+    ListenerAccessDenied {
+        /// Operator username.
+        username: String,
+        /// Listener name that was denied.
+        listener_name: String,
+    },
+    /// A database error occurred while checking RBAC constraints.
+    ///
+    /// Stored as a `String` so the error type remains `PartialEq + Eq`.
+    #[error("rbac database error: {0}")]
+    DatabaseError(String),
 }
 
 impl IntoResponse for AuthorizationError {
@@ -74,8 +99,11 @@ impl IntoResponse for AuthorizationError {
             Self::MissingSessionToken
             | Self::InvalidAuthorizationHeader
             | Self::UnknownSessionToken => StatusCode::UNAUTHORIZED,
-            Self::PermissionDenied { .. } => StatusCode::FORBIDDEN,
+            Self::PermissionDenied { .. }
+            | Self::AgentGroupDenied { .. }
+            | Self::ListenerAccessDenied { .. } => StatusCode::FORBIDDEN,
             Self::UnsupportedWebSocketCommand => StatusCode::BAD_REQUEST,
+            Self::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
 
         json_error_response(status, "authorization_error", self.to_string())
@@ -267,6 +295,57 @@ fn required_permission(message: &OperatorMessage) -> Result<Permission, Authoriz
         | OperatorMessage::HostFileRemove(_)
         | OperatorMessage::AgentRemove(_)
         | OperatorMessage::TeamserverProfile(_) => Ok(Permission::Admin),
+    }
+}
+
+/// Check that `username` is allowed to task `agent_id` based on per-operator
+/// group restrictions.
+///
+/// Returns `Ok(())` when the operator has no group restrictions, or when at
+/// least one of the agent's groups is in the operator's allow-list.
+pub async fn authorize_agent_group_access(
+    database: &Database,
+    username: &str,
+    agent_id: u32,
+) -> Result<(), AuthorizationError> {
+    let repo = database.agent_groups();
+    let agent_groups = repo
+        .groups_for_agent(agent_id)
+        .await
+        .map_err(|e| AuthorizationError::DatabaseError(e.to_string()))?;
+    let may_task = repo
+        .operator_may_task_agent(username, &agent_groups)
+        .await
+        .map_err(|e| AuthorizationError::DatabaseError(e.to_string()))?;
+    if may_task {
+        Ok(())
+    } else {
+        Err(AuthorizationError::AgentGroupDenied { username: username.to_owned(), agent_id })
+    }
+}
+
+/// Check that `username` is allowed to interact with `listener_name` based on
+/// the listener's per-operator allow-list.
+///
+/// Returns `Ok(())` when the allow-list is empty (unrestricted) or when the
+/// operator appears in the list.
+pub async fn authorize_listener_access(
+    database: &Database,
+    username: &str,
+    listener_name: &str,
+) -> Result<(), AuthorizationError> {
+    let may_use = database
+        .listener_access()
+        .operator_may_use_listener(username, listener_name)
+        .await
+        .map_err(|e| AuthorizationError::DatabaseError(e.to_string()))?;
+    if may_use {
+        Ok(())
+    } else {
+        Err(AuthorizationError::ListenerAccessDenied {
+            username: username.to_owned(),
+            listener_name: listener_name.to_owned(),
+        })
     }
 }
 

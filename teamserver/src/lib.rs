@@ -43,11 +43,11 @@ pub use auth::{
     OperatorSession, login_failure_message, login_success_message,
 };
 pub use database::{
-    AgentRepository, AgentResponseRecord, AgentResponseRepository, AuditLogEntry, AuditLogFilter,
-    AuditLogRepository, Database, LinkRecord, LinkRepository, ListenerRepository, ListenerStatus,
-    LootRecord, LootRepository, OperatorRepository, PayloadBuildRecord, PayloadBuildRepository,
-    PayloadBuildSummary, PersistedListener, PersistedListenerState, PersistedOperator,
-    TeamserverError,
+    AgentGroupRepository, AgentRepository, AgentResponseRecord, AgentResponseRepository,
+    AuditLogEntry, AuditLogFilter, AuditLogRepository, Database, LinkRecord, LinkRepository,
+    ListenerAccessRepository, ListenerRepository, ListenerStatus, LootRecord, LootRepository,
+    OperatorRepository, PayloadBuildRecord, PayloadBuildRepository, PayloadBuildSummary,
+    PersistedListener, PersistedListenerState, PersistedOperator, TeamserverError,
 };
 pub use demon::{
     DemonCallbackPackage, DemonPacketParser, DemonParserError, ParsedDemonInit, ParsedDemonPacket,
@@ -78,7 +78,8 @@ pub use payload_builder::{
 pub use plugins::{PluginError, PluginEvent, PluginRuntime};
 pub use rbac::{
     AdminAccess, AuthenticatedOperator, AuthorizationError, ListenerManagementAccess, Permission,
-    ReadAccess, TaskAgentAccess, authorize_permission, authorize_websocket_command,
+    ReadAccess, TaskAgentAccess, authorize_agent_group_access, authorize_listener_access,
+    authorize_permission, authorize_websocket_command,
 };
 pub use red_cell_common::crypto::hash_password_sha3;
 pub use service::{ServiceBridge, ServiceBridgeError, service_routes};

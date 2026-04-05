@@ -233,6 +233,18 @@ impl Database {
         PayloadBuildRepository::new(self.pool.clone())
     }
 
+    /// Access agent group and operator group-access persistence methods.
+    #[must_use]
+    pub fn agent_groups(&self) -> AgentGroupRepository {
+        AgentGroupRepository::new(self.pool.clone())
+    }
+
+    /// Access per-listener operator allow-list persistence methods.
+    #[must_use]
+    pub fn listener_access(&self) -> ListenerAccessRepository {
+        ListenerAccessRepository::new(self.pool.clone())
+    }
+
     /// Close the SQLite pool and wait for all checked-out connections to return.
     pub async fn close(&self) {
         self.pool.close().await;
@@ -2196,6 +2208,298 @@ impl PayloadBuildRepository {
     }
 }
 
+// ── AgentGroupRepository ──────────────────────────────────────────────────────
+
+/// CRUD and membership operations for named agent groups.
+#[derive(Clone, Debug)]
+pub struct AgentGroupRepository {
+    pool: SqlitePool,
+}
+
+impl AgentGroupRepository {
+    /// Create a new repository from a shared pool.
+    #[must_use]
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+
+    /// Ensure a group exists, creating it if it does not.  Idempotent.
+    pub async fn ensure_group(&self, group_name: &str) -> Result<(), TeamserverError> {
+        sqlx::query(
+            "INSERT INTO ts_agent_groups (group_name) VALUES (?)
+             ON CONFLICT(group_name) DO NOTHING",
+        )
+        .bind(group_name)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Delete a group (cascades to membership and operator-access rows).
+    ///
+    /// Returns `true` if a row was deleted.
+    pub async fn delete_group(&self, group_name: &str) -> Result<bool, TeamserverError> {
+        let result = sqlx::query("DELETE FROM ts_agent_groups WHERE group_name = ?")
+            .bind(group_name)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Return all group names sorted alphabetically.
+    pub async fn list_groups(&self) -> Result<Vec<String>, TeamserverError> {
+        sqlx::query_scalar("SELECT group_name FROM ts_agent_groups ORDER BY group_name")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Return all group names the given agent belongs to.
+    pub async fn groups_for_agent(&self, agent_id: u32) -> Result<Vec<String>, TeamserverError> {
+        sqlx::query_scalar(
+            "SELECT group_name FROM ts_agent_group_members
+             WHERE agent_id = ? ORDER BY group_name",
+        )
+        .bind(agent_id as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Return all agent IDs that belong to `group_name`.
+    pub async fn agents_in_group(&self, group_name: &str) -> Result<Vec<u32>, TeamserverError> {
+        let ids: Vec<i64> = sqlx::query_scalar(
+            "SELECT agent_id FROM ts_agent_group_members
+             WHERE group_name = ? ORDER BY agent_id",
+        )
+        .bind(group_name)
+        .fetch_all(&self.pool)
+        .await?;
+        ids.into_iter()
+            .map(|v| u32_from_i64("ts_agent_group_members.agent_id", v))
+            .collect()
+    }
+
+    /// Add `agent_id` to `group_name`.  The group must already exist.  No-ops
+    /// if the membership already exists.
+    pub async fn add_agent_to_group(
+        &self,
+        agent_id: u32,
+        group_name: &str,
+    ) -> Result<(), TeamserverError> {
+        sqlx::query(
+            "INSERT INTO ts_agent_group_members (agent_id, group_name) VALUES (?, ?)
+             ON CONFLICT(agent_id, group_name) DO NOTHING",
+        )
+        .bind(agent_id as i64)
+        .bind(group_name)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Remove `agent_id` from `group_name`.  Returns `true` if the membership existed.
+    pub async fn remove_agent_from_group(
+        &self,
+        agent_id: u32,
+        group_name: &str,
+    ) -> Result<bool, TeamserverError> {
+        let result = sqlx::query(
+            "DELETE FROM ts_agent_group_members WHERE agent_id = ? AND group_name = ?",
+        )
+        .bind(agent_id as i64)
+        .bind(group_name)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Replace the complete group membership for `agent_id`.
+    ///
+    /// All referenced groups are created automatically.  After the call the
+    /// agent belongs to exactly the groups in `groups`.
+    pub async fn set_agent_groups(
+        &self,
+        agent_id: u32,
+        groups: &[String],
+    ) -> Result<(), TeamserverError> {
+        let mut tx = self.pool.begin().await?;
+        for g in groups {
+            sqlx::query(
+                "INSERT INTO ts_agent_groups (group_name) VALUES (?)
+                 ON CONFLICT(group_name) DO NOTHING",
+            )
+            .bind(g)
+            .execute(&mut *tx)
+            .await?;
+        }
+        sqlx::query("DELETE FROM ts_agent_group_members WHERE agent_id = ?")
+            .bind(agent_id as i64)
+            .execute(&mut *tx)
+            .await?;
+        for g in groups {
+            sqlx::query(
+                "INSERT INTO ts_agent_group_members (agent_id, group_name) VALUES (?, ?)
+                 ON CONFLICT(agent_id, group_name) DO NOTHING",
+            )
+            .bind(agent_id as i64)
+            .bind(g)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Return the group names an operator is restricted to.
+    ///
+    /// An empty result means the operator is unrestricted.
+    pub async fn operator_allowed_groups(
+        &self,
+        username: &str,
+    ) -> Result<Vec<String>, TeamserverError> {
+        sqlx::query_scalar(
+            "SELECT group_name FROM ts_operator_group_access
+             WHERE username = ? ORDER BY group_name",
+        )
+        .bind(username)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Replace the group-access restrictions for `username`.
+    ///
+    /// An empty `groups` slice removes all restrictions (operator becomes
+    /// unrestricted).
+    pub async fn set_operator_allowed_groups(
+        &self,
+        username: &str,
+        groups: &[String],
+    ) -> Result<(), TeamserverError> {
+        let mut tx = self.pool.begin().await?;
+        for g in groups {
+            sqlx::query(
+                "INSERT INTO ts_agent_groups (group_name) VALUES (?)
+                 ON CONFLICT(group_name) DO NOTHING",
+            )
+            .bind(g)
+            .execute(&mut *tx)
+            .await?;
+        }
+        sqlx::query("DELETE FROM ts_operator_group_access WHERE username = ?")
+            .bind(username)
+            .execute(&mut *tx)
+            .await?;
+        for g in groups {
+            sqlx::query(
+                "INSERT INTO ts_operator_group_access (username, group_name) VALUES (?, ?)
+                 ON CONFLICT(username, group_name) DO NOTHING",
+            )
+            .bind(username)
+            .bind(g)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Return `true` when `username` is allowed to task the agent that belongs
+    /// to one of `agent_groups`.
+    ///
+    /// When the operator has no configured group restrictions returns `true`.
+    pub async fn operator_may_task_agent(
+        &self,
+        username: &str,
+        agent_groups: &[String],
+    ) -> Result<bool, TeamserverError> {
+        let allowed = self.operator_allowed_groups(username).await?;
+        if allowed.is_empty() {
+            return Ok(true);
+        }
+        Ok(agent_groups.iter().any(|ag| allowed.iter().any(|al| al == ag)))
+    }
+}
+
+// ── ListenerAccessRepository ──────────────────────────────────────────────────
+
+/// Per-listener operator allow-list operations.
+#[derive(Clone, Debug)]
+pub struct ListenerAccessRepository {
+    pool: SqlitePool,
+}
+
+impl ListenerAccessRepository {
+    /// Create a new repository from a shared pool.
+    #[must_use]
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+
+    /// Return the usernames allowed to use `listener_name`.
+    ///
+    /// An empty result means the listener is unrestricted.
+    pub async fn allowed_operators(
+        &self,
+        listener_name: &str,
+    ) -> Result<Vec<String>, TeamserverError> {
+        sqlx::query_scalar(
+            "SELECT username FROM ts_listener_allowed_operators
+             WHERE listener_name = ? ORDER BY username",
+        )
+        .bind(listener_name)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Replace the operator allow-list for `listener_name`.
+    ///
+    /// An empty `operators` slice removes all restrictions.
+    pub async fn set_allowed_operators(
+        &self,
+        listener_name: &str,
+        operators: &[String],
+    ) -> Result<(), TeamserverError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "DELETE FROM ts_listener_allowed_operators WHERE listener_name = ?",
+        )
+        .bind(listener_name)
+        .execute(&mut *tx)
+        .await?;
+        for username in operators {
+            sqlx::query(
+                "INSERT INTO ts_listener_allowed_operators (listener_name, username)
+                 VALUES (?, ?)
+                 ON CONFLICT(listener_name, username) DO NOTHING",
+            )
+            .bind(listener_name)
+            .bind(username)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Return `true` when `username` is allowed to use `listener_name`.
+    ///
+    /// When the allow-list is empty returns `true` for everyone.
+    pub async fn operator_may_use_listener(
+        &self,
+        username: &str,
+        listener_name: &str,
+    ) -> Result<bool, TeamserverError> {
+        let allowed = self.allowed_operators(listener_name).await?;
+        if allowed.is_empty() {
+            return Ok(true);
+        }
+        Ok(allowed.iter().any(|u| u == username))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -3845,5 +4149,149 @@ mod tests {
             .await
             .expect("unwrap");
         assert_eq!(count, 0);
+    }
+
+    // ── AgentGroupRepository tests ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn agent_group_ensure_and_list() {
+        let db = Database::connect_in_memory().await.expect("db");
+        let repo = db.agent_groups();
+        repo.ensure_group("dc").await.expect("ensure dc");
+        repo.ensure_group("workstation").await.expect("ensure workstation");
+        repo.ensure_group("dc").await.expect("ensure dc again (idempotent)");
+        let groups = repo.list_groups().await.expect("list");
+        assert_eq!(groups, vec!["dc", "workstation"]);
+    }
+
+    #[tokio::test]
+    async fn agent_group_delete_removes_group() {
+        let db = Database::connect_in_memory().await.expect("db");
+        let repo = db.agent_groups();
+        repo.ensure_group("exfil").await.expect("ensure");
+        assert!(repo.delete_group("exfil").await.expect("delete"));
+        assert!(!repo.delete_group("exfil").await.expect("delete again"));
+        assert!(repo.list_groups().await.expect("list").is_empty());
+    }
+
+    #[tokio::test]
+    async fn agent_group_set_agent_groups_round_trips() {
+        let db = Database::connect_in_memory().await.expect("db");
+        seed_agents(&db, &[0xDEAD_BEEF]).await;
+        let repo = db.agent_groups();
+        let groups = vec!["dc".to_owned(), "pivot".to_owned()];
+        repo.set_agent_groups(0xDEAD_BEEF, &groups).await.expect("set");
+        let fetched = repo.groups_for_agent(0xDEAD_BEEF).await.expect("get");
+        assert_eq!(fetched, groups);
+    }
+
+    #[tokio::test]
+    async fn agent_group_set_agent_groups_replace() {
+        let db = Database::connect_in_memory().await.expect("db");
+        seed_agents(&db, &[0x0000_0001]).await;
+        let repo = db.agent_groups();
+        repo.set_agent_groups(0x0000_0001, &["a".to_owned(), "b".to_owned()])
+            .await
+            .expect("set1");
+        repo.set_agent_groups(0x0000_0001, &["c".to_owned()]).await.expect("set2");
+        let fetched = repo.groups_for_agent(0x0000_0001).await.expect("get");
+        assert_eq!(fetched, vec!["c"]);
+    }
+
+    #[tokio::test]
+    async fn agent_group_add_remove_membership() {
+        let db = Database::connect_in_memory().await.expect("db");
+        seed_agents(&db, &[0x0000_0002]).await;
+        let repo = db.agent_groups();
+        repo.ensure_group("srv").await.expect("ensure");
+        repo.add_agent_to_group(0x0000_0002, "srv").await.expect("add");
+        assert_eq!(repo.groups_for_agent(0x0000_0002).await.expect("get"), vec!["srv"]);
+        let removed = repo.remove_agent_from_group(0x0000_0002, "srv").await.expect("remove");
+        assert!(removed);
+        assert!(repo.groups_for_agent(0x0000_0002).await.expect("get").is_empty());
+    }
+
+    #[tokio::test]
+    async fn agent_group_operator_may_task_agent_unrestricted() {
+        let db = Database::connect_in_memory().await.expect("db");
+        let repo = db.agent_groups();
+        // No restrictions → always permitted.
+        assert!(repo.operator_may_task_agent("alice", &["dc".to_owned()]).await.expect("check"));
+        assert!(repo.operator_may_task_agent("alice", &[]).await.expect("check"));
+    }
+
+    #[tokio::test]
+    async fn agent_group_operator_may_task_agent_restricted() {
+        let db = Database::connect_in_memory().await.expect("db");
+        let repo = db.agent_groups();
+        repo.set_operator_allowed_groups("alice", &["dc".to_owned()]).await.expect("set");
+        // Agent in allowed group → permitted.
+        assert!(repo.operator_may_task_agent("alice", &["dc".to_owned()]).await.expect("check"));
+        // Agent not in allowed group → denied.
+        assert!(
+            !repo
+                .operator_may_task_agent("alice", &["workstation".to_owned()])
+                .await
+                .expect("check")
+        );
+        // Ungrouped agent → denied.
+        assert!(!repo.operator_may_task_agent("alice", &[]).await.expect("check"));
+    }
+
+    #[tokio::test]
+    async fn agent_group_set_operator_allowed_groups_replace() {
+        let db = Database::connect_in_memory().await.expect("db");
+        let repo = db.agent_groups();
+        repo.set_operator_allowed_groups("bob", &["a".to_owned(), "b".to_owned()])
+            .await
+            .expect("set1");
+        assert_eq!(repo.operator_allowed_groups("bob").await.expect("list"), vec!["a", "b"]);
+        repo.set_operator_allowed_groups("bob", &[]).await.expect("set2");
+        assert!(repo.operator_allowed_groups("bob").await.expect("list").is_empty());
+    }
+
+    // ── ListenerAccessRepository tests ────────────────────────────────────────
+
+    fn stub_http_listener_for_access(name: &str) -> ListenerConfig {
+        stub_http_listener(name)
+    }
+
+    #[tokio::test]
+    async fn listener_access_unrestricted_by_default() {
+        let db = Database::connect_in_memory().await.expect("db");
+        db.listeners()
+            .create(&stub_http_listener_for_access("http-main"))
+            .await
+            .expect("create");
+        let repo = db.listener_access();
+        assert!(repo.allowed_operators("http-main").await.expect("list").is_empty());
+        assert!(repo.operator_may_use_listener("anyone", "http-main").await.expect("check"));
+    }
+
+    #[tokio::test]
+    async fn listener_access_set_and_enforce() {
+        let db = Database::connect_in_memory().await.expect("db");
+        db.listeners()
+            .create(&stub_http_listener_for_access("exfil"))
+            .await
+            .expect("create");
+        let repo = db.listener_access();
+        repo.set_allowed_operators("exfil", &["alice".to_owned()]).await.expect("set");
+        assert!(repo.operator_may_use_listener("alice", "exfil").await.expect("alice"));
+        assert!(!repo.operator_may_use_listener("bob", "exfil").await.expect("bob"));
+    }
+
+    #[tokio::test]
+    async fn listener_access_set_empty_removes_restrictions() {
+        let db = Database::connect_in_memory().await.expect("db");
+        db.listeners()
+            .create(&stub_http_listener_for_access("http-test"))
+            .await
+            .expect("create");
+        let repo = db.listener_access();
+        repo.set_allowed_operators("http-test", &["alice".to_owned()]).await.expect("set");
+        repo.set_allowed_operators("http-test", &[]).await.expect("clear");
+        assert!(repo.allowed_operators("http-test").await.expect("list").is_empty());
+        assert!(repo.operator_may_use_listener("anyone", "http-test").await.expect("check"));
     }
 }

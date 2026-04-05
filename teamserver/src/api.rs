@@ -51,8 +51,8 @@ use crate::websocket::{AgentCommandError, execute_agent_task};
 use crate::{
     AuditPage, AuditQuery, AuditResultStatus, AuditWebhookNotifier, AuthError, Database,
     LootRecord, SessionActivityPage, SessionActivityQuery, TeamserverError, audit_details,
-    parameter_object, query_audit_log, query_session_activity,
-    record_operator_action_with_notifications,
+    authorize_agent_group_access, authorize_listener_access, parameter_object, query_audit_log,
+    query_session_activity, record_operator_action_with_notifications,
 };
 const API_VERSION: &str = "v1";
 const API_PREFIX: &str = "/api/v1";
@@ -850,6 +850,8 @@ enum AgentApiError {
     Teamserver(#[from] crate::TeamserverError),
     #[error("{0}")]
     Task(#[from] AgentCommandError),
+    #[error("{0}")]
+    Authorization(#[from] crate::AuthorizationError),
 }
 
 impl IntoResponse for AgentApiError {
@@ -886,7 +888,15 @@ impl IntoResponse for AgentApiError {
             | Self::Task(AgentCommandError::Teamserver(crate::TeamserverError::QueueFull {
                 ..
             })) => (StatusCode::TOO_MANY_REQUESTS, "queue_full"),
-            Self::Teamserver(_) | Self::Task(_) => {
+            Self::Task(AgentCommandError::Authorization(
+                crate::AuthorizationError::AgentGroupDenied { .. }
+                | crate::AuthorizationError::ListenerAccessDenied { .. },
+            ))
+            | Self::Authorization(
+                crate::AuthorizationError::AgentGroupDenied { .. }
+                | crate::AuthorizationError::ListenerAccessDenied { .. },
+            ) => (StatusCode::FORBIDDEN, "agent_access_denied"),
+            Self::Teamserver(_) | Self::Task(_) | Self::Authorization(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "agent_api_error")
             }
         };
@@ -983,6 +993,8 @@ impl IntoResponse for JobApiError {
 enum OperatorApiError {
     #[error("{0}")]
     Auth(#[from] AuthError),
+    #[error("{0}")]
+    Database(#[from] TeamserverError),
 }
 
 impl IntoResponse for OperatorApiError {
@@ -1003,7 +1015,9 @@ impl IntoResponse for OperatorApiError {
             Self::Auth(AuthError::AuditLog(_)) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "operator_audit_unavailable")
             }
-            Self::Auth(_) => (StatusCode::INTERNAL_SERVER_ERROR, "operator_api_error"),
+            Self::Auth(_) | Self::Database(_) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "operator_api_error")
+            }
         };
 
         json_error_response(status, code, self.to_string())
@@ -1033,9 +1047,15 @@ pub fn api_routes(api: ApiRuntime) -> Router<TeamserverState> {
         .route("/jobs/{agent_id}/{request_id}", get(get_job))
         .route("/loot", get(list_loot))
         .route("/loot/{id}", get(get_loot))
+        .route("/agents/{id}/groups", get(get_agent_groups).put(set_agent_groups))
         .route("/operators", get(list_operators).post(create_operator))
         .route("/operators/{username}", delete(delete_operator))
         .route("/operators/{username}/role", put(update_operator_role))
+        .route(
+            "/operators/{username}/agent-groups",
+            get(get_operator_agent_groups).put(set_operator_agent_groups),
+        )
+        .route("/listeners/{name}/access", get(get_listener_access).put(set_listener_access))
         .route("/listeners", get(list_listeners).post(create_listener))
         .route("/listeners/{name}", get(get_listener).put(update_listener).delete(delete_listener))
         .route("/listeners/{name}/start", put(start_listener))
@@ -1399,6 +1419,10 @@ async fn kill_agent(
     Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<AgentTaskQueuedResponse>), AgentApiError> {
     let agent_id = parse_api_agent_id(&id)?;
+    authorize_agent_group_access(&state.database, &identity.key_id, agent_id).await?;
+    if let Some(listener_name) = state.agent_registry.listener_name(agent_id).await {
+        authorize_listener_access(&state.database, &identity.key_id, &listener_name).await?;
+    }
     let task_id = next_task_id();
     let message = Message {
         head: MessageHead {
@@ -1501,6 +1525,10 @@ async fn queue_agent_task(
     Json(mut task): Json<AgentTaskInfo>,
 ) -> Result<(StatusCode, Json<AgentTaskQueuedResponse>), AgentApiError> {
     let agent_id = parse_api_agent_id(&id)?;
+    authorize_agent_group_access(&state.database, &identity.key_id, agent_id).await?;
+    if let Some(listener_name) = state.agent_registry.listener_name(agent_id).await {
+        authorize_listener_access(&state.database, &identity.key_id, &listener_name).await?;
+    }
     let canonical_id = format!("{agent_id:08X}");
 
     if !task.demon_id.is_empty() && !task.demon_id.eq_ignore_ascii_case(&canonical_id) {
@@ -1687,6 +1715,10 @@ async fn agent_upload(
     use base64::engine::general_purpose::STANDARD as BASE64;
 
     let agent_id = parse_api_agent_id(&id)?;
+    authorize_agent_group_access(&state.database, &identity.key_id, agent_id).await?;
+    if let Some(listener_name) = state.agent_registry.listener_name(agent_id).await {
+        authorize_listener_access(&state.database, &identity.key_id, &listener_name).await?;
+    }
     let canonical_id = format!("{agent_id:08X}");
     let task_id = next_task_id();
 
@@ -1809,6 +1841,10 @@ async fn agent_download(
     use base64::engine::general_purpose::STANDARD as BASE64;
 
     let agent_id = parse_api_agent_id(&id)?;
+    authorize_agent_group_access(&state.database, &identity.key_id, agent_id).await?;
+    if let Some(listener_name) = state.agent_registry.listener_name(agent_id).await {
+        authorize_listener_access(&state.database, &identity.key_id, &listener_name).await?;
+    }
     let canonical_id = format!("{agent_id:08X}");
     let task_id = next_task_id();
 
@@ -2489,6 +2525,190 @@ async fn update_operator_role(
             Err(error.into())
         }
     }
+}
+
+// ── Agent group REST handlers ─────────────────────────────────────────────────
+
+/// Response body for agent group membership endpoints.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AgentGroupsResponse {
+    /// Hex-encoded agent id (e.g. `"DEADBEEF"`).
+    pub agent_id: String,
+    /// Group names the agent currently belongs to.
+    pub groups: Vec<String>,
+}
+
+/// Request body for setting agent group membership.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SetAgentGroupsRequest {
+    /// Replacement group list.  An empty array removes all memberships.
+    pub groups: Vec<String>,
+}
+
+async fn get_agent_groups(
+    State(state): State<TeamserverState>,
+    _identity: ReadApiAccess,
+    Path(id): Path<String>,
+) -> Result<Json<AgentGroupsResponse>, AgentApiError> {
+    let agent_id = parse_api_agent_id(&id)?;
+    let groups = state.database.agent_groups().groups_for_agent(agent_id).await?;
+    Ok(Json(AgentGroupsResponse { agent_id: format!("{agent_id:08X}"), groups }))
+}
+
+async fn set_agent_groups(
+    State(state): State<TeamserverState>,
+    identity: AdminApiAccess,
+    Path(id): Path<String>,
+    Json(request): Json<SetAgentGroupsRequest>,
+) -> Result<Json<AgentGroupsResponse>, AgentApiError> {
+    let agent_id = parse_api_agent_id(&id)?;
+    state.database.agent_groups().set_agent_groups(agent_id, &request.groups).await?;
+    record_audit_entry(
+        &state.database,
+        &state.webhooks,
+        &identity.key_id,
+        "agent.set_groups",
+        "agent",
+        Some(format!("{agent_id:08X}")),
+        audit_details(
+            AuditResultStatus::Success,
+            Some(agent_id),
+            Some("set_groups"),
+            Some(parameter_object([(
+                "groups",
+                serde_json::to_value(&request.groups).unwrap_or(Value::Null),
+            )])),
+        ),
+    )
+    .await;
+    Ok(Json(AgentGroupsResponse { agent_id: format!("{agent_id:08X}"), groups: request.groups }))
+}
+
+// ── Operator group-access REST handlers ──────────────────────────────────────
+
+/// Response body for operator group-access endpoints.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct OperatorGroupAccessResponse {
+    /// Operator username.
+    pub username: String,
+    /// Groups the operator may task agents from.  Empty means unrestricted.
+    pub allowed_groups: Vec<String>,
+}
+
+/// Request body for setting operator group-access restrictions.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SetOperatorGroupAccessRequest {
+    /// Replacement allow-list.  Empty makes the operator unrestricted.
+    pub allowed_groups: Vec<String>,
+}
+
+async fn get_operator_agent_groups(
+    State(state): State<TeamserverState>,
+    _identity: AdminApiAccess,
+    Path(username): Path<String>,
+) -> Result<Json<OperatorGroupAccessResponse>, OperatorApiError> {
+    let allowed_groups = state.database.agent_groups().operator_allowed_groups(&username).await?;
+    Ok(Json(OperatorGroupAccessResponse { username, allowed_groups }))
+}
+
+async fn set_operator_agent_groups(
+    State(state): State<TeamserverState>,
+    identity: AdminApiAccess,
+    Path(username): Path<String>,
+    Json(request): Json<SetOperatorGroupAccessRequest>,
+) -> Result<Json<OperatorGroupAccessResponse>, OperatorApiError> {
+    state
+        .database
+        .agent_groups()
+        .set_operator_allowed_groups(&username, &request.allowed_groups)
+        .await?;
+    record_audit_entry(
+        &state.database,
+        &state.webhooks,
+        &identity.key_id,
+        "operator.set_agent_groups",
+        "operator",
+        Some(username.clone()),
+        audit_details(
+            AuditResultStatus::Success,
+            None,
+            Some("set_agent_groups"),
+            Some(parameter_object([
+                ("username", Value::String(username.clone())),
+                (
+                    "allowed_groups",
+                    serde_json::to_value(&request.allowed_groups).unwrap_or(Value::Null),
+                ),
+            ])),
+        ),
+    )
+    .await;
+    Ok(Json(OperatorGroupAccessResponse { username, allowed_groups: request.allowed_groups }))
+}
+
+// ── Listener access REST handlers ─────────────────────────────────────────────
+
+/// Response body for listener operator allow-list endpoints.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ListenerAccessResponse {
+    /// Listener name.
+    pub listener_name: String,
+    /// Operators allowed to use this listener.  Empty means unrestricted.
+    pub allowed_operators: Vec<String>,
+}
+
+/// Request body for setting the listener operator allow-list.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SetListenerAccessRequest {
+    /// Replacement allow-list.  Empty removes all restrictions.
+    pub allowed_operators: Vec<String>,
+}
+
+async fn get_listener_access(
+    State(state): State<TeamserverState>,
+    _identity: AdminApiAccess,
+    Path(name): Path<String>,
+) -> Result<Json<ListenerAccessResponse>, ListenerManagerError> {
+    let allowed_operators = state.database.listener_access().allowed_operators(&name).await?;
+    Ok(Json(ListenerAccessResponse { listener_name: name, allowed_operators }))
+}
+
+async fn set_listener_access(
+    State(state): State<TeamserverState>,
+    identity: AdminApiAccess,
+    Path(name): Path<String>,
+    Json(request): Json<SetListenerAccessRequest>,
+) -> Result<Json<ListenerAccessResponse>, ListenerManagerError> {
+    state
+        .database
+        .listener_access()
+        .set_allowed_operators(&name, &request.allowed_operators)
+        .await?;
+    record_audit_entry(
+        &state.database,
+        &state.webhooks,
+        &identity.key_id,
+        "listener.set_access",
+        "listener",
+        Some(name.clone()),
+        audit_details(
+            AuditResultStatus::Success,
+            None,
+            Some("set_access"),
+            Some(parameter_object([
+                ("listener_name", Value::String(name.clone())),
+                (
+                    "allowed_operators",
+                    serde_json::to_value(&request.allowed_operators).unwrap_or(Value::Null),
+                ),
+            ])),
+        ),
+    )
+    .await;
+    Ok(Json(ListenerAccessResponse {
+        listener_name: name,
+        allowed_operators: request.allowed_operators,
+    }))
 }
 
 #[utoipa::path(

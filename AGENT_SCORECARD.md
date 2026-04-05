@@ -42,6 +42,21 @@ Each loop run updates the running totals and appends a review entry.
 
 <!-- QA and arch loops append entries below this line -->
 
+### Arch Review — 2026-04-05 04:49 — 61174223..c350d613
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 0 | — | No AI-attributed production-code defects found. |
+| Codex | 0 | — | No new Codex-attributed findings; pre-existing P1s go1s5/pebfp still open. |
+| Cursor | 0 | — | No Cursor-attributed findings. |
+| Michel Klomp | 2 | architecture drift, correctness | Filed `red-cell-c2-cnlrr` (P3) — teamserver RBAC API endpoints (`GET/PUT /agents/{id}/groups`, `GET/PUT /agents/groups/{name}`, `GET/PUT /listeners/{name}/access`) added in `77866c2b` but have no `client-cli` command surface; operators cannot manage groups or listener access from the CLI. Filed `red-cell-c2-wi8is` (P4) — `MIN_ENVELOPE_SIZE = 4` in `common/src/demon.rs:13` is named/valued as the minimum to start parsing the Size field, but a complete valid envelope requires 12 bytes; the name misleads callers about the true minimum. Human-authored; not counted against agent bug totals. |
+
+Build: compiling crates (`red-cell-common`, `red-cell` teamserver, `specter`, `phantom`) — **clippy -D warnings PASS** (exit 0, zero warnings). Workspace still **FAILED** on `red-cell-cli` (go1s5) and `red-cell-client` (pebfp) — both pre-existing Codex P1s.
+
+Core security path unchanged and sound: AES-256-CTR deferred-advance, HKDF-SHA256 session keys, Argon2id operator auth, WsEnvelope HMAC, constant-time comparisons, weak-key and legacy-CTR gating all intact. No `todo!`/`unimplemented!` in production Rust. Zero clippy warnings in production crates.
+
+New RBAC feature (`at2ls`, `77866c2b`): database schema, repository, API routes, and `authorize_agent_group_access`/`authorize_listener_access` RBAC helpers all present and structurally correct. Missing CLI surface filed as `cnlrr` (P3).
+
 ### QA Review — 2026-04-05 01:25 — 7e32ca73..b22c7243
 
 | Agent | Tasks closed | Bugs filed | Notes |

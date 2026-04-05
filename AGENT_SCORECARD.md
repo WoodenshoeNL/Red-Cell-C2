@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1190 | 253 | 42 |
+| Tasks closed | 1191 | 253 | 42 |
 | Bugs filed against | 206 | 43 | 10 |
 | Bug rate (bugs/task) | 0.17 | 0.17 | 0.24 |
 | Quality score | 83% | 83% | 76% |
 
-*Bug rates: Claude 206/1190=0.1731→0.17, Codex 43/253=0.1700→0.17, Cursor 10/42=0.2381→0.24*
+*Bug rates: Claude 206/1191=0.1730→0.17, Codex 43/253=0.1700→0.17, Cursor 10/42=0.2381→0.24*
 
 ## Violation Breakdown
 
@@ -5923,6 +5923,16 @@ Biggest blindspot: **unstaged AXFR/ANY blocking code** (implementing `red-cell-c
 | Cursor | 0 | 0 | No activity in range. |
 
 Build: `cargo check --workspace` ✅. `cargo clippy --workspace -- -D warnings` ✅ (clean). `cargo nextest run --workspace` ❌ — build artifact collision from concurrent parallel builds (incremental `.o` file missing due to parallel cargo check + nextest runs); separate serial `cargo test --no-run -p red-cell-client` confirmed code itself compiles cleanly. No new code to review; no new issues filed.
+
+### QA Review — 2026-04-05 04:20 — 4c301e23..7ae8cf6b
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 0 | Closed `red-cell-c2-1ln26` (`ed4e5c1c`): `decode_hex_tag` now returns `Result<[u8;32], WsHmacError>` — rejects wrong-length tags and non-hex chars with `BadHmac` instead of silently mapping to 0x00. 11 tests added covering all error paths and round-trip. No `unwrap()` in new code. Fix is correct and well-tested. `wip: interrupted` commit (`44b6d88f`) only changed indentation in `client/src/main.rs` test (unrelated to 1ln26); existing frame_metrics corruption unchanged (`red-cell-c2-pebfp`, already tracked). RBAC feature `red-cell-c2-at2ls` is in-progress with ~1000 lines of unstaged work in the working tree. |
+| Codex | 0 | 0 | No activity in range. |
+| Cursor | 0 | 0 | No activity in range. |
+
+Build: skipped — build directory lock held by 20+ active cargo/rustc processes from concurrent dev agent sessions. Pre-existing P1 compile errors `red-cell-c2-go1s5` (Backoff::with_initial_delay missing) and `red-cell-c2-pebfp` (frame_metrics in assert!) still block `cargo check --workspace`.
 
 ### QA Review — 2026-04-04 22:20 — 5094d17a..fa8d1355
 

@@ -10,18 +10,18 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 1196 | 255 | 42 |
-| Bugs filed against | 211 | 45 | 10 |
-| Bug rate (bugs/task) | 0.18 | 0.18 | 0.24 |
-| Quality score | 82% | 82% | 76% |
+| Bugs filed against | 211 | 48 | 10 |
+| Bug rate (bugs/task) | 0.18 | 0.19 | 0.24 |
+| Quality score | 82% | 81% | 76% |
 
-*Bug rates: Claude 211/1196=0.1764→0.18, Codex 45/255=0.1765→0.18, Cursor 10/42=0.2381→0.24*
+*Bug rates: Claude 211/1196=0.1764→0.18, Codex 48/255=0.1882→0.19, Cursor 10/42=0.2381→0.24*
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 14 | 0 | 0 |
-| Missing tests / stale tests | 76 | 19 | 5 |
+| Missing tests / stale tests | 76 | 22 | 5 |
 | Clippy warnings | 11 | 0 | 1 |
 | Protocol errors | 30 | 32 | 3 |
 | Security issues | 61 | 39 | 0 |
@@ -41,6 +41,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-05 13:20 — dce91ac8..b318d2dd
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | No dev commits in range. |
+| Codex | 0 | 3 | 510 lines of uncommitted work in working tree (red-cell-c2-r8du7 still open): verify-fingerprint GUI (qcnvq) + TLS hot-reload (e969d). Filed gmrw9 (missing tests: validate_tls_not_expired), v2p1t (missing tests: confirm/iter on KnownServersStore), e8zax (missing tests: reload_tls_cert + cert file watcher). All P2, zone:common/client/teamserver. The frame_metrics compile bug (pebfp) and x509-parser dep (zcvdc) are fixed in the working tree but not committed. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: skipped — stale cargo processes from Apr04 (PIDs 1167991, 1185007) hold the build directory lock; all workspace cargo commands block indefinitely. Pre-existing tracked compile errors pebfp/go1s5 are partially addressed in uncommitted working tree.
 
 ### Arch Review — 2026-04-05 12:45
 

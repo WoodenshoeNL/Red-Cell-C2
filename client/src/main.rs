@@ -9017,10 +9017,10 @@ mod tests {
                     "expected an error message on the login state"
                 );
                 assert!(
-                    login_state.error_message.as_deref().unwrap().contains("Connection closed"),
-            frame_metrics: FrameMetrics::default(),
-                    "error should contain the disconnect reason"
-                );
+                        login_state.error_message.as_deref().unwrap().contains("Connection closed"),
+                frame_metrics: FrameMetrics::default(),
+                        "error should contain the disconnect reason"
+                    );
             }
             _ => panic!("expected Login phase after Retrying during auth without last_auth_error"),
         }

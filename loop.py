@@ -800,6 +800,94 @@ def clean_tmp_worktrees(log: Logger):
         log.log("worktree cleanup: nothing to remove")
 
 
+TMP_CARGO_MAX_AGE_SECS = 7200   # remove non-worktree /tmp/red-cell* cargo dirs older than 2 hours
+TMP_CARGO_SIZE_LIMIT_GB = 5     # also clean heavyweight subdirs of review target when it exceeds this
+
+
+def clean_tmp_cargo_targets(log: Logger):
+    """
+    Remove stale Cargo target directories under /tmp that are NOT git worktrees.
+
+    The review loop keeps a stable shared target dir (REVIEW_CARGO_TARGET) and agents
+    sometimes create ad-hoc CARGO_TARGET_DIR paths like /tmp/red-cell-c2-*-target.
+    These are never registered as git worktrees so clean_tmp_worktrees() never touches
+    them.  Without this cleanup they accumulate GBs per session and fill the disk.
+
+    Strategy:
+    - For REVIEW_CARGO_TARGET: clean heavyweight subdirs when it exceeds
+      TMP_CARGO_SIZE_LIMIT_GB (keeps it usable for incremental builds but bounded).
+    - For all other /tmp/red-cell* dirs that are not git worktrees: remove entirely
+      if older than TMP_CARGO_MAX_AGE_SECS and no process has its CWD inside them.
+    """
+    import shutil, time as _time
+
+    # Collect paths that are registered git worktrees — never touch those here.
+    r = subprocess.run(
+        ["git", "worktree", "list", "--porcelain"],
+        capture_output=True, text=True, cwd=str(SCRIPT_DIR),
+    )
+    registered_worktrees = set()
+    if r.returncode == 0:
+        for line in r.stdout.splitlines():
+            if line.startswith("worktree "):
+                registered_worktrees.add(line.split(" ", 1)[1])
+
+    active = _active_worktree_paths()
+    now = _time.time()
+    removed = []
+
+    # Handle REVIEW_CARGO_TARGET: clean-in-place rather than delete entirely.
+    review_target = REVIEW_CARGO_TARGET
+    if review_target.exists():
+        size_gb = _dir_size_gb(review_target)
+        if size_gb >= TMP_CARGO_SIZE_LIMIT_GB:
+            log.log(
+                f"tmp cargo: review target is {size_gb:.1f} GB"
+                f" — cleaning heavyweight subdirs"
+            )
+            heavyweight_dirs = ["incremental", "deps", "build", ".fingerprint"]
+            cleaned = []
+            for name in heavyweight_dirs:
+                d = review_target / name
+                if d.exists():
+                    shutil.rmtree(d, ignore_errors=True)
+                    if not d.exists():
+                        cleaned.append(name)
+            if cleaned:
+                log.log(f"tmp cargo: cleaned review target/{{{','.join(cleaned)}}}")
+
+    # Sweep all other /tmp/red-cell* dirs that are plain cargo caches.
+    try:
+        tmp_entries = list(Path("/tmp").iterdir())
+    except OSError:
+        return
+
+    for entry in tmp_entries:
+        if not entry.name.startswith(("red-cell", "redcell")):
+            continue
+        path_str = str(entry)
+        if path_str == str(review_target):
+            continue  # already handled above
+        if path_str in registered_worktrees:
+            continue  # let clean_tmp_worktrees handle these
+        if path_str in active:
+            continue  # process still running inside
+        if not entry.is_dir():
+            continue
+        try:
+            age = now - entry.stat().st_mtime
+        except OSError:
+            continue
+        if age < TMP_CARGO_MAX_AGE_SECS:
+            continue
+        shutil.rmtree(entry, ignore_errors=True)
+        if not entry.exists():
+            removed.append(entry.name)
+
+    if removed:
+        log.log(f"tmp cargo: removed {len(removed)} stale dir(s): {', '.join(removed)}")
+
+
 def reset_stuck_tasks(log: Logger, stale_threshold_secs: int):
     """Reset any in_progress tasks that have been stuck longer than the threshold."""
     r = br(["list", "--status=in_progress", "--json"])
@@ -1277,6 +1365,7 @@ Start directly with understanding the task and implementing it.
         if iteration % DEV_CLEAN_EVERY == 0:
             clean_build_artifacts(log)
             clean_tmp_worktrees(log)
+            clean_tmp_cargo_targets(log)
 
         if max_turns_hit:
             log.log(f"Max turns ({DEV_MAX_TURNS}) reached — resuming task {next_id} immediately")
@@ -1425,6 +1514,7 @@ def review_loop(args, log: Logger):
         # Clean up stale build artifacts and any leftover tmp worktrees.
         clean_build_artifacts(log)
         clean_tmp_worktrees(log)
+        clean_tmp_cargo_targets(log)
 
         iteration += 1
 

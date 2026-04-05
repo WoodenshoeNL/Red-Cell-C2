@@ -42,6 +42,16 @@ Each loop run updates the running totals and appends a review entry.
 
 <!-- QA and arch loops append entries below this line -->
 
+### QA Review — 2026-04-05 14:00 — 57e3d03b..c08a76af
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | QA checkpoint commit only. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | Claimed red-cell-c2-sm3uq (listener create config-json validation, P2). No closures yet. |
+
+Build: failed — `red-cell-c2-pso2v` still open: missing `use std::sync::Arc` in client-cli/src/commands/session.rs breaks workspace compile (E0433).
+
 ### QA Review — 2026-04-05 13:20 — dce91ac8..b318d2dd
 
 | Agent | Tasks closed | Bugs filed | Notes |

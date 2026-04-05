@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1192 | 253 | 42 |
-| Bugs filed against | 209 | 43 | 10 |
+| Tasks closed | 1194 | 253 | 42 |
+| Bugs filed against | 210 | 43 | 10 |
 | Bug rate (bugs/task) | 0.18 | 0.17 | 0.24 |
 | Quality score | 82% | 83% | 76% |
 
-*Bug rates: Claude 209/1192=0.1754→0.18, Codex 43/253=0.1700→0.17, Cursor 10/42=0.2381→0.24*
+*Bug rates: Claude 210/1194=0.1759→0.18, Codex 43/253=0.1700→0.17, Cursor 10/42=0.2381→0.24*
 
 ## Violation Breakdown
 
@@ -5998,3 +5998,13 @@ Build: partial — `cargo check -p red-cell` passes (teamserver clean). Workspac
 | Cursor | 0 | 0 | No activity in range. |
 
 Build: FAILED — pre-existing `red-cell-c2-go1s5` (Backoff::with_initial_delay missing in backoff.rs, introduced by Codex d95dd822) still unresolved. teamserver-only check passes; workspace check fails on red-cell-cli.
+
+### QA Review — 2026-04-05 — e456ef0e..b9dde124
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 1 | Closed `red-cell-c2-i1hrq` (7ce09db6 — AllowLegacyCtr deprecation: WARN startup log + doc comment + operator-security.md migration guide). Closed `red-cell-c2-1dq4k` (cc29f023 — workflow meta-bug, stranded work was already committed). Claimed `red-cell-c2-vgupj` (load + chaos tests, work in progress — `teamserver/tests/load_and_chaos.rs` untracked). Filed `red-cell-c2-8i7yu` (P2): `registry.count()` called in 3 tests but method does not exist on AgentRegistry; must be replaced with `registry.list_active().await.len()` before commit. |
+| Codex | 0 | 0 | No activity in range. |
+| Cursor | 0 | 0 | No activity in range. |
+
+Build: FAILED (pre-existing) — workspace `cargo check` fails on `red-cell-cli` due to `red-cell-c2-go1s5` (Backoff::with_initial_delay missing, introduced by Codex d95dd822, filed previously). Teamserver-only check passes. `7ce09db6` code quality good: `warn!` import correct, deprecation message accurate, doc comment precise, migration guide thorough.

@@ -1026,14 +1026,16 @@ mod tests {
     #[tokio::test]
     async fn unknown_command_is_not_forwarded() {
         let addr = mock_ws_server(|mut ws| async move {
+            let mut saw_text = false;
             while let Some(msg) = ws.next().await {
                 match msg {
-                    Ok(Message::Text(_)) => panic!("unknown command must not be forwarded as text"),
+                    Ok(Message::Text(_)) => saw_text = true,
                     Ok(Message::Close(_)) => break,
                     Err(_) => break,
                     _ => {}
                 }
             }
+            assert!(!saw_text, "unknown command must not be forwarded as text");
             let _ = ws.close(None).await;
         })
         .await;

@@ -1193,7 +1193,7 @@ Start directly with understanding the task and implementing it.
             max_turns=DEV_MAX_TURNS if agent == "claude" else 0,
         )
 
-        max_turns_hit = result_subtype == "max_turns"
+        max_turns_hit = result_subtype in ("max_turns", "error_max_turns")
         token_limit_hit = agent == "claude" and (
             "Context limit reached" in output or result_subtype == "error_max_tokens"
         )
@@ -1249,6 +1249,8 @@ Start directly with understanding the task and implementing it.
                 log.log(f"WIP: committing uncommitted changes for {next_id}")
                 r = git(["commit", "-m", f"wip: interrupted {next_id} [{agent_id}]", "--quiet"])
                 if r.returncode == 0:
+                    git(["fetch", "origin", "--quiet"])
+                    git(["rebase", "origin/main", "--quiet"])
                     if git(["push", "--quiet"]).returncode == 0:
                         log.log("WIP: pushed")
                     else:

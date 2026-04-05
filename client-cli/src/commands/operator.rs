@@ -8,6 +8,8 @@
 //! | `operator create <name> --role <role>` | `POST /operators` | prints username and assigned role |
 //! | `operator delete <name>` | `DELETE /operators/{username}` | hard delete |
 //! | `operator set-role <name> <role>` | `PUT /operators/{username}/role` | role update |
+//! | `operator show-agent-groups <name>` | `GET /operators/{username}/agent-groups` | allowed agent groups |
+//! | `operator set-agent-groups <name>` | `PUT /operators/{username}/agent-groups` | replace group restrictions |
 
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
@@ -45,6 +47,13 @@ struct RawOperatorSummary {
 struct RawCreateResponse {
     username: String,
     role: String,
+}
+
+/// Wire body for `GET`/`PUT /operators/{username}/agent-groups`.
+#[derive(Debug, Deserialize)]
+struct RawOperatorGroupAccessResponse {
+    username: String,
+    allowed_groups: Vec<String>,
 }
 
 // ── public output types ───────────────────────────────────────────────────────
@@ -120,6 +129,29 @@ impl TextRender for SetRoleResult {
     }
 }
 
+/// Agent-group restrictions for an operator (`show-agent-groups` / `set-agent-groups`).
+#[derive(Debug, Clone, Serialize)]
+pub struct OperatorGroupAccessInfo {
+    /// Operator username.
+    pub username: String,
+    /// Group names this operator may task agents from (empty means unrestricted).
+    pub allowed_groups: Vec<String>,
+}
+
+impl TextRender for OperatorGroupAccessInfo {
+    fn render_text(&self) -> String {
+        if self.allowed_groups.is_empty() {
+            format!("Operator '{}' — unrestricted (no agent-group limits).", self.username)
+        } else {
+            format!(
+                "Operator '{}' — allowed agent groups: {}",
+                self.username,
+                self.allowed_groups.join(", ")
+            )
+        }
+    }
+}
+
 // ── top-level dispatcher ──────────────────────────────────────────────────────
 
 /// Dispatch an [`OperatorCommands`] variant and return a process exit code.
@@ -172,6 +204,38 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: OperatorCommand
         OperatorCommands::SetRole { username, role } => {
             match set_role(client, &username, &role).await {
                 Ok(result) => match print_success(fmt, &result) {
+                    Ok(()) => EXIT_SUCCESS,
+                    Err(e) => {
+                        print_error(&e).ok();
+                        e.exit_code()
+                    }
+                },
+                Err(e) => {
+                    print_error(&e).ok();
+                    e.exit_code()
+                }
+            }
+        }
+
+        OperatorCommands::ShowAgentGroups { username } => {
+            match get_operator_agent_groups(client, &username).await {
+                Ok(data) => match print_success(fmt, &data) {
+                    Ok(()) => EXIT_SUCCESS,
+                    Err(e) => {
+                        print_error(&e).ok();
+                        e.exit_code()
+                    }
+                },
+                Err(e) => {
+                    print_error(&e).ok();
+                    e.exit_code()
+                }
+            }
+        }
+
+        OperatorCommands::SetAgentGroups { username, group } => {
+            match set_operator_agent_groups(client, &username, &group).await {
+                Ok(data) => match print_success(fmt, &data) {
                     Ok(()) => EXIT_SUCCESS,
                     Err(e) => {
                         print_error(&e).ok();
@@ -254,6 +318,41 @@ async fn set_role(
     let raw: RawOperatorSummary = client.put(&format!("/operators/{username}/role"), &body).await?;
 
     Ok(SetRoleResult { username: raw.username, role: raw.role })
+}
+
+/// `operator show-agent-groups <username>` — fetch RBAC agent-group restrictions.
+///
+/// # Examples
+/// ```text
+/// red-cell-cli operator show-agent-groups alice
+/// ```
+#[instrument(skip(client))]
+async fn get_operator_agent_groups(
+    client: &ApiClient,
+    username: &str,
+) -> Result<OperatorGroupAccessInfo, CliError> {
+    let raw: RawOperatorGroupAccessResponse =
+        client.get(&format!("/operators/{username}/agent-groups")).await?;
+    Ok(OperatorGroupAccessInfo { username: raw.username, allowed_groups: raw.allowed_groups })
+}
+
+/// `operator set-agent-groups <username>` — replace agent-group restrictions.
+///
+/// # Examples
+/// ```text
+/// red-cell-cli operator set-agent-groups alice --group tier1
+/// red-cell-cli operator set-agent-groups alice
+/// ```
+#[instrument(skip(client, groups))]
+async fn set_operator_agent_groups(
+    client: &ApiClient,
+    username: &str,
+    groups: &[String],
+) -> Result<OperatorGroupAccessInfo, CliError> {
+    let body = serde_json::json!({ "allowed_groups": groups });
+    let raw: RawOperatorGroupAccessResponse =
+        client.put(&format!("/operators/{username}/agent-groups"), &body).await?;
+    Ok(OperatorGroupAccessInfo { username: raw.username, allowed_groups: raw.allowed_groups })
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -546,5 +645,38 @@ mod tests {
             !help.contains("viewer"),
             "help text must NOT mention retired role 'viewer' but was:\n{help}"
         );
+    }
+
+    // ── OperatorGroupAccessInfo / RawOperatorGroupAccessResponse ──────────────
+
+    #[test]
+    fn raw_operator_group_access_response_deserialises_server_shape() {
+        let json = r#"{"username":"alice","allowed_groups":["g1","g2"]}"#;
+        let raw: RawOperatorGroupAccessResponse = serde_json::from_str(json).expect("parse");
+        assert_eq!(raw.username, "alice");
+        assert_eq!(raw.allowed_groups, vec!["g1", "g2"]);
+    }
+
+    #[test]
+    fn operator_group_access_info_renders_restricted_and_unrestricted() {
+        let restricted = OperatorGroupAccessInfo {
+            username: "bob".to_owned(),
+            allowed_groups: vec!["corp".to_owned()],
+        };
+        assert!(restricted.render_text().contains("corp"));
+
+        let open = OperatorGroupAccessInfo { username: "carol".to_owned(), allowed_groups: vec![] };
+        assert!(open.render_text().contains("unrestricted"));
+    }
+
+    #[test]
+    fn operator_group_access_info_serialises() {
+        let info = OperatorGroupAccessInfo {
+            username: "dave".to_owned(),
+            allowed_groups: vec!["a".to_owned()],
+        };
+        let v = serde_json::to_value(&info).expect("serialise");
+        assert_eq!(v["username"], "dave");
+        assert_eq!(v["allowed_groups"], serde_json::json!(["a"]));
     }
 }

@@ -13,6 +13,8 @@
 //! | `agent kill --wait` | kill then poll `GET /agents/{id}` until dead | block |
 //! | `agent upload <id>` | `POST /agents/{id}/upload` | queue upload task |
 //! | `agent download <id>` | `POST /agents/{id}/download` | queue download task |
+//! | `agent groups <id>` | `GET /agents/{id}/groups` | RBAC group tags on the agent |
+//! | `agent set-groups <id>` | `PUT /agents/{id}/groups` | replace group membership |
 
 use std::time::{Duration, Instant};
 
@@ -331,6 +333,32 @@ impl TextRender for TransferResult {
     }
 }
 
+/// Wire body for `GET`/`PUT /agents/{id}/groups`.
+#[derive(Debug, Deserialize)]
+struct RawAgentGroupsResponse {
+    agent_id: String,
+    groups: Vec<String>,
+}
+
+/// RBAC group membership for an agent (`agent groups` / `agent set-groups`).
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentGroupsInfo {
+    /// Hex agent id as returned by the server (e.g. `"DEADBEEF"`).
+    pub agent_id: String,
+    /// Group names assigned to the agent (empty means no tags).
+    pub groups: Vec<String>,
+}
+
+impl TextRender for AgentGroupsInfo {
+    fn render_text(&self) -> String {
+        if self.groups.is_empty() {
+            format!("Agent {} — no RBAC groups.", self.agent_id)
+        } else {
+            format!("Agent {} — groups: {}", self.agent_id, self.groups.join(", "))
+        }
+    }
+}
+
 // ── top-level dispatcher ──────────────────────────────────────────────────────
 
 /// Dispatch an [`AgentCommands`] variant and return a process exit code.
@@ -463,6 +491,34 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) 
                 e.exit_code()
             }
         },
+
+        AgentCommands::Groups { id } => match get_groups(client, id).await {
+            Ok(data) => match print_success(fmt, &data) {
+                Ok(()) => EXIT_SUCCESS,
+                Err(e) => {
+                    print_error(&e).ok();
+                    e.exit_code()
+                }
+            },
+            Err(e) => {
+                print_error(&e).ok();
+                e.exit_code()
+            }
+        },
+
+        AgentCommands::SetGroups { id, group } => match set_groups(client, id, &group).await {
+            Ok(data) => match print_success(fmt, &data) {
+                Ok(()) => EXIT_SUCCESS,
+                Err(e) => {
+                    print_error(&e).ok();
+                    e.exit_code()
+                }
+            },
+            Err(e) => {
+                print_error(&e).ok();
+                e.exit_code()
+            }
+        },
     }
 }
 
@@ -490,6 +546,36 @@ async fn list(client: &ApiClient) -> Result<Vec<AgentSummary>, CliError> {
 async fn show(client: &ApiClient, id: AgentId) -> Result<AgentDetail, CliError> {
     let raw: RawAgent = client.get(&format!("/agents/{id}")).await?;
     Ok(agent_detail_from_raw(raw))
+}
+
+/// `agent groups <id>` — fetch RBAC group tags for an agent.
+///
+/// # Examples
+/// ```text
+/// red-cell-cli agent groups DEADBEEF
+/// ```
+#[instrument(skip(client))]
+async fn get_groups(client: &ApiClient, id: AgentId) -> Result<AgentGroupsInfo, CliError> {
+    let raw: RawAgentGroupsResponse = client.get(&format!("/agents/{id}/groups")).await?;
+    Ok(AgentGroupsInfo { agent_id: raw.agent_id, groups: raw.groups })
+}
+
+/// `agent set-groups <id>` — replace RBAC group membership for an agent.
+///
+/// # Examples
+/// ```text
+/// red-cell-cli agent set-groups DEADBEEF --group tier1 --group corp
+/// red-cell-cli agent set-groups DEADBEEF
+/// ```
+#[instrument(skip(client, groups))]
+async fn set_groups(
+    client: &ApiClient,
+    id: AgentId,
+    groups: &[String],
+) -> Result<AgentGroupsInfo, CliError> {
+    let body = serde_json::json!({ "groups": groups });
+    let raw: RawAgentGroupsResponse = client.put(&format!("/agents/{id}/groups"), &body).await?;
+    Ok(AgentGroupsInfo { agent_id: raw.agent_id, groups: raw.groups })
 }
 
 /// Map a user-supplied command name to a Demon `CommandID` decimal string.
@@ -1698,5 +1784,35 @@ mod tests {
             !matches!(err, CliError::InvalidArgs(_)),
             "should not reject file within size limit, got {err:?}"
         );
+    }
+
+    // ── AgentGroupsInfo / RawAgentGroupsResponse ──────────────────────────────
+
+    #[test]
+    fn raw_agent_groups_response_deserialises_server_shape() {
+        let json = r#"{"agent_id":"DEADBEEF","groups":["corp","tier1"]}"#;
+        let raw: RawAgentGroupsResponse = serde_json::from_str(json).expect("deserialise");
+        assert_eq!(raw.agent_id, "DEADBEEF");
+        assert_eq!(raw.groups, vec!["corp", "tier1"]);
+    }
+
+    #[test]
+    fn agent_groups_info_serialises_and_renders_text() {
+        let info = AgentGroupsInfo {
+            agent_id: "00AABBCC".to_owned(),
+            groups: vec!["g1".to_owned(), "g2".to_owned()],
+        };
+        let v = serde_json::to_value(&info).expect("serialise");
+        assert_eq!(v["agent_id"], "00AABBCC");
+        assert_eq!(v["groups"], serde_json::json!(["g1", "g2"]));
+        let t = info.render_text();
+        assert!(t.contains("00AABBCC"));
+        assert!(t.contains("g1"));
+    }
+
+    #[test]
+    fn agent_groups_info_empty_groups_renders_text() {
+        let info = AgentGroupsInfo { agent_id: "BADF00D".to_owned(), groups: vec![] };
+        assert!(info.render_text().contains("no RBAC groups"));
     }
 }

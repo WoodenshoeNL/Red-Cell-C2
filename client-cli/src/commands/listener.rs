@@ -10,6 +10,8 @@
 //! | `listener start <name>` | `PUT /listeners/{name}/start` | idempotent |
 //! | `listener stop <name>` | `PUT /listeners/{name}/stop` | idempotent |
 //! | `listener delete <name>` | `DELETE /listeners/{name}` | hard delete |
+//! | `listener access <name>` | `GET /listeners/{name}/access` | operator allow-list |
+//! | `listener set-access <name>` | `PUT /listeners/{name}/access` | replace allow-list |
 
 use red_cell_common::{
     DnsListenerConfig, ExternalListenerConfig, HttpListenerConfig, SmbListenerConfig,
@@ -139,6 +141,36 @@ impl TextRender for ListenerDeleted {
     }
 }
 
+/// Wire body for `GET`/`PUT /listeners/{name}/access`.
+#[derive(Debug, Deserialize)]
+struct RawListenerAccessResponse {
+    listener_name: String,
+    allowed_operators: Vec<String>,
+}
+
+/// Operator allow-list for a listener (`listener access` / `listener set-access`).
+#[derive(Debug, Clone, Serialize)]
+pub struct ListenerAccessInfo {
+    /// Listener name.
+    pub listener_name: String,
+    /// Operators allowed to use this listener (empty means unrestricted).
+    pub allowed_operators: Vec<String>,
+}
+
+impl TextRender for ListenerAccessInfo {
+    fn render_text(&self) -> String {
+        if self.allowed_operators.is_empty() {
+            format!("Listener {} — no operator restrictions.", self.listener_name)
+        } else {
+            format!(
+                "Listener {} — allowed operators: {}",
+                self.listener_name,
+                self.allowed_operators.join(", ")
+            )
+        }
+    }
+}
+
 // ── top-level dispatcher ──────────────────────────────────────────────────────
 
 /// Dispatch a [`ListenerCommands`] variant and return a process exit code.
@@ -252,6 +284,36 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: ListenerCommand
                 e.exit_code()
             }
         },
+
+        ListenerCommands::Access { name } => match get_access(client, &name).await {
+            Ok(data) => match print_success(fmt, &data) {
+                Ok(()) => EXIT_SUCCESS,
+                Err(e) => {
+                    print_error(&e).ok();
+                    e.exit_code()
+                }
+            },
+            Err(e) => {
+                print_error(&e).ok();
+                e.exit_code()
+            }
+        },
+
+        ListenerCommands::SetAccess { name, allow_operator } => {
+            match set_access(client, &name, &allow_operator).await {
+                Ok(data) => match print_success(fmt, &data) {
+                    Ok(()) => EXIT_SUCCESS,
+                    Err(e) => {
+                        print_error(&e).ok();
+                        e.exit_code()
+                    }
+                },
+                Err(e) => {
+                    print_error(&e).ok();
+                    e.exit_code()
+                }
+            }
+        }
     }
 }
 
@@ -392,6 +454,43 @@ async fn stop(client: &ApiClient, name: &str) -> Result<ListenerActionResult, Cl
 async fn delete(client: &ApiClient, name: &str) -> Result<ListenerDeleted, CliError> {
     client.delete_no_body(&format!("/listeners/{name}")).await?;
     Ok(ListenerDeleted { name: name.to_owned(), deleted: true })
+}
+
+/// `listener access <name>` — fetch the operator allow-list for a listener.
+///
+/// # Examples
+/// ```text
+/// red-cell-cli listener access http1
+/// ```
+#[instrument(skip(client))]
+async fn get_access(client: &ApiClient, name: &str) -> Result<ListenerAccessInfo, CliError> {
+    let raw: RawListenerAccessResponse = client.get(&format!("/listeners/{name}/access")).await?;
+    Ok(ListenerAccessInfo {
+        listener_name: raw.listener_name,
+        allowed_operators: raw.allowed_operators,
+    })
+}
+
+/// `listener set-access <name>` — replace the operator allow-list.
+///
+/// # Examples
+/// ```text
+/// red-cell-cli listener set-access http1 --allow-operator alice
+/// red-cell-cli listener set-access http1
+/// ```
+#[instrument(skip(client, operators))]
+async fn set_access(
+    client: &ApiClient,
+    name: &str,
+    operators: &[String],
+) -> Result<ListenerAccessInfo, CliError> {
+    let body = serde_json::json!({ "allowed_operators": operators });
+    let raw: RawListenerAccessResponse =
+        client.put(&format!("/listeners/{name}/access"), &body).await?;
+    Ok(ListenerAccessInfo {
+        listener_name: raw.listener_name,
+        allowed_operators: raw.allowed_operators,
+    })
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -1122,5 +1221,32 @@ mod tests {
         let detail = listener_detail_from_raw(raw);
         assert_eq!(detail.status, "Error");
         assert_eq!(detail.last_error.as_deref(), Some("bind failed: address in use"));
+    }
+
+    // ── ListenerAccessInfo ────────────────────────────────────────────────────
+
+    #[test]
+    fn raw_listener_access_response_deserialises_server_shape() {
+        let json = r#"{"listener_name":"http1","allowed_operators":["alice","bob"]}"#;
+        let raw: RawListenerAccessResponse = serde_json::from_str(json).expect("deserialise");
+        assert_eq!(raw.listener_name, "http1");
+        assert_eq!(raw.allowed_operators, vec!["alice", "bob"]);
+    }
+
+    #[test]
+    fn listener_access_info_renders_text() {
+        let info = ListenerAccessInfo {
+            listener_name: "l1".to_owned(),
+            allowed_operators: vec!["u1".to_owned()],
+        };
+        let t = info.render_text();
+        assert!(t.contains("l1"));
+        assert!(t.contains("u1"));
+    }
+
+    #[test]
+    fn listener_access_info_empty_allows_all_text() {
+        let info = ListenerAccessInfo { listener_name: "l2".to_owned(), allowed_operators: vec![] };
+        assert!(info.render_text().contains("no operator restrictions"));
     }
 }

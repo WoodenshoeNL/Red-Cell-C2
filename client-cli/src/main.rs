@@ -100,6 +100,8 @@ pub enum Commands {
     ///   red-cell-cli agent list
     ///   red-cell-cli agent show <id>
     ///   red-cell-cli agent exec <id> --cmd whoami --wait
+    ///   red-cell-cli agent groups <id>
+    ///   red-cell-cli agent set-groups <id> --group tier1
     #[command(verbatim_doc_comment)]
     Agent {
         #[command(subcommand)]
@@ -112,6 +114,8 @@ pub enum Commands {
     ///   red-cell-cli listener list
     ///   red-cell-cli listener show mylistener
     ///   red-cell-cli listener create --name http1 --type http --port 443
+    ///   red-cell-cli listener access http1
+    ///   red-cell-cli listener set-access http1 --allow-operator alice
     #[command(verbatim_doc_comment)]
     Listener {
         #[command(subcommand)]
@@ -136,6 +140,8 @@ pub enum Commands {
     ///   red-cell-cli operator list
     ///   red-cell-cli operator create alice --role operator
     ///   red-cell-cli operator set-role alice admin
+    ///   red-cell-cli operator show-agent-groups alice
+    ///   red-cell-cli operator set-agent-groups bob --group corp-dc
     #[command(verbatim_doc_comment)]
     Operator {
         #[command(subcommand)]
@@ -311,6 +317,32 @@ pub enum AgentCommands {
         #[arg(long)]
         dst: String,
     },
+
+    /// List RBAC group tags assigned to an agent (`GET /agents/{id}/groups`).
+    ///
+    /// Examples:
+    ///   red-cell-cli agent groups DEADBEEF
+    #[command(verbatim_doc_comment)]
+    Groups {
+        /// Agent ID
+        id: AgentId,
+    },
+
+    /// Replace the agent's RBAC group membership (`PUT /agents/{id}/groups`).
+    ///
+    /// Pass `--group` multiple times or omit it to clear all groups (unrestricted).
+    ///
+    /// Examples:
+    ///   red-cell-cli agent set-groups DEADBEEF --group corp-dc --group tier1
+    ///   red-cell-cli agent set-groups DEADBEEF
+    #[command(verbatim_doc_comment)]
+    SetGroups {
+        /// Agent ID
+        id: AgentId,
+        /// Group name (repeat to assign multiple groups)
+        #[arg(long)]
+        group: Vec<String>,
+    },
 }
 
 // ── listener subcommands ──────────────────────────────────────────────────────
@@ -415,6 +447,32 @@ pub enum ListenerCommands {
     Delete {
         /// Listener name
         name: String,
+    },
+
+    /// Show the operator allow-list for a listener (`GET /listeners/{name}/access`).
+    ///
+    /// Examples:
+    ///   red-cell-cli listener access http1
+    #[command(verbatim_doc_comment)]
+    Access {
+        /// Listener name
+        name: String,
+    },
+
+    /// Replace the operator allow-list for a listener (`PUT /listeners/{name}/access`).
+    ///
+    /// Pass `--allow-operator` multiple times or omit it to clear restrictions.
+    ///
+    /// Examples:
+    ///   red-cell-cli listener set-access http1 --allow-operator alice --allow-operator bob
+    ///   red-cell-cli listener set-access http1
+    #[command(verbatim_doc_comment)]
+    SetAccess {
+        /// Listener name
+        name: String,
+        /// Operator username allowed to use this listener (repeat for multiple)
+        #[arg(long = "allow-operator")]
+        allow_operator: Vec<String>,
     },
 }
 
@@ -527,6 +585,33 @@ pub enum OperatorCommands {
         username: String,
         /// New role (admin, operator, analyst)
         role: String,
+    },
+
+    /// Show which agent groups an operator may task (`GET /operators/{username}/agent-groups`).
+    ///
+    /// Examples:
+    ///   red-cell-cli operator show-agent-groups alice
+    #[command(verbatim_doc_comment)]
+    ShowAgentGroups {
+        /// Operator username
+        username: String,
+    },
+
+    /// Restrict an operator to tasking agents in specific groups
+    /// (`PUT /operators/{username}/agent-groups`).
+    ///
+    /// Pass `--group` multiple times or omit it to remove restrictions.
+    ///
+    /// Examples:
+    ///   red-cell-cli operator set-agent-groups alice --group corp-dc
+    ///   red-cell-cli operator set-agent-groups alice
+    #[command(verbatim_doc_comment)]
+    SetAgentGroups {
+        /// Operator username
+        username: String,
+        /// Allowed group name (repeat for multiple)
+        #[arg(long)]
+        group: Vec<String>,
     },
 }
 
@@ -1288,5 +1373,94 @@ mod tests {
             "log tail help must mention the default poll interval"
         );
         assert!(help.contains("Polls every 1 second"), "log tail help must mention polling");
+    }
+
+    #[test]
+    fn rbac_agent_groups_subcommands_parse() {
+        let g = Cli::try_parse_from(["red-cell-cli", "agent", "groups", "DEADBEEF"])
+            .expect("agent groups");
+        assert!(matches!(
+            g.command,
+            Some(Commands::Agent { action: AgentCommands::Groups { .. } })
+        ));
+
+        let s = Cli::try_parse_from([
+            "red-cell-cli",
+            "agent",
+            "set-groups",
+            "AABBCCDD",
+            "--group",
+            "g1",
+            "--group",
+            "g2",
+        ])
+        .expect("agent set-groups");
+        match s.command {
+            Some(Commands::Agent { action: AgentCommands::SetGroups { id, group } }) => {
+                assert_eq!(id, AgentId::new(0xAABBCCDD));
+                assert_eq!(group, vec!["g1", "g2"]);
+            }
+            other => panic!("expected Agent::SetGroups, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rbac_operator_agent_groups_subcommands_parse() {
+        let show = Cli::try_parse_from(["red-cell-cli", "operator", "show-agent-groups", "alice"])
+            .expect("show-agent-groups");
+        assert!(matches!(
+            show.command,
+            Some(Commands::Operator { action: OperatorCommands::ShowAgentGroups { .. } })
+        ));
+
+        let set = Cli::try_parse_from([
+            "red-cell-cli",
+            "operator",
+            "set-agent-groups",
+            "bob",
+            "--group",
+            "tier1",
+        ])
+        .expect("set-agent-groups");
+        match set.command {
+            Some(Commands::Operator {
+                action: OperatorCommands::SetAgentGroups { username, group },
+            }) => {
+                assert_eq!(username, "bob");
+                assert_eq!(group, vec!["tier1"]);
+            }
+            other => panic!("expected Operator::SetAgentGroups, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rbac_listener_access_subcommands_parse() {
+        let a =
+            Cli::try_parse_from(["red-cell-cli", "listener", "access", "http1"]).expect("access");
+        assert!(matches!(
+            a.command,
+            Some(Commands::Listener { action: ListenerCommands::Access { .. } })
+        ));
+
+        let s = Cli::try_parse_from([
+            "red-cell-cli",
+            "listener",
+            "set-access",
+            "dns1",
+            "--allow-operator",
+            "u1",
+            "--allow-operator",
+            "u2",
+        ])
+        .expect("set-access");
+        match s.command {
+            Some(Commands::Listener {
+                action: ListenerCommands::SetAccess { name, allow_operator },
+            }) => {
+                assert_eq!(name, "dns1");
+                assert_eq!(allow_operator, vec!["u1", "u2"]);
+            }
+            other => panic!("expected Listener::SetAccess, got {other:?}"),
+        }
     }
 }

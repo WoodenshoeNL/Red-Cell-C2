@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1196 | 255 | 42 |
-| Bugs filed against | 211 | 48 | 10 |
+| Tasks closed | 1197 | 255 | 42 |
+| Bugs filed against | 211 | 49 | 10 |
 | Bug rate (bugs/task) | 0.18 | 0.19 | 0.24 |
 | Quality score | 82% | 81% | 76% |
 
-*Bug rates: Claude 211/1196=0.1764→0.18, Codex 48/255=0.1882→0.19, Cursor 10/42=0.2381→0.24*
+*Bug rates: Claude 211/1197=0.1763→0.18, Codex 49/255=0.1922→0.19, Cursor 10/42=0.2381→0.24*
 
 ## Violation Breakdown
 
@@ -6100,3 +6100,13 @@ Build: passed — `cargo check --workspace` completed successfully (6m 12s). Con
 | Cursor | 0 | 0 | No activity. |
 
 Build: skipped — build directory locked by many concurrent cargo processes from prior agent sessions (nextest, cargo check ×4, cargo test ×3 all active). Pre-existing P1 `pebfp` (frame_metrics in assert!, client/src/main.rs) still open.
+
+### QA Review — 2026-04-05 — 34fd7967..57e3d03b
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 0 | Committed verify-fingerprint workflow (d1f36cbd): added confirmed_at field + confirm()/iter() methods to KnownServersStore, full egui window in render_known_servers_window(), 5 unit tests. Also fixed frame_metrics spurious assert! line (pebfp) and added missing tests (v2p1t) — both closed as addressed. Red-cell-c2-qcnvq closed. Red-cell-c2-k5xbg reopened (no work done). |
+| Codex | 0 | 1 | Filed pso2v (P1): missing `use std::sync::Arc;` in client-cli/src/commands/session.rs:145, introduced in refactor 6bec9c03 — breaks workspace build. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: failed — cargo check --workspace errors on red-cell-cli (session.rs:145: undeclared type Arc). Client crate (GUI) compiled successfully. Changes in this review range (client/src/known_servers.rs, client/src/main.rs) are correct and compile cleanly.

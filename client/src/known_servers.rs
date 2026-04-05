@@ -51,6 +51,10 @@ pub struct KnownServer {
     pub fingerprint: String,
     /// ISO-8601 timestamp of when the certificate was first trusted.
     pub first_seen: String,
+    /// ISO-8601 timestamp of when an operator explicitly re-confirmed the fingerprint
+    /// via the verify-fingerprint workflow.  `None` means it was only TOFU-accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmed_at: Option<String>,
     /// Optional operator-provided alias or comment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
@@ -158,9 +162,28 @@ impl KnownServersStore {
             KnownServer {
                 fingerprint: fingerprint.to_owned(),
                 first_seen: now,
+                confirmed_at: None,
                 comment: comment.map(str::to_owned),
             },
         );
+    }
+
+    /// Record that an operator explicitly confirmed the stored fingerprint for `host_port`.
+    ///
+    /// Sets `confirmed_at` to the current timestamp. Does nothing if the server is not
+    /// in the store. Returns `true` if the entry existed and was updated.
+    pub fn confirm(&mut self, host_port: &str) -> bool {
+        if let Some(entry) = self.servers.get_mut(host_port) {
+            entry.confirmed_at = Some(current_timestamp());
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Iterate over all known servers in `host:port` order.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &KnownServer)> {
+        self.servers.iter().map(|(k, v)| (k.as_str(), v))
     }
 
     /// Remove a server from the store. Returns `true` if it was present.
@@ -513,5 +536,57 @@ mod tests {
         store.trust("127.0.0.1:40056", &"cc".repeat(32), None);
 
         assert!(store.save_to(&path).is_ok(), "save_to should succeed");
+    }
+
+    #[test]
+    fn trust_sets_confirmed_at_to_none() {
+        let mut store = KnownServersStore::default();
+        store.trust("10.0.0.1:40056", &"a".repeat(64), None);
+        let entry = store.lookup("10.0.0.1:40056").unwrap();
+        assert!(entry.confirmed_at.is_none(), "trust() must not pre-confirm the entry");
+    }
+
+    #[test]
+    fn confirm_sets_confirmed_at_timestamp() {
+        let mut store = KnownServersStore::default();
+        store.trust("10.0.0.1:40056", &"a".repeat(64), None);
+        let updated = store.confirm("10.0.0.1:40056");
+        assert!(updated, "confirm() should return true for a known server");
+        let entry = store.lookup("10.0.0.1:40056").unwrap();
+        assert!(entry.confirmed_at.is_some(), "confirmed_at should be set after confirm()");
+        let ts = entry.confirmed_at.as_deref().unwrap();
+        assert!(ts.ends_with('Z') && ts.contains('T'), "timestamp should be ISO-8601: {ts}");
+    }
+
+    #[test]
+    fn confirm_returns_false_for_unknown_server() {
+        let mut store = KnownServersStore::default();
+        assert!(!store.confirm("10.0.0.1:40056"), "confirm() should return false for unknown host");
+    }
+
+    #[test]
+    fn iter_returns_all_entries_in_order() {
+        let mut store = KnownServersStore::default();
+        store.trust("b.example:9000", &"b".repeat(64), None);
+        store.trust("a.example:9000", &"a".repeat(64), None);
+        let keys: Vec<&str> = store.iter().map(|(k, _)| k).collect();
+        // BTreeMap → alphabetical order.
+        assert_eq!(keys, vec!["a.example:9000", "b.example:9000"]);
+    }
+
+    #[test]
+    fn confirmed_at_round_trips_through_toml() {
+        let dir =
+            tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir creation should succeed: {e}"));
+        let path = dir.path().join("known_servers.toml");
+
+        let mut store = KnownServersStore::default();
+        store.trust("10.0.0.1:40056", &"a".repeat(64), None);
+        store.confirm("10.0.0.1:40056");
+
+        store.save_to(&path).unwrap_or_else(|e| panic!("save: {e}"));
+        let loaded = KnownServersStore::load_from(&path);
+        let entry = loaded.lookup("10.0.0.1:40056").unwrap();
+        assert!(entry.confirmed_at.is_some(), "confirmed_at should survive TOML round-trip");
     }
 }

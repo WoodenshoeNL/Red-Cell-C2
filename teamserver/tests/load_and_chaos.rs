@@ -528,9 +528,18 @@ async fn mid_post_disconnect_leaves_no_ghost_agent() -> Result<(), Box<dyn std::
 #[tokio::test]
 async fn download_limit_enforced_under_concurrent_upload() -> Result<(), Box<dyn std::error::Error>>
 {
-    // 512 KiB aggregate cap — allows at most 2 of the 256 KiB chunks below.
-    const CAP_BYTES: u64 = 512 * 1024;
-    // Each chunk is 256 KiB — 5 agents × 256 KiB = 1 280 KiB > cap.
+    // Per-download cap: 256 KiB — each individual file may consume up to this much.
+    // Aggregate cap: 512 KiB — the total across all in-flight downloads.
+    //
+    // `with_max_aggregate_download_bytes` is clamped to `max(aggregate, per_download)`,
+    // so the per-download cap must be ≤ the aggregate cap for the aggregate limit to
+    // have any effect.  Using `ListenerManager::with_max_download_bytes` to set the
+    // per-download cap first, then overriding the aggregate cap, achieves the desired:
+    //   max_download_bytes       = 256 KiB
+    //   max_total_download_bytes = max(512 KiB, 256 KiB) = 512 KiB ✓
+    const PER_DOWNLOAD_CAP: u64 = 256 * 1024;
+    const AGGREGATE_CAP: u64 = 512 * 1024;
+    // Each chunk is 256 KiB — 5 agents × 256 KiB = 1 280 KiB > 512 KiB aggregate cap.
     const CHUNK_SIZE: usize = 256 * 1024;
     const CONCURRENT_AGENTS: u32 = 5;
 
@@ -543,9 +552,16 @@ async fn download_limit_enforced_under_concurrent_upload() -> Result<(), Box<dyn
     let mut event_rx = events.subscribe();
 
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None)
-        .with_max_aggregate_download_bytes(CAP_BYTES)
-        .with_demon_allow_legacy_ctr(true);
+    let manager = ListenerManager::with_max_download_bytes(
+        database,
+        registry.clone(),
+        events,
+        sockets,
+        None,
+        PER_DOWNLOAD_CAP,
+    )
+    .with_max_aggregate_download_bytes(AGGREGATE_CAP)
+    .with_demon_allow_legacy_ctr(true);
 
     let (port, guard) = common::available_port()?;
     manager.create(common::http_listener_config("chaos-dl-limit", port)).await?;
@@ -620,7 +636,7 @@ async fn download_limit_enforced_under_concurrent_upload() -> Result<(), Box<dyn
     let deadline = tokio::time::Instant::now() + Duration::from_millis(300);
     assert!(
         event_contains_response(&mut event_rx, "Error", "aggregate", deadline).await,
-        "expected at least one download chunk to trigger the aggregate cap ({CAP_BYTES} bytes) \
+        "expected at least one download chunk to trigger the aggregate cap ({AGGREGATE_CAP} bytes) \
          and broadcast an AgentResponse{{Type=Error, Message∋\"aggregate\"}} event, \
          but none was observed within the deadline"
     );

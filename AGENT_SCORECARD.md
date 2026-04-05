@@ -42,6 +42,16 @@ Each loop run updates the running totals and appends a review entry.
 
 <!-- QA and arch loops append entries below this line -->
 
+### QA Review — 2026-04-05 09:20 — f8c5d584..8d6bdeb5
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | No dev commits in range. Agent has claimed red-cell-c2-ho0n2 (dispatch integration test for DownloadConcurrentLimitExceeded) and has new tests staged in teamserver/src/dispatch/mod.rs — work in progress, not yet committed. |
+| Codex | 0 | 0 | No activity. Pre-existing P0s go1s5 and rbskj remain open. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: skipped — 15+ concurrent cargo processes running (dev loop active); workspace could not acquire build lock. Pre-existing compile failures on red-cell-cli (go1s5) and red-cell-client (pebfp) are tracked.
+
 ### Arch Review — 2026-04-05 04:49 — 61174223..c350d613
 
 | Agent | Findings | Categories | Notes |

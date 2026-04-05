@@ -10,11 +10,11 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 1194 | 253 | 42 |
-| Bugs filed against | 210 | 43 | 10 |
+| Bugs filed against | 211 | 43 | 10 |
 | Bug rate (bugs/task) | 0.18 | 0.17 | 0.24 |
 | Quality score | 82% | 83% | 76% |
 
-*Bug rates: Claude 210/1194=0.1759→0.18, Codex 43/253=0.1700→0.17, Cursor 10/42=0.2381→0.24*
+*Bug rates: Claude 211/1194=0.1768→0.18, Codex 43/253=0.1700→0.17, Cursor 10/42=0.2381→0.24*
 
 ## Violation Breakdown
 
@@ -34,7 +34,7 @@ Each loop run updates the running totals and appends a review entry.
 | Correctness / pagination | 65 | 8 | 1 |
 | Workflow / close-hygiene | 33 | 1 | 0 |
 | Code reuse / duplication | 11 | 0 | 0 |
-| Incomplete commits (stranded work) | 2 | 2 | 0 |
+| Incomplete commits (stranded work) | 3 | 2 | 0 |
 
 ---
 
@@ -6008,3 +6008,13 @@ Build: FAILED — pre-existing `red-cell-c2-go1s5` (Backoff::with_initial_delay 
 | Cursor | 0 | 0 | No activity in range. |
 
 Build: FAILED (pre-existing) — workspace `cargo check` fails on `red-cell-cli` due to `red-cell-c2-go1s5` (Backoff::with_initial_delay missing, introduced by Codex d95dd822, filed previously). Teamserver-only check passes. `7ce09db6` code quality good: `warn!` import correct, deprecation message accurate, doc comment precise, migration guide thorough.
+
+### QA Review — 2026-04-05 07:15 — b9dde124..c767eef4
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 1 | Filed `red-cell-c2-rmt02` (P1): `teamserver/tests/load_and_chaos.rs` created for vgupj but never committed — stranded on disk. |
+| Codex | 0 | 0 | No new tasks. Pre-existing P0 `go1s5` (Backoff::with_initial_delay compile error) escalated from P1→P0 this run. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: FAILED (pre-existing) — `cargo check --workspace` fails on `red-cell-cli` due to `go1s5` (Backoff::with_initial_delay missing, Codex commit d95dd822). No new development commits this range; only prior QA checkpoint commit.

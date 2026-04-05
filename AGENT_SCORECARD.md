@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1191 | 253 | 42 |
-| Bugs filed against | 208 | 43 | 10 |
-| Bug rate (bugs/task) | 0.17 | 0.17 | 0.24 |
-| Quality score | 83% | 83% | 76% |
+| Tasks closed | 1192 | 253 | 42 |
+| Bugs filed against | 209 | 43 | 10 |
+| Bug rate (bugs/task) | 0.18 | 0.17 | 0.24 |
+| Quality score | 82% | 83% | 76% |
 
-*Bug rates: Claude 208/1191=0.1747→0.17, Codex 43/253=0.1700→0.17, Cursor 10/42=0.2381→0.24*
+*Bug rates: Claude 209/1192=0.1754→0.18, Codex 43/253=0.1700→0.17, Cursor 10/42=0.2381→0.24*
 
 ## Violation Breakdown
 
@@ -34,7 +34,7 @@ Each loop run updates the running totals and appends a review entry.
 | Correctness / pagination | 65 | 8 | 1 |
 | Workflow / close-hygiene | 33 | 1 | 0 |
 | Code reuse / duplication | 11 | 0 | 0 |
-| Incomplete commits (stranded work) | 1 | 2 | 0 |
+| Incomplete commits (stranded work) | 2 | 2 | 0 |
 
 ---
 
@@ -5988,3 +5988,13 @@ Build: skipped — no Rust source changes in range; pre-existing P1 compile erro
 | Cursor | 0 | 0 | — |
 
 Build: partial — `cargo check -p red-cell` passes (teamserver clean). Workspace check fails on `red-cell-cli` due to pre-existing red-cell-c2-go1s5 (Backoff::with_initial_delay). `cargo clippy -p red-cell` clean.
+
+### QA Review — 2026-04-05 — 3faa50c5..e456ef0e
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 1 | Closed `red-cell-c2-at2ls` (d7f89847 — RBAC fmt cleanup + close). Claimed `red-cell-c2-i1hrq` (deprecate legacy CTR) but left implementation uncommitted in working tree — filed `red-cell-c2-1dq4k` (P2). |
+| Codex | 0 | 0 | No activity in range. |
+| Cursor | 0 | 0 | No activity in range. |
+
+Build: FAILED — pre-existing `red-cell-c2-go1s5` (Backoff::with_initial_delay missing in backoff.rs, introduced by Codex d95dd822) still unresolved. teamserver-only check passes; workspace check fails on red-cell-cli.

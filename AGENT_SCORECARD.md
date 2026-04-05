@@ -10,18 +10,18 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 1191 | 253 | 42 |
-| Bugs filed against | 206 | 43 | 10 |
+| Bugs filed against | 208 | 43 | 10 |
 | Bug rate (bugs/task) | 0.17 | 0.17 | 0.24 |
 | Quality score | 83% | 83% | 76% |
 
-*Bug rates: Claude 206/1191=0.1730→0.17, Codex 43/253=0.1700→0.17, Cursor 10/42=0.2381→0.24*
+*Bug rates: Claude 208/1191=0.1747→0.17, Codex 43/253=0.1700→0.17, Cursor 10/42=0.2381→0.24*
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 12 | 0 | 0 |
-| Missing tests / stale tests | 74 | 19 | 5 |
+| Missing tests / stale tests | 76 | 19 | 5 |
 | Clippy warnings | 11 | 0 | 1 |
 | Protocol errors | 30 | 32 | 3 |
 | Security issues | 60 | 39 | 0 |
@@ -5953,3 +5953,13 @@ Build: skipped — build directory locked by active dev agent (red-cell-c2-v9jrt
 | Cursor | 0 | 0 | — |
 
 Build: skipped — build directory locked by concurrent dev agent builds (target/codex-client in active use). Last successful build from parallel session: `Finished dev profile in 132m 52s` (no errors). Working-tree changes type-check clean based on recent parallel build evidence.
+
+### QA Review — 2026-04-05 04:15 — 7ae8cf6b..77866c2b
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 2 | WIP commit 77866c2b: granular RBAC (agent groups + listener access) for red-cell-c2-at2ls. Code quality good — no unwrap, transactions correct, migration schema correct. Filed red-cell-c2-0k3xs (missing rbac.rs unit tests) and red-cell-c2-7wsxf (missing API endpoint integration tests). |
+| Codex | 0 | 0 | — |
+| Cursor | 0 | 0 | — |
+
+Build: partial — `cargo check -p red-cell` passes (teamserver clean). Workspace check fails on `red-cell-cli` due to pre-existing red-cell-c2-go1s5 (Backoff::with_initial_delay). `cargo clippy -p red-cell` clean.

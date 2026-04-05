@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1196 | 253 | 42 |
-| Bugs filed against | 211 | 43 | 10 |
+| Tasks closed | 1196 | 255 | 42 |
+| Bugs filed against | 211 | 44 | 10 |
 | Bug rate (bugs/task) | 0.18 | 0.17 | 0.24 |
 | Quality score | 82% | 83% | 76% |
 
-*Bug rates: Claude 211/1196=0.1764→0.18, Codex 43/253=0.1700→0.17, Cursor 10/42=0.2381→0.24*
+*Bug rates: Claude 211/1196=0.1764→0.18, Codex 44/255=0.1725→0.17, Cursor 10/42=0.2381→0.24*
 
 ## Violation Breakdown
 
@@ -31,7 +31,7 @@ Each loop run updates the running totals and appends a review entry.
 | Test infrastructure / flakiness | 50 | 6 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 4 | 5 | 0 |
-| Correctness / pagination | 65 | 8 | 1 |
+| Correctness / pagination | 65 | 9 | 1 |
 | Workflow / close-hygiene | 33 | 1 | 0 |
 | Code reuse / duplication | 11 | 0 | 0 |
 | Incomplete commits (stranded work) | 4 | 2 | 0 |
@@ -6059,3 +6059,13 @@ Build: skipped — competing cargo processes from other agents consuming resourc
 | Cursor | 0 | 0 | No activity. |
 
 Build: skipped — build directory lock held by concurrent cargo processes (26 active); cargo check blocked on lock. Pre-existing P0 `go1s5` (Backoff::with_initial_delay, Codex commit d95dd822) still in committed code but fix is in Codex working tree awaiting commit. Pre-existing P1 `pebfp` (frame_metrics in assert!) still open. TLS hot-reload (`e969d`, Claude in progress) has working-tree compile errors in common/src/tls.rs (type inference in validate_tls_not_expired:136) — expected for in-progress work.
+
+### QA Review — 2026-04-05 11:10 — 17cb3824..815850b2
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | No dev commits in range. |
+| Codex | 2 | 1 | Closed `red-cell-c2-9ys0j` (6fa82d87): `AgentId` newtype in client-cli — strong typing, comprehensive tests, backoff `with_initial_delay` fix included (P0 `go1s5` resolved). Closed `red-cell-c2-ojudf` (55ab8fab): file browser breadcrumbs — refactored, no regression on Resolve/Refresh/Up buttons. Filed `red-cell-c2-3n71w` (P2): `AgentId::Display` outputs zero-padded hex like `00000001` which FromStr rejects as ambiguous; copy-paste roundtrip from `agent list` → `agent show` broken for IDs with all-decimal-digit hex representation. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: passed — `cargo check --workspace` completed successfully (6m 12s). Concurrent agent processes blocked nextest/clippy on file locks; full test run deferred. Pre-existing P1 `pebfp` (frame_metrics in assert!, client/src/main.rs:9169) still open. P0 `go1s5` closed — fix committed.

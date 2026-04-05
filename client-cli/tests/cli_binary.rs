@@ -150,9 +150,9 @@ async fn status_success_output_text_not_json_envelope() {
 }
 
 #[test]
-fn missing_required_positional_exits_2() {
+fn missing_required_positional_exits_1() {
     let out = base_cmd().args(["agent", "show"]).output().expect("spawn red-cell-cli");
-    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(out.status.code(), Some(1));
 }
 
 #[test]

@@ -1,6 +1,7 @@
 use std::io::Write as _;
 use std::path::PathBuf;
 
+use clap::error::ErrorKind;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
@@ -747,7 +748,19 @@ fn main() {
         .with_writer(std::io::stderr)
         .init();
 
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => {
+            // Clap defaults to exit 2 for usage errors; AGENTS.md reserves 2 for "not found".
+            // `--help` / `--version` are reported as errors by `try_parse` but must exit 0.
+            let code = match e.kind() {
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => EXIT_SUCCESS,
+                _ => EXIT_GENERAL,
+            };
+            let _ = e.print();
+            std::process::exit(code);
+        }
+    };
 
     // Bare invocation: print help and exit 0.
     if cli.command.is_none() {

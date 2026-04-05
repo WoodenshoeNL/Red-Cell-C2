@@ -10,11 +10,11 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 1196 | 255 | 42 |
-| Bugs filed against | 211 | 44 | 10 |
-| Bug rate (bugs/task) | 0.18 | 0.17 | 0.24 |
-| Quality score | 82% | 83% | 76% |
+| Bugs filed against | 211 | 45 | 10 |
+| Bug rate (bugs/task) | 0.18 | 0.18 | 0.24 |
+| Quality score | 82% | 82% | 76% |
 
-*Bug rates: Claude 211/1196=0.1764→0.18, Codex 44/255=0.1725→0.17, Cursor 10/42=0.2381→0.24*
+*Bug rates: Claude 211/1196=0.1764→0.18, Codex 45/255=0.1765→0.18, Cursor 10/42=0.2381→0.24*
 
 ## Violation Breakdown
 
@@ -34,7 +34,7 @@ Each loop run updates the running totals and appends a review entry.
 | Correctness / pagination | 65 | 9 | 1 |
 | Workflow / close-hygiene | 33 | 1 | 0 |
 | Code reuse / duplication | 11 | 0 | 0 |
-| Incomplete commits (stranded work) | 4 | 2 | 0 |
+| Incomplete commits (stranded work) | 4 | 3 | 0 |
 
 ---
 
@@ -6069,3 +6069,13 @@ Build: skipped — build directory lock held by concurrent cargo processes (26 a
 | Cursor | 0 | 0 | No activity. |
 
 Build: passed — `cargo check --workspace` completed successfully (6m 12s). Concurrent agent processes blocked nextest/clippy on file locks; full test run deferred. Pre-existing P1 `pebfp` (frame_metrics in assert!, client/src/main.rs:9169) still open. P0 `go1s5` closed — fix committed.
+
+### QA Review — 2026-04-05 12:30 — 815850b2..dce91ac8
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | No dev commits in range. |
+| Codex | 0 | 1 | No new dev commits. Claimed `red-cell-c2-qcnvq` and `red-cell-c2-k5xbg`; verify-fingerprint implementation partially staged (known_servers.rs) but main.rs (+162) and common/tls.rs (+288) unstaged and uncommitted. Filed `red-cell-c2-r8du7` (P1): stranded verify-fingerprint work in working tree. Pattern mirrors P0 `red-cell-c2-rbskj`. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: skipped — build directory locked by many concurrent cargo processes from prior agent sessions (nextest, cargo check ×4, cargo test ×3 all active). Pre-existing P1 `pebfp` (frame_metrics in assert!, client/src/main.rs) still open.

@@ -115,6 +115,13 @@ impl FromStr for AgentId {
             return Self::parse_decimal(decimal);
         }
 
+        // [`fmt::Display`] is always exactly 8 hex digits (uppercase in output; parse is
+        // case-insensitive). That form is never ambiguous with bare decimal, even when every
+        // digit is also a decimal numeral (e.g. `00000001`, `12345678`).
+        if trimmed.len() == 8 && trimmed.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Self::parse_hex(trimmed, trimmed);
+        }
+
         if trimmed.bytes().all(|b| b.is_ascii_digit()) {
             return Err(ParseAgentIdError::Ambiguous(trimmed.to_owned()));
         }
@@ -227,6 +234,20 @@ mod tests {
     fn rejects_ambiguous_digit_only_string() {
         let err = "1234".parse::<AgentId>().expect_err("must reject ambiguous digits");
         assert_eq!(err, ParseAgentIdError::Ambiguous("1234".to_owned()));
+    }
+
+    #[test]
+    fn display_parse_roundtrip_when_hex_looks_decimal() {
+        for id in [AgentId::new(0x1), AgentId::new(0x12345678), AgentId::new(0x00001234)] {
+            let s = id.to_string();
+            assert_eq!(s.parse::<AgentId>().expect("parse roundtrip"), id);
+        }
+    }
+
+    #[test]
+    fn serde_accepts_eight_char_hex_that_is_all_decimal_digits() {
+        let id: AgentId = serde_json::from_value(serde_json::json!("00000001")).expect("json");
+        assert_eq!(id, AgentId::new(1));
     }
 
     #[test]

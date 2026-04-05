@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1197 | 255 | 45 |
-| Bugs filed against | 215 | 49 | 12 |
+| Tasks closed | 1198 | 255 | 48 |
+| Bugs filed against | 215 | 49 | 13 |
 | Bug rate (bugs/task) | 0.18 | 0.19 | 0.27 |
 | Quality score | 82% | 81% | 73% |
 
-*Bug rates: Claude 215/1197=0.1796→0.18, Codex 49/255=0.1922→0.19, Cursor 12/45=0.2667→0.27*
+*Bug rates: Claude 215/1198=0.1795→0.18, Codex 49/255=0.1922→0.19, Cursor 13/48=0.2708→0.27*
 
 ## Violation Breakdown
 
@@ -23,7 +23,7 @@ Each loop run updates the running totals and appends a review entry.
 | unwrap / expect in production | 14 | 0 | 0 |
 | Missing tests / stale tests | 77 | 22 | 6 |
 | Clippy warnings | 11 | 0 | 1 |
-| Protocol errors | 30 | 32 | 3 |
+| Protocol errors | 30 | 32 | 4 |
 | Security issues | 61 | 39 | 0 |
 | Architecture drift | 38 | 25 | 1 |
 | Memory / resource leaks | 12 | 11 | 1 |
@@ -6158,3 +6158,12 @@ Build: passed — `cargo check --workspace` clean. Tests skipped — artifact di
 | Agent | Tasks closed | Bugs filed | Notes |
 |-------|-------------|------------|-------|
 | Claude | 0 | 2 | Committed plugin catch_unwind/health-tracking work for red-cell-c2-j82xb (wip: interrupted 66879b3e) — all 4 requirements implemented (catch_unwind, ERROR logging, per-plugin failure counts, /health endpoint). Never closed the issue (filed red-cell-c2-4e2d2, P3, workflow/close-hygiene). New `plugin_health_summary` public functi
+### QA Review — 2026-04-06 00:30 — a730b68d..41fa3bec
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 0 | Closed red-cell-c2-r8du7 (stranded work). Committed fix(common): zeroize base64 key strings (add serde feature to zeroize, remove intermediate plain-String allocation in deserialize_base64_to_zeroizing_bytes — also removes custom serialize_optional_zeroizing_string in favor of native Zeroizing<T> serde). Committed fix(teamserver): load test download cap exercises aggregate cap (download_start_payload + download_chunk_payload helpers, event_contains_response helper). Committed fix(loop): multiple loop infra improvements — max_turns 100→150, build cleanup covers all profile dirs, fetch+rebase before WIP push, error_max_turns detection. Partially addressed red-cell-c2-o0d4i (CHECKIN replay): warning emitted + docs/operator-security.md section added + 2 tests — issue still in_progress. Created docs/known-failures.md entry for lld SIGBUS (tracked as n11sv, P3). |
+| Codex | 0 | 0 | No activity this range. |
+| Cursor | 3 | 1 | Closed red-cell-c2-o34wl (CLI parse errors exit 1), red-cell-c2-lhj4o (session cmd validation allowlist), red-cell-c2-9spng (config permission stderr warning). feat(client-cli): RBAC agent groups, operator groups, listener access commands — CLI surface complete, backed by teamserver endpoints from prior session. Bug hca8v (P2) filed: session unknown-cmd error emits {"error":{"code":...}} envelope instead of {"ok":false,"cmd":...,"error":"UNKNOWN_COMMAND",...} — breaks session protocol contract for automated consumers. |
+
+Build: skipped — stale Apr04 cargo processes (PIDs 1167991, 1185007, 1188269, 1200647) still hold build lock; tracked in red-cell-c2-z10wz. A concurrent dev-agent cargo check is also running (PIDs 2163233, 2168676).

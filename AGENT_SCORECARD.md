@@ -28,19 +28,30 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 26 | 25 | 1 |
 | Memory / resource leaks | 11 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 10 | 0 |
-| Test infrastructure / flakiness | 49 | 6 | 1 |
+| Test infrastructure / flakiness | 50 | 6 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 4 | 5 | 0 |
 | Correctness / pagination | 65 | 8 | 1 |
 | Workflow / close-hygiene | 33 | 1 | 0 |
 | Code reuse / duplication | 11 | 0 | 0 |
-| Incomplete commits (stranded work) | 3 | 2 | 0 |
+| Incomplete commits (stranded work) | 4 | 2 | 0 |
 
 ---
 
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-04-05 09:35
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 2 | test infrastructure, incomplete commit | Filed `red-cell-c2-d1rmr` (P3) — `download_limit_enforced_under_concurrent_upload` test (load_and_chaos.rs, co-authored by Claude in f2ef7ea8) sends unencrypted garbage payloads that fail command parsing; the aggregate download cap never fires, making the test meaningless as cap enforcement coverage. Filed `red-cell-c2-nr6d9` (P3) — two new dispatch integration tests for `DownloadConcurrentLimitExceeded` (ho0n2 implementation) are left uncommitted in working tree. |
+| Codex | 0 | — | No Codex-attributed findings. Pre-existing P0s go1s5 and rbskj remain open. |
+| Cursor | 0 | — | No Cursor-attributed findings. |
+
+Overall codebase health: on track
+Biggest blindspot: aggregate download cap has no valid end-to-end test (the one test that claims to cover it doesn't actually exercise the cap path). Pre-existing P0/P1 build breaks on client-cli and client remain the most urgent blocking items.
 
 ### QA Review — 2026-04-05 09:20 — f8c5d584..8d6bdeb5
 

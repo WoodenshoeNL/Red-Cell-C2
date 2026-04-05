@@ -11,7 +11,7 @@ use std::time::Duration;
 use reqwest::{Client, StatusCode};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use tracing::{instrument, warn};
+use tracing::instrument;
 
 use crate::config::{ResolvedConfig, TlsMode};
 use crate::error::CliError;

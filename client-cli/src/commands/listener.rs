@@ -11,6 +11,9 @@
 //! | `listener stop <name>` | `PUT /listeners/{name}/stop` | idempotent |
 //! | `listener delete <name>` | `DELETE /listeners/{name}` | hard delete |
 
+use red_cell_common::{
+    DnsListenerConfig, ExternalListenerConfig, HttpListenerConfig, SmbListenerConfig,
+};
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
@@ -423,6 +426,7 @@ pub(crate) fn build_create_body(
     if let Some(raw_json) = config_json {
         let inner: serde_json::Value = serde_json::from_str(raw_json)
             .map_err(|e| CliError::InvalidArgs(format!("--config-json is not valid JSON: {e}")))?;
+        validate_inner_config_json_for_protocol(protocol, &inner)?;
         return Ok(serde_json::json!({
             "protocol": protocol,
             "config": inner,
@@ -482,6 +486,49 @@ pub(crate) fn build_create_body(
         "protocol": protocol,
         "config": inner,
     }))
+}
+
+/// Best-effort check that `--config-json` matches the schema for `--type` /
+/// `--protocol` before sending `POST /listeners`.
+///
+/// Protocols recognised here use the canonical structs from `red_cell_common`.
+/// Any other protocol string is left to the teamserver so future listener types
+/// are not blocked by an older CLI.
+fn validate_inner_config_json_for_protocol(
+    protocol: &str,
+    inner: &serde_json::Value,
+) -> Result<(), CliError> {
+    match protocol {
+        "http" => serde_json::from_value::<HttpListenerConfig>(inner.clone())
+            .map_err(|e| {
+                CliError::InvalidArgs(format!(
+                    "--config-json does not match HTTP listener schema: {e}"
+                ))
+            })
+            .map(|_| ()),
+        "dns" => serde_json::from_value::<DnsListenerConfig>(inner.clone())
+            .map_err(|e| {
+                CliError::InvalidArgs(format!(
+                    "--config-json does not match DNS listener schema: {e}"
+                ))
+            })
+            .map(|_| ()),
+        "smb" => serde_json::from_value::<SmbListenerConfig>(inner.clone())
+            .map_err(|e| {
+                CliError::InvalidArgs(format!(
+                    "--config-json does not match SMB listener schema: {e}"
+                ))
+            })
+            .map(|_| ()),
+        "external" => serde_json::from_value::<ExternalListenerConfig>(inner.clone())
+            .map_err(|e| {
+                CliError::InvalidArgs(format!(
+                    "--config-json does not match external listener schema: {e}"
+                ))
+            })
+            .map(|_| ()),
+        _ => Ok(()),
+    }
 }
 
 /// Extract a short info string from the raw `ListenerSummary.config` value.
@@ -849,6 +896,50 @@ mod tests {
         )
         .expect_err("bad json");
         assert!(matches!(err, CliError::InvalidArgs(_)));
+    }
+
+    #[test]
+    fn build_create_body_config_json_dns_shape_rejected_for_http_type() {
+        let raw =
+            r#"{"name":"dns1","host_bind":"0.0.0.0","port_bind":53,"domain":"c2.example.com"}"#;
+        let err =
+            build_create_body("x", "http", None, "0.0.0.0", None, None, None, false, Some(raw))
+                .expect_err("wrong schema for --type http");
+        let CliError::InvalidArgs(msg) = err else {
+            panic!("expected InvalidArgs, got {err:?}");
+        };
+        assert!(msg.contains("HTTP listener schema"), "expected HTTP schema hint, got: {msg}");
+    }
+
+    #[test]
+    fn build_create_body_config_json_http_shape_rejected_for_dns_type() {
+        let raw = r#"{"name":"h1","host_bind":"0.0.0.0","port_bind":443,"host_rotation":"round-robin","secure":false}"#;
+        let err =
+            build_create_body("x", "dns", None, "0.0.0.0", None, None, None, false, Some(raw))
+                .expect_err("wrong schema for --type dns");
+        let CliError::InvalidArgs(msg) = err else {
+            panic!("expected InvalidArgs, got {err:?}");
+        };
+        assert!(msg.contains("DNS listener schema"), "expected DNS schema hint, got: {msg}");
+    }
+
+    #[test]
+    fn build_create_body_config_json_unknown_protocol_skips_local_schema_validation() {
+        let raw = r#"{"name":"x","host_bind":"0.0.0.0","port_bind":443}"#;
+        let body = build_create_body(
+            "ignored",
+            "future_proto",
+            None,
+            "0.0.0.0",
+            None,
+            None,
+            None,
+            false,
+            Some(raw),
+        )
+        .expect("unknown protocol should not run local serde validation");
+        assert_eq!(body["protocol"], "future_proto");
+        assert_eq!(body["config"]["port_bind"], 443);
     }
 
     // ── extract_info ──────────────────────────────────────────────────────────

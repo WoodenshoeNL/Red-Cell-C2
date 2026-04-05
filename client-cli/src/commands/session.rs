@@ -142,7 +142,7 @@ fn build_connector(
                 .with_root_certificates(root_store)
                 .with_no_client_auth();
 
-            Ok(tokio_tungstenite::Connector::Rustls(Arc::new(config)))
+            Ok(tokio_tungstenite::Connector::Rustls(std::sync::Arc::new(config)))
         }
 
         TlsMode::Fingerprint(hex) => {

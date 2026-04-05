@@ -1,5 +1,7 @@
 //! Shared types used across multiple command modules.
 
+use std::fmt::Display;
+
 use serde::Deserialize;
 
 /// Wire format returned by `GET /agents/{id}/output`.
@@ -70,7 +72,7 @@ mod tests {
 /// The `since` parameter is the numeric database row id of the last seen
 /// entry.  The server returns only rows with `id > since`, matching the
 /// `AgentOutputQuery::since: Option<i64>` parameter on the teamserver side.
-pub(crate) fn output_url(agent_id: &str, since: Option<i64>) -> String {
+pub(crate) fn output_url(agent_id: impl Display, since: Option<i64>) -> String {
     match since {
         Some(cursor) => format!("/agents/{agent_id}/output?since={cursor}"),
         None => format!("/agents/{agent_id}/output"),

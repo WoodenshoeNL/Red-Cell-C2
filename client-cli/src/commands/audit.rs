@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
 use tracing::instrument;
 
+use crate::AgentId;
 use crate::AuditCommands;
 use crate::backoff::Backoff;
 use crate::client::ApiClient;
@@ -39,7 +40,7 @@ struct RawAuditRecord {
     action: String,
     target_kind: String,
     target_id: Option<String>,
-    agent_id: Option<String>,
+    agent_id: Option<AgentId>,
     command: Option<String>,
     result_status: String,
     occurred_at: String,
@@ -65,7 +66,7 @@ pub struct AuditEntry {
     /// Action type (e.g. `"agent.task"`, `"operator.login"`).
     pub action: String,
     /// Agent ID the action was performed on, if applicable.
-    pub agent_id: Option<String>,
+    pub agent_id: Option<AgentId>,
     /// Sub-action label or target reference for this event.
     pub detail: Option<String>,
     /// Outcome: `"success"` or `"failure"`.
@@ -82,7 +83,7 @@ impl TextRow for AuditEntry {
             self.ts.clone(),
             self.operator.clone(),
             self.action.clone(),
-            self.agent_id.clone().unwrap_or_default(),
+            self.agent_id.map_or_else(String::new, |id| id.to_string()),
             self.detail.clone().unwrap_or_default(),
             self.result_status.clone(),
         ]
@@ -100,7 +101,7 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AuditCommands) 
                 limit,
                 since.as_deref(),
                 operator.as_deref(),
-                agent.as_deref(),
+                agent,
                 action.as_deref(),
             )
             .await
@@ -159,7 +160,7 @@ async fn list(
     limit: u32,
     since: Option<&str>,
     operator: Option<&str>,
-    agent_id: Option<&str>,
+    agent_id: Option<AgentId>,
     action: Option<&str>,
 ) -> Result<Vec<AuditEntry>, CliError> {
     let mut params: Vec<String> = vec![format!("limit={limit}")];
@@ -171,7 +172,7 @@ async fn list(
         params.push(format!("operator={}", percent_encode(op)));
     }
     if let Some(aid) = agent_id {
-        params.push(format!("agent_id={}", percent_encode(aid)));
+        params.push(format!("agent_id={}", percent_encode(&aid.to_string())));
     }
     if let Some(act) = action {
         params.push(format!("action={}", percent_encode(act)));
@@ -270,7 +271,7 @@ fn print_entry_line(fmt: &OutputFormat, entry: &AuditEntry) -> Result<(), CliErr
         entry.ts,
         entry.operator,
         entry.action,
-        entry.agent_id.as_deref().unwrap_or("-"),
+        entry.agent_id.map_or_else(|| "-".to_owned(), |id| id.to_string()),
         entry.detail.as_deref().unwrap_or(""),
         entry.result_status,
     );
@@ -349,12 +350,13 @@ impl FollowCursor {
 }
 
 fn follow_entry_key(entry: &AuditEntry) -> String {
+    let agent_id = entry.agent_id.map_or_else(String::new, |id| id.to_string());
     format!(
         "{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}",
         entry.ts,
         entry.operator,
         entry.action,
-        entry.agent_id.as_deref().unwrap_or(""),
+        agent_id,
         entry.detail.as_deref().unwrap_or(""),
         entry.result_status,
     )
@@ -416,6 +418,10 @@ fn percent_encode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn agent_id(value: u32) -> AgentId {
+        AgentId::new(value)
+    }
     use crate::output::TextRender as _;
 
     fn sample_raw_record(
@@ -423,7 +429,7 @@ mod tests {
         action: &str,
         target_kind: &str,
         target_id: Option<&str>,
-        agent_id: Option<&str>,
+        agent_id: Option<AgentId>,
         command: Option<&str>,
         result_status: &str,
         occurred_at: &str,
@@ -433,7 +439,7 @@ mod tests {
             action: action.to_owned(),
             target_kind: target_kind.to_owned(),
             target_id: target_id.map(ToOwned::to_owned),
-            agent_id: agent_id.map(ToOwned::to_owned),
+            agent_id,
             command: command.map(ToOwned::to_owned),
             result_status: result_status.to_owned(),
             occurred_at: occurred_at.to_owned(),
@@ -449,7 +455,7 @@ mod tests {
             "agent.task",
             "agent",
             Some("CAFE0001"),
-            Some("abc123"),
+            Some(agent_id(0xABC123)),
             Some("whoami"),
             "success",
             "2026-03-21T12:00:00Z",
@@ -458,7 +464,7 @@ mod tests {
         assert_eq!(entry.ts, "2026-03-21T12:00:00Z");
         assert_eq!(entry.operator, "alice");
         assert_eq!(entry.action, "agent.task");
-        assert_eq!(entry.agent_id.as_deref(), Some("abc123"));
+        assert_eq!(entry.agent_id, Some(agent_id(0xABC123)));
         assert_eq!(entry.detail.as_deref(), Some("whoami"));
         assert_eq!(entry.result_status, "success");
     }
@@ -552,7 +558,7 @@ mod tests {
             ts: "2026-03-21T12:00:00Z".to_owned(),
             operator: "alice".to_owned(),
             action: "agent.task".to_owned(),
-            agent_id: Some("abc123".to_owned()),
+            agent_id: Some(agent_id(0xABC123)),
             detail: Some("whoami".to_owned()),
             result_status: "success".to_owned(),
         };
@@ -580,7 +586,7 @@ mod tests {
             ts: "2026-03-21T12:00:00Z".to_owned(),
             operator: "carol".to_owned(),
             action: "agent.kill".to_owned(),
-            agent_id: Some("xyz789".to_owned()),
+            agent_id: Some(agent_id(0xFED789)),
             detail: Some("SIGTERM".to_owned()),
             result_status: "success".to_owned(),
         };
@@ -588,7 +594,7 @@ mod tests {
         assert_eq!(v["ts"], "2026-03-21T12:00:00Z");
         assert_eq!(v["operator"], "carol");
         assert_eq!(v["action"], "agent.kill");
-        assert_eq!(v["agent_id"], "xyz789");
+        assert_eq!(v["agent_id"], "00FED789");
         assert_eq!(v["detail"], "SIGTERM");
         assert_eq!(v["result_status"], "success");
     }
@@ -599,14 +605,14 @@ mod tests {
             ts: "2026-03-21T12:00:00Z".to_owned(),
             operator: "dave".to_owned(),
             action: "agent.task".to_owned(),
-            agent_id: Some("abc".to_owned()),
+            agent_id: Some(agent_id(0xABC)),
             detail: Some("id".to_owned()),
             result_status: "success".to_owned(),
         }];
         let rendered = entries.render_text();
         assert!(rendered.contains("dave"));
         assert!(rendered.contains("agent.task"));
-        assert!(rendered.contains("abc"));
+        assert!(rendered.contains("00000ABC"));
     }
 
     #[test]
@@ -627,7 +633,7 @@ mod tests {
             ts: "2026-03-21T12:00:00Z".to_owned(),
             operator: "alice".to_owned(),
             action: "agent.task".to_owned(),
-            agent_id: Some("abc123".to_owned()),
+            agent_id: Some(agent_id(0xABC123)),
             detail: Some("whoami".to_owned()),
             result_status: "success".to_owned(),
         }
@@ -638,7 +644,7 @@ mod tests {
             ts: ts.to_owned(),
             operator: operator.to_owned(),
             action: "agent.task".to_owned(),
-            agent_id: Some("abc123".to_owned()),
+            agent_id: Some(agent_id(0xABC123)),
             detail: Some(detail.to_owned()),
             result_status: "success".to_owned(),
         }
@@ -647,7 +653,7 @@ mod tests {
     #[test]
     fn entry_line_json_mode_emits_ok_true_envelope() {
         let entry = sample_entry();
-        let text = "[...] alice  agent.task  agent=abc123  whoami  [success]".to_owned();
+        let text = "[...] alice  agent.task  agent=00ABC123  whoami  [success]".to_owned();
         let mut out = Vec::new();
         let mut err_out = Vec::new();
         crate::output::write_stream_entry(
@@ -665,7 +671,7 @@ mod tests {
         assert_eq!(v["data"]["ts"], "2026-03-21T12:00:00Z");
         assert_eq!(v["data"]["operator"], "alice");
         assert_eq!(v["data"]["action"], "agent.task");
-        assert_eq!(v["data"]["agent_id"], "abc123");
+        assert_eq!(v["data"]["agent_id"], "00ABC123");
         assert_eq!(v["data"]["detail"], "whoami");
         assert_eq!(v["data"]["result_status"], "success");
         assert!(err_out.is_empty());
@@ -700,7 +706,7 @@ mod tests {
     #[test]
     fn entry_line_text_mode_contains_key_fields() {
         let entry = sample_entry();
-        let agent = entry.agent_id.as_deref().unwrap_or("-");
+        let agent = entry.agent_id.map_or_else(|| "-".to_owned(), |id| id.to_string());
         let detail = entry.detail.as_deref().unwrap_or("");
         let text_line = format!(
             "[{}]  {:20}  {:16}  agent={}  {}  [{}]",
@@ -720,7 +726,7 @@ mod tests {
         let line = String::from_utf8(out).expect("utf-8");
         assert!(line.contains("alice"), "should contain operator");
         assert!(line.contains("agent.task"), "should contain action");
-        assert!(line.contains("abc123"), "should contain agent_id");
+        assert!(line.contains("00ABC123"), "should contain agent_id");
         assert!(line.contains("whoami"), "should contain detail");
         assert!(line.contains("success"), "should contain result_status");
     }

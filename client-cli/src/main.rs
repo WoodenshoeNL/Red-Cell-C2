@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
+mod agent_id;
 mod backoff;
 mod client;
 mod commands;
@@ -12,6 +13,7 @@ mod defaults;
 mod error;
 mod output;
 
+pub(crate) use agent_id::AgentId;
 use error::{CliError, EXIT_GENERAL, EXIT_SUCCESS};
 use output::OutputFormat;
 
@@ -180,7 +182,7 @@ pub enum Commands {
     Session {
         /// Default agent ID (used when a command does not include "id")
         #[arg(long)]
-        agent: Option<String>,
+        agent: Option<AgentId>,
     },
 
     /// Show help for a subcommand (alias: `<command> --help`).
@@ -215,7 +217,7 @@ pub enum AgentCommands {
     #[command(verbatim_doc_comment)]
     Show {
         /// Agent ID
-        id: String,
+        id: AgentId,
     },
 
     /// Execute a shell command on an agent.
@@ -229,7 +231,7 @@ pub enum AgentCommands {
     #[command(verbatim_doc_comment)]
     Exec {
         /// Agent ID
-        id: String,
+        id: AgentId,
         /// Shell command to execute on the agent
         #[arg(long)]
         cmd: String,
@@ -249,7 +251,7 @@ pub enum AgentCommands {
     #[command(verbatim_doc_comment)]
     Output {
         /// Agent ID
-        id: String,
+        id: AgentId,
         /// Stream new output as it arrives (prints JSON lines until Ctrl-C)
         #[arg(long)]
         watch: bool,
@@ -266,7 +268,7 @@ pub enum AgentCommands {
     #[command(verbatim_doc_comment)]
     Kill {
         /// Agent ID
-        id: String,
+        id: AgentId,
         /// Block until the agent's status becomes "dead"
         #[arg(long)]
         wait: bool,
@@ -279,7 +281,7 @@ pub enum AgentCommands {
     #[command(verbatim_doc_comment)]
     Upload {
         /// Agent ID
-        id: String,
+        id: AgentId,
         /// Local path of the file to upload
         #[arg(long)]
         src: String,
@@ -300,7 +302,7 @@ pub enum AgentCommands {
     #[command(verbatim_doc_comment)]
     Download {
         /// Agent ID
-        id: String,
+        id: AgentId,
         /// Source path on the remote agent
         #[arg(long)]
         src: String,
@@ -546,7 +548,7 @@ pub enum LootCommands {
         kind: Option<String>,
         /// Filter by agent ID
         #[arg(long)]
-        agent: Option<String>,
+        agent: Option<AgentId>,
         /// Filter by operator username
         #[arg(long)]
         operator: Option<String>,
@@ -595,7 +597,7 @@ pub enum AuditCommands {
         action: Option<String>,
         /// Filter by agent ID
         #[arg(long)]
-        agent: Option<String>,
+        agent: Option<AgentId>,
         /// Only return entries at or after this ISO 8601 UTC timestamp
         #[arg(long)]
         since: Option<String>,
@@ -750,7 +752,7 @@ async fn dispatch(cli: Cli) -> i32 {
 
         Commands::Audit { action } => commands::audit::run(&api_client, &fmt, action).await,
 
-        Commands::Session { agent } => commands::session::run(&resolved, agent.as_deref()).await,
+        Commands::Session { agent } => commands::session::run(&resolved, agent).await,
 
         Commands::Operator { action } => commands::operator::run(&api_client, &fmt, action).await,
 
@@ -1161,6 +1163,25 @@ mod tests {
                 );
             }
             other => panic!("expected Agent::Exec, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_show_rejects_ambiguous_digit_only_id() {
+        let err = Cli::try_parse_from(["red-cell-cli", "agent", "show", "1234"])
+            .expect_err("ambiguous digit-only id must be rejected");
+        let rendered = err.to_string();
+        assert!(rendered.contains("ambiguous agent id '1234'"));
+        assert!(rendered.contains("0x<hex>"));
+    }
+
+    #[test]
+    fn session_accepts_explicit_decimal_default_agent() {
+        let cli = Cli::try_parse_from(["red-cell-cli", "session", "--agent", "dec:42"])
+            .expect("explicit decimal default agent must parse");
+        match cli.command {
+            Some(Commands::Session { agent }) => assert_eq!(agent, Some(AgentId::new(42))),
+            other => panic!("expected Session, got {other:?}"),
         }
     }
 

@@ -66,6 +66,7 @@ use tokio::io::AsyncBufReadExt as _;
 use tokio_tungstenite::tungstenite::{Message, protocol::CloseFrame};
 use tracing::instrument;
 
+use crate::AgentId;
 use crate::config::{ResolvedConfig, TlsMode};
 use crate::error::{CliError, EXIT_GENERAL, EXIT_SUCCESS};
 
@@ -343,7 +344,7 @@ async fn connect_websocket(
 /// Returns an exit code:
 /// - [`EXIT_SUCCESS`] on clean EOF, `{"cmd":"exit"}`, or server-initiated close
 /// - [`EXIT_GENERAL`] on fatal I/O or WebSocket errors
-pub async fn run(config: &ResolvedConfig, default_agent: Option<&str>) -> i32 {
+pub async fn run(config: &ResolvedConfig, default_agent: Option<AgentId>) -> i32 {
     let ws = match connect_websocket(config).await {
         Ok(ws) => ws,
         Err(e) => {
@@ -373,7 +374,7 @@ async fn run_with_io<R, Out, ErrOut, S>(
     stdout: &mut Out,
     stderr: &mut ErrOut,
     ws: tokio_tungstenite::WebSocketStream<S>,
-    default_agent: Option<&str>,
+    default_agent: Option<AgentId>,
 ) -> i32
 where
     R: tokio::io::AsyncBufRead + Unpin,
@@ -446,7 +447,7 @@ async fn process_stdin_line<Out, ErrOut, Si>(
     stdout: &mut Out,
     stderr: &mut ErrOut,
     sink: &mut Si,
-    default_agent: Option<&str>,
+    default_agent: Option<AgentId>,
 ) -> LoopControl
 where
     Out: std::io::Write,
@@ -500,13 +501,11 @@ where
             }
 
             // ── default-agent injection ───────────────────────────────────
-            if let Some(da) = default_agent {
-                let id_absent = val.get("id").is_none_or(|v| v.is_null());
-                if id_absent {
-                    if let Some(obj) = val.as_object_mut() {
-                        obj.insert("id".to_owned(), serde_json::json!(da));
-                    }
+            if let Err(err) = normalize_agent_id_field(&cmd, &mut val, default_agent) {
+                if emit_error_to(stderr, &cmd, &err).is_err() {
+                    return LoopControl::Exit(EXIT_GENERAL);
                 }
+                return LoopControl::Continue;
             }
 
             // ── forward to server ─────────────────────────────────────────
@@ -534,6 +533,48 @@ where
             }
         }
     }
+}
+
+fn normalize_agent_id_field(
+    cmd: &str,
+    value: &mut serde_json::Value,
+    default_agent: Option<AgentId>,
+) -> Result<(), CliError> {
+    if !command_accepts_agent_id(cmd) {
+        return Ok(());
+    }
+
+    let Some(object) = value.as_object_mut() else {
+        return Ok(());
+    };
+
+    let normalized = match object.get("id") {
+        Some(raw) if !raw.is_null() => Some(parse_agent_id_value(raw)?),
+        _ => default_agent,
+    };
+
+    if let Some(id) = normalized {
+        object.insert("id".to_owned(), serde_json::json!(id));
+    }
+
+    Ok(())
+}
+
+fn command_accepts_agent_id(cmd: &str) -> bool {
+    matches!(
+        cmd,
+        "agent.show"
+            | "agent.exec"
+            | "agent.output"
+            | "agent.kill"
+            | "agent.upload"
+            | "agent.download"
+    )
+}
+
+fn parse_agent_id_value(value: &serde_json::Value) -> Result<AgentId, CliError> {
+    serde_json::from_value::<AgentId>(value.clone())
+        .map_err(|err| CliError::InvalidArgs(format!("invalid agent id: {err}")))
 }
 
 /// Handle one message received from the WebSocket.
@@ -1030,13 +1071,13 @@ mod tests {
         let mut stdout: Vec<u8> = Vec::new();
         let mut stderr: Vec<u8> = Vec::new();
 
-        run_with_io(reader, &mut stdout, &mut stderr, ws, Some("default-agent-123")).await;
+        run_with_io(reader, &mut stdout, &mut stderr, ws, Some(AgentId::new(0xA001))).await;
 
         assert!(stderr.is_empty(), "successful response must not hit stderr");
         let text = String::from_utf8(stdout).expect("utf8");
         let val: serde_json::Value = serde_json::from_str(text.trim()).expect("parse response");
         assert_eq!(
-            val["data"]["received_id"], "default-agent-123",
+            val["data"]["received_id"], "0000A001",
             "default agent must be injected when id is absent"
         );
     }
@@ -1062,18 +1103,18 @@ mod tests {
         .await;
 
         let ws = ws_connect(addr, "test-token").await;
-        let input = b"{\"cmd\":\"agent.show\",\"id\":\"explicit-id\"}\n";
+        let input = b"{\"cmd\":\"agent.show\",\"id\":\"abc123\"}\n";
         let reader = tokio::io::BufReader::new(input.as_slice());
         let mut stdout: Vec<u8> = Vec::new();
         let mut stderr: Vec<u8> = Vec::new();
 
-        run_with_io(reader, &mut stdout, &mut stderr, ws, Some("default-agent-123")).await;
+        run_with_io(reader, &mut stdout, &mut stderr, ws, Some(AgentId::new(0xA001))).await;
 
         assert!(stderr.is_empty(), "successful response must not hit stderr");
         let text = String::from_utf8(stdout).expect("utf8");
         let val: serde_json::Value = serde_json::from_str(text.trim()).expect("parse");
         assert_eq!(
-            val["data"]["received_id"], "explicit-id",
+            val["data"]["received_id"], "00ABC123",
             "explicit id must not be overwritten by default_agent"
         );
     }

@@ -21,6 +21,7 @@ use tokio::time::sleep;
 use tracing::instrument;
 
 use crate::AgentCommands;
+use crate::AgentId;
 use crate::backoff::Backoff;
 use crate::client::ApiClient;
 use crate::defaults::AGENT_EXEC_WAIT_TIMEOUT_SECS;
@@ -95,7 +96,7 @@ struct ApiAgentWire {
 #[serde(from = "ApiAgentWire")]
 pub(crate) struct RawAgent {
     /// Agent identifier as an uppercase hex string, e.g. `"DEADBEEF"`.
-    pub(crate) id: String,
+    pub(crate) id: AgentId,
     pub(crate) hostname: String,
     /// Combined OS string, e.g. `"Windows 11 x64"`.
     pub(crate) os: String,
@@ -120,7 +121,7 @@ pub(crate) struct RawAgent {
 impl From<ApiAgentWire> for RawAgent {
     fn from(w: ApiAgentWire) -> Self {
         Self {
-            id: format!("{:08X}", w.agent_id),
+            id: AgentId::from(w.agent_id),
             hostname: w.hostname,
             os: format!("{} {}", w.os_version, w.os_arch),
             last_seen: w.last_call_in,
@@ -154,7 +155,7 @@ use super::types::{OutputPage, output_url};
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentSummary {
     /// Unique agent identifier.
-    pub id: String,
+    pub id: AgentId,
     /// Hostname of the compromised host.
     pub hostname: String,
     /// Operating system (e.g. `"Windows 10 x64"`).
@@ -172,7 +173,7 @@ impl TextRow for AgentSummary {
 
     fn row(&self) -> Vec<String> {
         vec![
-            self.id.clone(),
+            self.id.to_string(),
             self.hostname.clone(),
             self.os.clone(),
             self.last_seen.clone(),
@@ -184,7 +185,7 @@ impl TextRow for AgentSummary {
 /// Full agent record returned by `agent show`.
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentDetail {
-    pub id: String,
+    pub id: AgentId,
     pub hostname: String,
     pub os: String,
     pub arch: Option<String>,
@@ -209,7 +210,7 @@ impl TextRender for AgentDetail {
         table.set_content_arrangement(ContentArrangement::Dynamic);
         table.set_header([Cell::new("Field"), Cell::new("Value")]);
         let rows: &[(&str, String)] = &[
-            ("id", self.id.clone()),
+            ("id", self.id.to_string()),
             ("hostname", self.hostname.clone()),
             ("os", self.os.clone()),
             ("arch", self.arch.clone().unwrap_or_default()),
@@ -296,7 +297,7 @@ impl TextRow for OutputEntry {
 /// Result of `agent kill`.
 #[derive(Debug, Clone, Serialize)]
 pub struct KillResult {
-    pub agent_id: String,
+    pub agent_id: AgentId,
     pub status: String,
 }
 
@@ -309,7 +310,7 @@ impl TextRender for KillResult {
 /// Result of `agent upload` and `agent download`.
 #[derive(Debug, Clone, Serialize)]
 pub struct TransferResult {
-    pub agent_id: String,
+    pub agent_id: AgentId,
     pub job_id: Option<String>,
     pub local_path: String,
     pub remote_path: String,
@@ -352,7 +353,7 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) 
             }
         },
 
-        AgentCommands::Show { id } => match show(client, &id).await {
+        AgentCommands::Show { id } => match show(client, id).await {
             Ok(data) => match print_success(fmt, &data) {
                 Ok(()) => EXIT_SUCCESS,
                 Err(e) => {
@@ -369,7 +370,7 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) 
         AgentCommands::Exec { id, cmd, wait, wait_timeout } => {
             let timeout_secs = wait_timeout.unwrap_or(AGENT_EXEC_WAIT_TIMEOUT_SECS);
             if wait {
-                match exec_wait(client, &id, &cmd, timeout_secs).await {
+                match exec_wait(client, id, &cmd, timeout_secs).await {
                     Ok(data) => match print_success(fmt, &data) {
                         Ok(()) => EXIT_SUCCESS,
                         Err(e) => {
@@ -383,7 +384,7 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) 
                     }
                 }
             } else {
-                match exec_submit(client, &id, &cmd).await {
+                match exec_submit(client, id, &cmd).await {
                     Ok(data) => match print_success(fmt, &data) {
                         Ok(()) => EXIT_SUCCESS,
                         Err(e) => {
@@ -401,9 +402,9 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) 
 
         AgentCommands::Output { id, watch, since } => {
             if watch {
-                watch_output(client, fmt, &id, since).await
+                watch_output(client, fmt, id, since).await
             } else {
-                match fetch_output(client, &id, since).await {
+                match fetch_output(client, id, since).await {
                     Ok(data) => match print_success(fmt, &data) {
                         Ok(()) => EXIT_SUCCESS,
                         Err(e) => {
@@ -419,7 +420,7 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) 
             }
         }
 
-        AgentCommands::Kill { id, wait } => match kill(client, &id, wait).await {
+        AgentCommands::Kill { id, wait } => match kill(client, id, wait).await {
             Ok(data) => match print_success(fmt, &data) {
                 Ok(()) => EXIT_SUCCESS,
                 Err(e) => {
@@ -434,7 +435,7 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) 
         },
 
         AgentCommands::Upload { id, src, dst, max_upload_mb } => {
-            match upload(client, &id, &src, &dst, max_upload_mb).await {
+            match upload(client, id, &src, &dst, max_upload_mb).await {
                 Ok(data) => match print_success(fmt, &data) {
                     Ok(()) => EXIT_SUCCESS,
                     Err(e) => {
@@ -449,7 +450,7 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) 
             }
         }
 
-        AgentCommands::Download { id, src, dst } => match download(client, &id, &src, &dst).await {
+        AgentCommands::Download { id, src, dst } => match download(client, id, &src, &dst).await {
             Ok(data) => match print_success(fmt, &data) {
                 Ok(()) => EXIT_SUCCESS,
                 Err(e) => {
@@ -486,7 +487,7 @@ async fn list(client: &ApiClient) -> Result<Vec<AgentSummary>, CliError> {
 /// red-cell-cli agent show abc123
 /// ```
 #[instrument(skip(client))]
-async fn show(client: &ApiClient, id: &str) -> Result<AgentDetail, CliError> {
+async fn show(client: &ApiClient, id: AgentId) -> Result<AgentDetail, CliError> {
     let raw: RawAgent = client.get(&format!("/agents/{id}")).await?;
     Ok(agent_detail_from_raw(raw))
 }
@@ -526,7 +527,7 @@ fn command_id_for(cmd: &str) -> &'static str {
 /// red-cell-cli agent exec abc123 --cmd "screenshot"
 /// ```
 #[instrument(skip(client))]
-async fn exec_submit(client: &ApiClient, id: &str, cmd: &str) -> Result<JobSubmitted, CliError> {
+async fn exec_submit(client: &ApiClient, id: AgentId, cmd: &str) -> Result<JobSubmitted, CliError> {
     /// Minimal `AgentTaskInfo` projection — field names match the PascalCase
     /// serde renames on the canonical `red_cell_common::operator::AgentTaskInfo`
     /// struct so the server can deserialise them without modification.
@@ -547,10 +548,11 @@ async fn exec_submit(client: &ApiClient, id: &str, cmd: &str) -> Result<JobSubmi
     }
 
     let cid = command_id_for(cmd);
+    let demon_id = id.to_string();
     let resp: TaskQueuedResponse = client
         .post(
             &format!("/agents/{id}/task"),
-            &Body { command_line: cmd, command_id: cid, demon_id: id, task_id: "" },
+            &Body { command_line: cmd, command_id: cid, demon_id: &demon_id, task_id: "" },
         )
         .await?;
     Ok(JobSubmitted { job_id: resp.task_id })
@@ -569,7 +571,7 @@ async fn exec_submit(client: &ApiClient, id: &str, cmd: &str) -> Result<JobSubmi
 #[instrument(skip(client))]
 async fn exec_wait(
     client: &ApiClient,
-    id: &str,
+    id: AgentId,
     cmd: &str,
     timeout_secs: u64,
 ) -> Result<ExecResult, CliError> {
@@ -631,7 +633,7 @@ async fn exec_wait(
 #[instrument(skip(client))]
 async fn fetch_output(
     client: &ApiClient,
-    id: &str,
+    id: AgentId,
     since: Option<i64>,
 ) -> Result<Vec<OutputEntry>, CliError> {
     let path = output_url(id, since);
@@ -659,7 +661,12 @@ async fn fetch_output(
 /// red-cell-cli agent output abc123 --watch
 /// red-cell-cli agent output abc123 --watch --since 42
 /// ```
-async fn watch_output(client: &ApiClient, fmt: &OutputFormat, id: &str, since: Option<i64>) -> i32 {
+async fn watch_output(
+    client: &ApiClient,
+    fmt: &OutputFormat,
+    id: AgentId,
+    since: Option<i64>,
+) -> i32 {
     let mut cursor: Option<i64> = since;
     let mut backoff = Backoff::new();
     // Create the ctrl_c future once and pin it so we can reuse the same OS-level
@@ -733,11 +740,11 @@ fn render_output_stream_line(entry: &OutputEntry) -> String {
 /// red-cell-cli agent kill abc123 --wait
 /// ```
 #[instrument(skip(client))]
-async fn kill(client: &ApiClient, id: &str, wait: bool) -> Result<KillResult, CliError> {
+async fn kill(client: &ApiClient, id: AgentId, wait: bool) -> Result<KillResult, CliError> {
     client.delete_no_body(&format!("/agents/{id}")).await?;
 
     if !wait {
-        return Ok(KillResult { agent_id: id.to_owned(), status: "kill_sent".to_owned() });
+        return Ok(KillResult { agent_id: id, status: "kill_sent".to_owned() });
     }
 
     let deadline = Instant::now() + Duration::from_secs(AGENT_EXEC_WAIT_TIMEOUT_SECS);
@@ -760,7 +767,7 @@ async fn kill(client: &ApiClient, id: &str, wait: bool) -> Result<KillResult, Cl
             Err(e) => return Err(e),
             Ok(raw) => {
                 if raw.status == "dead" {
-                    return Ok(KillResult { agent_id: id.to_owned(), status: raw.status });
+                    return Ok(KillResult { agent_id: id, status: raw.status });
                 }
                 backoff.record_empty();
                 sleep(backoff.delay()).await;
@@ -787,7 +794,7 @@ async fn kill(client: &ApiClient, id: &str, wait: bool) -> Result<KillResult, Cl
 #[instrument(skip(client))]
 async fn upload(
     client: &ApiClient,
-    id: &str,
+    id: AgentId,
     src: &str,
     dst: &str,
     max_upload_mb: u64,
@@ -821,7 +828,7 @@ async fn upload(
         .await?;
 
     Ok(TransferResult {
-        agent_id: id.to_owned(),
+        agent_id: id,
         job_id: Some(resp.task_id),
         local_path: src.to_owned(),
         remote_path: dst.to_owned(),
@@ -841,7 +848,7 @@ async fn upload(
 #[instrument(skip(client))]
 async fn download(
     client: &ApiClient,
-    id: &str,
+    id: AgentId,
     src: &str,
     dst: &str,
 ) -> Result<TransferResult, CliError> {
@@ -854,7 +861,7 @@ async fn download(
         client.post(&format!("/agents/{id}/download"), &Body { remote_path: src }).await?;
 
     Ok(TransferResult {
-        agent_id: id.to_owned(),
+        agent_id: id,
         job_id: Some(resp.task_id),
         local_path: dst.to_owned(),
         remote_path: src.to_owned(),
@@ -901,19 +908,23 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
+    fn agent_id(value: u32) -> AgentId {
+        AgentId::new(value)
+    }
+
     // ── AgentSummary ──────────────────────────────────────────────────────────
 
     #[test]
     fn agent_summary_serialises_required_fields() {
         let s = AgentSummary {
-            id: "abc".to_owned(),
+            id: agent_id(0xABC),
             hostname: "WIN10".to_owned(),
             os: "Windows 10".to_owned(),
             last_seen: "2026-01-01T00:00:00Z".to_owned(),
             status: "alive".to_owned(),
         };
         let v = serde_json::to_value(&s).expect("serialise");
-        assert_eq!(v["id"], "abc");
+        assert_eq!(v["id"], "00000ABC");
         assert_eq!(v["hostname"], "WIN10");
         assert_eq!(v["status"], "alive");
     }
@@ -921,7 +932,7 @@ mod tests {
     #[test]
     fn agent_summary_text_row_headers_match_row_length() {
         let s = AgentSummary {
-            id: "x".to_owned(),
+            id: agent_id(0xA),
             hostname: "h".to_owned(),
             os: "linux".to_owned(),
             last_seen: "t".to_owned(),
@@ -933,14 +944,14 @@ mod tests {
     #[test]
     fn vec_agent_summary_renders_table() {
         let items = vec![AgentSummary {
-            id: "abc".to_owned(),
+            id: agent_id(0xABC),
             hostname: "WIN10".to_owned(),
             os: "Windows 10".to_owned(),
             last_seen: "2026-01-01T00:00:00Z".to_owned(),
             status: "alive".to_owned(),
         }];
         let rendered = items.render_text();
-        assert!(rendered.contains("abc"));
+        assert!(rendered.contains("00000ABC"));
         assert!(rendered.contains("WIN10"));
         assert!(rendered.contains("alive"));
     }
@@ -950,7 +961,7 @@ mod tests {
     #[test]
     fn agent_detail_serialises_optional_fields_as_null() {
         let d = AgentDetail {
-            id: "x".to_owned(),
+            id: agent_id(0xA),
             hostname: "h".to_owned(),
             os: "linux".to_owned(),
             arch: None,
@@ -977,7 +988,7 @@ mod tests {
     #[test]
     fn agent_detail_render_text_contains_key_fields() {
         let d = AgentDetail {
-            id: "abc123".to_owned(),
+            id: agent_id(0xABC123),
             hostname: "myhost".to_owned(),
             os: "Windows".to_owned(),
             arch: Some("x86_64".to_owned()),
@@ -995,7 +1006,7 @@ mod tests {
             jitter: Some(10),
         };
         let rendered = d.render_text();
-        assert!(rendered.contains("abc123"));
+        assert!(rendered.contains("00ABC123"));
         assert!(rendered.contains("myhost"));
         assert!(rendered.contains("x86_64"));
         assert!(rendered.contains("1234"));
@@ -1124,9 +1135,9 @@ mod tests {
 
     #[test]
     fn kill_result_render_text_contains_id_and_status() {
-        let k = KillResult { agent_id: "abc".to_owned(), status: "dead".to_owned() };
+        let k = KillResult { agent_id: agent_id(0xABC), status: "dead".to_owned() };
         let rendered = k.render_text();
-        assert!(rendered.contains("abc"));
+        assert!(rendered.contains("00000ABC"));
         assert!(rendered.contains("dead"));
     }
 
@@ -1135,7 +1146,7 @@ mod tests {
     #[test]
     fn transfer_result_upload_render_contains_job_id() {
         let t = TransferResult {
-            agent_id: "abc".to_owned(),
+            agent_id: agent_id(0xABC),
             job_id: Some("j1".to_owned()),
             local_path: "/tmp/f".to_owned(),
             remote_path: "C:\\f".to_owned(),
@@ -1146,7 +1157,7 @@ mod tests {
     #[test]
     fn transfer_result_download_render_no_job_id() {
         let t = TransferResult {
-            agent_id: "abc".to_owned(),
+            agent_id: agent_id(0xABC),
             job_id: None,
             local_path: "/tmp/f".to_owned(),
             remote_path: "/etc/passwd".to_owned(),
@@ -1161,7 +1172,7 @@ mod tests {
     #[test]
     fn agent_summary_from_raw_maps_all_fields() {
         let raw = RawAgent {
-            id: "id1".to_owned(),
+            id: agent_id(0x1D1),
             hostname: "host".to_owned(),
             os: "linux".to_owned(),
             last_seen: "ts".to_owned(),
@@ -1179,7 +1190,7 @@ mod tests {
             jitter: None,
         };
         let s = agent_summary_from_raw(raw);
-        assert_eq!(s.id, "id1");
+        assert_eq!(s.id, agent_id(0x1D1));
         assert_eq!(s.hostname, "host");
         assert_eq!(s.status, "alive");
     }
@@ -1187,7 +1198,7 @@ mod tests {
     #[test]
     fn agent_detail_from_raw_preserves_optional_fields() {
         let raw = RawAgent {
-            id: "id2".to_owned(),
+            id: agent_id(0x1D2),
             hostname: "h".to_owned(),
             os: "win".to_owned(),
             last_seen: "t".to_owned(),
@@ -1249,7 +1260,7 @@ mod tests {
 
         let raw: RawAgent = serde_json::from_value(json).expect("deserialise RawAgent");
 
-        assert_eq!(raw.id, "DEADBEEF");
+        assert_eq!(raw.id, agent_id(0xDEADBEEF));
         assert_eq!(raw.hostname, "WORKSTATION01");
         assert_eq!(raw.os, "Windows 11 x64");
         assert_eq!(raw.last_seen, "2026-03-01T00:05:00Z");
@@ -1299,7 +1310,7 @@ mod tests {
 
         let raw: RawAgent = serde_json::from_value(json).expect("deserialise");
         assert_eq!(raw.status, "dead");
-        assert_eq!(raw.id, "00000001");
+        assert_eq!(raw.id, agent_id(1));
         assert_eq!(raw.os, "Windows 10 x64");
     }
 
@@ -1379,7 +1390,7 @@ mod tests {
     async fn exec_wait_returns_error_when_server_unreachable() {
         let cfg = mock_cfg("http://127.0.0.1:1");
         let client = crate::client::ApiClient::new(&cfg).expect("build client");
-        let result = exec_wait(&client, "agent1", "whoami", 30).await;
+        let result = exec_wait(&client, agent_id(0xA001), "whoami", 30).await;
         assert!(
             matches!(result, Err(crate::error::CliError::ServerUnreachable(_))),
             "exec_wait against unreachable server must return ServerUnreachable; got: {result:?}"
@@ -1392,7 +1403,7 @@ mod tests {
     async fn fetch_output_returns_error_when_server_unreachable() {
         let cfg = mock_cfg("http://127.0.0.1:1");
         let client = crate::client::ApiClient::new(&cfg).expect("build client");
-        let result = fetch_output(&client, "agent1", None).await;
+        let result = fetch_output(&client, agent_id(0xA001), None).await;
         assert!(
             matches!(result, Err(crate::error::CliError::ServerUnreachable(_))),
             "fetch_output against unreachable server must return ServerUnreachable; got: {result:?}"
@@ -1405,7 +1416,7 @@ mod tests {
     async fn fetch_output_with_since_cursor_returns_error_when_unreachable() {
         let cfg = mock_cfg("http://127.0.0.1:1");
         let client = crate::client::ApiClient::new(&cfg).expect("build client");
-        let result = fetch_output(&client, "agent1", Some(42)).await;
+        let result = fetch_output(&client, agent_id(0xA001), Some(42)).await;
         assert!(
             matches!(result, Err(crate::error::CliError::ServerUnreachable(_))),
             "fetch_output with cursor must return ServerUnreachable; got: {result:?}"
@@ -1427,14 +1438,14 @@ mod tests {
         impl Respond for PollResponder {
             fn respond(&self, request: &Request) -> ResponseTemplate {
                 match (request.method.as_str(), request.url.path()) {
-                    ("POST", "/api/v1/agents/agent1/task") => ResponseTemplate::new(202)
+                    ("POST", "/api/v1/agents/0000A001/task") => ResponseTemplate::new(202)
                         .set_body_json(serde_json::json!({
                             "agent_id": "AGENT1",
                             "task_id": "submitted_task",
                             "queued_jobs": 1
                         }))
                         .insert_header("content-type", "application/json"),
-                    ("GET", "/api/v1/agents/agent1/output") => {
+                    ("GET", "/api/v1/agents/0000A001/output") => {
                         let query = request.url.query().map(ToOwned::to_owned);
                         self.output_queries
                             .lock()
@@ -1489,21 +1500,22 @@ mod tests {
         let output_queries = Arc::new(Mutex::new(Vec::new()));
 
         Mock::given(method("POST"))
-            .and(path("/api/v1/agents/agent1/task"))
+            .and(path("/api/v1/agents/0000A001/task"))
             .respond_with(PollResponder { output_queries: Arc::clone(&output_queries) })
             .expect(1)
             .mount(&server)
             .await;
 
         Mock::given(method("GET"))
-            .and(path("/api/v1/agents/agent1/output"))
+            .and(path("/api/v1/agents/0000A001/output"))
             .respond_with(PollResponder { output_queries: Arc::clone(&output_queries) })
             .expect(2)
             .mount(&server)
             .await;
 
         let client = crate::client::ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
-        let result = exec_wait(&client, "agent1", "whoami", 5).await.expect("exec_wait succeeds");
+        let result =
+            exec_wait(&client, agent_id(0xA001), "whoami", 5).await.expect("exec_wait succeeds");
 
         assert_eq!(result.job_id, "submitted_task");
         assert_eq!(result.output, "DOMAIN\\\\user");
@@ -1620,7 +1632,7 @@ mod tests {
         let client = crate::client::ApiClient::new(&cfg).expect("build client");
 
         let exit_code =
-            watch_output(&client, &crate::output::OutputFormat::Json, "agent1", None).await;
+            watch_output(&client, &crate::output::OutputFormat::Json, agent_id(0xA001), None).await;
         assert_ne!(
             exit_code,
             crate::error::EXIT_SUCCESS,
@@ -1644,7 +1656,7 @@ mod tests {
         let cfg = mock_cfg("http://127.0.0.1:1");
         let client = crate::client::ApiClient::new(&cfg).expect("build client");
 
-        let err = upload(&client, "agent1", &path, "/dst", 0)
+        let err = upload(&client, agent_id(0xA001), &path, "/dst", 0)
             .await
             .expect_err("should reject oversized file");
 
@@ -1670,7 +1682,7 @@ mod tests {
         let cfg = mock_cfg("http://127.0.0.1:1");
         let client = crate::client::ApiClient::new(&cfg).expect("build client");
 
-        let err = upload(&client, "agent1", &path, "/dst", 1)
+        let err = upload(&client, agent_id(0xA001), &path, "/dst", 1)
             .await
             .expect_err("should fail on HTTP, not size check");
 

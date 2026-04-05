@@ -12,6 +12,7 @@ use std::io::Write as _;
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
+use crate::AgentId;
 use crate::LootCommands;
 use crate::client::ApiClient;
 use crate::error::{CliError, EXIT_SUCCESS};
@@ -26,7 +27,7 @@ use crate::output::{OutputFormat, TextRender, TextRow, print_error, print_succes
 #[derive(Debug, Deserialize)]
 struct RawLootSummary {
     id: i64,
-    agent_id: String,
+    agent_id: AgentId,
     kind: String,
     name: String,
     file_path: Option<String>,
@@ -50,7 +51,7 @@ pub struct LootEntry {
     /// Numeric database identifier.
     pub id: i64,
     /// Agent that produced this loot item.
-    pub agent_id: String,
+    pub agent_id: AgentId,
     /// Loot category (e.g. `"screenshot"`, `"credential"`, `"file"`).
     pub kind: String,
     /// Display name or filename of the loot item.
@@ -75,7 +76,7 @@ impl TextRow for LootEntry {
     fn row(&self) -> Vec<String> {
         vec![
             self.id.to_string(),
-            self.agent_id.clone(),
+            self.agent_id.to_string(),
             self.kind.clone(),
             self.name.clone(),
             self.size_bytes.map(|s| s.to_string()).unwrap_or_default(),
@@ -108,15 +109,8 @@ impl TextRender for LootDownloadResult {
 pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: LootCommands) -> i32 {
     match action {
         LootCommands::List { kind, agent, operator, since, limit } => {
-            match list(
-                client,
-                limit,
-                since.as_deref(),
-                kind.as_deref(),
-                agent.as_deref(),
-                operator.as_deref(),
-            )
-            .await
+            match list(client, limit, since.as_deref(), kind.as_deref(), agent, operator.as_deref())
+                .await
             {
                 Ok(data) => match print_success(fmt, &data) {
                     Ok(()) => EXIT_SUCCESS,
@@ -164,7 +158,7 @@ async fn list(
     limit: Option<u32>,
     since: Option<&str>,
     kind: Option<&str>,
-    agent_id: Option<&str>,
+    agent_id: Option<AgentId>,
     operator: Option<&str>,
 ) -> Result<Vec<LootEntry>, CliError> {
     let mut params: Vec<String> = Vec::new();
@@ -179,7 +173,7 @@ async fn list(
         params.push(format!("kind={}", percent_encode(k)));
     }
     if let Some(aid) = agent_id {
-        params.push(format!("agent_id={}", percent_encode(aid)));
+        params.push(format!("agent_id={}", percent_encode(&aid.to_string())));
     }
     if let Some(op) = operator {
         params.push(format!("operator={}", percent_encode(op)));
@@ -254,7 +248,7 @@ mod tests {
     fn sample_raw() -> RawLootSummary {
         RawLootSummary {
             id: 42,
-            agent_id: "DEADBEEF".to_owned(),
+            agent_id: AgentId::new(0xDEADBEEF),
             kind: "screenshot".to_owned(),
             name: "Desktop_01.01.2026-12.00.00.png".to_owned(),
             file_path: None,
@@ -270,7 +264,7 @@ mod tests {
         let raw = sample_raw();
         let entry = loot_entry_from_raw(raw);
         assert_eq!(entry.id, 42);
-        assert_eq!(entry.agent_id, "DEADBEEF");
+        assert_eq!(entry.agent_id, AgentId::new(0xDEADBEEF));
         assert_eq!(entry.kind, "screenshot");
         assert_eq!(entry.name, "Desktop_01.01.2026-12.00.00.png");
         assert!(entry.file_path.is_none());

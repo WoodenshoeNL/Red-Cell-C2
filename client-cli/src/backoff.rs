@@ -42,6 +42,14 @@ impl Backoff {
         Self { current: Duration::from_secs(INITIAL_SECS) }
     }
 
+    /// Create a new `Backoff` with a caller-specified initial delay.
+    ///
+    /// The initial delay is capped at [`MAX_SECS`] so all subsequent
+    /// exponential growth stays within the documented bound.
+    pub fn with_initial_delay(initial_secs: u64) -> Self {
+        Self { current: Duration::from_secs(initial_secs.clamp(1, MAX_SECS)) }
+    }
+
     /// Record an empty poll result: doubles the delay, capped at `MAX_SECS`.
     pub fn record_empty(&mut self) {
         let doubled = self.current.as_secs().saturating_mul(2);
@@ -123,5 +131,16 @@ mod tests {
     #[test]
     fn default_produces_same_initial_as_new() {
         assert_eq!(Backoff::default().delay(), Backoff::new().delay());
+    }
+
+    #[test]
+    fn with_initial_delay_uses_requested_delay_within_cap() {
+        assert_eq!(Backoff::with_initial_delay(5).delay(), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn with_initial_delay_clamps_to_supported_range() {
+        assert_eq!(Backoff::with_initial_delay(0).delay(), Duration::from_secs(1));
+        assert_eq!(Backoff::with_initial_delay(99).delay(), Duration::from_secs(MAX_SECS));
     }
 }

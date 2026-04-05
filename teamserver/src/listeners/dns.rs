@@ -16,9 +16,9 @@ use crate::{
 };
 
 use super::{
-    DemonInitRateLimiter, ListenerManagerError, ListenerRuntimeFuture, ReconnectProbeRateLimiter,
-    UnknownCallbackProbeAuditLimiter, allow_demon_init_for_ip, is_valid_demon_callback_request,
-    process_demon_transport,
+    DemonInitRateLimiter, DnsReconBlockLimiter, ListenerManagerError, ListenerRuntimeFuture,
+    ReconnectProbeRateLimiter, UnknownCallbackProbeAuditLimiter, allow_demon_init_for_ip,
+    is_valid_demon_callback_request, process_demon_transport,
 };
 
 // ── DNS C2 Listener ──────────────────────────────────────────────────────────
@@ -43,6 +43,10 @@ pub(crate) const DNS_RCODE_NOERROR: u16 = 0;
 pub(crate) const DNS_RCODE_NXDOMAIN: u16 = 3;
 /// DNS RCODE: Refused.
 pub(crate) const DNS_RCODE_REFUSED: u16 = 5;
+/// DNS query type for zone transfers (AXFR, RFC 5936). Blocked unconditionally.
+pub(crate) const DNS_QTYPE_AXFR: u16 = 252;
+/// DNS query type for "all records" (ANY/QTYPE=*, RFC 8482). Blocked unconditionally.
+pub(crate) const DNS_QTYPE_ANY: u16 = 255;
 /// Maximum age in seconds before a pending DNS upload is discarded.
 pub(crate) const DNS_UPLOAD_TIMEOUT_SECS: u64 = 120;
 /// How often the DNS listener prunes expired upload sessions.
@@ -183,6 +187,8 @@ pub(crate) struct DnsListenerState {
     pub(crate) demon_init_rate_limiter: DemonInitRateLimiter,
     pub(crate) unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
     pub(crate) reconnect_probe_rate_limiter: ReconnectProbeRateLimiter,
+    /// Rate limiter that blocks IPs sending repeated AXFR/ANY recon queries.
+    pub(crate) dns_recon_block_limiter: DnsReconBlockLimiter,
     pub(crate) shutdown: ShutdownController,
     /// Pending uploads keyed by agent ID.
     pub(crate) uploads: Mutex<HashMap<u32, DnsPendingUpload>>,
@@ -207,6 +213,7 @@ impl DnsListenerState {
         demon_init_rate_limiter: DemonInitRateLimiter,
         unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
         reconnect_probe_rate_limiter: ReconnectProbeRateLimiter,
+        dns_recon_block_limiter: DnsReconBlockLimiter,
         shutdown: ShutdownController,
         init_secret: Option<Vec<u8>>,
         allow_legacy_ctr: bool,
@@ -230,6 +237,7 @@ impl DnsListenerState {
             demon_init_rate_limiter,
             unknown_callback_probe_audit_limiter,
             reconnect_probe_rate_limiter,
+            dns_recon_block_limiter,
             shutdown,
             uploads: Mutex::new(HashMap::new()),
             responses: Mutex::new(HashMap::new()),
@@ -240,6 +248,32 @@ impl DnsListenerState {
 
     pub(crate) async fn handle_dns_packet(&self, buf: &[u8], peer_ip: IpAddr) -> Option<Vec<u8>> {
         let query = parse_dns_query(buf)?;
+
+        // AXFR and ANY queries have no legitimate use on a C2 DNS listener and
+        // are indicators of active zone enumeration or DNS amplification probing.
+        // Block them before any C2 parsing, log at WARN, and rate-limit repeat
+        // offenders so the log stays actionable (silent drop after threshold).
+        if query.qtype == DNS_QTYPE_AXFR || query.qtype == DNS_QTYPE_ANY {
+            let below_threshold = self.dns_recon_block_limiter.allow(peer_ip).await;
+            if below_threshold {
+                warn!(
+                    listener = %self.config.name,
+                    %peer_ip,
+                    qtype = query.qtype,
+                    "dns recon query detected (AXFR/ANY) — returning REFUSED"
+                );
+                return Some(build_dns_refused_response(query.id));
+            } else {
+                warn!(
+                    listener = %self.config.name,
+                    %peer_ip,
+                    qtype = query.qtype,
+                    "dns recon query from repeat offender — dropping without response"
+                );
+                return None;
+            }
+        }
+
         let Some(allowed_qtypes) = dns_allowed_query_types(&self.config.record_types) else {
             warn!(
                 listener = %self.config.name,
@@ -1469,6 +1503,7 @@ pub(crate) async fn spawn_dns_listener_runtime(
         demon_init_rate_limiter,
         unknown_callback_probe_audit_limiter,
         reconnect_probe_rate_limiter,
+        DnsReconBlockLimiter::new(),
         shutdown,
         init_secret,
         allow_legacy_ctr,

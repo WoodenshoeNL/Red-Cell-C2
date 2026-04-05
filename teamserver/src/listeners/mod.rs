@@ -78,6 +78,10 @@ const MAX_UNKNOWN_CALLBACK_PROBE_AUDIT_WINDOWS: usize = 10_000;
 const MAX_RECONNECT_PROBES_PER_AGENT: u32 = 10;
 const RECONNECT_PROBE_WINDOW_DURATION: Duration = Duration::from_secs(60);
 const MAX_RECONNECT_PROBE_WINDOWS: usize = 10_000;
+/// Maximum number of AXFR/ANY recon queries from a single IP before it is silently dropped.
+pub(crate) const MAX_DNS_RECON_QUERIES_PER_IP: u32 = 5;
+/// Sliding-window duration for DNS AXFR/ANY recon rate limiting.
+pub(crate) const DNS_RECON_WINDOW_DURATION: Duration = Duration::from_secs(60);
 const EXTRA_METHOD: &str = "Method";
 const EXTRA_BEHIND_REDIRECTOR: &str = "BehindRedirector";
 const EXTRA_TRUSTED_PROXY_PEERS: &str = "TrustedProxyPeers";
@@ -216,6 +220,52 @@ impl UnknownCallbackProbeAuditLimiter {
 
     #[cfg(test)]
     async fn tracked_source_count(&self) -> usize {
+        self.windows.lock().await.len()
+    }
+}
+
+/// Per-source-IP sliding-window rate limiter for DNS AXFR/ANY recon queries.
+///
+/// AXFR (zone transfer) and ANY queries have no legitimate use on our C2 DNS
+/// listener and are indicators of active reconnaissance. This limiter tracks
+/// how many such queries each IP has sent within the window and, once the
+/// threshold is exceeded, returns `false` so the caller can drop further
+/// queries without responding.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct DnsReconBlockLimiter {
+    pub(crate) windows: Arc<Mutex<HashMap<IpAddr, AttemptWindow>>>,
+}
+
+impl DnsReconBlockLimiter {
+    #[must_use]
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns `true` when the query should be allowed (below threshold).
+    /// Returns `false` once the IP has sent more than
+    /// [`MAX_DNS_RECON_QUERIES_PER_IP`] queries in the current window.
+    pub(crate) async fn allow(&self, ip: IpAddr) -> bool {
+        let mut windows = self.windows.lock().await;
+        let now = Instant::now();
+
+        prune_expired_windows(&mut windows, DNS_RECON_WINDOW_DURATION, now);
+        if !windows.contains_key(&ip) && windows.len() >= 10_000 {
+            evict_oldest_windows(&mut windows, 5_000);
+        }
+
+        let window = windows.entry(ip).or_default();
+        if now.duration_since(window.window_start) >= DNS_RECON_WINDOW_DURATION {
+            window.attempts = 0;
+            window.window_start = now;
+        }
+
+        window.attempts += 1;
+        window.attempts <= MAX_DNS_RECON_QUERIES_PER_IP
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn tracked_ip_count(&self) -> usize {
         self.windows.lock().await.len()
     }
 }

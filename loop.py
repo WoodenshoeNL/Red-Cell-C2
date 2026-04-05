@@ -594,7 +594,7 @@ def repair_db_if_needed(log: Logger, rename_prefix: bool):
         log.log("WARNING: DB rebuild failed")
 
 
-DEBUG_SIZE_LIMIT_GB   = 10     # nuke target/debug subdirs when it exceeds this size
+DEBUG_SIZE_LIMIT_GB   = 8      # nuke target/* build subdirs when total target/ exceeds this size
 
 
 def _dir_size_gb(path) -> float:
@@ -616,45 +616,50 @@ def _dir_size_gb(path) -> float:
 
 def clean_build_artifacts(log: Logger):
     """
-    Remove stale Rust build artifacts to keep target/debug from growing unboundedly.
+    Remove stale Rust build artifacts to keep target/ from growing unboundedly.
 
     Strategy:
-    - If target/debug exceeds DEBUG_SIZE_LIMIT_GB, nuke the heavyweight subdirs
-      (incremental, deps, build, .fingerprint) unconditionally. With multiple agents
-      building concurrently, files are touched every few minutes so time-based sweeps
-      never remove anything.
-    - Otherwise skip — no point paying the rmtree cost when the dir is small.
+    - Measure total target/ size (debug + all codex-* alternate target dirs).
+    - If total exceeds DEBUG_SIZE_LIMIT_GB, nuke heavyweight subdirs
+      (incremental, deps, build, .fingerprint) in every target profile dir.
+    - Uses ignore_errors=True on rmtree to survive races with concurrent cargo
+      processes that may be writing into the same dirs.
 
     Called after every review-loop iteration and every DEV_CLEAN_EVERY dev iterations.
     """
     import shutil
 
-    target_debug = SCRIPT_DIR / "target" / "debug"
-    if not target_debug.exists():
+    target_root = SCRIPT_DIR / "target"
+    if not target_root.exists():
         return
 
-    size_gb = _dir_size_gb(target_debug)
-    if size_gb < DEBUG_SIZE_LIMIT_GB:
-        log.log(f"build cache: target/debug is {size_gb:.1f} GB — under limit, skipping")
+    # Collect all profile dirs: debug + any codex-* alternate CARGO_TARGET_DIRs.
+    profile_dirs = []
+    for entry in target_root.iterdir():
+        if entry.is_dir() and (entry.name == "debug" or entry.name.startswith("codex-")):
+            profile_dirs.append(entry)
+
+    if not profile_dirs:
         return
 
-    log.log(f"build cache: target/debug is {size_gb:.1f} GB — exceeds {DEBUG_SIZE_LIMIT_GB} GB limit, nuking")
+    total_gb = sum(_dir_size_gb(d) for d in profile_dirs)
+    if total_gb < DEBUG_SIZE_LIMIT_GB:
+        log.log(f"build cache: target/ build dirs are {total_gb:.1f} GB — under limit, skipping")
+        return
 
-    # Nuke the heavyweight subdirs inside target/debug/.
-    # incremental alone was insufficient — deps/ and build/ also grow to many GB
-    # in a workspace with continuous dev-loop builds.
+    log.log(f"build cache: target/ build dirs are {total_gb:.1f} GB — exceeds {DEBUG_SIZE_LIMIT_GB} GB limit, nuking")
+
     heavyweight_dirs = ["incremental", "deps", "build", ".fingerprint"]
     removed = []
-    for name in heavyweight_dirs:
-        d = target_debug / name
-        if d.exists():
-            try:
-                shutil.rmtree(d)
-                removed.append(name)
-            except OSError as e:
-                log.log(f"build cache: could not remove {name}: {e}")
+    for profile in profile_dirs:
+        for name in heavyweight_dirs:
+            d = profile / name
+            if d.exists():
+                shutil.rmtree(d, ignore_errors=True)
+                if not d.exists():
+                    removed.append(f"{profile.name}/{name}")
     if removed:
-        log.log(f"build cache: removed target/debug/{{{','.join(removed)}}}")
+        log.log(f"build cache: removed {', '.join(removed)}")
 
 
 WORKTREE_MAX_AGE_SECS = 3600   # remove /tmp/red-cell* worktrees older than 1 hour

@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1189 | 253 | 42 |
+| Tasks closed | 1190 | 253 | 42 |
 | Bugs filed against | 206 | 43 | 10 |
 | Bug rate (bugs/task) | 0.17 | 0.17 | 0.24 |
 | Quality score | 83% | 83% | 76% |
 
-*Bug rates: Claude 206/1189=0.1732→0.17, Codex 43/253=0.1700→0.17, Cursor 10/42=0.2381→0.24*
+*Bug rates: Claude 206/1190=0.1731→0.17, Codex 43/253=0.1700→0.17, Cursor 10/42=0.2381→0.24*
 
 ## Violation Breakdown
 
@@ -52,15 +52,15 @@ Each loop run updates the running totals and appends a review entry.
 
 Build: skipped (no Rust source changes in range; pre-existing P1 compile errors tracked in red-cell-c2-go1s5 and red-cell-c2-pebfp)
 
-### QA Review — 2026-04-05 02:42 — 1afdf643..de4e12df
+### QA Review — 2026-04-05 02:42 — 1afdf643..1d87a82e
 
 | Agent | Tasks closed | Bugs filed | Notes |
 |-------|-------------|------------|-------|
-| Claude | 0 | 0 | Review range contains only a QA checkpoint commit — no dev work |
+| Claude | 1 | 0 | Closed red-cell-c2-vrsub (DNS AXFR/ANY recon blocking) in commit 1d87a82e — 6 tests added, implementation correct. Counter bug red-cell-c2-euhu2 (P3) carried forward; no new bugs filed this run. |
 | Codex | 0 | 0 | — |
 | Cursor | 0 | 0 | — |
 
-Build: skipped (review range is a single QA checkpoint; cargo check still running in background — pre-existing P1 errors red-cell-c2-go1s5 and red-cell-c2-pebfp confirmed still present in source; DNS AXFR/ANY WIP (red-cell-c2-hb2rh) remains uncommitted in working tree)
+Build: skipped (cargo check running in background during review; pre-existing P1 compile errors red-cell-c2-go1s5 and red-cell-c2-pebfp still present and tracked)
 
 ### Arch Review — 2026-04-05 01:00
 

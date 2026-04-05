@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1197 | 255 | 42 |
-| Bugs filed against | 211 | 49 | 10 |
-| Bug rate (bugs/task) | 0.18 | 0.19 | 0.24 |
-| Quality score | 82% | 81% | 76% |
+| Tasks closed | 1197 | 255 | 43 |
+| Bugs filed against | 213 | 49 | 11 |
+| Bug rate (bugs/task) | 0.18 | 0.19 | 0.26 |
+| Quality score | 82% | 81% | 74% |
 
-*Bug rates: Claude 211/1197=0.1763→0.18, Codex 49/255=0.1922→0.19, Cursor 10/42=0.2381→0.24*
+*Bug rates: Claude 213/1197=0.1780→0.18, Codex 49/255=0.1922→0.19, Cursor 11/43=0.2558→0.26*
 
 ## Violation Breakdown
 
@@ -26,13 +26,13 @@ Each loop run updates the running totals and appends a review entry.
 | Protocol errors | 30 | 32 | 3 |
 | Security issues | 61 | 39 | 0 |
 | Architecture drift | 26 | 25 | 1 |
-| Memory / resource leaks | 11 | 11 | 1 |
+| Memory / resource leaks | 12 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 10 | 0 |
 | Test infrastructure / flakiness | 50 | 6 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 4 | 5 | 0 |
 | Correctness / pagination | 65 | 9 | 1 |
-| Workflow / close-hygiene | 33 | 1 | 0 |
+| Workflow / close-hygiene | 34 | 1 | 1 |
 | Code reuse / duplication | 11 | 0 | 0 |
 | Incomplete commits (stranded work) | 4 | 3 | 0 |
 
@@ -6120,3 +6120,13 @@ Build: skipped — build directory locked by many concurrent cargo processes fro
 | Cursor | 0 | 0 | No activity. |
 
 Build: failed — cargo check --workspace errors on red-cell-cli (session.rs:145: undeclared type Arc). Client crate (GUI) compiled successfully. Changes in this review range (client/src/known_servers.rs, client/src/main.rs) are correct and compile cleanly.
+
+### QA Review — 2026-04-05 16:50 — c08a76af..9ad24dbf
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 2 | WIP commit: TLS hot-reload core implemented (`reload_tls_cert` + `spawn_cert_file_watcher` + `validate_tls_not_expired` + API endpoint). Tests for `validate_tls_not_expired` added (resolves gmrw9), but issue not closed. `reload_tls_cert` still lacks teamserver unit tests (e8zax open). Cert watcher only tracks cert mtime, not key mtime (filed 2nadw). |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 1 | 1 | Closed sm3uq: `--config-json` now validated against common listener schemas before POST. Also fixed pso2v (Arc import) and a clippy unused-import warning in same commit. pso2v fix not closed in tracker (filed 8dt50). |
+
+Build: passed — `cargo check --workspace` clean. Tests skipped — artifact directory locked by concurrent specter test process from dev agent.

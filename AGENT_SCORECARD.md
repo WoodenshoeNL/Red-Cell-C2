@@ -25,13 +25,13 @@ Each loop run updates the running totals and appends a review entry.
 | Clippy warnings | 11 | 0 | 1 |
 | Protocol errors | 30 | 32 | 3 |
 | Security issues | 61 | 39 | 0 |
-| Architecture drift | 26 | 25 | 1 |
+| Architecture drift | 35 | 25 | 1 |
 | Memory / resource leaks | 12 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 10 | 0 |
 | Test infrastructure / flakiness | 50 | 6 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 4 | 5 | 0 |
-| Correctness / pagination | 65 | 9 | 1 |
+| Correctness / pagination | 66 | 9 | 1 |
 | Workflow / close-hygiene | 34 | 1 | 1 |
 | Code reuse / duplication | 11 | 0 | 0 |
 | Incomplete commits (stranded work) | 4 | 3 | 0 |
@@ -41,6 +41,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-04-05 17:45
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 10 | correctness, architecture drift | pfy74 (P2) — `POST /api/v1/agents/{id}/upload` uses `Json<AgentUploadRequest>` with no `DefaultBodyLimit` override; axum's 2 MB default caps effective file size at ~1.5 MB (base64 overhead). Fix: add `DefaultBodyLimit::max(MAX_AGENT_MESSAGE_LEN)` to REST API router. z4n4q (P2) — payload_builder.rs 7 439 lines needs split. csclv (P2) — websocket.rs 5 735 lines needs split. bxub6 (P3) — client/src/transport.rs 5 750 lines needs split. 8ovgx (P3) — client/src/python.rs 5 229 lines needs split. 2psqd (P3) — plugins.rs 4 779 lines needs split. 666ye (P2) — agents.rs 4 461 lines needs split. 45bqy (P2) — database.rs 4 281 lines needs split. x21vb (P3) — tests/output_dispatch.rs 4 938 lines split. bzqsv (P3) — tests/database.rs 3 144 lines split. Infra: z10wz (P2) — stale Apr04 cargo processes hold build lock, blocking all test/clippy runs (no agent attribution). |
+| Codex | 0 | — | No new findings. |
+| Cursor | 0 | — | No new findings. |
+
+Overall codebase health: on track
+Biggest blindspot: Oversized source files (api.rs 11k, dispatch/mod.rs 11k, payload_builder.rs 7.4k, websocket.rs 5.7k) are now the primary risk — dev agents burn context just reading them, leaving little room for implementation. Security posture remains sound: no new crypto, auth, or protocol findings. Build clean (cargo check passes), tests blocked by stale Apr04 cargo processes (PIDs 1167991 1185007 1188269 1200647).
 
 ### QA Review — 2026-04-05 14:00 — 57e3d03b..c08a76af
 

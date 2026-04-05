@@ -9,19 +9,19 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1197 | 255 | 43 |
-| Bugs filed against | 213 | 49 | 11 |
-| Bug rate (bugs/task) | 0.18 | 0.19 | 0.26 |
-| Quality score | 82% | 81% | 74% |
+| Tasks closed | 1197 | 255 | 45 |
+| Bugs filed against | 215 | 49 | 12 |
+| Bug rate (bugs/task) | 0.18 | 0.19 | 0.27 |
+| Quality score | 82% | 81% | 73% |
 
-*Bug rates: Claude 213/1197=0.1780→0.18, Codex 49/255=0.1922→0.19, Cursor 11/43=0.2558→0.26*
+*Bug rates: Claude 215/1197=0.1796→0.18, Codex 49/255=0.1922→0.19, Cursor 12/45=0.2667→0.27*
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 14 | 0 | 0 |
-| Missing tests / stale tests | 76 | 22 | 5 |
+| Missing tests / stale tests | 77 | 22 | 6 |
 | Clippy warnings | 11 | 0 | 1 |
 | Protocol errors | 30 | 32 | 3 |
 | Security issues | 61 | 39 | 0 |
@@ -32,7 +32,7 @@ Each loop run updates the running totals and appends a review entry.
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 4 | 5 | 0 |
 | Correctness / pagination | 66 | 9 | 1 |
-| Workflow / close-hygiene | 34 | 1 | 1 |
+| Workflow / close-hygiene | 35 | 1 | 1 |
 | Code reuse / duplication | 11 | 0 | 0 |
 | Incomplete commits (stranded work) | 4 | 3 | 0 |
 
@@ -6141,3 +6141,13 @@ Build: failed — cargo check --workspace errors on red-cell-cli (session.rs:145
 | Cursor | 1 | 1 | Closed sm3uq: `--config-json` now validated against common listener schemas before POST. Also fixed pso2v (Arc import) and a clippy unused-import warning in same commit. pso2v fix not closed in tracker (filed 8dt50). |
 
 Build: passed — `cargo check --workspace` clean. Tests skipped — artifact directory locked by concurrent specter test process from dev agent.
+
+### QA Review — 2026-04-05 19:00 — 9ad24dbf..a730b68d
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 2 | Committed plugin catch_unwind/health-tracking work for red-cell-c2-j82xb (wip: interrupted 66879b3e) — all 4 requirements implemented (catch_unwind, ERROR logging, per-plugin failure counts, /health endpoint). Never closed the issue (filed red-cell-c2-4e2d2, P3, workflow/close-hygiene). New `plugin_health_summary` public function has no unit tests; auto-disable logic also untested (filed red-cell-c2-8p5jn, P2, missing tests). |
+| Codex | 0 | 0 | No activity in range. |
+| Cursor | 2 | 1 | Closed red-cell-c2-0q8cv (9eec5eb4): case-insensitive screenshot routing fix committed. Closed red-cell-c2-k5xbg (391011dc): CLI binary integration tests using std::process::Command + wiremock. Test `missing_required_positional_exits_2` asserts clap default exit 2 for missing arg, violating AGENTS.md spec (exit 1 = argument error, exit 2 = not found). Filed red-cell-c2-o34wl (P2, zone:client-cli). |
+
+Build: passed — `cargo check --workspace` clean (1m 24s). `cargo clippy --workspace -- -D warnings` passed (no warnings). Tests skipped — 8+ concurrent nextest/cargo-test processes from earlier agent sessions hold the build lock (known infra issue red-cell-c2-z10wz).

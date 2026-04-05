@@ -10,11 +10,11 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 1189 | 253 | 42 |
-| Bugs filed against | 205 | 43 | 10 |
+| Bugs filed against | 206 | 43 | 10 |
 | Bug rate (bugs/task) | 0.17 | 0.17 | 0.24 |
 | Quality score | 83% | 83% | 76% |
 
-*Bug rates: Claude 205/1189=0.1724→0.17, Codex 43/253=0.1700→0.17, Cursor 10/42=0.2381→0.24*
+*Bug rates: Claude 206/1189=0.1732→0.17, Codex 43/253=0.1700→0.17, Cursor 10/42=0.2381→0.24*
 
 ## Violation Breakdown
 
@@ -34,7 +34,7 @@ Each loop run updates the running totals and appends a review entry.
 | Correctness / pagination | 65 | 8 | 1 |
 | Workflow / close-hygiene | 33 | 1 | 0 |
 | Code reuse / duplication | 11 | 0 | 0 |
-| Incomplete commits (stranded work) | 0 | 2 | 0 |
+| Incomplete commits (stranded work) | 1 | 2 | 0 |
 
 ---
 
@@ -61,6 +61,16 @@ Build: skipped (no Rust source changes in range; pre-existing P1 compile errors 
 | Cursor | 0 | — | No Cursor-attributed findings. |
 
 Build: **FAILED** — `cargo check --workspace` fails on `red-cell-cli` (`Backoff::with_initial_delay` not in `backoff.rs`, `go1s5`) and on `client` tests (struct field injected into `assert!`, `pebfp`). Both Codex-attributed, introduced in the two commits since the last arch review.
+
+### QA Review — 2026-04-05 02:05 — b22c7243..1afdf643
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 1 | No new commits; DNS AXFR/ANY recon-blocking WIP left uncommitted in working tree (red-cell-c2-hb2rh). Counter-increment bug in DnsReconBlockLimiter::allow() already tracked in red-cell-c2-euhu2. |
+| Codex | 0 | 0 | — |
+| Cursor | 0 | 0 | — |
+
+Build: **FAILED** — pre-existing `Backoff::with_initial_delay` compile error (red-cell-c2-go1s5, Codex-attributed). Uncommitted DNS changes compile cleanly once the lock clears.
 
 Core security path (AES-256-CTR monotonic offset, HKDF-SHA256, Argon2id, WsEnvelope HMAC, constant-time comparisons, weak-key rejection) structurally sound. No `todo!`/`unimplemented!` in production Rust. P1 test-infra regressions `red-cell-c2-g2c7j`/`red-cell-c2-1mw3m`/`red-cell-c2-0og72` from prior review remain unresolved.
 

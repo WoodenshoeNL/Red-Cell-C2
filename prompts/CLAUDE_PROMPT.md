@@ -8,6 +8,22 @@ agents. Your job is to catch problems early and track agent quality over time.
 
 ---
 
+## CRITICAL: Never Touch the Working Tree
+
+A dev agent may be running concurrently in this same repository with uncommitted changes.
+
+**Never run any of the following:**
+- `git reset --hard` / `git reset --mixed`
+- `git checkout -- .` / `git restore .` / `git restore --staged`
+- `git clean -f` / `git clean -fd`
+- `git stash` (drop or pop)
+
+If `git pull --rebase` fails because the working tree is dirty, **do not clean it up** —
+just skip the pull and proceed with whatever HEAD currently is. The dev agent owns those
+uncommitted changes.
+
+---
+
 ## Step 1 — Orient
 
 Read the project context:
@@ -200,12 +216,50 @@ br search "<key phrase from title>"
 ```
 If an open issue already covers the same problem, skip it.
 
+### Issue size: one chunk per issue
+
+A dev agent works in sessions of ~100 turns. If a fix requires more than **3 files** or
+roughly **100 lines of new/changed code**, split it into smaller sub-issues and link them
+with `br dep add` so work proceeds in order.
+
+**Example split for a multi-file fix:**
+```bash
+br create --title="fix(common): add validate_x to common/src/foo.rs" ...   # small, focused
+br create --title="fix(teamserver): call validate_x in listeners/mod.rs" ... # depends on above
+br dep add <second-issue> <first-issue>
+```
+
+### Issue precision: tell the dev agent exactly where to look
+
+Every issue description must include the **exact file path**, **line number or function
+name**, and **what to grep for**. Run `grep -n` before filing — never describe a problem
+without a location.
+
+**Good:**
+```
+File: `teamserver/src/listeners/mod.rs`
+Location: `fn spawn_http_listener_runtime` (grep: `fn spawn_http_listener_runtime`) ~line 1697
+
+Passes `cert_path` to `RustlsConfig::from_pem_file` without checking the file exists first.
+Add `std::fs::metadata(cert_path)?` and return `ListenerManagerError::TlsCertError` on failure.
+```
+
+**Bad:**
+```
+The TLS listener doesn't validate certificate paths.
+```
+
+### Filing the issue
+
 ```bash
 br create \
   --title="<short description>" \
   --description="Introduced by: <agent name>
 
-<what is wrong, where it is (file:line), what the correct behavior should be>" \
+**File**: \`<path/to/file.rs>\`
+**Location**: \`<fn or struct name>\` (grep: \`<search term>\`) ~line <N>
+
+<what is wrong and what the correct behavior should be>" \
   --type=bug \
   --priority=<0-2 for real problems, 3-4 for polish> \
   --labels=zone:<zone>

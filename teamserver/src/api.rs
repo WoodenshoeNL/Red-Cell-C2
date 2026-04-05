@@ -50,9 +50,10 @@ use crate::rbac::{
 use crate::websocket::{AgentCommandError, execute_agent_task};
 use crate::{
     AuditPage, AuditQuery, AuditResultStatus, AuditWebhookNotifier, AuthError, Database,
-    LootRecord, SessionActivityPage, SessionActivityQuery, TeamserverError, audit_details,
-    authorize_agent_group_access, authorize_listener_access, parameter_object, query_audit_log,
-    query_session_activity, record_operator_action_with_notifications,
+    LootRecord, PluginHealthEntry, PluginRuntime, SessionActivityPage, SessionActivityQuery,
+    TeamserverError, audit_details, authorize_agent_group_access, authorize_listener_access,
+    parameter_object, query_audit_log, query_session_activity,
+    record_operator_action_with_notifications,
 };
 const API_VERSION: &str = "v1";
 const API_PREFIX: &str = "/api/v1";
@@ -1166,6 +1167,7 @@ struct ApiInfoResponse {
             HealthAgentCounts,
             HealthListenerCounts,
             HealthPluginCounts,
+            HealthPluginEntry,
             WebhookStats,
             DiscordWebhookStats,
             FlushPayloadCacheResponse,
@@ -1288,6 +1290,29 @@ struct HealthPluginCounts {
     loaded: u32,
     /// Number of plugins that failed to load at startup.
     failed: u32,
+    /// Number of plugins currently auto-disabled due to repeated runtime failures.
+    disabled: u32,
+}
+
+/// Runtime health entry for a single loaded Python plugin.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+struct HealthPluginEntry {
+    /// Name of the `.py` module (without extension).
+    name: String,
+    /// Number of consecutive callback/command failures since the last success.
+    consecutive_failures: u32,
+    /// Whether the plugin has been automatically disabled.
+    disabled: bool,
+}
+
+impl From<PluginHealthEntry> for HealthPluginEntry {
+    fn from(entry: PluginHealthEntry) -> Self {
+        Self {
+            name: entry.plugin_name,
+            consecutive_failures: entry.consecutive_failures,
+            disabled: entry.disabled,
+        }
+    }
 }
 
 /// Full health check response body.
@@ -1305,6 +1330,8 @@ struct HealthResponse {
     database: String,
     /// Python plugin load counts.
     plugins: HealthPluginCounts,
+    /// Per-plugin runtime health (only populated when plugins are loaded).
+    plugin_health: Vec<HealthPluginEntry>,
 }
 
 #[utoipa::path(
@@ -1340,6 +1367,14 @@ async fn get_health(
 
     let db_ok = state.database.probe(std::time::Duration::from_millis(500)).await;
     let db_status = if db_ok { "ok".to_owned() } else { "degraded".to_owned() };
+
+    let plugin_health: Vec<HealthPluginEntry> = PluginRuntime::current()
+        .ok()
+        .flatten()
+        .map(|rt| rt.plugin_health_summary().into_iter().map(HealthPluginEntry::from).collect())
+        .unwrap_or_default();
+    let disabled_count = plugin_health.iter().filter(|e| e.disabled).count() as u32;
+
     let overall = db_status.clone();
 
     Json(HealthResponse {
@@ -1348,7 +1383,12 @@ async fn get_health(
         agents: HealthAgentCounts { active, total },
         listeners: HealthListenerCounts { running, stopped },
         database: db_status,
-        plugins: HealthPluginCounts { loaded: state.plugins_loaded, failed: state.plugins_failed },
+        plugins: HealthPluginCounts {
+            loaded: state.plugins_loaded,
+            failed: state.plugins_failed,
+            disabled: disabled_count,
+        },
+        plugin_health,
     })
 }
 

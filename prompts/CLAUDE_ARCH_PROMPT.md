@@ -178,7 +178,31 @@ Look for features that are partially stubbed but silently do nothing:
 - Event bus messages emitted but never consumed (or vice versa)
 - Config fields parsed but never used
 
-### 5h — Unimplemented Functionality
+### 5h — Oversized Files
+
+Large files force dev agents to burn most of their context budget just reading code,
+leaving little room for actual implementation. Check for files that have grown too large:
+
+```bash
+# Source files over 800 lines
+find teamserver/src client/src client-cli/src common/src agent/specter/src agent/phantom/src \
+  -name "*.rs" 2>/dev/null | xargs wc -l 2>/dev/null | awk '$1 > 800' | sort -rn
+
+# Test files over 1500 lines
+find teamserver/tests teamserver/src client/tests -name "*.rs" 2>/dev/null \
+  | xargs wc -l 2>/dev/null | awk '$1 > 1500' | sort -rn
+```
+
+For each file above the threshold, file a **refactor task** describing the natural split
+points (use `grep -n '^pub fn \|^fn \|^struct \|^impl '` to find module seams).
+Each split task should describe the proposed sub-module names and what goes in each.
+
+Do NOT file a split issue if one already exists — check first:
+```bash
+br search "split <filename>"
+```
+
+### 5i — Unimplemented Functionality
 
 Look for parts of the codebase that are not yet implemented or only skeletally present:
 - `todo!()` / `unimplemented!()` macros — each one represents missing functionality
@@ -223,23 +247,74 @@ br search "<key phrase from title>"
 ```
 If an open issue already covers the same problem, skip it.
 
+### Issue size: one chunk per issue
+
+A dev agent works in sessions of ~100 turns. If a fix or implementation requires more than
+**3 files** or roughly **100 lines of new/changed code**, split it into focused sub-issues
+linked with `br dep add`. Never file a single issue for a whole feature.
+
+**Example — "implement TLS cert hot-reload" split into four issues:**
+```bash
+br create --title="feat(common): add CertificateResolver type to common/src/tls.rs"
+br create --title="feat(listeners): wire CertificateResolver into spawn_http_listener_runtime (listeners/mod.rs:1697)"
+br create --title="feat(api): add POST /api/listeners/{name}/tls-cert endpoint to api.rs"
+br create --title="test(teamserver): add hot-reload integration tests to listener_lifecycle.rs"
+
+br dep add <wire-issue>     <type-issue>
+br dep add <endpoint-issue> <wire-issue>
+br dep add <tests-issue>    <endpoint-issue>
+```
+
+Each sub-issue is independently completable in one session. The dependency chain ensures
+dev agents work in the right order.
+
+### Issue precision: tell the dev agent exactly where to look
+
+Run `grep -n` before filing. Every issue description must include:
+- **Exact file path** relative to repo root
+- **Line number or function/struct name**
+- **What to grep for** so the agent jumps straight to the code
+
+**Good description:**
+```
+File: `teamserver/src/listeners/mod.rs`
+Location: `fn spawn_http_listener_runtime` (grep: `fn spawn_http_listener_runtime`) ~line 1697
+
+Passes `cert_path: Option<PathBuf>` directly to `RustlsConfig::from_pem_file` without
+checking whether the file exists. Add `std::fs::metadata(cert_path)?` and return
+`ListenerManagerError::TlsCertError { message: ... }` if the file is missing or unreadable.
+```
+
+**Bad description:**
+```
+The TLS listener doesn't validate certificate paths.
+```
+
+### Filing the issues
+
 For **bugs and quality issues**:
 ```bash
 br create \
   --title="<short, specific title>" \
   --description="Introduced by: <agent name>
 
-<file:line — what is wrong, why it matters, what the fix should be>" \
+**File**: \`<path/to/file.rs>\`
+**Location**: \`<fn or struct name>\` (grep: \`<search term>\`) ~line <N>
+
+<what is wrong, why it matters, what the fix should be>" \
   --type=bug \
   --priority=<1 for security/crash, 2 for correctness, 3 for quality, 4 for polish> \
   --labels=zone:<zone>
 ```
 
-For **unimplemented functionality** (from 5h):
+For **unimplemented functionality** (from 5i):
 ```bash
 br create \
   --title="impl: <what needs to be implemented>" \
-  --description="<file:line — what is missing, what it should do, any relevant context from AGENTS.md or types>" \
+  --description="**File**: \`<path/to/file.rs>\`
+**Location**: \`<fn or struct name>\` (grep: \`<search term>\`) ~line <N>
+
+<what is missing, what it should do, any relevant context from AGENTS.md or types>" \
   --type=task \
   --priority=<2 for core functionality, 3 for secondary features, 4 for nice-to-haves> \
   --labels=zone:<zone>

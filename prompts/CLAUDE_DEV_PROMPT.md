@@ -97,6 +97,35 @@ Check what this issue blocks and what blocks it. If the task involves the Demon 
 existing Havoc logic, read the relevant source files under `./src/Havoc` first. Do not
 guess at protocol details — verify them from the source.
 
+### 3a. Read surgically — do not read files top to bottom
+
+Context is finite. Every line you read that is not directly relevant to your task is context
+you cannot use for implementation. **Never `cat` or fully read a file larger than ~200 lines.**
+
+Instead, locate exactly what you need before reading:
+
+```bash
+# Find the function/struct/impl you need to modify
+grep -n "fn reload_tls_cert\|struct ListenerManager\|impl ListenerManager" teamserver/src/listeners/mod.rs
+
+# Read only the relevant section (e.g. lines 900–960)
+# Use the Read tool with offset and limit parameters
+
+# Find where a type is defined across the workspace
+grep -rn "struct TlsError\|enum TlsError" common/src/
+
+# Find all call sites before changing a signature
+grep -rn "reload_tls_cert" teamserver/src/
+```
+
+**Rules:**
+- Use `grep -n` to find line numbers, then read only that section with `offset`/`limit`
+- Read the function signature + its immediate callers — not the entire file
+- For large files (`listeners/mod.rs`, `api.rs`, `tests.rs`): always grep first, read second
+- If you need to understand a module's public API: read only its `pub` declarations
+  (`grep -n "^pub " src/file.rs`) rather than reading the whole file
+- Stop reading as soon as you have enough to write the change
+
 ### 4. Plan before coding
 
 Before writing code, think through:
@@ -109,6 +138,23 @@ Before writing code, think through:
 
 - Write tests as you implement — not after
 - Keep changes focused on the task — do not refactor unrelated code
+- **Commit after each logical chunk** — do not accumulate all changes into one final commit.
+  After each self-contained piece compiles and its tests pass, commit it immediately:
+
+  ```bash
+  cargo check $CARGO_FLAGS          # must pass before committing
+  git add <specific files>
+  git commit -m "wip(<scope>): <what this chunk does  [<issue-id>]"
+  git push
+  ```
+
+  A "chunk" is anything independently verifiable: a new type, a new function + its tests,
+  a new API endpoint, a migration. If you hit the turn limit mid-task, the committed chunks
+  are safe and the next session can pick up from there instead of starting over.
+
+  The final commit that closes the issue is still a clean `feat`/`fix` commit (see step 7).
+  WIP commits will be visible in git history — that is fine.
+
 - If you discover a new problem or missing piece while working, create a beads issue:
 
 ```bash
@@ -149,12 +195,13 @@ issue, then re-run once.
 
 ### 7. Close, commit, and push
 
-Do this in a single commit — do not split code and issue-close into separate commits.
+Close the issue and commit any remaining uncommitted changes together. If all code was
+already committed in chunks during step 5, this commit contains only the beads close.
 
 ```bash
 br close <id> --reason="<brief description of what was implemented>"
 br sync --flush-only
-git add <specific changed files> .beads/issues.jsonl
+git add <any remaining changed files> .beads/issues.jsonl
 git commit -m "<type>(<scope>): <concise description>
 
 <optional body explaining the why>

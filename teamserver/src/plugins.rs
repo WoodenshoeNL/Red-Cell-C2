@@ -1,7 +1,7 @@
 //! Embedded Python plugin runtime for the teamserver.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 use tokio::runtime::Handle;
 use tokio::sync::RwLock;
-use tracing::{instrument, warn};
+use tracing::{error, instrument, warn};
 
 use crate::{
     AgentRegistry, Database, EventBus, Job, ListenerManager, ListenerManagerError, LootRecord,
@@ -63,6 +63,16 @@ impl Drop for CallbackRuntimeGuard {
 thread_local! {
     static CALLER_ROLE: RefCell<Option<OperatorRole>> = const { RefCell::new(None) };
 }
+
+// Thread-local plugin name set during `load_plugins_blocking` while loading each
+// `.py` module. Callbacks registered during module initialisation use this to
+// attach their plugin name for health-tracking purposes.
+thread_local! {
+    static LOADING_PLUGIN: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Default number of consecutive callback failures before a plugin is disabled.
+const DEFAULT_MAX_CONSECUTIVE_FAILURES: u32 = 5;
 
 /// RAII guard that sets the [`CALLER_ROLE`] thread-local for the current scope
 /// and clears it on drop.
@@ -187,10 +197,34 @@ impl PluginEvent {
     }
 }
 
+/// A Python event-callback together with the name of the plugin that registered it.
+///
+/// The plugin name is used for per-plugin health tracking and auto-disable logic.
+#[derive(Clone, Debug)]
+struct NamedCallback {
+    /// Name of the `.py` module that registered this callback (e.g. `"my_plugin"`).
+    plugin_name: String,
+    /// The Python callable.
+    callback: Arc<Py<PyAny>>,
+}
+
 #[derive(Clone, Debug)]
 struct RegisteredCommand {
     description: String,
     callback: Arc<Py<PyAny>>,
+    /// Plugin name that registered this command, for health tracking.
+    plugin_name: String,
+}
+
+/// Health snapshot for a single plugin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginHealthEntry {
+    /// Name of the `.py` module (without extension).
+    pub plugin_name: String,
+    /// Number of consecutive callback failures since the last success.
+    pub consecutive_failures: u32,
+    /// Whether the plugin has been automatically disabled.
+    pub disabled: bool,
 }
 
 #[derive(Debug)]
@@ -202,8 +236,14 @@ struct PluginRuntimeInner {
     plugins_dir: Option<PathBuf>,
     runtime_handle: Handle,
     listeners: RwLock<Option<ListenerManager>>,
-    callbacks: RwLock<BTreeMap<&'static str, Vec<Arc<Py<PyAny>>>>>,
+    callbacks: RwLock<BTreeMap<&'static str, Vec<NamedCallback>>>,
     commands: RwLock<BTreeMap<String, RegisteredCommand>>,
+    /// Per-plugin consecutive failure counts (plugin_name → count).
+    failure_counts: Mutex<BTreeMap<String, u32>>,
+    /// Plugins that have been auto-disabled after exceeding `max_consecutive_failures`.
+    disabled_plugins: Mutex<BTreeSet<String>>,
+    /// Maximum number of consecutive failures before a plugin is auto-disabled.
+    max_consecutive_failures: u32,
     /// When true, `invoke_callbacks` returns `Err` immediately — test-only fault injection.
     #[cfg(test)]
     force_emit_failure: std::sync::atomic::AtomicBool,
@@ -236,6 +276,9 @@ impl PluginRuntime {
                 listeners: RwLock::new(None),
                 callbacks: RwLock::new(BTreeMap::new()),
                 commands: RwLock::new(BTreeMap::new()),
+                failure_counts: Mutex::new(BTreeMap::new()),
+                disabled_plugins: Mutex::new(BTreeSet::new()),
+                max_consecutive_failures: DEFAULT_MAX_CONSECUTIVE_FAILURES,
                 #[cfg(test)]
                 force_emit_failure: std::sync::atomic::AtomicBool::new(false),
             }),
@@ -433,6 +476,9 @@ impl PluginRuntime {
                 listeners: RwLock::new(None),
                 callbacks: RwLock::new(BTreeMap::new()),
                 commands: RwLock::new(BTreeMap::new()),
+                failure_counts: Mutex::new(BTreeMap::new()),
+                disabled_plugins: Mutex::new(BTreeSet::new()),
+                max_consecutive_failures: DEFAULT_MAX_CONSECUTIVE_FAILURES,
                 force_emit_failure: std::sync::atomic::AtomicBool::new(false),
             }),
         }
@@ -460,6 +506,9 @@ impl PluginRuntime {
                 listeners: RwLock::new(None),
                 callbacks: RwLock::new(BTreeMap::new()),
                 commands: RwLock::new(BTreeMap::new()),
+                failure_counts: Mutex::new(BTreeMap::new()),
+                disabled_plugins: Mutex::new(BTreeSet::new()),
+                max_consecutive_failures: DEFAULT_MAX_CONSECUTIVE_FAILURES,
                 force_emit_failure: std::sync::atomic::AtomicBool::new(true),
             }),
         }
@@ -584,7 +633,19 @@ impl PluginRuntime {
                     }
                 };
 
-                match PyModule::from_code(py, &code, &filename, &module_name_cstr) {
+                // Set the loading-plugin thread-local so that any register_callback /
+                // register_command calls made during module initialisation are tagged
+                // with this plugin's name for health-tracking purposes.
+                LOADING_PLUGIN.with(|cell| {
+                    *cell.borrow_mut() = Some(module_name.clone());
+                });
+                let load_result =
+                    PyModule::from_code(py, &code, &filename, &module_name_cstr);
+                LOADING_PLUGIN.with(|cell| {
+                    *cell.borrow_mut() = None;
+                });
+
+                match load_result {
                     Ok(module) => {
                         if let Err(err) = py
                             .import("sys")
@@ -612,13 +673,16 @@ impl PluginRuntime {
         event: PluginEvent,
         callback: Py<PyAny>,
     ) -> Result<(), PluginError> {
+        let plugin_name = LOADING_PLUGIN
+            .with(|cell| cell.borrow().clone())
+            .unwrap_or_else(|| "<unknown>".to_owned());
         self.inner
             .callbacks
             .write()
             .await
             .entry(event.as_str())
             .or_default()
-            .push(Arc::new(callback));
+            .push(NamedCallback { plugin_name, callback: Arc::new(callback) });
         Ok(())
     }
 
@@ -628,11 +692,13 @@ impl PluginRuntime {
         description: String,
         callback: Py<PyAny>,
     ) -> Result<(), PluginError> {
-        self.inner
-            .commands
-            .write()
-            .await
-            .insert(name, RegisteredCommand { description, callback: Arc::new(callback) });
+        let plugin_name = LOADING_PLUGIN
+            .with(|cell| cell.borrow().clone())
+            .unwrap_or_else(|| "<unknown>".to_owned());
+        self.inner.commands.write().await.insert(
+            name,
+            RegisteredCommand { description, callback: Arc::new(callback), plugin_name },
+        );
         Ok(())
     }
 
@@ -641,6 +707,82 @@ impl PluginRuntime {
         F: std::future::Future<Output = T>,
     {
         self.inner.runtime_handle.block_on(fut)
+    }
+
+    /// Record a successful callback invocation for a plugin, resetting its consecutive failure count.
+    fn record_callback_success(&self, plugin_name: &str) {
+        if let Ok(mut counts) = self.inner.failure_counts.lock() {
+            counts.remove(plugin_name);
+        }
+    }
+
+    /// Record a failed callback invocation. Returns `true` when the plugin was just disabled.
+    fn record_callback_failure(&self, plugin_name: &str) -> bool {
+        let threshold = self.inner.max_consecutive_failures;
+        let new_count = {
+            let mut counts = match self.inner.failure_counts.lock() {
+                Ok(g) => g,
+                Err(e) => e.into_inner(),
+            };
+            let entry = counts.entry(plugin_name.to_owned()).or_insert(0);
+            *entry += 1;
+            *entry
+        };
+
+        if new_count >= threshold {
+            let mut disabled = match self.inner.disabled_plugins.lock() {
+                Ok(g) => g,
+                Err(e) => e.into_inner(),
+            };
+            if disabled.insert(plugin_name.to_owned()) {
+                error!(
+                    plugin = plugin_name,
+                    consecutive_failures = new_count,
+                    "plugin disabled after too many consecutive failures"
+                );
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Returns `true` if the given plugin has been auto-disabled.
+    fn is_plugin_disabled(&self, plugin_name: &str) -> bool {
+        match self.inner.disabled_plugins.lock() {
+            Ok(g) => g.contains(plugin_name),
+            Err(e) => e.into_inner().contains(plugin_name),
+        }
+    }
+
+    /// Return a health snapshot for every plugin that has registered at least one callback
+    /// or command, including those that have never failed.
+    pub fn plugin_health_summary(&self) -> Vec<PluginHealthEntry> {
+        // Collect all known plugin names from callbacks and commands.
+        let mut plugin_names: BTreeSet<String> = BTreeSet::new();
+        if let Ok(callbacks) = self.inner.callbacks.try_read() {
+            for entries in callbacks.values() {
+                for cb in entries {
+                    plugin_names.insert(cb.plugin_name.clone());
+                }
+            }
+        }
+        if let Ok(commands) = self.inner.commands.try_read() {
+            for cmd in commands.values() {
+                plugin_names.insert(cmd.plugin_name.clone());
+            }
+        }
+
+        let counts = self.inner.failure_counts.lock().unwrap_or_else(|e| e.into_inner());
+        let disabled = self.inner.disabled_plugins.lock().unwrap_or_else(|e| e.into_inner());
+
+        plugin_names
+            .into_iter()
+            .map(|name| {
+                let consecutive_failures = *counts.get(&name).unwrap_or(&0);
+                let is_disabled = disabled.contains(&name);
+                PluginHealthEntry { plugin_name: name, consecutive_failures, disabled: is_disabled }
+            })
+            .collect()
     }
 
     async fn invoke_callbacks(
@@ -662,7 +804,7 @@ impl PluginRuntime {
         }
 
         let runtime = self.clone();
-        tokio::task::spawn_blocking(move || {
+        let result = tokio::task::spawn_blocking(move || {
             // Set the thread-local so re-entrant calls from Python into the Rust
             // API bypass the global RUNTIME mutex.
             let _guard = CallbackRuntimeGuard::enter(&runtime);
@@ -671,11 +813,15 @@ impl PluginRuntime {
                 runtime.install_api_module(py)?;
 
                 let agent_id = match event {
-                    PluginEvent::AgentCheckin | PluginEvent::AgentRegistered | PluginEvent::AgentDead => payload
+                    PluginEvent::AgentCheckin
+                    | PluginEvent::AgentRegistered
+                    | PluginEvent::AgentDead => payload
                         .get("AgentID")
                         .and_then(Value::as_u64)
                         .and_then(|value| u32::try_from(value).ok()),
-                    PluginEvent::CommandOutput | PluginEvent::LootCaptured | PluginEvent::TaskCreated => payload
+                    PluginEvent::CommandOutput
+                    | PluginEvent::LootCaptured
+                    | PluginEvent::TaskCreated => payload
                         .get("agent_id")
                         .and_then(Value::as_u64)
                         .and_then(|value| u32::try_from(value).ok()),
@@ -687,18 +833,69 @@ impl PluginRuntime {
                 .into_any();
                 let py_args = PyTuple::new(py, [event_object])?;
 
-                for callback in callbacks {
-                    if let Err(error) = callback.bind(py).call1(py_args.clone()) {
-                        warn!(event = event.as_str(), error = %error, "python plugin callback failed");
+                for named_cb in &callbacks {
+                    if runtime.is_plugin_disabled(&named_cb.plugin_name) {
+                        continue;
+                    }
+
+                    // Wrap each invocation in catch_unwind to prevent a Rust panic
+                    // inside a callback from aborting the entire dispatch task.
+                    let call_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                        || named_cb.callback.bind(py).call1(py_args.clone()),
+                    ));
+
+                    match call_result {
+                        Ok(Ok(_)) => {
+                            runtime.record_callback_success(&named_cb.plugin_name);
+                        }
+                        Ok(Err(py_err)) => {
+                            error!(
+                                event = event.as_str(),
+                                plugin = %named_cb.plugin_name,
+                                error = %py_err,
+                                "python plugin callback raised an exception"
+                            );
+                            runtime.record_callback_failure(&named_cb.plugin_name);
+                        }
+                        Err(panic_payload) => {
+                            let msg = panic_payload
+                                .downcast_ref::<String>()
+                                .map(String::as_str)
+                                .or_else(|| panic_payload.downcast_ref::<&str>().copied())
+                                .unwrap_or("<non-string panic payload>");
+                            error!(
+                                event = event.as_str(),
+                                plugin = %named_cb.plugin_name,
+                                panic_message = msg,
+                                "python plugin callback panicked"
+                            );
+                            runtime.record_callback_failure(&named_cb.plugin_name);
+                        }
                     }
                 }
 
                 Ok(())
             })
         })
-        .await??;
+        .await;
 
-        Ok(())
+        match result {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(py_err)) => Err(PluginError::Python(py_err)),
+            Err(join_err) => {
+                if join_err.is_panic() {
+                    error!(
+                        event = event.as_str(),
+                        "plugin dispatch task panicked — all callbacks for this event were skipped"
+                    );
+                    // Do not propagate the panic; the dispatch task is isolated on a
+                    // blocking thread and the agent can still receive a response.
+                    Ok(())
+                } else {
+                    Err(PluginError::Join(join_err))
+                }
+            }
+        }
     }
 
     async fn get_agent(&self, agent_id: u32) -> Result<Option<AgentRecord>, TeamserverError> {
@@ -791,12 +988,22 @@ impl PluginRuntime {
             return Ok(false);
         };
 
+        if self.is_plugin_disabled(&command.plugin_name) {
+            error!(
+                command = name,
+                plugin = %command.plugin_name,
+                "python command skipped — plugin is disabled due to repeated failures"
+            );
+            return Ok(false);
+        }
+
         let runtime = self.clone();
+        let plugin_name = command.plugin_name.clone();
         let callback_args = args.clone();
         let joined_args = args.join(" ");
         let captured_task_id: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let task_id_for_callback = captured_task_id.clone();
-        tokio::task::spawn_blocking(move || {
+        let result = tokio::task::spawn_blocking(move || {
             // Set the thread-local so re-entrant calls from Python into the Rust
             // API bypass the global RUNTIME mutex.
             let _guard = CallbackRuntimeGuard::enter(&runtime);
@@ -804,17 +1011,60 @@ impl PluginRuntime {
             // permission checks against the invoking operator's role.
             let _role_guard = CallerRoleGuard::enter(role);
 
-            Python::with_gil(|py| -> PyResult<()> {
-                runtime.install_api_module(py)?;
-                let agent = Py::new(py, PyAgent { agent_id, last_task_id: task_id_for_callback })?
-                    .into_any();
-                let list = PyList::new(py, callback_args)?.into_any().unbind();
-                let py_args = PyTuple::new(py, [agent, list])?;
-                command.callback.bind(py).call1(py_args)?;
-                Ok(())
-            })
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                Python::with_gil(|py| -> PyResult<()> {
+                    runtime.install_api_module(py)?;
+                    let agent =
+                        Py::new(py, PyAgent { agent_id, last_task_id: task_id_for_callback })?
+                            .into_any();
+                    let list = PyList::new(py, callback_args)?.into_any().unbind();
+                    let py_args = PyTuple::new(py, [agent, list])?;
+                    command.callback.bind(py).call1(py_args)?;
+                    Ok(())
+                })
+            }))
         })
-        .await??;
+        .await;
+
+        match result {
+            Ok(Ok(Ok(()))) => {
+                self.record_callback_success(&plugin_name);
+            }
+            Ok(Ok(Err(py_err))) => {
+                error!(
+                    command = name,
+                    plugin = %plugin_name,
+                    error = %py_err,
+                    "python plugin command raised an exception"
+                );
+                self.record_callback_failure(&plugin_name);
+                return Err(PluginError::Python(py_err));
+            }
+            Ok(Err(panic_payload)) => {
+                let msg = panic_payload
+                    .downcast_ref::<String>()
+                    .map(String::as_str)
+                    .or_else(|| panic_payload.downcast_ref::<&str>().copied())
+                    .unwrap_or("<non-string panic payload>");
+                error!(
+                    command = name,
+                    plugin = %plugin_name,
+                    panic_message = msg,
+                    "python plugin command panicked"
+                );
+                self.record_callback_failure(&plugin_name);
+                return Err(PluginError::MutexPoisoned);
+            }
+            Err(join_err) => {
+                error!(
+                    command = name,
+                    plugin = %plugin_name,
+                    "python plugin command task failed to join"
+                );
+                self.record_callback_failure(&plugin_name);
+                return Err(PluginError::Join(join_err));
+            }
+        }
 
         let task_id = captured_task_id.lock().map_err(|_| PluginError::MutexPoisoned)?.clone();
 

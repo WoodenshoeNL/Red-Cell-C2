@@ -95,11 +95,53 @@ Read the description carefully. Check what this issue blocks and what blocks it.
 If the task requires understanding the existing Havoc implementation, read the relevant
 source files under `./src/Havoc`.
 
+### 3a. Read surgically — do not read files top to bottom
+
+Context is finite. Every line you read that is not directly relevant to your task is context
+you cannot use for implementation. **Never `cat` or fully read a file larger than ~200 lines.**
+
+Instead, locate exactly what you need before reading:
+
+```bash
+# Find the function/struct/impl you need to modify
+grep -n "fn my_function\|struct MyType" teamserver/src/relevant_file.rs
+
+# Read only the relevant section using offset/limit on the Read tool
+
+# Find where a type is defined across the workspace
+grep -rn "struct MyType\|enum MyType" common/src/
+
+# Find all call sites before changing a signature
+grep -rn "my_function" teamserver/src/
+```
+
+**Rules:**
+- Use `grep -n` to find line numbers, then read only that section with `offset`/`limit`
+- Read the function signature + its immediate callers — not the entire file
+- For large files: always grep first, read second
+- If you need to understand a module's public API: read only its `pub` declarations
+  (`grep -n "^pub " src/file.rs`) rather than reading the whole file
+- Stop reading as soon as you have enough to write the change
+
 ### 4. Implement
 
-- Work in small, logical commits
 - Write tests as you implement — not after
 - Keep changes focused on the task — do not refactor unrelated code
+- **Commit after each logical chunk** — do not accumulate all changes into one final commit.
+  After each self-contained piece compiles and its tests pass, commit it immediately:
+
+  ```bash
+  cargo check $CARGO_FLAGS          # must pass before committing
+  git add <specific files>
+  git commit -m "wip(<scope>): <what this chunk does  [<issue-id>]"
+  git push
+  ```
+
+  A "chunk" is anything independently verifiable: a new type, a new function + its tests,
+  a new API endpoint, a migration. Committing frequently means work survives interruptions.
+
+  The final commit that closes the issue is still a clean `feat`/`fix` commit (see step 6).
+
 - If you discover a new problem or missing piece, create a beads issue for it:
 
 ```bash
@@ -135,7 +177,8 @@ If tests fail: read the error, diagnose, fix, then re-run once. Do not retry wit
 
 ### 6. Close, commit, and push
 
-Do this in a single commit — do not split code and issue-close into separate commits.
+Close the issue and commit any remaining uncommitted changes together. If all code was
+already committed in chunks during step 4, this commit contains only the beads close.
 
 ```bash
 br close <id> --reason="<brief description of what was implemented>"

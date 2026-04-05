@@ -75,7 +75,7 @@ pub use normalize::NormalizedMakeService;
 pub use payload_builder::{
     BuildProgress, PayloadArtifact, PayloadBuildError, PayloadBuilderService, PayloadCache,
 };
-pub use plugins::{PluginError, PluginEvent, PluginRuntime};
+pub use plugins::{PluginError, PluginEvent, PluginHealthEntry, PluginRuntime};
 pub use rbac::{
     AdminAccess, AuthenticatedOperator, AuthorizationError, ListenerManagementAccess, Permission,
     ReadAccess, TaskAgentAccess, authorize_agent_group_access, authorize_listener_access,

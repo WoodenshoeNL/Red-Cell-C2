@@ -40,6 +40,7 @@ DEV_SLEEP_NO_WORK     = 60     # wait when no tasks are ready
 DEV_SLEEP_BETWEEN     = 15     # wait between tasks when --sleep not set
 DEV_SLEEP_TOKEN_LIMIT = 1200   # wait after Claude context limit hit
 DEV_CLEAN_EVERY       = 3      # run build-artifact cleanup every N dev iterations
+DEV_MAX_TURNS         = 100    # max turns per dev session; agent commits WIP and resumes next iteration
 
 # Valid zone names and their corresponding source paths
 ZONES = {
@@ -140,15 +141,18 @@ def git_pull_ff(log: Logger) -> bool:
 
 # ── Agent invocation ───────────────────────────────────────────────────────────
 
-def build_agent_cmd(agent: str, model: str) -> tuple:
+def build_agent_cmd(agent: str, model: str, max_turns: int = 0) -> tuple:
     """
     Returns (cmd, uses_stdin).
     Claude and Codex read the prompt from stdin; Cursor takes it as a positional arg.
+    max_turns: if > 0, pass --max-turns to the Claude CLI (Claude only).
     """
     if agent == "claude":
         cmd = ["claude", "-p", "--dangerously-skip-permissions", "--verbose", "--output-format", "stream-json"]
         if model:
             cmd += ["--model", model]
+        if max_turns > 0:
+            cmd += ["--max-turns", str(max_turns)]
         return cmd, True
 
     if agent == "codex":
@@ -173,30 +177,41 @@ def run_agent(
     prompt_content: str,
     log: Logger,
     extra_log_file: Path = None,
+    cwd: Path = None,
+    extra_env: dict = None,
+    max_turns: int = 0,
 ) -> tuple:
     """
     Run the agent with prompt_content. Streams output to terminal and log files.
-    Returns (exit_code, full_output_text).
+    Returns (exit_code, full_output_text, result_subtype).
 
     For claude (stream-json mode): raw JSON is written to log files; human-readable
     tool/text events are printed to the terminal. The returned text is the extracted
-    final response from the result event.
+    final response from the result event. result_subtype is the Claude result event
+    subtype (e.g. 'success', 'max_turns', 'error_max_tokens'); empty string for
+    non-Claude agents.
+
+    cwd: working directory for the agent subprocess (defaults to SCRIPT_DIR).
+    extra_env: additional environment variables merged into the subprocess environment.
+    max_turns: if > 0, pass --max-turns to Claude CLI (Claude only).
     """
-    cmd, uses_stdin = build_agent_cmd(agent, model)
+    cmd, uses_stdin = build_agent_cmd(agent, model, max_turns=max_turns)
     is_stream_json = agent == "claude"
+    run_cwd = str(cwd or SCRIPT_DIR)
+    run_env = {**os.environ, **(extra_env or {})}
 
     if not uses_stdin:
         # Cursor: prompt is the final positional argument
         proc = subprocess.Popen(
             cmd + [prompt_content],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, cwd=str(SCRIPT_DIR),
+            text=True, cwd=run_cwd, env=run_env,
         )
     else:
         proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, cwd=str(SCRIPT_DIR),
+            text=True, cwd=run_cwd, env=run_env,
         )
 
         def _write_stdin():
@@ -261,8 +276,8 @@ def run_agent(
         proc.wait()
 
     if is_stream_json:
-        return proc.returncode, extract_text_from_stream(raw_lines)
-    return proc.returncode, "".join(raw_lines)
+        return proc.returncode, extract_text_from_stream(raw_lines), extract_result_subtype_from_stream(raw_lines)
+    return proc.returncode, "".join(raw_lines), ""
 
 
 # ── Sleep with jitter ──────────────────────────────────────────────────────────
@@ -359,6 +374,21 @@ def format_stream_event(event: dict) -> str | None:
         return f"  [result] {subtype} — {turns} turns, {duration:.0f}s, ${cost:.4f}"
 
     return None  # skip system, tool_result, etc.
+
+
+def extract_result_subtype_from_stream(raw_lines: list) -> str:
+    """Return the subtype field from the Claude result event, e.g. 'success', 'max_turns', 'error_max_tokens'."""
+    for line in reversed(raw_lines):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            event = json.loads(stripped)
+            if event.get("type") == "result":
+                return event.get("subtype", "")
+        except json.JSONDecodeError:
+            pass
+    return ""
 
 
 def extract_text_from_stream(raw_lines: list) -> str:
@@ -1015,9 +1045,11 @@ def dev_loop(args, log: Logger):
         next_id = ""
 
         # Claude only: resume a task interrupted in a prior session
+        is_resume = False
         if agent == "claude":
             next_id = find_resumable_task(agent_id)
             if next_id:
+                is_resume = True
                 log.log(f"Resuming previously claimed task {next_id} (skipping re-claim)")
 
         if not next_id:
@@ -1105,6 +1137,28 @@ def dev_loop(args, log: Logger):
 
         zone_block = build_zone_block(effective_zones)
 
+        resume_block = ""
+        if is_resume:
+            wip = git(["log", "--oneline", "-5", "--grep", f"wip: interrupted {next_id}"]).stdout.strip()
+            resume_block = f"""
+---
+
+## Resume Context
+
+This is a **resumed session** — a previous run reached the {DEV_MAX_TURNS}-turn limit and
+committed a WIP checkpoint. Your prior work is preserved in git.
+
+**Start by orienting yourself:**
+```bash
+git log --oneline -5          # see the WIP commit and what came before it
+git diff HEAD~1 HEAD          # see exactly what was done in the last session
+git status                    # check for any remaining uncommitted changes
+```
+{"Last WIP commit: " + wip if wip else ""}
+Do NOT re-implement work that is already committed. Pick up from where the previous
+session left off and complete the remaining implementation.
+"""
+
         runtime_prompt = f"""{dev_prompt}
 
 ---
@@ -1115,7 +1169,7 @@ def dev_loop(args, log: Logger):
 **Agent**: `{agent_id}`
 
 {task_details}
-{zone_block}
+{zone_block}{resume_block}
 ---
 
 ## Current Beads State
@@ -1134,9 +1188,15 @@ Start directly with understanding the task and implementing it.
 """
 
         log.log(f"Running {agent.title()} on task {next_id}...")
-        exit_code, output = run_agent(agent, args.model, runtime_prompt, log)
+        exit_code, output, result_subtype = run_agent(
+            agent, args.model, runtime_prompt, log,
+            max_turns=DEV_MAX_TURNS if agent == "claude" else 0,
+        )
 
-        token_limit_hit = agent == "claude" and "Context limit reached" in output
+        max_turns_hit = result_subtype == "max_turns"
+        token_limit_hit = agent == "claude" and (
+            "Context limit reached" in output or result_subtype == "error_max_tokens"
+        )
 
         # Detect rate limiting — agent was unable to do any work
         rate_limited = (
@@ -1211,11 +1271,67 @@ Start directly with understanding the task and implementing it.
             clean_build_artifacts(log)
             clean_tmp_worktrees(log)
 
-        if token_limit_hit:
+        if max_turns_hit:
+            log.log(f"Max turns ({DEV_MAX_TURNS}) reached — resuming task {next_id} immediately")
+            # No sleep: resume on the very next iteration. find_resumable_task will
+            # pick up the still-in_progress task and the WIP commit provides context.
+        elif token_limit_hit:
             log.log(f"Token limit hit — sleeping {DEV_SLEEP_TOKEN_LIMIT}s before next iteration")
             time.sleep(DEV_SLEEP_TOKEN_LIMIT)
         else:
             do_sleep(sleep_secs, jitter_secs, log)
+
+
+# ── Review loop worktree isolation ────────────────────────────────────────────
+#
+# Each review loop run gets its own git worktree so it can never touch the main
+# checkout's working tree (and destroy a concurrent dev agent's uncommitted changes).
+#
+# The Cargo build cache is kept at a stable path between runs so incremental builds
+# work — only changed files trigger recompilation.
+
+# Stable Cargo target dir for all review loop runs. Kept between runs for incremental builds.
+REVIEW_CARGO_TARGET = Path("/tmp/red-cell-review-target")
+
+
+def create_review_worktree(loop_type: str, log: Logger) -> Path | None:
+    """
+    Create a temporary git worktree at HEAD for a single review loop run.
+    Returns the worktree path, or None if creation fails (caller falls back to SCRIPT_DIR).
+    """
+    import tempfile
+    tmp = Path(tempfile.mkdtemp(prefix=f"red-cell-{loop_type}-", dir="/tmp"))
+    tmp.rmdir()  # git worktree add requires the target not to exist
+
+    r = subprocess.run(
+        ["git", "worktree", "add", "--detach", str(tmp), "HEAD"],
+        capture_output=True, text=True, cwd=str(SCRIPT_DIR),
+    )
+    if r.returncode != 0:
+        log.log(f"WARNING: could not create review worktree: {r.stderr.strip()}")
+        return None
+    log.log(f"Review worktree: {tmp}")
+    return tmp
+
+
+def remove_review_worktree(worktree_path: Path, log: Logger):
+    """Remove a review worktree (but leave the shared cargo target dir intact)."""
+    import shutil
+
+    r = subprocess.run(
+        ["git", "worktree", "remove", "--force", str(worktree_path)],
+        capture_output=True, cwd=str(SCRIPT_DIR),
+    )
+    if r.returncode != 0 and worktree_path.exists():
+        try:
+            shutil.rmtree(worktree_path)
+        except OSError as e:
+            log.log(f"WARNING: could not remove worktree {worktree_path}: {e}")
+        subprocess.run(
+            ["git", "worktree", "prune"],
+            capture_output=True, cwd=str(SCRIPT_DIR),
+        )
+    log.log(f"Removed review worktree: {worktree_path.name}")
 
 
 # ── Review loops (qa, arch, quality, coverage) ─────────────────────────────────
@@ -1270,6 +1386,13 @@ def review_loop(args, log: Logger):
 
         git_pull_rebase(log)
 
+        # Run the review agent in an isolated worktree so it can never touch the main
+        # checkout's working tree (which may have a concurrent dev agent's uncommitted
+        # changes). Use a stable shared Cargo target dir for incremental builds.
+        worktree_path = create_review_worktree(loop_type, log)
+        run_cwd = worktree_path or SCRIPT_DIR
+        run_env: dict = {"CARGO_TARGET_DIR": str(REVIEW_CARGO_TARGET)}
+
         extra_log = None
         if per_run:
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1279,15 +1402,20 @@ def review_loop(args, log: Logger):
         prompt_content = prompt_file.read_text()
         if zone_block:
             prompt_content = f"{prompt_content}\n{zone_block}"
-        exit_code, _ = run_agent(agent, args.model, prompt_content, log, extra_log)
+        exit_code, _, _ = run_agent(
+            agent, args.model, prompt_content, log, extra_log,
+            cwd=run_cwd, extra_env=run_env,
+        )
+
+        if worktree_path:
+            remove_review_worktree(worktree_path, log)
 
         if exit_code != 0:
             log.log(f"WARNING: {agent.title()} exited with code {exit_code}")
         else:
             log.log(f"{loop_type.title()} review completed successfully")
 
-        # Clean up stale build artifacts and tmp worktrees after every review run.
-        # Review loops are the primary source of /tmp/red-cell* worktrees.
+        # Clean up stale build artifacts and any leftover tmp worktrees.
         clean_build_artifacts(log)
         clean_tmp_worktrees(log)
 

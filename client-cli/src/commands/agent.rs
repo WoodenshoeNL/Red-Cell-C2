@@ -506,8 +506,8 @@ async fn show(client: &ApiClient, id: AgentId) -> Result<AgentDetail, CliError> 
 fn command_id_for(cmd: &str) -> &'static str {
     // Only the first word is checked so that future parameterised commands
     // like `screenshot /path/to/save.png` route correctly.
-    let verb = cmd.split_whitespace().next().unwrap_or(cmd);
-    match verb {
+    let verb = cmd.split_whitespace().next().unwrap_or(cmd).to_ascii_lowercase();
+    match verb.as_str() {
         "screenshot" => "2510",
         _ => "21",
     }
@@ -1358,6 +1358,13 @@ mod tests {
     #[test]
     fn command_id_for_screenshot_returns_2510() {
         assert_eq!(command_id_for("screenshot"), "2510");
+    }
+
+    #[test]
+    fn command_id_for_screenshot_is_case_insensitive() {
+        assert_eq!(command_id_for("SCREENSHOT"), "2510");
+        assert_eq!(command_id_for("ScreenShot"), "2510");
+        assert_eq!(command_id_for("SCREENSHOT C:\\out.png"), "2510");
     }
 
     #[test]

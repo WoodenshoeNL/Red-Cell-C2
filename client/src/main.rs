@@ -5199,11 +5199,8 @@ impl ClientApp {
         }
 
         // Collect rows so we can mutate `known_servers` after the UI loop.
-        let entries: Vec<(String, known_servers::KnownServer)> = self
-            .known_servers
-            .iter()
-            .map(|(k, v)| (k.to_owned(), v.clone()))
-            .collect();
+        let entries: Vec<(String, known_servers::KnownServer)> =
+            self.known_servers.iter().map(|(k, v)| (k.to_owned(), v.clone())).collect();
 
         let mut confirm_key: Option<String> = None;
         let mut remove_key: Option<String> = None;

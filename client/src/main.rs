@@ -3790,23 +3790,59 @@ impl ClientApp {
         browser: Option<&AgentFileBrowserState>,
         current_dir: Option<&str>,
     ) {
-        ui.horizontal_wrapped(|ui| {
+        ui.horizontal(|ui| {
             ui.label(RichText::new("Path:").strong());
 
             if let Some(path) = current_dir {
-                // Split path into breadcrumb segments
                 let segments = breadcrumb_segments(path);
                 for (i, (label, full_path)) in segments.iter().enumerate() {
                     if i > 0 {
-                        ui.label(RichText::new(path_separator(path)).weak());
+                        ui.label(RichText::new(">").weak());
                     }
-                    if ui.link(RichText::new(label.as_str()).monospace()).clicked() {
+
+                    let segment_width = (ui.available_width() / (segments.len() - i).max(1) as f32)
+                        .clamp(72.0, 220.0);
+                    let button = egui::Button::new(RichText::new(label.as_str()).monospace())
+                        .truncate()
+                        .small()
+                        .frame(false);
+                    let mut response =
+                        ui.add_sized([segment_width, ui.spacing().interact_size.y], button);
+                    if response
+                        .intrinsic_size
+                        .is_some_and(|size| size.x > response.rect.width() + 0.5)
+                    {
+                        response = response.on_hover_text(full_path.as_str());
+                    }
+                    if response.clicked() {
                         self.queue_file_browser_cd(agent_id, full_path);
                         self.queue_file_browser_list(agent_id, full_path);
                     }
+                    let copied_path = full_path.clone();
+                    response.context_menu(|ui| {
+                        if ui.button("Copy path").clicked() {
+                            ui.ctx().copy_text(copied_path.clone());
+                            ui.close();
+                        }
+                    });
                 }
             } else {
-                ui.monospace("unknown");
+                let response =
+                    ui.add(egui::Label::new(RichText::new("unknown").monospace()).truncate());
+                response.on_hover_text("Resolve cwd to populate the breadcrumb path.");
+            }
+        });
+
+        ui.horizontal_wrapped(|ui| {
+            if current_dir.is_none() {
+                ui.add_enabled(false, egui::Button::new("Current path unavailable"));
+            } else if let Some(path) = current_dir {
+                let response =
+                    ui.add(egui::Label::new(RichText::new(path).monospace().weak()).truncate());
+                if response.intrinsic_size.is_some_and(|size| size.x > response.rect.width() + 0.5)
+                {
+                    response.on_hover_text(path);
+                }
             }
 
             ui.separator();
@@ -4050,44 +4086,7 @@ impl ClientApp {
         let current_dir = browser
             .and_then(|state| state.current_dir.clone())
             .or_else(|| browser.and_then(|state| state.directories.keys().next().cloned()));
-        let loaded_paths = browser.map(|state| &state.directories);
-        let operator = self.current_operator_username();
-        {
-            let ui_state = self.session_panel.file_browser_state_mut(agent_id);
-            if let Some(browser) = browser {
-                ui_state.pending_dirs.retain(|path| !browser.directories.contains_key(path));
-            }
-            if let Some(root) = current_dir.clone() {
-                if loaded_paths.is_none_or(|paths| !paths.contains_key(&root))
-                    && !ui_state.pending_dirs.contains(&root)
-                {
-                    let message = build_file_browser_list_task(agent_id, &root, &operator);
-                    ui_state.pending_dirs.insert(root.clone());
-                    ui_state.status_message = Some(format!("Queued listing for {root}."));
-                    self.session_panel.pending_messages.push(message);
-                }
-            }
-        }
-
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Current");
-            ui.monospace(current_dir.as_deref().unwrap_or("unknown"));
-
-            if ui.button("Resolve cwd").clicked() {
-                self.queue_file_browser_pwd(agent_id);
-            }
-            if ui.button("Refresh").clicked() {
-                if let Some(path) = current_dir.as_deref() {
-                    self.queue_file_browser_list(agent_id, path);
-                }
-            }
-            if ui.button("Up").clicked() {
-                if let Some(path) = current_dir.as_deref().and_then(parent_remote_path) {
-                    self.queue_file_browser_cd(agent_id, &path);
-                    self.queue_file_browser_list(agent_id, &path);
-                }
-            }
-        });
+        self.render_file_browser_breadcrumb(ui, agent_id, browser, current_dir.as_deref());
 
         let browser_status = browser.and_then(|state| state.status_message.as_deref());
         let ui_status = self
@@ -7494,11 +7493,6 @@ fn join_remote_path(base: &str, name: &str) -> String {
     }
 }
 
-/// Return the dominant path separator for a remote path (`\` for Windows, `/` otherwise).
-fn path_separator(path: &str) -> &'static str {
-    if path.contains('\\') { "\\" } else { "/" }
-}
-
 /// Split a remote path into `(label, cumulative_path)` pairs for breadcrumb rendering.
 fn breadcrumb_segments(path: &str) -> Vec<(String, String)> {
     let sep = if path.contains('\\') { '\\' } else { '/' };
@@ -9217,23 +9211,6 @@ mod tests {
             .filter(|t| **t == DockTab::ProcessList("ABCD1234".to_owned()))
             .count();
         assert_eq!(count, 1);
-    }
-
-    // ── path_separator ────────────────────────────────────────────────
-
-    #[test]
-    fn path_separator_windows() {
-        assert_eq!(path_separator("C:\\Users\\admin"), "\\");
-    }
-
-    #[test]
-    fn path_separator_unix() {
-        assert_eq!(path_separator("/home/user"), "/");
-    }
-
-    #[test]
-    fn path_separator_no_separator() {
-        assert_eq!(path_separator("file.txt"), "/");
     }
 
     // ── breadcrumb_segments ──────────────────────────────────────────

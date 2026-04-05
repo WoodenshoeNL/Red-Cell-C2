@@ -633,10 +633,17 @@ def clean_build_artifacts(log: Logger):
     if not target_root.exists():
         return
 
-    # Collect all profile dirs: debug + any codex-* alternate CARGO_TARGET_DIRs.
+    # Collect all cargo profile dirs inside target/.
+    # Detect by presence of at least one heavyweight subdir rather than name-matching,
+    # so any agent-specific CARGO_TARGET_DIR (codex-*, cursor-*, etc.) is caught
+    # automatically without needing to update this list when new profiles appear.
+    heavyweight_markers = {"deps", "build", "incremental", ".fingerprint"}
     profile_dirs = []
     for entry in target_root.iterdir():
-        if entry.is_dir() and (entry.name == "debug" or entry.name.startswith("codex-")):
+        if not entry.is_dir():
+            continue
+        children = {e.name for e in entry.iterdir()} if entry.is_dir() else set()
+        if children & heavyweight_markers:
             profile_dirs.append(entry)
 
     if not profile_dirs:

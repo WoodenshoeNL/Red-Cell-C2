@@ -5584,6 +5584,168 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn builtin_filesystem_download_handler_surfaces_concurrent_limit_as_error_event()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        registry.insert(sample_agent_info(0xABCD_EF70, test_key(0x11), test_iv(0x22))).await?;
+        let tracker = DownloadTracker::new(1024 * 1024).with_max_concurrent_per_agent(1);
+        let dispatcher = CommandDispatcher::with_builtin_handlers_and_downloads(
+            registry,
+            events,
+            database.clone(),
+            sockets,
+            None,
+            tracker,
+            false,
+        );
+
+        let file_id_1 = 0xB1_u32;
+        let file_id_2 = 0xB2_u32;
+
+        // Open first download — must succeed.
+        let mut open1 = Vec::new();
+        add_u32(&mut open1, u32::from(DemonFilesystemCommand::Download));
+        add_u32(&mut open1, 0);
+        add_u32(&mut open1, file_id_1);
+        add_u64(&mut open1, 16);
+        add_utf16(&mut open1, "C:\\Temp\\first.bin");
+        dispatcher.dispatch(0xABCD_EF70, u32::from(DemonCommand::CommandFs), 0x99, &open1).await?;
+
+        // Open second download while first is still active — concurrent limit exceeded.
+        // Must return Ok(()) (error is surfaced as event, not propagated).
+        let mut open2 = Vec::new();
+        add_u32(&mut open2, u32::from(DemonFilesystemCommand::Download));
+        add_u32(&mut open2, 0);
+        add_u32(&mut open2, file_id_2);
+        add_u64(&mut open2, 16);
+        add_utf16(&mut open2, "C:\\Temp\\second.bin");
+        dispatcher
+            .dispatch(0xABCD_EF70, u32::from(DemonCommand::CommandFs), 0x99, &open2)
+            .await
+            .expect("concurrent-limit rejection must not propagate as dispatch error");
+
+        // First event: download-progress "Started" for the first file.
+        let open_event = receiver.recv().await.ok_or("missing open event")?;
+        let OperatorMessage::AgentResponse(open_message) = open_event else {
+            panic!("expected AgentResponse for first download open");
+        };
+        assert_eq!(
+            open_message.info.extra.get("MiscType"),
+            Some(&Value::String("download-progress".to_owned()))
+        );
+
+        // Second event: error event for the concurrent-limit rejection.
+        let error_event = receiver.recv().await.ok_or("missing error event")?;
+        let OperatorMessage::AgentResponse(error_message) = error_event else {
+            panic!("expected AgentResponse error event for concurrent-limit rejection");
+        };
+        assert_eq!(error_message.info.extra.get("Type"), Some(&Value::String("Error".to_owned())));
+        let msg = error_message.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            msg.contains("limit exceeded"),
+            "error message should mention limit exceeded: {msg}"
+        );
+
+        // Audit log must contain a download.rejected entry.
+        let audit_rows = database.audit_log().list().await?;
+        assert!(
+            audit_rows.iter().any(|r| r.action == "download.rejected"),
+            "audit log must contain a download.rejected entry"
+        );
+
+        // No loot persisted (neither download completed).
+        assert!(database.loot().list_for_agent(0xABCD_EF70).await?.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_beacon_file_callbacks_surface_concurrent_limit_as_error_event()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        registry.insert(sample_agent_info(0xABCD_EF71, test_key(0x11), test_iv(0x22))).await?;
+        let tracker = DownloadTracker::new(1024 * 1024).with_max_concurrent_per_agent(1);
+        let dispatcher = CommandDispatcher::with_builtin_handlers_and_downloads(
+            registry,
+            events,
+            database.clone(),
+            sockets,
+            None,
+            tracker,
+            false,
+        );
+
+        let file_id_1 = 0xC1_u32;
+        let file_id_2 = 0xC2_u32;
+
+        // Open first beacon file download — must succeed.
+        let mut open_header1 = Vec::new();
+        open_header1.extend_from_slice(&file_id_1.to_be_bytes());
+        open_header1.extend_from_slice(&16_u32.to_be_bytes());
+        open_header1.extend_from_slice(b"C:\\Windows\\Temp\\first.txt");
+        let mut open1 = Vec::new();
+        add_u32(&mut open1, u32::from(DemonCallback::File));
+        add_bytes(&mut open1, &open_header1);
+        dispatcher
+            .dispatch(0xABCD_EF71, u32::from(DemonCommand::BeaconOutput), 0x77, &open1)
+            .await?;
+
+        // Open second beacon file download while first is active — concurrent limit exceeded.
+        // Must return Ok(()) (error is surfaced as event, not propagated).
+        let mut open_header2 = Vec::new();
+        open_header2.extend_from_slice(&file_id_2.to_be_bytes());
+        open_header2.extend_from_slice(&16_u32.to_be_bytes());
+        open_header2.extend_from_slice(b"C:\\Windows\\Temp\\second.txt");
+        let mut open2 = Vec::new();
+        add_u32(&mut open2, u32::from(DemonCallback::File));
+        add_bytes(&mut open2, &open_header2);
+        dispatcher
+            .dispatch(0xABCD_EF71, u32::from(DemonCommand::BeaconOutput), 0x77, &open2)
+            .await
+            .expect("concurrent-limit rejection must not propagate as dispatch error");
+
+        // First event: download-progress "Started" for the first file.
+        let open_event = receiver.recv().await.ok_or("missing beacon open event")?;
+        let OperatorMessage::AgentResponse(open_message) = open_event else {
+            panic!("expected AgentResponse for first beacon file open");
+        };
+        assert_eq!(
+            open_message.info.extra.get("MiscType"),
+            Some(&Value::String("download-progress".to_owned()))
+        );
+
+        // Second event: error event for the concurrent-limit rejection.
+        let error_event = receiver.recv().await.ok_or("missing error event")?;
+        let OperatorMessage::AgentResponse(error_message) = error_event else {
+            panic!("expected AgentResponse error event for concurrent-limit rejection");
+        };
+        assert_eq!(error_message.info.extra.get("Type"), Some(&Value::String("Error".to_owned())));
+        let msg = error_message.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            msg.contains("limit exceeded"),
+            "error message should mention limit exceeded: {msg}"
+        );
+
+        // Audit log must contain a download.rejected entry.
+        let audit_rows = database.audit_log().list().await?;
+        assert!(
+            audit_rows.iter().any(|r| r.action == "download.rejected"),
+            "audit log must contain a download.rejected entry"
+        );
+
+        // No loot persisted (neither download completed).
+        assert!(database.loot().list_for_agent(0xABCD_EF71).await?.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn with_builtin_handlers_and_max_download_bytes_happy_path()
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::connect_in_memory().await?;

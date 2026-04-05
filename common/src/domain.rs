@@ -141,12 +141,7 @@ pub struct HttpListenerProxyConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
     /// Optional proxy password (zeroized on drop).
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        serialize_with = "serialize_optional_zeroizing_string",
-        deserialize_with = "deserialize_optional_zeroizing_string"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<String>)]
     pub password: Option<Zeroizing<String>>,
 }
@@ -398,26 +393,11 @@ fn serialize_zeroizing_bytes_as_base64<S: Serializer>(
 fn deserialize_base64_to_zeroizing_bytes<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Zeroizing<Vec<u8>>, D::Error> {
-    let encoded = Zeroizing::new(String::deserialize(deserializer)?);
+    // Deserialize directly into Zeroizing<String> so the base64-encoded key
+    // material is zeroed on drop, not left in a plain String on the heap.
+    let encoded = Zeroizing::<String>::deserialize(deserializer)?;
     let bytes = BASE64_STANDARD.decode(encoded.as_bytes()).map_err(de::Error::custom)?;
     Ok(Zeroizing::new(bytes))
-}
-
-fn serialize_optional_zeroizing_string<S: Serializer>(
-    value: &Option<Zeroizing<String>>,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    match value {
-        Some(s) => serializer.serialize_some(s.as_str()),
-        None => serializer.serialize_none(),
-    }
-}
-
-fn deserialize_optional_zeroizing_string<'de, D: Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<Zeroizing<String>>, D::Error> {
-    let opt = Option::<String>::deserialize(deserializer)?;
-    Ok(opt.map(Zeroizing::new))
 }
 
 /// Shared persisted agent/session metadata.
@@ -1277,6 +1257,21 @@ mod tests {
         assert_eq!(json["password"], "secret");
         let decoded: HttpListenerProxyConfig = serde_json::from_value(json)?;
         assert_eq!(decoded.password.as_ref().map(|s| s.as_str()), Some("secret"));
+        Ok(())
+    }
+
+    #[test]
+    fn proxy_password_none_round_trips_through_serde() -> Result<(), Box<dyn std::error::Error>> {
+        // Verify that a missing/null proxy password deserializes to None
+        // (uses zeroize/serde to deserialize Option<Zeroizing<String>> without
+        // an intermediate plain-String allocation).
+        let json = serde_json::json!({
+            "enabled": false,
+            "host": "proxy.local",
+            "port": 3128
+        });
+        let decoded: HttpListenerProxyConfig = serde_json::from_value(json)?;
+        assert!(decoded.password.is_none());
         Ok(())
     }
 

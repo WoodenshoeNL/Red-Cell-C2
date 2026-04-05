@@ -20,11 +20,11 @@ Each loop run updates the running totals and appends a review entry.
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
-| unwrap / expect in production | 12 | 0 | 0 |
+| unwrap / expect in production | 14 | 0 | 0 |
 | Missing tests / stale tests | 76 | 19 | 5 |
 | Clippy warnings | 11 | 0 | 1 |
 | Protocol errors | 30 | 32 | 3 |
-| Security issues | 60 | 39 | 0 |
+| Security issues | 61 | 39 | 0 |
 | Architecture drift | 26 | 25 | 1 |
 | Memory / resource leaks | 11 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 10 | 0 |
@@ -41,6 +41,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-04-05 12:45
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 3 | security, unwrap/expect in production | Filed `red-cell-c2-o0d4i` (P2) — Demon/Archon COMMAND_CHECKIN replay can overwrite agent metadata (hostname, IP, username) with no freshness guarantee; seq-protection only covers Specter/Phantom. Filed `red-cell-c2-epdkv` (P3) — `expect()` in non-test production code at `teamserver/src/demon.rs:389` (callback seq-number feature, commit 034e8a7). Filed `red-cell-c2-8wwm7` (P3) — `unwrap_or(0)` silently discards jitter parse errors in Phantom CommandSleep handler (`command/mod.rs:72`), violates AGENTS.md and can cause 0ms spin. |
+| Codex | 0 | — | No new Codex-attributed findings. |
+| Cursor | 0 | — | No new Cursor-attributed findings. |
+
+Overall codebase health: on track
+Biggest blindspot: Demon/Archon CHECKIN replay metadata corruption (o0d4i) — documented in code but untracked; affects all legacy agent deployments. Build steps skipped due to systemd-oomd memory pressure (workspace cargo check terminates at ~180s); pre-built debug binaries present from prior sessions.
 
 ### Arch Review — 2026-04-05 09:35
 

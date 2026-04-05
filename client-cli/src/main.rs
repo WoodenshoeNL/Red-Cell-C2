@@ -12,6 +12,7 @@ mod config;
 mod defaults;
 mod error;
 mod output;
+mod tls;
 
 pub(crate) use agent_id::AgentId;
 use error::{CliError, EXIT_GENERAL, EXIT_SUCCESS};

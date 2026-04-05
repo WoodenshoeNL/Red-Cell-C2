@@ -59,8 +59,6 @@
 //! the agent id into any incoming command that has no `"id"` field before
 //! forwarding it to the server.
 
-use std::sync::Arc;
-
 use futures_util::{SinkExt as _, StreamExt as _};
 use tokio::io::AsyncBufReadExt as _;
 use tokio_tungstenite::tungstenite::{Message, protocol::CloseFrame};
@@ -69,6 +67,7 @@ use tracing::instrument;
 use crate::AgentId;
 use crate::config::{ResolvedConfig, TlsMode};
 use crate::error::{CliError, EXIT_GENERAL, EXIT_SUCCESS};
+use crate::tls::build_fingerprint_client_config;
 
 /// HTTP header name used by the teamserver for API-key authentication.
 const API_KEY_HEADER: &str = "x-api-key";
@@ -94,76 +93,6 @@ fn server_to_ws_url(server: &str) -> String {
         format!("ws://{rest}")
     } else {
         format!("ws://{server}")
-    }
-}
-
-// ── TLS helpers ──────────────────────────────────────────────────────────────
-
-/// SHA-256 fingerprint of a DER-encoded certificate (lowercase hex).
-fn cert_fingerprint(cert_der: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    let hash = Sha256::digest(cert_der);
-    hash.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-/// Certificate verifier that accepts any cert whose SHA-256 fingerprint
-/// matches a pinned value.  Used for `TlsMode::Fingerprint`.
-#[derive(Debug)]
-struct FingerprintVerifier {
-    expected: String,
-    provider: rustls::crypto::CryptoProvider,
-}
-
-impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
-    fn verify_server_cert(
-        &self,
-        end_entity: &rustls::pki_types::CertificateDer<'_>,
-        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
-        _server_name: &rustls::pki_types::ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: rustls::pki_types::UnixTime,
-    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        let actual = cert_fingerprint(end_entity.as_ref());
-        if actual == self.expected {
-            Ok(rustls::client::danger::ServerCertVerified::assertion())
-        } else {
-            Err(rustls::Error::General(format!(
-                "certificate fingerprint mismatch: expected {}, got {actual}",
-                self.expected
-            )))
-        }
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        message: &[u8],
-        cert: &rustls::pki_types::CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(
-            message,
-            cert,
-            dss,
-            &self.provider.signature_verification_algorithms,
-        )
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        message: &[u8],
-        cert: &rustls::pki_types::CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(
-            message,
-            cert,
-            dss,
-            &self.provider.signature_verification_algorithms,
-        )
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        self.provider.signature_verification_algorithms.supported_schemes()
     }
 }
 
@@ -217,19 +146,8 @@ fn build_connector(
         }
 
         TlsMode::Fingerprint(hex) => {
-            let provider = rustls::crypto::ring::default_provider();
-            let verifier = Arc::new(FingerprintVerifier {
-                expected: hex.to_ascii_lowercase(),
-                provider: provider.clone(),
-            });
-            let config = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
-                .with_safe_default_protocol_versions()
-                .map_err(|e| CliError::General(format!("TLS protocol version error: {e}")))?
-                .dangerous()
-                .with_custom_certificate_verifier(verifier)
-                .with_no_client_auth();
-
-            Ok(tokio_tungstenite::Connector::Rustls(Arc::new(config)))
+            let config = build_fingerprint_client_config(hex)?;
+            Ok(tokio_tungstenite::Connector::Rustls(std::sync::Arc::new(config)))
         }
     }
 }
@@ -1274,7 +1192,7 @@ mod tests {
         .await;
 
         let ws = ws_connect(addr, "test-token").await;
-        let input = b"{\"cmd\":\"agent.show\",\"id\":\"missing\"}\n";
+        let input = b"{\"cmd\":\"agent.show\",\"id\":\"0xDEADBEEF\"}\n";
         let reader = tokio::io::BufReader::new(input.as_slice());
         let mut stdout: Vec<u8> = Vec::new();
         let mut stderr: Vec<u8> = Vec::new();

@@ -13,7 +13,8 @@ deployed Demon agent using native Windows shell commands:
      contains recognisable token structure (user info + privilege list)
   7. Request/list Kerberos tickets via `klist` — verify no CliError is
      raised (exit 0 even when no domain tickets are cached)
-  8. Kill agent, stop listener, clean up
+  8. Network enumeration: `netstat -ano`, `arp -a`
+  9. Kill agent, stop listener, clean up
 
 Skip conditions:
   - ctx.windows is None (no Windows target configured)
@@ -153,6 +154,25 @@ def run(ctx):
                 "  [kerberos] Kerberos not available in this test environment — "
                 "klist check skipped"
             )
+
+        print("  [net] netstat -ano")
+        netstat_result = agent_exec(cli, agent_id, "netstat -ano", wait=True, timeout=45)
+        netstat_out = netstat_result.get("output", "").strip()
+        assert netstat_out and ("TCP" in netstat_out or "UDP" in netstat_out), (
+            f"netstat output missing protocol table: {netstat_out[:500]!r}"
+        )
+        print(f"  [net] netstat ok ({len(netstat_out)} chars)")
+
+        print("  [net] arp -a")
+        arp_result = agent_exec(cli, agent_id, "arp -a", wait=True, timeout=30)
+        arp_out = arp_result.get("output", "").strip()
+        assert arp_out, "arp -a returned empty output"
+        assert (
+            "Interface" in arp_out
+            or "dynamic" in arp_out.lower()
+            or "static" in arp_out.lower()
+        ), f"arp output missing expected markers: {arp_out[:500]!r}"
+        print(f"  [net] arp ok ({len(arp_out)} chars)")
 
         print("  [suite] all Kerberos token checks passed")
 

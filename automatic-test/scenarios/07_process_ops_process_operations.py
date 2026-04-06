@@ -104,6 +104,17 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
         )
         print(f"  [{agent_type}][ps] process list received ({len(ps_output)} chars), 'sshd' confirmed present")
 
+        # Listening sockets (agent-side network introspection)
+        print(f"  [{agent_type}][net] ss -tln (head)")
+        ss_result = agent_exec(
+            cli, agent_id, "ss -tln 2>/dev/null | head -n 40", wait=True, timeout=30
+        )
+        ss_out = ss_result.get("output", "").strip()
+        assert ss_out and len(ss_out) > 5, (
+            f"ss output unexpectedly short: {ss_out!r}"
+        )
+        print(f"  [{agent_type}][net] ss table non-empty ({len(ss_out)} chars)")
+
         # ── Step 7: Spawn a test process on target via SSH ───────────────────
         # Start a long sleep in the background and capture its PID.
         print(f"  [{agent_type}][spawn] starting sleep process on target via SSH")
@@ -246,6 +257,24 @@ def _run_for_agent_windows(ctx, agent_type: str, fmt: str, name_prefix: str) -> 
             f"  tasklist output (first 500 chars): {ps_output[:500]!r}"
         )
         print(f"  [{agent_type}][ps] process list received ({len(ps_output)} chars), 'svchost.exe' confirmed present")
+
+        print(f"  [{agent_type}][mod] tasklist /m ntdll.dll (sample)")
+        tlm = agent_exec(
+            cli, agent_id, "tasklist /m ntdll.dll", wait=True, timeout=45
+        ).get("output", "").strip()
+        assert tlm and "ntdll" in tlm.lower(), (
+            f"tasklist /m output missing ntdll: {tlm[:400]!r}"
+        )
+        print(f"  [{agent_type}][mod] tasklist /m ok")
+
+        print(f"  [{agent_type}][net] netstat -ano")
+        ns = agent_exec(cli, agent_id, "netstat -ano", wait=True, timeout=45).get(
+            "output", ""
+        ).strip()
+        assert ns and ("TCP" in ns or "UDP" in ns), (
+            f"netstat output missing protocol table: {ns[:400]!r}"
+        )
+        print(f"  [{agent_type}][net] netstat ok ({len(ns)} chars)")
 
         # ── Step 7: Spawn a test process on target via SSH ───────────────────
         # Use PowerShell Start-Process -PassThru to start a background process

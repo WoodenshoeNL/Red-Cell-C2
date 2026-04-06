@@ -14,7 +14,8 @@ Steps (per agent pass):
   3. Deploy via SSH/SCP to Windows 11 test machine
   4. Execute payload in background on target
   5. Wait for agent checkin
-  6. Run command suite: whoami, dir C:\\, ipconfig
+  6. Run command suite: whoami, dir C:\\, ipconfig, PowerShell, reg query,
+     sc query, tasklist /m, netstat -ano, arp -a
   7. Kill agent, stop listener, clean up work_dir on target
 """
 
@@ -107,6 +108,74 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
             f"ipconfig output does not contain 'IPv4 Address':\n{ipconfig_out[:500]}"
         )
         print(f"  [{agent_type}][cmd] ipconfig passed")
+
+        # PowerShell — distinct from cmd.exe
+        print(f"  [{agent_type}][cmd] powershell Write-Output")
+        result = agent_exec(
+            cli,
+            agent_id,
+            'powershell -NoProfile -Command "Write-Output PS_MARKER_OK"',
+            wait=True,
+            timeout=30,
+        )
+        ps_out = result.get("output", "").strip()
+        assert "PS_MARKER_OK" in ps_out, (
+            f"PowerShell output missing marker: {ps_out[:500]!r}"
+        )
+        print(f"  [{agent_type}][cmd] powershell passed")
+
+        # Registry read
+        print(f"  [{agent_type}][cmd] reg query ProgramFilesDir")
+        result = agent_exec(
+            cli,
+            agent_id,
+            r'reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion" /v ProgramFilesDir',
+            wait=True,
+            timeout=30,
+        )
+        reg_out = result.get("output", "").strip()
+        assert reg_out and (
+            "ProgramFilesDir" in reg_out or "REG_" in reg_out
+        ), f"unexpected reg query output: {reg_out[:500]!r}"
+        print(f"  [{agent_type}][cmd] reg query passed")
+
+        # Service enumeration
+        print(f"  [{agent_type}][cmd] sc query eventlog")
+        result = agent_exec(cli, agent_id, "sc query eventlog", wait=True, timeout=30)
+        sc_out = result.get("output", "").strip()
+        assert sc_out and "STATE" in sc_out.upper(), (
+            f"sc query output missing STATE: {sc_out[:500]!r}"
+        )
+        print(f"  [{agent_type}][cmd] sc query passed")
+
+        # Loaded modules
+        print(f"  [{agent_type}][cmd] tasklist /m ntdll.dll")
+        result = agent_exec(
+            cli, agent_id, "tasklist /m ntdll.dll", wait=True, timeout=45
+        )
+        tlm_out = result.get("output", "").strip()
+        assert tlm_out and "ntdll" in tlm_out.lower(), (
+            f"tasklist /m output missing ntdll: {tlm_out[:500]!r}"
+        )
+        print(f"  [{agent_type}][cmd] tasklist /m passed")
+
+        # TCP/UDP endpoints
+        print(f"  [{agent_type}][cmd] netstat -ano")
+        result = agent_exec(cli, agent_id, "netstat -ano", wait=True, timeout=45)
+        ns_out = result.get("output", "").strip()
+        assert ns_out and ("TCP" in ns_out or "UDP" in ns_out), (
+            f"netstat output missing TCP/UDP table: {ns_out[:500]!r}"
+        )
+        print(f"  [{agent_type}][cmd] netstat -ano passed")
+
+        # ARP cache
+        print(f"  [{agent_type}][cmd] arp -a")
+        result = agent_exec(cli, agent_id, "arp -a", wait=True, timeout=30)
+        arp_out = result.get("output", "").strip()
+        assert arp_out and (
+            "Interface" in arp_out or "dynamic" in arp_out.lower() or "static" in arp_out.lower()
+        ), f"arp output missing expected markers: {arp_out[:500]!r}"
+        print(f"  [{agent_type}][cmd] arp -a passed")
 
         print(f"  [{agent_type}][suite] all commands passed")
 

@@ -173,6 +173,28 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
         hostname_str = sysfile_content.decode(errors="replace").strip()
         print(f"  [{agent_type}][sysfile] /etc/hostname content: {hostname_str!r} ({len(sysfile_content)} bytes)")
 
+        # Permissions + long listing on the uploaded path (agent exec coverage)
+        print(f"  [{agent_type}][perm] stat uploaded file")
+        st = agent_exec(
+            cli, agent_id, f"stat -c '%a %n' {remote_upload_dst}", wait=True, timeout=30
+        ).get("output", "").strip()
+        assert st and remote_upload_dst.split("/")[-1] in st, (
+            f"stat of upload path failed or unexpected: {st!r}"
+        )
+        print(f"  [{agent_type}][perm] stat ok: {st!r}")
+        print(f"  [{agent_type}][perm] ls -la work dir (head)")
+        ls_agent = agent_exec(
+            cli,
+            agent_id,
+            f"ls -la {target.work_dir} | head -n 30",
+            wait=True,
+            timeout=30,
+        ).get("output", "").strip()
+        assert ls_agent and "uploaded-" in ls_agent, (
+            f"ls -la did not list uploaded artifact: {ls_agent[:400]!r}"
+        )
+        print(f"  [{agent_type}][perm] ls -la ok ({len(ls_agent.splitlines())} lines)")
+
         print(f"  [{agent_type}][suite] all file-transfer checks passed")
 
     finally:
@@ -341,6 +363,19 @@ def _run_for_agent_windows(ctx, agent_type: str, fmt: str, name_prefix: str) -> 
             f"downloaded {win_ini} is empty — expected non-empty content"
         )
         print(f"  [{agent_type}][sysfile] {win_ini} content: {len(sysfile_content)} bytes")
+
+        print(f"  [{agent_type}][perm] dir uploaded file")
+        dir_line = agent_exec(
+            cli,
+            agent_id,
+            f'dir /B "{remote_upload_dst}"',
+            wait=True,
+            timeout=30,
+        ).get("output", "").strip()
+        assert dir_line and "uploaded-" in dir_line, (
+            f"dir did not show uploaded file: {dir_line[:400]!r}"
+        )
+        print(f"  [{agent_type}][perm] dir ok")
 
         print(f"  [{agent_type}][suite] all file-transfer checks passed")
 

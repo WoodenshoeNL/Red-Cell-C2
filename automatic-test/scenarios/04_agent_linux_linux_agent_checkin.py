@@ -14,7 +14,8 @@ Steps (per agent pass):
   3. Deploy via SSH/SCP to Ubuntu test machine
   4. Execute payload in background on target
   5. Wait for agent checkin
-  6. Run command suite: whoami, pwd, ls /, hostname
+  6. Run command suite: whoami, pwd, ls /, hostname, stat, ls -la, ss/netstat,
+     env, /proc/version
   7. Kill agent, stop listener, clean up work_dir on target
 """
 
@@ -119,6 +120,62 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
             f"SSH reports {expected_hostname!r}"
         )
         print(f"  [{agent_type}][cmd] hostname passed: {hostname_out!r}")
+
+        # stat — file mode bits for a well-known path
+        print(f"  [{agent_type}][cmd] stat /etc/hostname")
+        result = agent_exec(
+            cli, agent_id, "stat -c '%a %n' /etc/hostname", wait=True, timeout=30
+        )
+        stat_out = result.get("output", "").strip()
+        assert stat_out, "stat returned empty output"
+        assert "hostname" in stat_out, (
+            f"stat output missing expected filename fragment: {stat_out!r}"
+        )
+        print(f"  [{agent_type}][cmd] stat passed: {stat_out!r}")
+
+        # ls -la — long listing (trimmed)
+        print(f"  [{agent_type}][cmd] ls -la / (head)")
+        result = agent_exec(cli, agent_id, "ls -la / | head -n 25", wait=True, timeout=30)
+        ls_la = result.get("output", "").strip()
+        assert ls_la, "ls -la returned empty output"
+        assert "total " in ls_la or "drwx" in ls_la, (
+            f"ls -la output missing expected long-list markers: {ls_la[:300]!r}"
+        )
+        print(f"  [{agent_type}][cmd] ls -la passed ({len(ls_la.splitlines())} lines)")
+
+        # Network listeners — prefer ss, fall back to netstat
+        print(f"  [{agent_type}][cmd] ss -tln (or netstat)")
+        result = agent_exec(
+            cli,
+            agent_id,
+            "ss -tln 2>/dev/null || netstat -tln 2>/dev/null || true",
+            wait=True,
+            timeout=30,
+        )
+        ss_out = result.get("output", "").strip()
+        assert len(ss_out) > 8, (
+            f"ss/netstat output unexpectedly short: {ss_out!r}"
+        )
+        print(f"  [{agent_type}][cmd] listener table non-empty ({len(ss_out)} chars)")
+
+        # Environment slice
+        print(f"  [{agent_type}][cmd] env (head)")
+        result = agent_exec(cli, agent_id, "env | head -n 40", wait=True, timeout=30)
+        env_out = result.get("output", "").strip()
+        assert env_out, "env returned empty output"
+        assert "PATH" in env_out, (
+            f"env output missing PATH: {env_out[:400]!r}"
+        )
+        print(f"  [{agent_type}][cmd] env passed (PATH present)")
+
+        # Kernel string from procfs
+        print(f"  [{agent_type}][cmd] cat /proc/version")
+        result = agent_exec(cli, agent_id, "cat /proc/version", wait=True, timeout=30)
+        ver_out = result.get("output", "").strip()
+        assert "Linux" in ver_out, (
+            f"/proc/version does not look like Linux: {ver_out!r}"
+        )
+        print(f"  [{agent_type}][cmd] /proc/version passed")
 
         print(f"  [{agent_type}][suite] all commands passed")
 

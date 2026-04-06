@@ -15,7 +15,6 @@ use red_cell::Job;
 use red_cell_common::HttpListenerConfig;
 use red_cell_common::config::Profile;
 use red_cell_common::demon::DemonCommand;
-use tokio_tungstenite::connect_async;
 
 fn demon_test_profile() -> Profile {
     Profile::parse(
@@ -58,7 +57,7 @@ async fn spawn_server_with_http_listener(
 ) -> Result<DemonTestHarness, Box<dyn std::error::Error>> {
     let server = common::spawn_test_server(demon_test_profile()).await?;
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::connect_ws(&server.ws_url()).await?;
     common::login(&mut socket).await?;
 
     server

@@ -11,9 +11,9 @@ mod common;
 use std::net::IpAddr;
 use std::time::Duration;
 
+use futures_util::SinkExt;
 use red_cell_common::crypto::hash_password_sha3;
 use red_cell_common::operator::{EventCode, LoginInfo, Message, MessageHead, OperatorMessage};
-use futures_util::SinkExt;
 use tokio_tungstenite::tungstenite::Message as ClientMessage;
 
 /// Connect a WebSocket client to the test teamserver, send a login frame

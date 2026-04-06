@@ -5,15 +5,12 @@ Unit tests for scenario 20 (DoH DNS listener interop).
 from __future__ import annotations
 
 import importlib.util as _ilu
-import socket
 import sys
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from lib import ScenarioSkipped
 
 _SCENARIO_PATH = (
     Path(__file__).parent.parent / "scenarios" / "20_agent_doh_dns_listener_interop.py"
@@ -79,32 +76,7 @@ class TestDnsResponseParsing(unittest.TestCase):
         self.assertEqual(_mod._parse_first_txt_answer(bytes(response)), "0001")
 
 
-class TestListenerSourceGate(unittest.TestCase):
-    def test_source_gate_rejects_legacy_parser(self) -> None:
-        source = """
-        let parts: Vec<&str> = ctrl.splitn(3, '-').collect();
-        [b32data, ctrl, up] if up == "up" => {}
-        [ctrl, dn] if dn == "dn" => {}
-        """
-        self.assertFalse(_mod._listener_source_supports_doh_grammar(source))
-
-    def test_source_gate_accepts_doh_markers(self) -> None:
-        source = """
-        let ready = "rdy.";
-        let uplink = ".u.";
-        let downlink = ".d.";
-        """
-        self.assertTrue(_mod._listener_source_supports_doh_grammar(source))
-
-
 class TestScenarioRun(unittest.TestCase):
-    def test_run_skips_when_listener_source_is_legacy(self) -> None:
-        ctx = _make_ctx()
-        with patch.object(_mod, "_listener_source_supports_doh_grammar", return_value=False):
-            with self.assertRaises(ScenarioSkipped) as cm:
-                _mod.run(ctx)
-        self.assertIn(_mod.LISTENER_DOH_BUG_ID, str(cm.exception))
-
     def test_upload_requires_nxdomain_per_chunk(self) -> None:
         with patch.object(_mod, "_chunk_packet", return_value=["abc", "def"]), \
              patch.object(_mod, "_send_dns_query", return_value=b"\x00\x01\x84\x03" + b"\x00" * 20):

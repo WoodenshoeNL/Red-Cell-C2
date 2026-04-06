@@ -4,18 +4,20 @@ Scenario 20_agent_doh_dns_listener_interop: DoH query-name interop against the D
 This scenario exercises the Specter/Archon DoH query-name grammar against the
 real authoritative DNS listener without depending on a public DoH resolver.
 It sends the same query names the agents generate, but directly over UDP to the
-teamserver's DNS listener.
+teamserver's DNS listener (mirroring scenario 13's raw protocol probe style).
 
-Intended flow once the teamserver-side parser/handler supports the DoH grammar:
+Flow:
   1. Create + start a DNS listener
   2. Upload a synthetic DEMON_INIT packet using DoH-style uplink names
+     (multi-chunk — validates chunked reassembly on the teamserver)
   3. Poll `rdy.<session>.d.<domain>` until the init ACK is ready
   4. Download the ACK using DoH-style chunk-fetch names
   5. Upload a synthetic GET_JOB callback and verify the empty response path
-
-Today this scenario is skip-gated because the teamserver listener still parses
-the legacy `up`/`dn` DNS grammar rather than the Specter/Archon DoH grammar.
-That follow-up is tracked in `red-cell-c2-mn9zk`.
+  6. Optional: deploy Specter on Windows with an HTTP listener that has
+     `doh_domain` / `doh_provider` set (ARC-08) while this DNS listener serves
+     the same zone — primary traffic is still HTTP; DoH fallback is compiled in.
+     Public DoH resolvers do not resolve private lab names end-to-end; the UDP
+     probes above are the authoritative DoH wire-format interop check.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ DESCRIPTION = "DoH query-name interop against the DNS listener (Specter/Archon g
 
 import base64
 import importlib.util
+import json
 import os
 import socket
 import struct
@@ -34,7 +37,6 @@ from pathlib import Path
 from lib import ScenarioSkipped
 
 
-LISTENER_DOH_BUG_ID = "red-cell-c2-mn9zk"
 DEFAULT_DNS_TIMEOUT_SECS = 5.0
 DOH_CHUNK_BYTES = 37
 
@@ -181,27 +183,6 @@ def _send_dns_query(host: str, port: int, qname: str, timeout: float = DEFAULT_D
     return response
 
 
-def _listener_source_supports_doh_grammar(source_text: str | None = None) -> bool:
-    """Return True when the listener source appears to understand the DoH grammar."""
-    if source_text is None:
-        source_path = Path(__file__).resolve().parents[2] / "teamserver" / "src" / "listeners.rs"
-        source_text = source_path.read_text(encoding="utf-8")
-
-    required_markers = (
-        "rdy.",
-        ".u.",
-        ".d.",
-    )
-    legacy_markers = (
-        '.splitn(3, \'-\')',
-        '"up"',
-        '"dn"',
-    )
-    return all(marker in source_text for marker in required_markers) and not all(
-        marker in source_text for marker in legacy_markers
-    )
-
-
 def _wait_for_dns_listener(host: str, port: int, domain: str, timeout: int = 15) -> None:
     """Poll the listener until it responds to any DNS TXT query."""
     deadline = time.monotonic() + timeout
@@ -269,17 +250,117 @@ def _download_response_via_doh_grammar(host: str, port: int, domain: str, sessio
     return b"".join(chunks)
 
 
+def _maybe_specter_doh_agent_pass(
+    ctx,
+    cli,
+    dns_domain: str,
+    teamserver_ip: str,
+    listeners_cfg: dict,
+) -> None:
+    """Optionally deploy Specter with HTTP listener config that enables ARC-08 DoH fields.
+
+    Requires a running DNS listener for *dns_domain* (same scenario). Primary C2 is HTTP;
+    the payload embeds ``doh_domain`` / ``doh_provider`` for Specter's DoH fallback transport.
+    """
+    available = set(ctx.env.get("agents", {}).get("available", ["demon"]))
+    if "specter" not in available:
+        print("  [specter] SKIPPED — 'specter' not listed in agents.available")
+        return
+    if ctx.windows is None:
+        print("  [specter] SKIPPED — ctx.windows is None (no Windows target)")
+        return
+
+    from lib.cli import (
+        agent_exec,
+        agent_kill,
+        listener_create,
+        listener_delete,
+        listener_start,
+        listener_stop,
+    )
+    from lib.deploy import DeployError, preflight_dns, preflight_ssh
+    from lib.deploy_agent import deploy_and_checkin
+
+    try:
+        preflight_ssh(ctx.windows)
+    except DeployError as exc:
+        raise ScenarioSkipped(str(exc)) from exc
+
+    try:
+        preflight_dns(ctx.windows, dns_domain, teamserver_ip)
+    except ScenarioSkipped as exc:
+        raise ScenarioSkipped(f"[specter] {exc}") from exc
+
+    uid = _short_id()
+    http_name = f"test-doh-http-{uid}"
+    win_port = int(listeners_cfg.get("windows_port", 19082))
+
+    inner = {
+        "name": http_name,
+        "host_bind": "0.0.0.0",
+        "port_bind": win_port,
+        "hosts": [teamserver_ip],
+        "host_rotation": "round-robin",
+        "secure": False,
+        "uris": ["/"],
+        "doh_domain": dns_domain,
+        "doh_provider": "cloudflare",
+    }
+    print(
+        f"  [specter] creating HTTP listener {http_name!r} on port {win_port} "
+        f"with doh_domain={dns_domain!r}"
+    )
+    listener_create(cli, http_name, "http", config_json=json.dumps(inner))
+    listener_start(cli, http_name)
+
+    agent_id = None
+    try:
+        agent = deploy_and_checkin(
+            ctx,
+            cli,
+            ctx.windows,
+            agent_type="specter",
+            fmt="exe",
+            listener_name=http_name,
+            label="specter-doh",
+        )
+        agent_id = agent["id"]
+
+        print("  [specter][cmd] whoami")
+        result = agent_exec(cli, agent_id, "whoami", wait=True, timeout=30)
+        whoami_out = result.get("output", "").strip()
+        assert whoami_out, "whoami returned empty output"
+        assert "\\" in whoami_out, (
+            f"whoami output {whoami_out!r} does not contain '\\' "
+            f"— expected DOMAIN\\username format"
+        )
+        print(f"  [specter][cmd] whoami passed: {whoami_out!r}")
+    finally:
+        if agent_id is not None:
+            print(f"  [specter][cleanup] killing agent {agent_id}")
+            try:
+                agent_kill(cli, agent_id)
+            except Exception as exc:
+                print(f"  [specter][cleanup] agent kill failed (non-fatal): {exc}")
+
+        print(f"  [specter][cleanup] stopping/deleting HTTP listener {http_name!r}")
+        try:
+            listener_stop(cli, http_name)
+        except Exception:
+            pass
+        try:
+            listener_delete(cli, http_name)
+        except Exception:
+            pass
+
+    print("  [specter] optional DoH-configured agent pass complete")
+
+
 def run(ctx):
     from urllib.parse import urlparse
 
     from lib.cli import agent_kill, listener_create, listener_delete, listener_start, listener_stop
     from lib.deploy import preflight_dns
-
-    if not _listener_source_supports_doh_grammar():
-        raise ScenarioSkipped(
-            "teamserver DNS listener still uses the legacy up/dn grammar; "
-            f"enable this scenario after {LISTENER_DOH_BUG_ID} lands"
-        )
 
     cli = ctx.cli
     listeners_cfg = ctx.env.get("listeners", {})
@@ -287,12 +368,13 @@ def run(ctx):
     dns_port = listeners_cfg.get("dns_port", 15353)
     dns_domain = listeners_cfg.get("dns_domain", "c2.test.local")
 
+    server_url = (
+        ctx.env.get("server", {}).get("rest_url")
+        or ctx.env.get("server", {}).get("url", "")
+    )
+    teamserver_ip = urlparse(server_url).hostname or "127.0.0.1"
+
     if ctx.linux is not None:
-        server_url = (
-            ctx.env.get("server", {}).get("rest_url")
-            or ctx.env.get("server", {}).get("url", "")
-        )
-        teamserver_ip = urlparse(server_url).hostname or "127.0.0.1"
         preflight_dns(ctx.linux, dns_domain, teamserver_ip)
     listener_name = f"test-doh-dns-{_short_id()}"
     scenario13 = _load_protocol_probe_module()
@@ -316,6 +398,13 @@ def run(ctx):
 
         print(f"  [init] uploading synthetic DEMON_INIT for agent 0x{agent_id:08X}")
         init_packet = scenario13._build_demon_init_packet(agent_id, key, iv)
+        init_chunks = _chunk_packet(init_packet)
+        assert len(init_chunks) >= 2, (
+            "DEMON_INIT must span multiple DoH chunks to validate teamserver chunked reassembly"
+        )
+        print(
+            f"  [init] packet size {len(init_packet)} bytes → {len(init_chunks)} DoH uplink chunks"
+        )
         init_session = _random_session_hex()
         _upload_packet_via_doh_grammar(server_host, dns_port, dns_domain, init_packet, init_session)
 
@@ -341,6 +430,8 @@ def run(ctx):
         )
         assert get_job_response == b"", f"GET_JOB with no queued work should return empty response, got {len(get_job_response)} bytes"
         print("  [get-job] empty response path verified")
+
+        _maybe_specter_doh_agent_pass(ctx, cli, dns_domain, teamserver_ip, listeners_cfg)
 
     finally:
         if agent_id is not None:

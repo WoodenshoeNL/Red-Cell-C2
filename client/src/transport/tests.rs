@@ -3296,3 +3296,36 @@ fn agent_response_empty_output_for_unknown_agent_returns_no_events() {
     assert!(events.is_empty(), "empty output should produce no events");
     assert!(!state.agent_consoles.contains_key("DEADBEEF"), "no console entry for empty output");
 }
+
+// ─── extract_session_token ────────────────────────────────────────────────────
+
+#[test]
+fn extract_session_token_parses_standard_format() {
+    let msg = "Successful Authenticated; SessionToken=abc123";
+    assert_eq!(extract_session_token(msg), Some("abc123"));
+}
+
+#[test]
+fn extract_session_token_returns_none_on_missing_marker() {
+    let msg = "Successful Authenticated";
+    assert!(extract_session_token(msg).is_none());
+}
+
+#[test]
+fn extract_session_token_returns_none_on_empty_string() {
+    assert!(extract_session_token("").is_none());
+}
+
+#[test]
+fn extract_session_token_returns_empty_token_when_marker_is_at_end() {
+    // "SessionToken=" with nothing after yields an empty token, not None.
+    let msg = "Successful Authenticated; SessionToken=";
+    assert_eq!(extract_session_token(msg), Some(""));
+}
+
+#[test]
+fn extract_session_token_returns_full_suffix_after_marker() {
+    // Everything after "SessionToken=" is the token, including any extra text.
+    let msg = "SessionToken=tok-xyz; extra=stuff";
+    assert_eq!(extract_session_token(msg), Some("tok-xyz; extra=stuff"));
+}

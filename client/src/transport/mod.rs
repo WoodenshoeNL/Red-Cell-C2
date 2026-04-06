@@ -460,8 +460,23 @@ async fn run_receive_loop(
                     match serde_json::from_str::<OperatorMessage>(&payload) {
                         Ok(msg) => {
                             if let OperatorMessage::InitConnectionSuccess(ref m) = msg {
-                                if let Some(token) = extract_session_token(&m.info.message) {
-                                    *hmac_key.lock().await = Some(derive_ws_hmac_key(token));
+                                match extract_session_token(&m.info.message) {
+                                    Some(token) => {
+                                        *hmac_key.lock().await =
+                                            Some(derive_ws_hmac_key(token));
+                                    }
+                                    None => {
+                                        warn!(
+                                            message = %m.info.message,
+                                            "InitConnectionSuccess missing SessionToken — \
+                                             cannot derive HMAC key; closing connection"
+                                        );
+                                        return Err(
+                                            "InitConnectionSuccess did not contain a \
+                                             SessionToken; HMAC key could not be derived"
+                                                .to_owned(),
+                                        );
+                                    }
                                 }
                             }
                             msg

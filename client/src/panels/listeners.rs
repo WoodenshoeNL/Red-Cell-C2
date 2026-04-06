@@ -3,11 +3,12 @@ use rfd::FileDialog;
 
 use crate::transport::{AppState, BuildConsoleEntry, PayloadBuildResult, SharedAppState};
 use crate::{
-    AllocMethod, ClientApp, ExecuteMethod, ListenerDialogMode, ListenerDialogState, ListenerInfo,
+    AllocMethod, ClientApp, ExecuteMethod, ListenerDialogMode, ListenerDialogState,
     ListenerProtocol, PayloadArch, PayloadFormat, SleepTechnique, build_console_message_color,
     build_console_message_prefix, build_listener_edit, build_listener_new, build_listener_remove,
     build_payload_request,
 };
+use red_cell_common::operator::ListenerInfo;
 
 impl ClientApp {
     pub(crate) fn render_listeners_panel(&mut self, ui: &mut egui::Ui, state: &AppState) {

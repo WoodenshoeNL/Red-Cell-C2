@@ -28,14 +28,13 @@ from __future__ import annotations
 import argparse
 import sys
 import time
-import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
 from lib.cli import CliConfig, CliError, status, login, \
     listener_create, listener_start, listener_stop, listener_delete
-from lib.config import make_cli_config
+from lib.config import ConfigError, load_env, make_cli_config
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -136,8 +135,11 @@ def main() -> None:
         print(f"[ERROR] Config not found: {config_path}")
         sys.exit(1)
 
-    with open(config_path, "rb") as f:
-        env = tomllib.load(f)
+    try:
+        env = load_env(config_path)
+    except ConfigError as exc:
+        print(f"[ERROR] Invalid env.toml: {exc}")
+        sys.exit(1)
 
     cfg = make_cli_config(env)
 

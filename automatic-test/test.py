@@ -26,7 +26,6 @@ import shutil
 import subprocess
 import sys
 import time
-import tomllib
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,25 +35,13 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from lib import ScenarioSkipped
 from lib.cli import CliConfig
-from lib.config import make_cli_config
+from lib.config import ConfigError, load_env, load_targets, make_cli_config
 from lib.deploy import TargetConfig
 from lib.failure_diagnostics import build_failure_diagnostic_report, write_scenario_failure_file
 
 
 # ── Config loading ───────────────────────────────────────────────────────────
-
-def load_env(path: Path) -> dict:
-    with open(path, "rb") as f:
-        return tomllib.load(f)
-
-
-def load_targets(path: Path) -> dict:
-    if not path.exists():
-        print(f"[WARN] {path} not found — deploy scenarios will be skipped.")
-        print(f"       Copy {path.parent / (path.name + '.example')} to {path} and fill in your values.")
-        return {}
-    with open(path, "rb") as f:
-        return tomllib.load(f)
+# ``load_env`` / ``load_targets`` live in ``lib.config`` (schema validation).
 
 
 def make_target(cfg: dict) -> TargetConfig:
@@ -330,8 +317,12 @@ def main():
         sys.exit(0 if ok else 1)
 
     config_dir = args.config_dir
-    env = load_env(config_dir / "env.toml")
-    targets_raw = load_targets(config_dir / "targets.toml")
+    try:
+        env = load_env(config_dir / "env.toml")
+        targets_raw = load_targets(config_dir / "targets.toml")
+    except ConfigError as exc:
+        print(f"[ERROR] {exc}")
+        sys.exit(1)
 
     cli_cfg = make_cli_config(env)
 

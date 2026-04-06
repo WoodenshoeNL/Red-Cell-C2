@@ -6,6 +6,9 @@ mod python;
 mod tasks;
 mod transport;
 
+pub(crate) use panels::session_graph::{
+    agent_is_active_status, build_session_graph, session_graph_status_color,
+};
 pub(crate) use tasks::*;
 
 use base64::Engine;
@@ -17,7 +20,7 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use clap::Parser;
-use eframe::egui::{self, Align, Align2, Color32, Layout, Pos2, Rect, RichText, Stroke};
+use eframe::egui::{self, Align, Align2, Color32, Layout, Pos2, RichText, Stroke};
 use known_servers::{KnownServersStore, host_port_from_url};
 use local_config::LocalConfig;
 use login::{LoginAction, LoginState, render_login_dialog};
@@ -2474,160 +2477,6 @@ fn script_output_color(stream: ScriptOutputStream) -> Color32 {
 
 fn script_name_for_display(path: &Path) -> Option<String> {
     path.file_stem().and_then(|stem| stem.to_str()).map(str::to_owned)
-}
-
-fn build_session_graph(agents: &[transport::AgentSummary]) -> SessionGraphLayout {
-    let mut sorted_agents = agents.to_vec();
-    sorted_agents.sort_by(|left, right| left.name_id.cmp(&right.name_id));
-
-    let known_ids =
-        sorted_agents.iter().map(|agent| agent.name_id.clone()).collect::<BTreeSet<_>>();
-    let mut parent_by_child = BTreeMap::new();
-
-    for agent in &sorted_agents {
-        if let Some(parent) = agent
-            .pivot_parent
-            .as_deref()
-            .filter(|parent| known_ids.contains(*parent))
-            .filter(|parent| *parent != agent.name_id)
-        {
-            parent_by_child.insert(agent.name_id.clone(), parent.to_owned());
-        }
-    }
-
-    for agent in &sorted_agents {
-        for child in &agent.pivot_links {
-            if child != &agent.name_id
-                && known_ids.contains(child)
-                && !parent_by_child.contains_key(child)
-            {
-                parent_by_child.insert(child.clone(), agent.name_id.clone());
-            }
-        }
-    }
-
-    let mut children = BTreeMap::<String, Vec<String>>::new();
-    children.entry(SESSION_GRAPH_ROOT_ID.to_owned()).or_default();
-    for agent in &sorted_agents {
-        let parent = parent_by_child
-            .get(&agent.name_id)
-            .cloned()
-            .unwrap_or_else(|| SESSION_GRAPH_ROOT_ID.to_owned());
-        children.entry(parent).or_default().push(agent.name_id.clone());
-    }
-    for child_ids in children.values_mut() {
-        child_ids.sort();
-    }
-
-    let mut positions = BTreeMap::new();
-    let mut next_leaf = 0.0;
-    assign_session_graph_positions(
-        SESSION_GRAPH_ROOT_ID,
-        0,
-        &children,
-        &mut next_leaf,
-        &mut positions,
-    );
-
-    let mut nodes = vec![SessionGraphNode {
-        id: SESSION_GRAPH_ROOT_ID.to_owned(),
-        title: "Teamserver".to_owned(),
-        subtitle: "root".to_owned(),
-        status: "Online".to_owned(),
-        position: positions.get(SESSION_GRAPH_ROOT_ID).copied().unwrap_or(Pos2::ZERO),
-        size: egui::vec2(148.0, 52.0),
-        kind: SessionGraphNodeKind::Teamserver,
-    }];
-
-    for agent in sorted_agents {
-        nodes.push(SessionGraphNode {
-            title: if agent.hostname.trim().is_empty() {
-                agent.name_id.clone()
-            } else {
-                agent.hostname.clone()
-            },
-            subtitle: agent.name_id.clone(),
-            status: agent.status.clone(),
-            position: positions.get(&agent.name_id).copied().unwrap_or(Pos2::ZERO),
-            size: egui::vec2(138.0, 58.0),
-            id: agent.name_id,
-            kind: SessionGraphNodeKind::Agent,
-        });
-    }
-
-    let mut edges = Vec::new();
-    for (parent, child_ids) in children {
-        for child in child_ids {
-            edges.push(SessionGraphEdge { from: parent.clone(), to: child });
-        }
-    }
-
-    SessionGraphLayout { nodes, edges }
-}
-
-fn assign_session_graph_positions(
-    node_id: &str,
-    depth: usize,
-    children: &BTreeMap<String, Vec<String>>,
-    next_leaf: &mut f32,
-    positions: &mut BTreeMap<String, Pos2>,
-) -> f32 {
-    const H_SPACING: f32 = 220.0;
-    const V_SPACING: f32 = 120.0;
-
-    let child_ids = children.get(node_id).cloned().unwrap_or_default();
-    let x = if child_ids.is_empty() {
-        let x = *next_leaf * H_SPACING;
-        *next_leaf += 1.0;
-        x
-    } else {
-        let child_xs = child_ids
-            .iter()
-            .map(|child| {
-                assign_session_graph_positions(child, depth + 1, children, next_leaf, positions)
-            })
-            .collect::<Vec<_>>();
-        let first = child_xs.first().copied().unwrap_or(*next_leaf * H_SPACING);
-        let last = child_xs.last().copied().unwrap_or(first);
-        (first + last) * 0.5
-    };
-
-    positions.insert(node_id.to_owned(), Pos2::new(x, depth as f32 * V_SPACING));
-    x
-}
-
-fn graph_node_position(layout: &SessionGraphLayout, node_id: &str) -> Option<Pos2> {
-    layout.nodes.iter().find(|node| node.id == node_id).map(|node| node.position)
-}
-
-fn graph_node_size(layout: &SessionGraphLayout, node_id: &str) -> Option<egui::Vec2> {
-    layout.nodes.iter().find(|node| node.id == node_id).map(|node| node.size)
-}
-
-fn session_graph_world_to_screen(rect: Rect, graph_state: &SessionGraphState, world: Pos2) -> Pos2 {
-    rect.center() + graph_state.pan + world.to_vec2() * graph_state.zoom
-}
-
-fn session_graph_node_rect(
-    rect: Rect,
-    graph_state: &SessionGraphState,
-    world_center: Pos2,
-    world_size: egui::Vec2,
-) -> Rect {
-    let center = session_graph_world_to_screen(rect, graph_state, world_center);
-    Rect::from_center_size(center, world_size * graph_state.zoom)
-}
-
-fn session_graph_status_color(status: &str) -> Color32 {
-    if agent_is_active_status(status) {
-        Color32::from_rgb(84, 170, 110)
-    } else {
-        Color32::from_rgb(174, 68, 68)
-    }
-}
-
-fn agent_is_active_status(status: &str) -> bool {
-    matches!(status.trim().to_ascii_lowercase().as_str(), "alive" | "active" | "online" | "true")
 }
 
 fn agent_ip(agent: &transport::AgentSummary) -> String {

@@ -123,6 +123,44 @@ grep -rn "my_function" teamserver/src/
   (`grep -n "^pub " src/file.rs`) rather than reading the whole file
 - Stop reading as soon as you have enough to write the change
 
+### 3b. Split large tasks before starting
+
+**If the task requires modifying or splitting a file larger than ~300 lines**, do not
+attempt the whole refactor in one session. Splitting a 5k–11k-line file takes 100–150
+turns — more than one session allows — and hitting the turn limit leaves the codebase
+in a half-split state.
+
+**Do this instead:**
+
+```bash
+# 1. Measure the target file
+wc -l <file>
+
+# 2. If it is > ~300 lines and the task is a refactor/split, identify the natural seams
+grep -n '^pub async fn \|^fn \|^pub fn \|^impl ' <file> | head -40
+
+# 3. Create one sub-issue per logical module/group of functions
+br search "<existing sub-issue title>"   # avoid duplicates
+br create \
+  --title="refactor(<scope>): extract <module> from <file>" \
+  --description="<what to extract, why, which functions/structs>" \
+  --type=task --priority=<same as parent>
+br update <new-id> --add-label zone:<zone>
+br dep add <new-id> <parent-id>          # new issue depends on parent (or vice versa)
+
+# 4. Close the parent issue with a note explaining the sub-issues
+br close <parent-id> --reason="split into sub-issues: <id1>, <id2>, ..."
+br sync --flush-only
+git add .beads/issues.jsonl
+git commit -m "chore: split <parent-id> into sub-issues"
+git push
+```
+
+Then pick the **first** sub-issue and do it in this session.
+
+**Rule:** One session = one logical module moved. Never start a refactor you cannot
+finish within ~80 turns (check: does `wc -l <file>` exceed 300? If so, split first).
+
 ### 4. Implement
 
 - Write tests as you implement — not after

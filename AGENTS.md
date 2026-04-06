@@ -307,6 +307,39 @@ Use `--zone autotest` when running a dev loop against `automatic-test/`:
 
 ---
 
+## Large Task Policy
+
+**Never attempt a refactor or file split larger than ~300 lines in a single session.**
+
+Splitting a 5k–11k-line file requires 100–150 turns. Sessions are capped at ~150 turns.
+Hitting the cap mid-split leaves the codebase in a broken intermediate state and forces
+the next session to spend turns just understanding where to resume.
+
+### Rule: measure first, split the issue before touching code
+
+```bash
+wc -l <file>            # > 300 lines? split the issue.
+```
+
+If the file is large, create **one sub-issue per logical module** before writing any code:
+
+```bash
+br create \
+  --title="refactor(<scope>): extract <module> from <file>" \
+  --description="Functions/structs to move: ...\nWhy: reduces file from Nk to ~Mk lines" \
+  --type=task --priority=<same as parent>
+br update <new-id> --add-label zone:<zone>
+br dep add <new-id> <parent-id>
+br close <parent-id> --reason="split into: <id1>, <id2>, ..."
+br sync --flush-only && git add .beads/issues.jsonl
+git commit -m "chore: split <parent-id> into sub-issues" && git push
+```
+
+Then pick the **first** sub-issue and implement only that module in this session.
+**One session = one logical module moved.**
+
+---
+
 ## Stopping a Dev Loop
 
 Both the Claude and Codex dev loops check for a `.stop` file at the repo root before each

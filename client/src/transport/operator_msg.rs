@@ -11,12 +11,12 @@ use serde::Deserialize;
 use tracing::warn;
 
 use super::event_bus::{
-    AgentConsoleEntry, AgentConsoleEntryKind, AgentFileBrowserState, AgentProcessListState,
-    AgentSummary, AppEvent, AppState, BuildConsoleEntry, CompletedDownload, ConnectedOperatorState,
-    ConnectionStatus, DownloadProgress, EventKind, FileBrowserEntry, ListenerSummary, LootItem,
-    LootKind, MAX_LOOT_AGENT_ID_CHARS, MAX_LOOT_NAME_CHARS, MAX_LOOT_PATH_CHARS,
-    MAX_LOOT_PREVIEW_CHARS, MAX_LOOT_SOURCE_CHARS, MAX_LOOT_TIMESTAMP_CHARS,
-    MAX_OPERATOR_ACTIVITY, OperatorActivityEntry, PayloadBuildResult, ProcessEntry,
+    AgentConsoleEntry, AgentConsoleEntryKind, AgentSummary, AppEvent, AppState, BuildConsoleEntry,
+    CompletedDownload, ConnectedOperatorState, ConnectionStatus, DownloadProgress, EventKind,
+    FileBrowserEntry, ListenerSummary, LootItem, LootKind, MAX_LOOT_AGENT_ID_CHARS,
+    MAX_LOOT_NAME_CHARS, MAX_LOOT_PATH_CHARS, MAX_LOOT_PREVIEW_CHARS, MAX_LOOT_SOURCE_CHARS,
+    MAX_LOOT_TIMESTAMP_CHARS, MAX_OPERATOR_ACTIVITY, OperatorActivityEntry, PayloadBuildResult,
+    ProcessEntry,
 };
 
 impl AppState {
@@ -592,7 +592,9 @@ pub(super) fn listener_summary_from_info(info: &ListenerInfo) -> ListenerSummary
     }
 }
 
-pub(super) fn agent_summary_from_message(info: &red_cell_common::operator::AgentInfo) -> AgentSummary {
+pub(super) fn agent_summary_from_message(
+    info: &red_cell_common::operator::AgentInfo,
+) -> AgentSummary {
     let pivot_parent = info
         .pivots
         .parent
@@ -772,7 +774,10 @@ fn process_list_rows_from_response(
     )
 }
 
-pub(super) fn extra_string(extra: &BTreeMap<String, serde_json::Value>, key: &str) -> Option<String> {
+pub(super) fn extra_string(
+    extra: &BTreeMap<String, serde_json::Value>,
+    key: &str,
+) -> Option<String> {
     extra.get(key).and_then(|value| match value {
         serde_json::Value::String(string) => Some(string.clone()),
         serde_json::Value::Number(number) => Some(number.to_string()),
@@ -796,7 +801,10 @@ fn extra_i64(extra: &BTreeMap<String, serde_json::Value>, key: &str) -> Option<i
     })
 }
 
-pub(super) fn loot_item_from_flat_info(info: &FlatInfo, fallback_kind: LootKind) -> Option<LootItem> {
+pub(super) fn loot_item_from_flat_info(
+    info: &FlatInfo,
+    fallback_kind: LootKind,
+) -> Option<LootItem> {
     let agent_id = flat_info_string(info, &["DemonID", "AgentID"])
         .as_deref()
         .map(normalize_agent_id)
@@ -1082,4 +1090,3 @@ fn parse_human_size(value: &str) -> Option<u64> {
 
     Some((number * multiplier).round() as u64)
 }
-

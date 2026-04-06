@@ -1,13 +1,12 @@
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures_util::SinkExt;
 use red_cell_common::crypto::seal_ws_frame;
 use red_cell_common::operator::OperatorMessage;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream,
-    tungstenite::protocol::Message as WebSocketMessage,
+    MaybeTlsStream, WebSocketStream, tungstenite::protocol::Message as WebSocketMessage,
 };
 
 /// Serialise and send outgoing operator messages over the WebSocket write half.
@@ -15,7 +14,10 @@ use tokio_tungstenite::{
 /// Exits when the outgoing channel is closed (all senders dropped) or when a
 /// WebSocket write error occurs.
 pub(super) async fn run_send_loop(
-    mut write: futures_util::stream::SplitSink<WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>, WebSocketMessage>,
+    mut write: futures_util::stream::SplitSink<
+        WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
+        WebSocketMessage,
+    >,
     outgoing_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<OperatorMessage>>>,
     hmac_key: Arc<tokio::sync::Mutex<Option<[u8; 32]>>>,
     send_seq: Arc<AtomicU64>,

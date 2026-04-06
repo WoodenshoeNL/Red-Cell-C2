@@ -34,7 +34,8 @@ async fn spawn_server_with_http_listener(
 ) -> Result<DemonTestHarness, Box<dyn std::error::Error>> {
     let server = common::spawn_test_server(demon_test_profile()).await?;
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server

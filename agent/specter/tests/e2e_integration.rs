@@ -88,11 +88,13 @@ impl MockSpecterCrypto {
     ///   These fields are big-endian per the Demon wire protocol, matching what the
     ///   teamserver's `parse_callback_packages` reads with `read_u32_be`.
     ///
-    /// * **Encrypted inner payload**: `[payload_len:4,BE][payload_bytes…]`
-    ///   The length prefix is big-endian (matching `read_length_prefixed_bytes_be`).
-    ///   The `payload_bytes` themselves are **little-endian** — individual fields are
-    ///   encoded with `write_u32_le` / `write_utf16le` so they are compatible with
-    ///   the teamserver's `CallbackParser::read_u32` / `read_utf16` methods.
+    /// * **Encrypted inner payload**: `[seq_num:8,LE][payload_len:4,BE][payload_bytes…]`
+    ///   The 8-byte sequence number prefix is little-endian and is skipped by the
+    ///   teamserver after decryption.  The length prefix is big-endian (matching
+    ///   `read_length_prefixed_bytes_be`).  The `payload_bytes` themselves are
+    ///   **little-endian** — individual fields are encoded with `write_u32_le` /
+    ///   `write_utf16le` so they are compatible with the teamserver's
+    ///   `CallbackParser::read_u32` / `read_utf16` methods.
     ///
     /// Returns `(command_id, request_id, decrypted_payload_bytes)`.  The caller
     /// must decode `decrypted_payload_bytes` with little-endian helpers.
@@ -108,12 +110,13 @@ impl MockSpecterCrypto {
             decrypt_agent_data_at_offset(&self.key, &self.iv, self.ctr_offset, encrypted)
                 .expect("decrypt callback payload");
 
-        // Encrypted region is `payload_len(4) + payload` — same length as ciphertext.
+        // Encrypted region is `seq_num(8) + payload_len(4) + payload` — same length as ciphertext.
         self.ctr_offset += ctr_blocks_for_len(encrypted.len());
 
+        let _seq = u64::from_le_bytes(decrypted[0..8].try_into().expect("seq_num"));
         let payload_len =
-            u32::from_be_bytes(decrypted[0..4].try_into().expect("payload_len")) as usize;
-        let payload = decrypted[4..4 + payload_len].to_vec();
+            u32::from_be_bytes(decrypted[8..12].try_into().expect("payload_len")) as usize;
+        let payload = decrypted[12..12 + payload_len].to_vec();
 
         (command_id, request_id, payload)
     }

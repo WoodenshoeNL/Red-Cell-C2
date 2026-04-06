@@ -149,3 +149,124 @@ impl TryFrom<OperatorRow> for PersistedOperator {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use red_cell_common::config::OperatorRole;
+
+    use crate::database::Database;
+
+    use super::{PersistedOperator, parse_operator_role};
+
+    fn sample_operator(username: &str) -> PersistedOperator {
+        PersistedOperator {
+            username: username.to_string(),
+            password_verifier: "argon2:initial_hash".to_string(),
+            role: OperatorRole::Operator,
+        }
+    }
+
+    #[tokio::test]
+    async fn operator_update_password_verifier_succeeds_for_existing_user() {
+        let db = Database::connect_in_memory().await.expect("db");
+        let repo = db.operators();
+        repo.create(&sample_operator("admin")).await.expect("create");
+        repo.update_password_verifier("admin", "argon2:new_hash").await.expect("update");
+        let fetched = repo.get("admin").await.expect("get").expect("should exist");
+        assert_eq!(fetched.password_verifier, "argon2:new_hash");
+    }
+
+    #[tokio::test]
+    async fn operator_update_password_verifier_silently_succeeds_for_nonexistent_user() {
+        let db = Database::connect_in_memory().await.expect("db");
+        let repo = db.operators();
+        assert!(repo.update_password_verifier("ghost", "argon2:hash").await.is_ok());
+        assert!(repo.get("ghost").await.expect("get").is_none());
+    }
+
+    #[tokio::test]
+    async fn operator_create_and_get_round_trips() {
+        let db = Database::connect_in_memory().await.expect("db");
+        let repo = db.operators();
+        repo.create(&sample_operator("testuser")).await.expect("create");
+        let fetched = repo.get("testuser").await.expect("get").expect("should exist");
+        assert_eq!(fetched.username, "testuser");
+        assert_eq!(fetched.password_verifier, "argon2:initial_hash");
+        assert_eq!(fetched.role, OperatorRole::Operator);
+    }
+
+    #[tokio::test]
+    async fn operator_get_returns_none_for_missing_user() {
+        let db = Database::connect_in_memory().await.expect("db");
+        assert!(db.operators().get("nobody").await.expect("get").is_none());
+    }
+
+    #[tokio::test]
+    async fn operator_repository_delete_removes_existing_row() {
+        let db = Database::connect_in_memory().await.expect("db");
+        let repo = db.operators();
+        repo.create(&sample_operator("delme")).await.expect("create");
+        assert!(repo.delete("delme").await.expect("delete"), "should delete existing row");
+        assert!(repo.get("delme").await.expect("get").is_none(), "row should be gone");
+    }
+
+    #[tokio::test]
+    async fn operator_repository_delete_returns_false_for_missing_user() {
+        let db = Database::connect_in_memory().await.expect("db");
+        assert!(!db.operators().delete("ghost").await.expect("delete"), "missing user → false");
+    }
+
+    #[tokio::test]
+    async fn operator_repository_update_role_changes_stored_role() {
+        let db = Database::connect_in_memory().await.expect("db");
+        let repo = db.operators();
+        let op = PersistedOperator {
+            username: "rolechange".to_owned(),
+            password_verifier: "v".to_owned(),
+            role: OperatorRole::Analyst,
+        };
+        repo.create(&op).await.expect("create");
+        assert!(repo.update_role("rolechange", OperatorRole::Admin).await.expect("update"));
+        let updated = repo.get("rolechange").await.expect("get").expect("should exist");
+        assert_eq!(updated.role, OperatorRole::Admin);
+    }
+
+    #[tokio::test]
+    async fn operator_repository_update_role_returns_false_for_missing_user() {
+        let db = Database::connect_in_memory().await.expect("db");
+        assert!(!db.operators().update_role("ghost", OperatorRole::Admin).await.expect("update"));
+    }
+
+    #[test]
+    fn parse_operator_role_accepts_titlecase() {
+        assert_eq!(parse_operator_role("Admin").expect("parse"), OperatorRole::Admin);
+        assert_eq!(parse_operator_role("Operator").expect("parse"), OperatorRole::Operator);
+        assert_eq!(parse_operator_role("Analyst").expect("parse"), OperatorRole::Analyst);
+    }
+
+    #[test]
+    fn parse_operator_role_accepts_lowercase() {
+        assert_eq!(parse_operator_role("admin").expect("parse"), OperatorRole::Admin);
+        assert_eq!(parse_operator_role("operator").expect("parse"), OperatorRole::Operator);
+        assert_eq!(parse_operator_role("analyst").expect("parse"), OperatorRole::Analyst);
+    }
+
+    #[test]
+    fn parse_operator_role_rejects_uppercase() {
+        assert!(parse_operator_role("ADMIN").is_err());
+        assert!(parse_operator_role("OPERATOR").is_err());
+    }
+
+    #[test]
+    fn parse_operator_role_rejects_mixed_case() {
+        assert!(parse_operator_role("aDmIn").is_err());
+        assert!(parse_operator_role("oPeRaToR").is_err());
+    }
+
+    #[test]
+    fn parse_operator_role_rejects_empty_and_unknown() {
+        assert!(parse_operator_role("").is_err());
+        assert!(parse_operator_role("root").is_err());
+        assert!(parse_operator_role(" admin").is_err());
+    }
+}

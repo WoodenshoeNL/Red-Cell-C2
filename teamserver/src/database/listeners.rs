@@ -211,3 +211,147 @@ impl TryFrom<ListenerRow> for PersistedListener {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use red_cell_common::{HttpListenerConfig, ListenerConfig};
+
+    use crate::database::Database;
+
+    use super::ListenerStatus;
+
+    fn stub_http_listener(name: &str) -> ListenerConfig {
+        ListenerConfig::from(HttpListenerConfig {
+            name: name.to_owned(),
+            kill_date: None,
+            working_hours: None,
+            hosts: vec!["127.0.0.1".to_owned()],
+            host_bind: "0.0.0.0".to_owned(),
+            host_rotation: "round-robin".to_owned(),
+            port_bind: 8080,
+            port_conn: None,
+            method: None,
+            behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
+            user_agent: None,
+            headers: Vec::new(),
+            uris: vec!["/".to_owned()],
+            host_header: None,
+            secure: false,
+            cert: None,
+            response: None,
+            proxy: None,
+            ja3_randomize: None,
+            doh_domain: None,
+            doh_provider: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn listener_set_state_created_to_running() {
+        let db = Database::connect_in_memory().await.expect("db");
+        let repo = db.listeners();
+        repo.create(&stub_http_listener("ls-test")).await.expect("create");
+
+        let persisted = repo.get("ls-test").await.expect("get").expect("should exist");
+        assert_eq!(persisted.state.status, ListenerStatus::Created);
+        assert!(persisted.state.last_error.is_none());
+
+        repo.set_state("ls-test", ListenerStatus::Running, None).await.expect("set_state");
+        let persisted = repo.get("ls-test").await.expect("get").expect("should exist");
+        assert_eq!(persisted.state.status, ListenerStatus::Running);
+        assert!(persisted.state.last_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn listener_set_state_running_to_error_with_message() {
+        let db = Database::connect_in_memory().await.expect("db");
+        let repo = db.listeners();
+        repo.create(&stub_http_listener("ls-err")).await.expect("create");
+        repo.set_state("ls-err", ListenerStatus::Running, None).await.expect("set_state");
+
+        repo.set_state("ls-err", ListenerStatus::Error, Some("bind failed: port in use"))
+            .await
+            .expect("set_state");
+        let persisted = repo.get("ls-err").await.expect("get").expect("should exist");
+        assert_eq!(persisted.state.status, ListenerStatus::Error);
+        assert_eq!(persisted.state.last_error.as_deref(), Some("bind failed: port in use"));
+    }
+
+    #[tokio::test]
+    async fn listener_set_state_error_to_stopped_clears_error() {
+        let db = Database::connect_in_memory().await.expect("db");
+        let repo = db.listeners();
+        repo.create(&stub_http_listener("ls-clr")).await.expect("create");
+        repo.set_state("ls-clr", ListenerStatus::Error, Some("crash")).await.expect("set_state");
+        repo.set_state("ls-clr", ListenerStatus::Stopped, None).await.expect("set_state");
+        let persisted = repo.get("ls-clr").await.expect("get").expect("should exist");
+        assert_eq!(persisted.state.status, ListenerStatus::Stopped);
+        assert!(persisted.state.last_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn listener_set_state_full_lifecycle() {
+        let db = Database::connect_in_memory().await.expect("db");
+        let repo = db.listeners();
+        repo.create(&stub_http_listener("ls-life")).await.expect("create");
+
+        let transitions = [
+            (ListenerStatus::Running, None),
+            (ListenerStatus::Stopped, None),
+            (ListenerStatus::Running, None),
+            (ListenerStatus::Error, Some("unexpected EOF")),
+            (ListenerStatus::Stopped, None),
+        ];
+
+        for (status, error) in &transitions {
+            repo.set_state("ls-life", *status, error.as_deref()).await.expect("set_state");
+            let persisted = repo.get("ls-life").await.expect("get").expect("should exist");
+            assert_eq!(persisted.state.status, *status);
+            assert_eq!(persisted.state.last_error.as_deref(), *error);
+        }
+    }
+
+    #[tokio::test]
+    async fn listener_set_state_nonexistent_listener_silently_succeeds() {
+        let db = Database::connect_in_memory().await.expect("db");
+        assert!(db.listeners().set_state("ghost", ListenerStatus::Running, None).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn listener_create_duplicate_name_returns_error() {
+        let db = Database::connect_in_memory().await.expect("db");
+        let repo = db.listeners();
+        repo.create(&stub_http_listener("dup")).await.expect("create");
+        assert!(
+            repo.create(&stub_http_listener("dup")).await.is_err(),
+            "duplicate name should fail"
+        );
+    }
+
+    #[test]
+    fn listener_status_try_from_str_valid_values() {
+        assert_eq!(
+            ListenerStatus::try_from_str("created").expect("parse"),
+            ListenerStatus::Created
+        );
+        assert_eq!(
+            ListenerStatus::try_from_str("running").expect("parse"),
+            ListenerStatus::Running
+        );
+        assert_eq!(
+            ListenerStatus::try_from_str("stopped").expect("parse"),
+            ListenerStatus::Stopped
+        );
+        assert_eq!(ListenerStatus::try_from_str("error").expect("parse"), ListenerStatus::Error);
+    }
+
+    #[test]
+    fn listener_status_try_from_str_rejects_invalid_string() {
+        assert!(ListenerStatus::try_from_str("").is_err());
+        assert!(ListenerStatus::try_from_str("RUNNING").is_err());
+        assert!(ListenerStatus::try_from_str("Created").is_err());
+        assert!(ListenerStatus::try_from_str("unknown").is_err());
+        assert!(ListenerStatus::try_from_str(" running").is_err());
+    }
+}

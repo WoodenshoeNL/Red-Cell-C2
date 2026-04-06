@@ -550,3 +550,104 @@ impl TryFrom<AgentRow> for PersistedAgent {
         Ok(Self { info, listener_name, ctr_block_offset, legacy_ctr, last_seen_seq, seq_protected })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use red_cell_common::{AgentEncryptionInfo, AgentRecord};
+    use zeroize::Zeroizing;
+
+    use crate::database::{Database, TeamserverError};
+
+    fn stub_agent(agent_id: u32) -> AgentRecord {
+        AgentRecord {
+            agent_id,
+            active: true,
+            reason: String::new(),
+            note: String::new(),
+            encryption: AgentEncryptionInfo {
+                aes_key: Zeroizing::new(b"k".to_vec()),
+                aes_iv: Zeroizing::new(b"i".to_vec()),
+            },
+            hostname: String::new(),
+            username: String::new(),
+            domain_name: String::new(),
+            external_ip: String::new(),
+            internal_ip: String::new(),
+            process_name: String::new(),
+            process_path: String::new(),
+            base_address: 0,
+            process_pid: 0,
+            process_tid: 0,
+            process_ppid: 0,
+            process_arch: String::new(),
+            elevated: false,
+            os_version: String::new(),
+            os_build: 0,
+            os_arch: String::new(),
+            sleep_delay: 0,
+            sleep_jitter: 0,
+            kill_date: None,
+            working_hours: None,
+            first_call_in: String::new(),
+            last_call_in: String::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_full_persists_listener_ctr_offset_and_legacy_ctr() {
+        let db = Database::connect_in_memory().await.expect("db");
+        let repo = db.agents();
+        repo.create_full(&stub_agent(0xAA), "https-listener", 42, true).await.expect("create_full");
+        let persisted = repo.get_persisted(0xAA).await.expect("get").expect("should exist");
+        assert_eq!(persisted.listener_name, "https-listener");
+        assert_eq!(persisted.ctr_block_offset, 42);
+        assert!(persisted.legacy_ctr);
+        assert_eq!(persisted.info.agent_id, 0xAA);
+    }
+
+    #[tokio::test]
+    async fn set_legacy_ctr_on_missing_agent_returns_agent_not_found() {
+        let db = Database::connect_in_memory().await.expect("db");
+        let err = db.agents().set_legacy_ctr(0xDEAD, true).await.expect_err("expected Err");
+        assert!(
+            matches!(err, TeamserverError::AgentNotFound { agent_id } if agent_id == 0xDEAD),
+            "expected AgentNotFound, got: {err:?}",
+        );
+        assert!(db.agents().get_persisted(0xDEAD).await.expect("get").is_none());
+    }
+
+    #[tokio::test]
+    async fn toggle_legacy_ctr_preserves_other_fields() {
+        let db = Database::connect_in_memory().await.expect("db");
+        let repo = db.agents();
+        repo.create_full(&stub_agent(0xBB), "smb-pipe", 99, true).await.expect("create_full");
+        repo.set_legacy_ctr(0xBB, false).await.expect("set_legacy_ctr");
+        let persisted = repo.get_persisted(0xBB).await.expect("get").expect("should exist");
+        assert!(!persisted.legacy_ctr, "legacy_ctr should now be false");
+        assert_eq!(persisted.listener_name, "smb-pipe");
+        assert_eq!(persisted.ctr_block_offset, 99);
+    }
+
+    #[tokio::test]
+    async fn set_status_persists_active_and_reason() {
+        let db = Database::connect_in_memory().await.expect("db");
+        let repo = db.agents();
+        repo.create_full(&stub_agent(0xCC), "https-listener", 0, false).await.expect("create_full");
+        repo.set_status(0xCC, false, "timed out").await.expect("set_status");
+        let persisted = repo.get_persisted(0xCC).await.expect("get").expect("should exist");
+        assert!(!persisted.info.active, "active should be false after set_status");
+        assert_eq!(persisted.info.reason, "timed out");
+        assert_eq!(persisted.listener_name, "https-listener");
+    }
+
+    #[tokio::test]
+    async fn set_status_on_missing_agent_returns_agent_not_found() {
+        let db = Database::connect_in_memory().await.expect("db");
+        let err = db.agents().set_status(0xDEAD, false, "gone").await.expect_err("expected Err");
+        assert!(
+            matches!(err, TeamserverError::AgentNotFound { agent_id } if agent_id == 0xDEAD),
+            "expected AgentNotFound, got: {err:?}",
+        );
+        assert!(db.agents().get_persisted(0xDEAD).await.expect("get").is_none());
+    }
+}

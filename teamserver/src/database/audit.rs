@@ -244,3 +244,252 @@ impl TryFrom<AuditLogRow> for AuditLogEntry {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use crate::database::Database;
+
+    use super::{AuditLogEntry, AuditLogFilter};
+
+    fn audit_entry(actor: &str, action: &str, occurred_at: &str) -> AuditLogEntry {
+        AuditLogEntry {
+            id: None,
+            actor: actor.to_string(),
+            action: action.to_string(),
+            target_kind: "agent".to_string(),
+            target_id: Some("0x00000001".to_string()),
+            details: Some(json!({"agent_id": "1", "command": "whoami", "result_status": "ok"})),
+            occurred_at: occurred_at.to_string(),
+        }
+    }
+
+    async fn seed_audit_entries(db: &Database) {
+        let repo = db.audit_log();
+        repo.create(&audit_entry("alice", "task.create", "2026-03-01T10:00:00Z"))
+            .await
+            .expect("create");
+        repo.create(&audit_entry("bob", "task.create", "2026-03-02T10:00:00Z"))
+            .await
+            .expect("create");
+        repo.create(&audit_entry("alice", "task.complete", "2026-03-03T10:00:00Z"))
+            .await
+            .expect("create");
+        repo.create(&audit_entry("carol", "agent.checkin", "2026-03-04T10:00:00Z"))
+            .await
+            .expect("create");
+        repo.create(&audit_entry("bob", "task.complete", "2026-03-05T10:00:00Z"))
+            .await
+            .expect("create");
+    }
+
+    #[tokio::test]
+    async fn audit_query_filtered_by_actor_substring() {
+        let db = Database::connect_in_memory().await.expect("db");
+        seed_audit_entries(&db).await;
+        let filter =
+            AuditLogFilter { actor_contains: Some("ali".to_string()), ..Default::default() };
+        let results = db.audit_log().query_filtered(&filter, 100, 0).await.expect("query");
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|e| e.actor == "alice"));
+    }
+
+    #[tokio::test]
+    async fn audit_query_filtered_by_action_substring() {
+        let db = Database::connect_in_memory().await.expect("db");
+        seed_audit_entries(&db).await;
+        let filter =
+            AuditLogFilter { action_contains: Some("complete".to_string()), ..Default::default() };
+        let results = db.audit_log().query_filtered(&filter, 100, 0).await.expect("query");
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|e| e.action == "task.complete"));
+    }
+
+    #[tokio::test]
+    async fn audit_query_filtered_by_date_range() {
+        let db = Database::connect_in_memory().await.expect("db");
+        seed_audit_entries(&db).await;
+        let filter = AuditLogFilter {
+            since: Some("2026-03-02T00:00:00Z".to_string()),
+            until: Some("2026-03-04T00:00:00Z".to_string()),
+            ..Default::default()
+        };
+        let results = db.audit_log().query_filtered(&filter, 100, 0).await.expect("query");
+        assert_eq!(results.len(), 2, "only entries on 03-02 and 03-03 should match");
+    }
+
+    #[tokio::test]
+    async fn audit_query_filtered_combined_actor_and_action() {
+        let db = Database::connect_in_memory().await.expect("db");
+        seed_audit_entries(&db).await;
+        let filter = AuditLogFilter {
+            actor_contains: Some("bob".to_string()),
+            action_contains: Some("create".to_string()),
+            ..Default::default()
+        };
+        let results = db.audit_log().query_filtered(&filter, 100, 0).await.expect("query");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].actor, "bob");
+        assert_eq!(results[0].action, "task.create");
+    }
+
+    #[tokio::test]
+    async fn audit_query_filtered_action_in_list() {
+        let db = Database::connect_in_memory().await.expect("db");
+        seed_audit_entries(&db).await;
+        let filter = AuditLogFilter {
+            action_in: Some(vec!["task.create".to_string(), "agent.checkin".to_string()]),
+            ..Default::default()
+        };
+        let results = db.audit_log().query_filtered(&filter, 100, 0).await.expect("query");
+        assert_eq!(results.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn audit_query_filtered_pagination_newest_first() {
+        let db = Database::connect_in_memory().await.expect("db");
+        seed_audit_entries(&db).await;
+        let filter = AuditLogFilter::default();
+        let repo = db.audit_log();
+        let page1 = repo.query_filtered(&filter, 2, 0).await.expect("p1");
+        let page2 = repo.query_filtered(&filter, 2, 2).await.expect("p2");
+        let page3 = repo.query_filtered(&filter, 2, 4).await.expect("p3");
+
+        assert_eq!(page1.len(), 2);
+        assert_eq!(page2.len(), 2);
+        assert_eq!(page3.len(), 1);
+
+        // Newest first.
+        assert!(page1[0].occurred_at >= page1[1].occurred_at);
+        assert!(page1[1].occurred_at >= page2[0].occurred_at);
+
+        // No overlapping ids.
+        let all_ids: Vec<_> =
+            page1.iter().chain(page2.iter()).chain(page3.iter()).map(|e| e.id).collect();
+        let mut deduped = all_ids.clone();
+        deduped.dedup();
+        assert_eq!(all_ids.len(), deduped.len(), "pages should not overlap");
+    }
+
+    #[tokio::test]
+    async fn audit_query_filtered_no_matches_returns_empty() {
+        let db = Database::connect_in_memory().await.expect("db");
+        seed_audit_entries(&db).await;
+        let filter = AuditLogFilter {
+            actor_contains: Some("nonexistent".to_string()),
+            ..Default::default()
+        };
+        assert!(db.audit_log().query_filtered(&filter, 100, 0).await.expect("query").is_empty());
+    }
+
+    #[tokio::test]
+    async fn audit_query_filtered_by_json_details_fields() {
+        let db = Database::connect_in_memory().await.expect("db");
+        seed_audit_entries(&db).await;
+        let repo = db.audit_log();
+
+        let filter = AuditLogFilter { agent_id: Some("1".to_string()), ..Default::default() };
+        assert_eq!(repo.query_filtered(&filter, 100, 0).await.expect("query").len(), 5);
+
+        let filter =
+            AuditLogFilter { command_contains: Some("who".to_string()), ..Default::default() };
+        assert_eq!(repo.query_filtered(&filter, 100, 0).await.expect("query").len(), 5);
+
+        let filter = AuditLogFilter { result_status: Some("ok".to_string()), ..Default::default() };
+        assert_eq!(repo.query_filtered(&filter, 100, 0).await.expect("query").len(), 5);
+
+        let filter =
+            AuditLogFilter { result_status: Some("error".to_string()), ..Default::default() };
+        assert!(repo.query_filtered(&filter, 100, 0).await.expect("query").is_empty());
+    }
+
+    #[tokio::test]
+    async fn audit_count_filtered_matches_query_length() {
+        let db = Database::connect_in_memory().await.expect("db");
+        seed_audit_entries(&db).await;
+        let repo = db.audit_log();
+
+        let count = repo.count_filtered(&AuditLogFilter::default()).await.expect("count");
+        let results = repo.query_filtered(&AuditLogFilter::default(), 100, 0).await.expect("query");
+        assert_eq!(count, results.len() as i64);
+
+        let filter =
+            AuditLogFilter { actor_contains: Some("alice".to_string()), ..Default::default() };
+        let count = repo.count_filtered(&filter).await.expect("count");
+        let results = repo.query_filtered(&filter, 100, 0).await.expect("query");
+        assert_eq!(count, results.len() as i64);
+        assert_eq!(count, 2);
+    }
+
+    #[tokio::test]
+    async fn audit_count_filtered_with_date_range() {
+        let db = Database::connect_in_memory().await.expect("db");
+        seed_audit_entries(&db).await;
+        let filter = AuditLogFilter {
+            since: Some("2026-03-03T00:00:00Z".to_string()),
+            until: Some("2026-03-05T23:59:59Z".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(db.audit_log().count_filtered(&filter).await.expect("count"), 3);
+    }
+
+    #[tokio::test]
+    async fn audit_latest_timestamps_no_matching_rows() {
+        let db = Database::connect_in_memory().await.expect("db");
+        let result = db
+            .audit_log()
+            .latest_timestamps_by_actor_for_actions(&["task.create"])
+            .await
+            .expect("query");
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn audit_latest_timestamps_empty_actions_returns_empty() {
+        let db = Database::connect_in_memory().await.expect("db");
+        seed_audit_entries(&db).await;
+        let result =
+            db.audit_log().latest_timestamps_by_actor_for_actions(&[]).await.expect("query");
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn audit_latest_timestamps_multiple_actors() {
+        let db = Database::connect_in_memory().await.expect("db");
+        seed_audit_entries(&db).await;
+        let result = db
+            .audit_log()
+            .latest_timestamps_by_actor_for_actions(&["task.create", "task.complete"])
+            .await
+            .expect("query");
+        assert_eq!(result.get("alice").map(String::as_str), Some("2026-03-03T10:00:00Z"));
+        assert_eq!(result.get("bob").map(String::as_str), Some("2026-03-05T10:00:00Z"));
+        assert!(!result.contains_key("carol"));
+    }
+
+    #[tokio::test]
+    async fn audit_latest_timestamps_single_action() {
+        let db = Database::connect_in_memory().await.expect("db");
+        seed_audit_entries(&db).await;
+        let result = db
+            .audit_log()
+            .latest_timestamps_by_actor_for_actions(&["agent.checkin"])
+            .await
+            .expect("query");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.get("carol").map(String::as_str), Some("2026-03-04T10:00:00Z"));
+    }
+
+    #[tokio::test]
+    async fn audit_latest_timestamps_nonexistent_action_returns_empty() {
+        let db = Database::connect_in_memory().await.expect("db");
+        seed_audit_entries(&db).await;
+        let result = db
+            .audit_log()
+            .latest_timestamps_by_actor_for_actions(&["nonexistent.action"])
+            .await
+            .expect("query");
+        assert!(result.is_empty());
+    }
+}

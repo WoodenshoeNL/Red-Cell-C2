@@ -451,7 +451,7 @@ impl AppState {
         }
         events.push(AppEvent::CommandResponse {
             agent_id: agent_id.clone(),
-            task_id,
+            task_id: task_id.clone(),
             output: output.clone(),
         });
 
@@ -459,6 +459,7 @@ impl AppState {
             kind: AgentConsoleEntryKind::from_command_id(&message.info.command_id),
             command_line: message.info.command_line,
             command_id: message.info.command_id,
+            task_id,
             received_at: message.head.timestamp,
             output,
         });

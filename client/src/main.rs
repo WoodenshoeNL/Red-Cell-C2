@@ -14,16 +14,11 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use clap::Parser;
-use eframe::egui::{
-    self, Align, Align2, Color32, FontId, Key, Layout, Pos2, Rect, RichText, Sense, Stroke,
-};
+use eframe::egui::{self, Align, Align2, Color32, Layout, Pos2, Rect, RichText, Stroke};
 use known_servers::{KnownServersStore, host_port_from_url};
 use local_config::LocalConfig;
 use login::{LoginAction, LoginState, render_login_dialog};
-use python::{
-    PythonRuntime, ScriptDescriptor, ScriptLoadStatus, ScriptOutputEntry, ScriptOutputStream,
-    ScriptTabDescriptor,
-};
+use python::{PythonRuntime, ScriptLoadStatus, ScriptOutputStream};
 use red_cell_common::demon::DemonCommand;
 use red_cell_common::operator::{
     AgentTaskInfo, BuildPayloadRequestInfo, EventCode, FlatInfo, ListenerInfo, Message,
@@ -31,10 +26,9 @@ use red_cell_common::operator::{
 };
 use rfd::FileDialog;
 use transport::{
-    AgentConsoleEntry, AgentConsoleEntryKind, AgentFileBrowserState, AgentProcessListState,
-    AppState, BuildConsoleEntry, ClientTransport, ConnectedOperatorState, ConnectionStatus,
-    EventKind, FileBrowserEntry, LootItem, LootKind, PayloadBuildResult, ProcessEntry,
-    SharedAppState, TlsVerification,
+    AgentConsoleEntry, AgentConsoleEntryKind, AgentFileBrowserState, AppState, ClientTransport,
+    ConnectedOperatorState, ConnectionStatus, EventKind, FileBrowserEntry, LootItem, LootKind,
+    ProcessEntry, SharedAppState, TlsVerification,
 };
 use zeroize::Zeroizing;
 
@@ -1823,9 +1817,19 @@ impl ClientApp {
 
         match build_console_task(agent_id, &command_line, &operator) {
             Ok(message) => {
+                let task_id = agent_task_id(&message).unwrap_or_default();
                 push_history_entry(console, &command_line);
                 console.input.clear();
-                console.status_message = Some(format!("Queued `{command_line}`."));
+                console.status_message = None;
+                // Show the outgoing task ID immediately so operators can correlate output.
+                let submitted_output =
+                    format!("→ [t:{}] {}", short_task_id(&task_id), command_line);
+                self.inject_console_entry_with_task(
+                    agent_id,
+                    &command_line,
+                    &submitted_output,
+                    &task_id,
+                );
                 self.session_panel.pending_messages.push(message);
             }
             Err(error) => {
@@ -1836,6 +1840,16 @@ impl ClientApp {
 
     /// Inserts a locally-generated console entry into the shared app state.
     fn inject_console_entry(&self, agent_id: &str, command_line: &str, output: &str) {
+        self.inject_console_entry_with_task(agent_id, command_line, output, "");
+    }
+
+    fn inject_console_entry_with_task(
+        &self,
+        agent_id: &str,
+        command_line: &str,
+        output: &str,
+        task_id: &str,
+    ) {
         let app_state = match &self.phase {
             AppPhase::Connected { app_state, .. } | AppPhase::Authenticating { app_state, .. } => {
                 app_state
@@ -1849,6 +1863,7 @@ impl ClientApp {
         state.agent_consoles.entry(agent_id.to_owned()).or_default().push(AgentConsoleEntry {
             kind: AgentConsoleEntryKind::Output,
             command_id: "local".to_owned(),
+            task_id: task_id.to_owned(),
             received_at: String::new(),
             command_line: Some(command_line.to_owned()),
             output: output.to_owned(),
@@ -2679,6 +2694,25 @@ fn next_task_id() -> u32 {
 
     static TASK_COUNTER: AtomicU32 = AtomicU32::new(1);
     TASK_COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Extract the task ID from an outgoing `AgentTask` message.
+fn agent_task_id(message: &OperatorMessage) -> Option<String> {
+    match message {
+        OperatorMessage::AgentTask(m) => Some(m.info.task_id.clone()),
+        _ => None,
+    }
+}
+
+/// Returns the last 4 characters of a task ID for compact display (e.g. `"3f2a"`).
+pub(crate) fn short_task_id(task_id: &str) -> &str {
+    let bytes = task_id.as_bytes();
+    if bytes.len() >= 4 {
+        // SAFETY: task IDs are ASCII hex strings.
+        &task_id[bytes.len() - 4..]
+    } else {
+        task_id
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

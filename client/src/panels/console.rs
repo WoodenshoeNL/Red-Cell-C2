@@ -5,7 +5,7 @@ use crate::{
     ClientApp, HistoryDirection, agent_arch, agent_os, apply_completion, apply_history_step,
     blank_if_empty, breadcrumb_segments, build_file_browser_list_task, directory_label,
     file_entry_label, find_file_entry, format_console_prompt, human_size, parent_remote_path,
-    save_completed_download, selected_remote_directory, upload_destination,
+    save_completed_download, selected_remote_directory, short_task_id, upload_destination,
 };
 
 impl ClientApp {
@@ -775,12 +775,19 @@ impl ClientApp {
             AgentConsoleEntryKind::Error => Color32::from_rgb(215, 83, 83),
         };
 
+        let task_color = task_id_color(&entry.task_id);
+
         ui.group(|ui| {
             ui.horizontal_wrapped(|ui| {
                 let timestamp = blank_if_empty(&entry.received_at, "pending");
                 ui.label(RichText::new(timestamp).weak().monospace());
                 ui.separator();
                 ui.colored_label(accent, RichText::new(&entry.command_id).monospace());
+                if !entry.task_id.is_empty() {
+                    ui.separator();
+                    let tag = format!("[t:{}]", short_task_id(&entry.task_id));
+                    ui.colored_label(task_color, RichText::new(tag).monospace().strong());
+                }
                 if let Some(command_line) = &entry.command_line {
                     if !command_line.trim().is_empty() {
                         ui.separator();
@@ -845,4 +852,31 @@ impl ClientApp {
             self.submit_console_command(agent_id);
         }
     }
+}
+
+/// Deterministically maps a task ID to a display color from a fixed palette.
+///
+/// The same task ID always produces the same color within a session, making it
+/// easy to visually correlate interleaved output chunks.
+fn task_id_color(task_id: &str) -> Color32 {
+    const PALETTE: &[Color32] = &[
+        Color32::from_rgb(100, 180, 255), // sky blue
+        Color32::from_rgb(255, 180, 80),  // amber
+        Color32::from_rgb(200, 130, 255), // lavender
+        Color32::from_rgb(80, 220, 200),  // teal
+        Color32::from_rgb(255, 120, 150), // rose
+        Color32::from_rgb(160, 230, 80),  // lime
+        Color32::from_rgb(255, 220, 60),  // yellow
+        Color32::from_rgb(120, 200, 180), // sage
+    ];
+
+    if task_id.is_empty() {
+        return Color32::from_rgb(160, 160, 160);
+    }
+
+    // Hash the task ID to a palette index using a simple FNV-1a fold.
+    let hash = task_id
+        .bytes()
+        .fold(2_166_136_261_u32, |acc, b| acc.wrapping_mul(16_777_619) ^ u32::from(b));
+    PALETTE[(hash as usize) % PALETTE.len()]
 }

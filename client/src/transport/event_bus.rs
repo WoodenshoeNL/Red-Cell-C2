@@ -261,6 +261,8 @@ impl AgentConsoleEntryKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AgentConsoleEntry {
     pub(crate) command_id: String,
+    /// Task ID assigned when the command was dispatched; empty for local/injected entries.
+    pub(crate) task_id: String,
     pub(crate) received_at: String,
     pub(crate) command_line: Option<String>,
     pub(crate) kind: AgentConsoleEntryKind,

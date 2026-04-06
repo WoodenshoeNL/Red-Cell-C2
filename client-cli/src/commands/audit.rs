@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
-use tracing::instrument;
+use tracing::{instrument, warn};
 
 use crate::AgentId;
 use crate::AuditCommands;
@@ -120,9 +120,9 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AuditCommands) 
             }
         }
 
-        AuditCommands::Tail { follow } => {
+        AuditCommands::Tail { follow, max_failures } => {
             if follow {
-                tail_follow(client, fmt).await
+                tail_follow(client, fmt, max_failures).await
             } else {
                 match list(client, TAIL_LIMIT, None, None, None, None).await {
                     Ok(data) => match print_success(fmt, &data) {
@@ -192,32 +192,58 @@ async fn list(
 /// # Examples
 /// ```text
 /// red-cell-cli log tail --follow
+/// red-cell-cli log tail --follow --max-failures 10
 /// ```
-async fn tail_follow(client: &ApiClient, fmt: &OutputFormat) -> i32 {
-    // Fetch initial batch of 20 entries.
-    let initial_result = tokio::select! {
-        result = list(client, TAIL_LIMIT, None, None, None, None) => result,
-        _ = tokio::signal::ctrl_c() => return EXIT_SUCCESS,
+#[instrument(skip(client, fmt), fields(max_failures = max_failures))]
+async fn tail_follow(client: &ApiClient, fmt: &OutputFormat, max_failures: u32) -> i32 {
+    let mut backoff = Backoff::with_initial_delay(AUDIT_TAIL_FOLLOW_POLL_INTERVAL_SECS);
+    let mut consecutive_timeouts = 0u32;
+
+    // Fetch initial batch of 20 entries (same transient-timeout retry policy as the poll loop).
+    let initial_entries = loop {
+        let initial_result = tokio::select! {
+            result = list(client, TAIL_LIMIT, None, None, None, None) => result,
+            _ = tokio::signal::ctrl_c() => return EXIT_SUCCESS,
+        };
+
+        match initial_result {
+            Ok(entries) => break entries,
+            Err(CliError::Timeout(msg)) => {
+                consecutive_timeouts = consecutive_timeouts.saturating_add(1);
+                warn!(
+                    attempt = consecutive_timeouts,
+                    max_failures,
+                    error = %msg,
+                    "audit log tail --follow: HTTP request timed out while fetching initial snapshot; retrying after backoff"
+                );
+                if consecutive_timeouts >= max_failures {
+                    let err = follow_consecutive_timeouts_exhausted(max_failures, &msg);
+                    print_error(&err).ok();
+                    return err.exit_code();
+                }
+                backoff.record_empty();
+                tokio::select! {
+                    _ = sleep(backoff.delay()) => {}
+                    _ = tokio::signal::ctrl_c() => return EXIT_SUCCESS,
+                }
+            }
+            Err(e) => {
+                print_error(&e).ok();
+                return e.exit_code();
+            }
+        }
     };
 
-    let mut cursor = match initial_result {
-        Err(e) => {
+    consecutive_timeouts = 0;
+
+    // Print existing entries the same way as a plain `log tail`.
+    for entry in &initial_entries {
+        if let Err(e) = print_entry_line(fmt, entry) {
             print_error(&e).ok();
             return e.exit_code();
         }
-        Ok(entries) => {
-            // Print existing entries the same way as a plain `log tail`.
-            for entry in &entries {
-                if let Err(e) = print_entry_line(fmt, entry) {
-                    print_error(&e).ok();
-                    return e.exit_code();
-                }
-            }
-            FollowCursor::from_printed_entries(&entries)
-        }
-    };
-
-    let mut backoff = Backoff::with_initial_delay(AUDIT_TAIL_FOLLOW_POLL_INTERVAL_SECS);
+    }
+    let mut cursor = FollowCursor::from_printed_entries(&initial_entries);
 
     // Poll for new entries using the cursor timestamp.
     loop {
@@ -228,15 +254,33 @@ async fn tail_follow(client: &ApiClient, fmt: &OutputFormat) -> i32 {
 
         let sleep_duration = match poll_result {
             Err(CliError::RateLimited { retry_after_secs }) => {
+                consecutive_timeouts = 0;
                 // Treat rate limiting as a transient condition: sleep for the
                 // requested delay then resume polling without exiting.
                 Duration::from_secs(retry_after_secs.unwrap_or(RATE_LIMIT_DEFAULT_WAIT_SECS))
+            }
+            Err(CliError::Timeout(msg)) => {
+                consecutive_timeouts = consecutive_timeouts.saturating_add(1);
+                warn!(
+                    attempt = consecutive_timeouts,
+                    max_failures,
+                    error = %msg,
+                    "audit log tail --follow: HTTP request timed out; retrying after backoff"
+                );
+                if consecutive_timeouts >= max_failures {
+                    let err = follow_consecutive_timeouts_exhausted(max_failures, &msg);
+                    print_error(&err).ok();
+                    return err.exit_code();
+                }
+                backoff.record_empty();
+                backoff.delay()
             }
             Err(e) => {
                 print_error(&e).ok();
                 return e.exit_code();
             }
             Ok(entries) => {
+                consecutive_timeouts = 0;
                 let fresh = cursor.drain_new_entries(&entries);
                 if fresh.is_empty() {
                     backoff.record_empty();
@@ -258,6 +302,13 @@ async fn tail_follow(client: &ApiClient, fmt: &OutputFormat) -> i32 {
             _ = tokio::signal::ctrl_c() => return EXIT_SUCCESS,
         }
     }
+}
+
+/// Error returned when [`tail_follow`] has seen `max_failures` consecutive HTTP timeouts.
+fn follow_consecutive_timeouts_exhausted(max_failures: u32, last_detail: &str) -> CliError {
+    CliError::Timeout(format!(
+        "audit log poll: reached {max_failures} consecutive request timeouts (last: {last_detail})"
+    ))
 }
 
 /// Write a single audit entry to stdout.
@@ -822,5 +873,17 @@ mod tests {
         let encoded = percent_encode("alice@example.com");
         assert!(encoded.contains('%'));
         assert!(!encoded.contains('@'));
+    }
+
+    // ── follow timeout exhaustion ─────────────────────────────────────────────
+
+    #[test]
+    fn follow_consecutive_timeouts_exhausted_maps_to_timeout_exit() {
+        let err = follow_consecutive_timeouts_exhausted(5, "request to https://x timed out");
+        assert!(matches!(err, CliError::Timeout(_)));
+        assert_eq!(err.exit_code(), crate::error::EXIT_TIMEOUT);
+        let s = err.to_string();
+        assert!(s.contains('5'), "message should include max failures: {s}");
+        assert!(s.contains("https://x"), "message should include last error detail: {s}");
     }
 }

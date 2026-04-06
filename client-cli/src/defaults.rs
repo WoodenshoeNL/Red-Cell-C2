@@ -11,6 +11,10 @@ pub const PAYLOAD_BUILD_WAIT_TIMEOUT_SECS: u64 = 300;
 /// Default initial polling interval for `log tail --follow`, in seconds.
 pub const AUDIT_TAIL_FOLLOW_POLL_INTERVAL_SECS: u64 = 1;
 
+/// Default number of consecutive HTTP request timeouts before `log tail --follow`
+/// exits with code 5 ([`EXIT_TIMEOUT`][crate::error::EXIT_TIMEOUT]).
+pub const AUDIT_TAIL_FOLLOW_MAX_FAILURES_DEFAULT: u32 = 5;
+
 static AGENT_EXEC_WAIT_TIMEOUT_HELP: OnceLock<String> = OnceLock::new();
 static PAYLOAD_BUILD_WAIT_TIMEOUT_HELP: OnceLock<String> = OnceLock::new();
 static AUDIT_TAIL_FOLLOW_HELP: OnceLock<String> = OnceLock::new();

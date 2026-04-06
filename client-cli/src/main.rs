@@ -176,6 +176,7 @@ pub enum Commands {
     ///   red-cell-cli log list
     ///   red-cell-cli log list --operator alice --limit 50
     ///   red-cell-cli log tail
+    ///   red-cell-cli log tail --follow --max-failures 10
     #[command(name = "log", verbatim_doc_comment)]
     Audit {
         #[command(subcommand)]
@@ -710,10 +711,21 @@ pub enum AuditCommands {
     /// Examples:
     ///   red-cell-cli log tail
     ///   red-cell-cli log tail --follow
+    ///   red-cell-cli log tail --follow --max-failures 10
     #[command(verbatim_doc_comment)]
     Tail {
         #[arg(long, help = crate::defaults::audit_tail_follow_help())]
         follow: bool,
+        /// Exit with timeout (code 5) after this many consecutive HTTP request
+        /// timeouts while polling (only applies with `--follow`). Transient
+        /// timeouts are retried with exponential backoff; each retry logs a
+        /// warning to stderr.
+        #[arg(
+            long,
+            default_value_t = crate::defaults::AUDIT_TAIL_FOLLOW_MAX_FAILURES_DEFAULT,
+            value_parser = clap::value_parser!(u32).range(1..=1024)
+        )]
+        max_failures: u32,
     },
 }
 
@@ -1092,6 +1104,32 @@ mod tests {
         assert!(matches!(cli.command, Some(Commands::Audit { .. })));
     }
 
+    #[test]
+    fn log_tail_follow_default_max_failures_is_five() {
+        let cli = Cli::try_parse_from(["red-cell-cli", "log", "tail", "--follow"]).expect("parse");
+        match cli.command {
+            Some(Commands::Audit { action: AuditCommands::Tail { follow, max_failures } }) => {
+                assert!(follow);
+                assert_eq!(max_failures, crate::defaults::AUDIT_TAIL_FOLLOW_MAX_FAILURES_DEFAULT);
+            }
+            _ => panic!("expected log tail --follow"),
+        }
+    }
+
+    #[test]
+    fn log_tail_follow_parses_max_failures() {
+        let cli =
+            Cli::try_parse_from(["red-cell-cli", "log", "tail", "--follow", "--max-failures", "7"])
+                .expect("parse");
+        match cli.command {
+            Some(Commands::Audit { action: AuditCommands::Tail { follow, max_failures } }) => {
+                assert!(follow);
+                assert_eq!(max_failures, 7);
+            }
+            _ => panic!("expected log tail --follow"),
+        }
+    }
+
     // ── global flag round-trips ───────────────────────────────────────────────
 
     #[test]
@@ -1396,6 +1434,11 @@ mod tests {
             "log tail help must mention the default poll interval"
         );
         assert!(help.contains("Polls every 1 second"), "log tail help must mention polling");
+        assert!(help.contains("--max-failures"), "log tail help must mention --max-failures");
+        assert!(
+            help.contains("default: 5"),
+            "log tail help must mention the default max consecutive HTTP timeouts"
+        );
     }
 
     #[test]

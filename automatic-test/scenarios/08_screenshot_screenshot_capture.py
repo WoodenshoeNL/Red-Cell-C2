@@ -18,7 +18,9 @@ Steps:
 Note: screenshot capture requires an active display session.  This scenario
 targets the Windows test machine which runs an interactive user session.
 Headless Linux targets are skipped unless ctx.linux is configured with an
-Xvfb display (DISPLAY env var set in targets.toml).
+Xvfb display (DISPLAY env var set in targets.toml).  For Linux, a pre-flight
+``xdpyinfo`` over SSH runs before deploy so an idle DISPLAY does not produce
+empty screenshots that slip past validation.
 
 Skip if ctx.windows is None (and ctx.linux is None or lacks display config).
 """
@@ -26,6 +28,7 @@ Skip if ctx.windows is None (and ctx.linux is None or lacks display config).
 DESCRIPTION = "Screenshot capture"
 
 import os
+import shlex
 import tempfile
 import uuid
 
@@ -57,6 +60,25 @@ def _is_valid_image(data: bytes) -> tuple[bool, str]:
 def _short_id() -> str:
     """Return a short unique hex suffix to avoid name collisions across test runs."""
     return uuid.uuid4().hex[:8]
+
+
+def _preflight_linux_x11_display(target, display: str) -> None:
+    """Verify DISPLAY is usable on the Linux target before deploying the agent.
+
+    Runs ``xdpyinfo`` with ``DISPLAY`` set.  Raises :class:`ScenarioSkipped` when
+    Xvfb (or another X server) is not listening — otherwise the agent can
+    return an empty screenshot while the scenario still passes weaker checks.
+    """
+    from lib.deploy import DeployError, run_remote
+
+    cmd = f"DISPLAY={shlex.quote(display)} xdpyinfo"
+    try:
+        run_remote(target, cmd, timeout=15)
+    except DeployError as exc:
+        raise ScenarioSkipped(
+            f"DISPLAY {display} not available on target; "
+            f"run Xvfb {display} -screen 0 1280x720x24 &"
+        ) from exc
 
 
 def _target_for_screenshot(ctx):
@@ -100,6 +122,13 @@ def run(ctx):
         preflight_ssh(target)
     except DeployError as exc:
         raise ScenarioSkipped(str(exc)) from exc
+
+    if not is_windows:
+        linux_display = getattr(ctx.linux, "display", None) or ctx.env.get(
+            "linux", {}
+        ).get("display")
+        if linux_display:
+            _preflight_linux_x11_display(target, linux_display)
 
     from lib.cli import (
         CliError,
@@ -182,6 +211,12 @@ def run(ctx):
 
         assert loot_entry["kind"] == "screenshot", (
             f"expected loot kind 'screenshot', got {loot_entry['kind']!r}"
+        )
+        loot_sz = loot_entry.get("size_bytes") or 0
+        assert loot_sz > 0, (
+            f"screenshot loot entry {loot_id} has empty or unknown size "
+            f"(size_bytes={loot_entry.get('size_bytes')!r}); "
+            "non-zero bytes are required to validate capture"
         )
         assert loot_entry.get("has_data", False), (
             f"loot entry {loot_id} has no binary data available for download"

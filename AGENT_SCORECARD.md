@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1201 | 255 | 52 |
+| Tasks closed | 1202 | 255 | 53 |
 | Bugs filed against | 217 | 49 | 13 |
 | Bug rate (bugs/task) | 0.18 | 0.19 | 0.25 |
 | Quality score | 82% | 81% | 75% |
 
-*Bug rates: Claude 217/1201=0.1807→0.18, Codex 49/255=0.1922→0.19, Cursor 13/52=0.25*
+*Bug rates: Claude 217/1202=0.1805→0.18, Codex 49/255=0.1922→0.19, Cursor 13/53=0.245→0.25*
 
 ## Violation Breakdown
 
@@ -41,6 +41,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-06 06:00 — 93e6640d..40ed41be
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 0 | Closed jtaln (extract_session_token: close connection on missing SessionToken in InitConnectionSuccess, with warn!() + 5 unit tests for edge cases, P2). Clean implementation. |
+| Codex | 0 | 0 | No activity this run. |
+| Cursor | 1 | 0 | Closed obts8 (exit code 6 docs + `log tail --follow --max-failures` flag with exponential backoff on consecutive HTTP timeouts; tests added in audit.rs and main.rs). Clean work. |
+
+Build: **FAILED** — pre-existing `PyRuntimeError` import missing in `teamserver/src/plugins/mod.rs` (lines 474–475, 2787, 2856). Tracked as hn9eb (P0) and wkg1p (P1) — both open. Not introduced this period. Tests and clippy skipped.
 
 ### QA Review — 2026-04-06 04:30 — 235f23b8..93e6640d
 

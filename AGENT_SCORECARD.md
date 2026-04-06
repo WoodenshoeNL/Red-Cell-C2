@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1202 | 255 | 53 |
-| Bugs filed against | 217 | 49 | 13 |
-| Bug rate (bugs/task) | 0.18 | 0.19 | 0.25 |
-| Quality score | 82% | 81% | 75% |
+| Tasks closed | 1206 | 255 | 59 |
+| Bugs filed against | 220 | 49 | 13 |
+| Bug rate (bugs/task) | 0.18 | 0.19 | 0.22 |
+| Quality score | 82% | 81% | 78% |
 
-*Bug rates: Claude 217/1202=0.1805→0.18, Codex 49/255=0.1922→0.19, Cursor 13/53=0.245→0.25*
+*Bug rates: Claude 220/1206=0.1824→0.18, Codex 49/255=0.1922→0.19, Cursor 13/59=0.2203→0.22*
 
 ## Violation Breakdown
 
@@ -22,7 +22,7 @@ Each loop run updates the running totals and appends a review entry.
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 14 | 0 | 0 |
 | Missing tests / stale tests | 77 | 22 | 6 |
-| Clippy warnings | 11 | 0 | 1 |
+| Clippy warnings | 12 | 0 | 1 |
 | Protocol errors | 30 | 32 | 4 |
 | Security issues | 61 | 39 | 0 |
 | Architecture drift | 38 | 25 | 1 |
@@ -32,7 +32,7 @@ Each loop run updates the running totals and appends a review entry.
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 4 | 5 | 0 |
 | Correctness / pagination | 66 | 9 | 1 |
-| Workflow / close-hygiene | 36 | 1 | 1 |
+| Workflow / close-hygiene | 38 | 1 | 1 |
 | Code reuse / duplication | 11 | 0 | 0 |
 | Incomplete commits (stranded work) | 5 | 3 | 0 |
 
@@ -6197,3 +6197,13 @@ Build: passed — `cargo check --workspace` clean. Tests skipped — artifact di
 | Cursor | 3 | 1 | Closed red-cell-c2-o34wl (CLI parse errors exit 1), red-cell-c2-lhj4o (session cmd validation allowlist), red-cell-c2-9spng (config permission stderr warning). feat(client-cli): RBAC agent groups, operator groups, listener access commands — CLI surface complete, backed by teamserver endpoints from prior session. Bug hca8v (P2) filed: session unknown-cmd error emits {"error":{"code":...}} envelope instead of {"ok":false,"cmd":...,"error":"UNKNOWN_COMMAND",...} — breaks session protocol contract for automated consumers. |
 
 Build: skipped — stale Apr04 cargo processes (PIDs 1167991, 1185007, 1188269, 1200647) still hold build lock; tracked in red-cell-c2-z10wz. A concurrent dev-agent cargo check is also running (PIDs 2163233, 2168676).
+
+### QA Review — 2026-04-06 10:35 — 40ed41be..29a7aba2
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 4 | 3 | Closed qnpuq (remove dead_code outgoing_tx), j82xb + 4e2d2 (plugin catch_unwind/health-tracking), nhjs4 (beads sync). Filed izaw8 (P3): committed build artifact dir target-pkvbc in WIP commit 35319db0; filed 72rsw (P2): unused PyBytes/PyDict imports in plugins/mod.rs cause clippy -D warnings failure (fix for hn9eb added unnecessary imports); filed vkzb5 (P4): hn9eb+wkg1p tracker issues not closed after ceb38dc7 fixed the import. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 6 | 0 | Closed 0a3bs (exponential backoff in wait.py), n6rqz (remote CPU/RSS monitoring scenario 14), f2bmh (resilience scenarios 21–23), 3ny4z (DoH scenario 20 skip-gate removed), p4jh4 (agent exec coverage + scenario 24 sleep-interval E2E), 832q1 (failure diagnostics). High-quality batch: new lib modules (teamserver_monitor.py, resilience.py, agent_timing.py, failure_diagnostics.py), all with unit tests. |
+
+Build: passed — `cargo check --workspace` clean (3 unused-import warnings in teamserver/plugins that will fail clippy; tracked in 72rsw). Nextest and clippy blocked on shared file locks from concurrent dev agents; tests skipped.

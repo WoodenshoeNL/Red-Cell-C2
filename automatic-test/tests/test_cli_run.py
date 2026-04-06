@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from lib.cli import CliConfig, CliError, _run
+from lib.cli import CliConfig, CliError, _run, agent_exec
 
 
 def _make_result(
@@ -168,6 +168,44 @@ class TestRunSubprocessTimeout(unittest.TestCase):
             with self.assertRaises(CliError) as ctx:
                 _run(_CFG, "status")
         self.assertEqual(ctx.exception.exit_code, -1)
+
+
+class TestAgentExecArgv(unittest.TestCase):
+    """agent_exec must pass --wait-timeout (polling budget), not --timeout."""
+
+    def test_wait_timeout_flag_and_value(self) -> None:
+        cfg = CliConfig(server="https://127.0.0.1:40056", token="tok")
+        result = _make_result(
+            stdout=json.dumps({"ok": True, "data": {"output": "ok"}}),
+            returncode=0,
+        )
+        with patch("subprocess.run", return_value=result) as mock_run:
+            agent_exec(cfg, "agent-id-1", "echo hi", wait=True, timeout=42)
+        cmd = mock_run.call_args[0][0]
+        self.assertEqual(
+            cmd[-8:],
+            [
+                "agent",
+                "exec",
+                "agent-id-1",
+                "--cmd",
+                "echo hi",
+                "--wait",
+                "--wait-timeout",
+                "42",
+            ],
+        )
+
+    def test_omits_wait_timeout_when_timeout_none(self) -> None:
+        cfg = CliConfig(server="https://127.0.0.1:40056", token="tok")
+        result = _make_result(
+            stdout=json.dumps({"ok": True, "data": {}}),
+            returncode=0,
+        )
+        with patch("subprocess.run", return_value=result) as mock_run:
+            agent_exec(cfg, "x", "id", wait=True, timeout=None)
+        cmd = mock_run.call_args[0][0]
+        self.assertNotIn("--wait-timeout", cmd)
 
 
 if __name__ == "__main__":

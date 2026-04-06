@@ -269,7 +269,7 @@ def agent_exec(cfg: CliConfig, agent_id: str, cmd: str,
     if wait:
         args.append("--wait")
     if timeout is not None:
-        args += ["--timeout", str(timeout)]
+        args += ["--wait-timeout", str(timeout)]
     return _run(cfg, *args)
 
 

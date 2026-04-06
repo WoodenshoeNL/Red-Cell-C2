@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1198 | 255 | 48 |
-| Bugs filed against | 215 | 49 | 13 |
-| Bug rate (bugs/task) | 0.18 | 0.19 | 0.27 |
-| Quality score | 82% | 81% | 73% |
+| Tasks closed | 1199 | 255 | 51 |
+| Bugs filed against | 216 | 49 | 13 |
+| Bug rate (bugs/task) | 0.18 | 0.19 | 0.25 |
+| Quality score | 82% | 81% | 75% |
 
-*Bug rates: Claude 215/1198=0.1795→0.18, Codex 49/255=0.1922→0.19, Cursor 13/48=0.2708→0.27*
+*Bug rates: Claude 216/1199=0.1801→0.18, Codex 49/255=0.1922→0.19, Cursor 13/51=0.2549→0.25*
 
 ## Violation Breakdown
 
@@ -32,7 +32,7 @@ Each loop run updates the running totals and appends a review entry.
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 4 | 5 | 0 |
 | Correctness / pagination | 66 | 9 | 1 |
-| Workflow / close-hygiene | 35 | 1 | 1 |
+| Workflow / close-hygiene | 36 | 1 | 1 |
 | Code reuse / duplication | 11 | 0 | 0 |
 | Incomplete commits (stranded work) | 4 | 3 | 0 |
 
@@ -41,6 +41,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-06 03:15 — 41fa3bec..235f23b8
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 1 | Closed bxub6 (transport.rs split into sub-modules, P3). Filed enwif (workflow/close-hygiene: wguqk P0 not closed after refactor fixed it). |
+| Codex | 0 | 0 | No activity this run. |
+| Cursor | 3 | 0 | Closed 3n71w (AgentId display→parse roundtrip, P2), hca8v (session unknown-cmd envelope, P2), rbskj (stranded Codex workflow, P0). Clean work with tests. |
+
+Build: passed — `cargo check --workspace` clean (2m 03s, blocked on shared build lock from stale Apr04 processes but completed). Tests/clippy skipped due to lock contention from multiple concurrent cargo invocations (existing issue z10wz).
 
 ### Arch Review — 2026-04-05 20:30
 

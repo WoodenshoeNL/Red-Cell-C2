@@ -18,10 +18,15 @@ Test steps:
        - captured_at is at or after test_start
        - kind == 'download'
   9. Verify audit log (entries since test_start):
-       - Contains entry with action 'listener.create'
-       - Contains entry with action 'payload.build'
-       - Contains entry with action 'agent.task' or 'agent.download'
-       - Every returned entry has operator field set to a non-empty string
+       - Completeness: at least one row per expected action in the scenario
+         (listener.create, listener.start, payload.build, agent.checkin,
+         agent.task, agent.download)
+       - Newest-first timestamp ordering (matches API contract)
+       - Operator attribution: API-key actions match configured operator name;
+         agent.checkin rows use actor ``teamserver``
+       - Filter coverage: operator / action / agent CLI filters match substring
+         semantics against the baseline set; REST ``since`` + ``until`` matches
+         the same multiset as the baseline window
  10. Export loot to CSV using Python's csv module:
        - Write all loot entries returned by loot list to a temp file
        - Parse the CSV and verify it is well-formed
@@ -84,6 +89,17 @@ def run(ctx):
     if target is None:
         raise ScenarioSkipped("no target configured (ctx.linux and ctx.windows are both None)")
 
+    from lib.audit_checks import (
+        assert_minimum_action_counts,
+        assert_multiset_equal,
+        assert_newest_first_timestamp_order,
+        assert_operator_attribution,
+        expected_subset_action_substring,
+        expected_subset_agent_id,
+        expected_subset_operator_substring,
+        expected_subset_until_window,
+        fetch_audit_items_rest,
+    )
     from lib.cli import (
         CliError,
         agent_download,
@@ -227,51 +243,67 @@ def run(ctx):
         )
 
         # ── Step 9: Verify audit log ───────────────────────────────────────────
-        print(f"  [audit] querying audit log since {test_start}")
+        expected_operator = (ctx.env.get("operator") or {}).get("username", "").strip()
+        assert expected_operator, (
+            "env.toml must set operator.username — needed for audit attribution checks"
+        )
+
+        # Upper bound captured immediately before querying so every row in this
+        # window should be <= audit_window_end (server clock).
+        audit_window_end = _utc_now_iso()
+        print(f"  [audit] querying audit log since {test_start} (window ends {audit_window_end})")
         audit_entries = log_list(cli, since=test_start, limit=200)
-        print(f"  [audit] {len(audit_entries)} entries found since test_start")
+        print(f"  [audit] {len(audit_entries)} entries in baseline (since={test_start!r})")
 
         actions_seen = {e["action"] for e in audit_entries}
         print(f"  [audit] action types seen: {sorted(actions_seen)}")
 
-        # listener.create must be present
-        assert "listener.create" in actions_seen, (
-            f"audit log missing 'listener.create' entry — "
-            f"actions seen: {sorted(actions_seen)}"
-        )
-        print("  [audit] listener.create ✓")
+        required_minimums = {
+            "listener.create": 1,
+            "listener.start": 1,
+            "payload.build": 1,
+            "agent.checkin": 1,
+            "agent.task": 1,
+            "agent.download": 1,
+        }
+        assert_minimum_action_counts(audit_entries, required_minimums)
+        print("  [audit] completeness (minimum per-action counts) ✓")
 
-        # payload.build must be present
-        assert "payload.build" in actions_seen, (
-            f"audit log missing 'payload.build' entry — "
-            f"actions seen: {sorted(actions_seen)}"
-        )
-        print("  [audit] payload.build ✓")
+        assert_newest_first_timestamp_order(audit_entries)
+        print("  [audit] timestamp order (newest first) ✓")
 
-        # At least one agent command action must be present.
-        agent_action_present = bool(
-            actions_seen & {"agent.task", "agent.download"}
+        assert_operator_attribution(
+            audit_entries,
+            expected_operator=expected_operator,
         )
-        assert agent_action_present, (
-            f"audit log is missing both 'agent.task' and 'agent.download' entries — "
-            f"actions seen: {sorted(actions_seen)}"
-        )
-        print("  [audit] agent action (agent.task / agent.download) ✓")
+        print("  [audit] operator attribution ✓")
 
-        # Every audit entry must have a non-empty operator field.
-        entries_missing_operator = [
-            e for e in audit_entries
-            if not e.get("operator", "").strip()
-        ]
-        assert len(entries_missing_operator) == 0, (
-            f"{len(entries_missing_operator)} audit entries are missing the operator "
-            f"field:\n"
-            + "\n".join(
-                f"  action={e.get('action')!r} ts={e.get('ts')!r}"
-                for e in entries_missing_operator[:5]
-            )
+        # ── Filter coverage (CLI substring semantics + REST date range) ─────
+        exp_op = expected_subset_operator_substring(audit_entries, expected_operator)
+        got_op = log_list(cli, since=test_start, operator=expected_operator, limit=200)
+        assert_multiset_equal(got_op, exp_op, label="audit filter --operator")
+        print("  [audit] filter --operator matches expected subset ✓")
+
+        exp_task = expected_subset_action_substring(audit_entries, "agent.task")
+        got_task = log_list(cli, since=test_start, action="agent.task", limit=200)
+        assert_multiset_equal(got_task, exp_task, label="audit filter --action agent.task")
+        print("  [audit] filter --action agent.task matches expected subset ✓")
+
+        exp_agent = expected_subset_agent_id(audit_entries, agent_id)
+        got_agent = log_list(cli, since=test_start, agent_id=agent_id, limit=200)
+        assert_multiset_equal(got_agent, exp_agent, label="audit filter --agent")
+        print("  [audit] filter --agent matches expected subset ✓")
+
+        exp_until = expected_subset_until_window(audit_entries, until_ts=audit_window_end)
+        rest_until = fetch_audit_items_rest(
+            cli.server,
+            cli.token,
+            since=test_start,
+            until=audit_window_end,
+            limit=200,
         )
-        print("  [audit] all entries have operator field set ✓")
+        assert_multiset_equal(rest_until, exp_until, label="REST /audit since+until")
+        print("  [audit] REST since+until window matches expected subset ✓")
 
         # ── Step 10: Export loot to CSV and validate ──────────────────────────
         print("  [csv] exporting loot list to CSV and validating")

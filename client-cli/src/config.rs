@@ -40,9 +40,10 @@ pub struct FingerprintTls {
 }
 
 /// Controls how the CLI verifies the teamserver's TLS certificate.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum TlsMode {
     /// Verify against the system/webpki root CAs (default, secure).
+    #[default]
     SystemRoots,
     /// Verify against a single custom CA certificate loaded from a PEM file.
     /// Built-in root CAs are disabled so only this CA is trusted.
@@ -50,12 +51,6 @@ pub enum TlsMode {
     /// Pin against a SHA-256 certificate fingerprint. Overrides `--ca-cert`
     /// when both are supplied.
     Fingerprint(FingerprintTls),
-}
-
-impl Default for TlsMode {
-    fn default() -> Self {
-        TlsMode::SystemRoots
-    }
 }
 
 /// Raw values loaded from a TOML config file.

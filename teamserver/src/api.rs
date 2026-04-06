@@ -4139,6 +4139,7 @@ async fn get_payload_job(
     responses(
         (status = 200, description = "Raw payload binary", content_type = "application/octet-stream"),
         (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
+        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
         (status = 404, description = "Payload not found or not yet built", body = ApiErrorBody),
         (status = 410, description = "Payload is stale — listener config changed after this payload was built", body = ApiErrorBody),
         (status = 429, description = "Rate limit exceeded", body = ApiErrorBody),
@@ -4147,7 +4148,7 @@ async fn get_payload_job(
 async fn download_payload(
     State(state): State<TeamserverState>,
     Path(id): Path<String>,
-    _identity: ReadApiAccess,
+    _identity: TaskAgentApiAccess,
 ) -> Response {
     match state.database.payload_builds().get(&id).await {
         Ok(Some(mut record)) if record.status == "done" && record.artifact.is_some() => {
@@ -10842,7 +10843,7 @@ mod tests {
         );
     }
 
-    // ── RBAC: analyst can read payloads but not build ───────────────────
+    // ── RBAC: analyst can list payloads but not build or download artifacts ─
 
     #[tokio::test]
     async fn analyst_can_list_payloads() {
@@ -10876,6 +10877,26 @@ mod tests {
                     .header(API_KEY_HEADER, "secret-analyst")
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"listener":"http1","arch":"x64","format":"exe"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn analyst_cannot_download_payload_artifact() {
+        let app =
+            test_router(Some((60, "rest-analyst", "secret-analyst", OperatorRole::Analyst))).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/payloads/any-id/download")
+                    .header(API_KEY_HEADER, "secret-analyst")
+                    .body(Body::empty())
                     .expect("request"),
             )
             .await

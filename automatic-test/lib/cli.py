@@ -285,6 +285,18 @@ def agent_kill(cfg: CliConfig, agent_id: str) -> dict:
     return _run(cfg, "agent", "kill", agent_id, "--wait")
 
 
+def agent_output(
+    cfg: CliConfig,
+    agent_id: str,
+    since: int | None = None,
+) -> list[dict]:
+    """Fetch persisted agent output (``agent output`` — not ``--watch``)."""
+    args = ["agent", "output", agent_id]
+    if since is not None:
+        args += ["--since", str(since)]
+    return _run(cfg, *args)
+
+
 # ── Operators ────────────────────────────────────────────────────────────────
 
 def operator_list(cfg: CliConfig) -> list[dict]:
@@ -298,6 +310,11 @@ def operator_create(cfg: CliConfig, username: str, password: str, role: str) -> 
 
 def operator_delete(cfg: CliConfig, username: str) -> dict:
     return _run(cfg, "operator", "delete", username)
+
+
+def operator_set_role(cfg: CliConfig, username: str, role: str) -> dict:
+    """Change an operator's role via ``operator set-role``."""
+    return _run(cfg, "operator", "set-role", username, role)
 
 
 # ── Loot ─────────────────────────────────────────────────────────────────────

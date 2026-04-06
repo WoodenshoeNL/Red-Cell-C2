@@ -11,7 +11,14 @@ from unittest.mock import mock_open, patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from lib.cli import CliConfig, CliError, payload_build, payload_build_and_fetch
+from lib.cli import (
+    CliConfig,
+    CliError,
+    agent_output,
+    operator_set_role,
+    payload_build,
+    payload_build_and_fetch,
+)
 
 
 _CFG = CliConfig(server="https://127.0.0.1:40056", token="test-token", timeout=3)
@@ -71,6 +78,33 @@ class TestPayloadBuild(unittest.TestCase):
         self.assertIn("--sleep", args)
         idx = args.index("--sleep")
         self.assertEqual(args[idx + 1], "60")
+
+
+class TestOperatorSetRole(unittest.TestCase):
+    def test_invokes_cli(self) -> None:
+        with patch("lib.cli._run", return_value={"username": "a", "role": "admin"}) as mock_run:
+            result = operator_set_role(_CFG, "alice", "admin")
+        self.assertEqual(result["username"], "a")
+        mock_run.assert_called_once_with(_CFG, "operator", "set-role", "alice", "admin")
+
+
+class TestAgentOutput(unittest.TestCase):
+    def test_without_since(self) -> None:
+        with patch("lib.cli._run", return_value=[]) as mock_run:
+            agent_output(_CFG, "dead0001")
+        mock_run.assert_called_once_with(_CFG, "agent", "output", "dead0001")
+
+    def test_with_since(self) -> None:
+        with patch("lib.cli._run", return_value=[]) as mock_run:
+            agent_output(_CFG, "dead0001", since=42)
+        mock_run.assert_called_once_with(
+            _CFG,
+            "agent",
+            "output",
+            "dead0001",
+            "--since",
+            "42",
+        )
 
 
 class TestPayloadBuildAndFetch(unittest.TestCase):

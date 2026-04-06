@@ -1,5 +1,12 @@
 //! Versioned REST API framework for the Red Cell teamserver.
 
+pub mod agents;
+pub mod audit;
+pub mod listeners;
+pub mod loot;
+pub mod operators;
+pub mod payload;
+
 use std::collections::{BTreeMap, HashMap};
 use std::marker::PhantomData;
 use std::net::{IpAddr, SocketAddr};
@@ -10,22 +17,20 @@ use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq;
 
 use axum::body::{Body, to_bytes};
-use axum::extract::{ConnectInfo, FromRequestParts, Path, Query, Request, State};
+use axum::extract::{ConnectInfo, FromRequestParts, Request, State};
 use axum::http::HeaderValue;
 use axum::http::Request as HttpRequest;
 use axum::http::header::AUTHORIZATION;
-use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE, RETRY_AFTER};
+use axum::http::header::{CONTENT_TYPE, RETRY_AFTER};
 use axum::http::{HeaderMap, StatusCode, request::Parts};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use hmac::{Hmac, Mac};
+use red_cell_common::ListenerConfig;
 use red_cell_common::config::{OperatorRole, Profile};
-use red_cell_common::demon::{DemonCommand, DemonFilesystemCommand};
-use red_cell_common::operator::{AgentTaskInfo, EventCode, Message, MessageHead};
-use red_cell_common::{AgentRecord, ListenerConfig};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 use sha2::Sha256;
 use thiserror::Error;
@@ -33,28 +38,21 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tokio::sync::Mutex;
 use tower::ServiceExt as _;
-use tracing::{debug, instrument, warn};
+use tracing::{debug, instrument};
 use utoipa::openapi::security::{ApiKey, ApiKeyValue, SecurityScheme};
-use utoipa::{IntoParams, Modify, OpenApi, ToSchema};
+use utoipa::{Modify, OpenApi, ToSchema};
 use utoipa_swagger_ui::SwaggerUi;
-use uuid::Uuid;
 
-use crate::agents::QueuedJob;
 use crate::app::TeamserverState;
-use crate::database::LootFilter;
-use crate::listeners::{ListenerManagerError, ListenerMarkRequest, ListenerSummary};
 use crate::rate_limiter::{AttemptWindow, evict_oldest_windows, prune_expired_windows};
 use crate::rbac::{
     CanAdminister, CanManageListeners, CanRead, CanTaskAgents, Permission, PermissionMarker,
 };
-use crate::websocket::{AgentCommandError, execute_agent_task};
 use crate::{
-    AuditPage, AuditQuery, AuditResultStatus, AuditWebhookNotifier, AuthError, Database,
-    LootRecord, PluginHealthEntry, PluginRuntime, SessionActivityPage, SessionActivityQuery,
-    TeamserverError, audit_details, authorize_agent_group_access, authorize_listener_access,
-    parameter_object, query_audit_log, query_session_activity,
-    record_operator_action_with_notifications,
+    AuditDetails, AuditWebhookNotifier, Database, PluginHealthEntry, PluginRuntime,
+    audit_details, parameter_object, record_operator_action_with_notifications,
 };
+
 const API_VERSION: &str = "v1";
 const API_PREFIX: &str = "/api/v1";
 const OPENAPI_PATH: &str = "/api/v1/openapi.json";
@@ -81,124 +79,6 @@ enum RateLimitSubject {
     PresentedCredential(ApiKeyDigest),
     MissingApiKey,
     InvalidAuthorizationHeader,
-}
-
-/// Sanitized REST representation of an agent/session.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, ToSchema)]
-struct ApiAgentInfo {
-    /// Numeric agent identifier.
-    #[serde(rename = "AgentID")]
-    agent_id: u32,
-    /// Whether the agent is still marked active.
-    #[serde(rename = "Active")]
-    active: bool,
-    /// Optional inactive reason or registration source.
-    #[serde(rename = "Reason")]
-    reason: String,
-    /// Optional operator-authored note attached to the agent.
-    #[serde(rename = "Note")]
-    note: String,
-    /// Computer hostname.
-    #[serde(rename = "Hostname")]
-    hostname: String,
-    /// Logon username.
-    #[serde(rename = "Username")]
-    username: String,
-    /// Logon domain.
-    #[serde(rename = "DomainName")]
-    domain_name: String,
-    /// External callback IP.
-    #[serde(rename = "ExternalIP")]
-    external_ip: String,
-    /// Internal workstation IP.
-    #[serde(rename = "InternalIP")]
-    internal_ip: String,
-    /// Process executable name.
-    #[serde(rename = "ProcessName")]
-    process_name: String,
-    /// Remote process base address.
-    #[serde(rename = "BaseAddress")]
-    base_address: u64,
-    /// Remote process id.
-    #[serde(rename = "ProcessPID")]
-    process_pid: u32,
-    /// Remote thread id.
-    #[serde(rename = "ProcessTID")]
-    process_tid: u32,
-    /// Remote parent process id.
-    #[serde(rename = "ProcessPPID")]
-    process_ppid: u32,
-    /// Process architecture label.
-    #[serde(rename = "ProcessArch")]
-    process_arch: String,
-    /// Whether the current token is elevated.
-    #[serde(rename = "Elevated")]
-    elevated: bool,
-    /// Operating system version string.
-    #[serde(rename = "OSVersion")]
-    os_version: String,
-    /// Operating system build number (e.g. 22000 for Windows 11 21H2).
-    #[serde(rename = "OSBuild")]
-    os_build: u32,
-    /// Operating system architecture label.
-    #[serde(rename = "OSArch")]
-    os_arch: String,
-    /// Sleep interval in seconds.
-    #[serde(rename = "SleepDelay")]
-    sleep_delay: u32,
-    /// Sleep jitter percentage.
-    #[serde(rename = "SleepJitter")]
-    sleep_jitter: u32,
-    /// Optional kill-date value.
-    #[serde(rename = "KillDate")]
-    kill_date: Option<i64>,
-    /// Optional working-hours bitmask.
-    #[serde(rename = "WorkingHours")]
-    working_hours: Option<i32>,
-    /// Registration timestamp.
-    #[serde(rename = "FirstCallIn")]
-    first_call_in: String,
-    /// Last callback timestamp.
-    #[serde(rename = "LastCallIn")]
-    last_call_in: String,
-}
-
-impl From<AgentRecord> for ApiAgentInfo {
-    fn from(agent: AgentRecord) -> Self {
-        Self::from(&agent)
-    }
-}
-
-impl From<&AgentRecord> for ApiAgentInfo {
-    fn from(agent: &AgentRecord) -> Self {
-        Self {
-            agent_id: agent.agent_id,
-            active: agent.active,
-            reason: agent.reason.clone(),
-            note: agent.note.clone(),
-            hostname: agent.hostname.clone(),
-            username: agent.username.clone(),
-            domain_name: agent.domain_name.clone(),
-            external_ip: agent.external_ip.clone(),
-            internal_ip: agent.internal_ip.clone(),
-            process_name: agent.process_name.clone(),
-            base_address: agent.base_address,
-            process_pid: agent.process_pid,
-            process_tid: agent.process_tid,
-            process_ppid: agent.process_ppid,
-            process_arch: agent.process_arch.clone(),
-            elevated: agent.elevated,
-            os_version: agent.os_version.clone(),
-            os_build: agent.os_build,
-            os_arch: agent.os_arch.clone(),
-            sleep_delay: agent.sleep_delay,
-            sleep_jitter: agent.sleep_jitter,
-            kill_date: agent.kill_date,
-            working_hours: agent.working_hours,
-            first_call_in: agent.first_call_in.clone(),
-            last_call_in: agent.last_call_in.clone(),
-        }
-    }
 }
 
 /// Fixed REST API rate-limiting configuration.
@@ -583,7 +463,7 @@ where
                 "api_key",
                 Some(identity.key_id.clone()),
                 audit_details(
-                    AuditResultStatus::Failure,
+                    crate::AuditResultStatus::Failure,
                     None,
                     Some("permission_denied"),
                     Some(parameter_object([
@@ -612,658 +492,7 @@ pub type TaskAgentApiAccess = ApiPermissionGuard<CanTaskAgents>;
 /// Administrative access to protected REST API routes.
 pub type AdminApiAccess = ApiPermissionGuard<CanAdminister>;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
-struct AgentTaskQueuedResponse {
-    agent_id: String,
-    task_id: String,
-    queued_jobs: usize,
-}
-
-/// Single output entry returned by `GET /agents/{id}/output`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
-struct AgentOutputEntry {
-    /// Database row identifier — use as `since` cursor for polling.
-    id: i64,
-    /// Stable task identifier, when known.
-    task_id: Option<String>,
-    /// Callback command identifier.
-    command_id: u32,
-    /// Original request identifier.
-    request_id: u32,
-    /// Response severity/type label.
-    response_type: String,
-    /// Human-readable status text.
-    message: String,
-    /// Raw output string emitted by the agent.
-    output: String,
-    /// Operator command line associated with the request, when known.
-    command_line: Option<String>,
-    /// Operator username associated with the request, when known.
-    operator: Option<String>,
-    /// Response timestamp string.
-    received_at: String,
-    /// Process exit code, when the agent reported one.
-    ///
-    /// Present for Red Cell Specter/Phantom shell command responses.
-    /// `None` for entries from legacy Havoc demons or non-shell callbacks.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    exit_code: Option<i32>,
-}
-
-/// Paginated agent output response.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
-struct AgentOutputPage {
-    /// Total number of entries returned.
-    total: usize,
-    /// Output entries in insertion order.
-    entries: Vec<AgentOutputEntry>,
-}
-
-/// Request body for `POST /agents/{id}/upload`.
-#[derive(Debug, Clone, Deserialize, ToSchema)]
-struct AgentUploadRequest {
-    /// Remote path on the target where the file should be written.
-    remote_path: String,
-    /// File content encoded as base64.
-    content: String,
-}
-
-/// Request body for `POST /agents/{id}/download`.
-#[derive(Debug, Clone, Deserialize, ToSchema)]
-struct AgentDownloadRequest {
-    /// Remote path on the target to download.
-    remote_path: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
-struct LootSummary {
-    id: i64,
-    agent_id: String,
-    kind: String,
-    name: String,
-    file_path: Option<String>,
-    size_bytes: Option<i64>,
-    captured_at: String,
-    has_data: bool,
-    operator: Option<String>,
-    command_line: Option<String>,
-    task_id: Option<String>,
-    metadata: Option<Value>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-struct OperatorSummary {
-    username: String,
-    role: OperatorRole,
-    online: bool,
-    last_seen: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, ToSchema)]
-struct CreateOperatorRequest {
-    username: String,
-    password: String,
-    role: OperatorRole,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
-struct CreatedOperatorResponse {
-    username: String,
-    role: OperatorRole,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, ToSchema)]
-struct UpdateOperatorRoleRequest {
-    role: OperatorRole,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
-struct LootPage {
-    total: usize,
-    limit: usize,
-    offset: usize,
-    items: Vec<LootSummary>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
-struct CredentialSummary {
-    id: i64,
-    agent_id: String,
-    name: String,
-    captured_at: String,
-    operator: Option<String>,
-    command_line: Option<String>,
-    task_id: Option<String>,
-    pattern: Option<String>,
-    content: Option<String>,
-    metadata: Option<Value>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
-struct CredentialPage {
-    total: usize,
-    limit: usize,
-    offset: usize,
-    items: Vec<CredentialSummary>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize, IntoParams)]
-struct CredentialQuery {
-    agent_id: Option<String>,
-    operator: Option<String>,
-    command: Option<String>,
-    name: Option<String>,
-    pattern: Option<String>,
-    since: Option<String>,
-    until: Option<String>,
-    limit: Option<usize>,
-    offset: Option<usize>,
-}
-
-impl CredentialQuery {
-    const DEFAULT_LIMIT: usize = 50;
-    const MAX_LIMIT: usize = 200;
-
-    fn limit(&self) -> usize {
-        self.limit.unwrap_or(Self::DEFAULT_LIMIT).clamp(1, Self::MAX_LIMIT)
-    }
-
-    fn offset(&self) -> usize {
-        self.offset.unwrap_or_default()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
-struct JobSummary {
-    agent_id: String,
-    command_id: u32,
-    request_id: String,
-    task_id: String,
-    command_line: String,
-    created_at: String,
-    operator: Option<String>,
-    payload_size: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
-struct JobPage {
-    total: usize,
-    limit: usize,
-    offset: usize,
-    items: Vec<JobSummary>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize, IntoParams)]
-struct JobQuery {
-    agent_id: Option<String>,
-    operator: Option<String>,
-    command: Option<String>,
-    task_id: Option<String>,
-    request_id: Option<String>,
-    command_id: Option<u32>,
-    limit: Option<usize>,
-    offset: Option<usize>,
-}
-
-impl JobQuery {
-    const DEFAULT_LIMIT: usize = 50;
-    const MAX_LIMIT: usize = 200;
-
-    fn limit(&self) -> usize {
-        self.limit.unwrap_or(Self::DEFAULT_LIMIT).clamp(1, Self::MAX_LIMIT)
-    }
-
-    fn offset(&self) -> usize {
-        self.offset.unwrap_or_default()
-    }
-}
-
-#[derive(Debug, Clone, Default, Deserialize, IntoParams)]
-struct LootQuery {
-    kind: Option<String>,
-    agent_id: Option<String>,
-    operator: Option<String>,
-    command: Option<String>,
-    name: Option<String>,
-    file_path: Option<String>,
-    since: Option<String>,
-    until: Option<String>,
-    limit: Option<usize>,
-    offset: Option<usize>,
-}
-
-impl LootQuery {
-    const DEFAULT_LIMIT: usize = 50;
-    const MAX_LIMIT: usize = 200;
-
-    fn limit(&self) -> usize {
-        self.limit.unwrap_or(Self::DEFAULT_LIMIT).clamp(1, Self::MAX_LIMIT)
-    }
-
-    fn offset(&self) -> usize {
-        self.offset.unwrap_or_default()
-    }
-}
-
-#[derive(Debug, Error)]
-enum AgentApiError {
-    #[error("{0}")]
-    Teamserver(#[from] crate::TeamserverError),
-    #[error("{0}")]
-    Task(#[from] AgentCommandError),
-    #[error("{0}")]
-    Authorization(#[from] crate::AuthorizationError),
-}
-
-impl IntoResponse for AgentApiError {
-    fn into_response(self) -> Response {
-        let (status, code) = match &self {
-            Self::Teamserver(crate::TeamserverError::AgentNotFound { .. }) => {
-                (StatusCode::NOT_FOUND, "agent_not_found")
-            }
-            Self::Task(
-                AgentCommandError::InvalidAgentId { .. }
-                | AgentCommandError::MissingAgentId
-                | AgentCommandError::MissingNote
-                | AgentCommandError::InvalidCommandId { .. }
-                | AgentCommandError::MissingField { .. }
-                | AgentCommandError::InvalidBooleanField { .. }
-                | AgentCommandError::InvalidNumericField { .. }
-                | AgentCommandError::InvalidBase64Field { .. }
-                | AgentCommandError::UnsupportedProcessSubcommand { .. }
-                | AgentCommandError::UnsupportedFilesystemSubcommand { .. }
-                | AgentCommandError::UnsupportedTokenSubcommand { .. }
-                | AgentCommandError::UnsupportedSocketSubcommand { .. }
-                | AgentCommandError::UnsupportedKerberosSubcommand { .. }
-                | AgentCommandError::UnsupportedInjectionWay { .. }
-                | AgentCommandError::UnsupportedInjectionTechnique { .. }
-                | AgentCommandError::UnsupportedArchitecture { .. }
-                | AgentCommandError::InvalidProcessCreateArguments
-                | AgentCommandError::InvalidRemovePayload
-                | AgentCommandError::UnsupportedCommandId { .. },
-            ) => (StatusCode::BAD_REQUEST, "invalid_agent_task"),
-            Self::Task(AgentCommandError::Teamserver(crate::TeamserverError::AgentNotFound {
-                ..
-            })) => (StatusCode::NOT_FOUND, "agent_not_found"),
-            Self::Teamserver(crate::TeamserverError::QueueFull { .. })
-            | Self::Task(AgentCommandError::Teamserver(crate::TeamserverError::QueueFull {
-                ..
-            })) => (StatusCode::TOO_MANY_REQUESTS, "queue_full"),
-            Self::Task(AgentCommandError::Authorization(
-                crate::AuthorizationError::AgentGroupDenied { .. }
-                | crate::AuthorizationError::ListenerAccessDenied { .. },
-            ))
-            | Self::Authorization(
-                crate::AuthorizationError::AgentGroupDenied { .. }
-                | crate::AuthorizationError::ListenerAccessDenied { .. },
-            ) => (StatusCode::FORBIDDEN, "agent_access_denied"),
-            Self::Teamserver(_) | Self::Task(_) | Self::Authorization(_) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "agent_api_error")
-            }
-        };
-
-        json_error_response(status, code, self.to_string())
-    }
-}
-
-#[derive(Debug, Error)]
-enum AuditApiError {
-    #[error("{0}")]
-    Teamserver(#[from] crate::TeamserverError),
-}
-
-#[derive(Debug, Error)]
-enum LootApiError {
-    #[error("{0}")]
-    Teamserver(#[from] crate::TeamserverError),
-    #[error("invalid loot id `{value}`")]
-    InvalidLootId { value: String },
-    #[error("invalid agent id `{value}`")]
-    InvalidAgentId { value: String },
-    #[error("loot item `{id}` not found")]
-    NotFound { id: i64 },
-    #[error("loot item `{id}` does not contain downloadable data")]
-    MissingData { id: i64 },
-}
-
-impl IntoResponse for LootApiError {
-    fn into_response(self) -> Response {
-        let (status, code) = match &self {
-            Self::InvalidLootId { .. } => (StatusCode::BAD_REQUEST, "invalid_loot_id"),
-            Self::InvalidAgentId { .. } => (StatusCode::BAD_REQUEST, "invalid_agent_id"),
-            Self::NotFound { .. } => (StatusCode::NOT_FOUND, "loot_not_found"),
-            Self::MissingData { .. } => (StatusCode::CONFLICT, "loot_missing_data"),
-            Self::Teamserver(_) => (StatusCode::INTERNAL_SERVER_ERROR, "loot_api_error"),
-        };
-
-        json_error_response(status, code, self.to_string())
-    }
-}
-
-#[derive(Debug, Error)]
-enum CredentialApiError {
-    #[error("{0}")]
-    Teamserver(#[from] crate::TeamserverError),
-    #[error("invalid credential id `{value}`")]
-    InvalidCredentialId { value: String },
-    #[error("invalid agent id `{value}`")]
-    InvalidAgentId { value: String },
-    #[error("credential `{id}` not found")]
-    NotFound { id: i64 },
-}
-
-impl IntoResponse for CredentialApiError {
-    fn into_response(self) -> Response {
-        let (status, code) = match &self {
-            Self::InvalidCredentialId { .. } => (StatusCode::BAD_REQUEST, "invalid_credential_id"),
-            Self::InvalidAgentId { .. } => (StatusCode::BAD_REQUEST, "invalid_agent_id"),
-            Self::NotFound { .. } => (StatusCode::NOT_FOUND, "credential_not_found"),
-            Self::Teamserver(_) => (StatusCode::INTERNAL_SERVER_ERROR, "credential_api_error"),
-        };
-
-        json_error_response(status, code, self.to_string())
-    }
-}
-
-#[derive(Debug, Error)]
-enum JobApiError {
-    #[error("{0}")]
-    Teamserver(#[from] crate::TeamserverError),
-    #[error("invalid agent id `{value}`")]
-    InvalidAgentId { value: String },
-    #[error("invalid request id `{value}`")]
-    InvalidRequestId { value: String },
-    #[error("queued job not found for agent `{agent_id}` request `{request_id}`")]
-    NotFound { agent_id: String, request_id: String },
-}
-
-impl IntoResponse for JobApiError {
-    fn into_response(self) -> Response {
-        let (status, code) = match &self {
-            Self::InvalidAgentId { .. } => (StatusCode::BAD_REQUEST, "invalid_agent_id"),
-            Self::InvalidRequestId { .. } => (StatusCode::BAD_REQUEST, "invalid_request_id"),
-            Self::NotFound { .. } => (StatusCode::NOT_FOUND, "job_not_found"),
-            Self::Teamserver(_) => (StatusCode::INTERNAL_SERVER_ERROR, "job_api_error"),
-        };
-
-        json_error_response(status, code, self.to_string())
-    }
-}
-
-#[derive(Debug, Error)]
-enum OperatorApiError {
-    #[error("{0}")]
-    Auth(#[from] AuthError),
-    #[error("{0}")]
-    Database(#[from] TeamserverError),
-}
-
-impl IntoResponse for OperatorApiError {
-    fn into_response(self) -> Response {
-        let (status, code) = match &self {
-            Self::Auth(AuthError::DuplicateUser { .. }) => {
-                (StatusCode::CONFLICT, "operator_exists")
-            }
-            Self::Auth(AuthError::EmptyUsername | AuthError::EmptyPassword) => {
-                (StatusCode::BAD_REQUEST, "invalid_operator")
-            }
-            Self::Auth(AuthError::OperatorNotFound { .. }) => {
-                (StatusCode::NOT_FOUND, "operator_not_found")
-            }
-            Self::Auth(AuthError::ProfileOperator { .. }) => {
-                (StatusCode::NOT_FOUND, "operator_not_found")
-            }
-            Self::Auth(AuthError::AuditLog(_)) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "operator_audit_unavailable")
-            }
-            Self::Auth(_) | Self::Database(_) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "operator_api_error")
-            }
-        };
-
-        json_error_response(status, code, self.to_string())
-    }
-}
-
-impl IntoResponse for AuditApiError {
-    fn into_response(self) -> Response {
-        json_error_response(StatusCode::INTERNAL_SERVER_ERROR, "audit_api_error", self.to_string())
-    }
-}
-
-/// Build the `/api/v1` router, including version metadata and OpenAPI docs.
-pub fn api_routes(api: ApiRuntime) -> Router<TeamserverState> {
-    let protected = Router::new()
-        .route("/agents", get(list_agents))
-        .route("/agents/{id}", get(get_agent).delete(kill_agent))
-        .route("/agents/{id}/task", post(queue_agent_task))
-        .route("/agents/{id}/output", get(get_agent_output))
-        .route("/agents/{id}/upload", post(agent_upload))
-        .route("/agents/{id}/download", post(agent_download))
-        .route("/audit", get(list_audit))
-        .route("/session-activity", get(list_session_activity))
-        .route("/credentials", get(list_credentials))
-        .route("/credentials/{id}", get(get_credential))
-        .route("/jobs", get(list_jobs))
-        .route("/jobs/{agent_id}/{request_id}", get(get_job))
-        .route("/loot", get(list_loot))
-        .route("/loot/{id}", get(get_loot))
-        .route("/agents/{id}/groups", get(get_agent_groups).put(set_agent_groups))
-        .route("/operators", get(list_operators).post(create_operator))
-        .route("/operators/{username}", delete(delete_operator))
-        .route("/operators/{username}/role", put(update_operator_role))
-        .route(
-            "/operators/{username}/agent-groups",
-            get(get_operator_agent_groups).put(set_operator_agent_groups),
-        )
-        .route("/listeners/{name}/access", get(get_listener_access).put(set_listener_access))
-        .route("/listeners", get(list_listeners).post(create_listener))
-        .route("/listeners/{name}", get(get_listener).put(update_listener).delete(delete_listener))
-        .route("/listeners/{name}/start", put(start_listener))
-        .route("/listeners/{name}/stop", put(stop_listener))
-        .route("/listeners/{name}/mark", post(mark_listener))
-        .route("/listeners/{name}/tls-cert", post(reload_listener_tls_cert))
-        .route("/webhooks/stats", get(get_webhook_stats))
-        .route("/payloads", get(list_payloads))
-        .route("/payloads/build", post(submit_payload_build))
-        .route("/payloads/jobs/{job_id}", get(get_payload_job))
-        .route("/payloads/{id}/download", get(download_payload))
-        .route("/payload-cache", post(flush_payload_cache))
-        .route("/ws", get(crate::session_ws::session_ws_handler))
-        .route("/health", get(get_health))
-        .route_layer(middleware::from_fn_with_state(api, api_auth_middleware));
-
-    Router::new()
-        .route("/", get(api_root))
-        .merge(protected)
-        .merge(SwaggerUi::new(DOCS_ROUTE).url(OPENAPI_ROUTE, ApiDoc::openapi()))
-        .fallback(api_not_found)
-}
-
-#[instrument(skip(api, request, next))]
-async fn api_auth_middleware(
-    State(api): State<ApiRuntime>,
-    mut request: Request,
-    next: Next,
-) -> Result<Response, ApiAuthError> {
-    let identity = api.authenticate(request.headers(), client_ip(&request)).await?;
-
-    debug!(key_id = %identity.key_id, role = ?identity.role, "authenticated rest api request");
-    request.extensions_mut().insert(identity);
-
-    Ok(next.run(request).await)
-}
-
-/// Create a consistent JSON error response body.
-#[must_use]
-pub fn json_error_response(
-    status: StatusCode,
-    code: impl Into<String>,
-    message: impl Into<String>,
-) -> Response {
-    let body =
-        ApiErrorBody { error: ApiErrorDetail { code: code.into(), message: message.into() } };
-
-    (status, Json(body)).into_response()
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
-struct ApiInfoResponse {
-    version: String,
-    prefix: String,
-    openapi_path: String,
-    documentation_path: String,
-    authentication_header: String,
-    enabled: bool,
-    rate_limit_per_minute: Option<u32>,
-}
-
-#[derive(OpenApi)]
-#[openapi(
-    paths(
-        api_root,
-        get_health,
-        list_agents,
-        get_agent,
-        kill_agent,
-        queue_agent_task,
-        get_agent_output,
-        agent_upload,
-        agent_download,
-        list_audit,
-        list_session_activity,
-        list_credentials,
-        get_credential,
-        list_jobs,
-        get_job,
-        list_loot,
-        get_loot,
-        list_operators,
-        create_operator,
-        delete_operator,
-        update_operator_role,
-        list_listeners,
-        create_listener,
-        get_listener,
-        update_listener,
-        delete_listener,
-        start_listener,
-        stop_listener,
-        mark_listener,
-        reload_listener_tls_cert,
-        get_webhook_stats,
-        list_payloads,
-        submit_payload_build,
-        get_payload_job,
-        download_payload,
-        flush_payload_cache
-    ),
-    components(
-        schemas(
-            ApiErrorBody,
-            ApiErrorDetail,
-            ApiInfoResponse,
-            HealthResponse,
-            HealthAgentCounts,
-            HealthListenerCounts,
-            HealthPluginCounts,
-            HealthPluginEntry,
-            WebhookStats,
-            DiscordWebhookStats,
-            FlushPayloadCacheResponse,
-            PayloadSummary,
-            PayloadBuildRequest,
-            PayloadBuildSubmitResponse,
-            PayloadJobStatus,
-            AgentTaskQueuedResponse,
-            AgentOutputEntry,
-            AgentOutputPage,
-            AgentUploadRequest,
-            AgentDownloadRequest,
-            AuditPage,
-            SessionActivityPage,
-            CredentialPage,
-            CredentialSummary,
-            JobPage,
-            JobSummary,
-            LootPage,
-            LootSummary,
-            OperatorSummary,
-            CreateOperatorRequest,
-            CreatedOperatorResponse,
-            UpdateOperatorRoleRequest,
-            crate::AuditRecord,
-            crate::AuditResultStatus,
-            crate::SessionActivityRecord,
-            ApiAgentInfo,
-            AgentTaskInfo,
-            ListenerConfig,
-            ListenerSummary,
-            ListenerMarkRequest,
-            crate::PersistedListenerState,
-            crate::ListenerStatus,
-            red_cell_common::ListenerProtocol,
-            red_cell_common::HttpListenerConfig,
-            red_cell_common::SmbListenerConfig,
-            red_cell_common::DnsListenerConfig,
-            red_cell_common::ListenerTlsConfig,
-            red_cell_common::HttpListenerResponseConfig,
-            red_cell_common::HttpListenerProxyConfig,
-            TlsCertReloadRequest
-        )
-    ),
-    modifiers(&ApiSecurity),
-    tags(
-        (name = "rest", description = "Versioned REST API for Red Cell automation clients"),
-        (name = "audit", description = "Operator audit trail endpoints"),
-        (name = "session_activity", description = "Persisted operator session activity endpoints"),
-        (name = "credentials", description = "Captured credential inventory endpoints"),
-        (name = "agents", description = "Agent inventory and tasking endpoints"),
-        (name = "jobs", description = "Queued agent job inspection endpoints"),
-        (name = "loot", description = "Captured loot listing and download endpoints"),
-        (name = "operators", description = "Administrative operator-management endpoints"),
-        (name = "listeners", description = "Listener lifecycle management endpoints"),
-        (name = "webhooks", description = "Outbound webhook delivery statistics"),
-        (name = "payloads", description = "Payload build and download endpoints"),
-        (name = "payload_cache", description = "Payload build artifact cache management")
-    )
-)]
-struct ApiDoc;
-
-struct ApiSecurity;
-
-impl Modify for ApiSecurity {
-    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
-        let components = openapi.components.get_or_insert_with(Default::default);
-        components.add_security_scheme(
-            "api_key",
-            SecurityScheme::ApiKey(ApiKey::Header(ApiKeyValue::new(API_KEY_HEADER))),
-        );
-    }
-}
-
-#[utoipa::path(
-    get,
-    path = "/",
-    context_path = "/api/v1",
-    tag = "rest",
-    responses(
-        (status = 200, description = "API version and discovery metadata", body = ApiInfoResponse)
-    )
-)]
-async fn api_root(State(api): State<ApiRuntime>) -> Json<ApiInfoResponse> {
-    let rate_limit = api.rate_limit();
-
-    Json(ApiInfoResponse {
-        version: API_VERSION.to_owned(),
-        prefix: API_PREFIX.to_owned(),
-        openapi_path: OPENAPI_PATH.to_owned(),
-        documentation_path: DOCS_PATH.to_owned(),
-        authentication_header: API_KEY_HEADER.to_owned(),
-        enabled: api.enabled(),
-        rate_limit_per_minute: (!rate_limit.disabled()).then_some(rate_limit.requests_per_minute),
-    })
-}
+// ── Health endpoint ───────────────────────────────────────────────────────────
 
 /// Agent population counts returned by the health endpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
@@ -1392,1989 +621,261 @@ async fn get_health(
     })
 }
 
-#[utoipa::path(
-    get,
-    path = "/agents",
-    context_path = "/api/v1",
-    tag = "agents",
-    security(("api_key" = [])),
-    responses(
-        (status = 200, description = "List all tracked agents", body = [ApiAgentInfo]),
-        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
-        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
-        (status = 429, description = "Rate limit exceeded", body = ApiErrorBody)
-    )
-)]
-async fn list_agents(
-    State(state): State<TeamserverState>,
-    _identity: ReadApiAccess,
-) -> Json<Vec<ApiAgentInfo>> {
-    Json(state.agent_registry.list().await.into_iter().map(ApiAgentInfo::from).collect())
+// ── Router assembly ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+struct ApiInfoResponse {
+    version: String,
+    prefix: String,
+    openapi_path: String,
+    documentation_path: String,
+    authentication_header: String,
+    enabled: bool,
+    rate_limit_per_minute: Option<u32>,
 }
 
-#[utoipa::path(
-    get,
-    path = "/agents/{id}",
-    context_path = "/api/v1",
-    tag = "agents",
-    security(("api_key" = [])),
-    params(("id" = String, Path, description = "Agent id in hex (with optional 0x prefix)")),
-    responses(
-        (status = 200, description = "Agent details", body = ApiAgentInfo),
-        (status = 400, description = "Invalid agent id", body = ApiErrorBody),
-        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
-        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
-        (status = 404, description = "Agent not found", body = ApiErrorBody)
-    )
-)]
-async fn get_agent(
-    State(state): State<TeamserverState>,
-    _identity: ReadApiAccess,
-    Path(id): Path<String>,
-) -> Result<Json<ApiAgentInfo>, AgentApiError> {
-    let agent_id = parse_api_agent_id(&id)?;
-    let agent = state
-        .agent_registry
-        .get(agent_id)
-        .await
-        .ok_or(crate::TeamserverError::AgentNotFound { agent_id })?;
-    Ok(Json(ApiAgentInfo::from(agent)))
-}
-
-#[utoipa::path(
-    delete,
-    path = "/agents/{id}",
-    context_path = "/api/v1",
-    tag = "agents",
-    security(("api_key" = [])),
-    params(("id" = String, Path, description = "Agent id in hex (with optional 0x prefix)")),
-    responses(
-        (status = 202, description = "Agent kill task queued", body = AgentTaskQueuedResponse),
-        (status = 400, description = "Invalid agent id", body = ApiErrorBody),
-        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
-        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
-        (status = 404, description = "Agent not found", body = ApiErrorBody)
-    )
-)]
-async fn kill_agent(
-    State(state): State<TeamserverState>,
-    identity: TaskAgentApiAccess,
-    Path(id): Path<String>,
-) -> Result<(StatusCode, Json<AgentTaskQueuedResponse>), AgentApiError> {
-    let agent_id = parse_api_agent_id(&id)?;
-    authorize_agent_group_access(&state.database, &identity.key_id, agent_id).await?;
-    if let Some(listener_name) = state.agent_registry.listener_name(agent_id).await {
-        authorize_listener_access(&state.database, &identity.key_id, &listener_name).await?;
-    }
-    let task_id = next_task_id();
-    let message = Message {
-        head: MessageHead {
-            event: EventCode::Session,
-            user: identity.key_id.clone(),
-            timestamp: String::new(),
-            one_time: String::new(),
-        },
-        info: AgentTaskInfo {
-            task_id: task_id.clone(),
-            command_line: "kill".to_owned(),
-            demon_id: format!("{agent_id:08X}"),
-            command_id: u32::from(DemonCommand::CommandExit).to_string(),
-            command: Some("kill".to_owned()),
-            ..AgentTaskInfo::default()
-        },
-    };
-    let queued_jobs = match execute_agent_task(
-        &state.agent_registry,
-        &state.sockets,
-        &state.events,
-        &identity.key_id,
-        identity.role,
-        message,
-    )
-    .await
-    {
-        Ok(queued_jobs) => {
-            record_audit_entry(
-                &state.database,
-                &state.webhooks,
-                &identity.key_id,
-                "agent.task",
-                "agent",
-                Some(format!("{agent_id:08X}")),
-                audit_details(
-                    AuditResultStatus::Success,
-                    Some(agent_id),
-                    Some("kill"),
-                    Some(parameter_object([
-                        ("task_id", Value::String(task_id.clone())),
-                        ("command", Value::String("kill".to_owned())),
-                    ])),
-                ),
-            )
-            .await;
-            queued_jobs
-        }
-        Err(error) => {
-            record_audit_entry(
-                &state.database,
-                &state.webhooks,
-                &identity.key_id,
-                "agent.task",
-                "agent",
-                Some(format!("{agent_id:08X}")),
-                audit_details(
-                    AuditResultStatus::Failure,
-                    Some(agent_id),
-                    Some("kill"),
-                    Some(parameter_object([
-                        ("task_id", Value::String(task_id.clone())),
-                        ("command", Value::String("kill".to_owned())),
-                        ("error", Value::String(error.to_string())),
-                    ])),
-                ),
-            )
-            .await;
-            return Err(error.into());
-        }
-    };
-
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(AgentTaskQueuedResponse { agent_id: format!("{agent_id:08X}"), task_id, queued_jobs }),
-    ))
-}
-
-#[utoipa::path(
-    post,
-    path = "/agents/{id}/task",
-    context_path = "/api/v1",
-    tag = "agents",
-    security(("api_key" = [])),
-    params(("id" = String, Path, description = "Agent id in hex (with optional 0x prefix)")),
-    request_body = AgentTaskInfo,
-    responses(
-        (status = 202, description = "Agent task queued", body = AgentTaskQueuedResponse),
-        (status = 400, description = "Invalid task payload", body = ApiErrorBody),
-        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
-        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
-        (status = 404, description = "Agent not found", body = ApiErrorBody),
-        (status = 429, description = "Agent task queue full", body = ApiErrorBody)
-    )
-)]
-async fn queue_agent_task(
-    State(state): State<TeamserverState>,
-    identity: TaskAgentApiAccess,
-    Path(id): Path<String>,
-    Json(mut task): Json<AgentTaskInfo>,
-) -> Result<(StatusCode, Json<AgentTaskQueuedResponse>), AgentApiError> {
-    let agent_id = parse_api_agent_id(&id)?;
-    authorize_agent_group_access(&state.database, &identity.key_id, agent_id).await?;
-    if let Some(listener_name) = state.agent_registry.listener_name(agent_id).await {
-        authorize_listener_access(&state.database, &identity.key_id, &listener_name).await?;
-    }
-    let canonical_id = format!("{agent_id:08X}");
-
-    if !task.demon_id.is_empty() && !task.demon_id.eq_ignore_ascii_case(&canonical_id) {
-        return Err(AgentCommandError::InvalidAgentId { agent_id: task.demon_id }.into());
-    }
-    if task.task_id.trim().is_empty() {
-        task.task_id = next_task_id();
-    }
-    task.demon_id = canonical_id.clone();
-
-    let audit_parameters = serde_json::to_value(&task).ok();
-    let command = task.command.clone().unwrap_or_else(|| task.command_line.clone());
-    let queued_jobs = match execute_agent_task(
-        &state.agent_registry,
-        &state.sockets,
-        &state.events,
-        &identity.key_id,
-        identity.role,
-        Message {
-            head: MessageHead {
-                event: EventCode::Session,
-                user: identity.key_id.clone(),
-                timestamp: String::new(),
-                one_time: String::new(),
-            },
-            info: task.clone(),
-        },
-    )
-    .await
-    {
-        Ok(queued_jobs) => {
-            record_audit_entry(
-                &state.database,
-                &state.webhooks,
-                &identity.key_id,
-                "agent.task",
-                "agent",
-                Some(canonical_id.clone()),
-                audit_details(
-                    AuditResultStatus::Success,
-                    Some(agent_id),
-                    Some(command.as_str()),
-                    audit_parameters.clone(),
-                ),
-            )
-            .await;
-            queued_jobs
-        }
-        Err(error) => {
-            record_audit_entry(
-                &state.database,
-                &state.webhooks,
-                &identity.key_id,
-                "agent.task",
-                "agent",
-                Some(canonical_id.clone()),
-                audit_details(
-                    AuditResultStatus::Failure,
-                    Some(agent_id),
-                    Some(command.as_str()),
-                    Some(parameter_object([
-                        ("task", audit_parameters.unwrap_or(Value::Null)),
-                        ("error", Value::String(error.to_string())),
-                    ])),
-                ),
-            )
-            .await;
-            return Err(error.into());
-        }
-    };
-
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(AgentTaskQueuedResponse {
-            agent_id: canonical_id,
-            task_id: task.task_id,
-            queued_jobs,
-        }),
-    ))
-}
-
-// ── agent output / upload / download ─────────────────────────────────────────
-
-/// Query parameters for `GET /agents/{id}/output`.
-#[derive(Debug, Deserialize, IntoParams)]
-struct AgentOutputQuery {
-    /// Cursor: only return rows with `id` strictly greater than this value.
-    since: Option<i64>,
-}
-
-#[utoipa::path(
-    get,
-    path = "/agents/{id}/output",
-    context_path = "/api/v1",
-    tag = "agents",
-    security(("api_key" = [])),
-    params(
-        ("id" = String, Path, description = "Agent id in hex (with optional 0x prefix)"),
-        AgentOutputQuery
+#[derive(OpenApi)]
+#[openapi(
+    paths(
+        api_root,
+        get_health,
+        agents::list_agents,
+        agents::get_agent,
+        agents::kill_agent,
+        agents::queue_agent_task,
+        agents::get_agent_output,
+        agents::agent_upload,
+        agents::agent_download,
+        audit::list_audit,
+        audit::list_session_activity,
+        loot::list_credentials,
+        loot::get_credential,
+        loot::list_jobs,
+        loot::get_job,
+        loot::list_loot,
+        loot::get_loot,
+        operators::list_operators,
+        operators::create_operator,
+        operators::delete_operator,
+        operators::update_operator_role,
+        listeners::list_listeners,
+        listeners::create_listener,
+        listeners::get_listener,
+        listeners::update_listener,
+        listeners::delete_listener,
+        listeners::start_listener,
+        listeners::stop_listener,
+        listeners::mark_listener,
+        listeners::reload_listener_tls_cert,
+        payload::get_webhook_stats,
+        payload::list_payloads,
+        payload::submit_payload_build,
+        payload::get_payload_job,
+        payload::download_payload,
+        payload::flush_payload_cache
     ),
-    responses(
-        (status = 200, description = "Agent output entries", body = AgentOutputPage),
-        (status = 400, description = "Invalid agent id", body = ApiErrorBody),
-        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
-        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
-        (status = 404, description = "Agent not found", body = ApiErrorBody)
-    )
-)]
-async fn get_agent_output(
-    State(state): State<TeamserverState>,
-    _identity: ReadApiAccess,
-    Path(id): Path<String>,
-    Query(query): Query<AgentOutputQuery>,
-) -> Result<Json<AgentOutputPage>, AgentApiError> {
-    let agent_id = parse_api_agent_id(&id)?;
-
-    // Verify agent exists.
-    state
-        .agent_registry
-        .get(agent_id)
-        .await
-        .ok_or(crate::TeamserverError::AgentNotFound { agent_id })?;
-
-    let records = state
-        .database
-        .agent_responses()
-        .list_for_agent_since(agent_id, query.since)
-        .await
-        .map_err(AgentApiError::Teamserver)?;
-
-    let entries: Vec<AgentOutputEntry> = records
-        .into_iter()
-        .map(|r| {
-            let exit_code = r
-                .extra
-                .as_ref()
-                .and_then(|v| v.get("ExitCode"))
-                .and_then(serde_json::Value::as_i64)
-                .map(|c| c as i32);
-            AgentOutputEntry {
-                id: r.id.unwrap_or(0),
-                task_id: r.task_id,
-                command_id: r.command_id,
-                request_id: r.request_id,
-                response_type: r.response_type,
-                message: r.message,
-                output: r.output,
-                command_line: r.command_line,
-                operator: r.operator,
-                received_at: r.received_at,
-                exit_code,
-            }
-        })
-        .collect();
-
-    let total = entries.len();
-    Ok(Json(AgentOutputPage { total, entries }))
-}
-
-#[utoipa::path(
-    post,
-    path = "/agents/{id}/upload",
-    context_path = "/api/v1",
-    tag = "agents",
-    security(("api_key" = [])),
-    params(("id" = String, Path, description = "Agent id in hex (with optional 0x prefix)")),
-    request_body = AgentUploadRequest,
-    responses(
-        (status = 202, description = "Upload task queued", body = AgentTaskQueuedResponse),
-        (status = 400, description = "Invalid agent id or payload", body = ApiErrorBody),
-        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
-        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
-        (status = 404, description = "Agent not found", body = ApiErrorBody),
-        (status = 429, description = "Agent task queue full", body = ApiErrorBody)
-    )
-)]
-async fn agent_upload(
-    State(state): State<TeamserverState>,
-    identity: TaskAgentApiAccess,
-    Path(id): Path<String>,
-    Json(body): Json<AgentUploadRequest>,
-) -> Result<(StatusCode, Json<AgentTaskQueuedResponse>), AgentApiError> {
-    use base64::Engine;
-    use base64::engine::general_purpose::STANDARD as BASE64;
-
-    let agent_id = parse_api_agent_id(&id)?;
-    authorize_agent_group_access(&state.database, &identity.key_id, agent_id).await?;
-    if let Some(listener_name) = state.agent_registry.listener_name(agent_id).await {
-        authorize_listener_access(&state.database, &identity.key_id, &listener_name).await?;
-    }
-    let canonical_id = format!("{agent_id:08X}");
-    let task_id = next_task_id();
-
-    // Validate the base64 content before queuing.
-    let _ = BASE64
-        .decode(&body.content)
-        .map_err(|_| AgentCommandError::MissingField { field: "content: invalid base64" })?;
-
-    // Encode remote_path and content as the semicolon-delimited base64 pair that
-    // the existing `build_upload_jobs` helper expects in `Arguments`.
-    let remote_b64 = BASE64.encode(body.remote_path.as_bytes());
-    let arguments = format!("{remote_b64};{}", body.content);
-
-    let command_line = format!("upload {} (via REST API)", body.remote_path);
-    let task = AgentTaskInfo {
-        task_id: task_id.clone(),
-        command_line: command_line.clone(),
-        demon_id: canonical_id.clone(),
-        command_id: u32::from(DemonCommand::CommandFs).to_string(),
-        command: Some("upload".to_owned()),
-        sub_command: Some(u32::from(DemonFilesystemCommand::Upload).to_string()),
-        arguments: Some(arguments),
-        ..AgentTaskInfo::default()
-    };
-
-    let message = Message {
-        head: MessageHead {
-            event: EventCode::Session,
-            user: identity.key_id.clone(),
-            timestamp: String::new(),
-            one_time: String::new(),
-        },
-        info: task,
-    };
-
-    let queued_jobs = match execute_agent_task(
-        &state.agent_registry,
-        &state.sockets,
-        &state.events,
-        &identity.key_id,
-        identity.role,
-        message,
-    )
-    .await
-    {
-        Ok(queued_jobs) => {
-            record_audit_entry(
-                &state.database,
-                &state.webhooks,
-                &identity.key_id,
-                "agent.upload",
-                "agent",
-                Some(canonical_id.clone()),
-                audit_details(
-                    AuditResultStatus::Success,
-                    Some(agent_id),
-                    Some("upload"),
-                    Some(parameter_object([
-                        ("task_id", Value::String(task_id.clone())),
-                        ("remote_path", Value::String(body.remote_path)),
-                    ])),
-                ),
-            )
-            .await;
-            queued_jobs
-        }
-        Err(error) => {
-            record_audit_entry(
-                &state.database,
-                &state.webhooks,
-                &identity.key_id,
-                "agent.upload",
-                "agent",
-                Some(canonical_id.clone()),
-                audit_details(
-                    AuditResultStatus::Failure,
-                    Some(agent_id),
-                    Some("upload"),
-                    Some(parameter_object([
-                        ("task_id", Value::String(task_id.clone())),
-                        ("error", Value::String(error.to_string())),
-                    ])),
-                ),
-            )
-            .await;
-            return Err(error.into());
-        }
-    };
-
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(AgentTaskQueuedResponse { agent_id: canonical_id, task_id, queued_jobs }),
-    ))
-}
-
-#[utoipa::path(
-    post,
-    path = "/agents/{id}/download",
-    context_path = "/api/v1",
-    tag = "agents",
-    security(("api_key" = [])),
-    params(("id" = String, Path, description = "Agent id in hex (with optional 0x prefix)")),
-    request_body = AgentDownloadRequest,
-    responses(
-        (status = 202, description = "Download task queued", body = AgentTaskQueuedResponse),
-        (status = 400, description = "Invalid agent id or payload", body = ApiErrorBody),
-        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
-        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
-        (status = 404, description = "Agent not found", body = ApiErrorBody),
-        (status = 429, description = "Agent task queue full", body = ApiErrorBody)
-    )
-)]
-async fn agent_download(
-    State(state): State<TeamserverState>,
-    identity: TaskAgentApiAccess,
-    Path(id): Path<String>,
-    Json(body): Json<AgentDownloadRequest>,
-) -> Result<(StatusCode, Json<AgentTaskQueuedResponse>), AgentApiError> {
-    use base64::Engine;
-    use base64::engine::general_purpose::STANDARD as BASE64;
-
-    let agent_id = parse_api_agent_id(&id)?;
-    authorize_agent_group_access(&state.database, &identity.key_id, agent_id).await?;
-    if let Some(listener_name) = state.agent_registry.listener_name(agent_id).await {
-        authorize_listener_access(&state.database, &identity.key_id, &listener_name).await?;
-    }
-    let canonical_id = format!("{agent_id:08X}");
-    let task_id = next_task_id();
-
-    // The filesystem download handler expects Arguments to be base64-encoded.
-    let arguments_b64 = BASE64.encode(body.remote_path.as_bytes());
-
-    let command_line = format!("download {} (via REST API)", body.remote_path);
-    let task = AgentTaskInfo {
-        task_id: task_id.clone(),
-        command_line: command_line.clone(),
-        demon_id: canonical_id.clone(),
-        command_id: u32::from(DemonCommand::CommandFs).to_string(),
-        command: Some("download".to_owned()),
-        sub_command: Some(u32::from(DemonFilesystemCommand::Download).to_string()),
-        arguments: Some(arguments_b64),
-        ..AgentTaskInfo::default()
-    };
-
-    let message = Message {
-        head: MessageHead {
-            event: EventCode::Session,
-            user: identity.key_id.clone(),
-            timestamp: String::new(),
-            one_time: String::new(),
-        },
-        info: task,
-    };
-
-    let queued_jobs = match execute_agent_task(
-        &state.agent_registry,
-        &state.sockets,
-        &state.events,
-        &identity.key_id,
-        identity.role,
-        message,
-    )
-    .await
-    {
-        Ok(queued_jobs) => {
-            record_audit_entry(
-                &state.database,
-                &state.webhooks,
-                &identity.key_id,
-                "agent.download",
-                "agent",
-                Some(canonical_id.clone()),
-                audit_details(
-                    AuditResultStatus::Success,
-                    Some(agent_id),
-                    Some("download"),
-                    Some(parameter_object([
-                        ("task_id", Value::String(task_id.clone())),
-                        ("remote_path", Value::String(body.remote_path)),
-                    ])),
-                ),
-            )
-            .await;
-            queued_jobs
-        }
-        Err(error) => {
-            record_audit_entry(
-                &state.database,
-                &state.webhooks,
-                &identity.key_id,
-                "agent.download",
-                "agent",
-                Some(canonical_id.clone()),
-                audit_details(
-                    AuditResultStatus::Failure,
-                    Some(agent_id),
-                    Some("download"),
-                    Some(parameter_object([
-                        ("task_id", Value::String(task_id.clone())),
-                        ("error", Value::String(error.to_string())),
-                    ])),
-                ),
-            )
-            .await;
-            return Err(error.into());
-        }
-    };
-
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(AgentTaskQueuedResponse { agent_id: canonical_id, task_id, queued_jobs }),
-    ))
-}
-
-#[utoipa::path(
-    get,
-    path = "/audit",
-    context_path = "/api/v1",
-    tag = "audit",
-    security(("api_key" = [])),
-    params(AuditQuery),
-    responses(
-        (status = 200, description = "Filtered and paginated audit trail", body = AuditPage),
-        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
-        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
-        (status = 429, description = "Rate limit exceeded", body = ApiErrorBody)
-    )
-)]
-async fn list_audit(
-    State(state): State<TeamserverState>,
-    _identity: ReadApiAccess,
-    Query(query): Query<AuditQuery>,
-) -> Result<Json<AuditPage>, AuditApiError> {
-    Ok(Json(query_audit_log(&state.database, &query).await?))
-}
-
-#[utoipa::path(
-    get,
-    path = "/session-activity",
-    context_path = "/api/v1",
-    tag = "session_activity",
-    security(("api_key" = [])),
-    params(SessionActivityQuery),
-    responses(
-        (status = 200, description = "Filtered and paginated operator session activity", body = SessionActivityPage),
-        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
-        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
-        (status = 429, description = "Rate limit exceeded", body = ApiErrorBody)
-    )
-)]
-async fn list_session_activity(
-    State(state): State<TeamserverState>,
-    _identity: ReadApiAccess,
-    Query(query): Query<SessionActivityQuery>,
-) -> Result<Json<SessionActivityPage>, AuditApiError> {
-    Ok(Json(query_session_activity(&state.database, &query).await?))
-}
-
-#[utoipa::path(
-    get,
-    path = "/credentials",
-    context_path = "/api/v1",
-    tag = "credentials",
-    security(("api_key" = [])),
-    params(CredentialQuery),
-    responses(
-        (status = 200, description = "Filtered and paginated captured credentials", body = CredentialPage),
-        (status = 400, description = "Invalid filter value", body = ApiErrorBody),
-        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
-        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
-        (status = 429, description = "Rate limit exceeded", body = ApiErrorBody)
-    )
-)]
-async fn list_credentials(
-    State(state): State<TeamserverState>,
-    _identity: ReadApiAccess,
-    Query(query): Query<CredentialQuery>,
-) -> Result<Json<CredentialPage>, CredentialApiError> {
-    let offset = query.offset();
-    let limit = query.limit();
-    let filter = LootFilter {
-        kind_exact: Some("credential".to_owned()),
-        agent_id: parse_optional_agent_id(query.agent_id.as_deref(), |value| {
-            CredentialApiError::InvalidAgentId { value }
-        })?,
-        name_contains: query.name.clone(),
-        operator_contains: query.operator.clone(),
-        command_contains: query.command.clone(),
-        pattern_contains: query.pattern.clone(),
-        since: normalize_timestamp_filter(query.since.as_deref()),
-        until: normalize_timestamp_filter(query.until.as_deref()),
-        ..LootFilter::default()
-    };
-    let repo = state.database.loot();
-    let items = repo
-        .query_filtered(&filter, usize_to_i64(limit, "limit")?, usize_to_i64(offset, "offset")?)
-        .await?
-        .into_iter()
-        .filter_map(credential_summary)
-        .collect::<Vec<_>>();
-    let total = i64_to_usize(repo.count_filtered(&filter).await?, "total")?;
-
-    Ok(Json(CredentialPage { total, limit, offset, items }))
-}
-
-#[utoipa::path(
-    get,
-    path = "/credentials/{id}",
-    context_path = "/api/v1",
-    tag = "credentials",
-    security(("api_key" = [])),
-    params(("id" = String, Path, description = "Numeric credential identifier")),
-    responses(
-        (status = 200, description = "Captured credential details", body = CredentialSummary),
-        (status = 400, description = "Invalid credential id", body = ApiErrorBody),
-        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
-        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
-        (status = 404, description = "Credential not found", body = ApiErrorBody)
-    )
-)]
-async fn get_credential(
-    State(state): State<TeamserverState>,
-    _identity: ReadApiAccess,
-    Path(id): Path<String>,
-) -> Result<Json<CredentialSummary>, CredentialApiError> {
-    let credential_id = id
-        .trim()
-        .parse::<i64>()
-        .map_err(|_| CredentialApiError::InvalidCredentialId { value: id.clone() })?;
-    let record = state
-        .database
-        .loot()
-        .get(credential_id)
-        .await?
-        .filter(|record| record.kind.eq_ignore_ascii_case("credential"))
-        .ok_or(CredentialApiError::NotFound { id: credential_id })?;
-
-    credential_summary(record).map(Json).ok_or(CredentialApiError::NotFound { id: credential_id })
-}
-
-#[utoipa::path(
-    get,
-    path = "/jobs",
-    context_path = "/api/v1",
-    tag = "jobs",
-    security(("api_key" = [])),
-    params(JobQuery),
-    responses(
-        (status = 200, description = "Queued jobs across all tracked agents", body = JobPage),
-        (status = 400, description = "Invalid filter value", body = ApiErrorBody),
-        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
-        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
-        (status = 429, description = "Rate limit exceeded", body = ApiErrorBody)
-    )
-)]
-async fn list_jobs(
-    State(state): State<TeamserverState>,
-    _identity: ReadApiAccess,
-    Query(query): Query<JobQuery>,
-) -> Result<Json<JobPage>, JobApiError> {
-    let normalized_agent_id = normalize_agent_filter(query.agent_id.as_deref(), |value| {
-        JobApiError::InvalidAgentId { value }
-    })?;
-    let normalized_request_id = normalize_request_filter(query.request_id.as_deref(), |value| {
-        JobApiError::InvalidRequestId { value }
-    })?;
-
-    let mut items = state
-        .agent_registry
-        .queued_jobs_all()
-        .await
-        .into_iter()
-        .filter(|queued_job| {
-            job_matches(
-                &query,
-                queued_job,
-                normalized_agent_id.as_deref(),
-                normalized_request_id.as_deref(),
-            )
-        })
-        .map(job_summary)
-        .collect::<Vec<_>>();
-
-    let total = items.len();
-    let offset = query.offset();
-    let limit = query.limit();
-    items = items.into_iter().skip(offset).take(limit).collect();
-
-    Ok(Json(JobPage { total, limit, offset, items }))
-}
-
-#[utoipa::path(
-    get,
-    path = "/jobs/{agent_id}/{request_id}",
-    context_path = "/api/v1",
-    tag = "jobs",
-    security(("api_key" = [])),
-    params(
-        ("agent_id" = String, Path, description = "Agent id in hex (with optional 0x prefix)"),
-        ("request_id" = String, Path, description = "Request id in hex (with optional 0x prefix)")
-    ),
-    responses(
-        (status = 200, description = "Queued job details", body = JobSummary),
-        (status = 400, description = "Invalid identifier", body = ApiErrorBody),
-        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
-        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
-        (status = 404, description = "Queued job not found", body = ApiErrorBody)
-    )
-)]
-async fn get_job(
-    State(state): State<TeamserverState>,
-    _identity: ReadApiAccess,
-    Path((agent_id, request_id)): Path<(String, String)>,
-) -> Result<Json<JobSummary>, JobApiError> {
-    let normalized_agent_id = normalize_agent_filter(Some(agent_id.as_str()), |value| {
-        JobApiError::InvalidAgentId { value }
-    })?
-    .ok_or(JobApiError::InvalidAgentId { value: agent_id.clone() })?;
-    let normalized_request_id = normalize_request_filter(Some(request_id.as_str()), |value| {
-        JobApiError::InvalidRequestId { value }
-    })?
-    .ok_or(JobApiError::InvalidRequestId { value: request_id.clone() })?;
-
-    state
-        .agent_registry
-        .queued_jobs_all()
-        .await
-        .into_iter()
-        .find(|queued_job| {
-            format!("{:08X}", queued_job.agent_id) == normalized_agent_id
-                && format!("{:X}", queued_job.job.request_id) == normalized_request_id
-        })
-        .map(job_summary)
-        .map(Json)
-        .ok_or(JobApiError::NotFound {
-            agent_id: normalized_agent_id,
-            request_id: normalized_request_id,
-        })
-}
-
-#[utoipa::path(
-    get,
-    path = "/loot",
-    context_path = "/api/v1",
-    tag = "loot",
-    security(("api_key" = [])),
-    params(LootQuery),
-    responses(
-        (status = 200, description = "Filtered and paginated captured loot", body = LootPage),
-        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
-        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
-        (status = 429, description = "Rate limit exceeded", body = ApiErrorBody)
-    )
-)]
-async fn list_loot(
-    State(state): State<TeamserverState>,
-    _identity: ReadApiAccess,
-    Query(query): Query<LootQuery>,
-) -> Result<Json<LootPage>, LootApiError> {
-    let offset = query.offset();
-    let limit = query.limit();
-    let filter = LootFilter {
-        kind_contains: query.kind.clone(),
-        agent_id: parse_optional_agent_id(query.agent_id.as_deref(), |value| {
-            LootApiError::InvalidAgentId { value }
-        })?,
-        name_contains: query.name.clone(),
-        file_path_contains: query.file_path.clone(),
-        operator_contains: query.operator.clone(),
-        command_contains: query.command.clone(),
-        since: normalize_timestamp_filter(query.since.as_deref()),
-        until: normalize_timestamp_filter(query.until.as_deref()),
-        ..LootFilter::default()
-    };
-    let repo = state.database.loot();
-    let items = repo
-        .query_filtered(&filter, usize_to_i64(limit, "limit")?, usize_to_i64(offset, "offset")?)
-        .await?
-        .into_iter()
-        .map(loot_summary)
-        .collect::<Vec<_>>();
-    let total = i64_to_usize(repo.count_filtered(&filter).await?, "total")?;
-
-    Ok(Json(LootPage { total, limit, offset, items }))
-}
-
-#[utoipa::path(
-    get,
-    path = "/loot/{id}",
-    context_path = "/api/v1",
-    tag = "loot",
-    security(("api_key" = [])),
-    params(("id" = String, Path, description = "Numeric loot identifier")),
-    responses(
-        (status = 200, description = "Loot item binary content"),
-        (status = 400, description = "Invalid loot id", body = ApiErrorBody),
-        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
-        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
-        (status = 404, description = "Loot item not found", body = ApiErrorBody),
-        (status = 409, description = "Loot item has no stored binary content", body = ApiErrorBody)
-    )
-)]
-async fn get_loot(
-    State(state): State<TeamserverState>,
-    _identity: ReadApiAccess,
-    Path(id): Path<String>,
-) -> Result<Response, LootApiError> {
-    let loot_id =
-        id.parse::<i64>().map_err(|_| LootApiError::InvalidLootId { value: id.clone() })?;
-    let record =
-        state.database.loot().get(loot_id).await?.ok_or(LootApiError::NotFound { id: loot_id })?;
-    let data = record.data.ok_or(LootApiError::MissingData { id: loot_id })?;
-    let filename = sanitize_filename(record.name.as_str());
-    let content_type = loot_content_type(record.kind.as_str(), filename.as_str());
-
-    let mut response = Response::new(axum::body::Body::from(data));
-    let headers = response.headers_mut();
-    headers.insert(
-        CONTENT_TYPE,
-        content_type.parse().map_err(|error: axum::http::header::InvalidHeaderValue| {
-            LootApiError::Teamserver(crate::TeamserverError::InvalidPersistedValue {
-                field: "content_type",
-                message: error.to_string(),
-            })
-        })?,
-    );
-    headers.insert(
-        CONTENT_DISPOSITION,
-        format!("attachment; filename=\"{filename}\"").parse().map_err(
-            |error: axum::http::header::InvalidHeaderValue| {
-                LootApiError::Teamserver(crate::TeamserverError::InvalidPersistedValue {
-                    field: "content_disposition",
-                    message: error.to_string(),
-                })
-            },
-        )?,
-    );
-
-    Ok(response)
-}
-
-#[utoipa::path(
-    get,
-    path = "/operators",
-    context_path = "/api/v1",
-    tag = "operators",
-    security(("api_key" = [])),
-    responses(
-        (status = 200, description = "List configured and runtime-created operators with presence state", body = [OperatorSummary]),
-        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
-        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
-        (status = 500, description = "Audit log unavailable for operator presence", body = ApiErrorBody),
-        (status = 429, description = "Rate limit exceeded", body = ApiErrorBody)
-    )
-)]
-async fn list_operators(
-    State(state): State<TeamserverState>,
-    _identity: AdminApiAccess,
-) -> Result<Json<Vec<OperatorSummary>>, OperatorApiError> {
-    let operators = state
-        .auth
-        .operator_inventory()
-        .await?
-        .into_iter()
-        .map(|operator| OperatorSummary {
-            username: operator.username,
-            role: operator.role,
-            online: operator.online,
-            last_seen: operator.last_seen,
-        })
-        .collect::<Vec<_>>();
-    Ok(Json(operators))
-}
-
-#[utoipa::path(
-    post,
-    path = "/operators",
-    context_path = "/api/v1",
-    tag = "operators",
-    security(("api_key" = [])),
-    request_body = CreateOperatorRequest,
-    responses(
-        (status = 201, description = "Operator account created", body = CreatedOperatorResponse),
-        (status = 400, description = "Invalid operator payload", body = ApiErrorBody),
-        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
-        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
-        (status = 409, description = "Operator already exists", body = ApiErrorBody)
-    )
-)]
-async fn create_operator(
-    State(state): State<TeamserverState>,
-    identity: AdminApiAccess,
-    Json(request): Json<CreateOperatorRequest>,
-) -> Result<(StatusCode, Json<CreatedOperatorResponse>), OperatorApiError> {
-    let username = request.username.trim().to_owned();
-    match state
-        .auth
-        .create_operator(username.as_str(), request.password.as_str(), request.role)
-        .await
-    {
-        Ok(()) => {
-            record_audit_entry(
-                &state.database,
-                &state.webhooks,
-                &identity.key_id,
-                "operator.create",
-                "operator",
-                Some(username.clone()),
-                audit_details(
-                    AuditResultStatus::Success,
-                    None,
-                    Some("create"),
-                    Some(parameter_object([
-                        ("username", Value::String(username.clone())),
-                        ("role", Value::String(format!("{:?}", request.role))),
-                    ])),
-                ),
-            )
-            .await;
-
-            Ok((
-                StatusCode::CREATED,
-                Json(CreatedOperatorResponse { username, role: request.role }),
-            ))
-        }
-        Err(error) => {
-            record_audit_entry(
-                &state.database,
-                &state.webhooks,
-                &identity.key_id,
-                "operator.create",
-                "operator",
-                Some(username.clone()),
-                audit_details(
-                    AuditResultStatus::Failure,
-                    None,
-                    Some("create"),
-                    Some(parameter_object([
-                        ("username", Value::String(username)),
-                        ("role", Value::String(format!("{:?}", request.role))),
-                        ("error", Value::String(error.to_string())),
-                    ])),
-                ),
-            )
-            .await;
-            Err(error.into())
-        }
-    }
-}
-
-#[utoipa::path(
-    delete,
-    path = "/operators/{username}",
-    context_path = "/api/v1",
-    tag = "operators",
-    security(("api_key" = [])),
-    params(
-        ("username" = String, Path, description = "Operator username to delete")
-    ),
-    responses(
-        (status = 204, description = "Operator deleted"),
-        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
-        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
-        (status = 404, description = "Operator not found or profile-configured", body = ApiErrorBody),
-        (status = 429, description = "Rate limit exceeded", body = ApiErrorBody)
-    )
-)]
-async fn delete_operator(
-    State(state): State<TeamserverState>,
-    identity: AdminApiAccess,
-    Path(username): Path<String>,
-) -> Result<StatusCode, OperatorApiError> {
-    match state.auth.delete_operator(&username).await {
-        Ok(()) => {
-            record_audit_entry(
-                &state.database,
-                &state.webhooks,
-                &identity.key_id,
-                "operator.delete",
-                "operator",
-                Some(username.clone()),
-                audit_details(
-                    AuditResultStatus::Success,
-                    None,
-                    Some("delete"),
-                    Some(parameter_object([("username", Value::String(username))])),
-                ),
-            )
-            .await;
-
-            Ok(StatusCode::NO_CONTENT)
-        }
-        Err(error) => {
-            record_audit_entry(
-                &state.database,
-                &state.webhooks,
-                &identity.key_id,
-                "operator.delete",
-                "operator",
-                Some(username.clone()),
-                audit_details(
-                    AuditResultStatus::Failure,
-                    None,
-                    Some("delete"),
-                    Some(parameter_object([
-                        ("username", Value::String(username)),
-                        ("error", Value::String(error.to_string())),
-                    ])),
-                ),
-            )
-            .await;
-            Err(error.into())
-        }
-    }
-}
-
-#[utoipa::path(
-    put,
-    path = "/operators/{username}/role",
-    context_path = "/api/v1",
-    tag = "operators",
-    security(("api_key" = [])),
-    params(
-        ("username" = String, Path, description = "Operator username")
-    ),
-    request_body = UpdateOperatorRoleRequest,
-    responses(
-        (status = 200, description = "Operator role updated", body = OperatorSummary),
-        (status = 400, description = "Invalid role", body = ApiErrorBody),
-        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
-        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
-        (status = 404, description = "Operator not found or profile-configured", body = ApiErrorBody),
-        (status = 500, description = "Audit log unavailable for operator presence", body = ApiErrorBody),
-        (status = 429, description = "Rate limit exceeded", body = ApiErrorBody)
-    )
-)]
-async fn update_operator_role(
-    State(state): State<TeamserverState>,
-    identity: AdminApiAccess,
-    Path(username): Path<String>,
-    Json(request): Json<UpdateOperatorRoleRequest>,
-) -> Result<Json<OperatorSummary>, OperatorApiError> {
-    match state.auth.update_operator_role(&username, request.role).await {
-        Ok(()) => {
-            record_audit_entry(
-                &state.database,
-                &state.webhooks,
-                &identity.key_id,
-                "operator.update_role",
-                "operator",
-                Some(username.clone()),
-                audit_details(
-                    AuditResultStatus::Success,
-                    None,
-                    Some("update_role"),
-                    Some(parameter_object([
-                        ("username", Value::String(username.clone())),
-                        ("role", Value::String(format!("{:?}", request.role))),
-                    ])),
-                ),
-            )
-            .await;
-
-            // Fetch updated presence info for the response.
-            let operators = state.auth.operator_inventory().await?;
-            let summary = operators
-                .into_iter()
-                .find(|op| op.username == username)
-                .map(|op| OperatorSummary {
-                    username: op.username,
-                    role: op.role,
-                    online: op.online,
-                    last_seen: op.last_seen,
-                })
-                .unwrap_or(OperatorSummary {
-                    username,
-                    role: request.role,
-                    online: false,
-                    last_seen: None,
-                });
-
-            Ok(Json(summary))
-        }
-        Err(error) => {
-            record_audit_entry(
-                &state.database,
-                &state.webhooks,
-                &identity.key_id,
-                "operator.update_role",
-                "operator",
-                Some(username.clone()),
-                audit_details(
-                    AuditResultStatus::Failure,
-                    None,
-                    Some("update_role"),
-                    Some(parameter_object([
-                        ("username", Value::String(username)),
-                        ("role", Value::String(format!("{:?}", request.role))),
-                        ("error", Value::String(error.to_string())),
-                    ])),
-                ),
-            )
-            .await;
-            Err(error.into())
-        }
-    }
-}
-
-// ── Agent group REST handlers ─────────────────────────────────────────────────
-
-/// Response body for agent group membership endpoints.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct AgentGroupsResponse {
-    /// Hex-encoded agent id (e.g. `"DEADBEEF"`).
-    pub agent_id: String,
-    /// Group names the agent currently belongs to.
-    pub groups: Vec<String>,
-}
-
-/// Request body for setting agent group membership.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct SetAgentGroupsRequest {
-    /// Replacement group list.  An empty array removes all memberships.
-    pub groups: Vec<String>,
-}
-
-async fn get_agent_groups(
-    State(state): State<TeamserverState>,
-    _identity: ReadApiAccess,
-    Path(id): Path<String>,
-) -> Result<Json<AgentGroupsResponse>, AgentApiError> {
-    let agent_id = parse_api_agent_id(&id)?;
-    let groups = state.database.agent_groups().groups_for_agent(agent_id).await?;
-    Ok(Json(AgentGroupsResponse { agent_id: format!("{agent_id:08X}"), groups }))
-}
-
-async fn set_agent_groups(
-    State(state): State<TeamserverState>,
-    identity: AdminApiAccess,
-    Path(id): Path<String>,
-    Json(request): Json<SetAgentGroupsRequest>,
-) -> Result<Json<AgentGroupsResponse>, AgentApiError> {
-    let agent_id = parse_api_agent_id(&id)?;
-    state.database.agent_groups().set_agent_groups(agent_id, &request.groups).await?;
-    record_audit_entry(
-        &state.database,
-        &state.webhooks,
-        &identity.key_id,
-        "agent.set_groups",
-        "agent",
-        Some(format!("{agent_id:08X}")),
-        audit_details(
-            AuditResultStatus::Success,
-            Some(agent_id),
-            Some("set_groups"),
-            Some(parameter_object([(
-                "groups",
-                serde_json::to_value(&request.groups).unwrap_or(Value::Null),
-            )])),
-        ),
-    )
-    .await;
-    Ok(Json(AgentGroupsResponse { agent_id: format!("{agent_id:08X}"), groups: request.groups }))
-}
-
-// ── Operator group-access REST handlers ──────────────────────────────────────
-
-/// Response body for operator group-access endpoints.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct OperatorGroupAccessResponse {
-    /// Operator username.
-    pub username: String,
-    /// Groups the operator may task agents from.  Empty means unrestricted.
-    pub allowed_groups: Vec<String>,
-}
-
-/// Request body for setting operator group-access restrictions.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct SetOperatorGroupAccessRequest {
-    /// Replacement allow-list.  Empty makes the operator unrestricted.
-    pub allowed_groups: Vec<String>,
-}
-
-async fn get_operator_agent_groups(
-    State(state): State<TeamserverState>,
-    _identity: AdminApiAccess,
-    Path(username): Path<String>,
-) -> Result<Json<OperatorGroupAccessResponse>, OperatorApiError> {
-    let allowed_groups = state.database.agent_groups().operator_allowed_groups(&username).await?;
-    Ok(Json(OperatorGroupAccessResponse { username, allowed_groups }))
-}
-
-async fn set_operator_agent_groups(
-    State(state): State<TeamserverState>,
-    identity: AdminApiAccess,
-    Path(username): Path<String>,
-    Json(request): Json<SetOperatorGroupAccessRequest>,
-) -> Result<Json<OperatorGroupAccessResponse>, OperatorApiError> {
-    state
-        .database
-        .agent_groups()
-        .set_operator_allowed_groups(&username, &request.allowed_groups)
-        .await?;
-    record_audit_entry(
-        &state.database,
-        &state.webhooks,
-        &identity.key_id,
-        "operator.set_agent_groups",
-        "operator",
-        Some(username.clone()),
-        audit_details(
-            AuditResultStatus::Success,
-            None,
-            Some("set_agent_groups"),
-            Some(parameter_object([
-                ("username", Value::String(username.clone())),
-                (
-                    "allowed_groups",
-                    serde_json::to_value(&request.allowed_groups).unwrap_or(Value::Null),
-                ),
-            ])),
-        ),
-    )
-    .await;
-    Ok(Json(OperatorGroupAccessResponse { username, allowed_groups: request.allowed_groups }))
-}
-
-// ── Listener access REST handlers ─────────────────────────────────────────────
-
-/// Response body for listener operator allow-list endpoints.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct ListenerAccessResponse {
-    /// Listener name.
-    pub listener_name: String,
-    /// Operators allowed to use this listener.  Empty means unrestricted.
-    pub allowed_operators: Vec<String>,
-}
-
-/// Request body for setting the listener operator allow-list.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct SetListenerAccessRequest {
-    /// Replacement allow-list.  Empty removes all restrictions.
-    pub allowed_operators: Vec<String>,
-}
-
-async fn get_listener_access(
-    State(state): State<TeamserverState>,
-    _identity: AdminApiAccess,
-    Path(name): Path<String>,
-) -> Result<Json<ListenerAccessResponse>, ListenerManagerError> {
-    let allowed_operators = state.database.listener_access().allowed_operators(&name).await?;
-    Ok(Json(ListenerAccessResponse { listener_name: name, allowed_operators }))
-}
-
-async fn set_listener_access(
-    State(state): State<TeamserverState>,
-    identity: AdminApiAccess,
-    Path(name): Path<String>,
-    Json(request): Json<SetListenerAccessRequest>,
-) -> Result<Json<ListenerAccessResponse>, ListenerManagerError> {
-    state
-        .database
-        .listener_access()
-        .set_allowed_operators(&name, &request.allowed_operators)
-        .await?;
-    record_audit_entry(
-        &state.database,
-        &state.webhooks,
-        &identity.key_id,
-        "listener.set_access",
-        "listener",
-        Some(name.clone()),
-        audit_details(
-            AuditResultStatus::Success,
-            None,
-            Some("set_access"),
-            Some(parameter_object([
-                ("listener_name", Value::String(name.clone())),
-                (
-                    "allowed_operators",
-                    serde_json::to_value(&request.allowed_operators).unwrap_or(Value::Null),
-                ),
-            ])),
-        ),
-    )
-    .await;
-    Ok(Json(ListenerAccessResponse {
-        listener_name: name,
-        allowed_operators: request.allowed_operators,
-    }))
-}
-
-#[utoipa::path(
-    get,
-    path = "/listeners",
-    context_path = "/api/v1",
-    tag = "listeners",
-    security(("api_key" = [])),
-    responses(
-        (status = 200, description = "List persisted listeners", body = [ListenerSummary]),
-        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
-        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
-        (status = 429, description = "Rate limit exceeded", body = ApiErrorBody)
-    )
-)]
-async fn list_listeners(
-    State(state): State<TeamserverState>,
-    _identity: ReadApiAccess,
-) -> Result<Json<Vec<ListenerSummary>>, ListenerManagerError> {
-    Ok(Json(state.listeners.list().await?))
-}
-
-#[utoipa::path(
-    post,
-    path = "/listeners",
-    context_path = "/api/v1",
-    tag = "listeners",
-    security(("api_key" = [])),
-    request_body = ListenerConfig,
-    responses(
-        (status = 201, description = "Listener created", body = ListenerSummary),
-        (status = 400, description = "Invalid listener configuration", body = ApiErrorBody),
-        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
-        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
-        (status = 409, description = "Listener already exists", body = ApiErrorBody),
-        (status = 422, description = "Listener failed to start", body = ApiErrorBody)
-    )
-)]
-async fn create_listener(
-    State(state): State<TeamserverState>,
-    identity: ListenerManagementApiAccess,
-    Json(config): Json<ListenerConfig>,
-) -> Result<(StatusCode, Json<ListenerSummary>), ListenerManagerError> {
-    let parameters = serde_json::to_value(&config).ok();
-    validate_listener_config_fields(&config)?;
-    let listener_name = config.name().to_owned();
-    let summary = match state.listeners.create(config).await {
-        Ok(summary) => summary,
-        Err(error) => {
-            record_audit_entry(
-                &state.database,
-                &state.webhooks,
-                &identity.key_id,
-                "listener.create",
-                "listener",
-                Some(listener_name),
-                audit_details(
-                    AuditResultStatus::Failure,
-                    None,
-                    Some("create"),
-                    Some(parameter_object([
-                        ("config", parameters.unwrap_or(Value::Null)),
-                        ("error", Value::String(error.to_string())),
-                    ])),
-                ),
-            )
-            .await;
-            return Err(error);
-        }
-    };
-    record_audit_entry(
-        &state.database,
-        &state.webhooks,
-        &identity.key_id,
-        "listener.create",
-        "listener",
-        Some(summary.name.clone()),
-        audit_details(
-            AuditResultStatus::Success,
-            None,
-            Some("create"),
-            serde_json::to_value(&summary.config).ok(),
-        ),
-    )
-    .await;
-    Ok((StatusCode::CREATED, Json(summary)))
-}
-
-fn validate_listener_config_fields(config: &ListenerConfig) -> Result<(), ListenerManagerError> {
-    if config.name().trim().is_empty() {
-        return Err(ListenerManagerError::InvalidConfig {
-            message: "listener name is required".to_owned(),
-        });
-    }
-
-    if let ListenerConfig::Smb(config) = config
-        && config.pipe_name.trim().is_empty()
-    {
-        return Err(ListenerManagerError::InvalidConfig {
-            message: "pipe name is required".to_owned(),
-        });
-    }
-
-    Ok(())
-}
-
-#[utoipa::path(
-    get,
-    path = "/listeners/{name}",
-    context_path = "/api/v1",
-    tag = "listeners",
-    security(("api_key" = [])),
-    params(("name" = String, Path, description = "Listener name")),
-    responses(
-        (status = 200, description = "Listener details", body = ListenerSummary),
-        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
-        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
-        (status = 404, description = "Listener not found", body = ApiErrorBody)
-    )
-)]
-async fn get_listener(
-    State(state): State<TeamserverState>,
-    _identity: ReadApiAccess,
-    Path(name): Path<String>,
-) -> Result<Json<ListenerSummary>, ListenerManagerError> {
-    Ok(Json(state.listeners.summary(&name).await?))
-}
-
-#[utoipa::path(
-    put,
-    path = "/listeners/{name}",
-    context_path = "/api/v1",
-    tag = "listeners",
-    security(("api_key" = [])),
-    params(("name" = String, Path, description = "Listener name")),
-    request_body = ListenerConfig,
-    responses(
-        (status = 200, description = "Listener updated", body = ListenerSummary),
-        (status = 400, description = "Invalid listener configuration", body = ApiErrorBody),
-        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
-        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
-        (status = 404, description = "Listener not found", body = ApiErrorBody)
-    )
-)]
-async fn update_listener(
-    State(state): State<TeamserverState>,
-    identity: ListenerManagementApiAccess,
-    Path(name): Path<String>,
-    Json(config): Json<ListenerConfig>,
-) -> Result<Json<ListenerSummary>, ListenerManagerError> {
-    let parameters = serde_json::to_value(&config).ok();
-    // Snapshot the current config so we can detect no-op updates later.
-    let old_config = state.listeners.summary(&name).await.ok().map(|s| s.config);
-    if config.name() != name {
-        let error = ListenerManagerError::InvalidConfig {
-            message: "path name must match listener configuration name".to_owned(),
-        };
-        record_audit_entry(
-            &state.database,
-            &state.webhooks,
-            &identity.key_id,
-            "listener.update",
-            "listener",
-            Some(name),
-            audit_details(
-                AuditResultStatus::Failure,
-                None,
-                Some("update"),
-                Some(parameter_object([
-                    ("config", parameters.unwrap_or(Value::Null)),
-                    ("error", Value::String(error.to_string())),
-                ])),
-            ),
+    components(
+        schemas(
+            ApiErrorBody,
+            ApiErrorDetail,
+            ApiInfoResponse,
+            HealthResponse,
+            HealthAgentCounts,
+            HealthListenerCounts,
+            HealthPluginCounts,
+            HealthPluginEntry,
+            payload::WebhookStats,
+            payload::DiscordWebhookStats,
+            payload::FlushPayloadCacheResponse,
+            payload::PayloadSummary,
+            payload::PayloadBuildRequest,
+            payload::PayloadBuildSubmitResponse,
+            payload::PayloadJobStatus,
+            agents::AgentTaskQueuedResponse,
+            agents::AgentOutputEntry,
+            agents::AgentOutputPage,
+            agents::AgentUploadRequest,
+            agents::AgentDownloadRequest,
+            agents::ApiAgentInfo,
+            agents::AgentGroupsResponse,
+            agents::SetAgentGroupsRequest,
+            crate::AuditPage,
+            crate::SessionActivityPage,
+            loot::CredentialPage,
+            loot::CredentialSummary,
+            loot::JobPage,
+            loot::JobSummary,
+            loot::LootPage,
+            loot::LootSummary,
+            operators::OperatorSummary,
+            operators::CreateOperatorRequest,
+            operators::CreatedOperatorResponse,
+            operators::UpdateOperatorRoleRequest,
+            operators::OperatorGroupAccessResponse,
+            operators::SetOperatorGroupAccessRequest,
+            operators::ListenerAccessResponse,
+            operators::SetListenerAccessRequest,
+            crate::AuditRecord,
+            crate::AuditResultStatus,
+            crate::SessionActivityRecord,
+            red_cell_common::operator::AgentTaskInfo,
+            ListenerConfig,
+            crate::listeners::ListenerSummary,
+            crate::listeners::ListenerMarkRequest,
+            crate::PersistedListenerState,
+            crate::ListenerStatus,
+            red_cell_common::ListenerProtocol,
+            red_cell_common::HttpListenerConfig,
+            red_cell_common::SmbListenerConfig,
+            red_cell_common::DnsListenerConfig,
+            red_cell_common::ListenerTlsConfig,
+            red_cell_common::HttpListenerResponseConfig,
+            red_cell_common::HttpListenerProxyConfig,
+            listeners::TlsCertReloadRequest
         )
-        .await;
-        return Err(error);
-    }
-
-    let summary = match state.listeners.update(config).await {
-        Ok(summary) => summary,
-        Err(error) => {
-            record_audit_entry(
-                &state.database,
-                &state.webhooks,
-                &identity.key_id,
-                "listener.update",
-                "listener",
-                Some(name),
-                audit_details(
-                    AuditResultStatus::Failure,
-                    None,
-                    Some("update"),
-                    Some(parameter_object([
-                        ("config", parameters.unwrap_or(Value::Null)),
-                        ("error", Value::String(error.to_string())),
-                    ])),
-                ),
-            )
-            .await;
-            return Err(error);
-        }
-    };
-    // Only invalidate cached payload builds when the listener config actually changed.
-    // An identical PUT (same config resubmitted) must not mark valid payloads as stale.
-    let config_changed = old_config.as_ref() != Some(&summary.config);
-    if config_changed {
-        // Errors are non-fatal: log and continue so the update itself still succeeds.
-        match state
-            .database
-            .payload_builds()
-            .invalidate_done_builds_for_listener(&summary.name, &now_rfc3339())
-            .await
-        {
-            Ok(0) => {}
-            Ok(count) => {
-                tracing::info!(
-                    listener = %summary.name,
-                    invalidated = count,
-                    "invalidated stale payload build records after listener config change"
-                );
-            }
-            Err(err) => {
-                tracing::warn!(
-                    listener = %summary.name,
-                    error = %err,
-                    "failed to invalidate payload build records after listener config change"
-                );
-            }
-        }
-    }
-
-    record_audit_entry(
-        &state.database,
-        &state.webhooks,
-        &identity.key_id,
-        "listener.update",
-        "listener",
-        Some(summary.name.clone()),
-        audit_details(
-            AuditResultStatus::Success,
-            None,
-            Some("update"),
-            serde_json::to_value(&summary.config).ok(),
-        ),
-    )
-    .await;
-    Ok(Json(summary))
-}
-
-#[utoipa::path(
-    delete,
-    path = "/listeners/{name}",
-    context_path = "/api/v1",
-    tag = "listeners",
-    security(("api_key" = [])),
-    params(("name" = String, Path, description = "Listener name")),
-    responses(
-        (status = 204, description = "Listener deleted"),
-        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
-        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
-        (status = 404, description = "Listener not found", body = ApiErrorBody)
+    ),
+    modifiers(&ApiSecurity),
+    tags(
+        (name = "rest", description = "Versioned REST API for Red Cell automation clients"),
+        (name = "audit", description = "Operator audit trail endpoints"),
+        (name = "session_activity", description = "Persisted operator session activity endpoints"),
+        (name = "credentials", description = "Captured credential inventory endpoints"),
+        (name = "agents", description = "Agent inventory and tasking endpoints"),
+        (name = "jobs", description = "Queued agent job inspection endpoints"),
+        (name = "loot", description = "Captured loot listing and download endpoints"),
+        (name = "operators", description = "Administrative operator-management endpoints"),
+        (name = "listeners", description = "Listener lifecycle management endpoints"),
+        (name = "webhooks", description = "Outbound webhook delivery statistics"),
+        (name = "payloads", description = "Payload build and download endpoints"),
+        (name = "payload_cache", description = "Payload build artifact cache management")
     )
 )]
-async fn delete_listener(
-    State(state): State<TeamserverState>,
-    identity: ListenerManagementApiAccess,
-    Path(name): Path<String>,
-) -> Result<StatusCode, ListenerManagerError> {
-    match state.listeners.delete(&name).await {
-        Ok(()) => {
-            record_audit_entry(
-                &state.database,
-                &state.webhooks,
-                &identity.key_id,
-                "listener.delete",
-                "listener",
-                Some(name.clone()),
-                audit_details(
-                    AuditResultStatus::Success,
-                    None,
-                    Some("delete"),
-                    Some(parameter_object([("listener", Value::String(name))])),
-                ),
-            )
-            .await;
-            Ok(StatusCode::NO_CONTENT)
-        }
-        Err(error) => {
-            record_audit_entry(
-                &state.database,
-                &state.webhooks,
-                &identity.key_id,
-                "listener.delete",
-                "listener",
-                Some(name.clone()),
-                audit_details(
-                    AuditResultStatus::Failure,
-                    None,
-                    Some("delete"),
-                    Some(parameter_object([
-                        ("listener", Value::String(name)),
-                        ("error", Value::String(error.to_string())),
-                    ])),
-                ),
-            )
-            .await;
-            Err(error)
-        }
+struct ApiDoc;
+
+struct ApiSecurity;
+
+impl Modify for ApiSecurity {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        let components = openapi.components.get_or_insert_with(Default::default);
+        components.add_security_scheme(
+            "api_key",
+            SecurityScheme::ApiKey(ApiKey::Header(ApiKeyValue::new(API_KEY_HEADER))),
+        );
     }
 }
 
-#[utoipa::path(
-    put,
-    path = "/listeners/{name}/start",
-    context_path = "/api/v1",
-    tag = "listeners",
-    security(("api_key" = [])),
-    params(("name" = String, Path, description = "Listener name")),
-    responses(
-        (status = 200, description = "Listener started", body = ListenerSummary),
-        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
-        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
-        (status = 404, description = "Listener not found", body = ApiErrorBody),
-        (status = 409, description = "Listener already running", body = ApiErrorBody),
-        (status = 422, description = "Listener failed to start", body = ApiErrorBody)
-    )
-)]
-async fn start_listener(
-    State(state): State<TeamserverState>,
-    identity: ListenerManagementApiAccess,
-    Path(name): Path<String>,
-) -> Result<Json<ListenerSummary>, ListenerManagerError> {
-    let summary = match state.listeners.start(&name).await {
-        Ok(summary) => summary,
-        Err(error) => {
-            record_audit_entry(
-                &state.database,
-                &state.webhooks,
-                &identity.key_id,
-                "listener.start",
-                "listener",
-                Some(name.clone()),
-                audit_details(
-                    AuditResultStatus::Failure,
-                    None,
-                    Some("start"),
-                    Some(parameter_object([
-                        ("listener", Value::String(name.clone())),
-                        ("error", Value::String(error.to_string())),
-                    ])),
-                ),
-            )
-            .await;
-            return Err(error);
-        }
-    };
-    record_audit_entry(
-        &state.database,
-        &state.webhooks,
-        &identity.key_id,
-        "listener.start",
-        "listener",
-        Some(summary.name.clone()),
-        audit_details(
-            AuditResultStatus::Success,
-            None,
-            Some("start"),
-            Some(parameter_object([("listener", Value::String(summary.name.clone()))])),
-        ),
-    )
-    .await;
-    Ok(Json(summary))
+/// Build the `/api/v1` router, including version metadata and OpenAPI docs.
+pub fn api_routes(api: ApiRuntime) -> Router<TeamserverState> {
+    let protected = Router::new()
+        .route("/agents", get(agents::list_agents))
+        .route("/agents/{id}", get(agents::get_agent).delete(agents::kill_agent))
+        .route("/agents/{id}/task", post(agents::queue_agent_task))
+        .route("/agents/{id}/output", get(agents::get_agent_output))
+        .route("/agents/{id}/upload", post(agents::agent_upload))
+        .route("/agents/{id}/download", post(agents::agent_download))
+        .route("/audit", get(audit::list_audit))
+        .route("/session-activity", get(audit::list_session_activity))
+        .route("/credentials", get(loot::list_credentials))
+        .route("/credentials/{id}", get(loot::get_credential))
+        .route("/jobs", get(loot::list_jobs))
+        .route("/jobs/{agent_id}/{request_id}", get(loot::get_job))
+        .route("/loot", get(loot::list_loot))
+        .route("/loot/{id}", get(loot::get_loot))
+        .route("/agents/{id}/groups", get(agents::get_agent_groups).put(agents::set_agent_groups))
+        .route("/operators", get(operators::list_operators).post(operators::create_operator))
+        .route("/operators/{username}", delete(operators::delete_operator))
+        .route("/operators/{username}/role", put(operators::update_operator_role))
+        .route(
+            "/operators/{username}/agent-groups",
+            get(operators::get_operator_agent_groups).put(operators::set_operator_agent_groups),
+        )
+        .route(
+            "/listeners/{name}/access",
+            get(operators::get_listener_access).put(operators::set_listener_access),
+        )
+        .route("/listeners", get(listeners::list_listeners).post(listeners::create_listener))
+        .route(
+            "/listeners/{name}",
+            get(listeners::get_listener)
+                .put(listeners::update_listener)
+                .delete(listeners::delete_listener),
+        )
+        .route("/listeners/{name}/start", put(listeners::start_listener))
+        .route("/listeners/{name}/stop", put(listeners::stop_listener))
+        .route("/listeners/{name}/mark", post(listeners::mark_listener))
+        .route("/listeners/{name}/tls-cert", post(listeners::reload_listener_tls_cert))
+        .route("/webhooks/stats", get(payload::get_webhook_stats))
+        .route("/payloads", get(payload::list_payloads))
+        .route("/payloads/build", post(payload::submit_payload_build))
+        .route("/payloads/jobs/{job_id}", get(payload::get_payload_job))
+        .route("/payloads/{id}/download", get(payload::download_payload))
+        .route("/payload-cache", post(payload::flush_payload_cache))
+        .route("/ws", get(crate::session_ws::session_ws_handler))
+        .route("/health", get(get_health))
+        .route_layer(middleware::from_fn_with_state(api, api_auth_middleware));
+
+    Router::new()
+        .route("/", get(api_root))
+        .merge(protected)
+        .merge(SwaggerUi::new(DOCS_ROUTE).url(OPENAPI_ROUTE, ApiDoc::openapi()))
+        .fallback(api_not_found)
+}
+
+#[instrument(skip(api, request, next))]
+async fn api_auth_middleware(
+    State(api): State<ApiRuntime>,
+    mut request: Request,
+    next: Next,
+) -> Result<Response, ApiAuthError> {
+    let identity = api.authenticate(request.headers(), client_ip(&request)).await?;
+
+    debug!(key_id = %identity.key_id, role = ?identity.role, "authenticated rest api request");
+    request.extensions_mut().insert(identity);
+
+    Ok(next.run(request).await)
+}
+
+/// Create a consistent JSON error response body.
+#[must_use]
+pub fn json_error_response(
+    status: StatusCode,
+    code: impl Into<String>,
+    message: impl Into<String>,
+) -> Response {
+    let body =
+        ApiErrorBody { error: ApiErrorDetail { code: code.into(), message: message.into() } };
+
+    (status, Json(body)).into_response()
 }
 
 #[utoipa::path(
-    put,
-    path = "/listeners/{name}/stop",
+    get,
+    path = "/",
     context_path = "/api/v1",
-    tag = "listeners",
-    security(("api_key" = [])),
-    params(("name" = String, Path, description = "Listener name")),
+    tag = "rest",
     responses(
-        (status = 200, description = "Listener stopped", body = ListenerSummary),
-        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
-        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
-        (status = 404, description = "Listener not found", body = ApiErrorBody),
-        (status = 409, description = "Listener not running", body = ApiErrorBody)
+        (status = 200, description = "API version and discovery metadata", body = ApiInfoResponse)
     )
 )]
-async fn stop_listener(
-    State(state): State<TeamserverState>,
-    identity: ListenerManagementApiAccess,
-    Path(name): Path<String>,
-) -> Result<Json<ListenerSummary>, ListenerManagerError> {
-    let summary = match state.listeners.stop(&name).await {
-        Ok(summary) => summary,
-        Err(error) => {
-            record_audit_entry(
-                &state.database,
-                &state.webhooks,
-                &identity.key_id,
-                "listener.stop",
-                "listener",
-                Some(name.clone()),
-                audit_details(
-                    AuditResultStatus::Failure,
-                    None,
-                    Some("stop"),
-                    Some(parameter_object([
-                        ("listener", Value::String(name.clone())),
-                        ("error", Value::String(error.to_string())),
-                    ])),
-                ),
-            )
-            .await;
-            return Err(error);
-        }
-    };
-    record_audit_entry(
-        &state.database,
-        &state.webhooks,
-        &identity.key_id,
-        "listener.stop",
-        "listener",
-        Some(summary.name.clone()),
-        audit_details(
-            AuditResultStatus::Success,
-            None,
-            Some("stop"),
-            Some(parameter_object([("listener", Value::String(summary.name.clone()))])),
-        ),
-    )
-    .await;
-    Ok(Json(summary))
-}
+async fn api_root(State(api): State<ApiRuntime>) -> Json<ApiInfoResponse> {
+    let rate_limit = api.rate_limit();
 
-#[utoipa::path(
-    post,
-    path = "/listeners/{name}/mark",
-    context_path = "/api/v1",
-    tag = "listeners",
-    security(("api_key" = [])),
-    params(("name" = String, Path, description = "Listener name")),
-    request_body = ListenerMarkRequest,
-    responses(
-        (status = 200, description = "Listener marked", body = ListenerSummary),
-        (status = 400, description = "Unsupported mark request", body = ApiErrorBody),
-        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
-        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
-        (status = 404, description = "Listener not found", body = ApiErrorBody)
-    )
-)]
-async fn mark_listener(
-    State(state): State<TeamserverState>,
-    identity: ListenerManagementApiAccess,
-    Path(name): Path<String>,
-    Json(request): Json<ListenerMarkRequest>,
-) -> Result<Json<ListenerSummary>, ListenerManagerError> {
-    let summary = match request.mark.as_str() {
-        mark if mark.eq_ignore_ascii_case("start") || mark.eq_ignore_ascii_case("online") => {
-            match state.listeners.start(&name).await {
-                Ok(summary) => summary,
-                Err(error) => {
-                    record_audit_entry(
-                        &state.database,
-                        &state.webhooks,
-                        &identity.key_id,
-                        "listener.start",
-                        "listener",
-                        Some(name.clone()),
-                        audit_details(
-                            AuditResultStatus::Failure,
-                            None,
-                            Some(request.mark.as_str()),
-                            Some(parameter_object([
-                                ("mark", Value::String(request.mark.clone())),
-                                ("error", Value::String(error.to_string())),
-                            ])),
-                        ),
-                    )
-                    .await;
-                    return Err(error);
-                }
-            }
-        }
-        mark if mark.eq_ignore_ascii_case("stop") || mark.eq_ignore_ascii_case("offline") => {
-            match state.listeners.stop(&name).await {
-                Ok(summary) => summary,
-                Err(error) => {
-                    record_audit_entry(
-                        &state.database,
-                        &state.webhooks,
-                        &identity.key_id,
-                        "listener.stop",
-                        "listener",
-                        Some(name.clone()),
-                        audit_details(
-                            AuditResultStatus::Failure,
-                            None,
-                            Some(request.mark.as_str()),
-                            Some(parameter_object([
-                                ("mark", Value::String(request.mark.clone())),
-                                ("error", Value::String(error.to_string())),
-                            ])),
-                        ),
-                    )
-                    .await;
-                    return Err(error);
-                }
-            }
-        }
-        _ => {
-            return Err(ListenerManagerError::UnsupportedMark { mark: request.mark });
-        }
-    };
-
-    let action = if summary.state.status == crate::ListenerStatus::Running {
-        "listener.start"
-    } else {
-        "listener.stop"
-    };
-    record_audit_entry(
-        &state.database,
-        &state.webhooks,
-        &identity.key_id,
-        action,
-        "listener",
-        Some(summary.name.clone()),
-        audit_details(
-            AuditResultStatus::Success,
-            None,
-            Some(request.mark.as_str()),
-            Some(parameter_object([("mark", Value::String(request.mark.clone()))])),
-        ),
-    )
-    .await;
-
-    Ok(Json(summary))
-}
-
-/// Request body for hot-reloading a running HTTPS listener's TLS certificate.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, ToSchema)]
-pub struct TlsCertReloadRequest {
-    /// PEM-encoded certificate chain (leaf + intermediates).
-    pub cert_pem: String,
-    /// PEM-encoded private key matching the leaf certificate.
-    pub key_pem: String,
-}
-
-#[utoipa::path(
-    post,
-    path = "/listeners/{name}/tls-cert",
-    context_path = "/api/v1",
-    tag = "listeners",
-    security(("api_key" = [])),
-    params(("name" = String, Path, description = "Listener name")),
-    request_body = TlsCertReloadRequest,
-    responses(
-        (status = 204, description = "Certificate hot-reloaded; new handshakes will use the new cert"),
-        (status = 400, description = "Invalid PEM, expired certificate, or key mismatch", body = ApiErrorBody),
-        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
-        (status = 403, description = "API key role lacks admin permission", body = ApiErrorBody),
-        (status = 404, description = "Listener not found", body = ApiErrorBody),
-        (status = 422, description = "Listener is not a running HTTPS listener", body = ApiErrorBody),
-    )
-)]
-async fn reload_listener_tls_cert(
-    State(state): State<TeamserverState>,
-    identity: AdminApiAccess,
-    Path(name): Path<String>,
-    Json(body): Json<TlsCertReloadRequest>,
-) -> Result<StatusCode, ListenerManagerError> {
-    match state
-        .listeners
-        .reload_tls_cert(&name, body.cert_pem.as_bytes(), body.key_pem.as_bytes())
-        .await
-    {
-        Ok(()) => {}
-        Err(error) => {
-            record_audit_entry(
-                &state.database,
-                &state.webhooks,
-                &identity.key_id,
-                "listener.tls_cert_reload",
-                "listener",
-                Some(name.clone()),
-                audit_details(
-                    AuditResultStatus::Failure,
-                    None,
-                    Some("tls_cert_reload"),
-                    Some(parameter_object([
-                        ("listener", Value::String(name.clone())),
-                        ("error", Value::String(error.to_string())),
-                    ])),
-                ),
-            )
-            .await;
-            return Err(error);
-        }
-    }
-
-    record_audit_entry(
-        &state.database,
-        &state.webhooks,
-        &identity.key_id,
-        "listener.tls_cert_reload",
-        "listener",
-        Some(name.clone()),
-        audit_details(
-            AuditResultStatus::Success,
-            None,
-            Some("tls_cert_reload"),
-            Some(parameter_object([("listener", Value::String(name))])),
-        ),
-    )
-    .await;
-
-    Ok(StatusCode::NO_CONTENT)
+    Json(ApiInfoResponse {
+        version: API_VERSION.to_owned(),
+        prefix: API_PREFIX.to_owned(),
+        openapi_path: OPENAPI_PATH.to_owned(),
+        documentation_path: DOCS_PATH.to_owned(),
+        authentication_header: API_KEY_HEADER.to_owned(),
+        enabled: api.enabled(),
+        rate_limit_per_minute: (!rate_limit.disabled()).then_some(rate_limit.requests_per_minute),
+    })
 }
 
 async fn api_not_found() -> Response {
     json_error_response(StatusCode::NOT_FOUND, "not_found", "rest api route not found")
 }
+
+// ── Shared private helper functions ───────────────────────────────────────────
 
 pub(crate) fn extract_api_key(headers: &HeaderMap) -> Result<String, ApiAuthError> {
     if let Some(value) = headers.get(API_KEY_HEADER) {
@@ -3424,220 +925,42 @@ fn authorize_api_role(role: OperatorRole, permission: Permission) -> Result<(), 
     }
 }
 
-fn parse_api_agent_id(value: &str) -> Result<u32, AgentApiError> {
+/// Parse a hex-encoded agent id from a REST path segment.
+pub(super) fn parse_api_agent_id(value: &str) -> Result<u32, crate::websocket::AgentCommandError> {
+    use crate::websocket::AgentCommandError;
+
     let trimmed = value.trim();
     if trimmed.is_empty() {
-        return Err(AgentCommandError::MissingAgentId.into());
+        return Err(AgentCommandError::MissingAgentId);
     }
 
     let hex_digits =
         trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")).unwrap_or(trimmed);
 
     u32::from_str_radix(hex_digits, 16)
-        .map_err(|_| AgentCommandError::InvalidAgentId { agent_id: trimmed.to_owned() }.into())
+        .map_err(|_| AgentCommandError::InvalidAgentId { agent_id: trimmed.to_owned() })
 }
 
-fn loot_summary(record: LootRecord) -> LootSummary {
-    let (operator, command_line, task_id) = loot_context_fields(record.metadata.as_ref());
-    LootSummary {
-        id: record.id.unwrap_or_default(),
-        agent_id: format!("{:08X}", record.agent_id),
-        kind: record.kind,
-        name: record.name,
-        file_path: record.file_path,
-        size_bytes: record.size_bytes,
-        captured_at: record.captured_at,
-        has_data: record.data.is_some(),
-        operator,
-        command_line,
-        task_id,
-        metadata: record.metadata,
-    }
-}
-
-fn credential_summary(record: LootRecord) -> Option<CredentialSummary> {
-    if !record.kind.eq_ignore_ascii_case("credential") {
-        return None;
-    }
-
-    let (operator, command_line, task_id) = loot_context_fields(record.metadata.as_ref());
-    Some(CredentialSummary {
-        id: record.id.unwrap_or_default(),
-        agent_id: format!("{:08X}", record.agent_id),
-        name: record.name,
-        captured_at: record.captured_at,
-        operator,
-        command_line,
-        task_id,
-        pattern: metadata_string_field(record.metadata.as_ref(), "pattern"),
-        content: record.data.as_deref().map(|data| String::from_utf8_lossy(data).into_owned()),
-        metadata: record.metadata,
-    })
-}
-
-fn job_summary(queued_job: QueuedJob) -> JobSummary {
-    JobSummary {
-        agent_id: format!("{:08X}", queued_job.agent_id),
-        command_id: queued_job.job.command,
-        request_id: format!("{:X}", queued_job.job.request_id),
-        task_id: queued_job.job.task_id,
-        command_line: queued_job.job.command_line,
-        created_at: queued_job.job.created_at,
-        operator: (!queued_job.job.operator.is_empty()).then_some(queued_job.job.operator),
-        payload_size: queued_job.job.payload.len(),
-    }
-}
-
-fn normalize_agent_filter<E>(
-    value: Option<&str>,
-    invalid: impl FnOnce(String) -> E + Copy,
-) -> Result<Option<String>, E> {
-    value
-        .map(|filter_value| match parse_hex_u32(filter_value) {
-            Some(parsed) => Ok(format!("{parsed:08X}")),
-            None => Err(invalid(filter_value.to_owned())),
-        })
-        .transpose()
-}
-
-fn normalize_request_filter<E>(
-    value: Option<&str>,
-    invalid: impl FnOnce(String) -> E + Copy,
-) -> Result<Option<String>, E> {
-    value
-        .map(|filter_value| match parse_hex_u32(filter_value) {
-            Some(parsed) => Ok(format!("{parsed:X}")),
-            None => Err(invalid(filter_value.to_owned())),
-        })
-        .transpose()
-}
-
-fn job_matches(
-    query: &JobQuery,
-    queued_job: &QueuedJob,
-    normalized_agent_id: Option<&str>,
-    normalized_request_id: Option<&str>,
-) -> bool {
-    normalized_agent_id.is_none_or(|agent_id| format!("{:08X}", queued_job.agent_id) == agent_id)
-        && normalized_request_id
-            .is_none_or(|request_id| format!("{:X}", queued_job.job.request_id) == request_id)
-        && query.command_id.is_none_or(|command_id| queued_job.job.command == command_id)
-        && contains_filter(queued_job.job.command_line.as_str(), query.command.as_deref())
-        && contains_filter(queued_job.job.task_id.as_str(), query.task_id.as_deref())
-        && optional_contains_filter(
-            (!queued_job.job.operator.is_empty()).then_some(queued_job.job.operator.as_str()),
-            query.operator.as_deref(),
-        )
-}
-
-fn loot_context_fields(
-    metadata: Option<&Value>,
-) -> (Option<String>, Option<String>, Option<String>) {
-    let object = metadata.and_then(Value::as_object);
-    let operator = object
-        .and_then(|value| value.get("operator"))
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned);
-    let command_line = object
-        .and_then(|value| value.get("command_line"))
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned);
-    let task_id = object
-        .and_then(|value| value.get("task_id"))
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned);
-    (operator, command_line, task_id)
-}
-
-fn metadata_string_field(metadata: Option<&Value>, key: &str) -> Option<String> {
-    metadata
-        .and_then(Value::as_object)
-        .and_then(|value| value.get(key))
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
-}
-
-fn parse_rfc3339(value: &str) -> Option<OffsetDateTime> {
-    OffsetDateTime::parse(value, &Rfc3339).ok()
-}
-
-fn normalize_timestamp_filter(value: Option<&str>) -> Option<String> {
-    parse_rfc3339(value?)
-        .and_then(|timestamp| timestamp.to_offset(time::UtcOffset::UTC).format(&Rfc3339).ok())
-}
-
-fn parse_optional_agent_id<E>(
-    value: Option<&str>,
-    invalid: impl FnOnce(String) -> E + Copy,
-) -> Result<Option<u32>, E> {
-    value
-        .map(|filter_value| {
-            parse_hex_u32(filter_value).ok_or_else(|| invalid(filter_value.to_owned()))
-        })
-        .transpose()
-}
-
-fn usize_to_i64(value: usize, field: &'static str) -> Result<i64, TeamserverError> {
-    i64::try_from(value).map_err(|_| TeamserverError::InvalidPersistedValue {
-        field,
-        message: format!("{field} exceeds i64 range"),
-    })
-}
-
-fn i64_to_usize(value: i64, field: &'static str) -> Result<usize, TeamserverError> {
-    usize::try_from(value).map_err(|_| TeamserverError::InvalidPersistedValue {
-        field,
-        message: format!("{field} exceeds usize range"),
-    })
-}
-
-fn parse_hex_u32(value: &str) -> Option<u32> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    let hex_digits =
-        trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")).unwrap_or(trimmed);
-    u32::from_str_radix(hex_digits, 16).ok()
-}
-
-fn contains_filter(value: &str, filter: Option<&str>) -> bool {
-    filter.is_none_or(|filter| value.contains(filter))
-}
-
-fn optional_contains_filter(value: Option<&str>, filter: Option<&str>) -> bool {
-    filter.is_none_or(|filter| value.is_some_and(|value| value.contains(filter)))
-}
-
-fn sanitize_filename(filename: &str) -> String {
-    let sanitized = filename.replace(['"', '\n', '\r'], "_");
-    if sanitized.is_empty() { "loot.bin".to_owned() } else { sanitized }
-}
-
-fn loot_content_type(kind: &str, filename: &str) -> &'static str {
-    if kind.eq_ignore_ascii_case("screenshot") || filename.ends_with(".png") {
-        "image/png"
-    } else if kind.eq_ignore_ascii_case("credential") || filename.ends_with(".txt") {
-        "text/plain; charset=utf-8"
-    } else {
-        "application/octet-stream"
-    }
-}
-
-fn next_task_id() -> String {
-    let bytes = *Uuid::new_v4().as_bytes();
+/// Generate a short random task ID.
+pub(super) fn next_task_id() -> String {
+    let bytes = *uuid::Uuid::new_v4().as_bytes();
     format!("{:08X}", u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
-async fn record_audit_entry(
+/// Format the current UTC time as RFC 3339.
+pub(super) fn now_rfc3339() -> String {
+    OffsetDateTime::now_utc().format(&Rfc3339).unwrap_or_else(|_| "unknown".to_owned())
+}
+
+/// Record an audit log entry, logging a warning if the write fails.
+pub(super) async fn record_audit_entry(
     database: &Database,
     webhooks: &AuditWebhookNotifier,
     actor: &str,
     action: &str,
     target_kind: &str,
     target_id: Option<String>,
-    details: crate::AuditDetails,
+    details: AuditDetails,
 ) {
     if let Err(error) = record_operator_action_with_notifications(
         database,
@@ -3667,585 +990,10 @@ const fn api_role_allows(role: OperatorRole, permission: Permission) -> bool {
     }
 }
 
-/// Delivery statistics for the Discord outbound webhook.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
-struct DiscordWebhookStats {
-    /// Total number of permanent delivery failures (all retry attempts exhausted).
-    failures: u64,
-}
-
-/// Aggregated outbound webhook delivery statistics.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
-struct WebhookStats {
-    /// Discord webhook stats, or `null` when Discord is not configured.
-    discord: Option<DiscordWebhookStats>,
-}
-
-#[utoipa::path(
-    get,
-    path = "/webhooks/stats",
-    context_path = "/api/v1",
-    tag = "webhooks",
-    security(("api_key" = [])),
-    responses(
-        (status = 200, description = "Outbound webhook delivery statistics", body = WebhookStats),
-        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
-        (status = 429, description = "Rate limit exceeded", body = ApiErrorBody),
-    )
-)]
-async fn get_webhook_stats(
-    State(webhooks): State<AuditWebhookNotifier>,
-    _identity: ReadApiAccess,
-) -> Json<WebhookStats> {
-    let discord = if webhooks.is_enabled() {
-        Some(DiscordWebhookStats { failures: webhooks.discord_failure_count() })
-    } else {
-        None
-    };
-
-    Json(WebhookStats { discord })
-}
-
-// ── Payload build REST endpoints ──────────────────────────────────────────────
-
-/// Summary returned by `GET /payloads` for each completed build.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-struct PayloadSummary {
-    /// Unique build/payload identifier.
-    id: String,
-    /// Display name of the payload (e.g. `"demon.x64.exe"`).
-    name: String,
-    /// Target CPU architecture.
-    arch: String,
-    /// File format: `"exe"`, `"dll"`, or `"bin"`.
-    format: String,
-    /// RFC 3339 build timestamp.
-    built_at: String,
-    /// Artifact size in bytes, if available.
-    size_bytes: Option<u64>,
-}
-
-/// Request body for `POST /payloads/build`.
-#[derive(Debug, Clone, Deserialize, ToSchema)]
-struct PayloadBuildRequest {
-    /// Name of the listener to embed in the payload.
-    listener: String,
-    /// Target CPU architecture (`"x64"` or `"x86"`).
-    arch: String,
-    /// Desired output format: `"exe"`, `"dll"`, or `"bin"`.
-    format: String,
-    /// Agent type to build: `"demon"`, `"archon"`, `"phantom"`, or `"specter"`.
-    /// Defaults to `"demon"` when omitted.
-    #[serde(default = "default_agent_type")]
-    agent: String,
-    /// Optional agent sleep interval in seconds.
-    sleep: Option<u64>,
-}
-
-fn default_agent_type() -> String {
-    "demon".to_owned()
-}
-
-/// Response returned by `POST /payloads/build`.
-#[derive(Debug, Clone, Serialize, ToSchema)]
-struct PayloadBuildSubmitResponse {
-    /// Server-assigned build job identifier.
-    job_id: String,
-}
-
-/// Response returned by `GET /payloads/jobs/{job_id}`.
-#[derive(Debug, Clone, Serialize, ToSchema)]
-struct PayloadJobStatus {
-    /// Build job identifier.
-    job_id: String,
-    /// Current status: `"pending"`, `"running"`, `"done"`, or `"error"`.
-    status: String,
-    /// Agent type that was requested for this build (e.g. `"Demon"`, `"Phantom"`).
-    agent_type: String,
-    /// Payload identifier (set when status is `"done"`).
-    payload_id: Option<String>,
-    /// Artifact size in bytes (set when status is `"done"`).
-    size_bytes: Option<u64>,
-    /// Error message (set when status is `"error"`).
-    error: Option<String>,
-}
-
-/// Map CLI-style format names to Havoc builder format strings.
-fn cli_format_to_havoc(format: &str) -> Result<&'static str, String> {
-    match format {
-        "exe" => Ok("Windows Exe"),
-        "dll" => Ok("Windows Dll"),
-        "bin" => Ok("Windows Shellcode"),
-        other => Err(format!("unsupported format '{other}': expected exe, dll, or bin")),
-    }
-}
-
-/// Normalize a CLI agent type string (case-insensitive) to the canonical
-/// PascalCase name expected by the payload builder.
-///
-/// Returns `Err` with a user-facing message for unrecognised values.
-fn normalize_agent_type(agent: &str) -> Result<&'static str, String> {
-    match agent.to_lowercase().as_str() {
-        "demon" => Ok("Demon"),
-        "archon" => Ok("Archon"),
-        "phantom" => Ok("Phantom"),
-        "specter" => Ok("Specter"),
-        other => Err(format!(
-            "unsupported agent type '{other}': expected demon, archon, phantom, or specter"
-        )),
-    }
-}
-
-/// Validate that the requested format is supported for the given agent type.
-///
-/// Phantom and Specter are Rust agents with a fixed build pipeline that always
-/// produces a single executable output regardless of the `format` field.
-/// Accepting `dll` or `bin` for those agents would silently build an exe while
-/// returning a successful response, misleading callers.  Demon and Archon use
-/// the Havoc C/ASM toolchain and support all three output classes.
-///
-/// `agent_type` must already be normalised to PascalCase (i.e. the output of
-/// [`normalize_agent_type`]).  `format` is the CLI short form (`"exe"`, `"dll"`,
-/// or `"bin"`).
-///
-/// Returns `Err` with a user-facing message when the combination is unsupported.
-fn validate_agent_format_combination(agent_type: &str, format: &str) -> Result<(), String> {
-    match agent_type {
-        // Rust agents have a single fixed output format (exe).
-        "Phantom" | "Specter" if format != "exe" => {
-            Err(format!("agent '{agent_type}' only supports format 'exe'; got '{format}'"))
-        }
-        _ => Ok(()),
-    }
-}
-
-fn now_rfc3339() -> String {
-    OffsetDateTime::now_utc().format(&Rfc3339).unwrap_or_else(|_| "unknown".to_owned())
-}
-
-#[utoipa::path(
-    get,
-    path = "/payloads",
-    context_path = "/api/v1",
-    tag = "payloads",
-    security(("api_key" = [])),
-    responses(
-        (status = 200, description = "List of completed payload builds", body = Vec<PayloadSummary>),
-        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
-        (status = 429, description = "Rate limit exceeded", body = ApiErrorBody),
-    )
-)]
-async fn list_payloads(State(state): State<TeamserverState>, _identity: ReadApiAccess) -> Response {
-    match state.database.payload_builds().list_summaries().await {
-        Ok(records) => {
-            let summaries: Vec<PayloadSummary> = records
-                .into_iter()
-                .filter(|r| r.status == "done")
-                .map(|r| PayloadSummary {
-                    id: r.id,
-                    name: r.name,
-                    arch: r.arch,
-                    format: r.format,
-                    built_at: r.created_at,
-                    size_bytes: r.size_bytes.map(|s| s as u64),
-                })
-                .collect();
-            Json(summaries).into_response()
-        }
-        Err(err) => {
-            tracing::error!(error = %err, "failed to list payload builds");
-            json_error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "payload_list_failed",
-                err.to_string(),
-            )
-        }
-    }
-}
-
-#[utoipa::path(
-    post,
-    path = "/payloads/build",
-    context_path = "/api/v1",
-    tag = "payloads",
-    security(("api_key" = [])),
-    request_body = PayloadBuildRequest,
-    responses(
-        (status = 202, description = "Build job submitted", body = PayloadBuildSubmitResponse),
-        (status = 400, description = "Invalid build request", body = ApiErrorBody),
-        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
-        (status = 404, description = "Listener not found", body = ApiErrorBody),
-        (status = 429, description = "Rate limit exceeded", body = ApiErrorBody),
-        (status = 500, description = "Internal server error during listener lookup or build", body = ApiErrorBody),
-    )
-)]
-async fn submit_payload_build(
-    State(state): State<TeamserverState>,
-    identity: TaskAgentApiAccess,
-    Json(request): Json<PayloadBuildRequest>,
-) -> Response {
-    // Validate format.
-    let havoc_format = match cli_format_to_havoc(&request.format) {
-        Ok(f) => f,
-        Err(msg) => {
-            return json_error_response(StatusCode::BAD_REQUEST, "invalid_format", msg);
-        }
-    };
-
-    // Validate and normalise agent type.
-    let agent_type = match normalize_agent_type(&request.agent) {
-        Ok(a) => a,
-        Err(msg) => {
-            return json_error_response(StatusCode::BAD_REQUEST, "invalid_agent_type", msg);
-        }
-    };
-
-    // Validate that the agent/format combination is supported.
-    if let Err(msg) = validate_agent_format_combination(agent_type, &request.format) {
-        return json_error_response(StatusCode::BAD_REQUEST, "unsupported_agent_format", msg);
-    }
-
-    // Validate architecture.
-    if !matches!(request.arch.as_str(), "x64" | "x86") {
-        return json_error_response(
-            StatusCode::BAD_REQUEST,
-            "invalid_arch",
-            format!("unsupported architecture '{}': expected x64 or x86", request.arch),
-        );
-    }
-
-    // Look up the listener.
-    let listener_summary = match state.listeners.summary(&request.listener).await {
-        Ok(s) => s,
-        Err(ListenerManagerError::ListenerNotFound { .. }) => {
-            return json_error_response(
-                StatusCode::NOT_FOUND,
-                "listener_not_found",
-                format!("listener '{}' not found", request.listener),
-            );
-        }
-        Err(err) => {
-            tracing::error!(listener = %request.listener, error = %err, "listener lookup failed during payload build");
-            return json_error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "payload_build_listener_lookup_failed",
-                format!("failed to look up listener '{}': {err}", request.listener),
-            );
-        }
-    };
-
-    let job_id = Uuid::new_v4().to_string();
-    let now = now_rfc3339();
-
-    let record = crate::PayloadBuildRecord {
-        id: job_id.clone(),
-        status: "pending".to_owned(),
-        name: String::new(),
-        arch: request.arch.clone(),
-        format: request.format.clone(),
-        listener: request.listener.clone(),
-        agent_type: agent_type.to_owned(),
-        sleep_secs: request.sleep.map(|s| i64::try_from(s).unwrap_or(i64::MAX)),
-        artifact: None,
-        size_bytes: None,
-        error: None,
-        created_at: now.clone(),
-        updated_at: now,
-    };
-
-    if let Err(err) = state.database.payload_builds().create(&record).await {
-        tracing::error!(error = %err, "failed to create payload build record");
-        return json_error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "payload_build_create_failed",
-            err.to_string(),
-        );
-    }
-
-    // Spawn the background build task.
-    let db = state.database.clone();
-    let payload_builder = state.payload_builder.clone();
-    let webhooks = state.webhooks.clone();
-    let actor = identity.key_id.clone();
-    let listener_config = listener_summary.config.clone();
-    let listener_name = request.listener.clone();
-    let arch = request.arch.clone();
-    let format_cli = request.format.clone();
-    let build_job_id = job_id.clone();
-
-    let build_request = red_cell_common::operator::BuildPayloadRequestInfo {
-        agent_type: agent_type.to_owned(),
-        listener: request.listener.clone(),
-        arch: request.arch.clone(),
-        format: havoc_format.to_owned(),
-        config: request
-            .sleep
-            .map_or_else(String::new, |s| serde_json::json!({"Sleep": s}).to_string()),
-    };
-
-    tokio::spawn(async move {
-        // Mark running.
-        if let Err(e) = db
-            .payload_builds()
-            .update_status(&build_job_id, "running", None, None, None, None, &now_rfc3339())
-            .await
-        {
-            warn!(build_id = %build_job_id, error = %e, "failed to update payload build status to running");
-        }
-
-        match payload_builder.build_payload(&listener_config, &build_request, |_progress| {}).await
-        {
-            Ok(artifact) => {
-                let size = i64::try_from(artifact.bytes.len()).unwrap_or(i64::MAX);
-                if let Err(e) = db
-                    .payload_builds()
-                    .update_status(
-                        &build_job_id,
-                        "done",
-                        Some(&artifact.file_name),
-                        Some(&artifact.bytes),
-                        Some(size),
-                        None,
-                        &now_rfc3339(),
-                    )
-                    .await
-                {
-                    warn!(build_id = %build_job_id, error = %e, "failed to update payload build status to done");
-                }
-
-                record_audit_entry(
-                    &db,
-                    &webhooks,
-                    &actor,
-                    "payload.build",
-                    "payload",
-                    Some(build_job_id),
-                    audit_details(
-                        AuditResultStatus::Success,
-                        None,
-                        None,
-                        Some(parameter_object([
-                            ("listener", Value::String(listener_name)),
-                            ("arch", Value::String(arch)),
-                            ("format", Value::String(format_cli)),
-                        ])),
-                    ),
-                )
-                .await;
-            }
-            Err(err) => {
-                if let Err(e) = db
-                    .payload_builds()
-                    .update_status(
-                        &build_job_id,
-                        "error",
-                        None,
-                        None,
-                        None,
-                        Some(&err.to_string()),
-                        &now_rfc3339(),
-                    )
-                    .await
-                {
-                    warn!(build_id = %build_job_id, error = %e, "failed to update payload build status to error");
-                }
-
-                record_audit_entry(
-                    &db,
-                    &webhooks,
-                    &actor,
-                    "payload.build",
-                    "payload",
-                    Some(build_job_id),
-                    audit_details(
-                        AuditResultStatus::Failure,
-                        None,
-                        None,
-                        Some(parameter_object([
-                            ("listener", Value::String(listener_name)),
-                            ("arch", Value::String(arch)),
-                            ("format", Value::String(format_cli)),
-                            ("error", Value::String(err.to_string())),
-                        ])),
-                    ),
-                )
-                .await;
-            }
-        }
-    });
-
-    (StatusCode::ACCEPTED, Json(PayloadBuildSubmitResponse { job_id })).into_response()
-}
-
-#[utoipa::path(
-    get,
-    path = "/payloads/jobs/{job_id}",
-    context_path = "/api/v1",
-    tag = "payloads",
-    security(("api_key" = [])),
-    params(
-        ("job_id" = String, Path, description = "Build job identifier")
-    ),
-    responses(
-        (status = 200, description = "Build job status", body = PayloadJobStatus),
-        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
-        (status = 404, description = "Job not found", body = ApiErrorBody),
-        (status = 429, description = "Rate limit exceeded", body = ApiErrorBody),
-    )
-)]
-async fn get_payload_job(
-    State(state): State<TeamserverState>,
-    Path(job_id): Path<String>,
-    _identity: ReadApiAccess,
-) -> Response {
-    match state.database.payload_builds().get_summary(&job_id).await {
-        Ok(Some(record)) => {
-            let payload_id = if record.status == "done" { Some(record.id.clone()) } else { None };
-            Json(PayloadJobStatus {
-                job_id: record.id,
-                status: record.status,
-                agent_type: record.agent_type,
-                payload_id,
-                size_bytes: record.size_bytes.map(|s| s as u64),
-                error: record.error,
-            })
-            .into_response()
-        }
-        Ok(None) => json_error_response(
-            StatusCode::NOT_FOUND,
-            "job_not_found",
-            format!("build job '{job_id}' not found"),
-        ),
-        Err(err) => {
-            tracing::error!(error = %err, "failed to get payload build job");
-            json_error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "payload_job_fetch_failed",
-                err.to_string(),
-            )
-        }
-    }
-}
-
-#[utoipa::path(
-    get,
-    path = "/payloads/{id}/download",
-    context_path = "/api/v1",
-    tag = "payloads",
-    security(("api_key" = [])),
-    params(
-        ("id" = String, Path, description = "Payload build identifier")
-    ),
-    responses(
-        (status = 200, description = "Raw payload binary", content_type = "application/octet-stream"),
-        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
-        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
-        (status = 404, description = "Payload not found or not yet built", body = ApiErrorBody),
-        (status = 410, description = "Payload is stale — listener config changed after this payload was built", body = ApiErrorBody),
-        (status = 429, description = "Rate limit exceeded", body = ApiErrorBody),
-    )
-)]
-async fn download_payload(
-    State(state): State<TeamserverState>,
-    Path(id): Path<String>,
-    _identity: TaskAgentApiAccess,
-) -> Response {
-    match state.database.payload_builds().get(&id).await {
-        Ok(Some(mut record)) if record.status == "done" && record.artifact.is_some() => {
-            // SAFETY: guard above checks is_some(); use take() to avoid expect()/unwrap()
-            let Some(artifact) = record.artifact.take() else {
-                return json_error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal_error",
-                    "artifact unexpectedly missing".to_string(),
-                );
-            };
-            let file_name =
-                if record.name.is_empty() { format!("payload-{id}.bin") } else { record.name };
-            (
-                StatusCode::OK,
-                [
-                    (CONTENT_TYPE, "application/octet-stream"),
-                    (CONTENT_DISPOSITION, &format!("attachment; filename=\"{file_name}\"")),
-                ],
-                artifact,
-            )
-                .into_response()
-        }
-        Ok(Some(record)) if record.status == "stale" => json_error_response(
-            StatusCode::GONE,
-            "payload_stale",
-            format!(
-                "payload '{id}' is stale — the listener config was updated after this \
-                 payload was built; submit a new build request"
-            ),
-        ),
-        Ok(Some(_)) => json_error_response(
-            StatusCode::NOT_FOUND,
-            "payload_not_ready",
-            format!("payload '{id}' is not yet built or build failed"),
-        ),
-        Ok(None) => json_error_response(
-            StatusCode::NOT_FOUND,
-            "payload_not_found",
-            format!("payload '{id}' not found"),
-        ),
-        Err(err) => {
-            tracing::error!(error = %err, "failed to fetch payload for download");
-            json_error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "payload_download_failed",
-                err.to_string(),
-            )
-        }
-    }
-}
-
-/// Response returned after flushing the payload build artifact cache.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
-struct FlushPayloadCacheResponse {
-    /// Number of cache entries removed.
-    flushed: u64,
-}
-
-#[utoipa::path(
-    post,
-    path = "/payload-cache",
-    context_path = "/api/v1",
-    tag = "payload_cache",
-    security(("api_key" = [])),
-    responses(
-        (status = 200, description = "Cache flushed", body = FlushPayloadCacheResponse),
-        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
-        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
-        (status = 429, description = "Rate limit exceeded", body = ApiErrorBody),
-        (status = 500, description = "Failed to flush cache", body = ApiErrorBody)
-    )
-)]
-async fn flush_payload_cache(
-    State(state): State<TeamserverState>,
-    _identity: AdminApiAccess,
-) -> Response {
-    match state.payload_builder.cache().flush().await {
-        Ok(flushed) => {
-            tracing::info!(flushed, "payload cache flushed via REST endpoint");
-            Json(FlushPayloadCacheResponse { flushed }).into_response()
-        }
-        Err(err) => {
-            tracing::error!(error = %err, "failed to flush payload cache");
-            json_error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "cache_flush_failed",
-                err.to_string(),
-            )
-        }
-    }
-}
-
-// ── NDJSON session WebSocket (red-cell-cli `session` mode) ─────────────────────
+// ── Session WebSocket dispatch helpers ────────────────────────────────────────
 
 /// Errors while mapping a session `cmd` to an internal REST request.
-#[derive(Debug, Error)]
+#[derive(Debug, thiserror::Error)]
 enum SessionBuildError {
     #[error("unknown session command `{0}`")]
     UnknownCommand(String),
@@ -4264,10 +1012,11 @@ impl SessionBuildError {
 /// Build `application/x-www-form-urlencoded` query string from a JSON object,
 /// skipping meta keys (`cmd`, `wait`, `timeout`) and null values.
 fn session_query_string_from_value(val: &Value) -> Result<String, SessionBuildError> {
+    use std::collections::BTreeMap as SortedMap;
     let obj = val
         .as_object()
         .ok_or_else(|| SessionBuildError::InvalidBody("expected JSON object".to_owned()))?;
-    let mut map = BTreeMap::<String, String>::new();
+    let mut map = SortedMap::<String, String>::new();
     for (k, v) in obj {
         if matches!(k.as_str(), "cmd" | "wait" | "timeout") {
             continue;
@@ -4490,8 +1239,10 @@ fn build_session_rest_request(
                 .get("mark")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| SessionBuildError::missing(cmd, "mark"))?;
-            let body = serde_json::to_vec(&ListenerMarkRequest { mark: mark.to_owned() })
-                .map_err(|e| SessionBuildError::InvalidBody(e.to_string()))?;
+            let body = serde_json::to_vec(&crate::listeners::ListenerMarkRequest {
+                mark: mark.to_owned(),
+            })
+            .map_err(|e| SessionBuildError::InvalidBody(e.to_string()))?;
             build("POST", &format!("/listeners/{name}/mark"), Body::from(body))
         }
         "operator.list" => Ok(HttpRequest::builder()
@@ -4779,7 +1530,6 @@ pub(crate) async fn session_api_dispatch_line(
     };
     session_ws_envelope_response(cmd, response).await
 }
-
 #[cfg(test)]
 mod tests {
     use axum::body::{Body, to_bytes};
@@ -4789,10 +1539,18 @@ mod tests {
 
     use super::*;
     use crate::{
-        AgentRegistry, AuthService, Database, EventBus, Job, ListenerManager,
-        OperatorConnectionManager, SocketRelayManager,
+        AgentRegistry, AuditResultStatus, AuthService, Database, EventBus, Job, ListenerManager,
+        LootRecord, OperatorConnectionManager, SocketRelayManager,
     };
+    use red_cell_common::AgentRecord;
+    use agents::AgentApiError;
+    use axum::http::header::{AUTHORIZATION, CONTENT_DISPOSITION};
+    use loot::{CredentialQuery, LootQuery};
+    use payload::{cli_format_to_havoc, normalize_agent_type, validate_agent_format_combination};
+    use red_cell_common::config::OperatorRole;
     use red_cell_common::crypto::hash_password_sha3;
+    use red_cell_common::demon::DemonCommand;
+    use uuid::Uuid;
     use zeroize::Zeroizing;
 
     // ---- lookup_key_ct unit tests ----

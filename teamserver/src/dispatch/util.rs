@@ -89,6 +89,148 @@ pub(crate) fn windows_arch_label(value: u32) -> &'static str {
     }
 }
 
+/// Binary payload parser for Demon callback packets.
+///
+/// Reads length-prefixed blobs and fixed-width integers from a byte slice,
+/// generating typed `CommandDispatchError::InvalidCallbackPayload` errors on
+/// any truncation or encoding failure.
+pub(in crate::dispatch) struct CallbackParser<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+    command_id: u32,
+}
+
+impl<'a> CallbackParser<'a> {
+    pub(in crate::dispatch) fn new(bytes: &'a [u8], command_id: u32) -> Self {
+        Self { bytes, offset: 0, command_id }
+    }
+
+    pub(in crate::dispatch) fn is_empty(&self) -> bool {
+        self.offset == self.bytes.len()
+    }
+
+    pub(in crate::dispatch) fn read_u32(
+        &mut self,
+        context: &'static str,
+    ) -> Result<u32, super::CommandDispatchError> {
+        let remaining = self.bytes.len().saturating_sub(self.offset);
+        if remaining < 4 {
+            return Err(super::CommandDispatchError::InvalidCallbackPayload {
+                command_id: self.command_id,
+                message: format!("{context}: expected 4 bytes, got {remaining}"),
+            });
+        }
+
+        let value =
+            u32::from_le_bytes(self.bytes[self.offset..self.offset + 4].try_into().map_err(
+                |_| super::CommandDispatchError::InvalidCallbackPayload {
+                    command_id: self.command_id,
+                    message: format!("{context}: failed to read u32"),
+                },
+            )?);
+        self.offset += 4;
+        Ok(value)
+    }
+
+    pub(in crate::dispatch) fn read_u64(
+        &mut self,
+        context: &'static str,
+    ) -> Result<u64, super::CommandDispatchError> {
+        let remaining = self.bytes.len().saturating_sub(self.offset);
+        if remaining < 8 {
+            return Err(super::CommandDispatchError::InvalidCallbackPayload {
+                command_id: self.command_id,
+                message: format!("{context}: expected 8 bytes, got {remaining}"),
+            });
+        }
+
+        let value =
+            u64::from_le_bytes(self.bytes[self.offset..self.offset + 8].try_into().map_err(
+                |_| super::CommandDispatchError::InvalidCallbackPayload {
+                    command_id: self.command_id,
+                    message: format!("{context}: failed to read u64"),
+                },
+            )?);
+        self.offset += 8;
+        Ok(value)
+    }
+
+    pub(in crate::dispatch) fn read_bool(
+        &mut self,
+        context: &'static str,
+    ) -> Result<bool, super::CommandDispatchError> {
+        Ok(self.read_u32(context)? != 0)
+    }
+
+    pub(in crate::dispatch) fn read_bytes(
+        &mut self,
+        context: &'static str,
+    ) -> Result<Vec<u8>, super::CommandDispatchError> {
+        let len = usize::try_from(self.read_u32(context)?).map_err(|_| {
+            super::CommandDispatchError::InvalidCallbackPayload {
+                command_id: self.command_id,
+                message: format!("{context}: length overflow"),
+            }
+        })?;
+        let remaining = self.bytes.len().saturating_sub(self.offset);
+        if remaining < len {
+            return Err(super::CommandDispatchError::InvalidCallbackPayload {
+                command_id: self.command_id,
+                message: format!("{context}: expected {len} bytes, got {remaining}"),
+            });
+        }
+
+        let value = self.bytes[self.offset..self.offset + len].to_vec();
+        self.offset += len;
+        Ok(value)
+    }
+
+    pub(in crate::dispatch) fn read_fixed_bytes(
+        &mut self,
+        len: usize,
+        context: &'static str,
+    ) -> Result<Vec<u8>, super::CommandDispatchError> {
+        let remaining = self.bytes.len().saturating_sub(self.offset);
+        if remaining < len {
+            return Err(super::CommandDispatchError::InvalidCallbackPayload {
+                command_id: self.command_id,
+                message: format!("{context}: expected {len} bytes, got {remaining}"),
+            });
+        }
+
+        let value = self.bytes[self.offset..self.offset + len].to_vec();
+        self.offset += len;
+        Ok(value)
+    }
+
+    pub(in crate::dispatch) fn read_utf16(
+        &mut self,
+        context: &'static str,
+    ) -> Result<String, super::CommandDispatchError> {
+        let raw = self.read_bytes(context)?;
+        if raw.len() % 2 != 0 {
+            return Err(super::CommandDispatchError::InvalidCallbackPayload {
+                command_id: self.command_id,
+                message: format!("{context}: utf16 length must be even"),
+            });
+        }
+
+        let words = raw
+            .chunks_exact(2)
+            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect::<Vec<_>>();
+        Ok(String::from_utf16_lossy(&words).trim_end_matches('\0').to_owned())
+    }
+
+    pub(in crate::dispatch) fn read_string(
+        &mut self,
+        context: &'static str,
+    ) -> Result<String, super::CommandDispatchError> {
+        let raw = self.read_bytes(context)?;
+        Ok(String::from_utf8_lossy(&raw).trim_end_matches('\0').to_owned())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

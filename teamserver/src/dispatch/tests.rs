@@ -1,5 +1,6 @@
 //! Integration and unit tests for the command dispatch module.
 
+use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use red_cell_common::crypto::{
     AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len, decrypt_agent_data,
@@ -8,8 +9,8 @@ use red_cell_common::crypto::{
 use red_cell_common::demon::{
     DemonCallback, DemonCallbackError, DemonCommand, DemonConfigKey, DemonFilesystemCommand,
     DemonInfoClass, DemonInjectError, DemonJobCommand, DemonKerberosCommand, DemonMessage,
-    DemonNetCommand, DemonPivotCommand, DemonProcessCommand, DemonSocketCommand,
-    DemonSocketType, DemonTokenCommand, DemonTransferCommand,
+    DemonNetCommand, DemonPivotCommand, DemonProcessCommand, DemonSocketCommand, DemonSocketType,
+    DemonTokenCommand, DemonTransferCommand,
 };
 use red_cell_common::operator::OperatorMessage;
 use serde_json::Value;
@@ -99,9 +100,8 @@ fn decode_pivot_payload(payload: &[u8]) -> Result<(u32, Vec<u8>), String> {
         payload[8..12].try_into().map_err(|_| "invalid pivot outer length".to_owned())?,
     ))
     .map_err(|_| "pivot outer length overflow".to_owned())?;
-    let outer = payload
-        .get(12..12 + outer_len)
-        .ok_or_else(|| "pivot outer buffer truncated".to_owned())?;
+    let outer =
+        payload.get(12..12 + outer_len).ok_or_else(|| "pivot outer buffer truncated".to_owned())?;
     if outer.len() < 8 {
         return Err("pivot outer buffer too short".to_owned());
     }
@@ -323,13 +323,11 @@ async fn custom_handlers_receive_agent_request_and_payload()
 }
 
 #[tokio::test]
-async fn dispatch_packages_concatenates_handler_responses()
--> Result<(), Box<dyn std::error::Error>> {
+async fn dispatch_packages_concatenates_handler_responses() -> Result<(), Box<dyn std::error::Error>>
+{
     let mut dispatcher = CommandDispatcher::new();
-    dispatcher
-        .register_handler(0x1111, |_, _, _| Box::pin(async move { Ok(Some(vec![1, 2])) }));
-    dispatcher
-        .register_handler(0x2222, |_, _, _| Box::pin(async move { Ok(Some(vec![3, 4])) }));
+    dispatcher.register_handler(0x1111, |_, _, _| Box::pin(async move { Ok(Some(vec![1, 2])) }));
+    dispatcher.register_handler(0x2222, |_, _, _| Box::pin(async move { Ok(Some(vec![3, 4])) }));
 
     let packages = vec![
         crate::DemonCallbackPackage { command_id: 0x1111, request_id: 1, payload: Vec::new() },
@@ -344,12 +342,10 @@ async fn dispatch_packages_concatenates_handler_responses()
 async fn collect_response_bytes_concatenates_all_child_package_responses()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut dispatcher = CommandDispatcher::new();
-    dispatcher.register_handler(0x1111, |_, _, _| {
-        Box::pin(async move { Ok(Some(vec![0xAA, 0xBB])) })
-    });
-    dispatcher.register_handler(0x2222, |_, _, _| {
-        Box::pin(async move { Ok(Some(vec![0xCC, 0xDD])) })
-    });
+    dispatcher
+        .register_handler(0x1111, |_, _, _| Box::pin(async move { Ok(Some(vec![0xAA, 0xBB])) }));
+    dispatcher
+        .register_handler(0x2222, |_, _, _| Box::pin(async move { Ok(Some(vec![0xCC, 0xDD])) }));
 
     let child_packages = vec![
         crate::DemonCallbackPackage { command_id: 0x1111, request_id: 17, payload: Vec::new() },
@@ -370,13 +366,8 @@ async fn builtin_get_job_handler_serializes_and_drains_jobs()
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let dispatcher = CommandDispatcher::with_builtin_handlers(
-        registry.clone(),
-        events,
-        database,
-        sockets,
-        None,
-    );
+    let dispatcher =
+        CommandDispatcher::with_builtin_handlers(registry.clone(), events, database, sockets, None);
     let key = test_key(0x55);
     let iv = test_iv(0x22);
     let agent_id = 0x5566_7788;
@@ -418,13 +409,8 @@ async fn builtin_get_job_wraps_linked_child_jobs_through_pivot_chain()
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let dispatcher = CommandDispatcher::with_builtin_handlers(
-        registry.clone(),
-        events,
-        database,
-        sockets,
-        None,
-    );
+    let dispatcher =
+        CommandDispatcher::with_builtin_handlers(registry.clone(), events, database, sockets, None);
     let root_id = 0x0102_0304;
     let pivot_id = 0x1112_1314;
     let child_id = 0x2122_2324;
@@ -486,20 +472,15 @@ async fn builtin_get_job_wraps_linked_child_jobs_through_pivot_chain()
 }
 
 #[tokio::test]
-async fn pivot_connect_callback_registers_child_and_link()
--> Result<(), Box<dyn std::error::Error>> {
+async fn pivot_connect_callback_registers_child_and_link() -> Result<(), Box<dyn std::error::Error>>
+{
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let mut receiver = events.subscribe();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let dispatcher = CommandDispatcher::with_builtin_handlers(
-        registry.clone(),
-        events,
-        database,
-        sockets,
-        None,
-    );
+    let dispatcher =
+        CommandDispatcher::with_builtin_handlers(registry.clone(), events, database, sockets, None);
     let parent_id = 0x4546_4748;
     let parent_key = test_key(0x21);
     let parent_iv = test_iv(0x31);
@@ -516,9 +497,7 @@ async fn pivot_connect_callback_registers_child_and_link()
             parent_id,
             u32::from(DemonCommand::CommandPivot),
             17,
-            &pivot_connect_payload(&valid_demon_init_body_monotonic(
-                child_id, child_key, child_iv,
-            )),
+            &pivot_connect_payload(&valid_demon_init_body_monotonic(child_id, child_key, child_iv)),
         )
         .await?;
 
@@ -548,13 +527,8 @@ async fn pivot_connect_callback_child_snapshot_preserves_listener_provenance()
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let dispatcher = CommandDispatcher::with_builtin_handlers(
-        registry.clone(),
-        events,
-        database,
-        sockets,
-        None,
-    );
+    let dispatcher =
+        CommandDispatcher::with_builtin_handlers(registry.clone(), events, database, sockets, None);
     let parent_id = 0xAABB_CCDD;
     let parent_key = test_key(0x11);
     let parent_iv = test_iv(0x22);
@@ -563,10 +537,7 @@ async fn pivot_connect_callback_child_snapshot_preserves_listener_provenance()
     let child_iv = test_iv(0x44);
 
     registry
-        .insert_with_listener(
-            sample_agent_info(parent_id, parent_key, parent_iv),
-            "http-external",
-        )
+        .insert_with_listener(sample_agent_info(parent_id, parent_key, parent_iv), "http-external")
         .await?;
 
     dispatcher
@@ -574,9 +545,7 @@ async fn pivot_connect_callback_child_snapshot_preserves_listener_provenance()
             parent_id,
             u32::from(DemonCommand::CommandPivot),
             42,
-            &pivot_connect_payload(&valid_demon_init_body_monotonic(
-                child_id, child_key, child_iv,
-            )),
+            &pivot_connect_payload(&valid_demon_init_body_monotonic(child_id, child_key, child_iv)),
         )
         .await?;
 
@@ -605,13 +574,8 @@ async fn pivot_connect_callback_failure_broadcasts_error_event()
     let events = EventBus::default();
     let mut receiver = events.subscribe();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let dispatcher = CommandDispatcher::with_builtin_handlers(
-        registry.clone(),
-        events,
-        database,
-        sockets,
-        None,
-    );
+    let dispatcher =
+        CommandDispatcher::with_builtin_handlers(registry.clone(), events, database, sockets, None);
     let parent_id = 0x1234_5678;
     let parent_key = test_key(0xAA);
     let parent_iv = test_iv(0xBB);
@@ -634,29 +598,15 @@ async fn pivot_connect_callback_failure_broadcasts_error_event()
     // No new agent should have been registered.
     assert_eq!(registry.children_of(parent_id).await, Vec::<u32>::new());
 
-    let event = receiver
-        .recv()
-        .await
-        .ok_or("expected an operator event after pivot connect failure")?;
+    let event =
+        receiver.recv().await.ok_or("expected an operator event after pivot connect failure")?;
     let OperatorMessage::AgentResponse(msg) = event else {
         return Err(format!("expected AgentResponse, got {event:?}").into());
     };
-    assert_eq!(
-        msg.info.demon_id,
-        format!("{parent_id:08X}"),
-        "event must be for the parent agent"
-    );
+    assert_eq!(msg.info.demon_id, format!("{parent_id:08X}"), "event must be for the parent agent");
     let msg_text = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
-    assert!(
-        msg_text.contains("Failed to connect"),
-        "message must mention failure: {:?}",
-        msg_text
-    );
-    assert!(
-        msg_text.contains("[5]"),
-        "message must include numeric error code: {:?}",
-        msg_text
-    );
+    assert!(msg_text.contains("Failed to connect"), "message must mention failure: {:?}", msg_text);
+    assert!(msg_text.contains("[5]"), "message must include numeric error code: {:?}", msg_text);
     let kind = msg.info.extra.get("Type").and_then(|v| v.as_str()).unwrap_or("");
     assert_eq!(kind, "Error", "message type must be Error");
     let request_id_str = msg.info.extra.get("RequestID").and_then(|v| v.as_str()).unwrap_or("");
@@ -680,13 +630,8 @@ async fn pivot_disconnect_callback_failure_broadcasts_error_event()
     let events = EventBus::default();
     let mut receiver = events.subscribe();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let dispatcher = CommandDispatcher::with_builtin_handlers(
-        registry.clone(),
-        events,
-        database,
-        sockets,
-        None,
-    );
+    let dispatcher =
+        CommandDispatcher::with_builtin_handlers(registry.clone(), events, database, sockets, None);
     let parent_id = 0xABCD_1234_u32;
     let child_id = 0x5678_EF01_u32;
     let parent_key = test_key(0xCC);
@@ -706,18 +651,12 @@ async fn pivot_disconnect_callback_failure_broadcasts_error_event()
 
     assert_eq!(response, None, "failure path should return no agent response bytes");
 
-    let event = receiver
-        .recv()
-        .await
-        .ok_or("expected an operator event after pivot disconnect failure")?;
+    let event =
+        receiver.recv().await.ok_or("expected an operator event after pivot disconnect failure")?;
     let OperatorMessage::AgentResponse(msg) = event else {
         return Err(format!("expected AgentResponse, got {event:?}").into());
     };
-    assert_eq!(
-        msg.info.demon_id,
-        format!("{parent_id:08X}"),
-        "event must be for the parent agent"
-    );
+    assert_eq!(msg.info.demon_id, format!("{parent_id:08X}"), "event must be for the parent agent");
     let msg_text = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
     assert!(
         msg_text.contains("Failed to disconnect"),
@@ -756,13 +695,8 @@ async fn pivot_list_callback_demon_id_is_zero_padded_on_left()
     let events = EventBus::default();
     let mut receiver = events.subscribe();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let dispatcher = CommandDispatcher::with_builtin_handlers(
-        registry.clone(),
-        events,
-        database,
-        sockets,
-        None,
-    );
+    let dispatcher =
+        CommandDispatcher::with_builtin_handlers(registry.clone(), events, database, sockets, None);
     let agent_id = 0xAAAA_BBBB;
     let key = test_key(0x11);
     let iv = test_iv(0x22);
@@ -806,13 +740,8 @@ async fn pivot_list_callback_with_entries_broadcasts_formatted_table()
     let events = EventBus::default();
     let mut receiver = events.subscribe();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let dispatcher = CommandDispatcher::with_builtin_handlers(
-        registry.clone(),
-        events,
-        database,
-        sockets,
-        None,
-    );
+    let dispatcher =
+        CommandDispatcher::with_builtin_handlers(registry.clone(), events, database, sockets, None);
     let agent_id = 0xAAAA_BBBB;
     let key = test_key(0x11);
     let iv = test_iv(0x22);
@@ -858,13 +787,8 @@ async fn pivot_list_callback_empty_broadcasts_no_pivots_message()
     let events = EventBus::default();
     let mut receiver = events.subscribe();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let dispatcher = CommandDispatcher::with_builtin_handlers(
-        registry.clone(),
-        events,
-        database,
-        sockets,
-        None,
-    );
+    let dispatcher =
+        CommandDispatcher::with_builtin_handlers(registry.clone(), events, database, sockets, None);
     let agent_id = 0xCCCC_DDDD;
     let key = test_key(0x33);
     let iv = test_iv(0x44);
@@ -903,13 +827,8 @@ async fn pivot_connect_failure_unknown_error_code_omits_name()
     let events = EventBus::default();
     let mut receiver = events.subscribe();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let dispatcher = CommandDispatcher::with_builtin_handlers(
-        registry.clone(),
-        events,
-        database,
-        sockets,
-        None,
-    );
+    let dispatcher =
+        CommandDispatcher::with_builtin_handlers(registry.clone(), events, database, sockets, None);
     let parent_id = 0x8182_8384;
     let parent_key = test_key(0x81);
     let parent_iv = test_iv(0x82);
@@ -933,10 +852,7 @@ async fn pivot_connect_failure_unknown_error_code_omits_name()
         return Err(format!("expected AgentResponse, got {event:?}").into());
     };
     let msg_text = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
-    assert!(
-        msg_text.contains("[9999]"),
-        "message must include numeric error code: {msg_text:?}"
-    );
+    assert!(msg_text.contains("[9999]"), "message must include numeric error code: {msg_text:?}");
     // The message should NOT contain a named error — just the bracketed code.
     assert_eq!(
         msg_text, "[SMB] Failed to connect: [9999]",
@@ -961,13 +877,8 @@ async fn pivot_disconnect_callback_success_marks_affected_and_broadcasts_info()
     let events = EventBus::default();
     let mut receiver = events.subscribe();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let dispatcher = CommandDispatcher::with_builtin_handlers(
-        registry.clone(),
-        events,
-        database,
-        sockets,
-        None,
-    );
+    let dispatcher =
+        CommandDispatcher::with_builtin_handlers(registry.clone(), events, database, sockets, None);
     let parent_id = 0x9192_9394;
     let child_id = 0xA1A2_A3A4;
     let parent_key = test_key(0x91);
@@ -997,8 +908,7 @@ async fn pivot_disconnect_callback_success_marks_affected_and_broadcasts_info()
     assert_eq!(response, None);
 
     // First event: AgentUpdate (mark) for the disconnected child.
-    let event =
-        receiver.recv().await.ok_or("expected AgentUpdate event for disconnected child")?;
+    let event = receiver.recv().await.ok_or("expected AgentUpdate event for disconnected child")?;
     let OperatorMessage::AgentUpdate(mark_msg) = event else {
         return Err(format!("expected AgentUpdate (mark), got {event:?}").into());
     };
@@ -1018,10 +928,7 @@ async fn pivot_disconnect_callback_success_marks_affected_and_broadcasts_info()
         msg_text.contains(&format!("{child_id:08X}")),
         "message must include child agent id: {msg_text:?}"
     );
-    assert!(
-        msg_text.contains("disconnected"),
-        "message must mention disconnection: {msg_text:?}"
-    );
+    assert!(msg_text.contains("disconnected"), "message must mention disconnection: {msg_text:?}");
 
     // Link should be removed.
     assert_eq!(
@@ -1045,13 +952,8 @@ async fn pivot_disconnect_callback_success_no_link_emits_response_without_marks(
     let events = EventBus::default();
     let mut receiver = events.subscribe();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let dispatcher = CommandDispatcher::with_builtin_handlers(
-        registry.clone(),
-        events,
-        database,
-        sockets,
-        None,
-    );
+    let dispatcher =
+        CommandDispatcher::with_builtin_handlers(registry.clone(), events, database, sockets, None);
     let parent_id = 0xB1B2_B3B4;
     let child_id = 0xC1C2_C3C4;
     let parent_key = test_key(0xB1);
@@ -1094,13 +996,8 @@ async fn builtin_checkin_handler_updates_last_call_in_and_broadcasts()
     let events = EventBus::default();
     let mut receiver = events.subscribe();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let dispatcher = CommandDispatcher::with_builtin_handlers(
-        registry.clone(),
-        events,
-        database,
-        sockets,
-        None,
-    );
+    let dispatcher =
+        CommandDispatcher::with_builtin_handlers(registry.clone(), events, database, sockets, None);
     let key = test_key(0x77);
     let iv = test_iv(0x44);
     let agent_id = 0x1020_3040;
@@ -1123,10 +1020,8 @@ async fn builtin_checkin_handler_updates_last_call_in_and_broadcasts()
         .ok_or_else(|| "agent should exist after checkin".to_owned())?;
     assert_ne!(updated.last_call_in, before);
 
-    let event = receiver
-        .recv()
-        .await
-        .ok_or_else(|| "agent update event should be broadcast".to_owned())?;
+    let event =
+        receiver.recv().await.ok_or_else(|| "agent update event should be broadcast".to_owned())?;
     let OperatorMessage::AgentUpdate(message) = event else {
         panic!("unexpected operator event");
     };
@@ -1144,13 +1039,8 @@ async fn builtin_checkin_handler_rejects_truncated_metadata_payload()
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let dispatcher = CommandDispatcher::with_builtin_handlers(
-        registry.clone(),
-        events,
-        database,
-        sockets,
-        None,
-    );
+    let dispatcher =
+        CommandDispatcher::with_builtin_handlers(registry.clone(), events, database, sockets, None);
     let key = test_key(0x77);
     let iv = test_iv(0x44);
     let agent_id = 0x1020_3040;
@@ -1186,13 +1076,8 @@ async fn builtin_checkin_handler_truncated_payload_does_not_mutate_state()
     let events = EventBus::default();
     let mut receiver = events.subscribe();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let dispatcher = CommandDispatcher::with_builtin_handlers(
-        registry.clone(),
-        events,
-        database,
-        sockets,
-        None,
-    );
+    let dispatcher =
+        CommandDispatcher::with_builtin_handlers(registry.clone(), events, database, sockets, None);
     let key = test_key(0x77);
     let iv = test_iv(0x44);
     let agent_id = 0x1020_3040;
@@ -1249,9 +1134,8 @@ async fn builtin_checkin_handler_refreshes_metadata_and_transport_state()
     registry.set_ctr_offset(agent_id, 7).await?;
     let payload = sample_checkin_metadata_payload(agent_id, refreshed_key, refreshed_iv);
 
-    let response = dispatcher
-        .dispatch(agent_id, u32::from(DemonCommand::CommandCheckin), 6, &payload)
-        .await?;
+    let response =
+        dispatcher.dispatch(agent_id, u32::from(DemonCommand::CommandCheckin), 6, &payload).await?;
 
     assert_eq!(response, None);
 
@@ -1290,10 +1174,8 @@ async fn builtin_checkin_handler_refreshes_metadata_and_transport_state()
         .ok_or_else(|| "agent should be persisted after checkin".to_owned())?;
     assert_eq!(persisted, updated);
 
-    let event = receiver
-        .recv()
-        .await
-        .ok_or_else(|| "agent update event should be broadcast".to_owned())?;
+    let event =
+        receiver.recv().await.ok_or_else(|| "agent update event should be broadcast".to_owned())?;
     let OperatorMessage::AgentUpdate(message) = event else {
         panic!("unexpected operator event");
     };
@@ -1309,13 +1191,8 @@ async fn builtin_checkin_handler_rejects_key_rotation_and_preserves_ctr_offset()
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let dispatcher = CommandDispatcher::with_builtin_handlers(
-        registry.clone(),
-        events,
-        database,
-        sockets,
-        None,
-    );
+    let dispatcher =
+        CommandDispatcher::with_builtin_handlers(registry.clone(), events, database, sockets, None);
     let original_key = test_key(0x77);
     let original_iv = test_iv(0x44);
     let attempted_key = test_key(0x12);
@@ -1339,9 +1216,8 @@ async fn builtin_checkin_handler_rejects_key_rotation_and_preserves_ctr_offset()
 
     // Dispatch a CHECKIN that attempts to rotate to a different key.
     let payload = sample_checkin_metadata_payload(agent_id, attempted_key, attempted_iv);
-    let response = dispatcher
-        .dispatch(agent_id, u32::from(DemonCommand::CommandCheckin), 6, &payload)
-        .await?;
+    let response =
+        dispatcher.dispatch(agent_id, u32::from(DemonCommand::CommandCheckin), 6, &payload).await?;
     assert_eq!(response, None);
 
     // The rotation must be refused: CTR offset preserved, original key still active.
@@ -1384,13 +1260,8 @@ async fn builtin_checkin_handler_rejects_kill_date_exceeding_i64_range()
     let events = EventBus::default();
     let mut receiver = events.subscribe();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let dispatcher = CommandDispatcher::with_builtin_handlers(
-        registry.clone(),
-        events,
-        database,
-        sockets,
-        None,
-    );
+    let dispatcher =
+        CommandDispatcher::with_builtin_handlers(registry.clone(), events, database, sockets, None);
     let key = test_key(0x77);
     let iv = test_iv(0x44);
     let refreshed_key = test_key(0x12);
@@ -1615,9 +1486,8 @@ async fn builtin_checkin_handler_preserves_high_bit_working_hours()
         working_hours,
     );
 
-    let response = dispatcher
-        .dispatch(agent_id, u32::from(DemonCommand::CommandCheckin), 7, &payload)
-        .await?;
+    let response =
+        dispatcher.dispatch(agent_id, u32::from(DemonCommand::CommandCheckin), 7, &payload).await?;
 
     assert_eq!(response, None);
 
@@ -1722,18 +1592,14 @@ async fn builtin_process_list_handler_broadcasts_formatted_agent_response()
         .await?;
     assert_eq!(response, None);
 
-    let event =
-        receiver.recv().await.ok_or_else(|| "agent response event missing".to_owned())?;
+    let event = receiver.recv().await.ok_or_else(|| "agent response event missing".to_owned())?;
     let OperatorMessage::AgentResponse(message) = event else {
         panic!("expected agent response event");
     };
     assert_eq!(message.info.demon_id, "DEADBEEF");
     assert_eq!(message.info.command_id, u32::from(DemonCommand::CommandProcList).to_string());
     assert!(message.info.output.contains("explorer.exe"));
-    assert_eq!(
-        message.info.extra.get("Message"),
-        Some(&Value::String("Process List:".to_owned()))
-    );
+    assert_eq!(message.info.extra.get("Message"), Some(&Value::String("Process List:".to_owned())));
     let rows = message
         .info
         .extra
@@ -1850,13 +1716,8 @@ async fn builtin_command_output_handler_captures_credentials_and_broadcasts_loot
             },
         )
         .await?;
-    let dispatcher = CommandDispatcher::with_builtin_handlers(
-        registry,
-        events,
-        database.clone(),
-        sockets,
-        None,
-    );
+    let dispatcher =
+        CommandDispatcher::with_builtin_handlers(registry, events, database.clone(), sockets, None);
 
     let mut payload = Vec::new();
     add_bytes(&mut payload, b"Username : alice\nPassword : Sup3rSecret!\nDomain   : LAB");
@@ -1876,10 +1737,7 @@ async fn builtin_command_output_handler_captures_credentials_and_broadcasts_loot
         output_message.info.extra.get("Message"),
         Some(&Value::String("Received Output [55 bytes]:".to_owned()))
     );
-    assert_eq!(
-        output_message.info.extra.get("RequestID"),
-        Some(&Value::String("66".to_owned()))
-    );
+    assert_eq!(output_message.info.extra.get("RequestID"), Some(&Value::String("66".to_owned())));
     assert_eq!(output_message.info.extra.get("TaskID"), Some(&Value::String("66".to_owned())));
 
     let OperatorMessage::AgentResponse(loot_message) = second else {
@@ -1920,10 +1778,7 @@ async fn builtin_command_output_handler_captures_credentials_and_broadcasts_loot
     assert_eq!(responses[0].command_line.as_deref(), Some("sekurlsa::logonpasswords"));
     assert_eq!(responses[0].task_id.as_deref(), Some("66"));
     assert_eq!(responses[0].operator.as_deref(), Some("operator"));
-    assert_eq!(
-        responses[0].output,
-        "Username : alice\nPassword : Sup3rSecret!\nDomain   : LAB"
-    );
+    assert_eq!(responses[0].output, "Username : alice\nPassword : Sup3rSecret!\nDomain   : LAB");
     Ok(())
 }
 
@@ -1980,10 +1835,7 @@ fn looks_like_pwdump_hash_matches_pwdump_format_only() {
             "Administrator:500:AAD3B435B51404EEAAD3B435B51404EE:32ED87BDB5FDC5E9CBA88547376818D4:::",
             true,
         ),
-        (
-            "alice:1001:0123456789ABCDEFFEDCBA9876543210:00112233445566778899AABBCCDDEEFF:::",
-            true,
-        ),
+        ("alice:1001:0123456789ABCDEFFEDCBA9876543210:00112233445566778899AABBCCDDEEFF:::", true),
         ("NTLM:0123456789ABCDEF0123456789ABCDEF", false),
         ("Administrator:500:nothex:32ED87BDB5FDC5E9CBA88547376818D4:::", false),
         ("status: hash sync completed", false),
@@ -2062,27 +1914,18 @@ async fn builtin_beacon_output_and_error_callbacks_persist_response_history()
             },
         )
         .await?;
-    let dispatcher = CommandDispatcher::with_builtin_handlers(
-        registry,
-        events,
-        database.clone(),
-        sockets,
-        None,
-    );
+    let dispatcher =
+        CommandDispatcher::with_builtin_handlers(registry, events, database.clone(), sockets, None);
 
     let mut output = Vec::new();
     add_u32(&mut output, u32::from(DemonCallback::Output));
     add_bytes(&mut output, b"Seatbelt complete");
-    dispatcher
-        .dispatch(0xABCD_EE02, u32::from(DemonCommand::BeaconOutput), 0x67, &output)
-        .await?;
+    dispatcher.dispatch(0xABCD_EE02, u32::from(DemonCommand::BeaconOutput), 0x67, &output).await?;
 
     let mut error = Vec::new();
     add_u32(&mut error, u32::from(DemonCallback::ErrorMessage));
     add_bytes(&mut error, b"access denied");
-    dispatcher
-        .dispatch(0xABCD_EE02, u32::from(DemonCommand::BeaconOutput), 0x67, &error)
-        .await?;
+    dispatcher.dispatch(0xABCD_EE02, u32::from(DemonCommand::BeaconOutput), 0x67, &error).await?;
 
     let first = receiver.recv().await.ok_or("missing beacon output event")?;
     let second = receiver.recv().await.ok_or("missing beacon error event")?;
@@ -2106,9 +1949,11 @@ async fn builtin_beacon_output_and_error_callbacks_persist_response_history()
     assert_eq!(responses[1].output, "access denied");
     assert_eq!(responses[1].response_type, "Error");
     assert!(responses.iter().all(|response| response.request_id == 0x67));
-    assert!(responses.iter().all(|response| {
-        response.command_line.as_deref() == Some("inline-execute seatbelt")
-    }));
+    assert!(
+        responses.iter().all(|response| {
+            response.command_line.as_deref() == Some("inline-execute seatbelt")
+        })
+    );
     Ok(())
 }
 
@@ -2121,13 +1966,8 @@ async fn builtin_screenshot_handler_persists_loot_and_broadcasts_misc_fields()
     let mut receiver = events.subscribe();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
     registry.insert(sample_agent_info(0xABCD_EF01, test_key(0x11), test_iv(0x22))).await?;
-    let dispatcher = CommandDispatcher::with_builtin_handlers(
-        registry,
-        events,
-        database.clone(),
-        sockets,
-        None,
-    );
+    let dispatcher =
+        CommandDispatcher::with_builtin_handlers(registry, events, database.clone(), sockets, None);
 
     let png = vec![0x89, b'P', b'N', b'G'];
     let payload = [1_u32.to_le_bytes().to_vec(), {
@@ -2147,8 +1987,7 @@ async fn builtin_screenshot_handler_persists_loot_and_broadcasts_misc_fields()
     assert_eq!(loot[0].data.as_deref(), Some(png.as_slice()));
 
     let loot_event = receiver.recv().await.ok_or_else(|| "loot event missing".to_owned())?;
-    let event =
-        receiver.recv().await.ok_or_else(|| "screenshot response missing".to_owned())?;
+    let event = receiver.recv().await.ok_or_else(|| "screenshot response missing".to_owned())?;
     let OperatorMessage::AgentResponse(loot_message) = loot_event else {
         panic!("expected screenshot loot event");
     };
@@ -2159,10 +1998,7 @@ async fn builtin_screenshot_handler_persists_loot_and_broadcasts_misc_fields()
     let OperatorMessage::AgentResponse(message) = event else {
         panic!("expected screenshot agent response event");
     };
-    assert_eq!(
-        message.info.extra.get("MiscType"),
-        Some(&Value::String("screenshot".to_owned()))
-    );
+    assert_eq!(message.info.extra.get("MiscType"), Some(&Value::String("screenshot".to_owned())));
     assert_eq!(
         message.info.extra.get("MiscData"),
         Some(&Value::String(BASE64_STANDARD.encode(&png)))
@@ -2179,13 +2015,8 @@ async fn builtin_filesystem_download_handler_persists_loot_and_progress()
     let mut receiver = events.subscribe();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
     registry.insert(sample_agent_info(0xABCD_EF11, test_key(0x11), test_iv(0x22))).await?;
-    let dispatcher = CommandDispatcher::with_builtin_handlers(
-        registry,
-        events,
-        database.clone(),
-        sockets,
-        None,
-    );
+    let dispatcher =
+        CommandDispatcher::with_builtin_handlers(registry, events, database.clone(), sockets, None);
 
     let file_id = 0x33_u32;
     let remote_path = "C:\\Temp\\sam.dump";
@@ -2271,13 +2102,8 @@ async fn builtin_filesystem_download_handler_accumulates_multi_chunk_downloads_u
     let mut receiver = events.subscribe();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
     registry.insert(sample_agent_info(0xABCD_EF12, test_key(0x11), test_iv(0x22))).await?;
-    let dispatcher = CommandDispatcher::with_builtin_handlers(
-        registry,
-        events,
-        database.clone(),
-        sockets,
-        None,
-    );
+    let dispatcher =
+        CommandDispatcher::with_builtin_handlers(registry, events, database.clone(), sockets, None);
 
     let file_id = 0x34_u32;
     let remote_path = "C:\\Temp\\partial.dump";
@@ -2310,34 +2136,20 @@ async fn builtin_filesystem_download_handler_accumulates_multi_chunk_downloads_u
     assert!(database.loot().list_for_agent(0xABCD_EF12).await?.is_empty());
 
     let _ = receiver.recv().await.ok_or("missing filesystem open event")?;
-    let progress_one =
-        receiver.recv().await.ok_or("missing first filesystem progress event")?;
-    let progress_two =
-        receiver.recv().await.ok_or("missing second filesystem progress event")?;
+    let progress_one = receiver.recv().await.ok_or("missing first filesystem progress event")?;
+    let progress_two = receiver.recv().await.ok_or("missing second filesystem progress event")?;
 
     let OperatorMessage::AgentResponse(progress_one) = progress_one else {
         panic!("expected first filesystem progress response");
     };
-    assert_eq!(
-        progress_one.info.extra.get("CurrentSize"),
-        Some(&Value::String("7".to_owned()))
-    );
-    assert_eq!(
-        progress_one.info.extra.get("ExpectedSize"),
-        Some(&Value::String("64".to_owned()))
-    );
+    assert_eq!(progress_one.info.extra.get("CurrentSize"), Some(&Value::String("7".to_owned())));
+    assert_eq!(progress_one.info.extra.get("ExpectedSize"), Some(&Value::String("64".to_owned())));
 
     let OperatorMessage::AgentResponse(progress_two) = progress_two else {
         panic!("expected second filesystem progress response");
     };
-    assert_eq!(
-        progress_two.info.extra.get("CurrentSize"),
-        Some(&Value::String("12".to_owned()))
-    );
-    assert_eq!(
-        progress_two.info.extra.get("ExpectedSize"),
-        Some(&Value::String("64".to_owned()))
-    );
+    assert_eq!(progress_two.info.extra.get("CurrentSize"), Some(&Value::String("12".to_owned())));
+    assert_eq!(progress_two.info.extra.get("ExpectedSize"), Some(&Value::String("64".to_owned())));
     let active = dispatcher.downloads.active_for_agent(0xABCD_EF12).await;
     assert_eq!(active.len(), 1);
     assert_eq!(active[0].0, file_id);
@@ -2389,13 +2201,8 @@ async fn builtin_filesystem_download_handler_rejects_writes_without_open()
     let mut receiver = events.subscribe();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
     registry.insert(sample_agent_info(0xABCD_EF13, test_key(0x11), test_iv(0x22))).await?;
-    let dispatcher = CommandDispatcher::with_builtin_handlers(
-        registry,
-        events,
-        database.clone(),
-        sockets,
-        None,
-    );
+    let dispatcher =
+        CommandDispatcher::with_builtin_handlers(registry, events, database.clone(), sockets, None);
 
     let error = dispatcher
         .dispatch(
@@ -2441,8 +2248,7 @@ async fn download_tracker_accumulates_multi_chunk_data_until_finish() {
         .await
         .expect("start should succeed");
 
-    let first =
-        tracker.append(0xABCD_EF51, 0x41, b"abc").await.expect("first chunk should append");
+    let first = tracker.append(0xABCD_EF51, 0x41, b"abc").await.expect("first chunk should append");
     assert_eq!(first.data, b"abc");
     assert_eq!(first.expected_size, 32);
 
@@ -2483,10 +2289,8 @@ async fn download_tracker_keeps_partial_downloads_active_until_finish() {
         .await
         .expect("start should succeed");
 
-    let partial = tracker
-        .append(0xABCD_EF54, 0x44, b"partial")
-        .await
-        .expect("partial chunk should append");
+    let partial =
+        tracker.append(0xABCD_EF54, 0x44, b"partial").await.expect("partial chunk should append");
     assert_eq!(partial.data, b"partial");
     assert_eq!(partial.expected_size, 32);
 
@@ -2571,10 +2375,8 @@ async fn download_tracker_drops_downloads_that_exceed_the_size_cap() {
         .await
         .expect("start should succeed");
 
-    let partial = tracker
-        .append(0xABCD_EF53, 0x43, b"12")
-        .await
-        .expect("first partial chunk should append");
+    let partial =
+        tracker.append(0xABCD_EF53, 0x43, b"12").await.expect("first partial chunk should append");
     assert_eq!(partial.data, b"12");
 
     let error = tracker
@@ -2815,13 +2617,8 @@ async fn builtin_beacon_file_callbacks_reassemble_downloads()
     let mut receiver = events.subscribe();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
     registry.insert(sample_agent_info(0xABCD_EF21, test_key(0x11), test_iv(0x22))).await?;
-    let dispatcher = CommandDispatcher::with_builtin_handlers(
-        registry,
-        events,
-        database.clone(),
-        sockets,
-        None,
-    );
+    let dispatcher =
+        CommandDispatcher::with_builtin_handlers(registry, events, database.clone(), sockets, None);
 
     let file_id = 0x55_u32;
     let remote_path = "C:\\Windows\\Temp\\note.txt";
@@ -2834,9 +2631,7 @@ async fn builtin_beacon_file_callbacks_reassemble_downloads()
     let mut open = Vec::new();
     add_u32(&mut open, u32::from(DemonCallback::File));
     add_bytes(&mut open, &open_header);
-    dispatcher
-        .dispatch(0xABCD_EF21, u32::from(DemonCommand::BeaconOutput), 0x77, &open)
-        .await?;
+    dispatcher.dispatch(0xABCD_EF21, u32::from(DemonCommand::BeaconOutput), 0x77, &open).await?;
 
     let mut chunk = Vec::new();
     chunk.extend_from_slice(&file_id.to_be_bytes());
@@ -2844,16 +2639,12 @@ async fn builtin_beacon_file_callbacks_reassemble_downloads()
     let mut write = Vec::new();
     add_u32(&mut write, u32::from(DemonCallback::FileWrite));
     add_bytes(&mut write, &chunk);
-    dispatcher
-        .dispatch(0xABCD_EF21, u32::from(DemonCommand::BeaconOutput), 0x77, &write)
-        .await?;
+    dispatcher.dispatch(0xABCD_EF21, u32::from(DemonCommand::BeaconOutput), 0x77, &write).await?;
 
     let mut close = Vec::new();
     add_u32(&mut close, u32::from(DemonCallback::FileClose));
     add_bytes(&mut close, &file_id.to_be_bytes());
-    dispatcher
-        .dispatch(0xABCD_EF21, u32::from(DemonCommand::BeaconOutput), 0x77, &close)
-        .await?;
+    dispatcher.dispatch(0xABCD_EF21, u32::from(DemonCommand::BeaconOutput), 0x77, &close).await?;
 
     let _ = receiver.recv().await.ok_or("missing beacon open event")?;
     let _ = receiver.recv().await.ok_or("missing beacon progress event")?;
@@ -2887,13 +2678,8 @@ async fn builtin_beacon_file_callbacks_accumulate_partial_downloads_until_close(
     let mut receiver = events.subscribe();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
     registry.insert(sample_agent_info(0xABCD_EF22, test_key(0x11), test_iv(0x22))).await?;
-    let dispatcher = CommandDispatcher::with_builtin_handlers(
-        registry,
-        events,
-        database.clone(),
-        sockets,
-        None,
-    );
+    let dispatcher =
+        CommandDispatcher::with_builtin_handlers(registry, events, database.clone(), sockets, None);
 
     let file_id = 0x56_u32;
     let remote_path = "C:\\Windows\\Temp\\partial.txt";
@@ -2932,26 +2718,14 @@ async fn builtin_beacon_file_callbacks_accumulate_partial_downloads_until_close(
     let OperatorMessage::AgentResponse(progress_one) = progress_one else {
         panic!("expected first beacon progress response");
     };
-    assert_eq!(
-        progress_one.info.extra.get("CurrentSize"),
-        Some(&Value::String("7".to_owned()))
-    );
-    assert_eq!(
-        progress_one.info.extra.get("ExpectedSize"),
-        Some(&Value::String("32".to_owned()))
-    );
+    assert_eq!(progress_one.info.extra.get("CurrentSize"), Some(&Value::String("7".to_owned())));
+    assert_eq!(progress_one.info.extra.get("ExpectedSize"), Some(&Value::String("32".to_owned())));
 
     let OperatorMessage::AgentResponse(progress_two) = progress_two else {
         panic!("expected second beacon progress response");
     };
-    assert_eq!(
-        progress_two.info.extra.get("CurrentSize"),
-        Some(&Value::String("12".to_owned()))
-    );
-    assert_eq!(
-        progress_two.info.extra.get("ExpectedSize"),
-        Some(&Value::String("32".to_owned()))
-    );
+    assert_eq!(progress_two.info.extra.get("CurrentSize"), Some(&Value::String("12".to_owned())));
+    assert_eq!(progress_two.info.extra.get("ExpectedSize"), Some(&Value::String("32".to_owned())));
     let active = dispatcher.downloads.active_for_agent(0xABCD_EF22).await;
     assert_eq!(active.len(), 1);
     assert_eq!(active[0].0, file_id);
@@ -3003,13 +2777,8 @@ async fn builtin_beacon_file_callbacks_reject_writes_without_open()
     let mut receiver = events.subscribe();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
     registry.insert(sample_agent_info(0xABCD_EF23, test_key(0x11), test_iv(0x22))).await?;
-    let dispatcher = CommandDispatcher::with_builtin_handlers(
-        registry,
-        events,
-        database.clone(),
-        sockets,
-        None,
-    );
+    let dispatcher =
+        CommandDispatcher::with_builtin_handlers(registry, events, database.clone(), sockets, None);
 
     let error = dispatcher
         .dispatch(
@@ -3092,10 +2861,7 @@ async fn builtin_filesystem_download_handler_surfaces_over_limit_as_error_event(
     };
     assert_eq!(error_message.info.extra.get("Type"), Some(&Value::String("Error".to_owned())));
     let msg = error_message.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
-    assert!(
-        msg.contains("limit exceeded"),
-        "error message should mention limit exceeded: {msg}"
-    );
+    assert!(msg.contains("limit exceeded"), "error message should mention limit exceeded: {msg}");
 
     // Audit log must have a download.rejected entry.
     let audit_rows = database.audit_log().list().await?;
@@ -3114,9 +2880,7 @@ async fn builtin_filesystem_download_handler_surfaces_over_limit_as_error_event(
     add_u32(&mut close, file_id);
     add_u32(&mut close, 0);
     assert_eq!(
-        dispatcher
-            .dispatch(0xABCD_EF31, u32::from(DemonCommand::CommandFs), 0x99, &close)
-            .await?,
+        dispatcher.dispatch(0xABCD_EF31, u32::from(DemonCommand::CommandFs), 0x99, &close).await?,
         None
     );
     Ok(())
@@ -3139,9 +2903,7 @@ async fn builtin_filesystem_upload_broadcasts_info() -> Result<(), Box<dyn std::
     add_u32(&mut payload, u32::from(DemonFilesystemCommand::Upload));
     add_u32(&mut payload, 4096); // size
     add_utf16(&mut payload, "C:\\Temp\\payload.bin");
-    dispatcher
-        .dispatch(0xF500_0001, u32::from(DemonCommand::CommandFs), 0xA1, &payload)
-        .await?;
+    dispatcher.dispatch(0xF500_0001, u32::from(DemonCommand::CommandFs), 0xA1, &payload).await?;
 
     let event = receiver.recv().await.ok_or("missing upload event")?;
     let OperatorMessage::AgentResponse(msg) = event else {
@@ -3170,9 +2932,7 @@ async fn builtin_filesystem_cd_broadcasts_changed_directory()
     let mut payload = Vec::new();
     add_u32(&mut payload, u32::from(DemonFilesystemCommand::Cd));
     add_utf16(&mut payload, "C:\\Users\\Admin\\Desktop");
-    dispatcher
-        .dispatch(0xF500_0002, u32::from(DemonCommand::CommandFs), 0xA2, &payload)
-        .await?;
+    dispatcher.dispatch(0xF500_0002, u32::from(DemonCommand::CommandFs), 0xA2, &payload).await?;
 
     let event = receiver.recv().await.ok_or("missing cd event")?;
     let OperatorMessage::AgentResponse(msg) = event else {
@@ -3186,8 +2946,8 @@ async fn builtin_filesystem_cd_broadcasts_changed_directory()
 }
 
 #[tokio::test]
-async fn builtin_filesystem_remove_file_broadcasts_info()
--> Result<(), Box<dyn std::error::Error>> {
+async fn builtin_filesystem_remove_file_broadcasts_info() -> Result<(), Box<dyn std::error::Error>>
+{
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
@@ -3202,9 +2962,7 @@ async fn builtin_filesystem_remove_file_broadcasts_info()
     add_u32(&mut payload, u32::from(DemonFilesystemCommand::Remove));
     add_u32(&mut payload, 0); // is_dir = false
     add_utf16(&mut payload, "C:\\Temp\\old.txt");
-    dispatcher
-        .dispatch(0xF500_0003, u32::from(DemonCommand::CommandFs), 0xA3, &payload)
-        .await?;
+    dispatcher.dispatch(0xF500_0003, u32::from(DemonCommand::CommandFs), 0xA3, &payload).await?;
 
     let event = receiver.recv().await.ok_or("missing remove event")?;
     let OperatorMessage::AgentResponse(msg) = event else {
@@ -3234,9 +2992,7 @@ async fn builtin_filesystem_remove_directory_broadcasts_info()
     add_u32(&mut payload, u32::from(DemonFilesystemCommand::Remove));
     add_u32(&mut payload, 1); // is_dir = true
     add_utf16(&mut payload, "C:\\Temp\\subdir");
-    dispatcher
-        .dispatch(0xF500_0004, u32::from(DemonCommand::CommandFs), 0xA4, &payload)
-        .await?;
+    dispatcher.dispatch(0xF500_0004, u32::from(DemonCommand::CommandFs), 0xA4, &payload).await?;
 
     let event = receiver.recv().await.ok_or("missing remove dir event")?;
     let OperatorMessage::AgentResponse(msg) = event else {
@@ -3263,9 +3019,7 @@ async fn builtin_filesystem_mkdir_broadcasts_info() -> Result<(), Box<dyn std::e
     let mut payload = Vec::new();
     add_u32(&mut payload, u32::from(DemonFilesystemCommand::Mkdir));
     add_utf16(&mut payload, "C:\\Temp\\newdir");
-    dispatcher
-        .dispatch(0xF500_0005, u32::from(DemonCommand::CommandFs), 0xA5, &payload)
-        .await?;
+    dispatcher.dispatch(0xF500_0005, u32::from(DemonCommand::CommandFs), 0xA5, &payload).await?;
 
     let event = receiver.recv().await.ok_or("missing mkdir event")?;
     let OperatorMessage::AgentResponse(msg) = event else {
@@ -3279,8 +3033,8 @@ async fn builtin_filesystem_mkdir_broadcasts_info() -> Result<(), Box<dyn std::e
 }
 
 #[tokio::test]
-async fn builtin_filesystem_copy_success_broadcasts_good()
--> Result<(), Box<dyn std::error::Error>> {
+async fn builtin_filesystem_copy_success_broadcasts_good() -> Result<(), Box<dyn std::error::Error>>
+{
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
@@ -3295,9 +3049,7 @@ async fn builtin_filesystem_copy_success_broadcasts_good()
     add_u32(&mut payload, 1); // success = true
     add_utf16(&mut payload, "C:\\src\\file.txt");
     add_utf16(&mut payload, "C:\\dst\\file.txt");
-    dispatcher
-        .dispatch(0xF500_0006, u32::from(DemonCommand::CommandFs), 0xA6, &payload)
-        .await?;
+    dispatcher.dispatch(0xF500_0006, u32::from(DemonCommand::CommandFs), 0xA6, &payload).await?;
 
     let event = receiver.recv().await.ok_or("missing copy event")?;
     let OperatorMessage::AgentResponse(msg) = event else {
@@ -3314,8 +3066,8 @@ async fn builtin_filesystem_copy_success_broadcasts_good()
 }
 
 #[tokio::test]
-async fn builtin_filesystem_copy_failure_broadcasts_error()
--> Result<(), Box<dyn std::error::Error>> {
+async fn builtin_filesystem_copy_failure_broadcasts_error() -> Result<(), Box<dyn std::error::Error>>
+{
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
@@ -3330,9 +3082,7 @@ async fn builtin_filesystem_copy_failure_broadcasts_error()
     add_u32(&mut payload, 0); // success = false
     add_utf16(&mut payload, "C:\\nope\\a.txt");
     add_utf16(&mut payload, "C:\\nope\\b.txt");
-    dispatcher
-        .dispatch(0xF500_0007, u32::from(DemonCommand::CommandFs), 0xA7, &payload)
-        .await?;
+    dispatcher.dispatch(0xF500_0007, u32::from(DemonCommand::CommandFs), 0xA7, &payload).await?;
 
     let event = receiver.recv().await.ok_or("missing copy failure event")?;
     let OperatorMessage::AgentResponse(msg) = event else {
@@ -3340,17 +3090,15 @@ async fn builtin_filesystem_copy_failure_broadcasts_error()
     };
     assert_eq!(
         msg.info.extra.get("Message"),
-        Some(&Value::String(
-            "Failed to copy file C:\\nope\\a.txt to C:\\nope\\b.txt".to_owned()
-        ))
+        Some(&Value::String("Failed to copy file C:\\nope\\a.txt to C:\\nope\\b.txt".to_owned()))
     );
     assert_eq!(msg.info.extra.get("Type"), Some(&Value::String("Error".to_owned())));
     Ok(())
 }
 
 #[tokio::test]
-async fn builtin_filesystem_move_success_broadcasts_good()
--> Result<(), Box<dyn std::error::Error>> {
+async fn builtin_filesystem_move_success_broadcasts_good() -> Result<(), Box<dyn std::error::Error>>
+{
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
@@ -3365,9 +3113,7 @@ async fn builtin_filesystem_move_success_broadcasts_good()
     add_u32(&mut payload, 1); // success = true
     add_utf16(&mut payload, "C:\\old\\data.bin");
     add_utf16(&mut payload, "C:\\new\\data.bin");
-    dispatcher
-        .dispatch(0xF500_0008, u32::from(DemonCommand::CommandFs), 0xA8, &payload)
-        .await?;
+    dispatcher.dispatch(0xF500_0008, u32::from(DemonCommand::CommandFs), 0xA8, &payload).await?;
 
     let event = receiver.recv().await.ok_or("missing move event")?;
     let OperatorMessage::AgentResponse(msg) = event else {
@@ -3384,8 +3130,8 @@ async fn builtin_filesystem_move_success_broadcasts_good()
 }
 
 #[tokio::test]
-async fn builtin_filesystem_move_failure_broadcasts_error()
--> Result<(), Box<dyn std::error::Error>> {
+async fn builtin_filesystem_move_failure_broadcasts_error() -> Result<(), Box<dyn std::error::Error>>
+{
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
@@ -3400,9 +3146,7 @@ async fn builtin_filesystem_move_failure_broadcasts_error()
     add_u32(&mut payload, 0); // success = false
     add_utf16(&mut payload, "C:\\locked\\x.dll");
     add_utf16(&mut payload, "C:\\dest\\x.dll");
-    dispatcher
-        .dispatch(0xF500_0009, u32::from(DemonCommand::CommandFs), 0xA9, &payload)
-        .await?;
+    dispatcher.dispatch(0xF500_0009, u32::from(DemonCommand::CommandFs), 0xA9, &payload).await?;
 
     let event = receiver.recv().await.ok_or("missing move failure event")?;
     let OperatorMessage::AgentResponse(msg) = event else {
@@ -3410,9 +3154,7 @@ async fn builtin_filesystem_move_failure_broadcasts_error()
     };
     assert_eq!(
         msg.info.extra.get("Message"),
-        Some(&Value::String(
-            "Failed to move file C:\\locked\\x.dll to C:\\dest\\x.dll".to_owned()
-        ))
+        Some(&Value::String("Failed to move file C:\\locked\\x.dll to C:\\dest\\x.dll".to_owned()))
     );
     assert_eq!(msg.info.extra.get("Type"), Some(&Value::String("Error".to_owned())));
     Ok(())
@@ -3433,9 +3175,7 @@ async fn builtin_filesystem_getpwd_broadcasts_current_directory()
     let mut payload = Vec::new();
     add_u32(&mut payload, u32::from(DemonFilesystemCommand::GetPwd));
     add_utf16(&mut payload, "C:\\Windows\\System32");
-    dispatcher
-        .dispatch(0xF500_000A, u32::from(DemonCommand::CommandFs), 0xAA, &payload)
-        .await?;
+    dispatcher.dispatch(0xF500_000A, u32::from(DemonCommand::CommandFs), 0xAA, &payload).await?;
 
     let event = receiver.recv().await.ok_or("missing getpwd event")?;
     let OperatorMessage::AgentResponse(msg) = event else {
@@ -3466,9 +3206,7 @@ async fn builtin_filesystem_cat_success_broadcasts_content()
     add_utf16(&mut payload, "C:\\flag.txt");
     add_u32(&mut payload, 1); // success = true
     add_bytes(&mut payload, file_content.as_bytes()); // read_string uses read_bytes
-    dispatcher
-        .dispatch(0xF500_000B, u32::from(DemonCommand::CommandFs), 0xAB, &payload)
-        .await?;
+    dispatcher.dispatch(0xF500_000B, u32::from(DemonCommand::CommandFs), 0xAB, &payload).await?;
 
     let event = receiver.recv().await.ok_or("missing cat event")?;
     let OperatorMessage::AgentResponse(msg) = event else {
@@ -3484,8 +3222,8 @@ async fn builtin_filesystem_cat_success_broadcasts_content()
 }
 
 #[tokio::test]
-async fn builtin_filesystem_cat_failure_broadcasts_error()
--> Result<(), Box<dyn std::error::Error>> {
+async fn builtin_filesystem_cat_failure_broadcasts_error() -> Result<(), Box<dyn std::error::Error>>
+{
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
@@ -3500,9 +3238,7 @@ async fn builtin_filesystem_cat_failure_broadcasts_error()
     add_utf16(&mut payload, "C:\\nonexistent.txt");
     add_u32(&mut payload, 0); // success = false
     add_bytes(&mut payload, b"error details");
-    dispatcher
-        .dispatch(0xF500_000C, u32::from(DemonCommand::CommandFs), 0xAC, &payload)
-        .await?;
+    dispatcher.dispatch(0xF500_000C, u32::from(DemonCommand::CommandFs), 0xAC, &payload).await?;
 
     let event = receiver.recv().await.ok_or("missing cat failure event")?;
     let OperatorMessage::AgentResponse(msg) = event else {
@@ -3546,9 +3282,7 @@ async fn builtin_filesystem_dir_list_only_broadcasts_paths()
     // Item 2
     add_utf16(&mut payload, "b.log");
 
-    dispatcher
-        .dispatch(0xF500_0010, u32::from(DemonCommand::CommandFs), 0xB0, &payload)
-        .await?;
+    dispatcher.dispatch(0xF500_0010, u32::from(DemonCommand::CommandFs), 0xB0, &payload).await?;
 
     let event = receiver.recv().await.ok_or("missing dir list event")?;
     let OperatorMessage::AgentResponse(msg) = event else {
@@ -3606,9 +3340,7 @@ async fn builtin_filesystem_dir_normal_mode_broadcasts_formatted_listing()
     add_u32(&mut payload, 0); // minute
     add_u32(&mut payload, 9); // hour
 
-    dispatcher
-        .dispatch(0xF500_0011, u32::from(DemonCommand::CommandFs), 0xB1, &payload)
-        .await?;
+    dispatcher.dispatch(0xF500_0011, u32::from(DemonCommand::CommandFs), 0xB1, &payload).await?;
 
     let event = receiver.recv().await.ok_or("missing dir normal event")?;
     let OperatorMessage::AgentResponse(msg) = event else {
@@ -3659,9 +3391,7 @@ async fn builtin_filesystem_dir_explorer_mode_broadcasts_base64_json()
     add_u32(&mut payload, 0); // minute
     add_u32(&mut payload, 12); // hour
 
-    dispatcher
-        .dispatch(0xF500_0012, u32::from(DemonCommand::CommandFs), 0xB2, &payload)
-        .await?;
+    dispatcher.dispatch(0xF500_0012, u32::from(DemonCommand::CommandFs), 0xB2, &payload).await?;
 
     let event = receiver.recv().await.ok_or("missing dir explorer event")?;
     let OperatorMessage::AgentResponse(msg) = event else {
@@ -3703,9 +3433,7 @@ async fn builtin_filesystem_dir_failure_broadcasts_not_found()
     add_utf16(&mut payload, "C:\\NoSuchDir\\*");
     add_u32(&mut payload, 0); // success = false
 
-    dispatcher
-        .dispatch(0xF500_0013, u32::from(DemonCommand::CommandFs), 0xB3, &payload)
-        .await?;
+    dispatcher.dispatch(0xF500_0013, u32::from(DemonCommand::CommandFs), 0xB3, &payload).await?;
 
     let event = receiver.recv().await.ok_or("missing dir failure event")?;
     let OperatorMessage::AgentResponse(msg) = event else {
@@ -3745,9 +3473,7 @@ async fn builtin_beacon_file_callbacks_surface_over_limit_as_error_event()
     let mut open = Vec::new();
     add_u32(&mut open, u32::from(DemonCallback::File));
     add_bytes(&mut open, &open_header);
-    dispatcher
-        .dispatch(0xABCD_EF41, u32::from(DemonCommand::BeaconOutput), 0x77, &open)
-        .await?;
+    dispatcher.dispatch(0xABCD_EF41, u32::from(DemonCommand::BeaconOutput), 0x77, &open).await?;
 
     // Chunk that exceeds the 4-byte cap — must succeed (not propagate error).
     let mut chunk = Vec::new();
@@ -3778,10 +3504,7 @@ async fn builtin_beacon_file_callbacks_surface_over_limit_as_error_event()
     };
     assert_eq!(error_message.info.extra.get("Type"), Some(&Value::String("Error".to_owned())));
     let msg = error_message.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
-    assert!(
-        msg.contains("limit exceeded"),
-        "error message should mention limit exceeded: {msg}"
-    );
+    assert!(msg.contains("limit exceeded"), "error message should mention limit exceeded: {msg}");
 
     // Audit log must have a download.rejected entry.
     let audit_rows = database.audit_log().list().await?;
@@ -3868,10 +3591,7 @@ async fn builtin_filesystem_download_handler_surfaces_concurrent_limit_as_error_
     };
     assert_eq!(error_message.info.extra.get("Type"), Some(&Value::String("Error".to_owned())));
     let msg = error_message.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
-    assert!(
-        msg.contains("limit exceeded"),
-        "error message should mention limit exceeded: {msg}"
-    );
+    assert!(msg.contains("limit exceeded"), "error message should mention limit exceeded: {msg}");
 
     // Audit log must contain a download.rejected entry.
     let audit_rows = database.audit_log().list().await?;
@@ -3916,9 +3636,7 @@ async fn builtin_beacon_file_callbacks_surface_concurrent_limit_as_error_event()
     let mut open1 = Vec::new();
     add_u32(&mut open1, u32::from(DemonCallback::File));
     add_bytes(&mut open1, &open_header1);
-    dispatcher
-        .dispatch(0xABCD_EF71, u32::from(DemonCommand::BeaconOutput), 0x77, &open1)
-        .await?;
+    dispatcher.dispatch(0xABCD_EF71, u32::from(DemonCommand::BeaconOutput), 0x77, &open1).await?;
 
     // Open second beacon file download while first is active — concurrent limit exceeded.
     // Must return Ok(()) (error is surfaced as event, not propagated).
@@ -3951,10 +3669,7 @@ async fn builtin_beacon_file_callbacks_surface_concurrent_limit_as_error_event()
     };
     assert_eq!(error_message.info.extra.get("Type"), Some(&Value::String("Error".to_owned())));
     let msg = error_message.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
-    assert!(
-        msg.contains("limit exceeded"),
-        "error message should mention limit exceeded: {msg}"
-    );
+    assert!(msg.contains("limit exceeded"), "error message should mention limit exceeded: {msg}");
 
     // Audit log must contain a download.rejected entry.
     let audit_rows = database.audit_log().list().await?;
@@ -4082,9 +3797,8 @@ async fn with_builtin_handlers_and_max_download_bytes_ceiling_exceeded()
     add_u32(&mut write2, 1);
     add_u32(&mut write2, file_id);
     add_bytes(&mut write2, b"ab");
-    let error2 = dispatcher
-        .dispatch(0xABCD_EF61, u32::from(DemonCommand::CommandFs), 0x99, &write2)
-        .await;
+    let error2 =
+        dispatcher.dispatch(0xABCD_EF61, u32::from(DemonCommand::CommandFs), 0x99, &write2).await;
     assert!(error2.is_err(), "writes after drop should be rejected with protocol error");
 
     // Drain: open event, then error event for the oversized chunk.
@@ -4211,9 +3925,7 @@ async fn builtin_kerberos_klist_handler_formats_ticket_output()
     add_u32(&mut payload, 0x4081_0000);
     add_bytes(&mut payload, b"ticket");
 
-    dispatcher
-        .dispatch(0x0102_0304, u32::from(DemonCommand::CommandKerberos), 9, &payload)
-        .await?;
+    dispatcher.dispatch(0x0102_0304, u32::from(DemonCommand::CommandKerberos), 9, &payload).await?;
 
     let event = receiver.recv().await.ok_or_else(|| "kerberos response missing".to_owned())?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -4226,8 +3938,7 @@ async fn builtin_kerberos_klist_handler_formats_ticket_output()
 }
 
 #[tokio::test]
-async fn token_steal_callback_broadcasts_success_event()
--> Result<(), Box<dyn std::error::Error>> {
+async fn token_steal_callback_broadcasts_success_event() -> Result<(), Box<dyn std::error::Error>> {
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
@@ -4241,9 +3952,7 @@ async fn token_steal_callback_broadcasts_success_event()
     add_utf16(&mut payload, "LAB\\admin");
     add_u32(&mut payload, 3);
     add_u32(&mut payload, 1234);
-    dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 10, &payload)
-        .await?;
+    dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 10, &payload).await?;
 
     let event = receiver.recv().await.ok_or("token steal response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -4277,9 +3986,7 @@ async fn token_list_callback_formats_vault_table() -> Result<(), Box<dyn std::er
     add_u32(&mut payload, 4444);
     add_u32(&mut payload, 1);
     add_u32(&mut payload, 1);
-    dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 11, &payload)
-        .await?;
+    dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 11, &payload).await?;
 
     let event = receiver.recv().await.ok_or("token list response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -4303,9 +4010,7 @@ async fn token_list_callback_empty_vault() -> Result<(), Box<dyn std::error::Err
 
     let mut payload = Vec::new();
     add_u32(&mut payload, u32::from(DemonTokenCommand::List));
-    dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 12, &payload)
-        .await?;
+    dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 12, &payload).await?;
 
     let event = receiver.recv().await.ok_or("token list empty response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -4333,9 +4038,7 @@ async fn token_privs_list_callback_formats_privilege_table()
     add_u32(&mut payload, 3);
     add_bytes(&mut payload, b"SeShutdownPrivilege\0");
     add_u32(&mut payload, 0);
-    dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 13, &payload)
-        .await?;
+    dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 13, &payload).await?;
 
     let event = receiver.recv().await.ok_or("token privs list response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -4349,8 +4052,7 @@ async fn token_privs_list_callback_formats_privilege_table()
 }
 
 #[tokio::test]
-async fn token_privs_get_callback_success_and_failure() -> Result<(), Box<dyn std::error::Error>>
-{
+async fn token_privs_get_callback_success_and_failure() -> Result<(), Box<dyn std::error::Error>> {
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
@@ -4364,9 +4066,7 @@ async fn token_privs_get_callback_success_and_failure() -> Result<(), Box<dyn st
     add_u32(&mut payload, 0);
     add_u32(&mut payload, 1);
     add_bytes(&mut payload, b"SeDebugPrivilege\0");
-    dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 14, &payload)
-        .await?;
+    dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 14, &payload).await?;
 
     let event = receiver.recv().await.ok_or("token privs get response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -4381,9 +4081,7 @@ async fn token_privs_get_callback_success_and_failure() -> Result<(), Box<dyn st
     add_u32(&mut payload, 0);
     add_u32(&mut payload, 0);
     add_bytes(&mut payload, b"SeDebugPrivilege\0");
-    dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 15, &payload)
-        .await?;
+    dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 15, &payload).await?;
 
     let event = receiver.recv().await.ok_or("token privs get failure response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -4407,9 +4105,7 @@ async fn token_make_callback_success_and_empty() -> Result<(), Box<dyn std::erro
     let mut payload = Vec::new();
     add_u32(&mut payload, u32::from(DemonTokenCommand::Make));
     add_utf16(&mut payload, "LAB\\admin");
-    dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 16, &payload)
-        .await?;
+    dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 16, &payload).await?;
 
     let event = receiver.recv().await.ok_or("token make response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -4421,9 +4117,7 @@ async fn token_make_callback_success_and_empty() -> Result<(), Box<dyn std::erro
 
     let mut payload = Vec::new();
     add_u32(&mut payload, u32::from(DemonTokenCommand::Make));
-    dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 17, &payload)
-        .await?;
+    dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 17, &payload).await?;
 
     let event = receiver.recv().await.ok_or("token make failure response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -4448,9 +4142,7 @@ async fn token_getuid_callback_elevated_and_normal() -> Result<(), Box<dyn std::
     add_u32(&mut payload, u32::from(DemonTokenCommand::GetUid));
     add_u32(&mut payload, 1);
     add_utf16(&mut payload, "LAB\\admin");
-    dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 18, &payload)
-        .await?;
+    dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 18, &payload).await?;
 
     let event = receiver.recv().await.ok_or("token getuid response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -4464,9 +4156,7 @@ async fn token_getuid_callback_elevated_and_normal() -> Result<(), Box<dyn std::
     add_u32(&mut payload, u32::from(DemonTokenCommand::GetUid));
     add_u32(&mut payload, 0);
     add_utf16(&mut payload, "LAB\\user");
-    dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 19, &payload)
-        .await?;
+    dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 19, &payload).await?;
 
     let event = receiver.recv().await.ok_or("token getuid normal response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -4491,9 +4181,7 @@ async fn token_revert_callback_success_and_failure() -> Result<(), Box<dyn std::
     let mut payload = Vec::new();
     add_u32(&mut payload, u32::from(DemonTokenCommand::Revert));
     add_u32(&mut payload, 1);
-    dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 20, &payload)
-        .await?;
+    dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 20, &payload).await?;
 
     let event = receiver.recv().await.ok_or("token revert response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -4505,9 +4193,7 @@ async fn token_revert_callback_success_and_failure() -> Result<(), Box<dyn std::
     let mut payload = Vec::new();
     add_u32(&mut payload, u32::from(DemonTokenCommand::Revert));
     add_u32(&mut payload, 0);
-    dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 21, &payload)
-        .await?;
+    dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 21, &payload).await?;
 
     let event = receiver.recv().await.ok_or("token revert failure response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -4532,9 +4218,7 @@ async fn token_remove_callback_success_and_failure() -> Result<(), Box<dyn std::
     add_u32(&mut payload, u32::from(DemonTokenCommand::Remove));
     add_u32(&mut payload, 1);
     add_u32(&mut payload, 5);
-    dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 22, &payload)
-        .await?;
+    dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 22, &payload).await?;
 
     let event = receiver.recv().await.ok_or("token remove response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -4547,9 +4231,7 @@ async fn token_remove_callback_success_and_failure() -> Result<(), Box<dyn std::
     add_u32(&mut payload, u32::from(DemonTokenCommand::Remove));
     add_u32(&mut payload, 0);
     add_u32(&mut payload, 5);
-    dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 23, &payload)
-        .await?;
+    dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 23, &payload).await?;
 
     let event = receiver.recv().await.ok_or("token remove failure response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -4572,9 +4254,7 @@ async fn token_clear_callback_broadcasts_success() -> Result<(), Box<dyn std::er
 
     let mut payload = Vec::new();
     add_u32(&mut payload, u32::from(DemonTokenCommand::Clear));
-    dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 24, &payload)
-        .await?;
+    dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 24, &payload).await?;
 
     let event = receiver.recv().await.ok_or("token clear response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -4605,9 +4285,7 @@ async fn token_find_tokens_callback_formats_table() -> Result<(), Box<dyn std::e
     add_u32(&mut payload, 0x3000);
     add_u32(&mut payload, 2);
     add_u32(&mut payload, 1);
-    dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 25, &payload)
-        .await?;
+    dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 25, &payload).await?;
 
     let event = receiver.recv().await.ok_or("token find response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -4633,9 +4311,7 @@ async fn token_find_tokens_callback_failure() -> Result<(), Box<dyn std::error::
     let mut payload = Vec::new();
     add_u32(&mut payload, u32::from(DemonTokenCommand::FindTokens));
     add_u32(&mut payload, 0);
-    dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 26, &payload)
-        .await?;
+    dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 26, &payload).await?;
 
     let event = receiver.recv().await.ok_or("token find failure response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -4647,8 +4323,7 @@ async fn token_find_tokens_callback_failure() -> Result<(), Box<dyn std::error::
 }
 
 #[tokio::test]
-async fn token_impersonate_success_emits_good_response()
--> Result<(), Box<dyn std::error::Error>> {
+async fn token_impersonate_success_emits_good_response() -> Result<(), Box<dyn std::error::Error>> {
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
@@ -4661,9 +4336,7 @@ async fn token_impersonate_success_emits_good_response()
     add_u32(&mut payload, u32::from(DemonTokenCommand::Impersonate));
     add_u32(&mut payload, 1); // success
     add_bytes(&mut payload, b"CORP\\jdoe\0");
-    dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 40, &payload)
-        .await?;
+    dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 40, &payload).await?;
 
     let event = receiver.recv().await.ok_or("impersonate success response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -4678,8 +4351,8 @@ async fn token_impersonate_success_emits_good_response()
 }
 
 #[tokio::test]
-async fn token_impersonate_failure_emits_error_response()
--> Result<(), Box<dyn std::error::Error>> {
+async fn token_impersonate_failure_emits_error_response() -> Result<(), Box<dyn std::error::Error>>
+{
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
@@ -4692,9 +4365,7 @@ async fn token_impersonate_failure_emits_error_response()
     add_u32(&mut payload, u32::from(DemonTokenCommand::Impersonate));
     add_u32(&mut payload, 0); // failure
     add_bytes(&mut payload, b"CORP\\jdoe\0");
-    dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 41, &payload)
-        .await?;
+    dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 41, &payload).await?;
 
     let event = receiver.recv().await.ok_or("impersonate failure response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -4721,9 +4392,7 @@ async fn token_make_success_emits_good_type() -> Result<(), Box<dyn std::error::
     let mut payload = Vec::new();
     add_u32(&mut payload, u32::from(DemonTokenCommand::Make));
     add_utf16(&mut payload, "CORP\\svcacct");
-    dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 42, &payload)
-        .await?;
+    dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 42, &payload).await?;
 
     let event = receiver.recv().await.ok_or("make success response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -4748,9 +4417,7 @@ async fn token_make_empty_payload_emits_error_type() -> Result<(), Box<dyn std::
     let mut payload = Vec::new();
     add_u32(&mut payload, u32::from(DemonTokenCommand::Make));
     // No user_domain — triggers failure path
-    dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 43, &payload)
-        .await?;
+    dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 43, &payload).await?;
 
     let event = receiver.recv().await.ok_or("make failure response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -4779,9 +4446,7 @@ async fn token_getuid_elevated_emits_admin_suffix() -> Result<(), Box<dyn std::e
     add_u32(&mut payload, u32::from(DemonTokenCommand::GetUid));
     add_u32(&mut payload, 1); // elevated
     add_utf16(&mut payload, "CORP\\admin");
-    dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 44, &payload)
-        .await?;
+    dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 44, &payload).await?;
 
     let event = receiver.recv().await.ok_or("getuid elevated response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -4798,9 +4463,7 @@ async fn token_getuid_elevated_emits_admin_suffix() -> Result<(), Box<dyn std::e
     add_u32(&mut payload, u32::from(DemonTokenCommand::GetUid));
     add_u32(&mut payload, 0); // not elevated
     add_utf16(&mut payload, "CORP\\user");
-    dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 45, &payload)
-        .await?;
+    dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 45, &payload).await?;
 
     let event = receiver.recv().await.ok_or("getuid normal response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -4830,9 +4493,7 @@ async fn token_privs_get_success_emits_good_type() -> Result<(), Box<dyn std::er
     add_u32(&mut payload, 0); // get mode
     add_u32(&mut payload, 1); // success
     add_bytes(&mut payload, b"SeImpersonatePrivilege\0");
-    dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 46, &payload)
-        .await?;
+    dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 46, &payload).await?;
 
     let event = receiver.recv().await.ok_or("privs get success response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -4850,9 +4511,7 @@ async fn token_privs_get_success_emits_good_type() -> Result<(), Box<dyn std::er
     add_u32(&mut payload, 0); // get mode
     add_u32(&mut payload, 0); // failure
     add_bytes(&mut payload, b"SeImpersonatePrivilege\0");
-    dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 47, &payload)
-        .await?;
+    dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 47, &payload).await?;
 
     let event = receiver.recv().await.ok_or("privs get failure response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -4867,8 +4526,8 @@ async fn token_privs_get_success_emits_good_type() -> Result<(), Box<dyn std::er
 }
 
 #[tokio::test]
-async fn token_privs_list_emits_good_type_with_all_states()
--> Result<(), Box<dyn std::error::Error>> {
+async fn token_privs_list_emits_good_type_with_all_states() -> Result<(), Box<dyn std::error::Error>>
+{
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
@@ -4888,9 +4547,7 @@ async fn token_privs_list_emits_good_type_with_all_states()
     add_u32(&mut payload, 0); // Disabled
     add_bytes(&mut payload, b"SeCustomPrivilege\0");
     add_u32(&mut payload, 99); // Unknown
-    dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 48, &payload)
-        .await?;
+    dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 48, &payload).await?;
 
     let event = receiver.recv().await.ok_or("privs list response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -4919,9 +4576,7 @@ async fn token_revert_success_emits_good_failure_emits_error()
     let mut payload = Vec::new();
     add_u32(&mut payload, u32::from(DemonTokenCommand::Revert));
     add_u32(&mut payload, 1); // success
-    dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 49, &payload)
-        .await?;
+    dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 49, &payload).await?;
 
     let event = receiver.recv().await.ok_or("revert success response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -4936,9 +4591,7 @@ async fn token_revert_success_emits_good_failure_emits_error()
     let mut payload = Vec::new();
     add_u32(&mut payload, u32::from(DemonTokenCommand::Revert));
     add_u32(&mut payload, 0); // failure
-    dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 50, &payload)
-        .await?;
+    dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 50, &payload).await?;
 
     let event = receiver.recv().await.ok_or("revert failure response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -4967,9 +4620,7 @@ async fn token_remove_success_emits_good_failure_emits_error()
     add_u32(&mut payload, u32::from(DemonTokenCommand::Remove));
     add_u32(&mut payload, 1); // success
     add_u32(&mut payload, 42); // token_id
-    dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 51, &payload)
-        .await?;
+    dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 51, &payload).await?;
 
     let event = receiver.recv().await.ok_or("remove success response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -4985,9 +4636,7 @@ async fn token_remove_success_emits_good_failure_emits_error()
     add_u32(&mut payload, u32::from(DemonTokenCommand::Remove));
     add_u32(&mut payload, 0); // failure
     add_u32(&mut payload, 42); // token_id
-    dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 52, &payload)
-        .await?;
+    dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 52, &payload).await?;
 
     let event = receiver.recv().await.ok_or("remove failure response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -5002,8 +4651,8 @@ async fn token_remove_success_emits_good_failure_emits_error()
 }
 
 #[tokio::test]
-async fn token_find_tokens_zero_count_returns_no_tokens()
--> Result<(), Box<dyn std::error::Error>> {
+async fn token_find_tokens_zero_count_returns_no_tokens() -> Result<(), Box<dyn std::error::Error>>
+{
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
@@ -5016,9 +4665,7 @@ async fn token_find_tokens_zero_count_returns_no_tokens()
     add_u32(&mut payload, u32::from(DemonTokenCommand::FindTokens));
     add_u32(&mut payload, 1); // success
     add_u32(&mut payload, 0); // num_tokens = 0
-    dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 53, &payload)
-        .await?;
+    dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 53, &payload).await?;
 
     let event = receiver.recv().await.ok_or("find tokens zero count response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -5050,9 +4697,7 @@ async fn token_find_tokens_impersonation_type_with_delegation()
     add_u32(&mut payload, 0x2000); // integrity = Medium
     add_u32(&mut payload, 3); // impersonation = Delegation
     add_u32(&mut payload, 2); // token_type = Impersonation
-    dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 54, &payload)
-        .await?;
+    dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 54, &payload).await?;
 
     let event = receiver.recv().await.ok_or("find tokens impersonation response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -5071,8 +4716,7 @@ async fn token_find_tokens_impersonation_type_with_delegation()
 }
 
 #[tokio::test]
-async fn token_find_tokens_failure_emits_error_type() -> Result<(), Box<dyn std::error::Error>>
-{
+async fn token_find_tokens_failure_emits_error_type() -> Result<(), Box<dyn std::error::Error>> {
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
@@ -5084,9 +4728,7 @@ async fn token_find_tokens_failure_emits_error_type() -> Result<(), Box<dyn std:
     let mut payload = Vec::new();
     add_u32(&mut payload, u32::from(DemonTokenCommand::FindTokens));
     add_u32(&mut payload, 0); // failure
-    dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 55, &payload)
-        .await?;
+    dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 55, &payload).await?;
 
     let event = receiver.recv().await.ok_or("find tokens failure response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -5101,8 +4743,7 @@ async fn token_find_tokens_failure_emits_error_type() -> Result<(), Box<dyn std:
 }
 
 #[tokio::test]
-async fn token_list_multiple_types_formats_correctly() -> Result<(), Box<dyn std::error::Error>>
-{
+async fn token_list_multiple_types_formats_correctly() -> Result<(), Box<dyn std::error::Error>> {
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
@@ -5141,9 +4782,7 @@ async fn token_list_multiple_types_formats_correctly() -> Result<(), Box<dyn std
     add_u32(&mut payload, 4000); // pid
     add_u32(&mut payload, 99); // type = unknown
     add_u32(&mut payload, 0); // impersonating = No
-    dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 56, &payload)
-        .await?;
+    dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 56, &payload).await?;
 
     let event = receiver.recv().await.ok_or("token list multi response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -5205,9 +4844,7 @@ async fn token_find_tokens_integrity_levels_formatted_correctly()
     add_u32(&mut payload, 0x4000); // integrity = System
     add_u32(&mut payload, 0); // impersonation = Anonymous
     add_u32(&mut payload, 2); // Impersonation token
-    dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 57, &payload)
-        .await?;
+    dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 57, &payload).await?;
 
     let event = receiver.recv().await.ok_or("find tokens integrity response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -5271,8 +4908,8 @@ async fn token_list_callback_rejects_truncated_row() -> Result<(), Box<dyn std::
 }
 
 #[tokio::test]
-async fn token_privs_list_callback_rejects_truncated_row()
--> Result<(), Box<dyn std::error::Error>> {
+async fn token_privs_list_callback_rejects_truncated_row() -> Result<(), Box<dyn std::error::Error>>
+{
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
@@ -5312,8 +4949,8 @@ async fn token_privs_list_callback_rejects_truncated_row()
 }
 
 #[tokio::test]
-async fn token_find_tokens_callback_rejects_truncated_row()
--> Result<(), Box<dyn std::error::Error>> {
+async fn token_find_tokens_callback_rejects_truncated_row() -> Result<(), Box<dyn std::error::Error>>
+{
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
@@ -5375,9 +5012,7 @@ async fn socket_read_callback_broadcasts_error_when_relay_delivery_fails()
     add_u32(&mut payload, 1);
     add_bytes(&mut payload, b"hello");
 
-    dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandSocket), 27, &payload)
-        .await?;
+    dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandSocket), 27, &payload).await?;
 
     let event = receiver.recv().await.ok_or("socket relay delivery error missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -5410,9 +5045,7 @@ async fn socket_rportfwd_add_callback_broadcasts_success_and_failure()
     add_u32(&mut success, u32::from_le_bytes([10, 0, 0, 5]));
     add_u32(&mut success, 8080);
 
-    dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandSocket), 28, &success)
-        .await?;
+    dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandSocket), 28, &success).await?;
 
     let success_event = receiver.recv().await.ok_or("missing rportfwd add success event")?;
     let OperatorMessage::AgentResponse(success_message) = success_event else {
@@ -5422,8 +5055,7 @@ async fn socket_rportfwd_add_callback_broadcasts_success_and_failure()
     assert_eq!(
         success_message.info.extra.get("Message"),
         Some(&Value::String(
-            "Started reverse port forward on 127.0.0.1:4444 to 10.0.0.5:8080 [Id: 55]"
-                .to_owned(),
+            "Started reverse port forward on 127.0.0.1:4444 to 10.0.0.5:8080 [Id: 55]".to_owned(),
         ))
     );
 
@@ -5436,18 +5068,13 @@ async fn socket_rportfwd_add_callback_broadcasts_success_and_failure()
     add_u32(&mut failure, u32::from_le_bytes([172, 16, 1, 20]));
     add_u32(&mut failure, 22);
 
-    dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandSocket), 29, &failure)
-        .await?;
+    dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandSocket), 29, &failure).await?;
 
     let failure_event = receiver.recv().await.ok_or("missing rportfwd add failure event")?;
     let OperatorMessage::AgentResponse(failure_message) = failure_event else {
         panic!("expected agent response event");
     };
-    assert_eq!(
-        failure_message.info.extra.get("Type"),
-        Some(&Value::String("Error".to_owned()))
-    );
+    assert_eq!(failure_message.info.extra.get("Type"), Some(&Value::String("Error".to_owned())));
     assert_eq!(
         failure_message.info.extra.get("Message"),
         Some(&Value::String(
@@ -5482,9 +5109,7 @@ async fn socket_rportfwd_list_callback_formats_output_rows()
     add_u32(&mut payload, u32::from_le_bytes([192, 168, 56, 10]));
     add_u32(&mut payload, 443);
 
-    dispatcher
-        .dispatch(0xCAFE_BABE, u32::from(DemonCommand::CommandSocket), 30, &payload)
-        .await?;
+    dispatcher.dispatch(0xCAFE_BABE, u32::from(DemonCommand::CommandSocket), 30, &payload).await?;
 
     let event = receiver.recv().await.ok_or("missing rportfwd list event")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -5521,9 +5146,7 @@ async fn socket_rportfwd_remove_callback_only_broadcasts_for_rportfwd_type()
     add_u32(&mut payload, u32::from_le_bytes([10, 10, 10, 10]));
     add_u32(&mut payload, 3389);
 
-    dispatcher
-        .dispatch(0xBEEF_CAFE, u32::from(DemonCommand::CommandSocket), 31, &payload)
-        .await?;
+    dispatcher.dispatch(0xBEEF_CAFE, u32::from(DemonCommand::CommandSocket), 31, &payload).await?;
 
     let event = receiver.recv().await.ok_or("missing rportfwd remove event")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -5572,9 +5195,7 @@ async fn socket_rportfwd_clear_callback_broadcasts_success_and_failure()
     let mut success = Vec::new();
     add_u32(&mut success, u32::from(DemonSocketCommand::ReversePortForwardClear));
     add_u32(&mut success, 1);
-    dispatcher
-        .dispatch(0xDEAD_BEEF, u32::from(DemonCommand::CommandSocket), 33, &success)
-        .await?;
+    dispatcher.dispatch(0xDEAD_BEEF, u32::from(DemonCommand::CommandSocket), 33, &success).await?;
 
     let success_event = receiver.recv().await.ok_or("missing rportfwd clear success event")?;
     let OperatorMessage::AgentResponse(success_message) = success_event else {
@@ -5589,18 +5210,13 @@ async fn socket_rportfwd_clear_callback_broadcasts_success_and_failure()
     let mut failure = Vec::new();
     add_u32(&mut failure, u32::from(DemonSocketCommand::ReversePortForwardClear));
     add_u32(&mut failure, 0);
-    dispatcher
-        .dispatch(0xDEAD_BEEF, u32::from(DemonCommand::CommandSocket), 34, &failure)
-        .await?;
+    dispatcher.dispatch(0xDEAD_BEEF, u32::from(DemonCommand::CommandSocket), 34, &failure).await?;
 
     let failure_event = receiver.recv().await.ok_or("missing rportfwd clear failure event")?;
     let OperatorMessage::AgentResponse(failure_message) = failure_event else {
         panic!("expected agent response event");
     };
-    assert_eq!(
-        failure_message.info.extra.get("Type"),
-        Some(&Value::String("Error".to_owned()))
-    );
+    assert_eq!(failure_message.info.extra.get("Type"), Some(&Value::String("Error".to_owned())));
     assert_eq!(
         failure_message.info.extra.get("Message"),
         Some(&Value::String("Failed to closed and remove all rportfwds".to_owned()))
@@ -5626,9 +5242,7 @@ async fn socket_write_callback_broadcasts_error_on_failure()
     add_u32(&mut payload, 0);
     add_u32(&mut payload, 10061);
 
-    dispatcher
-        .dispatch(0xFACE_FEED, u32::from(DemonCommand::CommandSocket), 35, &payload)
-        .await?;
+    dispatcher.dispatch(0xFACE_FEED, u32::from(DemonCommand::CommandSocket), 35, &payload).await?;
 
     let event = receiver.recv().await.ok_or("missing socket write failure event")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -5696,9 +5310,7 @@ async fn socket_connect_and_close_callbacks_drive_socks_client_lifecycle()
     add_u32(&mut connect, 1);
     add_u32(&mut connect, socket_id);
     add_u32(&mut connect, 0);
-    dispatcher
-        .dispatch(0x1234_5678, u32::from(DemonCommand::CommandSocket), 36, &connect)
-        .await?;
+    dispatcher.dispatch(0x1234_5678, u32::from(DemonCommand::CommandSocket), 36, &connect).await?;
 
     let mut connect_reply = [0_u8; 10];
     client.read_exact(&mut connect_reply).await?;
@@ -5708,9 +5320,7 @@ async fn socket_connect_and_close_callbacks_drive_socks_client_lifecycle()
     add_u32(&mut close, u32::from(DemonSocketCommand::Close));
     add_u32(&mut close, socket_id);
     add_u32(&mut close, u32::from(DemonSocketType::ReverseProxy));
-    dispatcher
-        .dispatch(0x1234_5678, u32::from(DemonCommand::CommandSocket), 37, &close)
-        .await?;
+    dispatcher.dispatch(0x1234_5678, u32::from(DemonCommand::CommandSocket), 37, &close).await?;
 
     let mut eof = [0_u8; 1];
     let closed = timeout(Duration::from_secs(1), client.read(&mut eof)).await?;
@@ -5719,8 +5329,7 @@ async fn socket_connect_and_close_callbacks_drive_socks_client_lifecycle()
 }
 
 #[tokio::test]
-async fn socket_callback_rejects_unknown_subcommands() -> Result<(), Box<dyn std::error::Error>>
-{
+async fn socket_callback_rejects_unknown_subcommands() -> Result<(), Box<dyn std::error::Error>> {
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
@@ -5763,9 +5372,7 @@ async fn socket_read_callback_broadcasts_error_on_agent_read_failure()
     add_u32(&mut payload, 0); // success = 0 (failure)
     add_u32(&mut payload, 10054); // error_code (WSAECONNRESET)
 
-    dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandSocket), 40, &payload)
-        .await?;
+    dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandSocket), 40, &payload).await?;
 
     let event = receiver.recv().await.ok_or("missing socket read failure event")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -5797,9 +5404,7 @@ async fn socket_read_callback_success_non_reverse_proxy_is_silent()
     add_u32(&mut payload, 1); // success
     add_bytes(&mut payload, b"some data");
 
-    dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandSocket), 41, &payload)
-        .await?;
+    dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandSocket), 41, &payload).await?;
 
     assert!(
         timeout(Duration::from_millis(50), receiver.recv()).await.is_err(),
@@ -5809,8 +5414,7 @@ async fn socket_read_callback_success_non_reverse_proxy_is_silent()
 }
 
 #[tokio::test]
-async fn socket_write_callback_no_broadcast_on_success()
--> Result<(), Box<dyn std::error::Error>> {
+async fn socket_write_callback_no_broadcast_on_success() -> Result<(), Box<dyn std::error::Error>> {
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
@@ -5825,9 +5429,7 @@ async fn socket_write_callback_no_broadcast_on_success()
     add_u32(&mut payload, u32::from(DemonSocketType::ReverseProxy));
     add_u32(&mut payload, 1); // success
 
-    dispatcher
-        .dispatch(0xFACE_FEED, u32::from(DemonCommand::CommandSocket), 42, &payload)
-        .await?;
+    dispatcher.dispatch(0xFACE_FEED, u32::from(DemonCommand::CommandSocket), 42, &payload).await?;
 
     assert!(
         timeout(Duration::from_millis(50), receiver.recv()).await.is_err(),
@@ -5885,9 +5487,7 @@ async fn builtin_process_modules_handler_broadcasts_module_list()
     add_bytes(&mut payload, b"kernel32.dll");
     add_u64(&mut payload, 0x7FFA_1000_0000);
 
-    dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandProc), 10, &payload)
-        .await?;
+    dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandProc), 10, &payload).await?;
 
     let event = receiver.recv().await.ok_or_else(|| "modules response missing".to_owned())?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -5932,18 +5532,13 @@ async fn builtin_process_grep_handler_broadcasts_matching_processes()
     add_bytes(&mut payload, b"NT AUTHORITY\\SYSTEM");
     add_u32(&mut payload, 64);
 
-    dispatcher
-        .dispatch(0x1122_3344, u32::from(DemonCommand::CommandProc), 11, &payload)
-        .await?;
+    dispatcher.dispatch(0x1122_3344, u32::from(DemonCommand::CommandProc), 11, &payload).await?;
 
     let event = receiver.recv().await.ok_or_else(|| "grep response missing".to_owned())?;
     let OperatorMessage::AgentResponse(message) = event else {
         panic!("expected agent response event");
     };
-    assert_eq!(
-        message.info.extra.get("Message"),
-        Some(&Value::String("Process Grep:".to_owned()))
-    );
+    assert_eq!(message.info.extra.get("Message"), Some(&Value::String("Process Grep:".to_owned())));
     let rows = message
         .info
         .extra
@@ -5980,9 +5575,7 @@ async fn builtin_process_memory_handler_broadcasts_memory_regions()
     add_u32(&mut payload, 0x1000); // MEM_COMMIT
     add_u32(&mut payload, 0x1000000); // MEM_IMAGE
 
-    dispatcher
-        .dispatch(0xDEAD_BEEF, u32::from(DemonCommand::CommandProc), 12, &payload)
-        .await?;
+    dispatcher.dispatch(0xDEAD_BEEF, u32::from(DemonCommand::CommandProc), 12, &payload).await?;
 
     let event = receiver.recv().await.ok_or_else(|| "memory response missing".to_owned())?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -6005,10 +5598,7 @@ async fn builtin_process_memory_handler_broadcasts_memory_regions()
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].get("Base"), Some(&Value::String("0x0000014000000000".to_owned())));
     assert_eq!(rows[0].get("Size"), Some(&Value::String("0x1000".to_owned())));
-    assert_eq!(
-        rows[0].get("Protect"),
-        Some(&Value::String("PAGE_EXECUTE_READWRITE".to_owned()))
-    );
+    assert_eq!(rows[0].get("Protect"), Some(&Value::String("PAGE_EXECUTE_READWRITE".to_owned())));
     assert_eq!(rows[0].get("State"), Some(&Value::String("MEM_COMMIT".to_owned())));
     assert_eq!(rows[0].get("Type"), Some(&Value::String("MEM_IMAGE".to_owned())));
     assert!(message.info.output.contains("PAGE_EXECUTE_READWRITE"));
@@ -6030,12 +5620,9 @@ async fn builtin_process_modules_handler_handles_empty_module_list()
     add_u32(&mut payload, u32::from(DemonProcessCommand::Modules));
     add_u32(&mut payload, 9999);
 
-    dispatcher
-        .dispatch(0xCAFE_BABE, u32::from(DemonCommand::CommandProc), 13, &payload)
-        .await?;
+    dispatcher.dispatch(0xCAFE_BABE, u32::from(DemonCommand::CommandProc), 13, &payload).await?;
 
-    let event =
-        receiver.recv().await.ok_or_else(|| "empty modules response missing".to_owned())?;
+    let event = receiver.recv().await.ok_or_else(|| "empty modules response missing".to_owned())?;
     let OperatorMessage::AgentResponse(message) = event else {
         panic!("expected agent response event");
     };
@@ -6050,8 +5637,7 @@ async fn builtin_process_modules_handler_handles_empty_module_list()
 }
 
 #[tokio::test]
-async fn builtin_inject_dll_handler_broadcasts_success()
--> Result<(), Box<dyn std::error::Error>> {
+async fn builtin_inject_dll_handler_broadcasts_success() -> Result<(), Box<dyn std::error::Error>> {
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
@@ -6082,8 +5668,7 @@ async fn builtin_inject_dll_handler_broadcasts_success()
 }
 
 #[tokio::test]
-async fn builtin_inject_dll_handler_broadcasts_error() -> Result<(), Box<dyn std::error::Error>>
-{
+async fn builtin_inject_dll_handler_broadcasts_error() -> Result<(), Box<dyn std::error::Error>> {
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
@@ -6145,8 +5730,7 @@ async fn builtin_inject_dll_handler_broadcasts_arch_mismatch()
 }
 
 #[tokio::test]
-async fn builtin_spawn_dll_handler_broadcasts_success() -> Result<(), Box<dyn std::error::Error>>
-{
+async fn builtin_spawn_dll_handler_broadcasts_success() -> Result<(), Box<dyn std::error::Error>> {
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
@@ -6177,8 +5761,7 @@ async fn builtin_spawn_dll_handler_broadcasts_success() -> Result<(), Box<dyn st
 }
 
 #[tokio::test]
-async fn builtin_spawn_dll_handler_broadcasts_error() -> Result<(), Box<dyn std::error::Error>>
-{
+async fn builtin_spawn_dll_handler_broadcasts_error() -> Result<(), Box<dyn std::error::Error>> {
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
@@ -6243,9 +5826,9 @@ async fn builtin_exit_handler_marks_agent_dead_and_broadcasts_events()
     };
     assert_eq!(
         message.info.extra.get("Message"),
-        Some(&Value::String(
-            "Agent has been tasked to cleanup and exit thread. cya...".to_owned(),
-        ))
+        Some(
+            &Value::String("Agent has been tasked to cleanup and exit thread. cya...".to_owned(),)
+        )
     );
 
     let agent = registry.get(0xAABB_CCDD).await.ok_or("agent should remain tracked")?;
@@ -6263,13 +5846,8 @@ async fn builtin_exit_handler_process_exit_broadcasts_process_message()
     let events = EventBus::default();
     let mut receiver = events.subscribe();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let dispatcher = CommandDispatcher::with_builtin_handlers(
-        registry.clone(),
-        events,
-        database,
-        sockets,
-        None,
-    );
+    let dispatcher =
+        CommandDispatcher::with_builtin_handlers(registry.clone(), events, database, sockets, None);
 
     dispatcher
         .dispatch(0xBBCC_DD01, u32::from(DemonCommand::CommandExit), 42, &2_u32.to_le_bytes())
@@ -6309,21 +5887,11 @@ async fn builtin_exit_handler_unknown_method_broadcasts_generic_message()
     let events = EventBus::default();
     let mut receiver = events.subscribe();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let dispatcher = CommandDispatcher::with_builtin_handlers(
-        registry.clone(),
-        events,
-        database,
-        sockets,
-        None,
-    );
+    let dispatcher =
+        CommandDispatcher::with_builtin_handlers(registry.clone(), events, database, sockets, None);
 
     dispatcher
-        .dispatch(
-            0xBBCC_DD02,
-            u32::from(DemonCommand::CommandExit),
-            43,
-            &0x99_u32.to_le_bytes(),
-        )
+        .dispatch(0xBBCC_DD02, u32::from(DemonCommand::CommandExit), 43, &0x99_u32.to_le_bytes())
         .await?;
 
     // First event: AgentUpdate marking dead.
@@ -6339,10 +5907,7 @@ async fn builtin_exit_handler_unknown_method_broadcasts_generic_message()
     let OperatorMessage::AgentResponse(message) = event else {
         panic!("expected agent response event");
     };
-    assert_eq!(
-        message.info.extra.get("Message"),
-        Some(&Value::String("Agent exited".to_owned()))
-    );
+    assert_eq!(message.info.extra.get("Message"), Some(&Value::String("Agent exited".to_owned())));
 
     let agent = registry.get(0xBBCC_DD02).await.ok_or("agent should remain tracked")?;
     assert!(!agent.active);
@@ -6377,8 +5942,7 @@ async fn builtin_kill_date_handler_marks_agent_dead_and_broadcasts_response()
     assert_eq!(
         message.info.extra.get("Message"),
         Some(&Value::String(
-            "Agent has reached its kill date, tasked to cleanup and exit thread. cya..."
-                .to_owned(),
+            "Agent has reached its kill date, tasked to cleanup and exit thread. cya...".to_owned(),
         ))
     );
     assert_eq!(message.info.extra.get("Type"), Some(&Value::String("Good".to_owned())));
@@ -6459,9 +6023,7 @@ async fn builtin_command_error_handler_broadcasts_win32_and_token_messages()
     let mut payload = Vec::new();
     add_u32(&mut payload, u32::from(DemonCallbackError::Win32));
     add_u32(&mut payload, 2);
-    dispatcher
-        .dispatch(0xCAFE_BABE, u32::from(DemonCommand::CommandError), 44, &payload)
-        .await?;
+    dispatcher.dispatch(0xCAFE_BABE, u32::from(DemonCommand::CommandError), 44, &payload).await?;
 
     let event = receiver.recv().await.ok_or("win32 error response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -6476,9 +6038,7 @@ async fn builtin_command_error_handler_broadcasts_win32_and_token_messages()
     let mut payload = Vec::new();
     add_u32(&mut payload, u32::from(DemonCallbackError::Token));
     add_u32(&mut payload, 1);
-    dispatcher
-        .dispatch(0xCAFE_BABE, u32::from(DemonCommand::CommandError), 45, &payload)
-        .await?;
+    dispatcher.dispatch(0xCAFE_BABE, u32::from(DemonCommand::CommandError), 45, &payload).await?;
 
     let event = receiver.recv().await.ok_or("token error response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -6506,9 +6066,7 @@ async fn command_error_handler_win32_unknown_code_and_token_non_0x1_status()
     let mut payload = Vec::new();
     add_u32(&mut payload, u32::from(DemonCallbackError::Win32));
     add_u32(&mut payload, 9999);
-    dispatcher
-        .dispatch(0xCAFE_BABE, u32::from(DemonCommand::CommandError), 50, &payload)
-        .await?;
+    dispatcher.dispatch(0xCAFE_BABE, u32::from(DemonCommand::CommandError), 50, &payload).await?;
 
     let event = receiver.recv().await.ok_or("win32 unknown code response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -6524,9 +6082,7 @@ async fn command_error_handler_win32_unknown_code_and_token_non_0x1_status()
     let mut payload = Vec::new();
     add_u32(&mut payload, u32::from(DemonCallbackError::Token));
     add_u32(&mut payload, 0x5);
-    dispatcher
-        .dispatch(0xCAFE_BABE, u32::from(DemonCommand::CommandError), 51, &payload)
-        .await?;
+    dispatcher.dispatch(0xCAFE_BABE, u32::from(DemonCommand::CommandError), 51, &payload).await?;
 
     let event = receiver.recv().await.ok_or("token non-0x1 response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -6555,9 +6111,7 @@ async fn command_error_handler_coffee_and_unknown_class_broadcast_nothing()
     // Case 3: Coffee — should return Ok(None) with no broadcast
     let mut payload = Vec::new();
     add_u32(&mut payload, u32::from(DemonCallbackError::Coffee));
-    dispatcher
-        .dispatch(0xCAFE_BABE, u32::from(DemonCommand::CommandError), 52, &payload)
-        .await?;
+    dispatcher.dispatch(0xCAFE_BABE, u32::from(DemonCommand::CommandError), 52, &payload).await?;
 
     let result = timeout(Duration::from_millis(50), receiver.recv()).await;
     assert!(result.is_err(), "Coffee error class should not broadcast any event");
@@ -6565,9 +6119,7 @@ async fn command_error_handler_coffee_and_unknown_class_broadcast_nothing()
     // Case 4: Unknown error class (0xFF) — should also return Ok(None) with no broadcast
     let mut payload = Vec::new();
     add_u32(&mut payload, 0xFF_u32);
-    dispatcher
-        .dispatch(0xCAFE_BABE, u32::from(DemonCommand::CommandError), 53, &payload)
-        .await?;
+    dispatcher.dispatch(0xCAFE_BABE, u32::from(DemonCommand::CommandError), 53, &payload).await?;
 
     let result = timeout(Duration::from_millis(50), receiver.recv()).await;
     assert!(result.is_err(), "Unknown error class should not broadcast any event");
@@ -6585,22 +6137,15 @@ async fn builtin_job_and_package_dropped_handlers_broadcast_agent_responses()
     let agent = sample_agent_info(0xAABB_CCDD, test_key(0x21), test_iv(0x43));
     registry.insert(agent).await?;
 
-    let dispatcher = CommandDispatcher::with_builtin_handlers(
-        registry,
-        events.clone(),
-        database,
-        sockets,
-        None,
-    );
+    let dispatcher =
+        CommandDispatcher::with_builtin_handlers(registry, events.clone(), database, sockets, None);
     let mut receiver = events.subscribe();
 
     let mut job_payload = Vec::new();
     add_u32(&mut job_payload, u32::from(DemonJobCommand::Resume));
     add_u32(&mut job_payload, 7);
     add_u32(&mut job_payload, 1);
-    dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandJob), 30, &job_payload)
-        .await?;
+    dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandJob), 30, &job_payload).await?;
 
     let event = receiver.recv().await.ok_or("job response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -6615,12 +6160,7 @@ async fn builtin_job_and_package_dropped_handlers_broadcast_agent_responses()
     add_u32(&mut dropped_payload, 8192);
     add_u32(&mut dropped_payload, 4096);
     dispatcher
-        .dispatch(
-            0xAABB_CCDD,
-            u32::from(DemonCommand::CommandPackageDropped),
-            31,
-            &dropped_payload,
-        )
+        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandPackageDropped), 31, &dropped_payload)
         .await?;
 
     let event = receiver.recv().await.ok_or("package dropped response missing")?;
@@ -6648,13 +6188,8 @@ async fn handle_job_list_with_entries_broadcasts_formatted_table()
     let agent = sample_agent_info(0xAABB_CCDD, test_key(0x21), test_iv(0x43));
     registry.insert(agent).await?;
 
-    let dispatcher = CommandDispatcher::with_builtin_handlers(
-        registry,
-        events.clone(),
-        database,
-        sockets,
-        None,
-    );
+    let dispatcher =
+        CommandDispatcher::with_builtin_handlers(registry, events.clone(), database, sockets, None);
     let mut receiver = events.subscribe();
 
     let mut payload = Vec::new();
@@ -6705,13 +6240,8 @@ async fn handle_job_list_with_zero_rows_still_broadcasts_header()
     let agent = sample_agent_info(0xAABB_CCDD, test_key(0x21), test_iv(0x43));
     registry.insert(agent).await?;
 
-    let dispatcher = CommandDispatcher::with_builtin_handlers(
-        registry,
-        events.clone(),
-        database,
-        sockets,
-        None,
-    );
+    let dispatcher =
+        CommandDispatcher::with_builtin_handlers(registry, events.clone(), database, sockets, None);
     let mut receiver = events.subscribe();
 
     let mut payload = Vec::new();
@@ -6741,13 +6271,8 @@ async fn handle_job_list_unknown_type_and_state_shows_unknown_label()
     let agent = sample_agent_info(0xAABB_CCDD, test_key(0x21), test_iv(0x43));
     registry.insert(agent).await?;
 
-    let dispatcher = CommandDispatcher::with_builtin_handlers(
-        registry,
-        events.clone(),
-        database,
-        sockets,
-        None,
-    );
+    let dispatcher =
+        CommandDispatcher::with_builtin_handlers(registry, events.clone(), database, sockets, None);
     let mut receiver = events.subscribe();
 
     let mut payload = Vec::new();
@@ -6784,13 +6309,8 @@ async fn handle_job_list_truncated_mid_row_returns_invalid_payload()
     let agent = sample_agent_info(0xAABB_CCDD, test_key(0x21), test_iv(0x43));
     registry.insert(agent).await?;
 
-    let dispatcher = CommandDispatcher::with_builtin_handlers(
-        registry,
-        events.clone(),
-        database,
-        sockets,
-        None,
-    );
+    let dispatcher =
+        CommandDispatcher::with_builtin_handlers(registry, events.clone(), database, sockets, None);
 
     let mut payload = Vec::new();
     add_u32(&mut payload, u32::from(DemonJobCommand::List));
@@ -6801,9 +6321,8 @@ async fn handle_job_list_truncated_mid_row_returns_invalid_payload()
     // Partial row: only job_id present, missing type and state
     add_u32(&mut payload, 20);
 
-    let result = dispatcher
-        .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandJob), 42, &payload)
-        .await;
+    let result =
+        dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandJob), 42, &payload).await;
 
     assert!(result.is_err(), "truncated mid-row payload should be rejected");
     let err = result.expect_err("truncated mid-row payload must fail");
@@ -6824,13 +6343,8 @@ async fn handle_job_suspend_success_and_failure_broadcasts_correct_messages()
     let agent = sample_agent_info(0xAABB_CCDD, test_key(0x21), test_iv(0x43));
     registry.insert(agent).await?;
 
-    let dispatcher = CommandDispatcher::with_builtin_handlers(
-        registry,
-        events.clone(),
-        database,
-        sockets,
-        None,
-    );
+    let dispatcher =
+        CommandDispatcher::with_builtin_handlers(registry, events.clone(), database, sockets, None);
     let mut receiver = events.subscribe();
 
     // Suspend success
@@ -6879,13 +6393,8 @@ async fn handle_job_killremove_success_and_failure_broadcasts_correct_messages()
     let agent = sample_agent_info(0xAABB_CCDD, test_key(0x21), test_iv(0x43));
     registry.insert(agent).await?;
 
-    let dispatcher = CommandDispatcher::with_builtin_handlers(
-        registry,
-        events.clone(),
-        database,
-        sockets,
-        None,
-    );
+    let dispatcher =
+        CommandDispatcher::with_builtin_handlers(registry, events.clone(), database, sockets, None);
     let mut receiver = events.subscribe();
 
     // KillRemove success
@@ -6955,9 +6464,8 @@ async fn handle_job_unknown_subcommand_returns_invalid_callback_payload()
 
     let mut payload = Vec::new();
     add_u32(&mut payload, 0xFF_u32); // invalid subcommand
-    let result = dispatcher
-        .dispatch(0xCAFE_BABE, u32::from(DemonCommand::CommandJob), 47, &payload)
-        .await;
+    let result =
+        dispatcher.dispatch(0xCAFE_BABE, u32::from(DemonCommand::CommandJob), 47, &payload).await;
 
     match result {
         Err(CommandDispatchError::InvalidCallbackPayload { command_id, .. }) => {
@@ -7023,9 +6531,7 @@ async fn builtin_net_and_transfer_handlers_format_operator_output()
     add_u32(&mut net_payload, 1);
     add_utf16(&mut net_payload, "bob");
     add_u32(&mut net_payload, 0);
-    dispatcher
-        .dispatch(0x1122_3344, u32::from(DemonCommand::CommandNet), 34, &net_payload)
-        .await?;
+    dispatcher.dispatch(0x1122_3344, u32::from(DemonCommand::CommandNet), 34, &net_payload).await?;
 
     let event = receiver.recv().await.ok_or("net response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -7041,8 +6547,8 @@ async fn builtin_net_and_transfer_handlers_format_operator_output()
 }
 
 #[tokio::test]
-async fn net_sessions_two_rows_produces_formatted_table()
--> Result<(), Box<dyn std::error::Error>> {
+async fn net_sessions_two_rows_produces_formatted_table() -> Result<(), Box<dyn std::error::Error>>
+{
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::new(16);
@@ -7222,8 +6728,7 @@ async fn net_group_two_rows_contains_both_names() -> Result<(), Box<dyn std::err
 }
 
 #[tokio::test]
-async fn net_localgroup_two_rows_contains_both_names() -> Result<(), Box<dyn std::error::Error>>
-{
+async fn net_localgroup_two_rows_contains_both_names() -> Result<(), Box<dyn std::error::Error>> {
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::new(16);
@@ -7360,9 +6865,8 @@ async fn net_computer_broadcasts_computer_list() -> Result<(), Box<dyn std::erro
     add_utf16(&mut payload, "WS01");
     add_utf16(&mut payload, "WS02");
 
-    let result = dispatcher
-        .dispatch(0x1122_3344, u32::from(DemonCommand::CommandNet), 57, &payload)
-        .await?;
+    let result =
+        dispatcher.dispatch(0x1122_3344, u32::from(DemonCommand::CommandNet), 57, &payload).await?;
     assert!(result.is_none(), "Computer subcommand should return None");
 
     let msg = timeout(Duration::from_millis(200), receiver.recv())
@@ -7409,9 +6913,8 @@ async fn net_dclist_broadcasts_dc_list() -> Result<(), Box<dyn std::error::Error
     add_utf16(&mut payload, "CORP.LOCAL");
     add_utf16(&mut payload, "DC01.corp.local");
 
-    let result = dispatcher
-        .dispatch(0x1122_3344, u32::from(DemonCommand::CommandNet), 58, &payload)
-        .await?;
+    let result =
+        dispatcher.dispatch(0x1122_3344, u32::from(DemonCommand::CommandNet), 58, &payload).await?;
     assert!(result.is_none(), "DcList subcommand should return None");
 
     let msg = timeout(Duration::from_millis(200), receiver.recv())
@@ -7580,10 +7083,11 @@ async fn builtin_config_handler_rejects_kill_date_exceeding_i64_range()
                 && message == "config kill date exceeds i64 range"
     ));
     assert_eq!(registry.get(0x5566_7800).await.and_then(|agent| agent.kill_date), None);
-    let persisted =
-        database.agents().get(0x5566_7800).await?.ok_or_else(|| {
-            "agent should still exist after rejected config update".to_owned()
-        })?;
+    let persisted = database
+        .agents()
+        .get(0x5566_7800)
+        .await?
+        .ok_or_else(|| "agent should still exist after rejected config update".to_owned())?;
     assert_eq!(persisted.kill_date, None);
     assert!(
         timeout(Duration::from_millis(50), receiver.recv()).await.is_err(),
@@ -7760,10 +7264,7 @@ async fn builtin_sleep_ppid_and_assembly_handlers_update_state_and_broadcast()
         message.info.extra.get("Message"),
         Some(&Value::String("Changed parent pid to spoof: 4242".to_owned()))
     );
-    assert_eq!(
-        registry.get(0xCAFEBABE).await.ok_or("missing updated agent")?.process_ppid,
-        4242
-    );
+    assert_eq!(registry.get(0xCAFEBABE).await.ok_or("missing updated agent")?.process_ppid, 4242);
 
     let mut assembly_payload = Vec::new();
     add_u32(&mut assembly_payload, 0x2);
@@ -7867,9 +7368,7 @@ async fn inline_execute_bof_output_broadcasts_agent_response()
     add_u32(&mut exc, 1);
     add_u32(&mut exc, 0xC000_0005_u32); // STATUS_ACCESS_VIOLATION
     add_u64(&mut exc, 0x0000_7FF7_DEAD_BEEF_u64);
-    dispatcher
-        .dispatch(0xB0B1B2B3, u32::from(DemonCommand::CommandInlineExecute), 3, &exc)
-        .await?;
+    dispatcher.dispatch(0xB0B1B2B3, u32::from(DemonCommand::CommandInlineExecute), 3, &exc).await?;
     let event = receiver.recv().await.ok_or("bof exception response missing")?;
     let OperatorMessage::AgentResponse(exc_message) = event else {
         panic!("expected agent response event");
@@ -7889,9 +7388,7 @@ async fn inline_execute_bof_output_broadcasts_agent_response()
     let mut sym = Vec::new();
     add_u32(&mut sym, 2);
     add_bytes(&mut sym, b"kernel32.VirtualAllocEx");
-    dispatcher
-        .dispatch(0xB0B1B2B3, u32::from(DemonCommand::CommandInlineExecute), 4, &sym)
-        .await?;
+    dispatcher.dispatch(0xB0B1B2B3, u32::from(DemonCommand::CommandInlineExecute), 4, &sym).await?;
     let event = receiver.recv().await.ok_or("bof symbol-not-found response missing")?;
     let OperatorMessage::AgentResponse(sym_message) = event else {
         panic!("expected agent response event");
@@ -8125,14 +7622,14 @@ async fn builtin_checkin_handler_records_agent_checkin_audit_entry()
     tokio::task::yield_now().await;
 
     let entries = database.audit_log().list().await?;
-    let checkin_entry = entries.iter().find(|e| e.action == "agent.checkin").expect(
-        "a checkin audit entry with action=\"agent.checkin\" should have been persisted",
-    );
+    let checkin_entry = entries
+        .iter()
+        .find(|e| e.action == "agent.checkin")
+        .expect("a checkin audit entry with action=\"agent.checkin\" should have been persisted");
     assert_eq!(checkin_entry.actor, "teamserver");
     assert_eq!(checkin_entry.target_kind, "agent");
     assert_eq!(checkin_entry.target_id.as_deref(), Some("ABCD1234"));
-    let details =
-        checkin_entry.details.as_ref().expect("checkin audit entry must include details");
+    let details = checkin_entry.details.as_ref().expect("checkin audit entry must include details");
     assert_eq!(details["result_status"], "success");
     assert_eq!(details["command"], "checkin");
     assert_eq!(details["agent_id"], "ABCD1234");
@@ -8185,13 +7682,8 @@ async fn pivot_command_callback_dispatches_inner_package_and_emits_mark_event()
     let events = EventBus::default();
     let mut receiver = events.subscribe();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let dispatcher = CommandDispatcher::with_builtin_handlers(
-        registry.clone(),
-        events,
-        database,
-        sockets,
-        None,
-    );
+    let dispatcher =
+        CommandDispatcher::with_builtin_handlers(registry.clone(), events, database, sockets, None);
 
     let parent_id = 0x1111_2222;
     let parent_key = test_key(0xAA);
@@ -8236,9 +7728,8 @@ async fn pivot_command_callback_dispatches_inner_package_and_emits_mark_event()
     );
     let payload = pivot_command_payload(&inner_envelope);
 
-    let response = dispatcher
-        .dispatch(parent_id, u32::from(DemonCommand::CommandPivot), 1, &payload)
-        .await?;
+    let response =
+        dispatcher.dispatch(parent_id, u32::from(DemonCommand::CommandPivot), 1, &payload).await?;
     assert_eq!(response, None);
 
     // First event should be the agent update (mark) event from last_call_in update.
@@ -8274,13 +7765,8 @@ async fn pivot_command_callback_unknown_inner_agent_returns_error()
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let dispatcher = CommandDispatcher::with_builtin_handlers(
-        registry.clone(),
-        events,
-        database,
-        sockets,
-        None,
-    );
+    let dispatcher =
+        CommandDispatcher::with_builtin_handlers(registry.clone(), events, database, sockets, None);
 
     let parent_id = 0xAAAA_BBBB;
     let parent_key = test_key(0x11);
@@ -8301,9 +7787,8 @@ async fn pivot_command_callback_unknown_inner_agent_returns_error()
     );
     let payload = pivot_command_payload(&inner_envelope);
 
-    let result = dispatcher
-        .dispatch(parent_id, u32::from(DemonCommand::CommandPivot), 1, &payload)
-        .await;
+    let result =
+        dispatcher.dispatch(parent_id, u32::from(DemonCommand::CommandPivot), 1, &payload).await;
 
     assert!(result.is_err(), "unknown inner agent must produce an error, not panic");
     Ok(())
@@ -8316,13 +7801,8 @@ async fn pivot_command_callback_truncated_inner_payload_returns_error()
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let dispatcher = CommandDispatcher::with_builtin_handlers(
-        registry.clone(),
-        events,
-        database,
-        sockets,
-        None,
-    );
+    let dispatcher =
+        CommandDispatcher::with_builtin_handlers(registry.clone(), events, database, sockets, None);
 
     let parent_id = 0xBBCC_DDEE;
     let parent_key = test_key(0x33);
@@ -8334,9 +7814,8 @@ async fn pivot_command_callback_truncated_inner_payload_returns_error()
     let truncated_inner = vec![0xDE, 0xAD];
     let payload = pivot_command_payload(&truncated_inner);
 
-    let result = dispatcher
-        .dispatch(parent_id, u32::from(DemonCommand::CommandPivot), 1, &payload)
-        .await;
+    let result =
+        dispatcher.dispatch(parent_id, u32::from(DemonCommand::CommandPivot), 1, &payload).await;
 
     assert!(result.is_err(), "truncated inner payload must produce a parse error, not panic");
     Ok(())
@@ -8353,13 +7832,8 @@ async fn pivot_connect_callback_non_init_inner_returns_invalid_callback()
     let events = EventBus::default();
     let mut receiver = events.subscribe();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let dispatcher = CommandDispatcher::with_builtin_handlers(
-        registry.clone(),
-        events,
-        database,
-        sockets,
-        None,
-    );
+    let dispatcher =
+        CommandDispatcher::with_builtin_handlers(registry.clone(), events, database, sockets, None);
 
     let parent_id = 0xD1D2_D3D4;
     let parent_key = test_key(0xD1);
@@ -8388,9 +7862,8 @@ async fn pivot_connect_callback_non_init_inner_returns_invalid_callback()
     );
 
     let payload = pivot_connect_payload(&callback_envelope);
-    let result = dispatcher
-        .dispatch(parent_id, u32::from(DemonCommand::CommandPivot), 77, &payload)
-        .await;
+    let result =
+        dispatcher.dispatch(parent_id, u32::from(DemonCommand::CommandPivot), 77, &payload).await;
 
     let err = result.expect_err("non-init inner envelope must be rejected");
     assert!(
@@ -8434,13 +7907,8 @@ async fn pivot_command_callback_non_callback_inner_returns_invalid_callback()
     let events = EventBus::default();
     let mut receiver = events.subscribe();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let dispatcher = CommandDispatcher::with_builtin_handlers(
-        registry.clone(),
-        events,
-        database,
-        sockets,
-        None,
-    );
+    let dispatcher =
+        CommandDispatcher::with_builtin_handlers(registry.clone(), events, database, sockets, None);
 
     let parent_id = 0xF1F2_F3F4;
     let parent_key = test_key(0xF1);
@@ -8463,9 +7931,8 @@ async fn pivot_command_callback_non_callback_inner_returns_invalid_callback()
     let init_envelope = valid_demon_init_body_monotonic(child_id, child_key, child_iv);
     let payload = pivot_command_payload(&init_envelope);
 
-    let result = dispatcher
-        .dispatch(parent_id, u32::from(DemonCommand::CommandPivot), 88, &payload)
-        .await;
+    let result =
+        dispatcher.dispatch(parent_id, u32::from(DemonCommand::CommandPivot), 88, &payload).await;
 
     let err = result.expect_err("non-callback inner envelope must be rejected");
     assert!(
@@ -8514,9 +7981,7 @@ async fn builtin_config_handler_memory_alloc() -> Result<(), Box<dyn std::error:
     let mut payload = Vec::new();
     add_u32(&mut payload, u32::from(DemonConfigKey::MemoryAlloc));
     add_u32(&mut payload, 0x40); // PAGE_EXECUTE_READWRITE
-    dispatcher
-        .dispatch(0xCF01_0001, u32::from(DemonCommand::CommandConfig), 100, &payload)
-        .await?;
+    dispatcher.dispatch(0xCF01_0001, u32::from(DemonCommand::CommandConfig), 100, &payload).await?;
 
     let event = receiver.recv().await.ok_or("config response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -8550,9 +8015,7 @@ async fn builtin_config_handler_memory_execute() -> Result<(), Box<dyn std::erro
     let mut payload = Vec::new();
     add_u32(&mut payload, u32::from(DemonConfigKey::MemoryExecute));
     add_u32(&mut payload, 0x20); // PAGE_EXECUTE_READ
-    dispatcher
-        .dispatch(0xCF01_0002, u32::from(DemonCommand::CommandConfig), 101, &payload)
-        .await?;
+    dispatcher.dispatch(0xCF01_0002, u32::from(DemonCommand::CommandConfig), 101, &payload).await?;
 
     let event = receiver.recv().await.ok_or("config response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -8586,9 +8049,7 @@ async fn builtin_config_handler_inject_spawn64() -> Result<(), Box<dyn std::erro
     let mut payload = Vec::new();
     add_u32(&mut payload, u32::from(DemonConfigKey::InjectSpawn64));
     add_utf16(&mut payload, "C:\\Windows\\System32\\notepad.exe");
-    dispatcher
-        .dispatch(0xCF01_0003, u32::from(DemonCommand::CommandConfig), 102, &payload)
-        .await?;
+    dispatcher.dispatch(0xCF01_0003, u32::from(DemonCommand::CommandConfig), 102, &payload).await?;
 
     let event = receiver.recv().await.ok_or("config response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -8624,9 +8085,7 @@ async fn builtin_config_handler_inject_spawn32() -> Result<(), Box<dyn std::erro
     let mut payload = Vec::new();
     add_u32(&mut payload, u32::from(DemonConfigKey::InjectSpawn32));
     add_utf16(&mut payload, "C:\\Windows\\SysWOW64\\rundll32.exe");
-    dispatcher
-        .dispatch(0xCF01_0004, u32::from(DemonCommand::CommandConfig), 103, &payload)
-        .await?;
+    dispatcher.dispatch(0xCF01_0004, u32::from(DemonCommand::CommandConfig), 103, &payload).await?;
 
     let event = receiver.recv().await.ok_or("config response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -8642,8 +8101,8 @@ async fn builtin_config_handler_inject_spawn32() -> Result<(), Box<dyn std::erro
 }
 
 #[tokio::test]
-async fn builtin_config_handler_implant_spf_thread_start()
--> Result<(), Box<dyn std::error::Error>> {
+async fn builtin_config_handler_implant_spf_thread_start() -> Result<(), Box<dyn std::error::Error>>
+{
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::new(16);
@@ -8664,9 +8123,7 @@ async fn builtin_config_handler_implant_spf_thread_start()
     add_u32(&mut payload, u32::from(DemonConfigKey::ImplantSpfThreadStart));
     add_bytes(&mut payload, b"ntdll.dll");
     add_bytes(&mut payload, b"RtlUserThreadStart");
-    dispatcher
-        .dispatch(0xCF01_0005, u32::from(DemonCommand::CommandConfig), 104, &payload)
-        .await?;
+    dispatcher.dispatch(0xCF01_0005, u32::from(DemonCommand::CommandConfig), 104, &payload).await?;
 
     let event = receiver.recv().await.ok_or("config response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -8675,16 +8132,15 @@ async fn builtin_config_handler_implant_spf_thread_start()
     assert_eq!(
         message.info.extra.get("Message"),
         Some(&Value::String(
-            "Sleep obfuscation spoof thread start addr to ntdll.dll!RtlUserThreadStart"
-                .to_owned()
+            "Sleep obfuscation spoof thread start addr to ntdll.dll!RtlUserThreadStart".to_owned()
         ))
     );
     Ok(())
 }
 
 #[tokio::test]
-async fn builtin_config_handler_implant_sleep_technique()
--> Result<(), Box<dyn std::error::Error>> {
+async fn builtin_config_handler_implant_sleep_technique() -> Result<(), Box<dyn std::error::Error>>
+{
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::new(16);
@@ -8704,9 +8160,7 @@ async fn builtin_config_handler_implant_sleep_technique()
     let mut payload = Vec::new();
     add_u32(&mut payload, u32::from(DemonConfigKey::ImplantSleepTechnique));
     add_u32(&mut payload, 2);
-    dispatcher
-        .dispatch(0xCF01_0006, u32::from(DemonCommand::CommandConfig), 105, &payload)
-        .await?;
+    dispatcher.dispatch(0xCF01_0006, u32::from(DemonCommand::CommandConfig), 105, &payload).await?;
 
     let event = receiver.recv().await.ok_or("config response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -8741,9 +8195,7 @@ async fn builtin_config_handler_implant_coffee_veh() -> Result<(), Box<dyn std::
     let mut payload = Vec::new();
     add_u32(&mut payload, u32::from(DemonConfigKey::ImplantCoffeeVeh));
     add_u32(&mut payload, 1); // true
-    dispatcher
-        .dispatch(0xCF01_0007, u32::from(DemonCommand::CommandConfig), 106, &payload)
-        .await?;
+    dispatcher.dispatch(0xCF01_0007, u32::from(DemonCommand::CommandConfig), 106, &payload).await?;
 
     let event = receiver.recv().await.ok_or("config response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -8758,9 +8210,7 @@ async fn builtin_config_handler_implant_coffee_veh() -> Result<(), Box<dyn std::
     let mut payload = Vec::new();
     add_u32(&mut payload, u32::from(DemonConfigKey::ImplantCoffeeVeh));
     add_u32(&mut payload, 0); // false
-    dispatcher
-        .dispatch(0xCF01_0007, u32::from(DemonCommand::CommandConfig), 107, &payload)
-        .await?;
+    dispatcher.dispatch(0xCF01_0007, u32::from(DemonCommand::CommandConfig), 107, &payload).await?;
 
     let event = receiver.recv().await.ok_or("config response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -8774,8 +8224,8 @@ async fn builtin_config_handler_implant_coffee_veh() -> Result<(), Box<dyn std::
 }
 
 #[tokio::test]
-async fn builtin_config_handler_implant_coffee_threaded()
--> Result<(), Box<dyn std::error::Error>> {
+async fn builtin_config_handler_implant_coffee_threaded() -> Result<(), Box<dyn std::error::Error>>
+{
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::new(16);
@@ -8795,9 +8245,7 @@ async fn builtin_config_handler_implant_coffee_threaded()
     let mut payload = Vec::new();
     add_u32(&mut payload, u32::from(DemonConfigKey::ImplantCoffeeThreaded));
     add_u32(&mut payload, 1); // true
-    dispatcher
-        .dispatch(0xCF01_0008, u32::from(DemonCommand::CommandConfig), 108, &payload)
-        .await?;
+    dispatcher.dispatch(0xCF01_0008, u32::from(DemonCommand::CommandConfig), 108, &payload).await?;
 
     let event = receiver.recv().await.ok_or("config response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -8831,9 +8279,7 @@ async fn builtin_config_handler_inject_technique() -> Result<(), Box<dyn std::er
     let mut payload = Vec::new();
     add_u32(&mut payload, u32::from(DemonConfigKey::InjectTechnique));
     add_u32(&mut payload, 3);
-    dispatcher
-        .dispatch(0xCF01_0009, u32::from(DemonCommand::CommandConfig), 109, &payload)
-        .await?;
+    dispatcher.dispatch(0xCF01_0009, u32::from(DemonCommand::CommandConfig), 109, &payload).await?;
 
     let event = receiver.recv().await.ok_or("config response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -8868,9 +8314,7 @@ async fn builtin_config_handler_inject_spoof_addr() -> Result<(), Box<dyn std::e
     add_u32(&mut payload, u32::from(DemonConfigKey::InjectSpoofAddr));
     add_bytes(&mut payload, b"kernel32.dll");
     add_bytes(&mut payload, b"CreateThread");
-    dispatcher
-        .dispatch(0xCF01_000A, u32::from(DemonCommand::CommandConfig), 110, &payload)
-        .await?;
+    dispatcher.dispatch(0xCF01_000A, u32::from(DemonCommand::CommandConfig), 110, &payload).await?;
 
     let event = receiver.recv().await.ok_or("config response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -8907,9 +8351,7 @@ async fn builtin_config_handler_implant_verbose() -> Result<(), Box<dyn std::err
     let mut payload = Vec::new();
     add_u32(&mut payload, u32::from(DemonConfigKey::ImplantVerbose));
     add_u32(&mut payload, 1); // true
-    dispatcher
-        .dispatch(0xCF01_000B, u32::from(DemonCommand::CommandConfig), 111, &payload)
-        .await?;
+    dispatcher.dispatch(0xCF01_000B, u32::from(DemonCommand::CommandConfig), 111, &payload).await?;
 
     let event = receiver.recv().await.ok_or("config response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -8924,9 +8366,7 @@ async fn builtin_config_handler_implant_verbose() -> Result<(), Box<dyn std::err
     let mut payload = Vec::new();
     add_u32(&mut payload, u32::from(DemonConfigKey::ImplantVerbose));
     add_u32(&mut payload, 0); // false
-    dispatcher
-        .dispatch(0xCF01_000B, u32::from(DemonCommand::CommandConfig), 112, &payload)
-        .await?;
+    dispatcher.dispatch(0xCF01_000B, u32::from(DemonCommand::CommandConfig), 112, &payload).await?;
 
     let event = receiver.recv().await.ok_or("config response missing")?;
     let OperatorMessage::AgentResponse(message) = event else {
@@ -8940,8 +8380,7 @@ async fn builtin_config_handler_implant_verbose() -> Result<(), Box<dyn std::err
 }
 
 #[tokio::test]
-async fn builtin_config_handler_working_hours_disabled()
--> Result<(), Box<dyn std::error::Error>> {
+async fn builtin_config_handler_working_hours_disabled() -> Result<(), Box<dyn std::error::Error>> {
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::new(16);
@@ -8961,9 +8400,7 @@ async fn builtin_config_handler_working_hours_disabled()
     let mut payload = Vec::new();
     add_u32(&mut payload, u32::from(DemonConfigKey::WorkingHours));
     add_u32(&mut payload, 0); // disable
-    dispatcher
-        .dispatch(0xCF01_000C, u32::from(DemonCommand::CommandConfig), 113, &payload)
-        .await?;
+    dispatcher.dispatch(0xCF01_000C, u32::from(DemonCommand::CommandConfig), 113, &payload).await?;
 
     let event = receiver.recv().await.ok_or("agent update missing")?;
     let OperatorMessage::AgentUpdate(_) = event else {
@@ -8982,8 +8419,8 @@ async fn builtin_config_handler_working_hours_disabled()
 }
 
 #[tokio::test]
-async fn builtin_config_handler_unknown_key_returns_error()
--> Result<(), Box<dyn std::error::Error>> {
+async fn builtin_config_handler_unknown_key_returns_error() -> Result<(), Box<dyn std::error::Error>>
+{
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::new(16);
@@ -9119,9 +8556,7 @@ async fn with_builtin_handlers_and_downloads_registers_all_builtin_commands()
     assert_eq!(dispatcher.downloads.max_download_bytes, custom_cap);
     assert_eq!(
         dispatcher.downloads.max_total_download_bytes,
-        custom_cap
-            .saturating_mul(super::DOWNLOAD_TRACKER_AGGREGATE_CAP_MULTIPLIER)
-            .max(custom_cap),
+        custom_cap.saturating_mul(super::DOWNLOAD_TRACKER_AGGREGATE_CAP_MULTIPLIER).max(custom_cap),
     );
 
     Ok(())
@@ -9219,10 +8654,7 @@ fn download_tracker_from_max_download_bytes_zero() {
 fn download_tracker_from_max_download_bytes_one() {
     let tracker = DownloadTracker::from_max_download_bytes(1);
     assert_eq!(tracker.max_download_bytes, 1);
-    assert_eq!(
-        tracker.max_total_download_bytes,
-        super::DOWNLOAD_TRACKER_AGGREGATE_CAP_MULTIPLIER,
-    );
+    assert_eq!(tracker.max_total_download_bytes, super::DOWNLOAD_TRACKER_AGGREGATE_CAP_MULTIPLIER,);
 }
 
 // ---- non_empty_option tests ----

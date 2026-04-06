@@ -49,8 +49,8 @@ use crate::rbac::{
     CanAdminister, CanManageListeners, CanRead, CanTaskAgents, Permission, PermissionMarker,
 };
 use crate::{
-    AuditDetails, AuditWebhookNotifier, Database, PluginHealthEntry, PluginRuntime,
-    audit_details, parameter_object, record_operator_action_with_notifications,
+    AuditDetails, AuditWebhookNotifier, Database, PluginHealthEntry, PluginRuntime, audit_details,
+    parameter_object, record_operator_action_with_notifications,
 };
 
 const API_VERSION: &str = "v1";
@@ -1542,11 +1542,11 @@ mod tests {
         AgentRegistry, AuditResultStatus, AuthService, Database, EventBus, Job, ListenerManager,
         LootRecord, OperatorConnectionManager, SocketRelayManager,
     };
-    use red_cell_common::AgentRecord;
     use agents::AgentApiError;
     use axum::http::header::{AUTHORIZATION, CONTENT_DISPOSITION};
     use loot::{CredentialQuery, LootQuery};
     use payload::{cli_format_to_havoc, normalize_agent_type, validate_agent_format_combination};
+    use red_cell_common::AgentRecord;
     use red_cell_common::config::OperatorRole;
     use red_cell_common::crypto::hash_password_sha3;
     use red_cell_common::demon::DemonCommand;

@@ -288,7 +288,7 @@ pub(super) async fn dispatch_builtin_packages(
     }
 
     let mut dispatcher =
-        CommandDispatcher::with_max_download_bytes(context.downloads.max_download_bytes);
+        CommandDispatcher::with_max_download_bytes(context.downloads.max_download_bytes());
     dispatcher.register_builtin_handlers(
         BuiltinHandlerDependencies {
             registry: context.registry.clone(),

@@ -218,6 +218,44 @@ else
     fi
 fi
 
+# ── 8c. sccache — compiler cache that survives target/ wipes ──────────────────
+echo ""
+echo "--- sccache ---"
+
+if command -v sccache &>/dev/null; then
+    ok "sccache: $(sccache --version 2>/dev/null | head -1)"
+else
+    warn "sccache not found — installing"
+    SCCACHE_TAG=$(curl -sS https://api.github.com/repos/mozilla/sccache/releases/latest \
+        | grep '"tag_name"' | cut -d'"' -f4)
+    if [[ -z "$SCCACHE_TAG" ]]; then
+        warn "Could not fetch sccache release info — skipping"
+    else
+        SCCACHE_ARCHIVE="sccache-${SCCACHE_TAG}-x86_64-unknown-linux-musl.tar.gz"
+        SCCACHE_URL="https://github.com/mozilla/sccache/releases/download/${SCCACHE_TAG}/${SCCACHE_ARCHIVE}"
+        SCCACHE_DIR="sccache-${SCCACHE_TAG}-x86_64-unknown-linux-musl"
+        if curl -LsSf "$SCCACHE_URL" \
+                | tar -xz --strip-components=1 -C ~/.cargo/bin "${SCCACHE_DIR}/sccache"; then
+            ok "sccache ${SCCACHE_TAG} installed"
+        else
+            warn "sccache install failed — builds will still work, just no compiler cache"
+        fi
+    fi
+fi
+
+# Wire sccache into cargo via ~/.cargo/config.toml so every cargo invocation
+# (user, agent, loop) uses it automatically without needing env vars.
+CARGO_CONFIG="$HOME/.cargo/config.toml"
+mkdir -p "$HOME/.cargo"
+if grep -q "rustc-wrapper" "$CARGO_CONFIG" 2>/dev/null; then
+    ok "cargo config: rustc-wrapper already set in $CARGO_CONFIG"
+elif command -v sccache &>/dev/null; then
+    printf '\n[build]\nrustc-wrapper = "sccache"\n' >> "$CARGO_CONFIG"
+    ok "cargo config: rustc-wrapper = \"sccache\" written to $CARGO_CONFIG"
+else
+    warn "sccache not available — skipping cargo config update"
+fi
+
 # ── 9. Logs directory ─────────────────────────────────────────────────────────
 mkdir -p "$SCRIPT_DIR/logs"
 ok "logs/ directory ready"

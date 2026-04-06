@@ -166,9 +166,20 @@ Fall back to `--workspace` when no zone is active.
 If the task is in a non-Rust zone (archon, demon) and you made no Rust changes, skip cargo
 commands entirely.
 
+**Phase 1 — compile check** (fast: seconds to ~2 min, no codegen):
+
 ```bash
 cargo fmt                          # auto-fix formatting first
-cargo check $CARGO_FLAGS           # abort if this fails — do not run tests against broken code
+cargo check $CARGO_FLAGS
+```
+
+**If `cargo check` exits non-zero: STOP. Fix every error, then re-run `cargo check`.**
+Do NOT proceed to Phase 2 while the code does not compile — running nextest against
+broken code wastes 5–15 minutes and produces no useful signal.
+
+**Phase 2 — tests and lint** (only when Phase 1 is green):
+
+```bash
 cargo nextest run $CARGO_FLAGS     # or: cargo test $CARGO_FLAGS
 cargo clippy $CARGO_FLAGS -- -D warnings
 ```

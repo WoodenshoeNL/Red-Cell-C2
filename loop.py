@@ -426,9 +426,9 @@ def extract_text_from_stream(raw_lines: list) -> str:
 # None means use --workspace (changes can affect all crates, e.g. common).
 # []   means no Rust crate at all (C/ASM or Python zone — skip cargo entirely).
 ZONE_PACKAGES = {
-    "teamserver": ["red-cell", "red-cell-common"],
-    "client":     ["red-cell-client", "red-cell-common"],
-    "client-cli": ["red-cell-cli", "red-cell-common"],
+    "teamserver": ["red-cell"],       # red-cell-common is a dep — checked transitively
+    "client":     ["red-cell-client"],
+    "client-cli": ["red-cell-cli"],
     "common":     None,      # --workspace: changes here can break any crate
     "archon":     [],        # C/ASM — no Rust crate
     "phantom":    [],        # Rust agent — built separately, not in workspace
@@ -464,7 +464,7 @@ def build_zone_block(zones: list) -> str:
                     pkgs_seen.add(pkg)
                     pkgs_ordered.append(pkg)
 
-    if use_workspace or (pkgs_ordered and len(zones) > 1):
+    if use_workspace:
         cargo_flags = "--workspace"
     elif pkgs_ordered:
         cargo_flags = " ".join(f"-p {pkg}" for pkg in pkgs_ordered)
@@ -654,6 +654,10 @@ def clean_build_artifacts(log: Logger):
         log.log(f"build cache: target/ build dirs are {total_gb:.1f} GB — under limit, skipping")
         return
 
+    if _cargo_target_locked(target_root):
+        log.log("build cache: cargo build in progress — skipping cleanup to avoid mid-build wipe")
+        return
+
     log.log(f"build cache: target/ build dirs are {total_gb:.1f} GB — exceeds {DEBUG_SIZE_LIMIT_GB} GB limit, nuking")
 
     heavyweight_dirs = ["incremental", "deps", "build", ".fingerprint"]
@@ -670,6 +674,31 @@ def clean_build_artifacts(log: Logger):
 
 
 WORKTREE_MAX_AGE_SECS = 3600   # remove /tmp/red-cell* worktrees older than 1 hour
+
+
+def _cargo_target_locked(target_dir: Path) -> bool:
+    """
+    Return True if any cargo build is actively writing into target_dir.
+
+    Cargo holds an exclusive flock on <target>/<profile>/.cargo-lock for the
+    entire duration of a build.  We try a non-blocking LOCK_EX on every
+    .cargo-lock file found inside target_dir; if any attempt fails with EWOULDBLOCK
+    the directory is in active use and must not be cleaned.
+    """
+    import glob as _glob
+    for lock_path in _glob.iglob(str(target_dir / "*" / ".cargo-lock")):
+        try:
+            fd = os.open(lock_path, os.O_RDONLY)
+        except OSError:
+            continue
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            return True   # lock is held — build in progress
+        finally:
+            os.close(fd)
+    return False
 
 
 def _active_worktree_paths() -> set:
@@ -811,20 +840,51 @@ TMP_CARGO_MAX_AGE_SECS = 7200   # remove non-worktree /tmp/red-cell* cargo dirs 
 TMP_CARGO_SIZE_LIMIT_GB = 5     # also clean heavyweight subdirs of review target when it exceeds this
 
 
+def _clean_cargo_target_inplace(target_dir: Path, label: str, size_limit_gb: float, log: Logger):
+    """
+    Clean heavyweight subdirs inside a stable cargo target dir when it exceeds
+    size_limit_gb.  Never deletes the directory itself so incremental builds survive.
+
+    Cargo lays out target/ as <profile>/{deps,build,incremental,.fingerprint}.
+    We iterate profile subdirs and remove those heavyweight children.
+    """
+    import shutil as _shutil
+    size_gb = _dir_size_gb(target_dir)
+    if size_gb < size_limit_gb:
+        return
+    log.log(f"tmp cargo: {label} is {size_gb:.1f} GB — cleaning heavyweight subdirs")
+    heavyweight_dirs = ["incremental", "deps", "build", ".fingerprint"]
+    cleaned = []
+    for profile in target_dir.iterdir():
+        if not profile.is_dir():
+            continue
+        children = {e.name for e in profile.iterdir()}
+        if not children & {"deps", "build", "incremental", ".fingerprint"}:
+            continue
+        for name in heavyweight_dirs:
+            d = profile / name
+            if d.exists():
+                _shutil.rmtree(d, ignore_errors=True)
+                if not d.exists():
+                    cleaned.append(f"{profile.name}/{name}")
+    if cleaned:
+        log.log(f"tmp cargo: cleaned {label}/{{{','.join(cleaned)}}}")
+
+
 def clean_tmp_cargo_targets(log: Logger):
     """
     Remove stale Cargo target directories under /tmp that are NOT git worktrees.
 
-    The review loop keeps a stable shared target dir (REVIEW_CARGO_TARGET) and agents
-    sometimes create ad-hoc CARGO_TARGET_DIR paths like /tmp/red-cell-c2-*-target.
-    These are never registered as git worktrees so clean_tmp_worktrees() never touches
-    them.  Without this cleanup they accumulate GBs per session and fill the disk.
+    The review loop keeps a stable shared target dir (REVIEW_CARGO_TARGET) and dev
+    loops keep per-zone stable dirs (/tmp/red-cell-target-<zone>).  All other
+    /tmp/red-cell* dirs that aren't git worktrees are swept and deleted when stale.
 
     Strategy:
-    - For REVIEW_CARGO_TARGET: clean heavyweight subdirs when it exceeds
-      TMP_CARGO_SIZE_LIMIT_GB (keeps it usable for incremental builds but bounded).
-    - For all other /tmp/red-cell* dirs that are not git worktrees: remove entirely
-      if older than TMP_CARGO_MAX_AGE_SECS and no process has its CWD inside them.
+    - Stable dirs (review + dev zone): clean heavyweight subdirs in-place when they
+      exceed TMP_CARGO_SIZE_LIMIT_GB.  Never delete — preserves incremental cache.
+      Skip entirely if a cargo build is actively holding the lock.
+    - Transient dirs (everything else): remove entirely if older than
+      TMP_CARGO_MAX_AGE_SECS and no process has its CWD inside them.
     """
     import shutil, time as _time
 
@@ -843,42 +903,40 @@ def clean_tmp_cargo_targets(log: Logger):
     now = _time.time()
     removed = []
 
-    # Handle REVIEW_CARGO_TARGET: clean-in-place rather than delete entirely.
-    review_target = REVIEW_CARGO_TARGET
-    if review_target.exists():
-        size_gb = _dir_size_gb(review_target)
-        if size_gb >= TMP_CARGO_SIZE_LIMIT_GB:
-            log.log(
-                f"tmp cargo: review target is {size_gb:.1f} GB"
-                f" — cleaning heavyweight subdirs"
-            )
-            heavyweight_dirs = ["incremental", "deps", "build", ".fingerprint"]
-            cleaned = []
-            for name in heavyweight_dirs:
-                d = review_target / name
-                if d.exists():
-                    shutil.rmtree(d, ignore_errors=True)
-                    if not d.exists():
-                        cleaned.append(name)
-            if cleaned:
-                log.log(f"tmp cargo: cleaned review target/{{{','.join(cleaned)}}}")
-
-    # Sweep all other /tmp/red-cell* dirs that are plain cargo caches.
     try:
         tmp_entries = list(Path("/tmp").iterdir())
     except OSError:
         return
 
+    # Identify all stable cargo target dirs: review target + dev zone targets.
+    # These are cleaned in-place (never deleted) to preserve incremental build cache.
+    stable_targets: dict[str, Path] = {str(REVIEW_CARGO_TARGET): REVIEW_CARGO_TARGET}
+    for entry in tmp_entries:
+        if entry.name.startswith("red-cell-target-") and entry.is_dir():
+            path_str = str(entry)
+            if path_str not in registered_worktrees:
+                stable_targets[path_str] = entry
+
+    for path_str, target_dir in stable_targets.items():
+        if not target_dir.exists():
+            continue
+        if _cargo_target_locked(target_dir):
+            log.log(f"tmp cargo: {target_dir.name} — build in progress, skipping")
+            continue
+        label = target_dir.name
+        _clean_cargo_target_inplace(target_dir, label, TMP_CARGO_SIZE_LIMIT_GB, log)
+
+    # Sweep all remaining /tmp/red-cell* dirs that are plain transient cargo caches.
     for entry in tmp_entries:
         if not entry.name.startswith(("red-cell", "redcell")):
             continue
         path_str = str(entry)
-        if path_str == str(review_target):
+        if path_str in stable_targets:
             continue  # already handled above
         if path_str in registered_worktrees:
             continue  # let clean_tmp_worktrees handle these
         if path_str in active:
-            continue  # process still running inside
+            continue  # process still running inside (CWD check)
         if not entry.is_dir():
             continue
         try:
@@ -1287,10 +1345,20 @@ Do NOT run `br update {next_id} --status=in_progress` — it is already `in_prog
 Start directly with understanding the task and implementing it.
 """
 
+        # Set a stable per-zone CARGO_TARGET_DIR so concurrent zone-scoped loops
+        # never contend on the same target/ directory lock.
+        dev_extra_env: dict = {}
+        if effective_zones:
+            zone_target = dev_zone_target_dir(effective_zones)
+            if zone_target is not None:
+                dev_extra_env["CARGO_TARGET_DIR"] = str(zone_target)
+                log.log(f"CARGO_TARGET_DIR: {zone_target}")
+
         log.log(f"Running {agent.title()} on task {next_id}...")
         exit_code, output, result_subtype = run_agent(
             agent, args.model, runtime_prompt, log,
             max_turns=DEV_MAX_TURNS if agent == "claude" else 0,
+            extra_env=dev_extra_env or None,
         )
 
         max_turns_hit = result_subtype in ("max_turns", "error_max_turns")
@@ -1395,6 +1463,32 @@ Start directly with understanding the task and implementing it.
 
 # Stable Cargo target dir for all review loop runs. Kept between runs for incremental builds.
 REVIEW_CARGO_TARGET = Path("/tmp/red-cell-review-target")
+
+# Prefix for per-zone stable Cargo target dirs used by dev loops.
+# e.g. /tmp/red-cell-target-teamserver, /tmp/red-cell-target-client-cli
+DEV_ZONE_TARGET_PREFIX = "/tmp/red-cell-target-"
+
+
+def dev_zone_target_dir(effective_zones: list) -> "Path | None":
+    """
+    Return a stable CARGO_TARGET_DIR path for the given effective zones, or None
+    if none of the zones contain a Rust crate (C/ASM or Python zones only).
+
+    Single Rust zone  → /tmp/red-cell-target-<zone>
+    Multiple zones    → /tmp/red-cell-target-<zone1>-<zone2>-... (sorted)
+
+    Zones with an empty ZONE_PACKAGES entry (archon, phantom, specter, autotest)
+    are skipped because they have no cargo workspace crate.
+    """
+    rust_zones = [
+        z for z in effective_zones
+        # None means --workspace (has Rust); [] means no Rust crate
+        if ZONE_PACKAGES.get(z) is None or len(ZONE_PACKAGES.get(z, [])) > 0
+    ]
+    if not rust_zones:
+        return None
+    suffix = "-".join(sorted(rust_zones))
+    return Path(f"{DEV_ZONE_TARGET_PREFIX}{suffix}")
 
 
 def create_review_worktree(loop_type: str, log: Logger) -> Path | None:

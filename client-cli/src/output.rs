@@ -37,6 +37,16 @@
 //! {"ok": false, "error": "ERROR_CODE", "message": "human readable"}
 //! ```
 //!
+//! # Non-fatal warnings (stderr)
+//!
+//! Some commands emit a single JSON object to **stderr** when the operation
+//! continues but the caller may have missed data (for example a stale output
+//! polling cursor after server-side pruning):
+//!
+//! ```json
+//! {"warning": "cursor_reset", "missed_from": 42}
+//! ```
+//!
 //! stdout and stderr are never mixed.
 
 use comfy_table::{Cell, ContentArrangement, Table};
@@ -121,6 +131,35 @@ pub fn print_success<T: Serialize + TextRender>(
 /// ```
 pub fn print_error(err: &CliError) -> std::io::Result<()> {
     write_error(&mut std::io::stderr(), err)
+}
+
+/// Emit a structured **warning** to **stderr** when an output polling cursor
+/// may be stale (for example the server reset or pruned rows, so entries with
+/// `id > missed_from` no longer exist).
+///
+/// Machine consumers should treat this as a signal to resync from a full fetch
+/// (`agent output` without `--since`) rather than waiting indefinitely for
+/// lines that were dropped.
+///
+/// ```json
+/// {"warning": "cursor_reset", "missed_from": 42}
+/// ```
+pub fn print_cursor_reset_warning(missed_from: i64) -> std::io::Result<()> {
+    write_cursor_reset_warning(&mut std::io::stderr(), missed_from)
+}
+
+/// Write [`print_cursor_reset_warning`] JSON to any writer (used in tests).
+pub(crate) fn write_cursor_reset_warning<W: std::io::Write>(
+    err: &mut W,
+    missed_from: i64,
+) -> std::io::Result<()> {
+    let envelope = serde_json::json!({
+        "warning": "cursor_reset",
+        "missed_from": missed_from,
+    });
+    let line = serde_json::to_string(&envelope)
+        .map_err(|e| std::io::Error::other(format!("serialize cursor warning: {e}")))?;
+    writeln!(err, "{line}")
 }
 
 /// Write a single streaming entry to stdout.
@@ -235,6 +274,16 @@ mod tests {
 
     use super::*;
     use crate::error::CliError;
+
+    #[test]
+    fn cursor_reset_warning_json_line_matches_contract() {
+        let mut buf = Vec::new();
+        write_cursor_reset_warning(&mut buf, 42).expect("write");
+        let s = String::from_utf8(buf).expect("utf-8");
+        let v: Value = serde_json::from_str(s.trim()).expect("json");
+        assert_eq!(v["warning"], "cursor_reset");
+        assert_eq!(v["missed_from"], 42);
+    }
 
     // ── JSON envelope helpers (test shape without I/O) ────────────────────────
 

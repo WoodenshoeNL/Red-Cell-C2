@@ -27,9 +27,10 @@ use crate::AgentId;
 use crate::backoff::Backoff;
 use crate::client::ApiClient;
 use crate::defaults::AGENT_EXEC_WAIT_TIMEOUT_SECS;
-use crate::error::{CliError, EXIT_SUCCESS};
+use crate::error::{CliError, EXIT_GENERAL, EXIT_SUCCESS};
 use crate::output::{
-    OutputFormat, TextRender, TextRow, print_error, print_stream_entry, print_success,
+    OutputFormat, TextRender, TextRow, print_cursor_reset_warning, print_error, print_stream_entry,
+    print_success,
 };
 /// Default sleep duration (seconds) when the server returns HTTP 429 without
 /// a `Retry-After` header.
@@ -433,13 +434,26 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) 
                 watch_output(client, fmt, id, since).await
             } else {
                 match fetch_output(client, id, since).await {
-                    Ok(data) => match print_success(fmt, &data) {
-                        Ok(()) => EXIT_SUCCESS,
-                        Err(e) => {
-                            print_error(&e).ok();
-                            e.exit_code()
+                    Ok(data) => {
+                        let mut warned_cursor_reset = false;
+                        if data.is_empty() {
+                            if let Some(missed) =
+                                take_cursor_reset_warning(since, false, &mut warned_cursor_reset)
+                            {
+                                if let Err(e) = print_cursor_reset_warning(missed) {
+                                    print_error(&CliError::Io(e.to_string())).ok();
+                                    return EXIT_GENERAL;
+                                }
+                            }
                         }
-                    },
+                        match print_success(fmt, &data) {
+                            Ok(()) => EXIT_SUCCESS,
+                            Err(e) => {
+                                print_error(&e).ok();
+                                e.exit_code()
+                            }
+                        }
+                    }
                     Err(e) => {
                         print_error(&e).ok();
                         e.exit_code()
@@ -707,6 +721,30 @@ async fn exec_wait(
     }
 }
 
+/// If the polling cursor is `Some(n)` with `n > 0` and the server returns no
+/// rows, the cursor may be **stale** (output log pruned or reset).  Callers
+/// should emit [`crate::output::print_cursor_reset_warning`] at most once per
+/// command invocation until any output has been observed.
+///
+/// Returns `Some(missed_from)` when a warning should be written to stderr;
+/// updates `already_warned` so the warning is not repeated on subsequent empty
+/// polls.
+fn take_cursor_reset_warning(
+    cursor: Option<i64>,
+    seen_output: bool,
+    already_warned: &mut bool,
+) -> Option<i64> {
+    if seen_output || *already_warned {
+        return None;
+    }
+    if cursor.is_some_and(|c| c > 0) {
+        *already_warned = true;
+        cursor
+    } else {
+        None
+    }
+}
+
 /// `agent output <id>` — fetch persisted output entries for an agent.
 ///
 /// Calls `GET /agents/{id}/output[?since=<cursor>]`.  When `since` is
@@ -740,7 +778,12 @@ async fn fetch_output(
 
 /// `agent output <id> --watch` — stream new output as JSON lines until Ctrl-C.
 ///
-/// Polls every second and prints each new entry as an individual JSON line.
+/// Polls with backoff and prints each new entry as an individual JSON line.
+///
+/// If `--since` is greater than zero and the first poll returns no rows, **stderr**
+/// may receive `{"warning":"cursor_reset","missed_from":N}` once — the cursor
+/// could be past the end of the retained log (for example after server pruning).
+/// Consumers waiting for a marker string should handle this warning and resync.
 ///
 /// # Examples
 /// ```text
@@ -754,6 +797,8 @@ async fn watch_output(
     since: Option<i64>,
 ) -> i32 {
     let mut cursor: Option<i64> = since;
+    let mut seen_output = false;
+    let mut warned_cursor_reset = false;
     let mut backoff = Backoff::new();
     // Create the ctrl_c future once and pin it so we can reuse the same OS-level
     // signal listener across all loop iterations. Creating a new ctrl_c() future
@@ -782,8 +827,17 @@ async fn watch_output(
             }
             Ok(entries) => {
                 if entries.is_empty() {
+                    if let Some(missed) =
+                        take_cursor_reset_warning(cursor, seen_output, &mut warned_cursor_reset)
+                    {
+                        if let Err(e) = print_cursor_reset_warning(missed) {
+                            print_error(&CliError::Io(e.to_string())).ok();
+                            return EXIT_GENERAL;
+                        }
+                    }
                     backoff.record_empty();
                 } else {
+                    seen_output = true;
                     backoff.record_non_empty();
                     for entry in &entries {
                         // Advance the numeric cursor so next poll only fetches newer entries.
@@ -1463,6 +1517,48 @@ mod tests {
     #[test]
     fn command_id_for_empty_returns_21() {
         assert_eq!(command_id_for(""), "21");
+    }
+
+    // ── output cursor stale warning ─────────────────────────────────────────────
+
+    #[test]
+    fn cursor_reset_warning_triggers_when_since_cursor_positive_and_empty_poll() {
+        let mut warned = false;
+        assert_eq!(take_cursor_reset_warning(Some(42), false, &mut warned), Some(42));
+        assert!(warned);
+    }
+
+    #[test]
+    fn cursor_reset_warning_skipped_when_cursor_none_or_zero() {
+        let mut w1 = false;
+        assert_eq!(take_cursor_reset_warning(None, false, &mut w1), None);
+        assert!(!w1);
+
+        let mut w2 = false;
+        assert_eq!(take_cursor_reset_warning(Some(0), false, &mut w2), None);
+        assert!(!w2);
+    }
+
+    #[test]
+    fn cursor_reset_warning_emitted_at_most_once_until_output_seen() {
+        let mut warned = false;
+        assert_eq!(take_cursor_reset_warning(Some(99), false, &mut warned), Some(99));
+        assert_eq!(take_cursor_reset_warning(Some(99), false, &mut warned), None);
+    }
+
+    #[test]
+    fn cursor_reset_warning_suppressed_after_output_seen() {
+        let mut warned = false;
+        assert_eq!(take_cursor_reset_warning(Some(5), true, &mut warned), None);
+        assert!(!warned);
+    }
+
+    /// Simulates `--since` beyond every retained row: empty page with a positive cursor.
+    #[test]
+    fn cursor_reset_warning_models_stale_cursor_beyond_available_entries() {
+        let mut warned = false;
+        assert_eq!(take_cursor_reset_warning(Some(10_000), false, &mut warned), Some(10_000));
+        assert!(warned, "stale high cursor must trigger one warning");
     }
 
     // ── exec_wait / fetch_output / watch_output ────────────────────────────────

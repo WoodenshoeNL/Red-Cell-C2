@@ -263,6 +263,14 @@ pub enum AgentCommands {
 
     /// Retrieve pending task output from an agent.
     ///
+    /// `--since` is the numeric output entry id (database row id) used as an
+    /// incremental polling cursor. If the teamserver prunes or resets its log,
+    /// a saved cursor may point past the newest retained row: the CLI then sees
+    /// no matching entries. On the first empty response with `--since` greater
+    /// than zero, **stderr** emits `{"warning":"cursor_reset","missed_from":N}`
+    /// so automated consumers can resync (for example re-run without `--since`)
+    /// instead of waiting forever for a marker that was pruned.
+    ///
     /// Examples:
     ///   red-cell-cli agent output abc123
     ///   red-cell-cli agent output abc123 --watch
@@ -274,7 +282,7 @@ pub enum AgentCommands {
         /// Stream new output as it arrives (prints JSON lines until Ctrl-C)
         #[arg(long)]
         watch: bool,
-        /// Only fetch output newer than this numeric output entry ID
+        /// Numeric output entry id — only fetch rows with id greater than this cursor
         #[arg(long)]
         since: Option<i64>,
     },
@@ -996,12 +1004,16 @@ mod tests {
             .to_string();
 
         assert!(
-            help.contains("numeric output entry ID"),
-            "agent output help must describe --since as a numeric output entry ID"
+            help.contains("numeric output entry id"),
+            "agent output help must describe --since as a numeric output entry id"
         );
         assert!(
             help.contains("--since 42"),
             "agent output help must show a numeric --since example"
+        );
+        assert!(
+            help.contains("cursor_reset"),
+            "agent output help must mention cursor_reset stderr warning"
         );
     }
 

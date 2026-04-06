@@ -9245,6 +9245,7 @@ mod tests {
             outgoing_tx: None,
             python_runtime: None,
             show_known_servers: false,
+            retained_app_state: None,
         }
     }
 

@@ -1,11 +1,7 @@
 use eframe::egui::{self, Align, Color32, Layout, RichText, Sense};
 
 use crate::transport::{self, AppState, EventKind};
-use crate::{
-    AgentSortColumn, ClientApp, NoteEditorState, SessionAction, agent_arch, agent_ip,
-    agent_matches_filter, agent_os, agent_sleep_jitter, build_kill_task, ellipsize, sort_agents,
-    sort_button_label,
-};
+use crate::{AgentSortColumn, ClientApp, NoteEditorState, SessionAction, build_kill_task};
 
 impl ClientApp {
     pub(crate) fn render_top_zone(&mut self, ui: &mut egui::Ui, state: &AppState) {
@@ -264,4 +260,128 @@ impl ClientApp {
             }
         }
     }
+}
+
+// ─── Agent helpers ────────────────────────────────────────────────────────────
+
+pub(crate) fn agent_ip(agent: &transport::AgentSummary) -> String {
+    if agent.internal_ip.trim().is_empty() {
+        agent.external_ip.clone()
+    } else {
+        agent.internal_ip.clone()
+    }
+}
+
+pub(crate) fn agent_arch(agent: &transport::AgentSummary) -> String {
+    if agent.process_arch.trim().is_empty() {
+        agent.os_arch.clone()
+    } else {
+        agent.process_arch.clone()
+    }
+}
+
+pub(crate) fn agent_os(agent: &transport::AgentSummary) -> String {
+    if agent.os_build.trim().is_empty() {
+        agent.os_version.clone()
+    } else {
+        format!("{} ({})", agent.os_version, agent.os_build)
+    }
+}
+
+pub(crate) fn agent_sleep_jitter(agent: &transport::AgentSummary) -> String {
+    match (agent.sleep_delay.trim(), agent.sleep_jitter.trim()) {
+        ("", "") => String::new(),
+        (delay, "") => delay.to_owned(),
+        ("", jitter) => format!("j{jitter}%"),
+        (delay, jitter) => format!("{delay}s / {jitter}%"),
+    }
+}
+
+pub(crate) fn agent_matches_filter(agent: &transport::AgentSummary, filter: &str) -> bool {
+    let filter = filter.trim();
+    if filter.is_empty() {
+        return true;
+    }
+
+    let needle = filter.to_ascii_lowercase();
+    [
+        agent.name_id.as_str(),
+        agent.hostname.as_str(),
+        agent.username.as_str(),
+        agent.domain_name.as_str(),
+        agent.internal_ip.as_str(),
+        agent.external_ip.as_str(),
+        agent.process_pid.as_str(),
+        agent.process_name.as_str(),
+        agent.process_arch.as_str(),
+        agent.os_version.as_str(),
+        agent.os_build.as_str(),
+        agent.note.as_str(),
+    ]
+    .into_iter()
+    .any(|field| field.to_ascii_lowercase().contains(&needle))
+}
+
+pub(crate) fn sort_agents(
+    agents: &mut [transport::AgentSummary],
+    column: AgentSortColumn,
+    descending: bool,
+) {
+    agents.sort_by(|left, right| {
+        let ordering = match column {
+            AgentSortColumn::Id => left.name_id.cmp(&right.name_id),
+            AgentSortColumn::Hostname => left.hostname.cmp(&right.hostname),
+            AgentSortColumn::Username => left.username.cmp(&right.username),
+            AgentSortColumn::Domain => left.domain_name.cmp(&right.domain_name),
+            AgentSortColumn::Ip => agent_ip(left).cmp(&agent_ip(right)),
+            AgentSortColumn::Pid => left.process_pid.cmp(&right.process_pid),
+            AgentSortColumn::Process => left.process_name.cmp(&right.process_name),
+            AgentSortColumn::Arch => agent_arch(left).cmp(&agent_arch(right)),
+            AgentSortColumn::Elevated => left.elevated.cmp(&right.elevated),
+            AgentSortColumn::Os => agent_os(left).cmp(&agent_os(right)),
+            AgentSortColumn::SleepJitter => {
+                agent_sleep_jitter(left).cmp(&agent_sleep_jitter(right))
+            }
+            AgentSortColumn::LastCheckin => left.last_call_in.cmp(&right.last_call_in),
+        };
+        let normalized = if ordering == std::cmp::Ordering::Equal {
+            left.name_id.cmp(&right.name_id)
+        } else {
+            ordering
+        };
+        if descending { normalized.reverse() } else { normalized }
+    });
+}
+
+pub(crate) fn sort_button_label(
+    current_column: Option<AgentSortColumn>,
+    descending: bool,
+    button_column: AgentSortColumn,
+) -> String {
+    let name = AgentSortColumn::ALL
+        .iter()
+        .find_map(|(column, label)| (*column == button_column).then_some(*label))
+        .unwrap_or("Column");
+    if current_column == Some(button_column) {
+        let arrow = if descending { "v" } else { "^" };
+        format!("{name} {arrow}")
+    } else {
+        name.to_owned()
+    }
+}
+
+pub(crate) fn ellipsize(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_owned();
+    }
+
+    let mut output = String::new();
+    for (index, ch) in value.chars().enumerate() {
+        if index + 1 >= max_chars {
+            break;
+        }
+        output.push(ch);
+    }
+    output.push_str("...");
+    output
 }

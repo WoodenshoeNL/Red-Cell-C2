@@ -57,6 +57,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
     from lib.deploy_agent import deploy_and_checkin
 
     cli = ctx.cli
+    co = int(ctx.timeouts.command_output)
     target = ctx.linux
     uid = _short_id()
     listener_name = f"{name_prefix}-{uid}"
@@ -83,7 +84,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
 
         # whoami → contains the expected SSH username
         print(f"  [{agent_type}][cmd] whoami")
-        result = agent_exec(cli, agent_id, "whoami", wait=True, timeout=30)
+        result = agent_exec(cli, agent_id, "whoami", wait=True, timeout=co)
         whoami_out = result.get("output", "").strip()
         assert whoami_out, "whoami returned empty output"
         assert target.user in whoami_out, (
@@ -94,7 +95,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
 
         # pwd → returns an absolute path
         print(f"  [{agent_type}][cmd] pwd")
-        result = agent_exec(cli, agent_id, "pwd", wait=True, timeout=30)
+        result = agent_exec(cli, agent_id, "pwd", wait=True, timeout=co)
         pwd_out = result.get("output", "").strip()
         assert pwd_out, "pwd returned empty output"
         assert pwd_out.startswith("/"), (
@@ -104,7 +105,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
 
         # ls / → non-empty directory listing
         print(f"  [{agent_type}][cmd] ls /")
-        result = agent_exec(cli, agent_id, "ls /", wait=True, timeout=30)
+        result = agent_exec(cli, agent_id, "ls /", wait=True, timeout=co)
         ls_out = result.get("output", "").strip()
         assert ls_out, "ls / returned empty output"
         print(f"  [{agent_type}][cmd] ls / passed ({len(ls_out.splitlines())} entries)")
@@ -112,7 +113,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
         # hostname → matches the hostname reported by SSH
         print(f"  [{agent_type}][cmd] hostname")
         expected_hostname = run_remote(target, "hostname").strip()
-        result = agent_exec(cli, agent_id, "hostname", wait=True, timeout=30)
+        result = agent_exec(cli, agent_id, "hostname", wait=True, timeout=co)
         hostname_out = result.get("output", "").strip()
         assert hostname_out, "hostname returned empty output"
         assert hostname_out == expected_hostname, (
@@ -124,7 +125,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
         # stat — file mode bits for a well-known path
         print(f"  [{agent_type}][cmd] stat /etc/hostname")
         result = agent_exec(
-            cli, agent_id, "stat -c '%a %n' /etc/hostname", wait=True, timeout=30
+            cli, agent_id, "stat -c '%a %n' /etc/hostname", wait=True, timeout=co
         )
         stat_out = result.get("output", "").strip()
         assert stat_out, "stat returned empty output"
@@ -135,7 +136,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
 
         # ls -la — long listing (trimmed)
         print(f"  [{agent_type}][cmd] ls -la / (head)")
-        result = agent_exec(cli, agent_id, "ls -la / | head -n 25", wait=True, timeout=30)
+        result = agent_exec(cli, agent_id, "ls -la / | head -n 25", wait=True, timeout=co)
         ls_la = result.get("output", "").strip()
         assert ls_la, "ls -la returned empty output"
         assert "total " in ls_la or "drwx" in ls_la, (
@@ -150,7 +151,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
             agent_id,
             "ss -tln 2>/dev/null || netstat -tln 2>/dev/null || true",
             wait=True,
-            timeout=30,
+            timeout=co,
         )
         ss_out = result.get("output", "").strip()
         assert len(ss_out) > 8, (
@@ -160,7 +161,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
 
         # Environment slice
         print(f"  [{agent_type}][cmd] env (head)")
-        result = agent_exec(cli, agent_id, "env | head -n 40", wait=True, timeout=30)
+        result = agent_exec(cli, agent_id, "env | head -n 40", wait=True, timeout=co)
         env_out = result.get("output", "").strip()
         assert env_out, "env returned empty output"
         assert "PATH" in env_out, (
@@ -170,7 +171,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
 
         # Kernel string from procfs
         print(f"  [{agent_type}][cmd] cat /proc/version")
-        result = agent_exec(cli, agent_id, "cat /proc/version", wait=True, timeout=30)
+        result = agent_exec(cli, agent_id, "cat /proc/version", wait=True, timeout=co)
         ver_out = result.get("output", "").strip()
         assert "Linux" in ver_out, (
             f"/proc/version does not look like Linux: {ver_out!r}"

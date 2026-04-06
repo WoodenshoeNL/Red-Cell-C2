@@ -185,7 +185,7 @@ def run(ctx):
         print("  [exec] launching payload in background on target")
         execute_background(target, remote_payload)
 
-        checkin_timeout = ctx.env.get("timeouts", {}).get("agent_checkin", 60)
+        checkin_timeout = int(ctx.timeouts.agent_checkin)
         print(f"  [wait] waiting up to {checkin_timeout}s for agent checkin")
 
         agent = wait_for_agent(cli, timeout=checkin_timeout, pre_existing_ids=pre_existing_ids)
@@ -203,7 +203,7 @@ def run(ctx):
         print("  [download] download command accepted")
 
         # ── Step 7: Wait for loot entry of kind 'download' ───────────────────
-        loot_timeout = ctx.env.get("timeouts", {}).get("loot_entry", 30)
+        loot_timeout = int(ctx.timeouts.loot_entry)
         print(f"  [wait] waiting up to {loot_timeout}s for 'download' loot entry")
 
         def _new_download_loot():

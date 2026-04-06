@@ -31,7 +31,16 @@ def _extract_host(url):
     return url.split(":")[0].split("/")[0]
 
 
-def _lifecycle_test(cli, host, name, listener_type, create_kwargs, check_port=None):
+def _lifecycle_test(
+    cli,
+    host,
+    name,
+    listener_type,
+    create_kwargs,
+    check_port=None,
+    *,
+    port_wait_timeout: float = 10.0,
+):
     """
     Run the full create → start → stop → delete lifecycle for one listener type.
 
@@ -77,7 +86,7 @@ def _lifecycle_test(cli, host, name, listener_type, create_kwargs, check_port=No
 
     # Optional TCP connectivity check (HTTP only; DNS is UDP, SMB uses named pipes)
     if check_port is not None:
-        wait_for_port(host, check_port)
+        wait_for_port(host, check_port, timeout=port_wait_timeout)
 
     # ── Stop ─────────────────────────────────────────────────────────────────
     result = listener_stop(cli, name)
@@ -123,6 +132,7 @@ def run(ctx):
 
     cli = ctx.cli
     env = ctx.env
+    port_wait = float(ctx.timeouts.listener_startup)
 
     # Extract the teamserver host for TCP port-open checks.
     server_url = (
@@ -152,6 +162,7 @@ def run(ctx):
             cli, host, http_name, "http",
             create_kwargs={"port": http_port},
             check_port=http_port,
+            port_wait_timeout=port_wait,
         )
         active.remove(http_name)
         print("  [HTTP] passed")

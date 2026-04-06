@@ -187,7 +187,7 @@ def run(ctx):
         print(f"  [screenshot] screenshot command queued, job_id={job_id!r}")
 
         # ── Step 7: Wait for new loot entry of type screenshot ───────────────
-        loot_timeout = ctx.env.get("timeouts", {}).get("screenshot_loot", 30)
+        loot_timeout = int(ctx.timeouts.screenshot_loot)
         print(f"  [wait] waiting up to {loot_timeout}s for screenshot loot entry")
 
         def _new_screenshot_loot():

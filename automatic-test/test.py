@@ -35,8 +35,18 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from lib import ScenarioSkipped
 from lib.cli import CliConfig
-from lib.config import ConfigError, load_env, load_targets, make_cli_config
-from lib.deploy import TargetConfig
+from lib.config import (
+    ConfigError,
+    load_env,
+    load_targets,
+    make_cli_config_from_parsed,
+    parse_env_config,
+    TimeoutsConfig,
+    timeouts_to_env_dict,
+)
+from lib.deploy import TargetConfig, configure_deploy_timeouts
+from lib.teamserver_monitor import configure_teamserver_ssh_connect_timeout
+from lib.wait import configure_wait_defaults
 from lib.failure_diagnostics import build_failure_diagnostic_report, write_scenario_failure_file
 
 
@@ -228,6 +238,7 @@ class RunContext:
     windows: TargetConfig | None
     windows2: TargetConfig | None
     env: dict
+    timeouts: TimeoutsConfig
     dry_run: bool
 
 
@@ -324,7 +335,25 @@ def main():
         print(f"[ERROR] {exc}")
         sys.exit(1)
 
-    cli_cfg = make_cli_config(env)
+    env_cfg = parse_env_config(env)
+    tmo = env_cfg.timeouts
+    configure_deploy_timeouts(
+        ssh_connect_secs=tmo.ssh_connect,
+        scp_transfer_secs=tmo.scp_transfer,
+        default_remote_cmd_secs=tmo.command_output,
+    )
+    configure_wait_defaults(
+        poll_interval_secs=tmo.poll_interval,
+        default_agent_checkin_secs=tmo.agent_checkin,
+    )
+    configure_teamserver_ssh_connect_timeout(tmo.ssh_connect)
+
+    base_timeouts = env.get("timeouts")
+    if not isinstance(base_timeouts, dict):
+        base_timeouts = {}
+    env = {**env, "timeouts": {**base_timeouts, **timeouts_to_env_dict(tmo)}}
+
+    cli_cfg = make_cli_config_from_parsed(env_cfg, env)
 
     # Apply --target filter before constructing TargetConfig objects so that
     # an intentionally-incomplete stanza for the disabled target does not
@@ -342,6 +371,7 @@ def main():
         windows=windows_target,
         windows2=windows2_target,
         env=env,
+        timeouts=tmo,
         dry_run=args.dry_run,
     )
 

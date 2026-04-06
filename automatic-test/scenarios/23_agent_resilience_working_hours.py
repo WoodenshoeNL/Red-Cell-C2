@@ -46,6 +46,7 @@ def run(ctx):
         raise ScenarioSkipped(str(exc)) from exc
 
     cli = ctx.cli
+    co = int(ctx.timeouts.command_output)
     target = ctx.linux
     uid = _short_id()
     listener_port = ctx.env.get("listeners", {}).get("linux_port", 19081)
@@ -119,7 +120,7 @@ def run(ctx):
         assert agent is not None
         agent_id = agent["id"]
         print(f"  [23][phase2] agent checked in: {agent_id}")
-        result = agent_exec(cli, agent_id, "whoami", wait=True, timeout=30)
+        result = agent_exec(cli, agent_id, "whoami", wait=True, timeout=co)
         assert result.get("output", "").strip(), "whoami returned empty output after open-window deploy"
         print("  [23][phase2] command succeeded — working-hours scenario complete")
     finally:

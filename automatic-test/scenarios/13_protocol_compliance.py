@@ -508,7 +508,7 @@ def run(ctx):
     listener_create(cli, listener_name, "http", port=listener_port)
     listener_start(cli, listener_name)
     print("  [listener] started — waiting for port to open")
-    _wait_for_tcp(server_host, listener_port)
+    _wait_for_tcp(server_host, listener_port, timeout=int(ctx.timeouts.listener_startup))
     print("  [listener] ready")
 
     agent_id = None

@@ -52,6 +52,7 @@ def run(ctx):
         raise ScenarioSkipped(str(exc)) from exc
 
     cli = ctx.cli
+    co = int(ctx.timeouts.command_output)
     target = ctx.linux
     uid = _short_id()
     listener_name = f"test-resilience-21-{uid}"
@@ -77,7 +78,7 @@ def run(ctx):
         )
         agent_id = agent["id"]
         print(f"  [21][cmd] baseline whoami on {agent_id}")
-        result = agent_exec(cli, agent_id, "whoami", wait=True, timeout=30)
+        result = agent_exec(cli, agent_id, "whoami", wait=True, timeout=co)
         assert result.get("output", "").strip(), "baseline whoami returned empty output"
 
         print(f"  [21][partition] stopping listener (simulated network drop)")
@@ -89,7 +90,8 @@ def run(ctx):
         print(f"  [21][recover] restarting listener")
         listener_start(cli, listener_name)
 
-        reconnect_timeout = float(ctx.env.get("timeouts", {}).get("resilience_reconnect", 120))
+        rr = ctx.timeouts.resilience_reconnect
+        reconnect_timeout = float(rr) if rr is not None else 120.0
         print(
             f"  [21][recover] waiting for agent exec to succeed (timeout {reconnect_timeout:.0f}s)"
         )

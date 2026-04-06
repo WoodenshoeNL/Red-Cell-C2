@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from lib.cli import CliConfig
+from lib.config import timeouts_for_unit_tests
 from lib.deploy_agent import deploy_and_checkin
 from lib.resilience import (
     extract_http_callback_host,
@@ -55,6 +56,7 @@ class TestDeployExpectCheckin(unittest.TestCase):
         cli = CliConfig(server="https://x", token="t")
         ctx = MagicMock()
         ctx.env = {"timeouts": {"agent_checkin": 60, "working_hours_probe": 12}}
+        ctx.timeouts = timeouts_for_unit_tests()
 
         target = MagicMock()
         target.work_dir = "/tmp/rc-test"
@@ -90,6 +92,7 @@ class TestDeployExpectCheckin(unittest.TestCase):
         cli = CliConfig(server="https://x", token="t")
         ctx = MagicMock()
         ctx.env = {"timeouts": {"agent_checkin": 60}}
+        ctx.timeouts = timeouts_for_unit_tests()
 
         target = MagicMock()
         target.work_dir = "/tmp/rc-test"

@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from lib import ScenarioSkipped
 from lib.cli import CliError
+from lib.config import timeouts_for_unit_tests
 
 _SCENARIO_PATH = Path(__file__).parent.parent / "scenarios" / "19_cross_agent_interop.py"
 _spec = _ilu.spec_from_file_location("scenario_19_cross_agent_interop", _SCENARIO_PATH)
@@ -25,6 +26,7 @@ def _make_ctx(env: dict | None = None) -> MagicMock:
     ctx = MagicMock()
     ctx.cli = MagicMock()
     ctx.env = env or {}
+    ctx.timeouts = timeouts_for_unit_tests()
     ctx.dry_run = False
     ctx.linux = MagicMock()
     ctx.linux.work_dir = "/tmp/red-cell-linux"

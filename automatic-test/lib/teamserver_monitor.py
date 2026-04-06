@@ -19,6 +19,16 @@ from urllib.parse import urlparse
 # Default process name for the teamserver binary (see teamserver Cargo.toml).
 _TEAMSERVER_COMM = "red-cell"
 
+# Set by :func:`configure_teamserver_ssh_connect_timeout` from ``config/env.toml``.
+_SSH_CONNECT_TIMEOUT_SECS = 10
+
+
+def configure_teamserver_ssh_connect_timeout(secs: float) -> None:
+    """Apply ``ssh_connect_secs`` to remote ``ps`` sampling (call once from ``test.py`` main)."""
+
+    global _SSH_CONNECT_TIMEOUT_SECS
+    _SSH_CONNECT_TIMEOUT_SECS = max(1, int(secs))
+
 
 def resolve_teamserver_host(env: dict[str, Any]) -> str:
     """Return the hostname or IP where the teamserver is expected to run.
@@ -212,7 +222,7 @@ def sample_remote_teamserver_cpu_rss(cfg: TeamserverSshConfig) -> tuple[float | 
                 "-o",
                 "BatchMode=yes",
                 "-o",
-                "ConnectTimeout=10",
+                f"ConnectTimeout={_SSH_CONNECT_TIMEOUT_SECS}",
                 "-i",
                 cfg.key,
                 f"{cfg.user}@{cfg.host}",

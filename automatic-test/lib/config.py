@@ -45,15 +45,52 @@ class OperatorConfig:
 
 @dataclass
 class TimeoutsConfig:
+    """Resolved harness timeouts (seconds unless noted).
+
+    TOML may use ``*_secs`` names for the primary tunables; legacy names without
+    the suffix remain accepted — see :func:`parse_env_config`.
+    """
+
     agent_checkin: float
     command_output: float
     agent_disconnect: float
     screenshot_loot: float
     loot_entry: float
     max_cli_subprocess_secs: float
+    #: After ``listener start``, wait up to this many seconds for TCP (HTTP lifecycle).
+    listener_startup: float
+    #: Default interval for :func:`lib.wait.poll` / stress polling when not overridden.
+    poll_interval: float
+    #: ``ssh``/``scp`` ``ConnectTimeout=`` (seconds).
+    ssh_connect: float
+    #: Wall-clock timeout for SCP upload/download subprocesses.
+    scp_transfer: float
+    #: Scenario 14: deadline for *all* concurrent agents to check in.
+    stress_concurrent_checkin: float
     resilience_reconnect: float | None = None
     resilience_kill_date: float | None = None
     working_hours_probe: float | None = None
+
+
+def timeouts_for_unit_tests() -> TimeoutsConfig:
+    """Stable :class:`TimeoutsConfig` for unit tests that mock :class:`RunContext` without ``env.toml``."""
+
+    return TimeoutsConfig(
+        agent_checkin=60.0,
+        command_output=30.0,
+        agent_disconnect=30.0,
+        screenshot_loot=30.0,
+        loot_entry=30.0,
+        max_cli_subprocess_secs=120.0,
+        listener_startup=5.0,
+        poll_interval=2.0,
+        ssh_connect=10.0,
+        scp_transfer=60.0,
+        stress_concurrent_checkin=30.0,
+        resilience_reconnect=None,
+        resilience_kill_date=None,
+        working_hours_probe=None,
+    )
 
 
 @dataclass
@@ -159,11 +196,18 @@ _ALLOWED_SERVER_KEYS = frozenset({"url", "rest_url"})
 _ALLOWED_OPERATOR_KEYS = frozenset({"username", "password", "api_key"})
 _ALLOWED_TIMEOUTS_KEYS = frozenset({
     "agent_checkin",
+    "agent_checkin_secs",
     "command_output",
+    "command_output_secs",
     "agent_disconnect",
     "screenshot_loot",
     "loot_entry",
     "max_cli_subprocess_secs",
+    "listener_startup_secs",
+    "poll_interval_secs",
+    "ssh_connect_secs",
+    "scp_transfer_secs",
+    "stress_concurrent_checkin_secs",
     "resilience_reconnect",
     "resilience_kill_date",
     "working_hours_probe",
@@ -197,9 +241,8 @@ _ALLOWED_ANALYST_KEYS = frozenset({"username", "api_key"})
 _ALLOWED_ARCHON_KEYS = frozenset({"extensions"})
 _ALLOWED_LINUX_ENV_KEYS = frozenset({"display"})
 
-_REQUIRED_TIMEOUTS = (
-    "agent_checkin",
-    "command_output",
+# Logical required fields (each may be satisfied by ``key`` or ``key_secs`` — see parser).
+_REQUIRED_TIMEOUTS_CORE = (
     "agent_disconnect",
     "screenshot_loot",
     "loot_entry",
@@ -265,6 +308,41 @@ def _require_positive_number(val: Any, path: str, errors: list[str]) -> float | 
     return None
 
 
+def _resolve_timeout_pair(
+    d: dict[str, Any],
+    new_key: str,
+    old_key: str,
+    label: str,
+    errors: list[str],
+) -> float | None:
+    """Prefer *new_key*; fall back to *old_key*. Error if both differ."""
+    v_new = d.get(new_key)
+    v_old = d.get(old_key)
+    if v_new is not None and v_old is not None and v_new != v_old:
+        errors.append(
+            f"{label}: {new_key!r} and {old_key!r} are both set to different values — "
+            "use only one"
+        )
+    raw = v_new if v_new is not None else v_old
+    if raw is None:
+        return None
+    path_key = new_key if v_new is not None else old_key
+    return _require_positive_number(raw, f"{label}.{path_key}", errors)
+
+
+def _optional_timeout_default(
+    d: dict[str, Any],
+    key: str,
+    default: float,
+    label: str,
+    errors: list[str],
+) -> float:
+    if key not in d or d[key] is None:
+        return default
+    n = _require_positive_number(d[key], f"{label}.{key}", errors)
+    return default if n is None else n
+
+
 def parse_env_config(raw: dict[str, Any]) -> EnvConfig:
     """Parse and validate *raw* env dict into :class:`EnvConfig`.
 
@@ -299,23 +377,52 @@ def parse_env_config(raw: dict[str, Any]) -> EnvConfig:
         op_user = api_key = password = None  # type: ignore[assignment]
 
     to_t = _require_table(raw, "timeouts", errors)
+    tr: dict[str, float | None] = {}
     if to_t is not None:
         _unknown_keys(to_t, _ALLOWED_TIMEOUTS_KEYS, "[timeouts]", errors)
-        for req in _REQUIRED_TIMEOUTS:
+        for req in _REQUIRED_TIMEOUTS_CORE:
             if req not in to_t:
                 errors.append(f"[timeouts]: missing required key {req!r}")
-        tr: dict[str, float | None] = {}
-        for req in _REQUIRED_TIMEOUTS:
+        for req in _REQUIRED_TIMEOUTS_CORE:
             if req in to_t:
                 n = _require_positive_number(to_t[req], f"[timeouts].{req}", errors)
                 tr[req] = n
+        ac = _resolve_timeout_pair(
+            to_t, "agent_checkin_secs", "agent_checkin", "[timeouts]", errors
+        )
+        if ac is None:
+            errors.append("[timeouts]: need agent_checkin_secs or agent_checkin")
+        else:
+            tr["agent_checkin"] = ac
+        co = _resolve_timeout_pair(
+            to_t, "command_output_secs", "command_output", "[timeouts]", errors
+        )
+        if co is None:
+            errors.append("[timeouts]: need command_output_secs or command_output")
+        else:
+            tr["command_output"] = co
+        tr["listener_startup"] = _optional_timeout_default(
+            to_t, "listener_startup_secs", 5.0, "[timeouts]", errors
+        )
+        tr["poll_interval"] = _optional_timeout_default(
+            to_t, "poll_interval_secs", 2.0, "[timeouts]", errors
+        )
+        tr["ssh_connect"] = _optional_timeout_default(
+            to_t, "ssh_connect_secs", 10.0, "[timeouts]", errors
+        )
+        tr["scp_transfer"] = _optional_timeout_default(
+            to_t, "scp_transfer_secs", 60.0, "[timeouts]", errors
+        )
+        tr["stress_concurrent_checkin"] = _optional_timeout_default(
+            to_t, "stress_concurrent_checkin_secs", 30.0, "[timeouts]", errors
+        )
         for opt in ("resilience_reconnect", "resilience_kill_date", "working_hours_probe"):
             if opt in to_t and to_t[opt] is not None:
                 tr[opt] = _require_positive_number(to_t[opt], f"[timeouts].{opt}", errors)
             else:
                 tr[opt] = None
     else:
-        tr = {}
+        pass
 
     li_t = _require_table(raw, "listeners", errors)
     if li_t is not None:
@@ -435,7 +542,8 @@ def parse_env_config(raw: dict[str, Any]) -> EnvConfig:
         raise ConfigError(errors)
 
     assert url is not None and op_user is not None and api_key is not None
-    assert tr.get("agent_checkin") is not None and available_list is not None
+    assert tr.get("agent_checkin") is not None and tr.get("command_output") is not None
+    assert available_list is not None
     assert dns_port is not None and smb_pipe is not None
 
     return EnvConfig(
@@ -448,6 +556,11 @@ def parse_env_config(raw: dict[str, Any]) -> EnvConfig:
             screenshot_loot=tr["screenshot_loot"],  # type: ignore[arg-type]
             loot_entry=tr["loot_entry"],  # type: ignore[arg-type]
             max_cli_subprocess_secs=tr["max_cli_subprocess_secs"],  # type: ignore[arg-type]
+            listener_startup=tr["listener_startup"],  # type: ignore[arg-type]
+            poll_interval=tr["poll_interval"],  # type: ignore[arg-type]
+            ssh_connect=tr["ssh_connect"],  # type: ignore[arg-type]
+            scp_transfer=tr["scp_transfer"],  # type: ignore[arg-type]
+            stress_concurrent_checkin=tr["stress_concurrent_checkin"],  # type: ignore[arg-type]
             resilience_reconnect=tr.get("resilience_reconnect"),
             resilience_kill_date=tr.get("resilience_kill_date"),
             working_hours_probe=tr.get("working_hours_probe"),
@@ -611,18 +724,48 @@ def _resolve_api_key(env: dict[str, Any]) -> str:
     )
 
 
+def timeouts_to_env_dict(t: TimeoutsConfig) -> dict[str, Any]:
+    """Flatten :class:`TimeoutsConfig` into ``env.toml``-style keys for ``ctx.env['timeouts']``."""
+
+    out: dict[str, Any] = {
+        "agent_checkin": t.agent_checkin,
+        "agent_checkin_secs": t.agent_checkin,
+        "command_output": t.command_output,
+        "command_output_secs": t.command_output,
+        "agent_disconnect": t.agent_disconnect,
+        "screenshot_loot": t.screenshot_loot,
+        "loot_entry": t.loot_entry,
+        "max_cli_subprocess_secs": t.max_cli_subprocess_secs,
+        "listener_startup_secs": t.listener_startup,
+        "poll_interval_secs": t.poll_interval,
+        "ssh_connect_secs": t.ssh_connect,
+        "scp_transfer_secs": t.scp_transfer,
+        "stress_concurrent_checkin_secs": t.stress_concurrent_checkin,
+    }
+    if t.resilience_reconnect is not None:
+        out["resilience_reconnect"] = t.resilience_reconnect
+    if t.resilience_kill_date is not None:
+        out["resilience_kill_date"] = t.resilience_kill_date
+    if t.working_hours_probe is not None:
+        out["working_hours_probe"] = t.working_hours_probe
+    return out
+
+
+def make_cli_config_from_parsed(cfg: EnvConfig, env: dict[str, Any]) -> CliConfig:
+    """Build :class:`CliConfig` from an already-parsed :class:`EnvConfig` (avoids double-parse)."""
+    t = cfg.timeouts
+    return CliConfig(
+        server=_resolve_cli_server(env),
+        token=_resolve_api_key(env),
+        timeout=int(t.command_output),
+        max_subprocess_secs=int(t.max_cli_subprocess_secs),
+    )
+
+
 def make_cli_config(env: dict[str, Any]) -> CliConfig:
     """Build the CLI wrapper config from env.toml.
 
     Call :func:`validate_env_dict` on the dict first when loading from disk
     (``load_env`` does this automatically).
     """
-    timeouts = env.get("timeouts", {})
-    if not isinstance(timeouts, dict):
-        timeouts = {}
-    return CliConfig(
-        server=_resolve_cli_server(env),
-        token=_resolve_api_key(env),
-        timeout=int(timeouts.get("command_output", 30)),
-        max_subprocess_secs=int(timeouts.get("max_cli_subprocess_secs", 120)),
-    )
+    return make_cli_config_from_parsed(parse_env_config(env), env)

@@ -57,6 +57,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
     from lib.deploy_agent import deploy_and_checkin
 
     cli = ctx.cli
+    co = int(ctx.timeouts.command_output)
     target = ctx.windows
     uid = _short_id()
     listener_name = f"{name_prefix}-{uid}"
@@ -83,7 +84,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
 
         # whoami → DOMAIN\username format
         print(f"  [{agent_type}][cmd] whoami")
-        result = agent_exec(cli, agent_id, "whoami", wait=True, timeout=30)
+        result = agent_exec(cli, agent_id, "whoami", wait=True, timeout=co)
         whoami_out = result.get("output", "").strip()
         assert whoami_out, "whoami returned empty output"
         assert "\\" in whoami_out, (
@@ -94,14 +95,14 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
 
         # dir C:\ → non-empty output
         print(f"  [{agent_type}][cmd] dir C:\\")
-        result = agent_exec(cli, agent_id, "dir C:\\", wait=True, timeout=30)
+        result = agent_exec(cli, agent_id, "dir C:\\", wait=True, timeout=co)
         dir_out = result.get("output", "").strip()
         assert dir_out, "dir C:\\ returned empty output"
         print(f"  [{agent_type}][cmd] dir C:\\ passed ({len(dir_out.splitlines())} lines)")
 
         # ipconfig → contains 'IPv4 Address'
         print(f"  [{agent_type}][cmd] ipconfig")
-        result = agent_exec(cli, agent_id, "ipconfig", wait=True, timeout=30)
+        result = agent_exec(cli, agent_id, "ipconfig", wait=True, timeout=co)
         ipconfig_out = result.get("output", "").strip()
         assert ipconfig_out, "ipconfig returned empty output"
         assert "IPv4 Address" in ipconfig_out, (
@@ -116,7 +117,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
             agent_id,
             'powershell -NoProfile -Command "Write-Output PS_MARKER_OK"',
             wait=True,
-            timeout=30,
+            timeout=co,
         )
         ps_out = result.get("output", "").strip()
         assert "PS_MARKER_OK" in ps_out, (
@@ -131,7 +132,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
             agent_id,
             r'reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion" /v ProgramFilesDir',
             wait=True,
-            timeout=30,
+            timeout=co,
         )
         reg_out = result.get("output", "").strip()
         assert reg_out and (
@@ -141,7 +142,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
 
         # Service enumeration
         print(f"  [{agent_type}][cmd] sc query eventlog")
-        result = agent_exec(cli, agent_id, "sc query eventlog", wait=True, timeout=30)
+        result = agent_exec(cli, agent_id, "sc query eventlog", wait=True, timeout=co)
         sc_out = result.get("output", "").strip()
         assert sc_out and "STATE" in sc_out.upper(), (
             f"sc query output missing STATE: {sc_out[:500]!r}"
@@ -170,7 +171,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
 
         # ARP cache
         print(f"  [{agent_type}][cmd] arp -a")
-        result = agent_exec(cli, agent_id, "arp -a", wait=True, timeout=30)
+        result = agent_exec(cli, agent_id, "arp -a", wait=True, timeout=co)
         arp_out = result.get("output", "").strip()
         assert arp_out and (
             "Interface" in arp_out or "dynamic" in arp_out.lower() or "static" in arp_out.lower()

@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from lib.deploy import (
     DeployError,
     TargetConfig,
+    _is_transient_ssh_failure,
     _quote_posix,
     _quote_powershell,
     _scp_args,
@@ -36,6 +37,30 @@ def _make_target(**kwargs) -> TargetConfig:
     )
     defaults.update(kwargs)
     return TargetConfig(**defaults)
+
+
+class TestIsTransientSshFailure(unittest.TestCase):
+    def test_connection_timed_out(self) -> None:
+        self.assertTrue(
+            _is_transient_ssh_failure(
+                "ssh: connect to host x port 22: Connection timed out",
+            )
+        )
+
+    def test_connection_refused(self) -> None:
+        self.assertTrue(
+            _is_transient_ssh_failure(
+                "ssh: connect to host x port 22: Connection refused",
+            )
+        )
+
+    def test_permission_denied_not_transient(self) -> None:
+        self.assertFalse(
+            _is_transient_ssh_failure("Permission denied (publickey,password)."),
+        )
+
+    def test_case_insensitive(self) -> None:
+        self.assertTrue(_is_transient_ssh_failure("CONNECTION REFUSED"))
 
 
 class TestTargetConfigValidation(unittest.TestCase):
@@ -221,13 +246,34 @@ class TestPreflightSsh(unittest.TestCase):
             preflight_ssh(self.target)  # must not raise
 
     def test_failure_raises_deploy_error(self) -> None:
-        """preflight_ssh must raise DeployError when ssh returns a non-zero exit code."""
-        with patch("subprocess.run", return_value=self._make_completed(255, "Connection refused")):
+        """preflight_ssh must raise DeployError on non-transient SSH failure (no retry)."""
+        # Permission denied is not retried — unlike Connection refused / timed out.
+        with patch("subprocess.run", return_value=self._make_completed(255, "Permission denied (publickey)")):
             with self.assertRaises(DeployError) as ctx:
                 preflight_ssh(self.target)
             self.assertIn("10.0.0.1", str(ctx.exception))
             self.assertIn("not reachable via SSH", str(ctx.exception))
             self.assertIn("targets.toml", str(ctx.exception))
+
+    def test_transient_connection_refused_exhausts_retries(self) -> None:
+        """After 3 transient failures, DeployError includes attempt count and stderr."""
+        bad = self._make_completed(255, "ssh: connect to host 10.0.0.1 port 22: Connection refused")
+        with patch("subprocess.run", return_value=bad):
+            with patch("lib.deploy.time.sleep"):
+                with self.assertRaises(DeployError) as ctx:
+                    preflight_ssh(self.target)
+        msg = str(ctx.exception)
+        self.assertIn("after 3 attempts", msg)
+        self.assertIn("Connection refused", msg)
+
+    def test_transient_retries_then_succeeds(self) -> None:
+        """Transient failures are retried; success on the 3rd attempt returns without raising."""
+        ok = self._make_completed(0)
+        bad = self._make_completed(255, "Connection timed out")
+        with patch("subprocess.run", side_effect=[bad, bad, ok]) as mock_run:
+            with patch("lib.deploy.time.sleep"):
+                preflight_ssh(self.target)
+        self.assertEqual(mock_run.call_count, 3)
 
     def test_error_message_contains_host(self) -> None:
         """DeployError message must identify the unreachable host."""
@@ -237,12 +283,12 @@ class TestPreflightSsh(unittest.TestCase):
                 preflight_ssh(target)
             self.assertIn("192.168.99.5", str(ctx.exception))
 
-    def test_uses_connect_timeout_5(self) -> None:
-        """preflight_ssh must use ConnectTimeout=5, not the longer default."""
+    def test_uses_configured_connect_timeout(self) -> None:
+        """preflight_ssh uses ``ConnectTimeout`` from :func:`configure_deploy_timeouts` (default 10 s)."""
         with patch("subprocess.run", return_value=self._make_completed(0)) as mock_run:
             preflight_ssh(self.target)
         call_args = mock_run.call_args[0][0]  # first positional arg is the command list
-        self.assertIn("ConnectTimeout=5", call_args)
+        self.assertIn("ConnectTimeout=10", call_args)
 
     def test_uses_batch_mode(self) -> None:
         """preflight_ssh must always use BatchMode=yes."""

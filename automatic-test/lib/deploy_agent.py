@@ -79,7 +79,11 @@ def deploy_and_checkin(
         lib.wait.TimeoutError: if *expect_checkin* is ``True`` and no agent checks in.
     """
     tag = label if label is not None else agent_type
-    timeout = ctx.env.get("timeouts", {}).get("agent_checkin", checkin_timeout)
+    t = getattr(ctx, "timeouts", None)
+    if t is not None:
+        timeout = int(t.agent_checkin)
+    else:
+        timeout = int(ctx.env.get("timeouts", {}).get("agent_checkin", checkin_timeout))
 
     # Step 1 — snapshot pre-existing agents so we can identify the new checkin.
     if pre_existing_ids is None:
@@ -135,7 +139,11 @@ def deploy_and_checkin(
     if not expect_checkin:
         probe = no_checkin_timeout
         if probe is None:
-            probe = int(ctx.env.get("timeouts", {}).get("working_hours_probe", 45))
+            tw = getattr(ctx, "timeouts", None)
+            if tw is not None and tw.working_hours_probe is not None:
+                probe = int(tw.working_hours_probe)
+            else:
+                probe = int(ctx.env.get("timeouts", {}).get("working_hours_probe", 45))
         print(f"  [{tag}][wait] expecting NO checkin within {probe}s (working-hours probe)")
         try:
             agent = wait_for_agent(cli, timeout=probe, pre_existing_ids=pre_existing_ids)

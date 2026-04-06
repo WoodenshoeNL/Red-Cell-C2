@@ -90,7 +90,8 @@ def run(ctx):
         else:
             print("  [22][wait] kill-date already passed before wait — continuing")
 
-        absent_timeout = float(ctx.env.get("timeouts", {}).get("resilience_kill_date", 120))
+        rk = ctx.timeouts.resilience_kill_date
+        absent_timeout = float(rk) if rk is not None else 120.0
         print(
             f"  [22][assert] expecting agent to drop off within {absent_timeout:.0f}s "
             "after kill-date"

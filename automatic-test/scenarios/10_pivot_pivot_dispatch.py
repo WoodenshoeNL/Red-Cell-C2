@@ -143,6 +143,7 @@ def _run_smb_pivot(ctx, parent_target, child_target):
     from lib.wait import poll
 
     cli = ctx.cli
+    co = int(ctx.timeouts.command_output)
     uid = _short_id()
     listener_name = f"test-pivot-http-{uid}"
     pipe_name = f"red_cell_pivot_{uid}"
@@ -175,7 +176,7 @@ def _run_smb_pivot(ctx, parent_target, child_target):
         print(f"  [step 4] opening SMB pivot pipe {pipe_path!r} on parent agent")
         agent_exec(
             cli, parent_agent_id, f"pivot smb connect {pipe_path}",
-            wait=True, timeout=30,
+            wait=True, timeout=co,
         )
         print("  [step 4] pivot smb connect sent")
 
@@ -192,7 +193,7 @@ def _run_smb_pivot(ctx, parent_target, child_target):
         smb_listeners = poll(
             fn=_smb_listener_appeared,
             predicate=lambda ls: len(ls) > 0,
-            timeout=30,
+            timeout=co,
             description="SMB pivot listener appearance",
         )
         smb_listener_name = smb_listeners[0]["name"]
@@ -212,7 +213,7 @@ def _run_smb_pivot(ctx, parent_target, child_target):
 
         # ── Step 8: Send whoami through child agent; verify output ───────────
         print("  [step 8] running whoami on child agent")
-        result = agent_exec(cli, child_agent_id, "whoami", wait=True, timeout=30)
+        result = agent_exec(cli, child_agent_id, "whoami", wait=True, timeout=co)
         whoami_out = result.get("output", "").strip()
         assert whoami_out, "child agent whoami returned empty output"
         assert "\\" in whoami_out, (
@@ -235,7 +236,7 @@ def _run_smb_pivot(ctx, parent_target, child_target):
         print(f"  [step 10] disconnecting SMB pivot (child {child_agent_id})")
         agent_exec(
             cli, parent_agent_id, f"pivot smb disconnect {child_agent_id}",
-            wait=True, timeout=30,
+            wait=True, timeout=co,
         )
         print("  [step 10] pivot smb disconnect sent")
 
@@ -253,7 +254,7 @@ def _run_smb_pivot(ctx, parent_target, child_target):
         poll(
             fn=_child_inactive,
             predicate=lambda result: result,
-            timeout=30,
+            timeout=co,
             description="child agent goes inactive after pivot disconnect",
         )
         print("  [step 11] child agent is inactive")

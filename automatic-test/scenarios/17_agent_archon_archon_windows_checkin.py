@@ -38,7 +38,9 @@ def _short_id() -> str:
     return uuid.uuid4().hex[:8]
 
 
-def _run_archon_extensions(cli, agent_id: str, extensions: list[dict]) -> None:
+def _run_archon_extensions(
+    cli, agent_id: str, extensions: list[dict], exec_timeout: int
+) -> None:
     """Execute Archon-specific commands listed in env.toml ``[archon.extensions]``.
 
     Each entry in *extensions* must have:
@@ -65,7 +67,7 @@ def _run_archon_extensions(cli, agent_id: str, extensions: list[dict]) -> None:
         if not cmd:
             continue
         print(f"  [archon][extensions] running: {cmd!r}")
-        result = agent_exec(cli, agent_id, cmd, wait=True, timeout=30)
+        result = agent_exec(cli, agent_id, cmd, wait=True, timeout=exec_timeout)
         output = result.get("output", "").strip()
         assert output, f"Archon extension command {cmd!r} returned empty output"
         if match:
@@ -114,6 +116,7 @@ def run(ctx) -> None:
     from lib.deploy import run_remote
 
     cli = ctx.cli
+    co = int(ctx.timeouts.command_output)
     target = ctx.windows
     uid = _short_id()
     listener_name = f"test-archon-{uid}"
@@ -148,7 +151,7 @@ def run(ctx) -> None:
 
         # whoami → DOMAIN\username format
         print("  [archon][cmd] whoami")
-        result = agent_exec(cli, agent_id, "whoami", wait=True, timeout=30)
+        result = agent_exec(cli, agent_id, "whoami", wait=True, timeout=co)
         whoami_out = result.get("output", "").strip()
         assert whoami_out, "whoami returned empty output"
         assert "\\" in whoami_out, (
@@ -159,14 +162,14 @@ def run(ctx) -> None:
 
         # dir C:\ → non-empty output
         print("  [archon][cmd] dir C:\\")
-        result = agent_exec(cli, agent_id, "dir C:\\", wait=True, timeout=30)
+        result = agent_exec(cli, agent_id, "dir C:\\", wait=True, timeout=co)
         dir_out = result.get("output", "").strip()
         assert dir_out, "dir C:\\ returned empty output"
         print(f"  [archon][cmd] dir C:\\ passed ({len(dir_out.splitlines())} lines)")
 
         # ipconfig → contains 'IPv4 Address'
         print("  [archon][cmd] ipconfig")
-        result = agent_exec(cli, agent_id, "ipconfig", wait=True, timeout=30)
+        result = agent_exec(cli, agent_id, "ipconfig", wait=True, timeout=co)
         ipconfig_out = result.get("output", "").strip()
         assert ipconfig_out, "ipconfig returned empty output"
         assert "IPv4 Address" in ipconfig_out, (
@@ -177,7 +180,7 @@ def run(ctx) -> None:
         print("  [archon][suite] baseline commands passed")
 
         # ── Step 7: Archon-specific extensions ───────────────────────────────
-        _run_archon_extensions(cli, agent_id, archon_extensions)
+        _run_archon_extensions(cli, agent_id, archon_extensions, co)
 
         print("  [archon][suite] all checks passed")
 

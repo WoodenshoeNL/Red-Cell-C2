@@ -8,6 +8,7 @@ are needed. Both Linux and Windows targets are accessed via SSH
 
 from __future__ import annotations
 
+import logging
 import shlex
 import subprocess
 import time
@@ -15,6 +16,113 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from lib import ScenarioSkipped
+
+logger = logging.getLogger(__name__)
+
+_SSH_MAX_ATTEMPTS = 3
+_SSH_RETRY_BACKOFF_SEC = 2
+
+# Set by :func:`configure_deploy_timeouts` from ``config/env.toml`` ``[timeouts]``.
+_SSH_CONNECT_SECS = 10
+_SCP_TRANSFER_SECS = 60
+_DEFAULT_REMOTE_CMD_SECS = 30
+
+
+def configure_deploy_timeouts(
+    *,
+    ssh_connect_secs: float,
+    scp_transfer_secs: float,
+    default_remote_cmd_secs: float,
+) -> None:
+    """Apply harness timeout values to SSH/SCP helpers (call once from ``test.py`` main)."""
+
+    global _SSH_CONNECT_SECS, _SCP_TRANSFER_SECS, _DEFAULT_REMOTE_CMD_SECS
+    _SSH_CONNECT_SECS = max(1, int(ssh_connect_secs))
+    _SCP_TRANSFER_SECS = max(1, int(scp_transfer_secs))
+    _DEFAULT_REMOTE_CMD_SECS = max(1, int(default_remote_cmd_secs))
+
+
+class DeployError(Exception):
+    pass
+
+
+def _is_transient_ssh_failure(stderr: str, stdout: str = "") -> bool:
+    """Return True if ssh/scp output indicates a retryable connection-level failure."""
+    combined = f"{stderr}\n{stdout}".lower()
+    return (
+        "connection timed out" in combined
+        or "connection refused" in combined
+    )
+
+
+def _run_ssh_cli_with_retry(
+    cmd: list[str],
+    host: str,
+    *,
+    timeout: int | None,
+    tool: str = "ssh",
+    raise_on_exhausted_transient: bool = True,
+) -> subprocess.CompletedProcess:
+    """Run ``ssh`` or ``scp`` with retries on transient connection failures.
+
+    Retries at most ``_SSH_MAX_ATTEMPTS`` times with ``_SSH_RETRY_BACKOFF_SEC``
+    seconds between attempts. Only ``Connection timed out`` and
+    ``Connection refused`` in combined stderr/stdout trigger retries.
+
+    Args:
+        cmd: Full argv (including ``ssh`` or ``scp`` as ``cmd[0]``).
+        host: Target hostname for logging and error messages.
+        timeout: Subprocess timeout, or None for no limit.
+        tool: ``\"ssh\"`` or ``\"scp\"`` — used in log lines and :class:`DeployError` text.
+        raise_on_exhausted_transient: If False, return the last failed
+            :class:`~subprocess.CompletedProcess` when all attempts exhaust on a
+            transient error (used by :func:`named_pipe_exists`).
+
+    Returns:
+        The completed process (exit code 0 on success).
+
+    Raises:
+        DeployError: After all retries are exhausted on a transient failure
+            (when ``raise_on_exhausted_transient`` is True), or
+            :class:`subprocess.TimeoutExpired` from :func:`subprocess.run`
+            (not retried).
+    """
+    last_result: subprocess.CompletedProcess | None = None
+    for attempt in range(1, _SSH_MAX_ATTEMPTS + 1):
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        last_result = result
+        if result.returncode == 0:
+            return result
+        combined = (result.stderr or "") + (result.stdout or "")
+        transient = _is_transient_ssh_failure(result.stderr or "", result.stdout or "")
+        if transient and attempt < _SSH_MAX_ATTEMPTS:
+            log_label = "SSH" if tool == "ssh" else "SCP"
+            logger.warning(
+                "%s to %s failed (attempt %d/%d), retrying in %ds...",
+                log_label,
+                host,
+                attempt,
+                _SSH_MAX_ATTEMPTS,
+                _SSH_RETRY_BACKOFF_SEC,
+            )
+            time.sleep(_SSH_RETRY_BACKOFF_SEC)
+            continue
+        if transient and attempt == _SSH_MAX_ATTEMPTS:
+            if not raise_on_exhausted_transient:
+                return result
+            exhausted_label = "SSH" if tool == "ssh" else "SCP"
+            raise DeployError(
+                f"{exhausted_label} to {host} failed after {_SSH_MAX_ATTEMPTS} attempts: "
+                f"{combined.strip()}"
+            )
+        return result
+    assert last_result is not None
+    return last_result
 
 
 @dataclass
@@ -41,7 +149,7 @@ def _ssh_args(target: TargetConfig) -> list[str]:
         "-p", str(target.port),
         "-o", "StrictHostKeyChecking=no",
         "-o", "BatchMode=yes",
-        "-o", "ConnectTimeout=10",
+        "-o", f"ConnectTimeout={_SSH_CONNECT_SECS}",
         "-i", target.key,
         f"{target.user}@{target.host}",
     ]
@@ -53,39 +161,33 @@ def _scp_args(target: TargetConfig) -> list[str]:
         "-P", str(target.port),
         "-o", "StrictHostKeyChecking=no",
         "-o", "BatchMode=yes",
-        "-o", "ConnectTimeout=10",
+        "-o", f"ConnectTimeout={_SSH_CONNECT_SECS}",
         "-i", target.key,
     ]
-
-
-class DeployError(Exception):
-    pass
 
 
 def preflight_ssh(target: TargetConfig) -> None:
     """Check that the target host is reachable via SSH before deploying.
 
-    Uses a short ConnectTimeout (5 s) so that an unreachable host is detected
-    quickly instead of surfacing as a cryptic error after a full payload build.
+    Uses ``ConnectTimeout`` from :func:`configure_deploy_timeouts` so tuning is
+    centralised with the rest of the harness.
     Call this at the start of any scenario that deploys a payload via SSH.
 
     Raises:
         DeployError: if the SSH connection cannot be established.
     """
-    result = subprocess.run(
-        [
-            "ssh",
-            "-p", str(target.port),
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "BatchMode=yes",
-            "-o", "ConnectTimeout=5",
-            "-i", target.key,
-            f"{target.user}@{target.host}",
-            "true",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=10,
+    cmd = [
+        "ssh",
+        "-p", str(target.port),
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "BatchMode=yes",
+        "-o", f"ConnectTimeout={_SSH_CONNECT_SECS}",
+        "-i", target.key,
+        f"{target.user}@{target.host}",
+        "true",
+    ]
+    result = _run_ssh_cli_with_retry(
+        cmd, target.host, timeout=max(_SSH_CONNECT_SECS + 5, 10), tool="ssh"
     )
     if result.returncode != 0:
         raise DeployError(
@@ -119,11 +221,11 @@ def preflight_dns(target: TargetConfig, domain: str, expected_ip: str) -> None:
         "python3 -c 'import socket,sys; print(socket.gethostbyname(sys.argv[1]))' "
         + shlex.quote(domain)
     )
-    result = subprocess.run(
+    result = _run_ssh_cli_with_retry(
         _ssh_args(target) + [probe],
-        capture_output=True,
-        text=True,
+        target.host,
         timeout=15,
+        tool="ssh",
     )
     if result.returncode != 0:
         raise ScenarioSkipped(
@@ -162,22 +264,31 @@ def named_pipe_exists(target: TargetConfig, pipe_name: str, ssh_timeout: int = 2
         'powershell -NoProfile -Command '
         f'"Test-Path -LiteralPath \'{pipe_path}\'"'
     )
-    result = subprocess.run(
+    result = _run_ssh_cli_with_retry(
         _ssh_args(target) + [remote_cmd],
-        capture_output=True,
-        text=True,
+        target.host,
         timeout=ssh_timeout,
+        tool="ssh",
+        raise_on_exhausted_transient=False,
     )
     if result.returncode != 0:
         return False
     return result.stdout.strip().lower() == "true"
 
 
-def run_remote(target: TargetConfig, command: str, timeout: int = 30) -> str:
-    """Run a shell command on the target via SSH and return stdout."""
-    result = subprocess.run(
+def run_remote(target: TargetConfig, command: str, timeout: int | None = None) -> str:
+    """Run a shell command on the target via SSH and return stdout.
+
+    When *timeout* is ``None``, uses the value set by :func:`configure_deploy_timeouts`
+    (default remote command ceiling, typically ``command_output_secs`` from env).
+    """
+    if timeout is None:
+        timeout = _DEFAULT_REMOTE_CMD_SECS
+    result = _run_ssh_cli_with_retry(
         _ssh_args(target) + [command],
-        capture_output=True, text=True, timeout=timeout,
+        target.host,
+        timeout=timeout,
+        tool="ssh",
     )
     if result.returncode != 0:
         raise DeployError(
@@ -191,9 +302,11 @@ def run_remote(target: TargetConfig, command: str, timeout: int = 30) -> str:
 def upload(target: TargetConfig, local_path: str | Path, remote_path: str) -> None:
     """SCP a local file to the target."""
     dest = f"{target.user}@{target.host}:{remote_path}"
-    result = subprocess.run(
+    result = _run_ssh_cli_with_retry(
         _scp_args(target) + [str(local_path), dest],
-        capture_output=True, text=True, timeout=60,
+        target.host,
+        timeout=_SCP_TRANSFER_SECS,
+        tool="scp",
     )
     if result.returncode != 0:
         raise DeployError(
@@ -206,9 +319,11 @@ def upload(target: TargetConfig, local_path: str | Path, remote_path: str) -> No
 def download(target: TargetConfig, remote_path: str, local_path: str | Path) -> None:
     """SCP a remote file to the local machine."""
     src = f"{target.user}@{target.host}:{remote_path}"
-    result = subprocess.run(
+    result = _run_ssh_cli_with_retry(
         _scp_args(target) + [src, str(local_path)],
-        capture_output=True, text=True, timeout=60,
+        target.host,
+        timeout=_SCP_TRANSFER_SECS,
+        tool="scp",
     )
     if result.returncode != 0:
         raise DeployError(
@@ -255,7 +370,14 @@ def execute_background(target: TargetConfig, command: str) -> None:
     else:
         quoted = _quote_posix(command)
         bg_cmd = f"nohup {quoted} </dev/null >/dev/null 2>&1 &"
-    subprocess.Popen(
+    result = _run_ssh_cli_with_retry(
         _ssh_args(target) + [bg_cmd],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        target.host,
+        timeout=_SCP_TRANSFER_SECS,
+        tool="ssh",
     )
+    if result.returncode != 0:
+        raise DeployError(
+            f"Background remote command failed (exit {result.returncode}):\n"
+            f"  stderr: {result.stderr.strip()}"
+        )

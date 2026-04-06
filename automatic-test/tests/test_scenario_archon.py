@@ -14,6 +14,8 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from lib import ScenarioSkipped
+from lib.cli import CliConfig
+from lib.config import timeouts_for_unit_tests
 
 # Import the scenario module directly.
 _SCENARIO_PATH = Path(__file__).parent.parent / "scenarios" / "17_agent_archon_archon_windows_checkin.py"
@@ -28,12 +30,18 @@ def _make_ctx(windows=True, dry_run=False, env=None):
     ctx = MagicMock()
     ctx.dry_run = dry_run
     ctx.env = env or {}
+    ctx.timeouts = timeouts_for_unit_tests()
     if windows:
         ctx.windows = MagicMock()
         ctx.windows.work_dir = "C:\\Temp\\rc-test"
     else:
         ctx.windows = None
-    ctx.cli = MagicMock()
+    ctx.cli = CliConfig(
+        server="https://127.0.0.1:40056",
+        token="test-token",
+        timeout=30,
+        max_subprocess_secs=120,
+    )
     return ctx
 
 
@@ -72,7 +80,7 @@ class TestRunArchonAvailabilityGate(unittest.TestCase):
 class TestRunArchonExtensions(unittest.TestCase):
     def test_no_extensions_does_not_raise(self) -> None:
         """Empty extension list must complete silently."""
-        _mod._run_archon_extensions(MagicMock(), "agent-123", [])
+        _mod._run_archon_extensions(MagicMock(), "agent-123", [], 30)
 
     def test_extension_command_called_and_asserted(self) -> None:
         from lib.cli import agent_exec as _orig_exec
@@ -85,7 +93,7 @@ class TestRunArchonExtensions(unittest.TestCase):
 
         with patch("lib.cli.agent_exec", return_value=fake_result):
             # Should not raise.
-            _mod._run_archon_extensions(cli, agent_id, extensions)
+            _mod._run_archon_extensions(cli, agent_id, extensions, 30)
 
     def test_extension_command_missing_match_raises(self) -> None:
         cli = MagicMock()
@@ -95,7 +103,7 @@ class TestRunArchonExtensions(unittest.TestCase):
 
         with patch("lib.cli.agent_exec", return_value=fake_result):
             with self.assertRaises(AssertionError) as cm:
-                _mod._run_archon_extensions(cli, "agent-abc", extensions)
+                _mod._run_archon_extensions(cli, "agent-abc", extensions, 30)
         self.assertIn("SeDebug", str(cm.exception))
 
     def test_extension_empty_output_raises(self) -> None:
@@ -104,7 +112,7 @@ class TestRunArchonExtensions(unittest.TestCase):
 
         with patch("lib.cli.agent_exec", return_value={"output": ""}):
             with self.assertRaises(AssertionError):
-                _mod._run_archon_extensions(cli, "agent-abc", extensions)
+                _mod._run_archon_extensions(cli, "agent-abc", extensions, 30)
 
 
 class TestArchonExtensionsTOMLShape(unittest.TestCase):
@@ -159,7 +167,7 @@ class TestArchonExtensionsTOMLShape(unittest.TestCase):
         fake_result = {"output": "CONTOSO\\Administrator"}
         with patch("lib.cli.agent_exec", return_value=fake_result):
             # Must not raise AttributeError ('str' has no attribute 'get')
-            _mod._run_archon_extensions(MagicMock(), "agent-abc", normalised)
+            _mod._run_archon_extensions(MagicMock(), "agent-abc", normalised, 30)
 
 
 if __name__ == "__main__":

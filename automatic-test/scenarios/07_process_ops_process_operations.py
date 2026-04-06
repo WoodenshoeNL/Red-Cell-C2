@@ -69,6 +69,8 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
     from lib.deploy_agent import deploy_and_checkin
 
     cli = ctx.cli
+    co = int(ctx.timeouts.command_output)
+    ssh = int(ctx.timeouts.ssh_connect)
     target = ctx.linux
     uid = _short_id()
     listener_name = f"{name_prefix}-{uid}"
@@ -93,7 +95,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
 
         # ── Step 6: List processes via agent ─────────────────────────────────
         print(f"  [{agent_type}][ps] listing processes via agent exec")
-        ps_result = agent_exec(cli, agent_id, "ps aux", wait=True, timeout=30)
+        ps_result = agent_exec(cli, agent_id, "ps aux", wait=True, timeout=co)
         ps_output = ps_result.get("output", "")
         assert ps_output, "ps aux returned empty output"
 
@@ -107,7 +109,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
         # Listening sockets (agent-side network introspection)
         print(f"  [{agent_type}][net] ss -tln (head)")
         ss_result = agent_exec(
-            cli, agent_id, "ss -tln 2>/dev/null | head -n 40", wait=True, timeout=30
+            cli, agent_id, "ss -tln 2>/dev/null | head -n 40", wait=True, timeout=co
         )
         ss_out = ss_result.get("output", "").strip()
         assert ss_out and len(ss_out) > 5, (
@@ -121,7 +123,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
         pid_str = run_remote(
             target,
             f"bash -c 'sleep 9999 & echo $!'",
-            timeout=10,
+            timeout=ssh,
         ).strip()
         assert pid_str.isdigit(), (
             f"expected a numeric PID from spawn command, got: {pid_str!r}"
@@ -130,7 +132,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
         print(f"  [{agent_type}][spawn] sleep process started, PID={sleep_pid}")
 
         # Verify it's actually running (sanity check via SSH).
-        ps_check = run_remote(target, f"ps -p {sleep_pid} -o pid= 2>/dev/null || true", timeout=10)
+        ps_check = run_remote(target, f"ps -p {sleep_pid} -o pid= 2>/dev/null || true", timeout=ssh)
         assert ps_check.strip() == str(sleep_pid), (
             f"sleep process PID {sleep_pid} not found in ps immediately after spawn"
         )
@@ -150,7 +152,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
         pid_check = run_remote(
             target,
             f"ps -p {sleep_pid} -o pid= 2>/dev/null || true",
-            timeout=10,
+            timeout=ssh,
         ).strip()
         assert pid_check == "", (
             f"process PID {sleep_pid} is still running after kill — "
@@ -223,6 +225,8 @@ def _run_for_agent_windows(ctx, agent_type: str, fmt: str, name_prefix: str) -> 
     from lib.deploy_agent import deploy_and_checkin
 
     cli = ctx.cli
+    co = int(ctx.timeouts.command_output)
+    ssh = int(ctx.timeouts.ssh_connect)
     target = ctx.windows
     uid = _short_id()
     listener_name = f"{name_prefix}-{uid}"
@@ -247,7 +251,7 @@ def _run_for_agent_windows(ctx, agent_type: str, fmt: str, name_prefix: str) -> 
 
         # ── Step 6: List processes via agent ─────────────────────────────────
         print(f"  [{agent_type}][ps] listing processes via agent exec (tasklist)")
-        ps_result = agent_exec(cli, agent_id, "tasklist", wait=True, timeout=30)
+        ps_result = agent_exec(cli, agent_id, "tasklist", wait=True, timeout=co)
         ps_output = ps_result.get("output", "")
         assert ps_output, "tasklist returned empty output"
 
@@ -300,7 +304,7 @@ def _run_for_agent_windows(ctx, agent_type: str, fmt: str, name_prefix: str) -> 
         ps_check = run_remote(
             target,
             f'tasklist /FI "PID eq {sleep_pid}" /FO CSV /NH 2>NUL',
-            timeout=10,
+            timeout=ssh,
         )
         assert str(sleep_pid) in ps_check, (
             f"sleep process PID {sleep_pid} not found in tasklist immediately after spawn;\n"
@@ -323,7 +327,7 @@ def _run_for_agent_windows(ctx, agent_type: str, fmt: str, name_prefix: str) -> 
         pid_check = run_remote(
             target,
             f'tasklist /FI "PID eq {sleep_pid}" /FO CSV /NH 2>NUL',
-            timeout=10,
+            timeout=ssh,
         ).strip()
         assert str(sleep_pid) not in pid_check, (
             f"process PID {sleep_pid} is still running after taskkill — "

@@ -90,20 +90,21 @@ def run(ctx):
         parse_last_seen(ls_raw)
         print(f"  [24][assert] last_seen parses as datetime: {ls_raw!r}")
 
+        poll_iv = float(ctx.timeouts.poll_interval)
         print(
             f"  [24][measure] observing last_seen updates (timeout {measure_timeout:.0f}s, "
-            "poll every 2s)…"
+            f"poll every {poll_iv:g}s)…"
         )
         gap = measure_wall_seconds_between_last_seen_changes(
             cli,
             agent_id,
-            poll_interval=2.0,
+            poll_interval=poll_iv,
             timeout=measure_timeout,
         )
         print(f"  [24][measure] wall seconds between last_seen updates: {gap:.1f}")
 
         # Loose bounds: allow slow targets and default Demon jitter without flaking CI.
-        lo = max(2.0, float(sleep_secs) * 0.35)
+        lo = max(poll_iv, float(sleep_secs) * 0.35)
         hi = float(sleep_secs) * 3.5 + 20.0
         assert lo <= gap <= hi, (
             f"expected last_seen interval between {lo:.1f}s and {hi:.1f}s "

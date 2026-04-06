@@ -47,7 +47,6 @@ PHANTOM_AGENT_COUNT = 5
 PHANTOM_RUN_SECONDS = 30
 
 EXEC_INTERVAL = 10       # seconds between parallel exec rounds during the run
-CHECKIN_DEADLINE = 30    # seconds to wait for all agents to check in
 CPU_LIMIT_PCT = 80.0     # default max teamserver CPU % (override via env.toml [teamserver])
 
 import os
@@ -75,7 +74,9 @@ def _unique_marker() -> str:
     return f"STRESS-{uuid.uuid4().hex}"
 
 
-def _wait_for_n_agents(cli, pre_existing_ids: set, n: int, timeout: int) -> list[str]:
+def _wait_for_n_agents(
+    cli, pre_existing_ids: set, n: int, timeout: int, poll_interval: float
+) -> list[str]:
     """Block until at least n new agent IDs appear.  Returns list of new IDs."""
     from lib.wait import poll
 
@@ -88,18 +89,18 @@ def _wait_for_n_agents(cli, pre_existing_ids: set, n: int, timeout: int) -> list
         fn=_new_agents,
         predicate=lambda ids: len(ids) >= n,
         timeout=timeout,
-        interval=2.0,
+        interval=poll_interval,
         description=f"{n} new agent checkins",
     )
     return new_ids
 
 
-def _exec_one(cli, agent_id: str, marker: str, label: str) -> dict:
+def _exec_one(cli, agent_id: str, marker: str, label: str, exec_timeout: int) -> dict:
     """Issue ``echo <marker>`` to one agent and return result dict."""
     from lib.cli import agent_exec, CliError
 
     try:
-        r = agent_exec(cli, agent_id, f"echo {marker}", wait=True, timeout=30)
+        r = agent_exec(cli, agent_id, f"echo {marker}", wait=True, timeout=exec_timeout)
         out = r.get("output", "").strip()
         return {
             "agent_id": agent_id,
@@ -120,11 +121,13 @@ def _exec_one(cli, agent_id: str, marker: str, label: str) -> dict:
         }
 
 
-def _exec_round(cli, agent_ids: list[str], markers: dict[str, str]) -> list[dict]:
+def _exec_round(
+    cli, agent_ids: list[str], markers: dict[str, str], exec_timeout: int
+) -> list[dict]:
     """Issue ``echo <marker>`` to all agents concurrently.  Returns list of result dicts."""
     with ThreadPoolExecutor(max_workers=len(agent_ids)) as pool:
         futures: list[Future] = [
-            pool.submit(_exec_one, cli, aid, markers[aid], f"agent-{i}")
+            pool.submit(_exec_one, cli, aid, markers[aid], f"agent-{i}", exec_timeout)
             for i, aid in enumerate(agent_ids)
         ]
         results = [f.result() for f in as_completed(futures)]
@@ -202,6 +205,10 @@ def _run_stress_for_agent(
     from lib.deploy import ensure_work_dir, execute_background, run_remote, upload
 
     cli = ctx.cli
+    co = int(ctx.timeouts.command_output)
+    checkin_deadline = int(ctx.timeouts.stress_concurrent_checkin)
+    poll_iv = float(ctx.timeouts.poll_interval)
+    ssh = int(ctx.timeouts.ssh_connect)
     target = ctx.linux
     uid = _short_id()
     listener_name = f"{name_prefix}-{uid}"
@@ -257,17 +264,21 @@ def _run_stress_for_agent(
 
         # ── Step 4: Wait for all agents to check in ───────────────────────────
         print(
-            f"  [{agent_type}][wait] waiting up to {CHECKIN_DEADLINE}s for "
+            f"  [{agent_type}][wait] waiting up to {checkin_deadline}s for "
             f"{agent_count} agents to check in"
         )
         checkin_start = time.monotonic()
         agent_ids = _wait_for_n_agents(
-            cli, pre_existing_ids, agent_count, timeout=CHECKIN_DEADLINE
+            cli,
+            pre_existing_ids,
+            agent_count,
+            timeout=checkin_deadline,
+            poll_interval=poll_iv,
         )
         checkin_elapsed = time.monotonic() - checkin_start
         assert len(agent_ids) >= agent_count, (
             f"Only {len(agent_ids)}/{agent_count} agents checked in within "
-            f"{CHECKIN_DEADLINE}s"
+            f"{checkin_deadline}s"
         )
         print(
             f"  [{agent_type}][wait] all {agent_count} agents checked in in "
@@ -303,7 +314,7 @@ def _run_stress_for_agent(
                 f"  [{agent_type}][run] exec round {round_num} "
                 f"(t+{time.monotonic()-run_start:.0f}s)"
             )
-            results = _exec_round(cli, agent_ids, markers)
+            results = _exec_round(cli, agent_ids, markers, co)
 
             # Check for failures without raising immediately — collect all errors.
             try:
@@ -426,7 +437,7 @@ def _run_stress_for_agent(
         # Remove remote payloads.
         for rp in remote_payloads:
             try:
-                run_remote(target, f"rm -f {rp}", timeout=10)
+                run_remote(target, f"rm -f {rp}", timeout=ssh)
             except Exception as exc:
                 print(f"  [{agent_type}][cleanup] remove {rp} failed (non-fatal): {exc}")
 

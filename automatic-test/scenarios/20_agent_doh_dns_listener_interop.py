@@ -270,6 +270,8 @@ def _maybe_specter_doh_agent_pass(
         print("  [specter] SKIPPED — ctx.windows is None (no Windows target)")
         return
 
+    co = int(ctx.timeouts.command_output)
+
     from lib.cli import (
         agent_exec,
         agent_kill,
@@ -327,7 +329,7 @@ def _maybe_specter_doh_agent_pass(
         agent_id = agent["id"]
 
         print("  [specter][cmd] whoami")
-        result = agent_exec(cli, agent_id, "whoami", wait=True, timeout=30)
+        result = agent_exec(cli, agent_id, "whoami", wait=True, timeout=co)
         whoami_out = result.get("output", "").strip()
         assert whoami_out, "whoami returned empty output"
         assert "\\" in whoami_out, (

@@ -66,6 +66,7 @@ def run(ctx):
     from lib.deploy import run_remote
 
     cli = ctx.cli
+    co = int(ctx.timeouts.command_output)
     target = ctx.windows
     uid = _short_id()
     listener_name = f"test-kerberos-{uid}"
@@ -91,7 +92,7 @@ def run(ctx):
         # `whoami /all` returns user info, group memberships, and token
         # privileges — the structured output expected by this test step.
         print("  [tokens] listing token info via 'whoami /all'")
-        token_result = agent_exec(cli, agent_id, "whoami /all", wait=True, timeout=30)
+        token_result = agent_exec(cli, agent_id, "whoami /all", wait=True, timeout=co)
         token_output = token_result.get("output", "").strip()
 
         assert token_output, "whoami /all returned empty output"
@@ -119,7 +120,7 @@ def run(ctx):
         print("  [kerberos] listing Kerberos tickets via 'klist'")
         kerberos_available = True
         try:
-            klist_result = agent_exec(cli, agent_id, "klist", wait=True, timeout=30)
+            klist_result = agent_exec(cli, agent_id, "klist", wait=True, timeout=co)
             klist_output = klist_result.get("output", "").strip()
             print(
                 f"  [kerberos] klist output received ({len(klist_output)} chars): "
@@ -164,7 +165,7 @@ def run(ctx):
         print(f"  [net] netstat ok ({len(netstat_out)} chars)")
 
         print("  [net] arp -a")
-        arp_result = agent_exec(cli, agent_id, "arp -a", wait=True, timeout=30)
+        arp_result = agent_exec(cli, agent_id, "arp -a", wait=True, timeout=co)
         arp_out = arp_result.get("output", "").strip()
         assert arp_out, "arp -a returned empty output"
         assert (

@@ -17,6 +17,7 @@ from lib.config import (
     load_targets,
     parse_env_config,
     parse_targets_config,
+    timeouts_for_unit_tests,
     validate_env_dict,
     validate_targets_dict,
 )
@@ -86,6 +87,32 @@ class TestValidateEnvDict(unittest.TestCase):
         cfg = parse_env_config(_minimal_valid_env())
         self.assertEqual(cfg.server.url, "wss://127.0.0.1:40056")
         self.assertEqual(cfg.agents.available, ["demon"])
+        self.assertEqual(cfg.timeouts.listener_startup, 5.0)
+        self.assertEqual(cfg.timeouts.poll_interval, 2.0)
+        self.assertEqual(cfg.timeouts.ssh_connect, 10.0)
+
+    def test_agent_checkin_secs_alias(self) -> None:
+        raw = _minimal_valid_env()
+        del raw["timeouts"]["agent_checkin"]
+        del raw["timeouts"]["command_output"]
+        raw["timeouts"]["agent_checkin_secs"] = 60
+        raw["timeouts"]["command_output_secs"] = 30
+        cfg = parse_env_config(raw)
+        self.assertEqual(cfg.timeouts.agent_checkin, 60.0)
+        self.assertEqual(cfg.timeouts.command_output, 30.0)
+
+    def test_timeout_pair_conflict_errors(self) -> None:
+        raw = _minimal_valid_env()
+        raw["timeouts"]["agent_checkin_secs"] = 60
+        raw["timeouts"]["agent_checkin"] = 99
+        with self.assertRaises(ConfigError) as ctx:
+            parse_env_config(raw)
+        self.assertIn("agent_checkin_secs", str(ctx.exception))
+
+    def test_timeouts_for_unit_tests(self) -> None:
+        t = timeouts_for_unit_tests()
+        self.assertEqual(t.poll_interval, 2.0)
+        self.assertEqual(t.stress_concurrent_checkin, 30.0)
 
     def test_unknown_top_level_key(self) -> None:
         raw = _minimal_valid_env()

@@ -120,7 +120,9 @@ def _build_and_deploy_linux(cli, target, listener_name, uid):
 
 # ── Isolation checks ─────────────────────────────────────────────────────────
 
-def _run_command_suite(cli, agent_id: str, label: str, marker: str) -> dict:
+def _run_command_suite(
+    cli, agent_id: str, label: str, marker: str, exec_timeout: int
+) -> dict:
     """Run the standard command suite against one agent.
 
     Returns a dict with the raw outputs keyed by command name.
@@ -132,7 +134,7 @@ def _run_command_suite(cli, agent_id: str, label: str, marker: str) -> dict:
 
     # whoami
     print(f"  [{label}] running whoami")
-    r = agent_exec(cli, agent_id, "whoami", wait=True, timeout=30)
+    r = agent_exec(cli, agent_id, "whoami", wait=True, timeout=exec_timeout)
     out = r.get("output", "").strip()
     assert out, f"[{label}] whoami returned empty output"
     outputs["whoami"] = out
@@ -140,7 +142,7 @@ def _run_command_suite(cli, agent_id: str, label: str, marker: str) -> dict:
 
     # echo marker (unique per agent — used for isolation check)
     print(f"  [{label}] echoing unique marker: {marker!r}")
-    r = agent_exec(cli, agent_id, f"echo {marker}", wait=True, timeout=30)
+    r = agent_exec(cli, agent_id, f"echo {marker}", wait=True, timeout=exec_timeout)
     out = r.get("output", "").strip()
     assert marker in out, (
         f"[{label}] echo output {out!r} does not contain marker {marker!r}"
@@ -151,7 +153,7 @@ def _run_command_suite(cli, agent_id: str, label: str, marker: str) -> dict:
     # ps / tasklist
     ps_cmd = "ps aux" if label == "linux" else "tasklist"
     print(f"  [{label}] running {ps_cmd!r}")
-    r = agent_exec(cli, agent_id, ps_cmd, wait=True, timeout=30)
+    r = agent_exec(cli, agent_id, ps_cmd, wait=True, timeout=exec_timeout)
     out = r.get("output", "").strip()
     assert out, f"[{label}] {ps_cmd} returned empty output"
     outputs["ps"] = out
@@ -286,6 +288,7 @@ def run(ctx):
     )
 
     cli = ctx.cli
+    co = int(ctx.timeouts.command_output)
     uid = _short_id()
 
     listener_win_name = f"test-interop-win-{uid}"
@@ -343,7 +346,7 @@ def run(ctx):
         print("  [deploy] both payloads deployed (Windows: Demon, Linux: Phantom)")
 
         # ── Step 6: Wait for both agents to check in ─────────────────────────
-        checkin_timeout = ctx.env.get("timeouts", {}).get("agent_checkin", 90)
+        checkin_timeout = int(ctx.timeouts.agent_checkin)
         print(f"  [wait] waiting up to {checkin_timeout}s for both agents to check in")
         new_agents = _wait_for_two_agents(cli, pre_existing_ids, timeout=checkin_timeout)
 
@@ -380,10 +383,10 @@ def run(ctx):
 
         with ThreadPoolExecutor(max_workers=2) as pool:
             win_suite = pool.submit(
-                _run_command_suite, cli, win_agent_id, "windows", win_marker
+                _run_command_suite, cli, win_agent_id, "windows", win_marker, co
             )
             lin_suite = pool.submit(
-                _run_command_suite, cli, lin_agent_id, "linux", lin_marker
+                _run_command_suite, cli, lin_agent_id, "linux", lin_marker, co
             )
 
             for future in as_completed([win_suite, lin_suite]):
@@ -422,7 +425,7 @@ def run(ctx):
             print(f"  [kill] Linux agent kill failed (non-fatal): {exc}")
 
         # ── Step 10: Verify both agents show as disconnected ──────────────────
-        disconnect_timeout = ctx.env.get("timeouts", {}).get("agent_disconnect", 30)
+        disconnect_timeout = int(ctx.timeouts.agent_disconnect)
         print(f"  [disconnect] waiting up to {disconnect_timeout}s for both agents to disconnect")
         _wait_for_agents_disconnected(
             cli, [win_agent_id, lin_agent_id], timeout=disconnect_timeout

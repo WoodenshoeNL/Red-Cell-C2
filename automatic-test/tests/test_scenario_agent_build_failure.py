@@ -18,6 +18,7 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from lib.cli import CliConfig, CliError
+from lib.config import timeouts_for_unit_tests
 
 
 _SCENARIOS = Path(__file__).parent.parent / "scenarios"
@@ -38,6 +39,7 @@ def _linux_ctx():
     ctx = MagicMock()
     ctx.cli = _CFG
     ctx.env = {"agents": {"available": ["demon"]}, "listeners": {}, "timeouts": {}}
+    ctx.timeouts = timeouts_for_unit_tests()
     ctx.linux = MagicMock()
     ctx.linux.work_dir = "/tmp/rc-test"
     ctx.linux.user = "testuser"
@@ -50,6 +52,7 @@ def _windows_ctx():
     ctx = MagicMock()
     ctx.cli = _CFG
     ctx.env = {"agents": {"available": ["demon"]}, "listeners": {}, "timeouts": {}}
+    ctx.timeouts = timeouts_for_unit_tests()
     ctx.windows = MagicMock()
     ctx.windows.work_dir = "C:\\Temp\\rc-test"
     ctx.linux = None
@@ -262,6 +265,7 @@ class TestScenario15(unittest.TestCase):
     def test_phantom_skipped_when_not_in_available(self) -> None:
         ctx = _linux_ctx()
         with patch("lib.deploy.preflight_ssh"), \
+             patch("lib.deploy.preflight_dns"), \
              patch.object(self.mod, "_run_for_agent") as mock_run:
             self.mod.run(ctx)
         agent_types = [c.kwargs["agent_type"] for c in mock_run.call_args_list]

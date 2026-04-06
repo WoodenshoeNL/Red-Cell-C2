@@ -66,6 +66,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
     from lib.wait import wait_for_named_pipe
 
     cli = ctx.cli
+    co = int(ctx.timeouts.command_output)
     target = ctx.windows
     uid = _short_id()
     listener_name = f"{name_prefix}-{uid}"
@@ -104,7 +105,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
 
         # whoami → DOMAIN\username format
         print(f"  [{agent_type}][cmd] whoami")
-        result = agent_exec(cli, agent_id, "whoami", wait=True, timeout=30)
+        result = agent_exec(cli, agent_id, "whoami", wait=True, timeout=co)
         whoami_out = result.get("output", "").strip()
         assert whoami_out, "whoami returned empty output"
         assert "\\" in whoami_out, (
@@ -115,14 +116,14 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
 
         # dir C:\ → non-empty output
         print(f"  [{agent_type}][cmd] dir C:\\")
-        result = agent_exec(cli, agent_id, "dir C:\\", wait=True, timeout=30)
+        result = agent_exec(cli, agent_id, "dir C:\\", wait=True, timeout=co)
         dir_out = result.get("output", "").strip()
         assert dir_out, "dir C:\\ returned empty output"
         print(f"  [{agent_type}][cmd] dir C:\\ passed ({len(dir_out.splitlines())} lines)")
 
         # ipconfig → contains 'IPv4 Address'
         print(f"  [{agent_type}][cmd] ipconfig")
-        result = agent_exec(cli, agent_id, "ipconfig", wait=True, timeout=30)
+        result = agent_exec(cli, agent_id, "ipconfig", wait=True, timeout=co)
         ipconfig_out = result.get("output", "").strip()
         assert ipconfig_out, "ipconfig returned empty output"
         assert "IPv4 Address" in ipconfig_out, (

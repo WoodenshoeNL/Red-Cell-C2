@@ -23,6 +23,23 @@ class ScenarioFailed(Exception):
     pass
 
 
+# Set by :func:`configure_wait_defaults` from ``config/env.toml`` ``[timeouts]``.
+_POLL_INTERVAL_SECS = 2.0
+_DEFAULT_AGENT_CHECKIN_SECS = 60
+
+
+def configure_wait_defaults(
+    *,
+    poll_interval_secs: float,
+    default_agent_checkin_secs: float,
+) -> None:
+    """Apply harness poll / check-in defaults (call once from ``test.py`` main)."""
+
+    global _POLL_INTERVAL_SECS, _DEFAULT_AGENT_CHECKIN_SECS
+    _POLL_INTERVAL_SECS = float(poll_interval_secs)
+    _DEFAULT_AGENT_CHECKIN_SECS = max(1, int(default_agent_checkin_secs))
+
+
 def wait_for_port(host: str, port: int, timeout: float = 10.0, interval: float = 0.2) -> None:
     """Block until *host:port* accepts a TCP connection or *timeout* seconds elapse.
 
@@ -65,7 +82,7 @@ def poll(
     fn: Callable[[], T],
     predicate: Callable[[T], bool],
     timeout: int = 60,
-    interval: float = 2.0,
+    interval: float | None = None,
     description: str = "condition",
     backoff: float = 1.0,
     max_interval: float = 10.0,
@@ -80,9 +97,10 @@ def poll(
 
     ``poll_until`` in older docs refers to this function.
     """
+    eff_interval = interval if interval is not None else _POLL_INTERVAL_SECS
     deadline = time.monotonic() + timeout
     last_exc: Exception | None = None
-    current_interval = interval
+    current_interval = eff_interval
     while time.monotonic() < deadline:
         try:
             result = fn()
@@ -105,7 +123,7 @@ poll_until = poll
 
 def wait_for_agent(
     cfg: CliConfig,
-    timeout: int = 60,
+    timeout: int | None = None,
     pre_existing_ids: set[str] | None = None,
 ) -> dict:
     """Wait until a *new* agent appears in the agent list.
@@ -115,6 +133,8 @@ def wait_for_agent(
     scenario 13's synthetic handshake) from being mistaken for a fresh
     checkin.  Returns the first new agent's dict.
     """
+    if timeout is None:
+        timeout = _DEFAULT_AGENT_CHECKIN_SECS
     _skip: set[str] = pre_existing_ids or set()
 
     def get_agents():
@@ -132,8 +152,11 @@ def wait_for_agent(
     return next(a for a in agents if a["id"] not in _skip)
 
 
-def wait_for_agent_id(cfg: CliConfig, agent_id: str, timeout: int = 60) -> dict:
+def wait_for_agent_id(cfg: CliConfig, agent_id: str, timeout: int | None = None) -> dict:
     """Wait until a specific agent ID appears in the agent list."""
+    if timeout is None:
+        timeout = _DEFAULT_AGENT_CHECKIN_SECS
+
     def get_agents():
         return agent_list(cfg)
 

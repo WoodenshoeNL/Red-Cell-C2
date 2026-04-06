@@ -85,6 +85,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
     from lib.deploy_agent import deploy_and_checkin
 
     cli = ctx.cli
+    co = int(ctx.timeouts.command_output)
     target = ctx.linux
     uid = _short_id()
     listener_name = f"{name_prefix}-{uid}"
@@ -176,7 +177,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
         # Permissions + long listing on the uploaded path (agent exec coverage)
         print(f"  [{agent_type}][perm] stat uploaded file")
         st = agent_exec(
-            cli, agent_id, f"stat -c '%a %n' {remote_upload_dst}", wait=True, timeout=30
+            cli, agent_id, f"stat -c '%a %n' {remote_upload_dst}", wait=True, timeout=co
         ).get("output", "").strip()
         assert st and remote_upload_dst.split("/")[-1] in st, (
             f"stat of upload path failed or unexpected: {st!r}"
@@ -188,7 +189,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
             agent_id,
             f"ls -la {target.work_dir} | head -n 30",
             wait=True,
-            timeout=30,
+            timeout=co,
         ).get("output", "").strip()
         assert ls_agent and "uploaded-" in ls_agent, (
             f"ls -la did not list uploaded artifact: {ls_agent[:400]!r}"
@@ -274,6 +275,7 @@ def _run_for_agent_windows(ctx, agent_type: str, fmt: str, name_prefix: str) -> 
     from lib.deploy_agent import deploy_and_checkin
 
     cli = ctx.cli
+    co = int(ctx.timeouts.command_output)
     target = ctx.windows
     uid = _short_id()
     listener_name = f"{name_prefix}-{uid}"
@@ -370,7 +372,7 @@ def _run_for_agent_windows(ctx, agent_type: str, fmt: str, name_prefix: str) -> 
             agent_id,
             f'dir /B "{remote_upload_dst}"',
             wait=True,
-            timeout=30,
+            timeout=co,
         ).get("output", "").strip()
         assert dir_line and "uploaded-" in dir_line, (
             f"dir did not show uploaded file: {dir_line[:400]!r}"

@@ -38,6 +38,7 @@ from lib import ScenarioSkipped
 from lib.cli import CliConfig
 from lib.config import make_cli_config
 from lib.deploy import TargetConfig
+from lib.failure_diagnostics import build_failure_diagnostic_report, write_scenario_failure_file
 
 
 # ── Config loading ───────────────────────────────────────────────────────────
@@ -243,13 +244,16 @@ class RunContext:
     dry_run: bool
 
 
-def run_scenario(scenario_id: str, path: Path, ctx: RunContext) -> str:
+def run_scenario(scenario_id: str, path: Path, ctx: RunContext) -> tuple[str, Path | None]:
     """Load and run a scenario module.
 
-    Returns one of:
+    Returns ``(status, report_path)`` where *status* is one of:
+
         ``"passed"``  — scenario ran and all assertions succeeded
         ``"skipped"`` — scenario raised :class:`lib.ScenarioSkipped` (not a failure)
         ``"failed"``  — scenario raised any other exception
+
+    *report_path* is set when a failed run wrote ``test-results/.../scenario_NN_failure.txt``.
     """
     module_name = f"scenarios.{path.stem}"
     spec = importlib.util.spec_from_file_location(module_name, path)
@@ -262,22 +266,32 @@ def run_scenario(scenario_id: str, path: Path, ctx: RunContext) -> str:
 
     if ctx.dry_run:
         print("  [DRY RUN] skipping execution")
-        return "passed"
+        return "passed", None
 
+    automatic_test_root = Path(__file__).resolve().parent
     start = time.monotonic()
     try:
         mod.run(ctx)
         elapsed = time.monotonic() - start
         print(f"  ✓ PASSED ({elapsed:.1f}s)")
-        return "passed"
+        return "passed", None
     except ScenarioSkipped as exc:
         elapsed = time.monotonic() - start
         print(f"  ~ SKIPPED ({elapsed:.1f}s): {exc}")
-        return "skipped"
+        return "skipped", None
     except Exception as exc:
         elapsed = time.monotonic() - start
         print(f"  ✗ FAILED ({elapsed:.1f}s): {exc}")
-        return "failed"
+        title = getattr(mod, "DESCRIPTION", path.stem)
+        text = build_failure_diagnostic_report(
+            ctx, scenario_id, title, exc, log_lines=100
+        )
+        print(text, end="")
+        report_path = write_scenario_failure_file(
+            automatic_test_root, scenario_id, text
+        )
+        print(f"  Diagnostic report written to: {report_path}")
+        return "failed", report_path
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -401,19 +415,26 @@ def main():
         )
 
     passed = failed = skipped = 0
+    failure_reports: list[Path] = []
     for sid, path in selected:
-        outcome = run_scenario(sid, path, ctx)
+        outcome, report_path = run_scenario(sid, path, ctx)
         if outcome == "passed":
             passed += 1
         elif outcome == "skipped":
             skipped += 1
         else:
             failed += 1
+            if report_path is not None:
+                failure_reports.append(report_path)
 
     total = passed + failed + skipped
     print(f"\n{'═' * 60}")
     skip_note = f", {skipped} skipped" if skipped else ""
     print(f"  Results: {passed} passed, {failed} failed{skip_note} out of {total} scenarios")
+    if failure_reports:
+        print("  Failure diagnostic reports:")
+        for fp in failure_reports:
+            print(f"    {fp}")
     print(f"{'═' * 60}\n")
     sys.exit(0 if failed == 0 else 1)
 

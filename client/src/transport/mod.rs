@@ -77,7 +77,6 @@ pub(crate) enum TlsVerification {
 pub(crate) struct ClientTransport {
     runtime: Option<Runtime>,
     shutdown_tx: watch::Sender<bool>,
-    #[allow(dead_code)]
     outgoing_tx: mpsc::UnboundedSender<OperatorMessage>,
 }
 
@@ -462,8 +461,7 @@ async fn run_receive_loop(
                             if let OperatorMessage::InitConnectionSuccess(ref m) = msg {
                                 match extract_session_token(&m.info.message) {
                                     Some(token) => {
-                                        *hmac_key.lock().await =
-                                            Some(derive_ws_hmac_key(token));
+                                        *hmac_key.lock().await = Some(derive_ws_hmac_key(token));
                                     }
                                     None => {
                                         warn!(
@@ -471,11 +469,9 @@ async fn run_receive_loop(
                                             "InitConnectionSuccess missing SessionToken — \
                                              cannot derive HMAC key; closing connection"
                                         );
-                                        return Err(
-                                            "InitConnectionSuccess did not contain a \
+                                        return Err("InitConnectionSuccess did not contain a \
                                              SessionToken; HMAC key could not be derived"
-                                                .to_owned(),
-                                        );
+                                            .to_owned());
                                     }
                                 }
                             }

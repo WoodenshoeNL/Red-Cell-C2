@@ -41,6 +41,7 @@ use output::OutputFormat;
 ///   3  auth failure (bad token, insufficient role)
 ///   4  server unreachable
 ///   5  timeout exceeded
+///   6  rate limited (HTTP 429); polling loops should retry with backoff / Retry-After
 #[derive(Debug, Parser)]
 #[command(name = "red-cell-cli", author, version, about, long_about = None)]
 #[command(propagate_version = true)]

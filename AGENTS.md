@@ -84,6 +84,9 @@ stderr (failure): {"ok": false, "error": "ERROR_CODE", "message": "human text"}
 | 3 | Auth failure (bad token, insufficient role) |
 | 4 | Server unreachable |
 | 5 | Timeout (--timeout exceeded) |
+| 6 | Rate limited (HTTP 429; stderr `error`: `RATE_LIMITED`) |
+
+Long-running **polling** loops (for example `--watch` streams) should retry with backoff or respect `Retry-After` instead of surfacing exit code 6 to the outer caller when recovery is possible.
 
 ### Auth resolution order (first wins)
 

@@ -13,7 +13,7 @@ import uuid
 
 from lib.cli import CliConfig, agent_list, payload_build_and_fetch
 from lib.deploy import TargetConfig, ensure_work_dir, execute_background, run_remote, upload
-from lib.wait import wait_for_agent
+from lib.wait import TimeoutError as WaitTimeoutError, wait_for_agent
 
 
 def deploy_and_checkin(
@@ -27,7 +27,10 @@ def deploy_and_checkin(
     pre_existing_ids: set[str] | None = None,
     arch: str = "x64",
     label: str | None = None,
-) -> dict:
+    sleep_secs: int | None = None,
+    expect_checkin: bool = True,
+    no_checkin_timeout: int | None = None,
+) -> dict | None:
     """Build, deploy, execute, and wait for a single agent checkin.
 
     Handles the repeated boilerplate across scenarios:
@@ -58,14 +61,22 @@ def deploy_and_checkin(
         arch:             Payload architecture (default ``"x64"``).
         label:            Print-tag prefix, e.g. ``"demon"`` → ``[demon][payload]``.
                           Defaults to *agent_type* when *None*.
+        sleep_secs:       Passed to ``payload build --sleep`` (agent callback interval).
+        expect_checkin:   When ``False``, wait up to *no_checkin_timeout* and expect
+                          **no** new agent (working-hours / blocked scenarios).
+        no_checkin_timeout: Seconds to wait for absence of checkin when *expect_checkin*
+                          is ``False``.  Defaults to ``timeouts.working_hours_probe``
+                          from env or ``45``.
 
     Returns:
-        The agent dict returned by :func:`~lib.wait.wait_for_agent`.
+        The agent dict from :func:`~lib.wait.wait_for_agent`, or ``None`` when
+        *expect_checkin* is ``False`` and no agent appears (expected).
 
     Raises:
-        AssertionError: if the built payload is empty.
+        AssertionError: if the built payload is empty, or if *expect_checkin* is
+                          ``False`` but an agent checks in anyway.
         lib.deploy.DeployError: if SCP upload or a remote command fails.
-        lib.wait.TimeoutError: if no new agent checks in within the timeout.
+        lib.wait.TimeoutError: if *expect_checkin* is ``True`` and no agent checks in.
     """
     tag = label if label is not None else agent_type
     timeout = ctx.env.get("timeouts", {}).get("agent_checkin", checkin_timeout)
@@ -88,7 +99,12 @@ def deploy_and_checkin(
         # Step 2 — build payload.
         print(f"  [{tag}][payload] building {agent_type} {fmt} {arch}")
         raw = payload_build_and_fetch(
-            cli, listener=listener_name, arch=arch, fmt=fmt, agent=agent_type
+            cli,
+            listener=listener_name,
+            arch=arch,
+            fmt=fmt,
+            agent=agent_type,
+            sleep_secs=sleep_secs,
         )
         assert len(raw) > 0, f"{agent_type} payload is empty"
         print(f"  [{tag}][payload] built ({len(raw)} bytes)")
@@ -116,6 +132,20 @@ def deploy_and_checkin(
             pass
 
     # Step 5 — wait for agent checkin (outside the finally so failure propagates cleanly).
+    if not expect_checkin:
+        probe = no_checkin_timeout
+        if probe is None:
+            probe = int(ctx.env.get("timeouts", {}).get("working_hours_probe", 45))
+        print(f"  [{tag}][wait] expecting NO checkin within {probe}s (working-hours probe)")
+        try:
+            agent = wait_for_agent(cli, timeout=probe, pre_existing_ids=pre_existing_ids)
+        except WaitTimeoutError:
+            print(f"  [{tag}][wait] no checkin (expected)")
+            return None
+        raise AssertionError(
+            f"agent {agent.get('id')!r} checked in unexpectedly — outside working hours"
+        )
+
     print(f"  [{tag}][wait] waiting up to {timeout}s for agent checkin")
     agent = wait_for_agent(cli, timeout=timeout, pre_existing_ids=pre_existing_ids)
     print(f"  [{tag}][wait] agent checked in: {agent['id']}")

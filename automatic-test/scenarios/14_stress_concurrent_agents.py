@@ -19,7 +19,9 @@ Steps (per agent pass):
   5.  Start CPU monitoring in a background thread
   6.  For RUN_SECONDS: issue shell exec to all agents in parallel every
       EXEC_INTERVAL s, checking for cross-agent marker bleed after each round
-  7.  Assert teamserver CPU stayed below 80 % throughout the run
+  7.  Assert teamserver CPU (and optional RSS) stayed below configured limits
+      throughout the run — localhost ``ps`` or remote SSH per ``[teamserver]``
+      in env.toml
   8.  Assert teamserver produced no ERROR-level log entries
   9.  Kill all agents; verify disconnected; stop listener; clean up
 
@@ -27,7 +29,8 @@ Pass criteria:
   - All N agents check in within 30 s
   - No agent drops connection during the run
   - All shell exec commands return correct output (no cross-agent bleed)
-  - Teamserver CPU < 80 % (sampled via /proc or ps)
+  - Teamserver CPU < configured limit (default 80 %), optional RSS cap — sampled
+    via local ``ps`` or SSH to ``[teamserver]`` host when SSH is configured
   - Teamserver does not crash or produce ERROR-level log entries
 """
 
@@ -45,17 +48,21 @@ PHANTOM_RUN_SECONDS = 30
 
 EXEC_INTERVAL = 10       # seconds between parallel exec rounds during the run
 CHECKIN_DEADLINE = 30    # seconds to wait for all agents to check in
-CPU_LIMIT_PCT = 80.0     # maximum allowable teamserver CPU %
+CPU_LIMIT_PCT = 80.0     # default max teamserver CPU % (override via env.toml [teamserver])
 
 import os
-import subprocess
 import tempfile
-import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed, Future
 
 from lib import ScenarioSkipped
+from lib.teamserver_monitor import (
+    TeamserverResourceMonitor,
+    assert_resource_limits,
+    format_samples_for_output,
+    load_teamserver_monitor_settings,
+)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -154,83 +161,6 @@ def _assert_exec_round(results: list[dict], round_num: int) -> None:
         raise AssertionError(
             f"Exec round {round_num} failures:\n" + "\n".join(failures)
         )
-
-
-# ── CPU monitoring ────────────────────────────────────────────────────────────
-
-class _CpuMonitor(threading.Thread):
-    """Sample teamserver CPU usage in the background.
-
-    Tries to find the ``red-cell`` process via ``ps`` and records the max CPU %
-    seen during the monitoring window.
-    """
-
-    def __init__(self, interval: float = 5.0):
-        super().__init__(daemon=True)
-        self.interval = interval
-        self._stop_event = threading.Event()
-        self.samples: list[float] = []
-        self.max_cpu: float = 0.0
-        self._pid: int | None = None
-
-    def _find_pid(self) -> int | None:
-        """Return the PID of the ``red-cell`` teamserver, or None if not found."""
-        try:
-            result = subprocess.run(
-                ["pgrep", "-x", "red-cell"],
-                capture_output=True, text=True, timeout=5,
-            )
-            if result.returncode == 0:
-                lines = result.stdout.strip().splitlines()
-                if lines:
-                    return int(lines[0])
-        except Exception:
-            pass
-        # Fallback: search ps output for 'red-cell' (not the test process itself)
-        try:
-            result = subprocess.run(
-                ["ps", "axo", "pid,comm,pcpu"],
-                capture_output=True, text=True, timeout=5,
-            )
-            for line in result.stdout.splitlines():
-                parts = line.split()
-                if len(parts) >= 2 and "red-cell" in parts[1]:
-                    return int(parts[0])
-        except Exception:
-            pass
-        return None
-
-    def _sample_cpu(self) -> float | None:
-        """Return current CPU % for the teamserver PID, or None."""
-        if self._pid is None:
-            self._pid = self._find_pid()
-        if self._pid is None:
-            return None
-        try:
-            result = subprocess.run(
-                ["ps", "-p", str(self._pid), "-o", "pcpu="],
-                capture_output=True, text=True, timeout=5,
-            )
-            if result.returncode == 0:
-                text = result.stdout.strip()
-                if text:
-                    return float(text)
-        except Exception:
-            pass
-        return None
-
-    def run(self):
-        while not self._stop_event.is_set():
-            cpu = self._sample_cpu()
-            if cpu is not None:
-                self.samples.append(cpu)
-                if cpu > self.max_cpu:
-                    self.max_cpu = cpu
-            self._stop_event.wait(self.interval)
-
-    def stop(self):
-        self._stop_event.set()
-        self.join(timeout=10)
 
 
 # ── Per-agent-type stress runner ──────────────────────────────────────────────
@@ -347,8 +277,15 @@ def _run_stress_for_agent(
         # Assign one unique marker per agent for the entire run.
         markers: dict[str, str] = {aid: _unique_marker() for aid in agent_ids}
 
-        # ── Step 5: Start CPU monitoring ──────────────────────────────────────
-        cpu_monitor = _CpuMonitor(interval=5.0)
+        # ── Step 5: Teamserver CPU/RSS monitoring (local ps or remote SSH) ─────
+        ts_settings = load_teamserver_monitor_settings(
+            ctx.env, default_cpu_limit_pct=CPU_LIMIT_PCT
+        )
+        cpu_monitor = TeamserverResourceMonitor(ts_settings, interval=5.0)
+        cpu_monitor.configure()
+        if cpu_monitor.disable_reason:
+            print(f"  [{agent_type}][cpu] {cpu_monitor.disable_reason}")
+        edge_start = cpu_monitor.take_edge_sample("stress_start")
         cpu_monitor.start()
 
         run_start = time.monotonic()
@@ -405,20 +342,34 @@ def _run_stress_for_agent(
         run_elapsed = time.monotonic() - run_start
         print(f"  [{agent_type}][run] completed {run_elapsed:.1f}s run, {round_num} exec rounds")
 
-        # ── Step 7: Stop CPU monitor + assert CPU limit ───────────────────────
+        # ── Step 7: Stop monitor, edge sample, assert CPU/RSS limits ──────────
         cpu_monitor.stop()
-        if cpu_monitor.samples:
+        edge_end = cpu_monitor.take_edge_sample("stress_end")
+        had_samples = bool(cpu_monitor.samples)
+        samples_summary = format_samples_for_output(cpu_monitor.samples)
+        def _edge_s(e):
+            if e is None:
+                return "none"
+            return f"cpu={e.cpu_pct:.1f}% rss_mib={e.rss_kb / 1024:.1f}"
+
+        print(
+            f"  [{agent_type}][cpu] teamserver={ts_settings.host!r} mode={cpu_monitor.mode} "
+            f"max_cpu={cpu_monitor.max_cpu:.1f}% max_rss={cpu_monitor.max_rss_kb / 1024:.1f}MiB "
+            f"edge_start={_edge_s(edge_start)} edge_end={_edge_s(edge_end)}"
+        )
+        print(f"  [{agent_type}][cpu] samples: {samples_summary}")
+        if not had_samples and cpu_monitor._mode != "disabled":
             print(
-                f"  [{agent_type}][cpu] max CPU: {cpu_monitor.max_cpu:.1f}%  "
-                f"({len(cpu_monitor.samples)} samples)"
+                f"  [{agent_type}][cpu] no teamserver process samples — "
+                f"CPU/RSS checks skipped (is red-cell running on {ts_settings.host!r}?)"
             )
-            if cpu_monitor.max_cpu > CPU_LIMIT_PCT:
-                exec_errors.append(
-                    f"Teamserver CPU peaked at {cpu_monitor.max_cpu:.1f}% "
-                    f"(limit: {CPU_LIMIT_PCT}%)"
-                )
-        else:
-            print(f"  [{agent_type}][cpu] teamserver process not found on localhost — CPU check skipped")
+        limit_errs = assert_resource_limits(
+            ts_settings,
+            cpu_monitor.max_cpu,
+            cpu_monitor.max_rss_kb,
+            had_samples,
+        )
+        exec_errors.extend(limit_errs)
 
         # ── Step 8: Check for ERROR log entries ───────────────────────────────
         print(f"  [{agent_type}][log] checking for ERROR-level log entries")

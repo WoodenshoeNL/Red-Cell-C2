@@ -147,6 +147,21 @@ class LinuxEnvSectionConfig:
 
 
 @dataclass
+class KerberosSectionConfig:
+    """Optional ``[kerberos]`` stanza for scenario 09 structured validation.
+
+    When ``enabled`` is true, ``domain_realm``, ``account_name``, and a non-empty
+    ``expected_groups`` list are required at load time.
+    """
+
+    enabled: bool
+    domain_realm: str
+    account_name: str
+    expected_groups: list[str]
+    expected_impersonation_level: str
+
+
+@dataclass
 class EnvConfig:
     server: ServerConfig
     operator: OperatorConfig
@@ -157,6 +172,7 @@ class EnvConfig:
     analyst_operator: AnalystOperatorConfig | None = None
     archon: ArchonSectionConfig | None = None
     linux: LinuxEnvSectionConfig | None = None
+    kerberos: KerberosSectionConfig | None = None
 
 
 @dataclass
@@ -190,6 +206,7 @@ _ALLOWED_ENV_ROOT = frozenset({
     "analyst_operator",
     "archon",
     "linux",
+    "kerberos",
 })
 
 _ALLOWED_SERVER_KEYS = frozenset({"url", "rest_url"})
@@ -240,6 +257,13 @@ _ALLOWED_TEAMSERVER_KEYS = frozenset({
 _ALLOWED_ANALYST_KEYS = frozenset({"username", "api_key"})
 _ALLOWED_ARCHON_KEYS = frozenset({"extensions"})
 _ALLOWED_LINUX_ENV_KEYS = frozenset({"display"})
+_ALLOWED_KERBEROS_KEYS = frozenset({
+    "enabled",
+    "domain_realm",
+    "account_name",
+    "expected_groups",
+    "expected_impersonation_level",
+})
 
 # Logical required fields (each may be satisfied by ``key`` or ``key_secs`` — see parser).
 _REQUIRED_TIMEOUTS_CORE = (
@@ -538,6 +562,72 @@ def parse_env_config(raw: dict[str, Any]) -> EnvConfig:
         else:
             errors.append(f"[linux] must be a table, got {type(lx).__name__}")
 
+    kerberos_obj: KerberosSectionConfig | None = None
+    if "kerberos" in raw:
+        kr = raw["kerberos"]
+        if kr is None:
+            errors.append("[kerberos] must be a table or omitted")
+        elif not isinstance(kr, dict):
+            errors.append(f"[kerberos] must be a table, got {type(kr).__name__}")
+        elif len(kr) == 0:
+            kerberos_obj = None
+        else:
+            _unknown_keys(kr, _ALLOWED_KERBEROS_KEYS, "[kerberos]", errors)
+            en_raw = kr.get("enabled", True)
+            if isinstance(en_raw, bool):
+                enabled_k = en_raw
+            else:
+                errors.append(
+                    "[kerberos].enabled: expected boolean, got "
+                    f"{type(en_raw).__name__}"
+                )
+                enabled_k = False
+            dr_raw = kr.get("domain_realm", "")
+            an_raw = kr.get("account_name", "")
+            eg_raw = kr.get("expected_groups", [])
+            ei_raw = kr.get("expected_impersonation_level", "Identification")
+
+            if not isinstance(dr_raw, str):
+                errors.append("[kerberos].domain_realm: expected string")
+                dr = ""
+            else:
+                dr = dr_raw.strip()
+            if not isinstance(an_raw, str):
+                errors.append("[kerberos].account_name: expected string")
+                an = ""
+            else:
+                an = an_raw.strip()
+
+            if not isinstance(eg_raw, list) or not all(isinstance(x, str) for x in eg_raw):
+                errors.append("[kerberos].expected_groups must be a list of strings")
+                eg_list: list[str] = []
+            else:
+                eg_list = [str(x).strip() for x in eg_raw if str(x).strip()]
+
+            if not isinstance(ei_raw, str):
+                errors.append("[kerberos].expected_impersonation_level: expected string")
+                ei = "Identification"
+            else:
+                ei = ei_raw.strip() or "Identification"
+
+            if enabled_k:
+                if not dr:
+                    errors.append("[kerberos].domain_realm: required when enabled = true")
+                if not an:
+                    errors.append("[kerberos].account_name: required when enabled = true")
+                if not eg_list:
+                    errors.append(
+                        "[kerberos].expected_groups: non-empty list required when "
+                        "enabled = true"
+                    )
+            kerberos_obj = KerberosSectionConfig(
+                enabled=enabled_k,
+                domain_realm=dr,
+                account_name=an,
+                expected_groups=eg_list,
+                expected_impersonation_level=ei,
+            )
+
     if errors:
         raise ConfigError(errors)
 
@@ -584,6 +674,7 @@ def parse_env_config(raw: dict[str, Any]) -> EnvConfig:
         analyst_operator=analyst_obj,
         archon=archon_obj,
         linux=linux_env_obj,
+        kerberos=kerberos_obj,
     )
 
 

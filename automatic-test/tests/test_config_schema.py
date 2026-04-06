@@ -87,6 +87,7 @@ class TestValidateEnvDict(unittest.TestCase):
         cfg = parse_env_config(_minimal_valid_env())
         self.assertEqual(cfg.server.url, "wss://127.0.0.1:40056")
         self.assertEqual(cfg.agents.available, ["demon"])
+        self.assertIsNone(cfg.kerberos)
         self.assertEqual(cfg.timeouts.listener_startup, 5.0)
         self.assertEqual(cfg.timeouts.poll_interval, 2.0)
         self.assertEqual(cfg.timeouts.ssh_connect, 10.0)
@@ -151,6 +152,38 @@ class TestValidateEnvDict(unittest.TestCase):
         env = load_env(path)
         self.assertIn("server", env)
         self.assertIsInstance(env["agents"]["available"], list)
+
+    def test_kerberos_optional_disabled(self) -> None:
+        raw = _minimal_valid_env()
+        raw["kerberos"] = {"enabled": False}
+        validate_env_dict(raw)
+        cfg = parse_env_config(raw)
+        assert cfg.kerberos is not None
+        self.assertFalse(cfg.kerberos.enabled)
+
+    def test_kerberos_enabled_requires_fields(self) -> None:
+        raw = _minimal_valid_env()
+        raw["kerberos"] = {"enabled": True}
+        with self.assertRaises(ConfigError) as ctx:
+            validate_env_dict(raw)
+        self.assertIn("domain_realm", str(ctx.exception))
+
+    def test_kerberos_enabled_ok(self) -> None:
+        raw = _minimal_valid_env()
+        raw["kerberos"] = {
+            "enabled": True,
+            "domain_realm": "CONTOSO.COM",
+            "account_name": "alice",
+            "expected_groups": ["Domain Users"],
+            "expected_impersonation_level": "Identification",
+        }
+        validate_env_dict(raw)
+        cfg = parse_env_config(raw)
+        assert cfg.kerberos is not None
+        self.assertTrue(cfg.kerberos.enabled)
+        self.assertEqual(cfg.kerberos.domain_realm, "CONTOSO.COM")
+        self.assertEqual(cfg.kerberos.account_name, "alice")
+        self.assertEqual(cfg.kerberos.expected_groups, ["Domain Users"])
 
 
 class TestValidateTargetsDict(unittest.TestCase):

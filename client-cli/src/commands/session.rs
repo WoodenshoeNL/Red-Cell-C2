@@ -214,8 +214,8 @@ fn build_connector(
             Ok(tokio_tungstenite::Connector::Rustls(std::sync::Arc::new(config)))
         }
 
-        TlsMode::Fingerprint(hex) => {
-            let config = build_fingerprint_client_config(hex)?;
+        TlsMode::Fingerprint(fp) => {
+            let config = build_fingerprint_client_config(&fp.sha256_hex, fp.pin_mode)?;
             Ok(tokio_tungstenite::Connector::Rustls(std::sync::Arc::new(config)))
         }
     }

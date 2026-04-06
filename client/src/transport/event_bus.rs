@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use eframe::egui;
 use red_cell_common::OperatorInfo;
@@ -406,6 +407,8 @@ pub(crate) struct AppState {
     /// The most recent payload build response, if any.  The dialog reads this to
     /// offer the operator a file-save action.
     pub(crate) last_payload_response: Option<PayloadBuildResult>,
+    /// Wall-clock time when the session was established (used for client-side TTL tracking).
+    pub(crate) session_start: Option<Instant>,
 }
 
 impl AppState {
@@ -428,6 +431,7 @@ impl AppState {
             last_auth_error: None,
             build_console_messages: Vec::new(),
             last_payload_response: None,
+            session_start: None,
         }
     }
 }

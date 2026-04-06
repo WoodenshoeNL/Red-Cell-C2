@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, VecDeque};
+use std::time::Instant;
 
 use base64::Engine;
 use red_cell_common::OperatorInfo;
@@ -25,6 +26,7 @@ impl AppState {
         match message {
             OperatorMessage::InitConnectionSuccess(message) => {
                 self.connection_status = ConnectionStatus::Connected;
+                self.session_start = Some(Instant::now());
                 if !message.head.user.is_empty() {
                     self.online_operators.insert(message.head.user.clone());
                     self.operator_info = Some(OperatorInfo {

@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use clap::Parser;
@@ -44,6 +45,10 @@ const SESSION_GRAPH_HEIGHT: f32 = 280.0;
 const SESSION_GRAPH_MIN_ZOOM: f32 = 0.35;
 const SESSION_GRAPH_MAX_ZOOM: f32 = 2.5;
 const SESSION_GRAPH_ROOT_ID: &str = "__teamserver__";
+/// Server-side session TTL (teamserver expires tokens after 1 hour).
+const SESSION_TTL: Duration = Duration::from_secs(3600);
+/// How far before expiry to show the warning banner.
+const SESSION_WARN_BEFORE: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Clone, Parser, PartialEq, Eq)]
 #[command(name = "red-cell-client", about = "Red Cell operator client")]
@@ -1045,6 +1050,9 @@ struct ClientApp {
     python_runtime: Option<PythonRuntime>,
     /// Whether the Known Servers verification window is open.
     show_known_servers: bool,
+    /// Preserved agent/loot state from the most recent session.  Set when a session
+    /// expires so the operator can still see their data while re-authenticating.
+    retained_app_state: Option<SharedAppState>,
 }
 
 impl ClientApp {
@@ -1070,6 +1078,7 @@ impl ClientApp {
             outgoing_tx: None,
             python_runtime: None,
             show_known_servers: false,
+            retained_app_state: None,
         })
     }
 
@@ -1096,7 +1105,24 @@ impl ClientApp {
                 self.tls_verification = TlsVerification::Fingerprint(entry.fingerprint.clone());
             }
         }
-        let app_state = Arc::new(Mutex::new(AppState::new(server_url.clone())));
+        // If a previous session expired while still connected, reuse its app state
+        // so that agents, loot, and consoles remain visible during re-authentication.
+        let app_state = if let Some(retained) = self.retained_app_state.take() {
+            {
+                let mut state = match retained.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                state.session_start = None;
+                state.operator_info = None;
+                state.connection_status = ConnectionStatus::Connecting;
+                state.last_auth_error = None;
+                state.tls_failure = None;
+            }
+            retained
+        } else {
+            Arc::new(Mutex::new(AppState::new(server_url.clone())))
+        };
         let scripts_dir =
             self.scripts_dir.clone().or_else(|| self.local_config.resolved_scripts_dir());
         let python_runtime = scripts_dir.as_ref().and_then(|path| match PythonRuntime::initialize(
@@ -1239,6 +1265,35 @@ impl ClientApp {
                 self.outgoing_tx = None;
                 self.phase = AppPhase::Login(login_state);
             }
+        }
+    }
+
+    /// Check whether the active session has passed the server-side TTL.
+    ///
+    /// If expired, transitions from `Connected` back to `Login`, stashing the current
+    /// `AppState` in `retained_app_state` so agents and loot remain visible while the
+    /// operator re-enters their credentials.
+    fn check_session_expiry(&mut self) {
+        let AppPhase::Connected { app_state, .. } = &self.phase else {
+            return;
+        };
+        let session_start = match app_state.lock() {
+            Ok(guard) => guard.session_start,
+            Err(poisoned) => poisoned.into_inner().session_start,
+        };
+        let Some(start) = session_start else {
+            return;
+        };
+        if start.elapsed() < SESSION_TTL {
+            return;
+        }
+
+        let placeholder =
+            AppPhase::Login(LoginState::new(&self.cli_server_url, &self.local_config));
+        let old_phase = std::mem::replace(&mut self.phase, placeholder);
+        if let AppPhase::Connected { app_state, .. } = old_phase {
+            self.outgoing_tx = None;
+            self.retained_app_state = Some(app_state);
         }
     }
 
@@ -2472,6 +2527,40 @@ impl ClientApp {
         }
 
         self.flush_pending_messages();
+        self.render_session_expiry_banner(ctx, &snapshot);
+    }
+
+    /// Non-blocking warning banner shown 5 minutes before the session expires.
+    fn render_session_expiry_banner(&self, ctx: &egui::Context, state: &AppState) {
+        let Some(start) = state.session_start else {
+            return;
+        };
+        let elapsed = start.elapsed();
+        if elapsed < SESSION_TTL.saturating_sub(SESSION_WARN_BEFORE) {
+            return;
+        }
+        if elapsed >= SESSION_TTL {
+            return;
+        }
+        let remaining = SESSION_TTL - elapsed;
+        let mins = remaining.as_secs() / 60;
+        let secs = remaining.as_secs() % 60;
+
+        egui::Window::new("session_expiry_banner")
+            .title_bar(false)
+            .resizable(false)
+            .collapsible(false)
+            .anchor(Align2::CENTER_TOP, [0.0, 30.0])
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.colored_label(
+                        Color32::from_rgb(255, 165, 0),
+                        format!(
+                            "Session expires in {mins}:{secs:02} — save your work and re-authenticate."
+                        ),
+                    );
+                });
+            });
     }
 
     /// Havoc-style menu bar: Havoc, View, Attack, Scripts, Help.
@@ -2545,11 +2634,29 @@ impl ClientApp {
         });
     }
 
-    /// Bottom status bar showing operator name (like Havoc).
+    /// Bottom status bar showing operator name and remaining session time.
     fn render_status_bar(&self, ui: &mut egui::Ui, state: &AppState) {
         ui.horizontal_centered(|ui| {
             let operator = state.operator_info.as_ref().map_or("—", |op| op.username.as_str());
             ui.label(RichText::new(operator).monospace().small());
+
+            if let Some(start) = state.session_start {
+                let elapsed = start.elapsed();
+                if elapsed < SESSION_TTL {
+                    let remaining = SESSION_TTL - elapsed;
+                    let mins = remaining.as_secs() / 60;
+                    let secs = remaining.as_secs() % 60;
+                    let (label_text, color) = if remaining <= SESSION_WARN_BEFORE {
+                        (
+                            format!("  session expires in {mins}:{secs:02}"),
+                            Color32::from_rgb(255, 165, 0), // orange
+                        )
+                    } else {
+                        (format!("  session {mins}:{secs:02}"), Color32::from_rgb(120, 120, 120))
+                    };
+                    ui.label(RichText::new(label_text).monospace().small().color(color));
+                }
+            }
         });
     }
 
@@ -5352,7 +5459,13 @@ impl eframe::App for ClientApp {
             }
             AppPhase::Connected { app_state, .. } => {
                 let app_state_ref = app_state.clone();
-                self.render_main_ui(ctx, &app_state_ref);
+                self.check_session_expiry();
+                // Still Connected after expiry check?
+                if matches!(self.phase, AppPhase::Connected { .. }) {
+                    self.render_main_ui(ctx, &app_state_ref);
+                    // Drive the session countdown even when no server events arrive.
+                    ctx.request_repaint_after(Duration::from_secs(10));
+                }
             }
         }
     }

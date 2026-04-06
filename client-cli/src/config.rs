@@ -12,19 +12,50 @@ use serde::Deserialize;
 use serde::Serialize;
 use thiserror::Error;
 
+/// Which certificate in the TLS handshake to match when using fingerprint pinning.
+///
+/// **Leaf** pinning binds to the server's end-entity certificate: it is the
+/// strictest check, but you must update the pin whenever that certificate is
+/// renewed. **Chain** pinning matches the fingerprint against any certificate
+/// the server presents (leaf plus intermediates); use it to pin an
+/// intermediate CA so leaf rotation does not require a new pin. Chain pinning
+/// is weaker in the sense that any presented cert in the chain with that
+/// fingerprint satisfies the check—prefer leaf pinning when you can.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FingerprintPinMode {
+    /// Match only the end-entity (leaf) certificate (default).
+    #[default]
+    Leaf,
+    /// Match the fingerprint against any certificate in the presented chain.
+    Chain,
+}
+
+/// TLS fingerprint pinning parameters (`--cert-fingerprint` / `--pin-intermediate`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FingerprintTls {
+    /// SHA-256 fingerprint of the certificate to pin (lowercase hex, 64 chars).
+    pub sha256_hex: String,
+    /// Whether to require a match on the leaf only or anywhere in the chain.
+    pub pin_mode: FingerprintPinMode,
+}
+
 /// Controls how the CLI verifies the teamserver's TLS certificate.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub enum TlsMode {
     /// Verify against the system/webpki root CAs (default, secure).
-    #[default]
     SystemRoots,
     /// Verify against a single custom CA certificate loaded from a PEM file.
     /// Built-in root CAs are disabled so only this CA is trusted.
     CustomCa(PathBuf),
-    /// Pin against a specific SHA-256 certificate fingerprint (lowercase hex).
-    /// The CA chain is not checked; only the end-entity cert's fingerprint is
-    /// compared.  Overrides `--ca-cert` when both are supplied.
-    Fingerprint(String),
+    /// Pin against a SHA-256 certificate fingerprint. Overrides `--ca-cert`
+    /// when both are supplied.
+    Fingerprint(FingerprintTls),
+}
+
+impl Default for TlsMode {
+    fn default() -> Self {
+        TlsMode::SystemRoots
+    }
 }
 
 /// Raw values loaded from a TOML config file.
@@ -63,6 +94,10 @@ pub enum ConfigError {
     /// No auth token was found in any source.
     #[error("missing auth token — provide --token, set RC_TOKEN, or add `token` to a config file")]
     MissingToken,
+
+    /// `--pin-intermediate` was set without `--cert-fingerprint`.
+    #[error("--pin-intermediate requires --cert-fingerprint")]
+    PinIntermediateWithoutFingerprint,
 
     /// A config file existed but could not be read.
     #[error("failed to read config file {path}: {source}")]
@@ -233,12 +268,16 @@ fn tighten_permissions(path: &Path) {
 /// `ca_cert` and `cert_fingerprint` come from `--ca-cert` / `--cert-fingerprint`.
 /// When both are supplied `cert_fingerprint` wins.  Neither is read from config
 /// files — they are CLI-only for security-sensitive TLS decisions.
+///
+/// `pin_intermediate` maps to [`FingerprintPinMode::Chain`] when
+/// `cert_fingerprint` is set; it is an error without a fingerprint.
 pub fn resolve(
     cli_server: Option<String>,
     cli_token: Option<String>,
     cli_timeout: Option<u64>,
     ca_cert: Option<PathBuf>,
     cert_fingerprint: Option<String>,
+    pin_intermediate: bool,
 ) -> Result<ResolvedConfig, ConfigError> {
     // Pay the I/O cost of loading files when any value that can come from the
     // config file is absent from the CLI/env.  Timeout is included so that
@@ -270,9 +309,20 @@ pub fn resolve(
     let timeout =
         cli_timeout.or_else(|| file_config.as_ref().and_then(|c| c.timeout)).unwrap_or(30);
 
+    if pin_intermediate && cert_fingerprint.is_none() {
+        return Err(ConfigError::PinIntermediateWithoutFingerprint);
+    }
+
     // TLS mode: fingerprint wins over CA cert; both are CLI-only (not in file configs).
     let tls_mode = match (ca_cert, cert_fingerprint) {
-        (_, Some(fp)) => TlsMode::Fingerprint(fp),
+        (_, Some(fp)) => TlsMode::Fingerprint(FingerprintTls {
+            sha256_hex: fp,
+            pin_mode: if pin_intermediate {
+                FingerprintPinMode::Chain
+            } else {
+                FingerprintPinMode::Leaf
+            },
+        }),
         (Some(path), None) => TlsMode::CustomCa(path),
         (None, None) => TlsMode::SystemRoots,
     };
@@ -375,6 +425,7 @@ timeout = 60
             Some(30),
             None,
             None,
+            false,
         )
         .unwrap();
         assert_eq!(cfg.server, "https://ts:40056");
@@ -390,6 +441,7 @@ timeout = 60
             Some(30),
             None,
             None,
+            false,
         )
         .unwrap();
         assert_eq!(cfg.server, "https://ts:40056");
@@ -401,7 +453,7 @@ timeout = 60
         let _guard = CWD_LOCK.lock().unwrap();
         let original = std::env::current_dir().unwrap();
         std::env::set_current_dir(tmp.path()).unwrap();
-        let err = resolve(None, Some("tok".to_owned()), None, None, None);
+        let err = resolve(None, Some("tok".to_owned()), None, None, None, false);
         std::env::set_current_dir(&original).unwrap();
         assert!(matches!(err, Err(ConfigError::MissingServer)));
     }
@@ -412,7 +464,7 @@ timeout = 60
         let _guard = CWD_LOCK.lock().unwrap();
         let original = std::env::current_dir().unwrap();
         std::env::set_current_dir(tmp.path()).unwrap();
-        let err = resolve(Some("https://ts:40056".to_owned()), None, None, None, None);
+        let err = resolve(Some("https://ts:40056".to_owned()), None, None, None, None, false);
         std::env::set_current_dir(&original).unwrap();
         assert!(matches!(err, Err(ConfigError::MissingToken)));
     }
@@ -425,9 +477,61 @@ timeout = 60
             Some(45),
             None,
             None,
+            false,
         )
         .unwrap();
         assert_eq!(cfg.timeout, 45);
+    }
+
+    #[test]
+    fn resolve_pin_intermediate_without_fingerprint_errors() {
+        let err = resolve(
+            Some("https://ts:40056".to_owned()),
+            Some("tok".to_owned()),
+            Some(30),
+            None,
+            None,
+            true,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ConfigError::PinIntermediateWithoutFingerprint));
+    }
+
+    #[test]
+    fn resolve_cert_fingerprint_with_pin_intermediate_sets_chain_mode() {
+        let cfg = resolve(
+            Some("https://ts:40056".to_owned()),
+            Some("tok".to_owned()),
+            Some(30),
+            None,
+            Some("ab".repeat(32)),
+            true,
+        )
+        .unwrap();
+        match &cfg.tls_mode {
+            TlsMode::Fingerprint(fp) => {
+                assert_eq!(fp.pin_mode, FingerprintPinMode::Chain);
+                assert_eq!(fp.sha256_hex.len(), 64);
+            }
+            _ => panic!("expected Fingerprint tls mode"),
+        }
+    }
+
+    #[test]
+    fn resolve_cert_fingerprint_defaults_to_leaf_pin_mode() {
+        let cfg = resolve(
+            Some("https://ts:40056".to_owned()),
+            Some("tok".to_owned()),
+            Some(30),
+            None,
+            Some("ab".repeat(32)),
+            false,
+        )
+        .unwrap();
+        match &cfg.tls_mode {
+            TlsMode::Fingerprint(fp) => assert_eq!(fp.pin_mode, FingerprintPinMode::Leaf),
+            _ => panic!("expected Fingerprint tls mode"),
+        }
     }
 
     // ── resolve: file-based fallback ─────────────────────────────────────────
@@ -449,7 +553,7 @@ timeout = 90
         let _guard = CWD_LOCK.lock().unwrap();
         let original = std::env::current_dir().unwrap();
         std::env::set_current_dir(tmp.path()).unwrap();
-        let result = resolve(None, None, None, None, None);
+        let result = resolve(None, None, None, None, None, false);
         std::env::set_current_dir(&original).unwrap();
 
         let cfg = result.expect("resolve should succeed with file config");
@@ -476,7 +580,7 @@ timeout = 60
         std::env::set_current_dir(tmp.path()).unwrap();
         // token provided on CLI; server absent → file is loaded.
         // cli_timeout = None (flag omitted), so the file's 60 wins.
-        let result = resolve(None, Some("tok".to_owned()), None, None, None);
+        let result = resolve(None, Some("tok".to_owned()), None, None, None, false);
         std::env::set_current_dir(&original).unwrap();
 
         let cfg = result.expect("resolve should succeed");
@@ -501,7 +605,7 @@ timeout = 60
         let original = std::env::current_dir().unwrap();
         std::env::set_current_dir(tmp.path()).unwrap();
         // Explicit --timeout 30 must beat file's 60.
-        let result = resolve(None, Some("tok".to_owned()), Some(30), None, None);
+        let result = resolve(None, Some("tok".to_owned()), Some(30), None, None, false);
         std::env::set_current_dir(&original).unwrap();
 
         let cfg = result.expect("resolve should succeed");
@@ -532,6 +636,7 @@ timeout = 120
             None, // --timeout omitted
             None,
             None,
+            false,
         );
         std::env::set_current_dir(&original).unwrap();
 
@@ -643,7 +748,7 @@ token  = "file-tok"
         let _guard = CWD_LOCK.lock().unwrap();
         let original = std::env::current_dir().unwrap();
         std::env::set_current_dir(tmp.path()).unwrap();
-        let result = resolve(Some("https://cli-ts:9999".to_owned()), None, None, None, None);
+        let result = resolve(Some("https://cli-ts:9999".to_owned()), None, None, None, None, false);
         std::env::set_current_dir(&original).unwrap();
 
         let cfg = result.expect("resolve should succeed with partial override");

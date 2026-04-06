@@ -71,12 +71,21 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub ca_cert: Option<PathBuf>,
 
-    /// SHA-256 fingerprint (lowercase hex, 64 chars) of the teamserver's
-    /// TLS certificate.  Overrides --ca-cert when both are supplied.
-    /// The certificate chain is not validated; only the end-entity cert's
-    /// fingerprint is compared.
+    /// SHA-256 fingerprint (lowercase hex, 64 chars) of a certificate to pin.
+    /// Overrides --ca-cert when both are supplied.  By default only the
+    /// end-entity (leaf) certificate is compared; use --pin-intermediate to
+    /// require a match anywhere in the server-presented chain (e.g. pin an
+    /// intermediate CA so leaf renewal does not require updating the pin).
     #[arg(long, global = true)]
     pub cert_fingerprint: Option<String>,
+
+    /// With --cert-fingerprint, match the fingerprint against any certificate
+    /// in the TLS chain (leaf + intermediates) instead of only the leaf.
+    /// Stronger default is leaf-only pinning; chain pinning survives leaf
+    /// rotation but is a looser check (any chain cert with that fingerprint
+    /// satisfies the pin).
+    #[arg(long, global = true)]
+    pub pin_intermediate: bool,
 
     #[command(subcommand)]
     pub command: Option<Commands>,
@@ -803,6 +812,7 @@ async fn dispatch(cli: Cli) -> i32 {
         cli.timeout,
         cli.ca_cert,
         cli.cert_fingerprint,
+        cli.pin_intermediate,
     ) {
         Ok(cfg) => cfg,
         Err(e) => {

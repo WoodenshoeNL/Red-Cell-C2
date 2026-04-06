@@ -36,7 +36,8 @@ impl ApiClient {
     ///
     /// - [`TlsMode::SystemRoots`]: verify against the system/webpki root CAs.
     /// - [`TlsMode::CustomCa`]: load a PEM CA cert and disable built-in roots.
-    /// - [`TlsMode::Fingerprint`]: pin against a SHA-256 cert fingerprint.
+    /// - [`TlsMode::Fingerprint`]: pin against a SHA-256 cert fingerprint (leaf
+    ///   or chain per [`crate::config::FingerprintTls::pin_mode`]).
     ///
     /// Returns an error if the underlying HTTP client cannot be constructed
     /// (e.g. the TLS backend is missing or the CA file cannot be read).
@@ -267,8 +268,8 @@ fn build_http_client(config: &ResolvedConfig) -> Result<Client, CliError> {
                 .map_err(|e| CliError::General(format!("failed to build HTTP client: {e}")))?
         }
 
-        TlsMode::Fingerprint(hex) => {
-            let rustls_config = build_fingerprint_client_config(hex)?;
+        TlsMode::Fingerprint(fp) => {
+            let rustls_config = build_fingerprint_client_config(&fp.sha256_hex, fp.pin_mode)?;
             base.use_preconfigured_tls(rustls_config)
                 .build()
                 .map_err(|e| CliError::General(format!("failed to build HTTP client: {e}")))?

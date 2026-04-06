@@ -4,7 +4,9 @@ Unit tests for lib.deploy.named_pipe_exists and lib.wait.wait_for_named_pipe.
 
 from __future__ import annotations
 
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -14,6 +16,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from lib.deploy import TargetConfig, named_pipe_exists
 from lib.wait import ScenarioFailed, wait_for_named_pipe
 
+_fd, _SAMPLE_KEY_PATH = tempfile.mkstemp(prefix="named-pipe-test-key-")
+os.close(_fd)
+
 
 def _sample_target() -> TargetConfig:
     return TargetConfig(
@@ -21,7 +26,7 @@ def _sample_target() -> TargetConfig:
         port=22,
         user="tester",
         work_dir="C:\\work",
-        key="/tmp/key",
+        key=_SAMPLE_KEY_PATH,
     )
 
 

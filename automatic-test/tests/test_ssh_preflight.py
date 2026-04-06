@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import sys
 import tempfile
@@ -15,6 +16,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from test import _ssh_deploy_scenario_ids, check_ssh_targets
 
+_fd, _TEST_KEY_PATH = tempfile.mkstemp(prefix="ssh-preflight-test-key-")
+os.close(_fd)
+
 
 def _make_target(**kwargs):
     """Return a minimal TargetConfig-like object for testing."""
@@ -24,7 +28,7 @@ def _make_target(**kwargs):
         port=22,
         user="testuser",
         work_dir="/tmp/rc-test",
-        key="/home/user/.ssh/id_ed25519",
+        key=_TEST_KEY_PATH,
     )
     defaults.update(kwargs)
     return TargetConfig(**defaults)

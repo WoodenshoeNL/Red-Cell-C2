@@ -4,9 +4,12 @@ tests/test_deploy.py — Unit tests for lib/deploy.py.
 Run with:  python3 -m unittest discover -s automatic-test/tests
 """
 
+import os
 import shlex
 import subprocess
 import sys
+import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -22,9 +25,26 @@ from lib.deploy import (
     _quote_powershell,
     _scp_args,
     _ssh_args,
+    ensure_work_dir,
+    execute_background,
     preflight_dns,
     preflight_ssh,
+    run_remote,
+    upload,
 )
+
+_MODULE_KEY_PATH: str | None = None
+
+
+def _module_key_path() -> str:
+    """Real filesystem path used as an SSH key placeholder in unit tests."""
+
+    global _MODULE_KEY_PATH
+    if _MODULE_KEY_PATH is None:
+        fd, path = tempfile.mkstemp(prefix="deploy-test-key-")
+        os.close(fd)
+        _MODULE_KEY_PATH = path
+    return _MODULE_KEY_PATH
 
 
 def _make_target(**kwargs) -> TargetConfig:
@@ -33,7 +53,7 @@ def _make_target(**kwargs) -> TargetConfig:
         port=22,
         user="testuser",
         work_dir="/tmp/rc-test",
-        key="~/.ssh/id_ed25519",
+        key=_module_key_path(),
     )
     defaults.update(kwargs)
     return TargetConfig(**defaults)
@@ -67,7 +87,7 @@ class TestTargetConfigValidation(unittest.TestCase):
     def test_valid_config(self) -> None:
         t = _make_target()
         self.assertEqual(t.host, "192.168.1.10")
-        self.assertEqual(t.key, "~/.ssh/id_ed25519")
+        self.assertTrue(Path(t.key).is_file())
 
     def test_empty_key_raises(self) -> None:
         """key="" must raise ValueError with a clear message."""
@@ -97,7 +117,8 @@ class TestTargetConfigValidation(unittest.TestCase):
 
 class TestSshArgs(unittest.TestCase):
     def setUp(self) -> None:
-        self.target = _make_target(key="/home/user/.ssh/test_key")
+        self.key_path = _module_key_path()
+        self.target = _make_target(key=self.key_path)
 
     def test_first_arg_is_ssh(self) -> None:
         self.assertEqual(_ssh_args(self.target)[0], "ssh")
@@ -110,7 +131,7 @@ class TestSshArgs(unittest.TestCase):
     def test_key_flag(self) -> None:
         args = _ssh_args(self.target)
         idx = args.index("-i")
-        self.assertEqual(args[idx + 1], "/home/user/.ssh/test_key")
+        self.assertEqual(args[idx + 1], self.key_path)
 
     def test_destination_last(self) -> None:
         args = _ssh_args(self.target)
@@ -136,7 +157,8 @@ class TestSshArgs(unittest.TestCase):
 
 class TestScpArgs(unittest.TestCase):
     def setUp(self) -> None:
-        self.target = _make_target(key="/home/user/.ssh/test_key")
+        self.key_path = _module_key_path()
+        self.target = _make_target(key=self.key_path)
 
     def test_first_arg_is_scp(self) -> None:
         self.assertEqual(_scp_args(self.target)[0], "scp")
@@ -150,7 +172,7 @@ class TestScpArgs(unittest.TestCase):
     def test_key_flag(self) -> None:
         args = _scp_args(self.target)
         idx = args.index("-i")
-        self.assertEqual(args[idx + 1], "/home/user/.ssh/test_key")
+        self.assertEqual(args[idx + 1], self.key_path)
 
     def test_batchmode_yes(self) -> None:
         args = _scp_args(self.target)
@@ -233,7 +255,8 @@ class TestPreflightSsh(unittest.TestCase):
     """Tests for preflight_ssh connectivity check."""
 
     def setUp(self) -> None:
-        self.target = _make_target(host="10.0.0.1", key="/home/user/.ssh/test_key")
+        self.key_path = _module_key_path()
+        self.target = _make_target(host="10.0.0.1", key=self.key_path)
 
     def _make_completed(self, returncode: int, stderr: str = "") -> subprocess.CompletedProcess:
         return subprocess.CompletedProcess(
@@ -277,7 +300,7 @@ class TestPreflightSsh(unittest.TestCase):
 
     def test_error_message_contains_host(self) -> None:
         """DeployError message must identify the unreachable host."""
-        target = _make_target(host="192.168.99.5", key="/tmp/key")
+        target = _make_target(host="192.168.99.5", key=self.key_path)
         with patch("subprocess.run", return_value=self._make_completed(1)):
             with self.assertRaises(DeployError) as ctx:
                 preflight_ssh(target)
@@ -306,7 +329,7 @@ class TestPreflightSsh(unittest.TestCase):
 
     def test_custom_port(self) -> None:
         """preflight_ssh must pass the target's SSH port."""
-        target = _make_target(port=2222, key="/tmp/key")
+        target = _make_target(port=2222, key=self.key_path)
         with patch("subprocess.run", return_value=self._make_completed(0)) as mock_run:
             preflight_ssh(target)
         call_args = mock_run.call_args[0][0]
@@ -324,7 +347,8 @@ class TestPreflightDns(unittest.TestCase):
     """Tests for preflight_dns — remote probe must not embed domain in Python source."""
 
     def setUp(self) -> None:
-        self.target = _make_target(host="10.0.0.1", key="/home/user/.ssh/test_key")
+        self.key_path = _module_key_path()
+        self.target = _make_target(host="10.0.0.1", key=self.key_path)
 
     def _completed(self, stdout: str, returncode: int = 0) -> subprocess.CompletedProcess:
         return subprocess.CompletedProcess(
@@ -358,6 +382,87 @@ class TestPreflightDns(unittest.TestCase):
                 preflight_dns(self.target, "dns.test", "192.168.1.1")
         self.assertIn("10.0.0.99", str(ctx.exception))
         self.assertIn("192.168.1.1", str(ctx.exception))
+
+
+class TestDeployErrorPaths(unittest.TestCase):
+    """Deployment error paths with mocked subprocess (no real SSH)."""
+
+    def setUp(self) -> None:
+        self.key_path = _module_key_path()
+        self.target = _make_target(key=self.key_path)
+
+    def _completed(
+        self, returncode: int, stderr: str = "", stdout: str = ""
+    ) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(
+            args=[], returncode=returncode, stdout=stdout, stderr=stderr
+        )
+
+    def test_ssh_missing_key(self) -> None:
+        missing = f"/nonexistent/ssh_key_{os.getpid()}"
+        with self.assertRaises(ValueError) as ctx:
+            TargetConfig(
+                host="h.example",
+                port=22,
+                user="u",
+                work_dir="/tmp/w",
+                key=missing,
+            )
+        self.assertIn("not found", str(ctx.exception))
+        self.assertIn(missing, str(ctx.exception))
+
+    def test_ssh_connection_refused(self) -> None:
+        """Exit 255 with connection refused exhausts retries and raises DeployError."""
+        bad = self._completed(
+            255,
+            "ssh: connect to host 10.0.0.1 port 22: Connection refused",
+        )
+        t = _make_target(host="10.0.0.1", key=self.key_path)
+        with patch("subprocess.run", return_value=bad):
+            with patch("lib.deploy.time.sleep"):
+                with self.assertRaises(DeployError) as ctx:
+                    run_remote(t, "echo hi")
+        msg = str(ctx.exception)
+        self.assertIn("after 3 attempts", msg)
+        self.assertIn("Connection refused", msg)
+
+    def test_scp_transfer_failure(self) -> None:
+        bad = self._completed(1, "scp: /remote/path: Permission denied")
+        with patch("subprocess.run", return_value=bad):
+            with self.assertRaises(DeployError) as ctx:
+                upload(self.target, "/tmp/local.bin", "/remote/path")
+        msg = str(ctx.exception)
+        self.assertIn("SCP upload failed", msg)
+        self.assertIn("exit 1", msg)
+        self.assertIn("/tmp/local.bin", msg)
+        self.assertIn("Permission denied", msg)
+
+    def test_ensure_work_dir_permission_denied(self) -> None:
+        bad = self._completed(
+            1,
+            "mkdir: cannot create directory '/root/forbidden': Permission denied",
+        )
+        t = _make_target(work_dir="/root/forbidden", key=self.key_path)
+        with patch("subprocess.run", return_value=bad):
+            with self.assertRaises(DeployError) as ctx:
+                ensure_work_dir(t)
+        msg = str(ctx.exception)
+        self.assertIn("Remote command failed", msg)
+        self.assertIn("mkdir", msg)
+
+    def test_execute_background_returns_immediately(self) -> None:
+        """Local subprocess.run must return quickly; remote command uses nohup … &."""
+        ok = self._completed(0)
+        t = _make_target(work_dir="/tmp/rc-bg", key=self.key_path)
+        with patch("subprocess.run", return_value=ok) as m:
+            t0 = time.perf_counter()
+            execute_background(t, "/bin/sleep 86400")
+            elapsed = time.perf_counter() - t0
+        self.assertLess(elapsed, 1.0)
+        self.assertEqual(m.call_count, 1)
+        remote_cmd = m.call_args[0][0][-1]
+        self.assertIn("nohup", remote_cmd)
+        self.assertIn("&", remote_cmd)
 
 
 if __name__ == "__main__":

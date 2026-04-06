@@ -141,6 +141,11 @@ class TargetConfig:
                 "password authentication is not supported (BatchMode=yes is always set). "
                 "Generate a key with ssh-keygen and set key= in targets.toml."
             )
+        key_path = Path(self.key).expanduser()
+        if not key_path.is_file():
+            raise ValueError(
+                f"SSH target {self.user}@{self.host}: SSH private key file not found: {key_path}"
+            )
 
 
 def _ssh_args(target: TargetConfig) -> list[str]:

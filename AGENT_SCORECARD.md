@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1214 | 255 | 72 |
-| Bugs filed against | 221 | 49 | 13 |
+| Tasks closed | 1215 | 255 | 72 |
+| Bugs filed against | 222 | 49 | 13 |
 | Bug rate (bugs/task) | 0.18 | 0.19 | 0.18 |
 | Quality score | 82% | 81% | 82% |
 
-*Bug rates: Claude 221/1214=0.1820→0.18, Codex 49/255=0.1922→0.19, Cursor 13/72=0.1806→0.18*
+*Bug rates: Claude 222/1215=0.1827→0.18, Codex 49/255=0.1922→0.19, Cursor 13/72=0.1806→0.18*
 
 ## Violation Breakdown
 
@@ -28,7 +28,7 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 38 | 25 | 1 |
 | Memory / resource leaks | 12 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 10 | 0 |
-| Test infrastructure / flakiness | 51 | 6 | 1 |
+| Test infrastructure / flakiness | 52 | 6 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 4 | 5 | 0 |
 | Correctness / pagination | 66 | 9 | 1 |
@@ -6217,3 +6217,13 @@ Build: passed — `cargo check --workspace` clean (3 unused-import warnings in t
 | Cursor | 13 | 0 | Closed izaw8 (target-pkvbc cleanup), qqxct (SSH retry already implemented), g9oh8 (deploy error paths + SSH key validation tests), 4jdqo (Kerberos scenario 09 ticket validation), 6978z (centralise harness timeouts in ctx.timeouts), 0z85j (env.toml + targets.toml schema validation at load time), 7nrro (scenario 12 RBAC coverage expansion), fv5m5 (safe shell quoting preflight_dns), 5f3qj (--wait-timeout in agent_exec harness), nhxuu (SMB preflight for scenario 16), mg35c (scenario 11 audit log completeness/filters), wluah (Xvfb/DISPLAY validation for scenario 08), b43vj (remove redundant port check scenario 02). High-quality autotest work: config.py 820-line schema validation, kerberos_checks.py, audit_checks.py — all with unit tests. |
 
 Build: **cargo check** passed. **clippy** passed (0 warnings, exit 0). **nextest** partially failed — specter/tests/init_callback_flow.rs fails to compile (E0308 ×2, missed WsSession wrap); all other test packages run. Tracked as 16w04 (P1, zone:specter). Teamserver integration tests still running as of scorecard write.
+
+### QA Review — 2026-04-06 20:30 — f8fded05..ba5d906
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 1 | Closed b2ztk (refactor api.rs 11k lines → 7 per-domain modules: agents.rs/audit.rs/listeners.rs/loot.rs/operators.rs/payload.rs/mod.rs, commit 559f1c92). WIP commit ba5d9069 moves dispatch test block to dispatch/tests.rs for 9meob (in_progress, not closed). Filed u8gi1 (P1): `use base64::Engine as _` dropped when tests moved from dispatch/mod.rs to dispatch/tests.rs — 5 compile errors; `encode` and `decode` trait methods unavailable. One-line fix. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **cargo check** passed (3m 40s). **clippy** passed (0 warnings, exit 0). **nextest** FAILED — `dispatch/tests.rs` fails to compile (E0599 ×5: `encode`/`decode` not found) due to missing `use base64::Engine as _;` import; all other test packages unaffected. Tracked as u8gi1 (P1, zone:teamserver).

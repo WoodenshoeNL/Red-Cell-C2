@@ -4,6 +4,7 @@ tests/test_deploy.py — Unit tests for lib/deploy.py.
 Run with:  python3 -m unittest discover -s automatic-test/tests
 """
 
+import shlex
 import subprocess
 import sys
 import unittest
@@ -13,7 +14,16 @@ from unittest.mock import patch
 # Make lib/ importable when running from the automatic-test directory or repo root.
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from lib.deploy import DeployError, TargetConfig, _quote_posix, _quote_powershell, _scp_args, _ssh_args, preflight_ssh
+from lib.deploy import (
+    DeployError,
+    TargetConfig,
+    _quote_posix,
+    _quote_powershell,
+    _scp_args,
+    _ssh_args,
+    preflight_dns,
+    preflight_ssh,
+)
 
 
 def _make_target(**kwargs) -> TargetConfig:
@@ -262,6 +272,46 @@ class TestPreflightSsh(unittest.TestCase):
         with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="ssh", timeout=10)):
             with self.assertRaises(subprocess.TimeoutExpired):
                 preflight_ssh(self.target)
+
+
+class TestPreflightDns(unittest.TestCase):
+    """Tests for preflight_dns — remote probe must not embed domain in Python source."""
+
+    def setUp(self) -> None:
+        self.target = _make_target(host="10.0.0.1", key="/home/user/.ssh/test_key")
+
+    def _completed(self, stdout: str, returncode: int = 0) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(
+            args=[], returncode=returncode, stdout=stdout, stderr=""
+        )
+
+    def test_success_when_resolution_matches(self) -> None:
+        with patch("subprocess.run", return_value=self._completed("192.168.1.50\n")) as mock_run:
+            preflight_dns(self.target, "c2.example.test", "192.168.1.50")
+        remote_cmd = mock_run.call_args[0][0][-1]
+        prefix = "python3 -c 'import socket,sys; print(socket.gethostbyname(sys.argv[1]))' "
+        self.assertEqual(remote_cmd, prefix + shlex.quote("c2.example.test"))
+
+    def test_domain_passed_via_argv_shell_escaped(self) -> None:
+        """Domain with shell metacharacters must be argv[1], not interpolated into -c."""
+        domain = "evil'$(rm -rf /)"
+        expected_ip = "127.0.0.1"
+        with patch("subprocess.run", return_value=self._completed(expected_ip + "\n")) as mock_run:
+            preflight_dns(self.target, domain, expected_ip)
+        remote_cmd = mock_run.call_args[0][0][-1]
+        self.assertIn("sys.argv[1]", remote_cmd)
+        self.assertNotIn(domain, remote_cmd)
+        prefix = "python3 -c 'import socket,sys; print(socket.gethostbyname(sys.argv[1]))' "
+        self.assertEqual(remote_cmd, prefix + shlex.quote(domain))
+
+    def test_mismatch_raises_scenario_skipped(self) -> None:
+        from lib import ScenarioSkipped
+
+        with patch("subprocess.run", return_value=self._completed("10.0.0.99\n")):
+            with self.assertRaises(ScenarioSkipped) as ctx:
+                preflight_dns(self.target, "dns.test", "192.168.1.1")
+        self.assertIn("10.0.0.99", str(ctx.exception))
+        self.assertIn("192.168.1.1", str(ctx.exception))
 
 
 if __name__ == "__main__":

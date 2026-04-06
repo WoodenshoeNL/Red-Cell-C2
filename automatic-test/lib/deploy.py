@@ -97,8 +97,8 @@ def preflight_ssh(target: TargetConfig) -> None:
 def preflight_dns(target: TargetConfig, domain: str, expected_ip: str) -> None:
     """Check that ``domain`` resolves to ``expected_ip`` on the target machine.
 
-    Runs ``python3 -c "import socket; print(socket.gethostbyname(domain))"``
-    on the remote target via SSH and compares the result to ``expected_ip``.
+    Runs ``python3 -c '...' <domain>`` (domain shell-escaped) on the remote
+    target via SSH and compares the result to ``expected_ip``.
 
     DNS listener scenarios (15, 20) require the C2 domain to resolve to the
     teamserver IP on the target's resolver before the agent can check in.
@@ -116,7 +116,8 @@ def preflight_dns(target: TargetConfig, domain: str, expected_ip: str) -> None:
             entry.
     """
     probe = (
-        f"python3 -c \"import socket; print(socket.gethostbyname('{domain}'))\""
+        "python3 -c 'import socket,sys; print(socket.gethostbyname(sys.argv[1]))' "
+        + shlex.quote(domain)
     )
     result = subprocess.run(
         _ssh_args(target) + [probe],

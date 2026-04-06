@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyModule, PyTuple};
+use pyo3::types::{PyDict, PyModule, PyTuple};
 use serde_json::Value;
 
 use super::PluginRuntime;

@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyList, PyModule, PyTuple};
+use pyo3::types::{PyList, PyModule, PyTuple};
 use red_cell_common::AgentRecord;
 use red_cell_common::config::OperatorRole;
 use red_cell_common::operator::{AgentTaskInfo, EventCode, Message, MessageHead, OperatorMessage};

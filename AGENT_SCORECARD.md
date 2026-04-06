@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1199 | 255 | 51 |
-| Bugs filed against | 216 | 49 | 13 |
+| Tasks closed | 1201 | 255 | 52 |
+| Bugs filed against | 217 | 49 | 13 |
 | Bug rate (bugs/task) | 0.18 | 0.19 | 0.25 |
 | Quality score | 82% | 81% | 75% |
 
-*Bug rates: Claude 216/1199=0.1801→0.18, Codex 49/255=0.1922→0.19, Cursor 13/51=0.2549→0.25*
+*Bug rates: Claude 217/1201=0.1807→0.18, Codex 49/255=0.1922→0.19, Cursor 13/52=0.25*
 
 ## Violation Breakdown
 
@@ -34,13 +34,23 @@ Each loop run updates the running totals and appends a review entry.
 | Correctness / pagination | 66 | 9 | 1 |
 | Workflow / close-hygiene | 36 | 1 | 1 |
 | Code reuse / duplication | 11 | 0 | 0 |
-| Incomplete commits (stranded work) | 4 | 3 | 0 |
+| Incomplete commits (stranded work) | 5 | 3 | 0 |
 
 ---
 
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-06 04:30 — 235f23b8..93e6640d
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 1 | Closed o0d4i (CHECKIN replay warning + operator docs, P2), fmx47 (client session TTL tracking + expiry banner + auto-logout, P2). Filed hn9eb (P0 build broken): wip commit 0d4f9d94 left plugins/mod.rs missing `PyRuntimeError` import after partial plugins.rs split — `cargo check` fails with E0433 × 2. |
+| Codex | 0 | 0 | No activity this run. |
+| Cursor | 1 | 0 | Closed ypvrp (TLS chain fingerprint pinning in client-cli — `--pin-intermediate` flag, chain/leaf pin mode, new tests). Clean work, no issues. |
+
+Build: **FAILED** — `cargo check --workspace` exits non-zero; `teamserver/src/plugins/mod.rs` lines 474–475 (and 2787, 2856) reference `PyRuntimeError` without importing it. Introduced by Claude's wip commit 0d4f9d94. Bug hn9eb filed (P0, zone:teamserver). Tests and clippy skipped due to broken build.
 
 ### QA Review — 2026-04-06 03:15 — 41fa3bec..235f23b8
 

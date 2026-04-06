@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1206 | 255 | 59 |
-| Bugs filed against | 220 | 49 | 13 |
-| Bug rate (bugs/task) | 0.18 | 0.19 | 0.22 |
-| Quality score | 82% | 81% | 78% |
+| Tasks closed | 1214 | 255 | 72 |
+| Bugs filed against | 221 | 49 | 13 |
+| Bug rate (bugs/task) | 0.18 | 0.19 | 0.18 |
+| Quality score | 82% | 81% | 82% |
 
-*Bug rates: Claude 220/1206=0.1824→0.18, Codex 49/255=0.1922→0.19, Cursor 13/59=0.2203→0.22*
+*Bug rates: Claude 221/1214=0.1820→0.18, Codex 49/255=0.1922→0.19, Cursor 13/72=0.1806→0.18*
 
 ## Violation Breakdown
 
@@ -28,7 +28,7 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 38 | 25 | 1 |
 | Memory / resource leaks | 12 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 10 | 0 |
-| Test infrastructure / flakiness | 50 | 6 | 1 |
+| Test infrastructure / flakiness | 51 | 6 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 4 | 5 | 0 |
 | Correctness / pagination | 66 | 9 | 1 |
@@ -6207,3 +6207,13 @@ Build: skipped — stale Apr04 cargo processes (PIDs 1167991, 1185007, 1188269, 
 | Cursor | 6 | 0 | Closed 0a3bs (exponential backoff in wait.py), n6rqz (remote CPU/RSS monitoring scenario 14), f2bmh (resilience scenarios 21–23), 3ny4z (DoH scenario 20 skip-gate removed), p4jh4 (agent exec coverage + scenario 24 sleep-interval E2E), 832q1 (failure diagnostics). High-quality batch: new lib modules (teamserver_monitor.py, resilience.py, agent_timing.py, failure_diagnostics.py), all with unit tests. |
 
 Build: passed — `cargo check --workspace` clean (3 unused-import warnings in teamserver/plugins that will fail clippy; tracked in 72rsw). Nextest and clippy blocked on shared file locks from concurrent dev agents; tests skipped.
+
+### QA Review — 2026-04-06 19:20 — 29a7aba2..f8fded05
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 8 | 1 | Closed 0og72 (specter e2e seq_num prefix fix), 1mw3m (phantom e2e seq_num prefix fix), g2c7j (WsSession post-login WsEnvelope fix), hn9eb (PyRuntimeError import added), wkg1p (same commit), iw12a (show task ID in agent console), 45bqy (database.rs 4281-line split into 9 per-entity modules with 103 tests, exact parity), w4fif (test-plan §5.3 docs). Filed 16w04 (P1): specter/tests/init_callback_flow.rs missed in WsSession rollout — raw socket passed to login() which now expects &mut WsSession; test binary fails to compile. |
+| Codex | 0 | 0 | No activity this run. |
+| Cursor | 13 | 0 | Closed izaw8 (target-pkvbc cleanup), qqxct (SSH retry already implemented), g9oh8 (deploy error paths + SSH key validation tests), 4jdqo (Kerberos scenario 09 ticket validation), 6978z (centralise harness timeouts in ctx.timeouts), 0z85j (env.toml + targets.toml schema validation at load time), 7nrro (scenario 12 RBAC coverage expansion), fv5m5 (safe shell quoting preflight_dns), 5f3qj (--wait-timeout in agent_exec harness), nhxuu (SMB preflight for scenario 16), mg35c (scenario 11 audit log completeness/filters), wluah (Xvfb/DISPLAY validation for scenario 08), b43vj (remove redundant port check scenario 02). High-quality autotest work: config.py 820-line schema validation, kerberos_checks.py, audit_checks.py — all with unit tests. |
+
+Build: **cargo check** passed. **clippy** passed (0 warnings, exit 0). **nextest** partially failed — specter/tests/init_callback_flow.rs fails to compile (E0308 ×2, missed WsSession wrap); all other test packages run. Tracked as 16w04 (P1, zone:specter). Teamserver integration tests still running as of scorecard write.

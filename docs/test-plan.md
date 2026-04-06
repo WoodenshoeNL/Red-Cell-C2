@@ -159,7 +159,7 @@ is noted.
 |---|------|-----------------|--------|
 | 5.1 | `agent exec <linux-id> --cmd "id" --wait` | Output contains `uid=` | |
 | 5.2 | `agent exec <win-id> --cmd "whoami" --wait` | Output contains `DOMAIN\user` or `hostname\user` | |
-| 5.3 | `agent exec <id> --cmd "sleep 30" --timeout 5` | Exit code `5` (timeout) | |
+| 5.3 | `agent exec <id> --cmd "sleep 30" --wait --wait-timeout 5` | Exit code `5` (timeout) | |
 | 5.4 | `agent exec <id>` with empty `--cmd` | Error returned; no task queued | |
 
 ### 5b. Filesystem

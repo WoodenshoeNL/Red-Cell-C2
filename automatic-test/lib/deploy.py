@@ -139,6 +139,39 @@ def preflight_dns(target: TargetConfig, domain: str, expected_ip: str) -> None:
         )
 
 
+def named_pipe_exists(target: TargetConfig, pipe_name: str, ssh_timeout: int = 25) -> bool:
+    """Return True if the named pipe exists on the Windows target (``Test-Path`` on ``\\\\.\\pipe\\``).
+
+    Uses SSH + PowerShell (``Test-Path -LiteralPath``) so the probe runs on the
+    same machine the agent will use. Used as a pre-flight after starting an SMB
+    listener so bind failures surface before deploy/checkin timeouts.
+
+    Args:
+        target:       Windows SSH target.
+        pipe_name:    Pipe name suffix (same as listener config, under ``\\\\.\\pipe\\``).
+        ssh_timeout:  Per-attempt SSH subprocess timeout in seconds.
+
+    Returns:
+        True if PowerShell reports the path exists; False on SSH failure,
+        non-zero exit, or stdout other than ``True``.
+    """
+    safe = pipe_name.replace("'", "''")
+    pipe_path = f"\\\\.\\pipe\\{safe}"
+    remote_cmd = (
+        'powershell -NoProfile -Command '
+        f'"Test-Path -LiteralPath \'{pipe_path}\'"'
+    )
+    result = subprocess.run(
+        _ssh_args(target) + [remote_cmd],
+        capture_output=True,
+        text=True,
+        timeout=ssh_timeout,
+    )
+    if result.returncode != 0:
+        return False
+    return result.stdout.strip().lower() == "true"
+
+
 def run_remote(target: TargetConfig, command: str, timeout: int = 30) -> str:
     """Run a shell command on the target via SSH and return stdout."""
     result = subprocess.run(

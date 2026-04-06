@@ -63,6 +63,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
     )
     from lib.deploy import run_remote
     from lib.deploy_agent import deploy_and_checkin
+    from lib.wait import wait_for_named_pipe
 
     cli = ctx.cli
     target = ctx.windows
@@ -81,6 +82,12 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
     listener_create(cli, listener_name, "smb", pipe_name=pipe_name)
     listener_start(cli, listener_name)
     print(f"  [{agent_type}][listener] started")
+    print(
+        f"  [{agent_type}][listener] waiting for named pipe \\\\.\\pipe\\{pipe_name} "
+        "on Windows target"
+    )
+    wait_for_named_pipe(target, pipe_name, timeout=5.0, interval=0.2)
+    print(f"  [{agent_type}][listener] named pipe is visible on target")
 
     agent_id = None
     try:

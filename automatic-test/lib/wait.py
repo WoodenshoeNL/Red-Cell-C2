@@ -10,6 +10,7 @@ import time
 from typing import Callable, TypeVar
 
 from lib.cli import CliConfig, agent_list
+from lib.deploy import TargetConfig, named_pipe_exists
 
 T = TypeVar("T")
 
@@ -35,6 +36,29 @@ def wait_for_port(host: str, port: int, timeout: float = 10.0, interval: float =
         except OSError:
             time.sleep(interval)
     raise ScenarioFailed(f"port {host}:{port} did not open within {timeout}s")
+
+
+def wait_for_named_pipe(
+    target: TargetConfig,
+    pipe_name: str,
+    timeout: float = 5.0,
+    interval: float = 0.2,
+) -> None:
+    """Block until the SMB named pipe is visible on *target* or *timeout* elapses.
+
+    Polls :func:`lib.deploy.named_pipe_exists` in a loop (same style as
+    :func:`wait_for_port`). Raises :class:`ScenarioFailed` if the pipe never
+    appears — distinct from an agent checkin timeout later in the scenario.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if named_pipe_exists(target, pipe_name):
+            return
+        time.sleep(interval)
+    raise ScenarioFailed(
+        f"SMB named pipe \\\\.\\pipe\\{pipe_name} did not appear on {target.host} "
+        f"within {timeout}s (listener may have failed to bind — check teamserver logs)"
+    )
 
 
 def poll(

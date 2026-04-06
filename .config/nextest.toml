@@ -11,6 +11,7 @@
 [test-groups]
 assembly-dispatch-serial = { max-threads = 1 }
 net-dispatch-serial = { max-threads = 1 }
+output-dispatch-serial = { max-threads = 1 }
 service-bridge-serial = { max-threads = 1 }
 client-cli-contract-serial = { max-threads = 1 }
 
@@ -21,6 +22,10 @@ test-group = 'assembly-dispatch-serial'
 [[profile.default.overrides]]
 filter = 'package(red-cell) & binary(net_dispatch)'
 test-group = 'net-dispatch-serial'
+
+[[profile.default.overrides]]
+filter = 'package(red-cell) & binary(output_dispatch)'
+test-group = 'output-dispatch-serial'
 
 [[profile.default.overrides]]
 filter = 'package(red-cell) & binary(service_bridge)'

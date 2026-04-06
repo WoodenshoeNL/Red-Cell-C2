@@ -105,7 +105,7 @@ impl MockCrypto {
 
     /// Decrypt a callback packet.
     ///
-    /// Wire format: `command_id(4, clear) | request_id(4, clear) | encrypted(payload_len(4) | payload)`.
+    /// Wire format: `command_id(4, clear) | request_id(4, clear) | encrypted(seq_num(8 LE) | payload_len(4 BE) | payload)`.
     fn decrypt_callback(&mut self, body: &[u8]) -> (u32, u32, Vec<u8>) {
         let envelope = DemonEnvelope::from_bytes(body).expect("parse envelope");
         assert_eq!(envelope.header.agent_id, self.agent_id);
@@ -116,16 +116,17 @@ impl MockCrypto {
         let request_id =
             u32::from_be_bytes(envelope.payload[4..8].try_into().expect("request_id bytes"));
 
-        // Decrypt the remainder: payload_len(4) | payload.
+        // Decrypt the remainder: seq_num(8 LE) | payload_len(4 BE) | payload.
         let encrypted = &envelope.payload[8..];
         let plaintext =
             decrypt_agent_data_at_offset(&self.key, &self.iv, self.ctr_offset, encrypted)
                 .expect("decrypt callback payload");
         self.ctr_offset += ctr_blocks_for_len(encrypted.len());
 
+        let _seq = u64::from_le_bytes(plaintext[0..8].try_into().expect("seq_num bytes"));
         let payload_len =
-            u32::from_be_bytes(plaintext[0..4].try_into().expect("payload_len bytes")) as usize;
-        let payload = plaintext[4..4 + payload_len].to_vec();
+            u32::from_be_bytes(plaintext[8..12].try_into().expect("payload_len bytes")) as usize;
+        let payload = plaintext[12..12 + payload_len].to_vec();
 
         (command_id, request_id, payload)
     }

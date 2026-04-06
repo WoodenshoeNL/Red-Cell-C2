@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1215 | 255 | 72 |
-| Bugs filed against | 222 | 49 | 13 |
+| Tasks closed | 1216 | 255 | 72 |
+| Bugs filed against | 224 | 49 | 13 |
 | Bug rate (bugs/task) | 0.18 | 0.19 | 0.18 |
 | Quality score | 82% | 81% | 82% |
 
-*Bug rates: Claude 222/1215=0.1827→0.18, Codex 49/255=0.1922→0.19, Cursor 13/72=0.1806→0.18*
+*Bug rates: Claude 224/1216=0.1842→0.18, Codex 49/255=0.1922→0.19, Cursor 13/72=0.1806→0.18*
 
 ## Violation Breakdown
 
@@ -22,7 +22,7 @@ Each loop run updates the running totals and appends a review entry.
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 14 | 0 | 0 |
 | Missing tests / stale tests | 77 | 22 | 6 |
-| Clippy warnings | 12 | 0 | 1 |
+| Clippy warnings | 13 | 0 | 1 |
 | Protocol errors | 30 | 32 | 4 |
 | Security issues | 61 | 39 | 0 |
 | Architecture drift | 38 | 25 | 1 |
@@ -34,7 +34,7 @@ Each loop run updates the running totals and appends a review entry.
 | Correctness / pagination | 66 | 9 | 1 |
 | Workflow / close-hygiene | 38 | 1 | 1 |
 | Code reuse / duplication | 11 | 0 | 0 |
-| Incomplete commits (stranded work) | 5 | 3 | 0 |
+| Incomplete commits (stranded work) | 6 | 3 | 0 |
 
 ---
 
@@ -6227,3 +6227,13 @@ Build: **cargo check** passed. **clippy** passed (0 warnings, exit 0). **nextest
 | Cursor | 0 | 0 | No activity. |
 
 Build: **cargo check** passed (3m 40s). **clippy** passed (0 warnings, exit 0). **nextest** FAILED — `dispatch/tests.rs` fails to compile (E0599 ×5: `encode`/`decode` not found) due to missing `use base64::Engine as _;` import; all other test packages unaffected. Tracked as u8gi1 (P1, zone:teamserver).
+
+### QA Review — 2026-04-06 21:30 — ba5d906..1d913df8
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 2 | Closed 9meob (refactor(dispatch): split mod.rs shared helpers into focused modules — download.rs, response.rs, util.rs). Also fixed u8gi1 (base64::Engine import in tests.rs — closed as resolved in the same refactor commit). Filed 0d0he (P0 build broken): `filtered_process_rows` not imported in `panels/process.rs` after wip(client) refactor — 2 compile errors. Filed 111z0 (P1): stale unused imports in main.rs after tasks.rs/session_graph.rs extraction — 6 dead imports emitting warnings. The client main.rs split (red-cell-c2-s4d9h) was interrupted and committed in a broken state. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **FAILED** — `cargo check --workspace` exits non-zero. `client/src/panels/process.rs` lines 70 and 231 reference `filtered_process_rows` without importing it (E0425 ×2). 3 unused-import warnings in `client/src/main.rs`. Tracked as 0d0he (P0, zone:client) and 111z0 (P1, zone:client). Tests and clippy skipped.

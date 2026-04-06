@@ -4,7 +4,7 @@ use rfd::FileDialog;
 use crate::transport::{AgentProcessListState, AppState, ProcessEntry};
 use crate::{
     ClientApp, InjectionTargetAction, InjectionTechnique, ProcessInjectionDialogState,
-    blank_if_empty,
+    blank_if_empty, filtered_process_rows,
 };
 
 impl ClientApp {

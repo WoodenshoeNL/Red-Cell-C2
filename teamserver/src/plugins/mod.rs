@@ -5,8 +5,8 @@ mod python;
 mod registry;
 
 pub use events::PluginEvent;
-pub use registry::PluginHealthEntry;
 use python::{PyAgent, PyEvent, populate_api_module};
+pub use registry::PluginHealthEntry;
 use registry::{
     DEFAULT_MAX_CONSECUTIVE_FAILURES, NamedCallback, PluginRuntimeInner, RegisteredCommand,
 };
@@ -1070,7 +1070,6 @@ fn check_plugin_permission(permission: crate::rbac::Permission) -> PyResult<()> 
         )))
     }
 }
-
 
 /// Process-wide serialisation lock for tests that install a `PluginRuntime` as the
 /// active global.  Tests in other modules that call `PluginRuntime::swap_active` must

@@ -1,0 +1,552 @@
+//! Agent CRUD repository.
+
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use red_cell_common::{AgentEncryptionInfo, AgentRecord};
+use sqlx::{FromRow, Sqlite, SqlitePool};
+use zeroize::Zeroizing;
+
+use super::TeamserverError;
+
+/// Persisted agent row plus transport state needed by the in-memory registry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PersistedAgent {
+    /// Agent metadata mirrored into operator-facing APIs.
+    pub info: AgentRecord,
+    /// Listener that accepted the current or most recent session.
+    pub listener_name: String,
+    /// Shared AES-CTR block offset tracked across decrypt/encrypt operations.
+    pub ctr_block_offset: u64,
+    /// When `true`, AES-CTR resets to block offset 0 for every packet (Demon/Archon
+    /// compatibility).  When `false`, the monotonic `ctr_block_offset` advances across
+    /// packets (Specter behaviour).
+    pub legacy_ctr: bool,
+    /// Last callback sequence number accepted from this agent.  `0` means no seq-protected
+    /// callback has been received yet.
+    pub last_seen_seq: u64,
+    /// When `true`, the teamserver enforces monotonic sequence numbers on incoming callbacks.
+    /// Demon and Archon agents (frozen wire format) are exempt (`false`).
+    pub seq_protected: bool,
+}
+
+/// CRUD operations for persisted agents.
+#[derive(Clone, Debug)]
+pub struct AgentRepository {
+    pool: SqlitePool,
+}
+
+impl AgentRepository {
+    /// Create a new agent repository from a shared pool.
+    #[must_use]
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+
+    /// Insert a new agent row.
+    pub async fn create(&self, agent: &AgentRecord) -> Result<(), TeamserverError> {
+        self.create_with_listener(agent, "null").await
+    }
+
+    /// Insert a new agent row with the listener that accepted the session.
+    pub async fn create_with_listener(
+        &self,
+        agent: &AgentRecord,
+        listener_name: &str,
+    ) -> Result<(), TeamserverError> {
+        self.create_with_listener_and_ctr_offset(agent, listener_name, 0).await
+    }
+
+    /// Insert a new agent row with the listener and initial CTR state for the session.
+    ///
+    /// Uses non-legacy (monotonic) CTR mode.  Use [`AgentRepository::create_full`] to
+    /// set legacy mode for Demon/Archon agents.
+    pub async fn create_with_listener_and_ctr_offset(
+        &self,
+        agent: &AgentRecord,
+        listener_name: &str,
+        ctr_block_offset: u64,
+    ) -> Result<(), TeamserverError> {
+        self.create_full(agent, listener_name, ctr_block_offset, false).await
+    }
+
+    /// Insert a new agent row with all transport parameters.
+    pub async fn create_full(
+        &self,
+        agent: &AgentRecord,
+        listener_name: &str,
+        ctr_block_offset: u64,
+        legacy_ctr: bool,
+    ) -> Result<(), TeamserverError> {
+        let mut transaction = self.pool.begin().await?;
+        insert_agent_row(&mut *transaction, agent, listener_name, ctr_block_offset, legacy_ctr)
+            .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Update an existing agent row.
+    pub async fn update(&self, agent: &AgentRecord) -> Result<(), TeamserverError> {
+        self.update_with_listener(agent, "null").await
+    }
+
+    /// Update an existing agent row and the listener that accepted the session.
+    pub async fn update_with_listener(
+        &self,
+        agent: &AgentRecord,
+        listener_name: &str,
+    ) -> Result<(), TeamserverError> {
+        let result = sqlx::query(
+            r#"
+            UPDATE ts_agents SET
+                active = ?, reason = ?, note = ?, aes_key = ?, aes_iv = ?, hostname = ?, username = ?,
+                domain_name = ?, external_ip = ?, internal_ip = ?, process_name = ?, process_path = ?,
+                base_address = ?, process_pid = ?, process_tid = ?, process_ppid = ?,
+                process_arch = ?, elevated = ?, os_version = ?, os_build = ?, os_arch = ?, listener_name = ?, sleep_delay = ?,
+                sleep_jitter = ?, kill_date = ?, working_hours = ?, first_call_in = ?,
+                last_call_in = ?
+            WHERE agent_id = ?
+            "#,
+        )
+        .bind(super::bool_to_i64(agent.active))
+        .bind(&agent.reason)
+        .bind(&agent.note)
+        .bind(BASE64_STANDARD.encode(&*agent.encryption.aes_key))
+        .bind(BASE64_STANDARD.encode(&*agent.encryption.aes_iv))
+        .bind(&agent.hostname)
+        .bind(&agent.username)
+        .bind(&agent.domain_name)
+        .bind(&agent.external_ip)
+        .bind(&agent.internal_ip)
+        .bind(&agent.process_name)
+        .bind(&agent.process_path)
+        .bind(super::i64_from_u64("base_address", agent.base_address)?)
+        .bind(i64::from(agent.process_pid))
+        .bind(i64::from(agent.process_tid))
+        .bind(i64::from(agent.process_ppid))
+        .bind(&agent.process_arch)
+        .bind(super::bool_to_i64(agent.elevated))
+        .bind(&agent.os_version)
+        .bind(i64::from(agent.os_build))
+        .bind(&agent.os_arch)
+        .bind(listener_name)
+        .bind(i64::from(agent.sleep_delay))
+        .bind(i64::from(agent.sleep_jitter))
+        .bind(agent.kill_date)
+        .bind(agent.working_hours.map(i64::from))
+        .bind(&agent.first_call_in)
+        .bind(&agent.last_call_in)
+        .bind(i64::from(agent.agent_id))
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(TeamserverError::AgentNotFound { agent_id: agent.agent_id });
+        }
+
+        Ok(())
+    }
+
+    /// Update an existing agent row on re-registration, resetting the CTR block offset and
+    /// last-seen sequence number to 0 and refreshing all runtime metadata.
+    /// Preserves the original `first_call_in` and the operator-authored `note`.
+    pub async fn reregister_full(
+        &self,
+        agent: &AgentRecord,
+        listener_name: &str,
+        legacy_ctr: bool,
+    ) -> Result<(), TeamserverError> {
+        let result = sqlx::query(
+            r#"
+            UPDATE ts_agents SET
+                active = 1, reason = '', ctr_block_offset = 0, last_seen_seq = 0, legacy_ctr = ?,
+                aes_key = ?, aes_iv = ?, hostname = ?, username = ?, domain_name = ?,
+                external_ip = ?, internal_ip = ?, process_name = ?, process_path = ?,
+                base_address = ?, process_pid = ?, process_tid = ?, process_ppid = ?,
+                process_arch = ?, elevated = ?, os_version = ?, os_build = ?, os_arch = ?,
+                listener_name = ?, sleep_delay = ?, sleep_jitter = ?, kill_date = ?,
+                working_hours = ?, last_call_in = ?
+            WHERE agent_id = ?
+            "#,
+        )
+        .bind(super::bool_to_i64(legacy_ctr))
+        .bind(BASE64_STANDARD.encode(&*agent.encryption.aes_key))
+        .bind(BASE64_STANDARD.encode(&*agent.encryption.aes_iv))
+        .bind(&agent.hostname)
+        .bind(&agent.username)
+        .bind(&agent.domain_name)
+        .bind(&agent.external_ip)
+        .bind(&agent.internal_ip)
+        .bind(&agent.process_name)
+        .bind(&agent.process_path)
+        .bind(super::i64_from_u64("base_address", agent.base_address)?)
+        .bind(i64::from(agent.process_pid))
+        .bind(i64::from(agent.process_tid))
+        .bind(i64::from(agent.process_ppid))
+        .bind(&agent.process_arch)
+        .bind(super::bool_to_i64(agent.elevated))
+        .bind(&agent.os_version)
+        .bind(i64::from(agent.os_build))
+        .bind(&agent.os_arch)
+        .bind(listener_name)
+        .bind(i64::from(agent.sleep_delay))
+        .bind(i64::from(agent.sleep_jitter))
+        .bind(agent.kill_date)
+        .bind(agent.working_hours.map(i64::from))
+        .bind(&agent.last_call_in)
+        .bind(i64::from(agent.agent_id))
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(TeamserverError::AgentNotFound { agent_id: agent.agent_id });
+        }
+
+        Ok(())
+    }
+
+    /// Fetch a single agent by identifier.
+    pub async fn get(&self, agent_id: u32) -> Result<Option<AgentRecord>, TeamserverError> {
+        let row = sqlx::query_as::<_, AgentRow>("SELECT * FROM ts_agents WHERE agent_id = ?")
+            .bind(i64::from(agent_id))
+            .fetch_optional(&self.pool)
+            .await?;
+
+        row.map(TryInto::try_into).transpose()
+    }
+
+    /// Return all persisted agents.
+    pub async fn list(&self) -> Result<Vec<AgentRecord>, TeamserverError> {
+        let rows = sqlx::query_as::<_, AgentRow>("SELECT * FROM ts_agents ORDER BY agent_id")
+            .fetch_all(&self.pool)
+            .await?;
+
+        rows.into_iter().map(TryInto::try_into).collect()
+    }
+
+    /// Return only agents still marked active.
+    pub async fn list_active(&self) -> Result<Vec<AgentRecord>, TeamserverError> {
+        let rows = sqlx::query_as::<_, AgentRow>(
+            "SELECT * FROM ts_agents WHERE active = 1 ORDER BY agent_id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(TryInto::try_into).collect()
+    }
+
+    /// Check whether an agent row exists.
+    pub async fn exists(&self, agent_id: u32) -> Result<bool, TeamserverError> {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ts_agents WHERE agent_id = ?")
+            .bind(i64::from(agent_id))
+            .fetch_one(&self.pool)
+            .await?;
+
+        Ok(count > 0)
+    }
+
+    /// Update the active flag and reason for an agent.
+    pub async fn set_status(
+        &self,
+        agent_id: u32,
+        active: bool,
+        reason: &str,
+    ) -> Result<(), TeamserverError> {
+        let result = sqlx::query("UPDATE ts_agents SET active = ?, reason = ? WHERE agent_id = ?")
+            .bind(super::bool_to_i64(active))
+            .bind(reason)
+            .bind(i64::from(agent_id))
+            .execute(&self.pool)
+            .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(TeamserverError::AgentNotFound { agent_id });
+        }
+
+        Ok(())
+    }
+
+    /// Delete an agent row.
+    pub async fn delete(&self, agent_id: u32) -> Result<(), TeamserverError> {
+        sqlx::query("DELETE FROM ts_agents WHERE agent_id = ?")
+            .bind(i64::from(agent_id))
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
+    }
+
+    /// Update the operator-authored note for an agent.
+    pub async fn set_note(&self, agent_id: u32, note: &str) -> Result<(), TeamserverError> {
+        let result = sqlx::query("UPDATE ts_agents SET note = ? WHERE agent_id = ?")
+            .bind(note)
+            .bind(i64::from(agent_id))
+            .execute(&self.pool)
+            .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(TeamserverError::AgentNotFound { agent_id });
+        }
+
+        Ok(())
+    }
+
+    /// Fetch a single persisted agent plus its CTR state.
+    pub async fn get_persisted(
+        &self,
+        agent_id: u32,
+    ) -> Result<Option<PersistedAgent>, TeamserverError> {
+        let row = sqlx::query_as::<_, AgentRow>("SELECT * FROM ts_agents WHERE agent_id = ?")
+            .bind(i64::from(agent_id))
+            .fetch_optional(&self.pool)
+            .await?;
+
+        row.map(TryInto::try_into).transpose()
+    }
+
+    /// Return all persisted agents plus their CTR state.
+    pub async fn list_persisted(&self) -> Result<Vec<PersistedAgent>, TeamserverError> {
+        let rows = sqlx::query_as::<_, AgentRow>("SELECT * FROM ts_agents ORDER BY agent_id")
+            .fetch_all(&self.pool)
+            .await?;
+
+        rows.into_iter().map(TryInto::try_into).collect()
+    }
+
+    /// Persist the current CTR block offset for an agent.
+    pub async fn set_ctr_block_offset(
+        &self,
+        agent_id: u32,
+        ctr_block_offset: u64,
+    ) -> Result<(), TeamserverError> {
+        update_agent_ctr_block_offset(&self.pool, agent_id, ctr_block_offset).await
+    }
+
+    /// Persist the legacy CTR mode flag for an agent.
+    pub async fn set_legacy_ctr(
+        &self,
+        agent_id: u32,
+        legacy_ctr: bool,
+    ) -> Result<(), TeamserverError> {
+        let result = sqlx::query("UPDATE ts_agents SET legacy_ctr = ? WHERE agent_id = ?")
+            .bind(super::bool_to_i64(legacy_ctr))
+            .bind(i64::from(agent_id))
+            .execute(&self.pool)
+            .await?;
+        if result.rows_affected() == 0 {
+            return Err(TeamserverError::AgentNotFound { agent_id });
+        }
+        Ok(())
+    }
+
+    /// Persist the last accepted callback sequence number for an agent.
+    pub async fn set_last_seen_seq(
+        &self,
+        agent_id: u32,
+        last_seen_seq: u64,
+    ) -> Result<(), TeamserverError> {
+        let result = sqlx::query("UPDATE ts_agents SET last_seen_seq = ? WHERE agent_id = ?")
+            .bind(super::i64_from_u64("last_seen_seq", last_seen_seq)?)
+            .bind(i64::from(agent_id))
+            .execute(&self.pool)
+            .await?;
+        if result.rows_affected() == 0 {
+            return Err(TeamserverError::AgentNotFound { agent_id });
+        }
+        Ok(())
+    }
+
+    /// Persist the seq-protected flag for an agent.
+    pub async fn set_seq_protected(
+        &self,
+        agent_id: u32,
+        seq_protected: bool,
+    ) -> Result<(), TeamserverError> {
+        let result = sqlx::query("UPDATE ts_agents SET seq_protected = ? WHERE agent_id = ?")
+            .bind(super::bool_to_i64(seq_protected))
+            .bind(i64::from(agent_id))
+            .execute(&self.pool)
+            .await?;
+        if result.rows_affected() == 0 {
+            return Err(TeamserverError::AgentNotFound { agent_id });
+        }
+        Ok(())
+    }
+}
+
+pub(super) async fn insert_agent_row(
+    executor: impl sqlx::Executor<'_, Database = Sqlite>,
+    agent: &AgentRecord,
+    listener_name: &str,
+    ctr_block_offset: u64,
+    legacy_ctr: bool,
+) -> Result<(), TeamserverError> {
+    sqlx::query(
+        r#"
+        INSERT INTO ts_agents (
+            agent_id, active, reason, note, ctr_block_offset, legacy_ctr, aes_key, aes_iv, hostname, username, domain_name,
+            external_ip, internal_ip, process_name, process_path, base_address, process_pid, process_tid,
+            process_ppid, process_arch, elevated, os_version, os_build, os_arch, listener_name, sleep_delay,
+            sleep_jitter, kill_date, working_hours, first_call_in, last_call_in, last_seen_seq, seq_protected
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(i64::from(agent.agent_id))
+    .bind(super::bool_to_i64(agent.active))
+    .bind(&agent.reason)
+    .bind(&agent.note)
+    .bind(super::i64_from_u64("ctr_block_offset", ctr_block_offset)?)
+    .bind(super::bool_to_i64(legacy_ctr))
+    .bind(BASE64_STANDARD.encode(&*agent.encryption.aes_key))
+    .bind(BASE64_STANDARD.encode(&*agent.encryption.aes_iv))
+    .bind(&agent.hostname)
+    .bind(&agent.username)
+    .bind(&agent.domain_name)
+    .bind(&agent.external_ip)
+    .bind(&agent.internal_ip)
+    .bind(&agent.process_name)
+    .bind(&agent.process_path)
+    .bind(super::i64_from_u64("base_address", agent.base_address)?)
+    .bind(i64::from(agent.process_pid))
+    .bind(i64::from(agent.process_tid))
+    .bind(i64::from(agent.process_ppid))
+    .bind(&agent.process_arch)
+    .bind(super::bool_to_i64(agent.elevated))
+    .bind(&agent.os_version)
+    .bind(i64::from(agent.os_build))
+    .bind(&agent.os_arch)
+    .bind(listener_name)
+    .bind(i64::from(agent.sleep_delay))
+    .bind(i64::from(agent.sleep_jitter))
+    .bind(agent.kill_date)
+    .bind(agent.working_hours.map(i64::from))
+    .bind(&agent.first_call_in)
+    .bind(&agent.last_call_in)
+    .bind(0_i64) // last_seen_seq starts at 0
+    .bind(0_i64) // seq_protected defaults to false
+    .execute(executor)
+    .await?;
+
+    Ok(())
+}
+
+async fn update_agent_ctr_block_offset(
+    executor: impl sqlx::Executor<'_, Database = Sqlite>,
+    agent_id: u32,
+    ctr_block_offset: u64,
+) -> Result<(), TeamserverError> {
+    let result = sqlx::query("UPDATE ts_agents SET ctr_block_offset = ? WHERE agent_id = ?")
+        .bind(super::i64_from_u64("ctr_block_offset", ctr_block_offset)?)
+        .bind(i64::from(agent_id))
+        .execute(executor)
+        .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(TeamserverError::AgentNotFound { agent_id });
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, FromRow)]
+struct AgentRow {
+    agent_id: i64,
+    active: i64,
+    reason: String,
+    note: String,
+    ctr_block_offset: i64,
+    aes_key: String,
+    aes_iv: String,
+    hostname: String,
+    username: String,
+    domain_name: String,
+    external_ip: String,
+    internal_ip: String,
+    process_name: String,
+    process_path: String,
+    base_address: i64,
+    process_pid: i64,
+    process_tid: i64,
+    process_ppid: i64,
+    process_arch: String,
+    elevated: i64,
+    os_version: String,
+    os_build: i64,
+    os_arch: String,
+    listener_name: String,
+    sleep_delay: i64,
+    sleep_jitter: i64,
+    kill_date: Option<i64>,
+    working_hours: Option<i64>,
+    first_call_in: String,
+    last_call_in: String,
+    legacy_ctr: i64,
+    last_seen_seq: i64,
+    seq_protected: i64,
+}
+
+impl TryFrom<AgentRow> for AgentRecord {
+    type Error = TeamserverError;
+
+    fn try_from(row: AgentRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            agent_id: super::u32_from_i64("agent_id", row.agent_id)?,
+            active: super::bool_from_i64("active", row.active)?,
+            reason: row.reason,
+            note: row.note,
+            encryption: AgentEncryptionInfo {
+                aes_key: Zeroizing::new(BASE64_STANDARD.decode(&row.aes_key).map_err(|e| {
+                    TeamserverError::InvalidPersistedValue {
+                        field: "aes_key",
+                        message: format!("base64 decode failed: {e}"),
+                    }
+                })?),
+                aes_iv: Zeroizing::new(BASE64_STANDARD.decode(&row.aes_iv).map_err(|e| {
+                    TeamserverError::InvalidPersistedValue {
+                        field: "aes_iv",
+                        message: format!("base64 decode failed: {e}"),
+                    }
+                })?),
+            },
+            hostname: row.hostname,
+            username: row.username,
+            domain_name: row.domain_name,
+            external_ip: row.external_ip,
+            internal_ip: row.internal_ip,
+            process_name: row.process_name,
+            process_path: row.process_path,
+            base_address: super::u64_from_i64("base_address", row.base_address)?,
+            process_pid: super::u32_from_i64("process_pid", row.process_pid)?,
+            process_tid: super::u32_from_i64("process_tid", row.process_tid)?,
+            process_ppid: super::u32_from_i64("process_ppid", row.process_ppid)?,
+            process_arch: row.process_arch,
+            elevated: super::bool_from_i64("elevated", row.elevated)?,
+            os_version: row.os_version,
+            os_build: super::u32_from_i64("os_build", row.os_build)?,
+            os_arch: row.os_arch,
+            sleep_delay: super::u32_from_i64("sleep_delay", row.sleep_delay)?,
+            sleep_jitter: super::u32_from_i64("sleep_jitter", row.sleep_jitter)?,
+            kill_date: row.kill_date,
+            working_hours: row
+                .working_hours
+                .map(i32::try_from)
+                .transpose()
+                .map_err(|_| super::invalid_value("working_hours", "value does not fit in i32"))?,
+            first_call_in: row.first_call_in,
+            last_call_in: row.last_call_in,
+        })
+    }
+}
+
+impl TryFrom<AgentRow> for PersistedAgent {
+    type Error = TeamserverError;
+
+    fn try_from(row: AgentRow) -> Result<Self, Self::Error> {
+        let ctr_block_offset = super::u64_from_i64("ctr_block_offset", row.ctr_block_offset)?;
+        let legacy_ctr = super::bool_from_i64("legacy_ctr", row.legacy_ctr)?;
+        let last_seen_seq = super::u64_from_i64("last_seen_seq", row.last_seen_seq)?;
+        let seq_protected = super::bool_from_i64("seq_protected", row.seq_protected)?;
+        let listener_name = row.listener_name.clone();
+        let info = AgentRecord::try_from(row)?;
+        Ok(Self { info, listener_name, ctr_block_offset, legacy_ctr, last_seen_seq, seq_protected })
+    }
+}

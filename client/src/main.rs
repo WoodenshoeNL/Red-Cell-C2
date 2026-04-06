@@ -6,9 +6,6 @@ mod python;
 mod tasks;
 mod transport;
 
-pub(crate) use panels::session_graph::{
-    agent_is_active_status, build_session_graph, session_graph_status_color,
-};
 pub(crate) use tasks::*;
 
 use base64::Engine;
@@ -25,10 +22,7 @@ use known_servers::{KnownServersStore, host_port_from_url};
 use local_config::LocalConfig;
 use login::{LoginAction, LoginState, render_login_dialog};
 use python::{PythonRuntime, ScriptLoadStatus, ScriptOutputStream};
-use red_cell_common::demon::DemonCommand;
-use red_cell_common::operator::{
-    AgentTaskInfo, EventCode, ListenerInfo, MessageHead, OperatorMessage,
-};
+use red_cell_common::operator::{ListenerInfo, OperatorMessage};
 use rfd::FileDialog;
 use transport::{
     AgentConsoleEntry, AgentConsoleEntryKind, AgentFileBrowserState, AppState, ClientTransport,
@@ -3272,6 +3266,11 @@ fn human_size(size_bytes: u64) -> String {
 mod tests {
     use super::*;
     use clap::Parser;
+    use panels::session_graph::{
+        agent_is_active_status, build_session_graph, session_graph_status_color,
+    };
+    use red_cell_common::demon::DemonCommand;
+    use red_cell_common::operator::{AgentTaskInfo, EventCode, MessageHead};
     use std::sync::{LazyLock, Mutex, MutexGuard};
     use std::time::{SystemTime, UNIX_EPOCH};
     use transport::{AgentFileBrowserState, AgentSummary, FileBrowserEntry, LootItem};

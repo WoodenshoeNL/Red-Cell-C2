@@ -53,10 +53,11 @@
 //!
 //! Any other `cmd` must match a known session command (same names as the
 //! `red-cell-cli` surface and the teamserver session router).  Unknown
-//! commands produce a single local JSON line on **stdout** and are not sent
-//! to the server:
+//! commands produce a single local JSON line on **stdout** (same `ok`/`cmd`/
+//! `error`/`message` envelope as other session errors, written to stdout) and
+//! are not sent to the server:
 //! ```json
-//! {"error": {"code": "unknown_command", "message": "unknown command `…`"}}
+//! {"ok": false, "cmd": "agent.lst", "error": "UNKNOWN_COMMAND", "message": "unknown command `agent.lst`"}
 //! ```
 //!
 //! All recognised commands are forwarded to the server unchanged.
@@ -488,7 +489,9 @@ where
             }
 
             if !is_known_session_command(&cmd) {
-                if emit_unknown_command_to_stdout(stdout, &cmd).is_err() {
+                if emit_error_to(stdout, &cmd, &CliError::UnknownSessionCommand(cmd.clone()))
+                    .is_err()
+                {
                     return LoopControl::Exit(EXIT_GENERAL);
                 }
                 return LoopControl::Continue;
@@ -719,26 +722,6 @@ fn emit_error_to(
     }
 }
 
-/// Emit a local unknown-command error to stdout (session contract for client-side validation).
-fn emit_unknown_command_to_stdout(
-    writer: &mut impl std::io::Write,
-    cmd: &str,
-) -> std::io::Result<()> {
-    let envelope = serde_json::json!({
-        "error": {
-            "code": "unknown_command",
-            "message": format!("unknown command `{cmd}`"),
-        }
-    });
-    match serde_json::to_string(&envelope) {
-        Ok(s) => writeln!(writer, "{s}"),
-        Err(_) => writeln!(
-            writer,
-            r#"{{"error":{{"code":"unknown_command","message":"unknown command"}}}}"#
-        ),
-    }
-}
-
 /// Write a session-close diagnostic line to `writer`.
 fn emit_session_closed_to(
     writer: &mut impl std::io::Write,
@@ -889,13 +872,16 @@ mod tests {
     }
 
     #[test]
-    fn emit_unknown_command_to_stdout_matches_contract() {
+    fn unknown_session_command_uses_error_envelope_on_stdout() {
         let mut buf = Vec::new();
-        emit_unknown_command_to_stdout(&mut buf, "agent.lst").expect("write");
+        let err = CliError::UnknownSessionCommand("agent.lst".to_owned());
+        emit_error_to(&mut buf, "agent.lst", &err).expect("write");
         let val: serde_json::Value =
             serde_json::from_str(String::from_utf8(buf).expect("utf8").trim()).expect("json");
-        assert_eq!(val["error"]["code"], "unknown_command");
-        assert_eq!(val["error"]["message"].as_str(), Some("unknown command `agent.lst`"));
+        assert_eq!(val["ok"], false);
+        assert_eq!(val["cmd"], "agent.lst");
+        assert_eq!(val["error"], "UNKNOWN_COMMAND");
+        assert_eq!(val["message"].as_str(), Some("unknown command `agent.lst`"));
     }
 
     // ── run_with_io via mock WebSocket server ──────────────────────────────────
@@ -1052,7 +1038,10 @@ mod tests {
         assert!(stderr.is_empty(), "local unknown-command error must not hit stderr");
         let line = String::from_utf8(stdout).expect("utf8");
         let val: serde_json::Value = serde_json::from_str(line.trim()).expect("json");
-        assert_eq!(val["error"]["code"], "unknown_command");
+        assert_eq!(val["ok"], false);
+        assert_eq!(val["cmd"], "agent.lst");
+        assert_eq!(val["error"], "UNKNOWN_COMMAND");
+        assert!(val["message"].as_str().is_some_and(|m| m.contains("agent.lst")));
     }
 
     /// Invalid JSON on stdin must produce a local error line and continue

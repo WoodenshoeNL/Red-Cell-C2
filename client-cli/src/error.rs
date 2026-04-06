@@ -51,6 +51,8 @@ pub const ERROR_CODE_SERIALIZE_FAILED: &str = "SERIALIZE_FAILED";
 pub const ERROR_CODE_IO_WRITE_FAILED: &str = "IO_WRITE_FAILED";
 /// Machine-readable error code for server-side rate limiting (HTTP 429).
 pub const ERROR_CODE_RATE_LIMITED: &str = "RATE_LIMITED";
+/// Machine-readable error code for an unknown session-mode `cmd` (local validation).
+pub const ERROR_CODE_UNKNOWN_COMMAND: &str = "UNKNOWN_COMMAND";
 
 /// All errors that a CLI command can produce.
 #[derive(Debug, Error)]
@@ -74,6 +76,10 @@ pub enum CliError {
     /// Invalid combination of flags or arguments supplied by the caller.
     #[error("invalid arguments: {0}")]
     InvalidArgs(String),
+
+    /// Unknown `cmd` in `red-cell-cli session` (rejected before forwarding).
+    #[error("unknown command `{0}`")]
+    UnknownSessionCommand(String),
 
     /// An unexpected 5xx response was returned by the teamserver.
     #[error("server error: {0}")]
@@ -124,6 +130,7 @@ impl CliError {
             CliError::Timeout(_) => EXIT_TIMEOUT,
             CliError::RateLimited { .. } => EXIT_RATE_LIMITED,
             CliError::InvalidArgs(_) => EXIT_GENERAL,
+            CliError::UnknownSessionCommand(_) => EXIT_GENERAL,
             CliError::ServerError(_) => EXIT_GENERAL,
             CliError::Unsupported(_) => EXIT_GENERAL,
             CliError::SerializeFailed(_) => EXIT_GENERAL,
@@ -144,6 +151,7 @@ impl CliError {
             CliError::Timeout(_) => ERROR_CODE_TIMEOUT,
             CliError::RateLimited { .. } => ERROR_CODE_RATE_LIMITED,
             CliError::InvalidArgs(_) => ERROR_CODE_INVALID_ARGS,
+            CliError::UnknownSessionCommand(_) => ERROR_CODE_UNKNOWN_COMMAND,
             CliError::ServerError(_) => ERROR_CODE_SERVER_ERROR,
             CliError::Unsupported(_) => ERROR_CODE_UNSUPPORTED,
             CliError::SerializeFailed(_) => ERROR_CODE_SERIALIZE_FAILED,
@@ -178,6 +186,14 @@ mod tests {
         let err = CliError::InvalidArgs("--foo and --bar are mutually exclusive".to_owned());
         assert_eq!(err.exit_code(), EXIT_GENERAL);
         assert_eq!(err.error_code(), ERROR_CODE_INVALID_ARGS);
+    }
+
+    #[test]
+    fn unknown_session_command_exits_1_with_unknown_command_code() {
+        let err = CliError::UnknownSessionCommand("agent.lst".to_owned());
+        assert_eq!(err.exit_code(), EXIT_GENERAL);
+        assert_eq!(err.error_code(), ERROR_CODE_UNKNOWN_COMMAND);
+        assert!(err.to_string().contains("agent.lst"));
     }
 
     #[test]

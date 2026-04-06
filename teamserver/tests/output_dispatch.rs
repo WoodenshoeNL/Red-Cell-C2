@@ -115,7 +115,8 @@ async fn exit_callback_marks_agent_dead_and_broadcasts_update()
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server.listeners.create(common::http_listener_config("out-exit-test", listener_port)).await?;
@@ -204,7 +205,8 @@ async fn exit_callback_process_exit_broadcasts_correct_message()
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server.listeners.create(common::http_listener_config("out-exit-proc", listener_port)).await?;
@@ -280,7 +282,8 @@ async fn exit_callback_unknown_method_broadcasts_fallback_message()
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server.listeners.create(common::http_listener_config("out-exit-unk", listener_port)).await?;
@@ -358,7 +361,8 @@ async fn demon_info_mem_alloc_broadcasts_response() -> Result<(), Box<dyn std::e
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server.listeners.create(common::http_listener_config("out-info-test", listener_port)).await?;
@@ -432,7 +436,8 @@ async fn job_list_callback_broadcasts_formatted_table() -> Result<(), Box<dyn st
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server.listeners.create(common::http_listener_config("out-job-test", listener_port)).await?;
@@ -537,7 +542,8 @@ async fn job_list_callback_empty_broadcasts_header_only() -> Result<(), Box<dyn 
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -625,7 +631,8 @@ async fn demon_info_truncated_payload_returns_error_no_broadcast()
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server.listeners.create(common::http_listener_config("out-trunc-test", listener_port)).await?;
@@ -688,7 +695,8 @@ async fn exit_callback_empty_payload_returns_error_no_broadcast()
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -752,7 +760,8 @@ async fn exit_callback_truncated_exit_method_returns_error_no_broadcast()
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -815,7 +824,8 @@ async fn demon_info_mem_exec_broadcasts_response() -> Result<(), Box<dyn std::er
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server.listeners.create(common::http_listener_config("out-mexec-test", listener_port)).await?;
@@ -892,7 +902,8 @@ async fn demon_info_mem_protect_broadcasts_response() -> Result<(), Box<dyn std:
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server.listeners.create(common::http_listener_config("out-mprot-test", listener_port)).await?;
@@ -980,7 +991,8 @@ async fn demon_info_proc_create_non_verbose_no_broadcast() -> Result<(), Box<dyn
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -1046,7 +1058,8 @@ async fn demon_info_unknown_class_no_broadcast() -> Result<(), Box<dyn std::erro
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -1112,7 +1125,8 @@ async fn demon_info_proc_create_verbose_success_broadcasts_response()
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -1186,7 +1200,8 @@ async fn demon_info_proc_create_verbose_failure_broadcasts_response()
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -1261,7 +1276,8 @@ async fn demon_info_proc_create_verbose_no_pipe_broadcasts_response()
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -1340,7 +1356,8 @@ async fn job_suspend_success_broadcasts_good_response() -> Result<(), Box<dyn st
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server.listeners.create(common::http_listener_config("out-job-susp-ok", listener_port)).await?;
@@ -1407,7 +1424,8 @@ async fn job_suspend_failure_broadcasts_error_response() -> Result<(), Box<dyn s
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -1475,7 +1493,8 @@ async fn job_resume_success_broadcasts_good_response() -> Result<(), Box<dyn std
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server.listeners.create(common::http_listener_config("out-job-res-ok", listener_port)).await?;
@@ -1540,7 +1559,8 @@ async fn job_resume_failure_broadcasts_error_response() -> Result<(), Box<dyn st
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -1606,7 +1626,8 @@ async fn job_kill_remove_success_broadcasts_good_response() -> Result<(), Box<dy
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server.listeners.create(common::http_listener_config("out-job-kill-ok", listener_port)).await?;
@@ -1669,7 +1690,8 @@ async fn job_kill_remove_failure_broadcasts_error_response()
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -1799,7 +1821,8 @@ async fn job_died_no_broadcast() -> Result<(), Box<dyn std::error::Error>> {
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server.listeners.create(common::http_listener_config("out-job-died", listener_port)).await?;
@@ -1862,7 +1885,8 @@ async fn command_output_happy_path_broadcasts_response() -> Result<(), Box<dyn s
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server.listeners.create(common::http_listener_config("out-output-ok", listener_port)).await?;
@@ -1942,7 +1966,8 @@ async fn command_output_empty_does_not_broadcast() -> Result<(), Box<dyn std::er
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -2008,7 +2033,8 @@ async fn command_error_win32_known_code_broadcasts_error() -> Result<(), Box<dyn
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -2081,7 +2107,8 @@ async fn command_error_win32_unknown_code_broadcasts_numeric()
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -2149,7 +2176,8 @@ async fn command_error_token_empty_vault_broadcasts_message()
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -2218,7 +2246,8 @@ async fn command_error_token_other_status_broadcasts_hex() -> Result<(), Box<dyn
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -2287,7 +2316,8 @@ async fn command_error_coffee_no_broadcast() -> Result<(), Box<dyn std::error::E
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server.listeners.create(common::http_listener_config("out-err-coffee", listener_port)).await?;
@@ -2347,7 +2377,8 @@ async fn command_error_unknown_class_no_broadcast() -> Result<(), Box<dyn std::e
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -2413,7 +2444,8 @@ async fn kill_date_callback_marks_agent_dead_and_broadcasts()
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -2493,7 +2525,8 @@ async fn sleep_callback_updates_agent_and_broadcasts() -> Result<(), Box<dyn std
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server.listeners.create(common::http_listener_config("out-sleep-test", listener_port)).await?;
@@ -2578,7 +2611,8 @@ async fn config_kill_date_set_broadcasts_and_updates_agent()
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server.listeners.create(common::http_listener_config("out-cfg-kd-set", listener_port)).await?;
@@ -2653,7 +2687,8 @@ async fn config_kill_date_zero_disables_and_broadcasts() -> Result<(), Box<dyn s
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server.listeners.create(common::http_listener_config("out-cfg-kd-zero", listener_port)).await?;
@@ -2725,7 +2760,8 @@ async fn config_working_hours_set_broadcasts_and_updates() -> Result<(), Box<dyn
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server.listeners.create(common::http_listener_config("out-cfg-wh-set", listener_port)).await?;
@@ -2797,7 +2833,8 @@ async fn config_working_hours_zero_disables() -> Result<(), Box<dyn std::error::
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server.listeners.create(common::http_listener_config("out-cfg-wh-zero", listener_port)).await?;
@@ -2868,7 +2905,8 @@ async fn config_memory_alloc_broadcasts_value() -> Result<(), Box<dyn std::error
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -2944,7 +2982,8 @@ async fn config_invalid_key_returns_error() -> Result<(), Box<dyn std::error::Er
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server.listeners.create(common::http_listener_config("out-cfg-bad-key", listener_port)).await?;
@@ -3007,7 +3046,8 @@ async fn job_list_malformed_incomplete_row_returns_error_no_broadcast()
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -3080,7 +3120,8 @@ async fn job_list_callback_single_job_broadcasts_one_row() -> Result<(), Box<dyn
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server.listeners.create(common::http_listener_config("out-job-single", listener_port)).await?;
@@ -3171,7 +3212,8 @@ async fn job_list_callback_three_jobs_broadcasts_all_rows() -> Result<(), Box<dy
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server.listeners.create(common::http_listener_config("out-job-three", listener_port)).await?;
@@ -3270,7 +3312,8 @@ async fn job_unknown_subcommand_returns_error() -> Result<(), Box<dyn std::error
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server.listeners.create(common::http_listener_config("out-job-unknown", listener_port)).await?;
@@ -3436,7 +3479,8 @@ async fn config_memory_execute_broadcasts_value() -> Result<(), Box<dyn std::err
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server.listeners.create(common::http_listener_config("out-cfg-memexec", listener_port)).await?;
@@ -3506,7 +3550,8 @@ async fn config_inject_spawn64_broadcasts_path() -> Result<(), Box<dyn std::erro
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server.listeners.create(common::http_listener_config("out-cfg-spawn64", listener_port)).await?;
@@ -3576,7 +3621,8 @@ async fn config_inject_spawn32_broadcasts_path() -> Result<(), Box<dyn std::erro
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server.listeners.create(common::http_listener_config("out-cfg-spawn32", listener_port)).await?;
@@ -3647,7 +3693,8 @@ async fn config_spf_thread_start_broadcasts_module_symbol() -> Result<(), Box<dy
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -3715,7 +3762,8 @@ async fn config_sleep_technique_broadcasts_value() -> Result<(), Box<dyn std::er
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -3788,7 +3836,8 @@ async fn config_coffee_veh_true_broadcasts_enabled() -> Result<(), Box<dyn std::
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -3858,7 +3907,8 @@ async fn config_coffee_threaded_false_broadcasts_disabled() -> Result<(), Box<dy
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -3927,7 +3977,8 @@ async fn config_inject_technique_broadcasts_value() -> Result<(), Box<dyn std::e
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -4001,7 +4052,8 @@ async fn config_inject_spoof_addr_broadcasts_module_symbol()
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -4069,7 +4121,8 @@ async fn config_implant_verbose_broadcasts_value() -> Result<(), Box<dyn std::er
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server.listeners.create(common::http_listener_config("out-cfg-verbose", listener_port)).await?;
@@ -4139,7 +4192,8 @@ async fn command_output_empty_payload_returns_error_no_broadcast()
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -4202,7 +4256,8 @@ async fn command_output_truncated_length_prefix_returns_error_no_broadcast()
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -4265,7 +4320,8 @@ async fn command_output_length_exceeds_payload_returns_error_no_broadcast()
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -4334,7 +4390,8 @@ async fn command_output_u32_max_length_prefix_returns_error_no_broadcast()
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -4403,7 +4460,8 @@ async fn command_error_win32_truncated_body_returns_error_no_broadcast()
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -4468,7 +4526,8 @@ async fn command_error_token_truncated_body_returns_error_no_broadcast()
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -4535,7 +4594,8 @@ async fn sleep_callback_empty_payload_returns_error_no_broadcast()
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server.listeners.create(common::http_listener_config("out-sleep-empty", listener_port)).await?;
@@ -4595,7 +4655,8 @@ async fn sleep_callback_truncated_missing_jitter_returns_error_no_broadcast()
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server.listeners.create(common::http_listener_config("out-sleep-trunc", listener_port)).await?;
@@ -4660,7 +4721,8 @@ async fn command_output_credential_pattern_creates_loot_record()
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -4775,7 +4837,8 @@ async fn command_output_pwdump_hash_creates_loot_record() -> Result<(), Box<dyn 
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server.listeners.create(common::http_listener_config("out-cred-pwdump", listener_port)).await?;
@@ -4873,7 +4936,8 @@ async fn command_output_no_credentials_creates_no_loot() -> Result<(), Box<dyn s
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server.listeners.create(common::http_listener_config("out-cred-none", listener_port)).await?;

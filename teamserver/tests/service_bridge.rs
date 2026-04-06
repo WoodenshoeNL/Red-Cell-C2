@@ -448,9 +448,10 @@ async fn service_bridge_rate_limiter_is_independent_from_operator_ws() {
 
     // Now try an operator WebSocket login — it should NOT be rate-limited.
     let url = format!("ws://127.0.0.1:{}/havoc", addr.port());
-    let (mut operator, _) = tokio_tungstenite::connect_async(&url)
+    let (raw_operator_, _) = tokio_tungstenite::connect_async(&url)
         .await
         .expect("operator ws connect should succeed even after service bridge lockout");
+    let mut operator = common::WsSession::new(raw_operator_);
 
     // Use the common login helper which sends a properly formatted operator
     // login and waits up to 30 s for the Argon2id-heavy response — the

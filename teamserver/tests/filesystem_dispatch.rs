@@ -198,7 +198,8 @@ async fn dir_callback_broadcasts_directory_listing() -> Result<(), Box<dyn std::
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server.listeners.create(common::http_listener_config("fs-dir-test", listener_port)).await?;
@@ -267,7 +268,8 @@ async fn upload_callback_broadcasts_upload_message() -> Result<(), Box<dyn std::
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server.listeners.create(common::http_listener_config("fs-upload-test", listener_port)).await?;
@@ -336,7 +338,8 @@ async fn cat_callback_success_broadcasts_file_content() -> Result<(), Box<dyn st
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server.listeners.create(common::http_listener_config("fs-cat-test", listener_port)).await?;
@@ -398,7 +401,8 @@ async fn getpwd_callback_broadcasts_current_directory() -> Result<(), Box<dyn st
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server.listeners.create(common::http_listener_config("fs-pwd-test", listener_port)).await?;
@@ -474,7 +478,8 @@ async fn download_flow_emits_progress_loot_and_complete_events()
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server

@@ -67,7 +67,7 @@ fn legacy_ctr_test_profile() -> red_cell_common::config::Profile {
 /// Uses the monotonic-CTR profile (default, `AllowLegacyCtr = false`).
 async fn spawn_server(
     listener_name: &str,
-) -> Result<(common::TestServer, u16, reqwest::Client, common::WsClient), Box<dyn std::error::Error>>
+) -> Result<(common::TestServer, u16, reqwest::Client, common::WsSession), Box<dyn std::error::Error>>
 {
     spawn_server_with_profile(listener_name, monotonic_test_profile()).await
 }
@@ -76,14 +76,15 @@ async fn spawn_server(
 async fn spawn_server_with_profile(
     listener_name: &str,
     profile: red_cell_common::config::Profile,
-) -> Result<(common::TestServer, u16, reqwest::Client, common::WsClient), Box<dyn std::error::Error>>
+) -> Result<(common::TestServer, u16, reqwest::Client, common::WsSession), Box<dyn std::error::Error>>
 {
     let server = common::spawn_test_server(profile).await?;
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
     use tokio_tungstenite::connect_async;
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server

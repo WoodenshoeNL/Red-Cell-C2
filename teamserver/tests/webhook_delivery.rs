@@ -117,9 +117,10 @@ async fn ws_login(
     addr: SocketAddr,
     username: &str,
     password: &str,
-) -> Result<common::WsClient, Box<dyn std::error::Error>> {
+) -> Result<common::WsSession, Box<dyn std::error::Error>> {
     let url = format!("ws://{addr}/havoc");
-    let (mut socket, _) = tokio_tungstenite::connect_async(&url).await?;
+    let (raw_socket_, _) = tokio_tungstenite::connect_async(&url).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
 
     let payload = serde_json::to_string(&OperatorMessage::Login(Message {
         head: MessageHead {
@@ -130,7 +131,7 @@ async fn ws_login(
         },
         info: LoginInfo { user: username.to_owned(), password: hash_password_sha3(password) },
     }))?;
-    socket.send(WsMessage::Text(payload.into())).await?;
+    socket.socket.send(WsMessage::Text(payload.into())).await?;
     let _ = common::read_operator_message(&mut socket).await?;
     let _ = common::read_operator_snapshot(&mut socket).await?;
 
@@ -202,7 +203,8 @@ async fn failed_login_delivers_webhook_with_failure_status()
 
     // Attempt login with wrong password.
     let url = server.ws_url();
-    let (mut socket, _) = tokio_tungstenite::connect_async(&url).await?;
+    let (raw_socket_, _) = tokio_tungstenite::connect_async(&url).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     let payload = serde_json::to_string(&OperatorMessage::Login(Message {
         head: MessageHead {
             event: EventCode::InitConnection,
@@ -215,7 +217,7 @@ async fn failed_login_delivers_webhook_with_failure_status()
             password: hash_password_sha3("wrong-password"),
         },
     }))?;
-    socket.send(WsMessage::Text(payload.into())).await?;
+    socket.socket.send(WsMessage::Text(payload.into())).await?;
     let response = common::read_operator_message(&mut socket).await?;
     assert!(
         matches!(response, OperatorMessage::InitConnectionError(_)),

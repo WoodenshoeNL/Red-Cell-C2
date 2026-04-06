@@ -3,7 +3,6 @@ mod common;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use futures_util::SinkExt;
 #[cfg(unix)]
 use interprocess::local_socket::ToNsName as _;
 #[cfg(unix)]
@@ -35,16 +34,15 @@ async fn operator_session_listener_and_mock_demon_round_trip()
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     assert_ne!(listener_port, server.addr.port());
     let client = reqwest::Client::new();
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
 
     common::login(&mut socket).await?;
     common::assert_no_operator_message(&mut socket, Duration::from_millis(200)).await;
 
     // Release the port reservation immediately before the server binds it.
     drop(listener_guard);
-    socket
-        .send(ClientMessage::Text(listener_new_message("operator", listener_port).into()))
-        .await?;
+    socket.send_text(listener_new_message("operator", listener_port)).await?;
 
     let listener_created = common::read_operator_message(&mut socket).await?;
     let OperatorMessage::ListenerNew(message) = listener_created else {
@@ -101,7 +99,8 @@ async fn operator_session_listener_and_mock_demon_round_trip()
 
     // Connect a second operator mid-session and verify the agent appears in the
     // snapshot — mirrors the check already present in the SMB round-trip test.
-    let (mut snapshot_socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_snapshot_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut snapshot_socket = common::WsSession::new(raw_snapshot_socket_);
     common::login(&mut snapshot_socket).await?;
     let snapshot_agent = read_until_operator_message(&mut snapshot_socket, |msg| {
         matches!(msg, OperatorMessage::AgentNew(_))
@@ -115,7 +114,7 @@ async fn operator_session_listener_and_mock_demon_round_trip()
     assert_eq!(snapshot_msg.info.hostname, "wkstn-01");
     snapshot_socket.close(None).await?;
 
-    socket.send(ClientMessage::Text(agent_task_message("2A").into())).await?;
+    socket.send_text(agent_task_message("2A")).await?;
 
     let task_echo = common::read_operator_message(&mut socket).await?;
     let OperatorMessage::AgentTask(message) = task_echo else {
@@ -222,16 +221,15 @@ async fn reconnect_probe_does_not_duplicate_agent_new_and_resumes_callbacks()
 
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
 
     common::login(&mut socket).await?;
     common::assert_no_operator_message(&mut socket, Duration::from_millis(200)).await;
 
     // Create and start an HTTP listener.
     drop(listener_guard);
-    socket
-        .send(ClientMessage::Text(listener_new_message("operator", listener_port).into()))
-        .await?;
+    socket.send_text(listener_new_message("operator", listener_port)).await?;
 
     let _listener_created = common::read_operator_message(&mut socket).await?;
     let _listener_started = common::read_operator_message(&mut socket).await?;
@@ -301,7 +299,7 @@ async fn reconnect_probe_does_not_duplicate_agent_new_and_resumes_callbacks()
     // We do NOT advance ctr_offset here.
 
     // --- Step 4: queue a task so we can verify output delivery ---
-    socket.send(ClientMessage::Text(agent_task_message_for("3B", "ABCDEF01").into())).await?;
+    socket.send_text(agent_task_message_for("3B", "ABCDEF01")).await?;
 
     let task_echo = common::read_operator_message(&mut socket).await?;
     let OperatorMessage::AgentTask(task_msg) = task_echo else {
@@ -358,18 +356,20 @@ async fn two_operators_both_receive_agent_events() -> Result<(), Box<dyn std::er
     let client = reqwest::Client::new();
 
     // Connect operator-1.
-    let (mut op1, _) = connect_async(server.ws_url()).await?;
+    let (raw_op1_, _) = connect_async(server.ws_url()).await?;
+    let mut op1 = common::WsSession::new(raw_op1_);
     common::login_as(&mut op1, "op_alpha", "alpha_pw").await?;
     common::assert_no_operator_message(&mut op1, Duration::from_millis(200)).await;
 
     // Connect operator-2.
-    let (mut op2, _) = connect_async(server.ws_url()).await?;
+    let (raw_op2_, _) = connect_async(server.ws_url()).await?;
+    let mut op2 = common::WsSession::new(raw_op2_);
     common::login_as(&mut op2, "op_beta", "beta_pw").await?;
     common::assert_no_operator_message(&mut op2, Duration::from_millis(200)).await;
 
     // Operator-1 creates an HTTP listener.
     drop(listener_guard);
-    op1.send(ClientMessage::Text(listener_new_message("op_alpha", listener_port).into())).await?;
+    op1.send_text(listener_new_message("op_alpha", listener_port)).await?;
 
     // Wait for the listener to be registered by consuming its creation events on op1.
     let _listener_created =
@@ -425,7 +425,7 @@ async fn two_operators_both_receive_agent_events() -> Result<(), Box<dyn std::er
     assert_eq!(msg2.info.listener, "edge-http");
 
     // Operator-1 sends an AgentTask — both must see the echo.
-    op1.send(ClientMessage::Text(agent_task_message_for("5F", "CAFEBABE").into())).await?;
+    op1.send_text(agent_task_message_for("5F", "CAFEBABE")).await?;
 
     let task_echo_1 =
         read_until_operator_message(&mut op1, |m| matches!(m, OperatorMessage::AgentTask(_)))
@@ -489,16 +489,13 @@ async fn operator_session_smb_listener_and_mock_demon_round_trip()
 
     let pipe_name = unique_pipe_name("operator-round-trip");
     let listener_name = "edge-smb";
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
 
     common::login(&mut socket).await?;
     common::assert_no_operator_message(&mut socket, Duration::from_millis(200)).await;
 
-    socket
-        .send(ClientMessage::Text(
-            listener_new_smb_message("operator", listener_name, &pipe_name).into(),
-        ))
-        .await?;
+    socket.send_text(listener_new_smb_message("operator", listener_name, &pipe_name)).await?;
 
     let listener_created = common::read_operator_message(&mut socket).await?;
     let OperatorMessage::ListenerNew(message) = listener_created else {
@@ -559,7 +556,8 @@ async fn operator_session_smb_listener_and_mock_demon_round_trip()
     assert_eq!(message.info.listener, listener_name);
     assert_eq!(message.info.hostname, "wkstn-01");
 
-    let (mut snapshot_socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_snapshot_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut snapshot_socket = common::WsSession::new(raw_snapshot_socket_);
     common::login(&mut snapshot_socket).await?;
     let snapshot_agent = read_until_operator_message(&mut snapshot_socket, |message| {
         matches!(message, OperatorMessage::AgentNew(_))
@@ -572,7 +570,7 @@ async fn operator_session_smb_listener_and_mock_demon_round_trip()
     assert_eq!(message.info.listener, listener_name);
     snapshot_socket.close(None).await?;
 
-    socket.send(ClientMessage::Text(agent_task_message("2A").into())).await?;
+    socket.send_text(agent_task_message("2A")).await?;
 
     let task_echo = read_until_operator_message(&mut socket, |message| {
         matches!(message, OperatorMessage::AgentTask(_))
@@ -659,16 +657,15 @@ async fn operator_session_dns_listener_and_mock_demon_round_trip()
     let dns_port = free_udp_port();
     let dns_domain = "c2.example.com";
     let listener_name = "edge-dns";
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
 
     common::login(&mut socket).await?;
     common::assert_no_operator_message(&mut socket, Duration::from_millis(200)).await;
 
     // Create a DNS listener via WebSocket.
     socket
-        .send(ClientMessage::Text(
-            listener_new_dns_message("operator", listener_name, dns_port, dns_domain).into(),
-        ))
+        .send_text(listener_new_dns_message("operator", listener_name, dns_port, dns_domain))
         .await?;
 
     let listener_created = common::read_operator_message(&mut socket).await?;
@@ -729,7 +726,8 @@ async fn operator_session_dns_listener_and_mock_demon_round_trip()
     assert_eq!(message.info.hostname, "wkstn-01");
 
     // 4. Second operator connects and sees agent in snapshot.
-    let (mut snapshot_socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_snapshot_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut snapshot_socket = common::WsSession::new(raw_snapshot_socket_);
     common::login(&mut snapshot_socket).await?;
     let snapshot_agent = read_until_operator_message(&mut snapshot_socket, |msg| {
         matches!(msg, OperatorMessage::AgentNew(_))
@@ -744,7 +742,7 @@ async fn operator_session_dns_listener_and_mock_demon_round_trip()
     snapshot_socket.close(None).await?;
 
     // 5. Operator sends AgentTask.
-    socket.send(ClientMessage::Text(agent_task_message("2A").into())).await?;
+    socket.send_text(agent_task_message("2A")).await?;
 
     let task_echo = common::read_operator_message(&mut socket).await?;
     let OperatorMessage::AgentTask(message) = task_echo else {
@@ -1085,9 +1083,10 @@ fn multi_role_profile() -> Profile {
 
 /// Read the next frame and assert it is a Close frame, indicating RBAC rejection.
 async fn assert_connection_closed_after_rbac_denial(
-    socket: &mut common::WsClient,
+    socket: &mut common::WsSession,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let next = timeout(Duration::from_secs(30), futures_util::StreamExt::next(socket)).await?;
+    let next =
+        timeout(Duration::from_secs(30), futures_util::StreamExt::next(&mut socket.socket)).await?;
     match next {
         Some(Ok(ClientMessage::Close(_))) | None => Ok(()),
         Some(Ok(frame)) => {
@@ -1098,7 +1097,7 @@ async fn assert_connection_closed_after_rbac_denial(
 }
 
 async fn read_until_operator_message<F>(
-    socket: &mut common::WsClient,
+    socket: &mut common::WsSession,
     mut predicate: F,
 ) -> Result<OperatorMessage, Box<dyn std::error::Error>>
 where
@@ -1119,7 +1118,8 @@ where
 #[tokio::test]
 async fn analyst_cannot_send_agent_task_message() -> Result<(), Box<dyn std::error::Error>> {
     let server = common::spawn_test_server(multi_role_profile()).await?;
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login_as(&mut socket, "analyst", "analystpw").await?;
 
     let task_msg = serde_json::to_string(&OperatorMessage::AgentTask(Message {
@@ -1137,7 +1137,7 @@ async fn analyst_cannot_send_agent_task_message() -> Result<(), Box<dyn std::err
             ..AgentTaskInfo::default()
         },
     }))?;
-    socket.send(ClientMessage::Text(task_msg.into())).await?;
+    socket.send_text(task_msg).await?;
 
     assert_connection_closed_after_rbac_denial(&mut socket).await?;
 
@@ -1151,7 +1151,8 @@ async fn analyst_cannot_send_agent_task_message() -> Result<(), Box<dyn std::err
 #[tokio::test]
 async fn analyst_cannot_create_listener() -> Result<(), Box<dyn std::error::Error>> {
     let server = common::spawn_test_server(multi_role_profile()).await?;
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login_as(&mut socket, "analyst", "analystpw").await?;
 
     let msg = serde_json::to_string(&OperatorMessage::ListenerNew(Message {
@@ -1167,7 +1168,7 @@ async fn analyst_cannot_create_listener() -> Result<(), Box<dyn std::error::Erro
             ..ListenerInfo::default()
         },
     }))?;
-    socket.send(ClientMessage::Text(msg.into())).await?;
+    socket.send_text(msg).await?;
 
     assert_connection_closed_after_rbac_denial(&mut socket).await?;
 
@@ -1181,7 +1182,8 @@ async fn analyst_cannot_create_listener() -> Result<(), Box<dyn std::error::Erro
 #[tokio::test]
 async fn analyst_cannot_edit_listener() -> Result<(), Box<dyn std::error::Error>> {
     let server = common::spawn_test_server(multi_role_profile()).await?;
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login_as(&mut socket, "analyst", "analystpw").await?;
 
     let msg = serde_json::to_string(&OperatorMessage::ListenerEdit(Message {
@@ -1197,7 +1199,7 @@ async fn analyst_cannot_edit_listener() -> Result<(), Box<dyn std::error::Error>
             ..ListenerInfo::default()
         },
     }))?;
-    socket.send(ClientMessage::Text(msg.into())).await?;
+    socket.send_text(msg).await?;
 
     assert_connection_closed_after_rbac_denial(&mut socket).await?;
 
@@ -1211,7 +1213,8 @@ async fn analyst_cannot_edit_listener() -> Result<(), Box<dyn std::error::Error>
 #[tokio::test]
 async fn analyst_cannot_remove_listener() -> Result<(), Box<dyn std::error::Error>> {
     let server = common::spawn_test_server(multi_role_profile()).await?;
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login_as(&mut socket, "analyst", "analystpw").await?;
 
     let msg = serde_json::to_string(&OperatorMessage::ListenerRemove(Message {
@@ -1223,7 +1226,7 @@ async fn analyst_cannot_remove_listener() -> Result<(), Box<dyn std::error::Erro
         },
         info: NameInfo { name: "edge-http".to_owned() },
     }))?;
-    socket.send(ClientMessage::Text(msg.into())).await?;
+    socket.send_text(msg).await?;
 
     assert_connection_closed_after_rbac_denial(&mut socket).await?;
 
@@ -1237,7 +1240,8 @@ async fn analyst_cannot_remove_listener() -> Result<(), Box<dyn std::error::Erro
 #[tokio::test]
 async fn analyst_cannot_mark_listener() -> Result<(), Box<dyn std::error::Error>> {
     let server = common::spawn_test_server(multi_role_profile()).await?;
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login_as(&mut socket, "analyst", "analystpw").await?;
 
     let msg = serde_json::to_string(&OperatorMessage::ListenerMark(Message {
@@ -1249,7 +1253,7 @@ async fn analyst_cannot_mark_listener() -> Result<(), Box<dyn std::error::Error>
         },
         info: ListenerMarkInfo { name: "edge-http".to_owned(), mark: "Online".to_owned() },
     }))?;
-    socket.send(ClientMessage::Text(msg.into())).await?;
+    socket.send_text(msg).await?;
 
     assert_connection_closed_after_rbac_denial(&mut socket).await?;
 
@@ -1263,7 +1267,8 @@ async fn analyst_cannot_mark_listener() -> Result<(), Box<dyn std::error::Error>
 #[tokio::test]
 async fn operator_cannot_send_admin_message() -> Result<(), Box<dyn std::error::Error>> {
     let server = common::spawn_test_server(multi_role_profile()).await?;
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login_as(&mut socket, "operator", "operatorpw").await?;
 
     let msg = serde_json::to_string(&OperatorMessage::AgentRemove(Message {
@@ -1275,7 +1280,7 @@ async fn operator_cannot_send_admin_message() -> Result<(), Box<dyn std::error::
         },
         info: FlatInfo::default(),
     }))?;
-    socket.send(ClientMessage::Text(msg.into())).await?;
+    socket.send_text(msg).await?;
 
     assert_connection_closed_after_rbac_denial(&mut socket).await?;
 
@@ -1295,7 +1300,8 @@ async fn wrong_password_receives_error_and_connection_closes()
     use red_cell_common::operator::LoginInfo;
 
     let addr = common::spawn_test_server(multi_role_profile()).await?.addr;
-    let (mut socket, _) = connect_async(format!("ws://{addr}/havoc")).await?;
+    let (raw_socket_, _) = connect_async(format!("ws://{addr}/havoc")).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
 
     // Send correct username but wrong password hash.
     let bad_login = serde_json::to_string(&OperatorMessage::Login(Message {
@@ -1310,13 +1316,14 @@ async fn wrong_password_receives_error_and_connection_closes()
             password: hash_password_sha3("this-is-not-the-right-password"),
         },
     }))?;
-    socket.send(ClientMessage::Text(bad_login.into())).await?;
+    socket.send_text(bad_login).await?;
 
     // Server imposes a 2 s delay on failed logins; Argon2id with OWASP-recommended
     // parameters adds additional latency for the memory-hard hash.
-    let response = timeout(Duration::from_secs(30), futures_util::StreamExt::next(&mut socket))
-        .await?
-        .ok_or("server closed connection without sending a rejection message")??;
+    let response =
+        timeout(Duration::from_secs(30), futures_util::StreamExt::next(&mut socket.socket))
+            .await?
+            .ok_or("server closed connection without sending a rejection message")??;
     let rejection: OperatorMessage = match response {
         ClientMessage::Text(payload) => serde_json::from_str(payload.as_str())?,
         other => return Err(format!("unexpected frame before rejection message: {other:?}").into()),
@@ -1327,7 +1334,8 @@ async fn wrong_password_receives_error_and_connection_closes()
     );
 
     // After the rejection message the server must close the connection.
-    let next = timeout(Duration::from_secs(10), futures_util::StreamExt::next(&mut socket)).await?;
+    let next =
+        timeout(Duration::from_secs(10), futures_util::StreamExt::next(&mut socket.socket)).await?;
     match next {
         Some(Ok(ClientMessage::Close(_))) | None => {}
         Some(Ok(frame)) => {
@@ -1372,13 +1380,15 @@ async fn repeated_wrong_passwords_trigger_rate_limiter_lockout()
 
     // --- Phase 1: exhaust the failure budget ---
     for i in 0..MAX_FAILURES {
-        let (mut socket, _) = connect_async(format!("ws://{addr}/havoc")).await?;
-        socket.send(ClientMessage::Text(bad_login.clone().into())).await?;
+        let (raw_socket_, _) = connect_async(format!("ws://{addr}/havoc")).await?;
+        let mut socket = common::WsSession::new(raw_socket_);
+        socket.send_text(bad_login.clone()).await?;
 
         // Each failed login incurs a 2 s server-side delay plus Argon2id hashing time.
-        let response = timeout(Duration::from_secs(30), futures_util::StreamExt::next(&mut socket))
-            .await?
-            .ok_or(format!("attempt {}: server closed without rejection", i + 1))??;
+        let response =
+            timeout(Duration::from_secs(30), futures_util::StreamExt::next(&mut socket.socket))
+                .await?
+                .ok_or(format!("attempt {}: server closed without rejection", i + 1))??;
         let rejection: OperatorMessage = match response {
             ClientMessage::Text(payload) => serde_json::from_str(payload.as_str())?,
             other => return Err(format!("attempt {}: unexpected frame: {other:?}", i + 1).into()),
@@ -1391,11 +1401,13 @@ async fn repeated_wrong_passwords_trigger_rate_limiter_lockout()
 
         // Wait for the close frame so the server records the failure before we
         // open the next connection.
-        let _ = timeout(Duration::from_secs(10), futures_util::StreamExt::next(&mut socket)).await;
+        let _ = timeout(Duration::from_secs(10), futures_util::StreamExt::next(&mut socket.socket))
+            .await;
     }
 
     // --- Phase 2: the next attempt must be rejected by the rate limiter ---
-    let (mut socket, _) = connect_async(format!("ws://{addr}/havoc")).await?;
+    let (raw_socket_, _) = connect_async(format!("ws://{addr}/havoc")).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     // Start timing only after the connection is established so that TCP setup
     // latency and OS scheduler jitter from parallel Argon2id hashing do not
     // inflate the measurement.
@@ -1404,9 +1416,10 @@ async fn repeated_wrong_passwords_trigger_rate_limiter_lockout()
     // The rate-limited path rejects *before* reading a login frame, so we
     // intentionally do NOT send any login message. The server should push an
     // error and close the socket on its own.
-    let response = timeout(Duration::from_secs(10), futures_util::StreamExt::next(&mut socket))
-        .await?
-        .ok_or("rate-limited attempt: server closed without sending rejection")?;
+    let response =
+        timeout(Duration::from_secs(10), futures_util::StreamExt::next(&mut socket.socket))
+            .await?
+            .ok_or("rate-limited attempt: server closed without sending rejection")?;
 
     // Verify the rejection is an InitConnectionError.
     match response? {
@@ -1436,7 +1449,8 @@ async fn repeated_wrong_passwords_trigger_rate_limiter_lockout()
     let _ = start; // suppress unused-variable lint
 
     // The server must close the connection after the rejection.
-    let next = timeout(Duration::from_secs(10), futures_util::StreamExt::next(&mut socket)).await?;
+    let next =
+        timeout(Duration::from_secs(10), futures_util::StreamExt::next(&mut socket.socket)).await?;
     match next {
         Some(Ok(ClientMessage::Close(_))) | None => {}
         Some(Ok(frame)) => {
@@ -1456,7 +1470,8 @@ async fn repeated_wrong_passwords_trigger_rate_limiter_lockout()
 async fn analyst_can_send_chat_message_without_disconnection()
 -> Result<(), Box<dyn std::error::Error>> {
     let addr = common::spawn_test_server(multi_role_profile()).await?.addr;
-    let (mut socket, _) = connect_async(format!("ws://{addr}/havoc")).await?;
+    let (raw_socket_, _) = connect_async(format!("ws://{addr}/havoc")).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login_as(&mut socket, "analyst", "analystpw").await?;
 
     let msg = serde_json::to_string(&OperatorMessage::ChatMessage(Message {
@@ -1468,7 +1483,7 @@ async fn analyst_can_send_chat_message_without_disconnection()
         },
         info: FlatInfo::default(),
     }))?;
-    socket.send(ClientMessage::Text(msg.into())).await?;
+    socket.send_text(msg).await?;
 
     // The server should NOT close the connection — no frame should arrive within the window.
     common::assert_no_operator_message(&mut socket, Duration::from_millis(300)).await;
@@ -1480,7 +1495,8 @@ async fn analyst_can_send_chat_message_without_disconnection()
 async fn admin_can_send_agent_remove_without_disconnection()
 -> Result<(), Box<dyn std::error::Error>> {
     let addr = common::spawn_test_server(multi_role_profile()).await?.addr;
-    let (mut socket, _) = connect_async(format!("ws://{addr}/havoc")).await?;
+    let (raw_socket_, _) = connect_async(format!("ws://{addr}/havoc")).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login_as(&mut socket, "admin", "adminpw").await?;
 
     let msg = serde_json::to_string(&OperatorMessage::AgentRemove(Message {
@@ -1492,12 +1508,13 @@ async fn admin_can_send_agent_remove_without_disconnection()
         },
         info: FlatInfo::default(),
     }))?;
-    socket.send(ClientMessage::Text(msg.into())).await?;
+    socket.send_text(msg).await?;
 
     // The server must NOT close the connection — Admin is allowed to send AgentRemove.
     // It may respond with a message (e.g. error about a missing agent), but the key
     // assertion is that the connection stays open — no Close frame is received.
-    let result = timeout(Duration::from_secs(2), futures_util::StreamExt::next(&mut socket)).await;
+    let result =
+        timeout(Duration::from_secs(2), futures_util::StreamExt::next(&mut socket.socket)).await;
     match result {
         Err(_) => {} // timeout — no message, connection still open ✓
         Ok(Some(Ok(ClientMessage::Close(_)))) => {

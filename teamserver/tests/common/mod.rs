@@ -17,8 +17,9 @@ use red_cell_common::HttpListenerConfig;
 use red_cell_common::OperatorInfo;
 use red_cell_common::config::Profile;
 use red_cell_common::crypto::{
-    AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len, encrypt_agent_data,
-    encrypt_agent_data_at_offset, hash_password_sha3,
+    AGENT_IV_LENGTH, AGENT_KEY_LENGTH, WsEnvelope, ctr_blocks_for_len, derive_ws_hmac_key,
+    encrypt_agent_data, encrypt_agent_data_at_offset, hash_password_sha3, open_ws_frame,
+    seal_ws_frame,
 };
 use red_cell_common::demon::{DemonCommand, DemonEnvelope};
 use red_cell_common::operator::{EventCode, LoginInfo, Message, MessageHead, OperatorMessage};
@@ -26,8 +27,110 @@ use tokio::net::TcpListener;
 use tokio::time::{sleep, timeout};
 use tokio_tungstenite::{WebSocketStream, tungstenite::Message as ClientMessage};
 
-/// A WebSocket client stream connected to the test teamserver.
-pub type WsClient = WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+/// Raw underlying WebSocket stream.
+type RawWsStream = WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// A WebSocket session with HMAC envelope state for post-login frames.
+///
+/// After a successful login the teamserver wraps every outgoing frame in a
+/// `WsEnvelope` (HMAC-SHA256 + monotonic seq).  Clients must likewise wrap
+/// every post-login send.  This struct tracks the per-session key and sequence
+/// counters so that [`login`], [`login_as`], [`read_operator_message`], and
+/// direct sends all stay in sync.
+///
+/// The inner `socket` field is intentionally `pub` so that tests which need
+/// low-level access (e.g. `socket.next()` for raw close frames) can reach it
+/// directly.
+pub struct WsSession {
+    pub socket: RawWsStream,
+    hmac_key: Option<[u8; 32]>,
+    send_seq: u64,
+    recv_seq: Option<u64>,
+}
+
+impl WsSession {
+    /// Wrap a raw WebSocket stream into a fresh session (no HMAC key yet).
+    pub fn new(socket: RawWsStream) -> Self {
+        Self { socket, hmac_key: None, send_seq: 0, recv_seq: None }
+    }
+
+    /// Send a JSON string, HMAC-wrapping it when the session key is available.
+    pub async fn send_text(
+        &mut self,
+        json: impl Into<String>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let json = json.into();
+        if let Some(key) = &self.hmac_key {
+            let seq = self.send_seq;
+            self.send_seq += 1;
+            let envelope = seal_ws_frame(key, seq, &json);
+            let wire = serde_json::to_string(&envelope)?;
+            self.socket.send(ClientMessage::Text(wire.into())).await?;
+        } else {
+            self.socket.send(ClientMessage::Text(json.into())).await?;
+        }
+        Ok(())
+    }
+
+    /// Send a raw WebSocket frame, bypassing HMAC (for pre-login or close frames).
+    pub async fn send_frame(
+        &mut self,
+        frame: ClientMessage,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.socket.send(frame).await?;
+        Ok(())
+    }
+
+    /// Close the WebSocket connection.
+    pub async fn close(
+        &mut self,
+        code: Option<tokio_tungstenite::tungstenite::protocol::CloseFrame>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.socket.close(code).await?;
+        Ok(())
+    }
+
+    /// Receive the next `OperatorMessage`, unwrapping the `WsEnvelope` when
+    /// the HMAC key is established (i.e. after `InitConnectionSuccess`).
+    ///
+    /// On the first successful `InitConnectionSuccess` frame the session key
+    /// is derived from the embedded token and stored for all subsequent frames.
+    pub async fn recv_msg(&mut self) -> Result<OperatorMessage, Box<dyn std::error::Error>> {
+        let next = timeout(Duration::from_secs(30), self.socket.next()).await?;
+        let frame = next.ok_or_else(|| "missing websocket frame".to_owned())??;
+        match frame {
+            ClientMessage::Text(payload) => {
+                if let Some(key) = &self.hmac_key {
+                    let envelope: WsEnvelope = serde_json::from_str(payload.as_str())?;
+                    let inner_json = open_ws_frame(key, &envelope, self.recv_seq)
+                        .map_err(|e| format!("HMAC verification failed: {e}"))?;
+                    self.recv_seq = Some(envelope.seq);
+                    Ok(serde_json::from_str(&inner_json)?)
+                } else {
+                    let msg: OperatorMessage = serde_json::from_str(payload.as_str())?;
+                    if let OperatorMessage::InitConnectionSuccess(ref m) = msg {
+                        if let Some(token) =
+                            m.info.message.split_once("SessionToken=").map(|(_, t)| t)
+                        {
+                            self.hmac_key = Some(derive_ws_hmac_key(token));
+                        }
+                    }
+                    Ok(msg)
+                }
+            }
+            other => Err(format!("unexpected websocket frame: {other:?}").into()),
+        }
+    }
+}
+
+/// Type alias kept for backward compatibility with test files that reference `common::WsClient`.
+pub type WsClient = WsSession;
+
+/// Connect a WebSocket client to `url` and return a fresh [`WsSession`].
+pub async fn connect_ws(url: &str) -> Result<WsSession, Box<dyn std::error::Error>> {
+    let (inner, _) = tokio_tungstenite::connect_async(url).await?;
+    Ok(WsSession::new(inner))
+}
 
 /// Handles returned by [`spawn_test_server`] so tests can interact with
 /// the teamserver's listener manager and agent registry without duplicating
@@ -110,13 +213,13 @@ pub async fn spawn_test_server(profile: Profile) -> Result<TestServer, Box<dyn s
 
 /// Authenticate over WebSocket as `"operator"` / `"password1234"` and consume the
 /// success + snapshot frames.
-pub async fn login(socket: &mut WsClient) -> Result<(), Box<dyn std::error::Error>> {
-    login_as(socket, "operator", "password1234").await
+pub async fn login(session: &mut WsSession) -> Result<(), Box<dyn std::error::Error>> {
+    login_as(session, "operator", "password1234").await
 }
 
 /// Authenticate over WebSocket as `username`/`password`; consume the success + snapshot frames.
 pub async fn login_as(
-    socket: &mut WsClient,
+    session: &mut WsSession,
     username: &str,
     password: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -129,37 +232,32 @@ pub async fn login_as(
         },
         info: LoginInfo { user: username.to_owned(), password: hash_password_sha3(password) },
     }))?;
-    socket.send(ClientMessage::Text(payload.into())).await?;
-    let response = read_operator_message(socket).await?;
+    // Login message is always sent plain (pre-auth, no HMAC key yet).
+    session.socket.send(ClientMessage::Text(payload.into())).await?;
+    let response = read_operator_message(session).await?;
     assert!(
         matches!(response, OperatorMessage::InitConnectionSuccess(_)),
         "expected InitConnectionSuccess, got {response:?}"
     );
-    let _snapshot = read_operator_snapshot(socket).await?;
+    let _snapshot = read_operator_snapshot(session).await?;
     Ok(())
 }
 
 /// Read the next operator WebSocket frame, expecting a JSON [`OperatorMessage`].
+///
+/// Automatically unwraps `WsEnvelope` frames after login.
 pub async fn read_operator_message(
-    socket: &mut WsClient,
+    session: &mut WsSession,
 ) -> Result<OperatorMessage, Box<dyn std::error::Error>> {
-    // Argon2id with OWASP-recommended parameters (64 MiB, t=3, p=4) makes
-    // login verification measurably slower; allow enough time for the server
-    // to complete the memory-hard hash before declaring a timeout.
-    let next = timeout(Duration::from_secs(30), socket.next()).await?;
-    let frame = next.ok_or_else(|| "missing websocket frame".to_owned())??;
-    match frame {
-        ClientMessage::Text(payload) => Ok(serde_json::from_str(payload.as_str())?),
-        other => Err(format!("unexpected websocket frame: {other:?}").into()),
-    }
+    session.recv_msg().await
 }
 
 /// Read the next operator WebSocket frame and parse it as an operator snapshot
 /// (`InitConnectionInfo`), returning the list of connected operators.
 pub async fn read_operator_snapshot(
-    socket: &mut WsClient,
+    session: &mut WsSession,
 ) -> Result<Vec<OperatorInfo>, Box<dyn std::error::Error>> {
-    let message = read_operator_message(socket).await?;
+    let message = read_operator_message(session).await?;
     let OperatorMessage::InitConnectionInfo(message) = message else {
         return Err("expected operator snapshot event".into());
     };
@@ -175,8 +273,8 @@ pub async fn read_operator_snapshot(
 }
 
 /// Assert that no operator message arrives within `wait`.
-pub async fn assert_no_operator_message(socket: &mut WsClient, wait: Duration) {
-    let result = timeout(wait, socket.next()).await;
+pub async fn assert_no_operator_message(session: &mut WsSession, wait: Duration) {
+    let result = timeout(wait, session.socket.next()).await;
     assert!(result.is_err(), "unexpected operator message during empty session snapshot");
 }
 

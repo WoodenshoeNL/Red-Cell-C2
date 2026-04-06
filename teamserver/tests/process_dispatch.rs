@@ -227,7 +227,8 @@ async fn ppid_spoof_callback_broadcasts_good_and_updates_agent()
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -301,7 +302,8 @@ async fn process_list_callback_broadcasts_process_table() -> Result<(), Box<dyn 
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server.listeners.create(common::http_listener_config("proc-list-test", listener_port)).await?;
@@ -364,7 +366,8 @@ async fn proc_create_verbose_success_broadcasts_info() -> Result<(), Box<dyn std
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -427,7 +430,8 @@ async fn proc_kill_success_broadcasts_good() -> Result<(), Box<dyn std::error::E
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server.listeners.create(common::http_listener_config("proc-kill-test", listener_port)).await?;
@@ -483,7 +487,8 @@ async fn proc_kill_failure_broadcasts_error() -> Result<(), Box<dyn std::error::
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -539,7 +544,8 @@ async fn proc_modules_callback_broadcasts_module_rows() -> Result<(), Box<dyn st
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -605,7 +611,8 @@ async fn proc_grep_callback_broadcasts_grep_rows() -> Result<(), Box<dyn std::er
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server.listeners.create(common::http_listener_config("proc-grep-test", listener_port)).await?;
@@ -667,7 +674,8 @@ async fn inject_shellcode_success_broadcasts_good() -> Result<(), Box<dyn std::e
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -723,7 +731,8 @@ async fn inject_shellcode_failure_broadcasts_error() -> Result<(), Box<dyn std::
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -780,7 +789,8 @@ async fn inject_dll_success_broadcasts_good() -> Result<(), Box<dyn std::error::
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -836,7 +846,8 @@ async fn inject_dll_arch_mismatch_broadcasts_error() -> Result<(), Box<dyn std::
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -892,7 +903,8 @@ async fn spawn_dll_success_broadcasts_good() -> Result<(), Box<dyn std::error::E
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -948,7 +960,8 @@ async fn spawn_dll_failure_broadcasts_error() -> Result<(), Box<dyn std::error::
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -1004,7 +1017,8 @@ async fn proc_memory_callback_broadcasts_memory_rows() -> Result<(), Box<dyn std
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -1079,7 +1093,8 @@ async fn specter_process_list_le_payload_parses_correctly() -> Result<(), Box<dy
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server

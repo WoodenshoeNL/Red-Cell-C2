@@ -3,7 +3,7 @@ mod common;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use futures_util::{SinkExt, StreamExt};
+use futures_util::StreamExt;
 use red_cell::Job;
 use red_cell_common::config::Profile;
 use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH};
@@ -55,7 +55,7 @@ fn agent_remove_payload(demon_id: &str) -> String {
 /// Collect all operator WebSocket messages that arrive within `window`, up to
 /// `max_frames`.  Returns without error once the timeout expires.
 async fn collect_messages_within(
-    socket: &mut common::WsClient,
+    socket: &mut common::WsSession,
     window: Duration,
     max_frames: usize,
 ) -> Vec<OperatorMessage> {
@@ -74,7 +74,7 @@ async fn collect_messages_within(
 /// Read operator WebSocket messages until `predicate` matches, discarding
 /// non-matching messages.  Gives up after 20 frames.
 async fn read_until<F>(
-    socket: &mut common::WsClient,
+    socket: &mut common::WsSession,
     mut predicate: F,
 ) -> Result<OperatorMessage, Box<dyn std::error::Error>>
 where
@@ -112,7 +112,8 @@ async fn agent_remove_cleans_up_all_state() -> Result<(), Box<dyn std::error::Er
     common::wait_for_listener(listener_port).await?;
 
     // --- Connect operator WebSocket ---
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     // --- Register agent via Demon init ---
@@ -181,7 +182,7 @@ async fn agent_remove_cleans_up_all_state() -> Result<(), Box<dyn std::error::Er
     );
 
     // --- Issue AgentRemove via operator WebSocket ---
-    socket.send(ClientMessage::Text(agent_remove_payload("CAFEBABE").into())).await?;
+    socket.send_text(agent_remove_payload("CAFEBABE")).await?;
 
     // --- Wait for AgentRemove broadcast ---
     let remove_event = timeout(Duration::from_secs(5), async {
@@ -293,11 +294,12 @@ async fn agent_remove_rejected_for_operator_role() -> Result<(), Box<dyn std::er
     let _ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     // --- Connect as the Operator-role user ---
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login_as(&mut socket, "lowpriv", "lowprivpass").await?;
 
     // --- Send AgentRemove (should be rejected) ---
-    socket.send(ClientMessage::Text(agent_remove_payload("CAFE0001").into())).await?;
+    socket.send_text(agent_remove_payload("CAFE0001")).await?;
 
     // The server should close the connection on RBAC failure. Collect any
     // remaining frames — none of them should be an AgentRemove broadcast.
@@ -311,7 +313,7 @@ async fn agent_remove_rejected_for_operator_role() -> Result<(), Box<dyn std::er
 
     // The WebSocket should be closed (or closing) after the RBAC rejection.
     // Verify by trying to read one more frame — it should fail or be a Close.
-    let frame = timeout(Duration::from_secs(1), socket.next()).await;
+    let frame = timeout(Duration::from_secs(1), socket.socket.next()).await;
     match frame {
         Ok(Some(Ok(ClientMessage::Close(_)))) | Ok(None) | Err(_) => { /* expected */ }
         other => panic!("expected socket closure after RBAC rejection, got: {other:?}"),
@@ -359,11 +361,12 @@ async fn agent_remove_rejected_for_analyst_role() -> Result<(), Box<dyn std::err
     let _ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     // --- Connect as the Analyst-role user ---
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login_as(&mut socket, "lowpriv", "lowprivpass").await?;
 
     // --- Send AgentRemove (should be rejected) ---
-    socket.send(ClientMessage::Text(agent_remove_payload("CAFE0002").into())).await?;
+    socket.send_text(agent_remove_payload("CAFE0002")).await?;
 
     // Collect remaining frames — none should be an AgentRemove broadcast.
     let messages = collect_messages_within(&mut socket, Duration::from_secs(2), 10).await;
@@ -399,12 +402,13 @@ async fn agent_remove_nonexistent_id_does_not_broadcast() -> Result<(), Box<dyn 
     let server = common::spawn_test_server(admin_profile()).await?;
 
     // --- Connect operator WebSocket ---
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     // --- Send AgentRemove for an ID that was never registered ---
     let fake_id = "DEAD1234";
-    socket.send(ClientMessage::Text(agent_remove_payload(fake_id).into())).await?;
+    socket.send_text(agent_remove_payload(fake_id)).await?;
 
     // --- Collect messages that arrive within a short window ---
     // A TeamserverLog error event may arrive; an AgentRemove must NOT.
@@ -419,7 +423,7 @@ async fn agent_remove_nonexistent_id_does_not_broadcast() -> Result<(), Box<dyn 
     // --- Verify the server is still alive: send a second request and confirm
     //     it is handled without panicking (another non-existent remove).     ---
     let fake_id_2 = "DEAD5678";
-    socket.send(ClientMessage::Text(agent_remove_payload(fake_id_2).into())).await?;
+    socket.send_text(agent_remove_payload(fake_id_2)).await?;
     let messages2 = collect_messages_within(&mut socket, Duration::from_millis(500), 10).await;
     for msg in &messages2 {
         assert!(

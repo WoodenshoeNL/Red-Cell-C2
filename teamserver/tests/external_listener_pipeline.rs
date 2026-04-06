@@ -2,7 +2,6 @@ mod common;
 
 use std::time::Duration;
 
-use futures_util::SinkExt;
 use red_cell::{
     AgentRegistry, ApiRuntime, AuditWebhookNotifier, AuthService, Database, EventBus,
     ListenerManager, LoginRateLimiter, MAX_AGENT_MESSAGE_LEN, OperatorConnectionManager,
@@ -16,7 +15,7 @@ use red_cell_common::operator::{AgentTaskInfo, EventCode, Message, MessageHead, 
 use reqwest::Client;
 use tokio::net::TcpListener;
 use tokio::time::timeout;
-use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
+use tokio_tungstenite::connect_async;
 
 /// Spawn a test server using [`build_router`] so the teamserver fallback handler
 /// is active (required for External C2 bridge endpoint routing).
@@ -345,7 +344,8 @@ async fn external_listener_task_delivery_happy_path() -> Result<(), Box<dyn std:
     // Legacy CTR mode: offset stays at 0.
 
     // ── Connect operator via WebSocket and login ─────────────────────────────
-    let (mut socket, _) = connect_async(format!("ws://{}/havoc", server.addr)).await?;
+    let (raw_socket_, _) = connect_async(format!("ws://{}/havoc", server.addr)).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     // Consume the AgentNew event broadcast by the init above.
@@ -379,7 +379,7 @@ async fn external_listener_task_delivery_happy_path() -> Result<(), Box<dyn std:
             ..AgentTaskInfo::default()
         },
     }))?;
-    socket.send(ClientMessage::Text(task_msg.into())).await?;
+    socket.send_text(task_msg).await?;
 
     // ── Consume the task-echo broadcast ──────────────────────────────────────
     let task_echo = common::read_operator_message(&mut socket).await?;
@@ -532,7 +532,8 @@ async fn external_listener_task_consumed_after_download() -> Result<(), Box<dyn 
     // Legacy CTR mode: offset stays at 0.
 
     // ── Connect operator and queue a task ─────────────────────────────────────
-    let (mut socket, _) = connect_async(format!("ws://{}/havoc", server.addr)).await?;
+    let (raw_socket_, _) = connect_async(format!("ws://{}/havoc", server.addr)).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     // Consume the AgentNew event (may arrive after login snapshot).
@@ -561,7 +562,7 @@ async fn external_listener_task_consumed_after_download() -> Result<(), Box<dyn 
             ..AgentTaskInfo::default()
         },
     }))?;
-    socket.send(ClientMessage::Text(task_msg.into())).await?;
+    socket.send_text(task_msg).await?;
 
     // Consume the task echo.
     let task_echo = common::read_operator_message(&mut socket).await?;

@@ -562,7 +562,7 @@ mod tests {
         let db = Database::connect_in_memory().await.expect("db");
         seed_agents(&db, &[101]).await;
         let repo = db.agent_responses();
-        let make_record = |request_id: i64, output: &str, received_at: &str| AgentResponseRecord {
+        let make_record = |request_id: u32, output: &str, received_at: &str| AgentResponseRecord {
             id: None,
             agent_id: 101,
             command_id: 21,

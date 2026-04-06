@@ -57,7 +57,7 @@ struct NetTestHarness {
     key: [u8; AGENT_KEY_LENGTH],
     iv: [u8; AGENT_IV_LENGTH],
     ctr_offset: u64,
-    socket: common::WsClient,
+    socket: common::WsSession,
 }
 
 impl NetTestHarness {
@@ -66,7 +66,8 @@ impl NetTestHarness {
         let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
         let client = reqwest::Client::new();
 
-        let (mut socket, _) = connect_async(server.ws_url()).await?;
+        let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+        let mut socket = common::WsSession::new(raw_socket_);
         common::login(&mut socket).await?;
 
         server

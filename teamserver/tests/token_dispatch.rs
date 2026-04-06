@@ -99,7 +99,8 @@ macro_rules! setup_test {
         let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
         let client = reqwest::Client::new();
 
-        let (mut socket, _) = connect_async(server.ws_url()).await?;
+        let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+        let mut socket = common::WsSession::new(raw_socket_);
         common::login(&mut socket).await?;
 
         server.listeners.create(common::http_listener_config($name, listener_port)).await?;

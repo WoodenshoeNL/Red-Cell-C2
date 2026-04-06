@@ -354,6 +354,8 @@ impl std::fmt::Display for WsHmacError {
     }
 }
 
+impl std::error::Error for WsHmacError {}
+
 /// Derive the 32-byte per-session HMAC key from a session token string.
 ///
 /// Uses HKDF-SHA256 with the fixed info label `b"red-cell-ws-hmac-v1"`.

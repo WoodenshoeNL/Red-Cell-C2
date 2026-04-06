@@ -13,7 +13,7 @@ use tokio_tungstenite::connect_async;
 /// Read operator WebSocket messages until `predicate` matches, discarding
 /// non-matching messages.  Gives up after 20 frames.
 async fn read_until<F>(
-    socket: &mut common::WsClient,
+    socket: &mut common::WsSession,
     mut predicate: F,
 ) -> Result<OperatorMessage, Box<dyn std::error::Error>>
 where
@@ -74,7 +74,8 @@ async fn agent_marked_dead_after_liveness_timeout_expires() -> Result<(), Box<dy
     common::wait_for_listener(listener_port).await?;
 
     // --- Connect operator WebSocket ---
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     // --- Register agent via Demon init ---
@@ -193,7 +194,8 @@ async fn active_agent_survives_liveness_sweep_that_kills_stale_peer()
     common::wait_for_listener(listener_port).await?;
 
     // --- Connect operator WebSocket ---
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     let client = reqwest::Client::new();

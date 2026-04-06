@@ -105,7 +105,7 @@ fn pivot_disconnect_failure_payload(child_agent_id: u32) -> Vec<u8> {
 struct PivotTestHarness {
     client: reqwest::Client,
     listener_port: u16,
-    socket: common::WsClient,
+    socket: common::WsSession,
     server: common::TestServer,
     parent_agent_id: u32,
     parent_key: [u8; AGENT_KEY_LENGTH],
@@ -120,7 +120,8 @@ async fn setup_pivot_test(
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server.listeners.create(common::http_listener_config(listener_name, listener_port)).await?;
@@ -822,7 +823,8 @@ async fn pivot_connect_from_unregistered_parent_returns_404()
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server

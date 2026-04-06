@@ -3298,7 +3298,7 @@ havoc.RegisterCommand("scan", "second scan", run_scan)
                     let bad_cb = helper.getattr("raise_error")?.unbind();
 
                     let tracker = PyList::empty(py);
-                    let locals = PyDict::new(py);
+                    let locals = pyo3::types::PyDict::new(py);
                     locals.set_item("_tracker", tracker.clone())?;
                     let good_cb = py.eval(
                         pyo3::ffi::c_str!(
@@ -3828,7 +3828,7 @@ havoc.RegisterCommand("scan", "second scan", run_scan)
                 Python::with_gil(|py| -> PyResult<(Py<PyList>, Py<PyAny>, Py<PyAny>, Py<PyAny>)> {
                     runtime.install_api_module(py)?;
                     let tracker = PyList::empty(py);
-                    let locals = PyDict::new(py);
+                    let locals = pyo3::types::PyDict::new(py);
                     locals.set_item("_tracker", tracker.clone())?;
 
                     let cb1 = py.eval(
@@ -4001,7 +4001,7 @@ havoc.RegisterCommand("scan", "second scan", run_scan)
                     let module = py.import("havoc")?;
                     let agent = module.getattr("Agent")?.call1(("00ABCDEF",))?;
                     // Pass a dict as args — should be rejected.
-                    let dict = PyDict::new(py);
+                    let dict = pyo3::types::PyDict::new(py);
                     match agent.call_method1("task", (1u32, dict)) {
                         Err(err) => Ok(err.to_string()),
                         Ok(_) => Ok("unexpected success".to_owned()),

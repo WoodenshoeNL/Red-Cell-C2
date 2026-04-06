@@ -7,7 +7,7 @@ use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},
 };
-use futures_util::{SinkExt, StreamExt};
+use futures_util::StreamExt;
 use red_cell::{
     AgentRegistry, ApiRuntime, AuditWebhookNotifier, AuthService, Database, EventBus,
     ListenerManager, LoginRateLimiter, OperatorConnectionManager, PayloadBuilderService,
@@ -286,7 +286,7 @@ async fn rest_api_rejects_invalid_api_key_through_build_router() {
 
 /// Helper: build and send a login message over WebSocket.
 async fn send_login(
-    socket: &mut common::WsClient,
+    socket: &mut common::WsSession,
     username: &str,
     password: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -299,16 +299,17 @@ async fn send_login(
         },
         info: LoginInfo { user: username.to_owned(), password: sha3(password) },
     }))?;
-    socket.send(ClientMessage::Text(payload.into())).await?;
+    socket.send_text(payload).await?;
     Ok(())
 }
 
 #[tokio::test]
 async fn websocket_login_succeeds_with_valid_credentials_via_build_router() {
     let addr = spawn_full_router_server(test_profile()).await;
-    let (mut socket, response) = tokio_tungstenite::connect_async(format!("ws://{addr}/havoc"))
+    let (raw_socket_, response) = tokio_tungstenite::connect_async(format!("ws://{addr}/havoc"))
         .await
         .expect("WebSocket handshake should succeed");
+    let mut socket = common::WsSession::new(raw_socket_);
 
     assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
 
@@ -327,9 +328,10 @@ async fn websocket_login_succeeds_with_valid_credentials_via_build_router() {
 #[tokio::test]
 async fn websocket_login_rejected_with_wrong_password_via_build_router() {
     let addr = spawn_full_router_server(test_profile()).await;
-    let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/havoc"))
+    let (raw_socket_, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/havoc"))
         .await
         .expect("WebSocket handshake should succeed");
+    let mut socket = common::WsSession::new(raw_socket_);
 
     send_login(&mut socket, "operator", "wrong-password")
         .await
@@ -337,7 +339,7 @@ async fn websocket_login_rejected_with_wrong_password_via_build_router() {
 
     // The server should respond with an error and close the connection.
     // Allow generous timeout for Argon2id password verification.
-    let msg = timeout(Duration::from_secs(30), socket.next()).await;
+    let msg = timeout(Duration::from_secs(30), socket.socket.next()).await;
     match msg {
         Ok(Some(Ok(ClientMessage::Text(text)))) => {
             let parsed: OperatorMessage =
@@ -360,15 +362,16 @@ async fn websocket_login_rejected_with_wrong_password_via_build_router() {
 #[tokio::test]
 async fn websocket_login_rejected_for_nonexistent_user_via_build_router() {
     let addr = spawn_full_router_server(test_profile()).await;
-    let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/havoc"))
+    let (raw_socket_, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/havoc"))
         .await
         .expect("WebSocket handshake should succeed");
+    let mut socket = common::WsSession::new(raw_socket_);
 
     send_login(&mut socket, "nonexistent", "password1234")
         .await
         .expect("sending login should succeed");
 
-    let msg = timeout(Duration::from_secs(30), socket.next()).await;
+    let msg = timeout(Duration::from_secs(30), socket.socket.next()).await;
     match msg {
         Ok(Some(Ok(ClientMessage::Text(text)))) => {
             let parsed: OperatorMessage =

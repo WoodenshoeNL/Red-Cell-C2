@@ -11,10 +11,9 @@ mod common;
 use std::net::IpAddr;
 use std::time::Duration;
 
-use futures_util::{SinkExt, StreamExt};
 use red_cell_common::crypto::hash_password_sha3;
 use red_cell_common::operator::{EventCode, LoginInfo, Message, MessageHead, OperatorMessage};
-use tokio::time::timeout;
+use futures_util::SinkExt;
 use tokio_tungstenite::tungstenite::Message as ClientMessage;
 
 /// Connect a WebSocket client to the test teamserver, send a login frame
@@ -24,9 +23,10 @@ async fn attempt_login(
     addr: std::net::SocketAddr,
     username: &str,
     password: &str,
-) -> Result<(OperatorMessage, common::WsClient), Box<dyn std::error::Error>> {
+) -> Result<(OperatorMessage, common::WsSession), Box<dyn std::error::Error>> {
     let url = format!("ws://{addr}/havoc");
-    let (mut socket, _) = tokio_tungstenite::connect_async(&url).await?;
+    let (raw_socket_, _) = tokio_tungstenite::connect_async(&url).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
 
     let payload = serde_json::to_string(&OperatorMessage::Login(Message {
         head: MessageHead {
@@ -37,14 +37,11 @@ async fn attempt_login(
         },
         info: LoginInfo { user: username.to_owned(), password: hash_password_sha3(password) },
     }))?;
-    socket.send(ClientMessage::Text(payload.into())).await?;
+    // Pre-login send — no HMAC key yet, send plain.
+    socket.socket.send(ClientMessage::Text(payload.into())).await?;
 
-    let next = timeout(Duration::from_secs(30), socket.next()).await?;
-    let frame = next.ok_or_else(|| "missing websocket frame".to_owned())??;
-    let response = match frame {
-        ClientMessage::Text(text) => serde_json::from_str::<OperatorMessage>(text.as_str())?,
-        other => return Err(format!("unexpected frame: {other:?}").into()),
-    };
+    // recv_msg handles the plain InitConnectionSuccess frame and derives the HMAC key from it.
+    let response = socket.recv_msg().await?;
 
     Ok((response, socket))
 }

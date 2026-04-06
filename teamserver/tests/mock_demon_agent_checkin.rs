@@ -2,7 +2,6 @@ mod common;
 
 use std::time::Duration;
 
-use futures_util::SinkExt;
 use red_cell_common::HttpListenerConfig;
 use red_cell_common::config::Profile;
 use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, decrypt_agent_data_at_offset};
@@ -10,7 +9,7 @@ use red_cell_common::demon::{DemonCommand, DemonMessage};
 use red_cell_common::operator::{
     AgentResponseInfo, AgentTaskInfo, EventCode, Message, MessageHead, OperatorMessage,
 };
-use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
+use tokio_tungstenite::connect_async;
 
 fn demon_test_profile() -> Profile {
     Profile::parse(
@@ -43,7 +42,8 @@ async fn spawn_server_with_http_listener(
     let server = common::spawn_test_server(demon_test_profile()).await?;
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
-    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
     common::login(&mut socket).await?;
 
     server
@@ -91,7 +91,7 @@ struct DemonTestHarness {
     listener_port: u16,
     listener_name: String,
     client: reqwest::Client,
-    socket: common::WsClient,
+    socket: common::WsSession,
 }
 
 impl DemonTestHarness {
@@ -182,7 +182,7 @@ async fn mock_demon_checkin_get_job_and_output_flow() -> Result<(), Box<dyn std:
     assert_eq!(message.info.hostname, "wkstn-01");
 
     let task = operator_task_message("2A", "checkin", "12345678", DemonCommand::CommandCheckin)?;
-    harness.socket.send(ClientMessage::Text(task.into())).await?;
+    harness.socket.send_text(task).await?;
 
     let task_echo = common::read_operator_message(&mut harness.socket).await?;
     let OperatorMessage::AgentTask(message) = task_echo else {
@@ -281,7 +281,7 @@ async fn mock_demon_checkin_streams_multiple_output_events_for_one_task()
 
     let task =
         operator_task_message("2A", "shell whoami", "12345678", DemonCommand::CommandCheckin)?;
-    harness.socket.send(ClientMessage::Text(task.into())).await?;
+    harness.socket.send_text(task).await?;
 
     let task_echo = common::read_operator_message(&mut harness.socket).await?;
     let OperatorMessage::AgentTask(message) = task_echo else {
@@ -378,7 +378,7 @@ async fn mock_demon_checkin_interleaved_output_keeps_task_attribution()
 
     let first_task =
         operator_task_message("2A", "shell whoami", "12345678", DemonCommand::CommandCheckin)?;
-    harness.socket.send(ClientMessage::Text(first_task.into())).await?;
+    harness.socket.send_text(first_task).await?;
     let first_task_echo = common::read_operator_message(&mut harness.socket).await?;
     assert!(matches!(first_task_echo, OperatorMessage::AgentTask(_)));
 
@@ -388,7 +388,7 @@ async fn mock_demon_checkin_interleaved_output_keeps_task_attribution()
         "12345678",
         DemonCommand::CommandCheckin,
     )?;
-    harness.socket.send(ClientMessage::Text(second_task.into())).await?;
+    harness.socket.send_text(second_task).await?;
     let second_task_echo = common::read_operator_message(&mut harness.socket).await?;
     assert!(matches!(second_task_echo, OperatorMessage::AgentTask(_)));
 
@@ -652,7 +652,7 @@ async fn get_job_with_empty_task_queue_returns_empty_response()
     // Queue a task so the next GET_JOB has work to return.  If the empty-poll had
     // desynchronised the CTR state, the server would fail to decrypt this callback.
     let task = operator_task_message("AA", "checkin", "12345678", DemonCommand::CommandCheckin)?;
-    harness.socket.send(ClientMessage::Text(task.into())).await?;
+    harness.socket.send_text(task).await?;
 
     let task_echo = common::read_operator_message(&mut harness.socket).await?;
     assert!(matches!(task_echo, OperatorMessage::AgentTask(_)), "expected AgentTask echo");
@@ -716,12 +716,13 @@ async fn unauthenticated_operator_cannot_inject_agent_task()
     // Legacy CTR mode: offset stays at 0.
 
     // --- Open a second (unauthenticated) WebSocket client -------------------------
-    let (mut unauth_socket, _) = connect_async(harness.server.ws_url()).await?;
+    let (raw_unauth_socket_, _) = connect_async(harness.server.ws_url()).await?;
+    let mut unauth_socket = common::WsSession::new(raw_unauth_socket_);
 
     // Send an AgentTask as the very first frame — no login attempt at all.
     let task =
         operator_task_message("FF", "shell whoami", "12345678", DemonCommand::CommandCheckin)?;
-    unauth_socket.send(ClientMessage::Text(task.into())).await?;
+    unauth_socket.send_text(task).await?;
 
     // The server must reject the non-login message during the auth phase.
     // It responds with `InitConnectionError` and closes the connection.
@@ -796,7 +797,8 @@ async fn failed_login_operator_cannot_inject_agent_task() -> Result<(), Box<dyn 
     // Legacy CTR mode: offset stays at 0.
 
     // --- Attempt login with wrong password ----------------------------------------
-    let (mut bad_socket, _) = connect_async(harness.server.ws_url()).await?;
+    let (raw_bad_socket_, _) = connect_async(harness.server.ws_url()).await?;
+    let mut bad_socket = common::WsSession::new(raw_bad_socket_);
     let login_payload =
         serde_json::to_string(&OperatorMessage::Login(red_cell_common::operator::Message {
             head: MessageHead {
@@ -810,7 +812,7 @@ async fn failed_login_operator_cannot_inject_agent_task() -> Result<(), Box<dyn 
                 password: red_cell_common::crypto::hash_password_sha3("wrong_password"),
             },
         }))?;
-    bad_socket.send(ClientMessage::Text(login_payload.into())).await?;
+    bad_socket.send_text(login_payload).await?;
 
     // Server responds with InitConnectionError for bad credentials.
     let rejection = common::read_operator_message(&mut bad_socket).await?;
@@ -920,7 +922,7 @@ async fn wrong_key_callback_returns_404_and_preserves_ctr_offset()
 
     // --- A subsequent valid callback must still succeed ------------------------------
     let task = operator_task_message("CC", "checkin", "12345678", DemonCommand::CommandCheckin)?;
-    harness.socket.send(ClientMessage::Text(task.into())).await?;
+    harness.socket.send_text(task).await?;
     let _task_echo = common::read_operator_message(&mut harness.socket).await?;
 
     let valid_response = harness
@@ -1021,7 +1023,7 @@ async fn duplicate_demon_init_rejected_preserves_original_agent()
 
     // --- Verify original key still works --------------------------------------------
     let task = operator_task_message("DD", "checkin", "12345678", DemonCommand::CommandCheckin)?;
-    harness.socket.send(ClientMessage::Text(task.into())).await?;
+    harness.socket.send_text(task).await?;
     let _task_echo = common::read_operator_message(&mut harness.socket).await?;
 
     let valid_response = harness
@@ -1131,7 +1133,7 @@ async fn multiple_concurrent_agents_on_same_listener() -> Result<(), Box<dyn std
         let task_id = format!("{:X}", agent.agent_id & 0xFF);
         let task =
             operator_task_message(&task_id, "checkin", &demon_id, DemonCommand::CommandCheckin)?;
-        harness.socket.send(ClientMessage::Text(task.into())).await?;
+        harness.socket.send_text(task).await?;
         let _echo = common::read_operator_message(&mut harness.socket).await?;
     }
 
@@ -1249,7 +1251,7 @@ async fn stale_ctr_offset_callback_returns_404_and_preserves_state()
 
     // --- First callback at offset 0 -------------------------------------------------
     let task = operator_task_message("AA", "checkin", "12345678", DemonCommand::CommandCheckin)?;
-    harness.socket.send(ClientMessage::Text(task.into())).await?;
+    harness.socket.send_text(task).await?;
     let _task_echo = tokio::time::timeout(
         Duration::from_secs(10),
         common::read_operator_message(&mut harness.socket),
@@ -1310,7 +1312,7 @@ async fn stale_ctr_offset_callback_returns_404_and_preserves_state()
 
     // --- Third callback also succeeds -----------------------------------------------
     let task2 = operator_task_message("BB", "checkin", "12345678", DemonCommand::CommandCheckin)?;
-    harness.socket.send(ClientMessage::Text(task2.into())).await?;
+    harness.socket.send_text(task2).await?;
     let _task2_echo = tokio::time::timeout(
         Duration::from_secs(10),
         common::read_operator_message(&mut harness.socket),
@@ -1717,7 +1719,8 @@ async fn malformed_operator_message_closes_connection_without_breaking_dispatch(
     );
 
     // Open a second operator connection for the "bad" client.
-    let (mut bad_socket, _) = connect_async(harness.server.ws_url()).await?;
+    let (raw_bad_socket_, _) = connect_async(harness.server.ws_url()).await?;
+    let mut bad_socket = common::WsSession::new(raw_bad_socket_);
     common::login(&mut bad_socket).await?;
 
     // The second socket receives snapshot events (listeners, agents, etc.).
@@ -1733,10 +1736,10 @@ async fn malformed_operator_message_closes_connection_without_breaking_dispatch(
     assert!(saw_agent_new, "expected AgentNew in snapshot on second socket");
 
     // --- Send malformed (non-JSON) message on the bad socket ---
-    bad_socket.send(ClientMessage::Text("not valid json".into())).await?;
+    bad_socket.send_text("not valid json").await?;
 
     // The server should close the bad connection.
-    let close_frame = timeout(Duration::from_secs(10), bad_socket.next()).await?;
+    let close_frame = timeout(Duration::from_secs(10), bad_socket.socket.next()).await?;
     assert!(
         close_frame
             .as_ref()
@@ -1748,7 +1751,7 @@ async fn malformed_operator_message_closes_connection_without_breaking_dispatch(
     // --- Verify the good operator connection still works ---
     // Submit a valid agent task on the original (good) socket.
     let task = operator_task_message("AA", "checkin", "12345678", DemonCommand::CommandCheckin)?;
-    harness.socket.send(ClientMessage::Text(task.into())).await?;
+    harness.socket.send_text(task).await?;
 
     // We should receive the task echo, proving the dispatch loop is alive.
     let task_echo = common::read_operator_message(&mut harness.socket).await?;

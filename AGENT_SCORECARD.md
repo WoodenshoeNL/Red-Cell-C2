@@ -10,18 +10,18 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 1227 | 255 | 72 |
-| Bugs filed against | 229 | 49 | 13 |
+| Bugs filed against | 231 | 49 | 13 |
 | Bug rate (bugs/task) | 0.19 | 0.19 | 0.18 |
 | Quality score | 81% | 81% | 82% |
 
-*Bug rates: Claude 229/1227=0.1867→0.19, Codex 49/255=0.1922→0.19, Cursor 13/72=0.1806→0.18*
+*Bug rates: Claude 231/1227=0.1883→0.19, Codex 49/255=0.1922→0.19, Cursor 13/72=0.1806→0.18*
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 16 | 0 | 0 |
-| Missing tests / stale tests | 78 | 22 | 6 |
+| Missing tests / stale tests | 79 | 22 | 6 |
 | Clippy warnings | 13 | 0 | 1 |
 | Protocol errors | 30 | 32 | 4 |
 | Security issues | 62 | 39 | 0 |
@@ -41,6 +41,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-07 — a04ed612..e7377124
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 2 | WIP commit fcdd437b (ijuqt: database health monitor + backup scheduler). Build passed. Filed xtst9 (P3, doc mismatch: `recovery_probe_secs` used for all probe intervals, not just degraded-recovery as documented). Filed mdfln (P2, missing state-transition tests for `DatabaseHealthMonitor`). Also: devloop improvements in e7377124 (disk check, stale cargo kill, DEV_CLEAN_EVERY=1). |
+| Codex | 0 | 0 | No activity this run. |
+| Cursor | 0 | 0 | No activity this run. |
+
+Build: **passed** — `cargo check --workspace` clean (~5m 55s). Tests: still running at checkpoint time (nextest compile phase). Clippy: skipped.
 
 ### QA Review — 2026-04-06 06:00 — 93e6640d..40ed41be
 

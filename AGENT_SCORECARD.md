@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1216 | 255 | 72 |
+| Tasks closed | 1223 | 255 | 72 |
 | Bugs filed against | 224 | 49 | 13 |
 | Bug rate (bugs/task) | 0.18 | 0.19 | 0.18 |
 | Quality score | 82% | 81% | 82% |
 
-*Bug rates: Claude 224/1216=0.1842→0.18, Codex 49/255=0.1922→0.19, Cursor 13/72=0.1806→0.18*
+*Bug rates: Claude 224/1223=0.1831→0.18, Codex 49/255=0.1922→0.19, Cursor 13/72=0.1806→0.18*
 
 ## Violation Breakdown
 
@@ -6237,3 +6237,13 @@ Build: **cargo check** passed (3m 40s). **clippy** passed (0 warnings, exit 0). 
 | Cursor | 0 | 0 | No activity. |
 
 Build: **FAILED** — `cargo check --workspace` exits non-zero. `client/src/panels/process.rs` lines 70 and 231 reference `filtered_process_rows` without importing it (E0425 ×2). 3 unused-import warnings in `client/src/main.rs`. Tracked as 0d0he (P0, zone:client) and 111z0 (P1, zone:client). Tests and clippy skipped.
+
+### QA Review — 2026-04-07 02:00 — 1d913df8..f5518de2
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 7 | 0 | Closed 0ub3b (refactor(specter): split dispatch/mod.rs 10k lines into 11 per-command modules — assembly, config, filesystem, harvest, inject, kerberos, network, persist, process, screenshot, token; mod.rs retains shared types + 500 inline tests). Closed 16w04 (fix(specter): wrap raw socket in WsSession in init_callback_flow test). Closed s4d9h (refactor(client): split state types + helpers into state.rs and helpers.rs — ~1860 lines moved). Closed 0d0he (fix(client): missing filtered_process_rows import in panels/process.rs). Closed 111z0 (fix(client): remove stale unused imports in main.rs after module extraction). Closed fka3c (fix(teamserver): serialize net_dispatch integration tests in nextest serial group). Closed en1v7 (fix(teamserver): serialize output_dispatch in nextest serial group). All fixes are clean — no unwrap/expect/todo in production code, no new quality violations. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **passed** — `cargo check --workspace` clean (2m 55s). Tests/clippy skipped — build lock held by concurrent dev agent cargo processes (15 active).

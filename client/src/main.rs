@@ -25,9 +25,9 @@ pub(crate) use panels::agents::{
 
 // Additional imports used only in the test module via `use super::*`.
 #[cfg(test)]
-use eframe::egui::Color32;
-#[cfg(test)]
 use base64::Engine;
+#[cfg(test)]
+use eframe::egui::Color32;
 #[cfg(test)]
 use python::{ScriptLoadStatus, ScriptOutputStream};
 #[cfg(test)]
@@ -4023,7 +4023,12 @@ mod tests {
     fn loot_panel_refresh_filtered_loot_rebuilds_when_revision_changes() {
         let mut panel = LootPanelState { active_tab: LootTab::Files, ..LootPanelState::default() };
         let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
-        state.loot.push(make_loot_item(LootKind::File, "report.pdf", "AA", "2026-03-10T12:00:00Z"));
+        Arc::make_mut(&mut state.loot).push(make_loot_item(
+            LootKind::File,
+            "report.pdf",
+            "AA",
+            "2026-03-10T12:00:00Z",
+        ));
         state.loot_revision = 1;
 
         panel.refresh_filtered_loot(
@@ -4038,8 +4043,11 @@ mod tests {
         assert_eq!(panel.filtered_loot, vec![0]);
         assert!(!panel.filter_dirty);
 
-        state.loot.push(make_loot_item(LootKind::File, "backup.zip", "AA", "2026-03-11T12:00:00Z"));
-        state.loot[1].file_path = Some("C:\\Temp\\backup.zip".to_owned());
+        {
+            let loot = Arc::make_mut(&mut state.loot);
+            loot.push(make_loot_item(LootKind::File, "backup.zip", "AA", "2026-03-11T12:00:00Z"));
+            loot[1].file_path = Some("C:\\Temp\\backup.zip".to_owned());
+        }
         state.loot_revision += 1;
 
         panel.refresh_filtered_loot(

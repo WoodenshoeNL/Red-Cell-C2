@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::Arc;
 use std::time::Instant;
 
 use base64::Engine;
@@ -69,7 +70,8 @@ impl AppState {
             }
             OperatorMessage::ListenerRemove(message) => {
                 let name = message.info.name.clone();
-                self.listeners.retain(|listener| listener.name != message.info.name);
+                Arc::make_mut(&mut self.listeners)
+                    .retain(|listener| listener.name != message.info.name);
                 events.push(AppEvent::ListenerChanged { name, action: "stop".to_owned() });
             }
             OperatorMessage::ListenerMark(message) => {
@@ -160,18 +162,19 @@ impl AppState {
             }
             OperatorMessage::AgentRemove(message) => {
                 if let Some(agent_id) = flat_info_string(&message.info, &["AgentID", "DemonID"]) {
-                    self.agents.retain(|agent| agent.name_id != normalize_agent_id(&agent_id));
+                    Arc::make_mut(&mut self.agents)
+                        .retain(|agent| agent.name_id != normalize_agent_id(&agent_id));
                 }
             }
             OperatorMessage::AgentUpdate(message) => {
                 let agent_id = normalize_agent_id(&message.info.agent_id);
                 events.push(AppEvent::AgentCheckin(agent_id.clone()));
-                if let Some(agent) = self.agents.iter_mut().find(|agent| agent.name_id == agent_id)
-                {
+                let agents = Arc::make_mut(&mut self.agents);
+                if let Some(agent) = agents.iter_mut().find(|agent| agent.name_id == agent_id) {
                     agent.status = message.info.marked;
                     agent.last_call_in = message.head.timestamp;
                 } else {
-                    self.agents.push(AgentSummary {
+                    agents.push(AgentSummary {
                         name_id: agent_id,
                         status: message.info.marked,
                         domain_name: String::new(),
@@ -213,7 +216,7 @@ impl AppState {
                     message.head.timestamp,
                     format!("{}: {}", message.info.message_type, message.info.message),
                 );
-                self.build_console_messages.push(BuildConsoleEntry {
+                Arc::make_mut(&mut self.build_console_messages).push(BuildConsoleEntry {
                     message_type: message.info.message_type,
                     message: message.info.message,
                 });
@@ -268,30 +271,35 @@ impl AppState {
     }
 
     fn upsert_agent(&mut self, agent: AgentSummary) {
-        match self.agents.iter_mut().find(|existing| existing.name_id == agent.name_id) {
+        let agents = Arc::make_mut(&mut self.agents);
+        match agents.iter_mut().find(|existing| existing.name_id == agent.name_id) {
             Some(existing) => *existing = agent,
-            None => self.agents.push(agent),
+            None => agents.push(agent),
         }
     }
 
     pub(crate) fn update_agent_note(&mut self, agent_id: &str, note: String) {
-        if let Some(agent) = self.agents.iter_mut().find(|agent| agent.name_id == agent_id) {
+        if let Some(agent) =
+            Arc::make_mut(&mut self.agents).iter_mut().find(|agent| agent.name_id == agent_id)
+        {
             agent.note = note;
         }
     }
 
     fn upsert_listener(&mut self, listener: ListenerSummary) {
-        match self.listeners.iter_mut().find(|existing| existing.name == listener.name) {
+        let listeners = Arc::make_mut(&mut self.listeners);
+        match listeners.iter_mut().find(|existing| existing.name == listener.name) {
             Some(existing) => *existing = listener,
-            None => self.listeners.push(listener),
+            None => listeners.push(listener),
         }
     }
 
     fn mark_listener(&mut self, mark: &ListenerMarkInfo) {
         let status = mark.mark.clone();
-        match self.listeners.iter_mut().find(|listener| listener.name == mark.name) {
+        let listeners = Arc::make_mut(&mut self.listeners);
+        match listeners.iter_mut().find(|listener| listener.name == mark.name) {
             Some(listener) => listener.status = status,
-            None => self.listeners.push(ListenerSummary {
+            None => listeners.push(ListenerSummary {
                 name: mark.name.clone(),
                 protocol: "unknown".to_owned(),
                 host: String::new(),
@@ -488,27 +496,29 @@ impl AppState {
     }
 
     fn upsert_loot(&mut self, loot_item: LootItem) {
-        match self.loot.iter_mut().find(|existing| {
+        let loot = Arc::make_mut(&mut self.loot);
+        match loot.iter_mut().find(|existing| {
             existing.kind == loot_item.kind
                 && existing.agent_id == loot_item.agent_id
                 && existing.name == loot_item.name
                 && existing.collected_at == loot_item.collected_at
         }) {
             Some(existing) => *existing = loot_item,
-            None => self.loot.push(loot_item),
+            None => loot.push(loot_item),
         }
         self.loot_revision = self.loot_revision.wrapping_add(1);
     }
 
     fn remove_loot_matching(&mut self, info: &FlatInfo, fallback_kind: LootKind) {
         if let Some(item) = loot_item_from_flat_info(info, fallback_kind) {
-            let initial_len = self.loot.len();
-            self.loot.retain(|existing| {
+            let loot = Arc::make_mut(&mut self.loot);
+            let initial_len = loot.len();
+            loot.retain(|existing| {
                 !(existing.kind == item.kind
                     && existing.agent_id == item.agent_id
                     && existing.name == item.name)
             });
-            if self.loot.len() != initial_len {
+            if loot.len() != initial_len {
                 self.loot_revision = self.loot_revision.wrapping_add(1);
             }
         }

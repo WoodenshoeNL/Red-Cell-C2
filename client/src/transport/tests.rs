@@ -4,7 +4,7 @@ use super::operator_msg::{
 };
 use super::*;
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
 use futures_util::SinkExt;
@@ -336,7 +336,7 @@ fn agent_reregistered_logs_reregistered_not_new() {
 #[test]
 fn update_agent_note_updates_matching_agent_and_ignores_unknown_ids() {
     let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
-    state.agents.push(AgentSummary {
+    Arc::make_mut(&mut state.agents).push(AgentSummary {
         name_id: "ABCD1234".to_owned(),
         status: "Alive".to_owned(),
         domain_name: "LAB".to_owned(),
@@ -402,7 +402,7 @@ fn agent_update_for_unknown_agent_creates_stub_entry() {
 #[test]
 fn agent_remove_drops_matching_agent() {
     let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
-    state.agents.push(AgentSummary {
+    Arc::make_mut(&mut state.agents).push(AgentSummary {
         name_id: "ABCD1234".to_owned(),
         status: "Alive".to_owned(),
         domain_name: "LAB".to_owned(),
@@ -442,7 +442,7 @@ fn agent_remove_drops_matching_agent() {
 #[test]
 fn agent_remove_ignores_unknown_agent_id() {
     let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
-    state.agents.push(AgentSummary {
+    Arc::make_mut(&mut state.agents).push(AgentSummary {
         name_id: "ABCD1234".to_owned(),
         status: "Alive".to_owned(),
         domain_name: "LAB".to_owned(),
@@ -1211,7 +1211,7 @@ fn certificate_fingerprint_produces_hex_sha256() {
 fn listener_error_updates_existing_listener_status_and_pushes_chat() {
     let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
     // Pre-populate a listener so we can verify it is updated in-place.
-    state.listeners.push(ListenerSummary {
+    Arc::make_mut(&mut state.listeners).push(ListenerSummary {
         name: "http".to_owned(),
         protocol: "Https".to_owned(),
         host: "0.0.0.0".to_owned(),

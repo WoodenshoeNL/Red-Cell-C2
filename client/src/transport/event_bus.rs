@@ -385,12 +385,16 @@ pub(crate) struct AppState {
     pub(crate) server_url: String,
     pub(crate) connection_status: ConnectionStatus,
     pub(crate) operator_info: Option<OperatorInfo>,
-    pub(crate) agents: Vec<AgentSummary>,
+    /// Arc-wrapped to allow O(1) snapshot clones at read sites (e.g. Python bindings).
+    /// Mutate via `Arc::make_mut(&mut self.agents)` for copy-on-write semantics.
+    pub(crate) agents: Arc<Vec<AgentSummary>>,
     pub(crate) agent_consoles: BTreeMap<String, Vec<AgentConsoleEntry>>,
     pub(crate) file_browsers: BTreeMap<String, AgentFileBrowserState>,
     pub(crate) process_lists: BTreeMap<String, AgentProcessListState>,
-    pub(crate) listeners: Vec<ListenerSummary>,
-    pub(crate) loot: Vec<LootItem>,
+    /// Arc-wrapped for O(1) snapshot clones; mutate via `Arc::make_mut`.
+    pub(crate) listeners: Arc<Vec<ListenerSummary>>,
+    /// Arc-wrapped for O(1) snapshot clones; mutate via `Arc::make_mut`.
+    pub(crate) loot: Arc<Vec<LootItem>>,
     pub(crate) loot_revision: u64,
     /// Persistent notification / chat log with per-entry read tracking.
     pub(crate) event_log: EventLog,
@@ -405,7 +409,8 @@ pub(crate) struct AppState {
     pub(crate) last_auth_error: Option<String>,
     /// Build console messages received during payload generation (displayed in the
     /// Payload dialog's "Building Console" area).
-    pub(crate) build_console_messages: Vec<BuildConsoleEntry>,
+    /// Arc-wrapped for O(1) snapshot clones; mutate via `Arc::make_mut`.
+    pub(crate) build_console_messages: Arc<Vec<BuildConsoleEntry>>,
     /// The most recent payload build response, if any.  The dialog reads this to
     /// offer the operator a file-save action.
     pub(crate) last_payload_response: Option<PayloadBuildResult>,
@@ -419,19 +424,19 @@ impl AppState {
             server_url,
             connection_status: ConnectionStatus::Disconnected,
             operator_info: None,
-            agents: Vec::new(),
+            agents: Arc::new(Vec::new()),
             agent_consoles: BTreeMap::new(),
             file_browsers: BTreeMap::new(),
             process_lists: BTreeMap::new(),
-            listeners: Vec::new(),
-            loot: Vec::new(),
+            listeners: Arc::new(Vec::new()),
+            loot: Arc::new(Vec::new()),
             loot_revision: 0,
             event_log: EventLog::new(DEFAULT_EVENT_LOG_MAX),
             online_operators: BTreeSet::new(),
             connected_operators: BTreeMap::new(),
             tls_failure: None,
             last_auth_error: None,
-            build_console_messages: Vec::new(),
+            build_console_messages: Arc::new(Vec::new()),
             last_payload_response: None,
             session_start: None,
         }

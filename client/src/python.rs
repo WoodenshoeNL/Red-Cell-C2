@@ -445,9 +445,9 @@ impl PythonApiState {
         state.agents.iter().find(|agent| agent.name_id == normalized).cloned()
     }
 
-    fn agent_snapshots(&self) -> Vec<AgentSummary> {
+    fn agent_snapshots(&self) -> Arc<Vec<AgentSummary>> {
         let state = lock_app_state(&self.app_state);
-        state.agents.clone()
+        Arc::clone(&state.agents)
     }
 
     fn listener_snapshot(&self, name: &str) -> Option<ListenerSummary> {
@@ -456,9 +456,9 @@ impl PythonApiState {
         state.listeners.iter().find(|listener| listener.name == normalized).cloned()
     }
 
-    fn listener_snapshots(&self) -> Vec<ListenerSummary> {
+    fn listener_snapshots(&self) -> Arc<Vec<ListenerSummary>> {
         let state = lock_app_state(&self.app_state);
-        state.listeners.clone()
+        Arc::clone(&state.listeners)
     }
 
     fn loot_snapshots(
@@ -2369,8 +2369,8 @@ fn agents(py: Python<'_>) -> PyResult<Vec<Py<PyAgent>>> {
     let api_state = active_api_state()?;
     api_state
         .agent_snapshots()
-        .into_iter()
-        .map(|agent| Py::new(py, PyAgent { agent_id: agent.name_id }))
+        .iter()
+        .map(|agent| Py::new(py, PyAgent { agent_id: agent.name_id.clone() }))
         .collect()
 }
 
@@ -2384,8 +2384,8 @@ fn listeners(py: Python<'_>) -> PyResult<Vec<Py<PyListener>>> {
     let api_state = active_api_state()?;
     api_state
         .listener_snapshots()
-        .into_iter()
-        .map(|listener| Py::new(py, PyListener { name: listener.name }))
+        .iter()
+        .map(|listener| Py::new(py, PyListener { name: listener.name.clone() }))
         .collect()
 }
 
@@ -2988,7 +2988,7 @@ havocui.CreateTab('Status', render)\n",
             Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
         {
             let mut state = lock_app_state(&app_state);
-            state.agents.push(sample_agent("00ABCDEF"));
+            Arc::make_mut(&mut state.agents).push(sample_agent("00ABCDEF"));
         }
 
         let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
@@ -3104,7 +3104,7 @@ red_cell.on_agent_checkin(on_checkin)\n",
             Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
         {
             let mut state = lock_app_state(&app_state);
-            state.agents.push(sample_agent("00ABCDEF"));
+            Arc::make_mut(&mut state.agents).push(sample_agent("00ABCDEF"));
         }
 
         let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
@@ -3135,7 +3135,7 @@ red_cell.register_command('demo', demo)\n",
             Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
         {
             let mut state = lock_app_state(&app_state);
-            state.agents.push(sample_agent("00ABCDEF"));
+            Arc::make_mut(&mut state.agents).push(sample_agent("00ABCDEF"));
         }
 
         let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
@@ -3164,7 +3164,7 @@ red_cell.register_command('demo', demo)\n",
             Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
         {
             let mut state = lock_app_state(&app_state);
-            state.agents.push(sample_agent("00ABCDEF"));
+            Arc::make_mut(&mut state.agents).push(sample_agent("00ABCDEF"));
         }
 
         let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
@@ -3199,7 +3199,7 @@ havoc.RegisterCommand(function=run, module='situational_awareness', command='who
             Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
         {
             let mut state = lock_app_state(&app_state);
-            state.agents.push(sample_agent("00ABCDEF"));
+            Arc::make_mut(&mut state.agents).push(sample_agent("00ABCDEF"));
         }
 
         let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
@@ -3237,7 +3237,7 @@ red_cell.register_command('demo', demo)\n",
             Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
         {
             let mut state = lock_app_state(&app_state);
-            state.agents.push(sample_agent("00ABCDEF"));
+            Arc::make_mut(&mut state.agents).push(sample_agent("00ABCDEF"));
         }
 
         let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
@@ -3276,7 +3276,7 @@ event.OnNewSession(on_new_session)\n",
             Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
         {
             let mut state = lock_app_state(&app_state);
-            state.agents.push(sample_agent("00ABCDEF"));
+            Arc::make_mut(&mut state.agents).push(sample_agent("00ABCDEF"));
         }
 
         let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
@@ -3343,7 +3343,7 @@ havoc.RegisterCommand(function=queue, module='ops', command='pwd', description='
             Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
         {
             let mut state = lock_app_state(&app_state);
-            state.agents.push(sample_agent("00ABCDEF"));
+            Arc::make_mut(&mut state.agents).push(sample_agent("00ABCDEF"));
             state.operator_info = Some(red_cell_common::OperatorInfo {
                 username: "operator".to_owned(),
                 password_hash: None,
@@ -3382,7 +3382,7 @@ havoc.RegisterCommand(function=queue, module='ops', command='pwd', description='
             Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
         {
             let mut state = lock_app_state(&app_state);
-            state.agents.push(sample_agent("00ABCDEF"));
+            Arc::make_mut(&mut state.agents).push(sample_agent("00ABCDEF"));
         }
         let _runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
             .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
@@ -3408,8 +3408,8 @@ havoc.RegisterCommand(function=queue, module='ops', command='pwd', description='
             Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
         {
             let mut state = lock_app_state(&app_state);
-            state.agents.push(sample_agent("00ABCDEF"));
-            state.listeners.push(sample_listener("https"));
+            Arc::make_mut(&mut state.agents).push(sample_agent("00ABCDEF"));
+            Arc::make_mut(&mut state.listeners).push(sample_listener("https"));
         }
         let _runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
             .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
@@ -3447,13 +3447,13 @@ havoc.RegisterCommand(function=queue, module='ops', command='pwd', description='
             Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
         {
             let mut state = lock_app_state(&app_state);
-            state.loot.push(sample_loot_item(
+            Arc::make_mut(&mut state.loot).push(sample_loot_item(
                 "00AABBCC",
                 crate::transport::LootKind::Credential,
                 "cred-1",
                 Some("dXNlcjpwYXNz"),
             ));
-            state.loot.push(sample_loot_item(
+            Arc::make_mut(&mut state.loot).push(sample_loot_item(
                 "00DDEEFF",
                 crate::transport::LootKind::File,
                 "file-1",
@@ -3495,19 +3495,19 @@ havoc.RegisterCommand(function=queue, module='ops', command='pwd', description='
             Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
         {
             let mut state = lock_app_state(&app_state);
-            state.loot.push(sample_loot_item(
+            Arc::make_mut(&mut state.loot).push(sample_loot_item(
                 "00AABBCC",
                 crate::transport::LootKind::Credential,
                 "cred-1",
                 Some("dXNlcjpwYXNz"),
             ));
-            state.loot.push(sample_loot_item(
+            Arc::make_mut(&mut state.loot).push(sample_loot_item(
                 "00AABBCC",
                 crate::transport::LootKind::File,
                 "file-1",
                 Some("ZmlsZWNvbnRlbnQ="),
             ));
-            state.loot.push(sample_loot_item(
+            Arc::make_mut(&mut state.loot).push(sample_loot_item(
                 "00DDEEFF",
                 crate::transport::LootKind::Credential,
                 "cred-2",
@@ -3572,7 +3572,7 @@ havoc.RegisterCommand(function=queue, module='ops', command='pwd', description='
             Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
         {
             let mut state = lock_mutex(&app_state);
-            state.agents.push(sample_agent("AABBCCDD"));
+            Arc::make_mut(&mut state.agents).push(sample_agent("AABBCCDD"));
         }
 
         let runtime = PythonRuntime::initialize(app_state.clone(), temp_dir.path().to_path_buf())
@@ -3624,7 +3624,7 @@ havoc.RegisterCommand(function=queue, module='ops', command='pwd', description='
             Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
         {
             let mut state = lock_mutex(&app_state);
-            state.agents.push(sample_agent("11223344"));
+            Arc::make_mut(&mut state.agents).push(sample_agent("11223344"));
         }
 
         let runtime = PythonRuntime::initialize(app_state.clone(), temp_dir.path().to_path_buf())
@@ -3675,7 +3675,7 @@ havoc.RegisterCommand(function=queue, module='ops', command='pwd', description='
             Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
         {
             let mut state = lock_mutex(&app_state);
-            state.agents.push(sample_agent("DEADBEEF"));
+            Arc::make_mut(&mut state.agents).push(sample_agent("DEADBEEF"));
         }
 
         let runtime = PythonRuntime::initialize(app_state.clone(), temp_dir.path().to_path_buf())
@@ -3863,7 +3863,7 @@ red_cell.register_command('demo', cmd, options=options)\n",
             Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
         {
             let mut state = lock_app_state(&app_state);
-            state.agents.push(sample_agent("00ABCDEF"));
+            Arc::make_mut(&mut state.agents).push(sample_agent("00ABCDEF"));
         }
 
         let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
@@ -3909,7 +3909,7 @@ red_cell.register_command('hist', cmd)\n",
             Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
         {
             let mut state = lock_app_state(&app_state);
-            state.agents.push(sample_agent("00ABCDEF"));
+            Arc::make_mut(&mut state.agents).push(sample_agent("00ABCDEF"));
         }
 
         let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
@@ -3963,8 +3963,8 @@ red_cell.register_command('scoped', cmd)\n",
             Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
         {
             let mut state = lock_app_state(&app_state);
-            state.agents.push(sample_agent("AABBCCDD"));
-            state.agents.push(sample_agent("11223344"));
+            Arc::make_mut(&mut state.agents).push(sample_agent("AABBCCDD"));
+            Arc::make_mut(&mut state.agents).push(sample_agent("11223344"));
         }
 
         let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
@@ -4005,7 +4005,7 @@ havocui.RegisterCommand('ui cmd', run)\n",
             Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
         {
             let mut state = lock_app_state(&app_state);
-            state.agents.push(sample_agent("00ABCDEF"));
+            Arc::make_mut(&mut state.agents).push(sample_agent("00ABCDEF"));
         }
 
         let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
@@ -4036,7 +4036,7 @@ havocui.RegisterCommand('recon scan', 'Run a recon scan', [{{'name': 'target', '
             Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
         {
             let mut state = lock_app_state(&app_state);
-            state.agents.push(sample_agent("00ABCDEF"));
+            Arc::make_mut(&mut state.agents).push(sample_agent("00ABCDEF"));
         }
 
         let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
@@ -4163,7 +4163,7 @@ havocui.RegisterCommand('recon scan', 'Run a recon scan', [{{'name': 'target', '
             Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
         {
             let mut state = lock_mutex(&app_state);
-            state.agents.push(sample_agent("AABB0001"));
+            Arc::make_mut(&mut state.agents).push(sample_agent("AABB0001"));
         }
 
         let _runtime = PythonRuntime::initialize(app_state.clone(), temp_dir.path().to_path_buf())
@@ -4208,7 +4208,7 @@ havocui.RegisterCommand('recon scan', 'Run a recon scan', [{{'name': 'target', '
             Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
         {
             let mut state = lock_mutex(&app_state);
-            state.agents.push(sample_agent("AABB0002"));
+            Arc::make_mut(&mut state.agents).push(sample_agent("AABB0002"));
         }
 
         let runtime = PythonRuntime::initialize(app_state.clone(), temp_dir.path().to_path_buf())
@@ -4608,7 +4608,7 @@ havocui.RegisterCommand('recon scan', 'Run a recon scan', [{{'name': 'target', '
             Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
         {
             let mut state = lock_app_state(&app_state);
-            state.agents.push(sample_agent("DEADBEEF"));
+            Arc::make_mut(&mut state.agents).push(sample_agent("DEADBEEF"));
         }
 
         let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
@@ -4681,7 +4681,7 @@ red_cell.register_command('boom', boom)\n";
             Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
         {
             let mut state = lock_app_state(&app_state);
-            state.agents.push(sample_agent("00ABCDEF"));
+            Arc::make_mut(&mut state.agents).push(sample_agent("00ABCDEF"));
         }
 
         let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
@@ -5075,7 +5075,7 @@ red_cell.register_command('boom', boom)\n";
             Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
         {
             let mut state = lock_app_state(&app_state);
-            state.agents.push(sample_agent("00ABCDEF"));
+            Arc::make_mut(&mut state.agents).push(sample_agent("00ABCDEF"));
         }
 
         let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())

@@ -1,5 +1,6 @@
 use eframe::egui::{self, Align2, Color32, RichText, Sense};
 use rfd::FileDialog;
+use std::sync::Arc;
 
 use crate::transport::{AppState, BuildConsoleEntry, PayloadBuildResult, SharedAppState};
 use crate::{
@@ -34,7 +35,7 @@ impl ClientApp {
             if state.listeners.is_empty() {
                 ui.label(RichText::new("No listeners configured.").weak());
             } else {
-                for listener in &state.listeners {
+                for listener in state.listeners.iter() {
                     let is_selected =
                         self.session_panel.selected_listener.as_deref() == Some(&listener.name);
 
@@ -355,7 +356,7 @@ impl ClientApp {
         let mut save_result: Option<PayloadBuildResult> = None;
 
         // Snapshot build console + payload response from shared state.
-        let build_messages: Vec<BuildConsoleEntry> = state.build_console_messages.clone();
+        let build_messages: Arc<Vec<BuildConsoleEntry>> = Arc::clone(&state.build_console_messages);
         let payload_result: Option<PayloadBuildResult> = state.last_payload_response.clone();
 
         egui::Window::new("Payload")
@@ -554,7 +555,7 @@ impl ClientApp {
                                         "No build output yet.",
                                     );
                                 } else {
-                                    for entry in &build_messages {
+                                    for entry in build_messages.iter() {
                                         let color =
                                             build_console_message_color(&entry.message_type);
                                         let prefix =
@@ -594,12 +595,12 @@ impl ClientApp {
                 // Clear previous build state.
                 match app_state.lock() {
                     Ok(mut s) => {
-                        s.build_console_messages.clear();
+                        Arc::make_mut(&mut s.build_console_messages).clear();
                         s.last_payload_response = None;
                     }
                     Err(poisoned) => {
                         let mut s = poisoned.into_inner();
-                        s.build_console_messages.clear();
+                        Arc::make_mut(&mut s.build_console_messages).clear();
                         s.last_payload_response = None;
                     }
                 }
@@ -627,12 +628,12 @@ impl ClientApp {
             // Clear build state when closing the dialog.
             match app_state.lock() {
                 Ok(mut s) => {
-                    s.build_console_messages.clear();
+                    Arc::make_mut(&mut s.build_console_messages).clear();
                     s.last_payload_response = None;
                 }
                 Err(poisoned) => {
                     let mut s = poisoned.into_inner();
-                    s.build_console_messages.clear();
+                    Arc::make_mut(&mut s.build_console_messages).clear();
                     s.last_payload_response = None;
                 }
             }

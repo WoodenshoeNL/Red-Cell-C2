@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1227 | 255 | 72 |
-| Bugs filed against | 232 | 49 | 13 |
-| Bug rate (bugs/task) | 0.19 | 0.19 | 0.18 |
-| Quality score | 81% | 81% | 82% |
+| Tasks closed | 1229 | 255 | 77 |
+| Bugs filed against | 233 | 49 | 13 |
+| Bug rate (bugs/task) | 0.19 | 0.19 | 0.17 |
+| Quality score | 81% | 81% | 83% |
 
-*Bug rates: Claude 232/1227=0.1891→0.19, Codex 49/255=0.1922→0.19, Cursor 13/72=0.1806→0.18*
+*Bug rates: Claude 233/1229=0.1896→0.19, Codex 49/255=0.1922→0.19, Cursor 13/77=0.1688→0.17*
 
 ## Violation Breakdown
 
@@ -22,7 +22,7 @@ Each loop run updates the running totals and appends a review entry.
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 16 | 0 | 0 |
 | Missing tests / stale tests | 80 | 22 | 6 |
-| Clippy warnings | 13 | 0 | 1 |
+| Clippy warnings | 14 | 0 | 1 |
 | Protocol errors | 30 | 32 | 4 |
 | Security issues | 62 | 39 | 0 |
 | Architecture drift | 38 | 25 | 1 |
@@ -6309,3 +6309,13 @@ Notes: Clean review — all production code changes are structurally sound, audi
 
 Build: `cargo check` ✓ (clean, 6m 35s). `cargo clippy` **killed by oomd** (known issue). `cargo nextest` **killed by oomd** — compilation phase completed clean before OOM kill; no compiler errors observed.
 Notes: Solid security feature delivery. AES-256-GCM implementation is correct: random per-row nonces, zeroize on drop, Debug redaction, and comprehensive crypto unit tests. Legacy fallback path is sound and explicitly documented in the migration. One minor code-quality finding (expect() in crypto.rs production paths). jd7dd (missing legacy-fallback test) and tdjak/2r506 remain open.
+
+### QA Review — 2026-04-07 20:30 — 62538600..db24c130
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 1 | Closed 4dyvs (P1): extract payload_builder/cache.rs — clean 857-line module with atomic writes, content-addressed hashing, comprehensive tests. Closed z10wz (P1): stale cargo process cleanup (no code, issue triage). Filed vrx84 (P3): unused `HeaderConfig` import left behind in payload_builder/mod.rs test block after cache extraction. |
+| Codex | 0 | 0 | No activity this run. |
+| Cursor | 5 | 0 | Closed os0yd (P2): process list refresh UX with spinner, auto-refresh combo (10s/30s/60s), generation-based completion tracking, 90s timeout. Closed msk2g (P2): clear login password via Zeroizing after auth success. Closed 2w1hh (P1): extract python/callbacks.rs (330 lines). Closed hwh1v (P2): remove dead ConsoleLayoutMode enum and field. Closed awy3u (P3): rolling file logs (daily rotation, 7-day retention, configurable via LocalConfig). All clean, well-tested work. |
+
+Build: `cargo check` **passed** (clean, 3m 14s). Tests: blocked by concurrent dev-agent build lock — compilation completed clean but test runner did not start. Clippy: blocked by build lock. Two compiler warnings: unused `HeaderConfig` import (new, Claude — tracked as vrx84), unused `loot_kind_from_strings` import (pre-existing, not from this range).

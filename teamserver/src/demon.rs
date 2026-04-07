@@ -2813,7 +2813,6 @@ mod tests {
         let mut encrypted = red_cell_common::crypto::encrypt_agent_data(&key, &iv, &metadata)
             .expect("encryption must succeed");
 
-        // Outer envelope: MAGIC | SIZE | AGENT_ID | COMMAND_ID=DemonInit | REQUEST_ID
         let command_id = u32::from(DemonCommand::DemonInit);
         let mut inner = Vec::new();
         inner.extend_from_slice(&u32_be(command_id));
@@ -2823,12 +2822,9 @@ mod tests {
         inner.push(secret_version);
         inner.append(&mut encrypted);
 
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&DEMON_MAGIC_VALUE.to_le_bytes());
-        buf.extend_from_slice(&u32_be((inner.len() + 4) as u32)); // size includes agent_id
-        buf.extend_from_slice(&u32_be(agent_id));
-        buf.extend_from_slice(&inner);
-        buf
+        red_cell_common::demon::DemonEnvelope::new(agent_id, inner)
+            .expect("versioned init envelope must be valid")
+            .to_bytes()
     }
 
     #[tokio::test]

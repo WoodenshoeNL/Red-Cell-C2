@@ -1981,14 +1981,14 @@ async fn agent_list_with_corrupt_base64_aes_key_returns_error() -> Result<(), Te
     let agent = sample_agent(0xBAD0_0001);
     repository.create(&agent).await?;
 
-    sqlx::query("UPDATE ts_agents SET aes_key = '!!!not-valid-base64!!!' WHERE agent_id = ?")
+    sqlx::query("UPDATE ts_agents SET aes_key_enc = '!!!not-valid-base64!!!' WHERE agent_id = ?")
         .bind(i64::from(agent.agent_id))
         .execute(database.pool())
         .await
         .expect("raw SQL update must succeed");
 
     let result = repository.list().await;
-    assert!(result.is_err(), "list() must fail when a row has invalid base64 aes_key");
+    assert!(result.is_err(), "list() must fail when a row has invalid aes_key_enc");
     let err = result.expect_err("expected Err");
     assert!(
         matches!(&err, TeamserverError::InvalidPersistedValue { field, .. } if *field == "aes_key"),
@@ -2006,14 +2006,14 @@ async fn agent_list_with_corrupt_base64_aes_iv_returns_error() -> Result<(), Tea
     let agent = sample_agent(0xBAD0_0002);
     repository.create(&agent).await?;
 
-    sqlx::query("UPDATE ts_agents SET aes_iv = '!!!not-valid-base64!!!' WHERE agent_id = ?")
+    sqlx::query("UPDATE ts_agents SET aes_iv_enc = '!!!not-valid-base64!!!' WHERE agent_id = ?")
         .bind(i64::from(agent.agent_id))
         .execute(database.pool())
         .await
         .expect("raw SQL update must succeed");
 
     let result = repository.list().await;
-    assert!(result.is_err(), "list() must fail when a row has invalid base64 aes_iv");
+    assert!(result.is_err(), "list() must fail when a row has invalid aes_iv_enc");
     let err = result.expect_err("expected Err");
     assert!(
         matches!(&err, TeamserverError::InvalidPersistedValue { field, .. } if *field == "aes_iv"),
@@ -2031,14 +2031,14 @@ async fn agent_get_with_corrupt_base64_returns_error() -> Result<(), TeamserverE
     let agent = sample_agent(0xBAD0_0003);
     repository.create(&agent).await?;
 
-    sqlx::query("UPDATE ts_agents SET aes_key = '@@invalid@@' WHERE agent_id = ?")
+    sqlx::query("UPDATE ts_agents SET aes_key_enc = '@@invalid@@' WHERE agent_id = ?")
         .bind(i64::from(agent.agent_id))
         .execute(database.pool())
         .await
         .expect("raw SQL update must succeed");
 
     let result = repository.get(agent.agent_id).await;
-    assert!(result.is_err(), "get() must fail when the row has invalid base64 aes_key");
+    assert!(result.is_err(), "get() must fail when the row has invalid aes_key_enc");
     let err = result.expect_err("expected Err");
     assert!(
         matches!(&err, TeamserverError::InvalidPersistedValue { field, .. } if *field == "aes_key"),
@@ -2060,14 +2060,14 @@ async fn agent_get_persisted_with_corrupt_aes_key_returns_error() -> Result<(), 
     let agent = sample_agent(0xBAD1_0001);
     repository.create(&agent).await?;
 
-    sqlx::query("UPDATE ts_agents SET aes_key = '!!!bad!!!' WHERE agent_id = ?")
+    sqlx::query("UPDATE ts_agents SET aes_key_enc = '!!!bad!!!' WHERE agent_id = ?")
         .bind(i64::from(agent.agent_id))
         .execute(database.pool())
         .await
         .expect("raw SQL update must succeed");
 
     let result = repository.get_persisted(agent.agent_id).await;
-    assert!(result.is_err(), "get_persisted() must fail on invalid base64 aes_key");
+    assert!(result.is_err(), "get_persisted() must fail on invalid aes_key_enc");
     let err = result.expect_err("expected Err");
     assert!(
         matches!(&err, TeamserverError::InvalidPersistedValue { field, .. } if *field == "aes_key"),
@@ -2085,14 +2085,14 @@ async fn agent_list_persisted_with_corrupt_aes_iv_returns_error() -> Result<(), 
     let agent = sample_agent(0xBAD1_0002);
     repository.create(&agent).await?;
 
-    sqlx::query("UPDATE ts_agents SET aes_iv = '!!!bad!!!' WHERE agent_id = ?")
+    sqlx::query("UPDATE ts_agents SET aes_iv_enc = '!!!bad!!!' WHERE agent_id = ?")
         .bind(i64::from(agent.agent_id))
         .execute(database.pool())
         .await
         .expect("raw SQL update must succeed");
 
     let result = repository.list_persisted().await;
-    assert!(result.is_err(), "list_persisted() must fail on invalid base64 aes_iv");
+    assert!(result.is_err(), "list_persisted() must fail on invalid aes_iv_enc");
     let err = result.expect_err("expected Err");
     assert!(
         matches!(&err, TeamserverError::InvalidPersistedValue { field, .. } if *field == "aes_iv"),

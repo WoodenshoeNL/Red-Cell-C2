@@ -3707,7 +3707,7 @@ async fn dns_listener_runtime_exits_when_shutdown_started_before_first_poll() {
         UnknownCallbackProbeAuditLimiter::new(),
         ReconnectProbeRateLimiter::new(),
         shutdown.clone(),
-        None,
+        DemonInitSecretConfig::None,
         crate::dispatch::DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
         true,
     )
@@ -4082,7 +4082,7 @@ async fn dns_listener_start_rejects_unsupported_record_types() {
         UnknownCallbackProbeAuditLimiter::new(),
         ReconnectProbeRateLimiter::new(),
         ShutdownController::new(),
-        None,
+        DemonInitSecretConfig::None,
         crate::dispatch::DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
         false,
     )

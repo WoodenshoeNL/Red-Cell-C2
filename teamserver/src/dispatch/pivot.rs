@@ -293,8 +293,8 @@ pub(super) async fn dispatch_builtin_packages(
         let occurred_at =
             OffsetDateTime::now_utc().format(&Rfc3339).unwrap_or_else(|_| String::from("unknown"));
         let details = serde_json::json!({
-            "depth": depth,
-            "max_depth": max_depth,
+            "result_status": "failure",
+            "parameters": { "depth": depth, "max_depth": max_depth },
         });
         if let Err(err) = context
             .database
@@ -1012,7 +1012,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_builtin_packages_at_max_depth_logs_audit_and_returns_ok_none()
     -> Result<(), Box<dyn std::error::Error>> {
-        use crate::OperatorMessage;
+        use red_cell_common::operator::OperatorMessage;
         use crate::dispatch::DEFAULT_MAX_PIVOT_CHAIN_DEPTH;
 
         let (database, registry, events, sockets, downloads) = setup_dispatch_context().await;
@@ -1057,8 +1057,14 @@ mod tests {
             format!("{child_id:08X}"),
             "event must name triggering agent"
         );
+        let error_text = msg
+            .info
+            .extra
+            .get("Message")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&msg.info.output);
         assert!(
-            msg.info.output.contains("Pivot") || msg.info.message.to_lowercase().contains("depth"),
+            error_text.contains("Pivot") || error_text.to_lowercase().contains("depth"),
             "error message must mention pivot depth: {:?}",
             msg.info
         );
@@ -1068,7 +1074,7 @@ mod tests {
             .await
             .expect("audit query must succeed");
         assert!(
-            page.records.iter().any(|r| r.action == "pivot_depth_exceeded"),
+            page.items.iter().any(|r| r.action == "pivot_depth_exceeded"),
             "an audit record with action=pivot_depth_exceeded must exist"
         );
 
@@ -1114,7 +1120,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_builtin_packages_uses_configurable_depth_limit()
     -> Result<(), Box<dyn std::error::Error>> {
-        use crate::OperatorMessage;
+        use red_cell_common::operator::OperatorMessage;
 
         let (database, registry, events, sockets, downloads) = setup_dispatch_context().await;
         let mut rx = events.subscribe();

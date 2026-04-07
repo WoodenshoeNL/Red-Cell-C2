@@ -326,6 +326,7 @@ impl AgentRegistry {
                 false, // seq_protected defaults to false (Demon/Archon compatibility)
             )),
         );
+        self.update_active_agent_gauge(&entries).await;
         Ok(())
     }
 
@@ -471,6 +472,7 @@ impl AgentRegistry {
 
         self.clear_links_for_agent(agent_id).await?;
         self.purge_request_contexts(agent_id).await;
+        self.refresh_active_agent_gauge().await;
         Ok(())
     }
 
@@ -1047,6 +1049,32 @@ impl AgentRegistry {
         self.link_repository.delete(parent_agent_id, link_agent_id).await?;
         self.remove_link_from_memory(parent_agent_id, link_agent_id).await;
         Ok(affected)
+    }
+
+    /// Count active agents and update the Prometheus gauge.
+    ///
+    /// Accepts a read-locked reference to avoid re-acquiring the lock when the
+    /// caller already holds it (e.g. after [`insert_full`]).
+    async fn update_active_agent_gauge(
+        &self,
+        entries: &std::collections::HashMap<u32, Arc<AgentEntry>>,
+    ) {
+        let mut active = 0u64;
+        for handle in entries.values() {
+            if handle.info.read().await.active {
+                active += 1;
+            }
+        }
+        crate::metrics::set_agents_active(active);
+    }
+
+    /// Re-count active agents from scratch and update the gauge.
+    ///
+    /// Used when the caller does not hold the entries lock (e.g. after
+    /// [`mark_dead`]).
+    async fn refresh_active_agent_gauge(&self) {
+        let entries = self.entries.read().await;
+        self.update_active_agent_gauge(&entries).await;
     }
 
     async fn entry(&self, agent_id: u32) -> Option<Arc<AgentEntry>> {

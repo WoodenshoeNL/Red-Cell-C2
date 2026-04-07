@@ -888,7 +888,12 @@ impl CommandDispatcher {
             return Err(CommandDispatchError::UnknownCommand { agent_id, command_id, request_id });
         };
 
-        handler(agent_id, request_id, payload.to_vec()).await
+        let cmd_label = format!("0x{command_id:04X}");
+        crate::metrics::inc_callbacks_total(&cmd_label);
+        let start = std::time::Instant::now();
+        let result = handler(agent_id, request_id, payload.to_vec()).await;
+        crate::metrics::observe_callback_latency(&cmd_label, start.elapsed().as_secs_f64());
+        result
     }
 
     /// Dispatch multiple parsed callback packages and concatenate any response packages.

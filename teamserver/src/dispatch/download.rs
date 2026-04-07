@@ -193,6 +193,7 @@ impl DownloadTracker {
         let updated = download.state.clone();
         let _ = download;
         tracker.total_buffered_bytes = next_total;
+        crate::metrics::add_download_bytes(chunk.len() as u64);
         Ok(updated)
     }
 

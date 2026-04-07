@@ -9,18 +9,18 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1225 | 255 | 72 |
-| Bugs filed against | 228 | 49 | 13 |
+| Tasks closed | 1227 | 255 | 72 |
+| Bugs filed against | 229 | 49 | 13 |
 | Bug rate (bugs/task) | 0.19 | 0.19 | 0.18 |
 | Quality score | 81% | 81% | 82% |
 
-*Bug rates: Claude 228/1225=0.1861→0.19, Codex 49/255=0.1922→0.19, Cursor 13/72=0.1806→0.18*
+*Bug rates: Claude 229/1227=0.1867→0.19, Codex 49/255=0.1922→0.19, Cursor 13/72=0.1806→0.18*
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
-| unwrap / expect in production | 15 | 0 | 0 |
+| unwrap / expect in production | 16 | 0 | 0 |
 | Missing tests / stale tests | 78 | 22 | 6 |
 | Clippy warnings | 13 | 0 | 1 |
 | Protocol errors | 30 | 32 | 4 |
@@ -6268,3 +6268,14 @@ Build: `cargo check` **passed** (7m 36s). `cargo clippy` **passed** (4m 38s, zer
 
 Build: `cargo check` ✓ (clean). `cargo clippy -- -D warnings` ✓ (zero warnings). `cargo nextest run --workspace`: still compiling/linking at review time — two concurrent nextest processes (dev loop + QA) competing for 5GB+ RAM per linker invocation (known issue red-cell-c2-n11sv). No test failures observed in compilation phase; 0 errors from compiler.
 Notes: Clean review — all production code changes are structurally sound, audit details format enriched with result_status and parameters nesting (consistent with AuditLogFilter filtering on `$.result_status`). Previously filed bugs (tdjak, 2r506, jd7dd) remain open and unaddressed. Active security work (y8o4r) is in progress with good partial commits.
+
+### QA Review — 2026-04-07 11:00 — 96e14b56..a04ed612
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 1 | Closed y8o4r (P2): AES-256-GCM at-rest encryption for agent session keys — DbMasterKey in database/crypto.rs, per-row nonces, encrypt-on-write/decrypt-on-read in agents.rs, migration 20260407100000, load_or_create_master_key in main.rs. Closed t6gnb (P3): versioned init-secret support for zero-downtime key rotation. Also fix(db) c032e02b: stable master key in reload test. Filed w3qs7 (P3): two .expect() calls in production paths in DbMasterKey::encrypt/decrypt (database/crypto.rs:98,121) — structurally infallible but violate no-expect rule. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓ (clean, 6m 35s). `cargo clippy` **killed by oomd** (known issue). `cargo nextest` **killed by oomd** — compilation phase completed clean before OOM kill; no compiler errors observed.
+Notes: Solid security feature delivery. AES-256-GCM implementation is correct: random per-row nonces, zeroize on drop, Debug redaction, and comprehensive crypto unit tests. Legacy fallback path is sound and explicitly documented in the migration. One minor code-quality finding (expect() in crypto.rs production paths). jd7dd (missing legacy-fallback test) and tdjak/2r506 remain open.

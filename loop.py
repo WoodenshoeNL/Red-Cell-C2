@@ -39,7 +39,7 @@ DEFAULT_SLEEP = {
 DEV_SLEEP_NO_WORK     = 60     # wait when no tasks are ready
 DEV_SLEEP_BETWEEN     = 15     # wait between tasks when --sleep not set
 DEV_SLEEP_TOKEN_LIMIT = 1200   # wait after Claude context limit hit
-DEV_CLEAN_EVERY       = 3      # run build-artifact cleanup every N dev iterations
+DEV_CLEAN_EVERY       = 1      # run build-artifact cleanup every N dev iterations
 DEV_MAX_TURNS         = 150    # max turns per dev session; agent commits WIP and resumes next iteration
 
 # Valid zone names and their corresponding source paths
@@ -595,6 +595,109 @@ def repair_db_if_needed(log: Logger, rename_prefix: bool):
 
 
 DEBUG_SIZE_LIMIT_GB   = 8      # nuke target/* build subdirs when total target/ exceeds this size
+MIN_FREE_DISK_GB      = 5.0   # bail if less than this many GB free before starting a session
+
+
+def check_disk_space(log: Logger) -> bool:
+    """
+    Return True if there is enough free disk space to proceed.
+    Logs a warning and returns False if free space is below MIN_FREE_DISK_GB.
+    Called once at the top of each dev loop iteration so the agent never starts
+    a session that will ENOSPC mid-build (which wastes the entire session).
+    """
+    try:
+        stat = os.statvfs(SCRIPT_DIR)
+        free_gb = (stat.f_bavail * stat.f_frsize) / (1024 ** 3)
+        if free_gb < MIN_FREE_DISK_GB:
+            log.log(
+                f"PREFLIGHT FAIL: only {free_gb:.1f} GB free on disk "
+                f"(need {MIN_FREE_DISK_GB} GB) — skipping iteration to avoid ENOSPC"
+            )
+            return False
+        log.log(f"preflight: disk OK ({free_gb:.1f} GB free)")
+        return True
+    except OSError as e:
+        log.log(f"WARNING: could not check disk space: {e}")
+        return True   # don't block on stat failure
+
+
+def kill_stale_cargo_processes(log: Logger):
+    """
+    Kill cargo/rustc processes older than 1 hour that are not associated with the
+    current loop process tree.  These stale processes hold the Cargo build-directory
+    file lock and block all subsequent cargo check / nextest / clippy invocations.
+
+    Safe because:
+    - We only kill processes older than STALE_CARGO_AGE_SECS (1 hour).
+    - We skip any process whose PID is in our own process group.
+    - We use SIGTERM first, SIGKILL only if still alive after 3 s.
+    """
+    import signal
+
+    STALE_CARGO_AGE_SECS = 3600
+    our_pgid = os.getpgrp()
+
+    try:
+        result = subprocess.run(
+            ["pgrep", "-a", "-x", "cargo"],
+            capture_output=True, text=True,
+        )
+        pids = []
+        for line in result.stdout.splitlines():
+            parts = line.split(None, 1)
+            if not parts:
+                continue
+            try:
+                pid = int(parts[0])
+            except ValueError:
+                continue
+            # Skip processes in our own process group
+            try:
+                if os.getpgid(pid) == our_pgid:
+                    continue
+            except OSError:
+                continue
+            # Check process age via /proc/<pid>/stat
+            try:
+                with open(f"/proc/{pid}/stat") as f:
+                    fields = f.read().split()
+                # Field 22 (0-indexed 21) is starttime in clock ticks
+                starttime_ticks = int(fields[21])
+                hz = os.sysconf(os.sysconf_names["SC_CLK_TCK"])
+                with open("/proc/stat") as f:
+                    for l in f:
+                        if l.startswith("btime"):
+                            boot_time = int(l.split()[1])
+                            break
+                    else:
+                        continue
+                start_epoch = boot_time + starttime_ticks / hz
+                age_secs = time.time() - start_epoch
+                if age_secs >= STALE_CARGO_AGE_SECS:
+                    pids.append((pid, age_secs))
+            except (OSError, IndexError, ValueError):
+                continue
+
+        if not pids:
+            log.log("preflight: no stale cargo processes found")
+            return
+
+        for pid, age in pids:
+            log.log(f"preflight: killing stale cargo PID {pid} (age {age/3600:.1f}h)")
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                continue
+        time.sleep(3)
+        for pid, _ in pids:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass   # already gone — good
+        log.log(f"preflight: killed {len(pids)} stale cargo process(es)")
+
+    except FileNotFoundError:
+        log.log("preflight: pgrep not available — skipping stale-cargo check")
 
 
 def _dir_size_gb(path) -> float:
@@ -1198,6 +1301,16 @@ def dev_loop(args, log: Logger):
 
         repair_db_if_needed(log, rename_prefix)
         reset_stuck_tasks(log, stale_secs)
+
+        # Preflight: kill stale cargo processes and verify disk space
+        kill_stale_cargo_processes(log)
+        if not check_disk_space(log):
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            clean_build_artifacts(log)
+            clean_tmp_worktrees(log)
+            clean_tmp_cargo_targets(log)
+            time.sleep(DEV_SLEEP_NO_WORK)
+            continue
 
         # Find the next task to work on
         next_id = ""

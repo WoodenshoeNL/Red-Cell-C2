@@ -69,6 +69,20 @@ The original Havoc source is at `./src/Havoc` — use it as reference for:
 - Prefer small, focused commits over large ones
 - Read the relevant Havoc source before implementing protocol or business logic
 
+### Pagination checklist
+
+Any function that queries a list from the database or REST API **must** be paginated if the
+result set is unbounded. Before closing a task that touches list/query endpoints, verify:
+
+- [ ] The query uses `LIMIT` + `OFFSET` (or a cursor) — never `SELECT *` without a bound
+- [ ] The API response includes `total`, `offset`, and `limit` fields so callers know when to stop
+- [ ] The default page size is capped (≤ 500 rows) even when the caller does not pass `limit`
+- [ ] There is a test that verifies behaviour at page boundaries (last page, empty page, single item)
+- [ ] Client-side callers loop until `offset + len(items) >= total` — not until the response is empty
+
+Correctness/pagination bugs are the second-largest violation category in this project (66 known
+cases). Skipping this checklist is how they accumulate.
+
 ---
 
 ## Workflow
@@ -242,6 +256,23 @@ cargo clippy $CARGO_FLAGS -- -D warnings
 Do NOT retry with progressively narrower package scopes — that wastes time. Fix the
 issue, then re-run once.
 
+**Phase 3 — production safety check** (only when Phase 2 is green):
+
+```bash
+# Catch unwrap()/expect() in production code — the #1 recurring violation category.
+# This is not caught by clippy -D warnings by default.
+grep -rn '\.unwrap()\|\.expect(' \
+  teamserver/src/ client/src/ common/src/ client-cli/src/ \
+  agent/phantom/src/ agent/specter/src/ \
+  2>/dev/null \
+  | grep -v '#\[cfg(test)\]' \
+  | grep -v '/tests/' \
+  | grep -v '//.*unwrap\|//.*expect'
+```
+
+If this grep finds any matches: replace each with `?`, `unwrap_or`, `unwrap_or_else`, or
+a proper error variant. **Do not commit if this grep has output.**
+
 ### 7. Close, commit, and push
 
 Close the issue and commit any remaining uncommitted changes together. If all code was
@@ -249,6 +280,7 @@ already committed in chunks during step 5, this commit contains only the beads c
 
 ```bash
 br close <id> --reason="<brief description of what was implemented>"
+br lint                            # catch issues missing fields or stale deps
 br sync --flush-only
 git add <any remaining changed files> .beads/issues.jsonl
 git commit -m "<type>(<scope>): <concise description>

@@ -220,10 +220,76 @@ pub(crate) struct AgentFileBrowserUiState {
     pub(crate) dismissed_downloads: BTreeSet<String>,
 }
 
-#[derive(Debug, Default)]
+/// Auto-refresh interval for the process list panel (standalone tab and console sub-panel).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum ProcessListAutoRefresh {
+    #[default]
+    Off,
+    Secs10,
+    Secs30,
+    Secs60,
+}
+
+impl ProcessListAutoRefresh {
+    /// Returns `None` when off, otherwise the interval in seconds.
+    pub(crate) fn interval_secs(self) -> Option<u64> {
+        match self {
+            Self::Off => None,
+            Self::Secs10 => Some(10),
+            Self::Secs30 => Some(30),
+            Self::Secs60 => Some(60),
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::Secs10 => "10s",
+            Self::Secs30 => "30s",
+            Self::Secs60 => "60s",
+        }
+    }
+}
+
+#[cfg(test)]
+mod process_list_auto_refresh_tests {
+    use super::ProcessListAutoRefresh;
+
+    #[test]
+    fn interval_secs_matches_variant() {
+        assert_eq!(ProcessListAutoRefresh::Off.interval_secs(), None);
+        assert_eq!(ProcessListAutoRefresh::Secs10.interval_secs(), Some(10));
+        assert_eq!(ProcessListAutoRefresh::Secs30.interval_secs(), Some(30));
+        assert_eq!(ProcessListAutoRefresh::Secs60.interval_secs(), Some(60));
+    }
+}
+
+#[derive(Debug)]
 pub(crate) struct AgentProcessPanelState {
     pub(crate) filter: String,
     pub(crate) status_message: Option<String>,
+    pub(crate) refresh_in_flight: bool,
+    pub(crate) pending_refresh_generation: Option<u64>,
+    pub(crate) refresh_started_at: Option<std::time::Instant>,
+    /// Local wall-clock label, e.g. `Last refreshed: 14:32:05`.
+    pub(crate) last_refreshed_display: Option<String>,
+    pub(crate) auto_refresh: ProcessListAutoRefresh,
+    pub(crate) next_auto_refresh_at: Option<std::time::Instant>,
+}
+
+impl Default for AgentProcessPanelState {
+    fn default() -> Self {
+        Self {
+            filter: String::new(),
+            status_message: None,
+            refresh_in_flight: false,
+            pending_refresh_generation: None,
+            refresh_started_at: None,
+            last_refreshed_display: None,
+            auto_refresh: ProcessListAutoRefresh::Off,
+            next_auto_refresh_at: None,
+        }
+    }
 }
 
 #[derive(Debug, Default)]

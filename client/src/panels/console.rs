@@ -43,7 +43,6 @@ impl ClientApp {
         let agent = state.agents.iter().find(|agent| agent.name_id == agent_id);
         let entries = state.agent_consoles.get(agent_id).map(Vec::as_slice).unwrap_or(&[]);
         let browser = state.file_browsers.get(agent_id);
-        let process_list = state.process_lists.get(agent_id);
         let status_message = self
             .session_panel
             .console_state
@@ -109,7 +108,7 @@ impl ClientApp {
                 ui.add_space(12.0);
                 ui.separator();
                 ui.add_space(8.0);
-                self.render_process_panel(ui, agent, agent_id, process_list);
+                self.render_process_panel(ui, agent, agent_id, state);
             });
     }
 

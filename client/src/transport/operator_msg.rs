@@ -487,6 +487,7 @@ impl AppState {
 
         let process_list = self.process_lists.entry(agent_id.to_owned()).or_default();
         process_list.rows = rows;
+        process_list.refresh_generation = process_list.refresh_generation.saturating_add(1);
         process_list.updated_at = Some(message.head.timestamp.clone());
         process_list.status_message = Some(format!(
             "Loaded {} process{}",

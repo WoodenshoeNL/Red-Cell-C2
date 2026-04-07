@@ -1,20 +1,121 @@
+use std::time::Duration;
+
 use eframe::egui::{self, Color32, RichText};
 use rfd::FileDialog;
 
-use crate::transport::{AgentProcessListState, AppState, ProcessEntry};
+use crate::transport::{AppState, ProcessEntry};
 use crate::{
     ClientApp, InjectionTargetAction, InjectionTechnique, ProcessInjectionDialogState,
-    blank_if_empty, filtered_process_rows,
+    ProcessListAutoRefresh, blank_if_empty, filtered_process_rows,
 };
 
 impl ClientApp {
+    /// Search, refresh, last-refreshed time, and optional auto-refresh interval.
+    pub(crate) fn render_process_list_toolbar(
+        &mut self,
+        ui: &mut egui::Ui,
+        agent_id: &str,
+        state: &AppState,
+        filter_width: f32,
+        filter_hint: &'static str,
+    ) {
+        self.sync_process_refresh_completion(agent_id, state);
+        self.maybe_process_list_auto_refresh(agent_id, ui.ctx());
+
+        let current_pid = state
+            .agents
+            .iter()
+            .find(|a| a.name_id == agent_id)
+            .and_then(|entry| entry.process_pid.trim().parse::<u32>().ok());
+
+        let in_flight =
+            self.session_panel.process_state.get(agent_id).is_some_and(|p| p.refresh_in_flight);
+        let prev_auto = self
+            .session_panel
+            .process_state
+            .get(agent_id)
+            .map(|p| p.auto_refresh)
+            .unwrap_or(ProcessListAutoRefresh::Off);
+        let last_refreshed = self
+            .session_panel
+            .process_state
+            .get(agent_id)
+            .and_then(|p| p.last_refreshed_display.clone());
+
+        let mut next_auto = prev_auto;
+        let mut queue_refresh = false;
+
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Filter");
+            let filter = &mut self.session_panel.process_state_mut(agent_id).filter;
+            ui.add(
+                egui::TextEdit::singleline(filter)
+                    .desired_width(filter_width)
+                    .hint_text(filter_hint),
+            );
+
+            if in_flight {
+                ui.add(egui::Spinner::new());
+            }
+
+            let refresh = ui.add_enabled(!in_flight, egui::Button::new("Refresh"));
+            if refresh.clicked() {
+                queue_refresh = true;
+            }
+
+            if let Some(ref last) = last_refreshed {
+                ui.separator();
+                ui.label(RichText::new(last).weak());
+            }
+
+            ui.separator();
+            egui::ComboBox::from_id_salt(("process-auto-refresh", agent_id))
+                .selected_text(format!("Auto: {}", prev_auto.label()))
+                .show_ui(ui, |ui| {
+                    for option in [
+                        ProcessListAutoRefresh::Off,
+                        ProcessListAutoRefresh::Secs10,
+                        ProcessListAutoRefresh::Secs30,
+                        ProcessListAutoRefresh::Secs60,
+                    ] {
+                        ui.selectable_value(
+                            &mut next_auto,
+                            option,
+                            format!("Auto: {}", option.label()),
+                        );
+                    }
+                });
+
+            if let Some(pid) = current_pid {
+                ui.separator();
+                ui.label(RichText::new(format!("Agent PID {pid}")).weak());
+            }
+        });
+
+        if queue_refresh {
+            self.queue_process_refresh(agent_id);
+        }
+
+        if next_auto != prev_auto {
+            let panel = self.session_panel.process_state_mut(agent_id);
+            panel.auto_refresh = next_auto;
+            if let Some(secs) = next_auto.interval_secs() {
+                panel.next_auto_refresh_at =
+                    Some(std::time::Instant::now() + Duration::from_secs(secs));
+            } else {
+                panel.next_auto_refresh_at = None;
+            }
+        }
+    }
+
     pub(crate) fn render_process_panel(
         &mut self,
         ui: &mut egui::Ui,
         agent: Option<&crate::transport::AgentSummary>,
         agent_id: &str,
-        process_list: Option<&AgentProcessListState>,
+        state: &AppState,
     ) {
+        let process_list = state.process_lists.get(agent_id);
         ui.heading("Process List");
         ui.separator();
 
@@ -26,29 +127,7 @@ impl ClientApp {
             .and_then(|state| state.status_message.clone())
             .or_else(|| process_list.and_then(|state| state.status_message.clone()));
 
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Filter");
-            let filter = &mut self.session_panel.process_state_mut(agent_id).filter;
-            ui.add(
-                egui::TextEdit::singleline(filter)
-                    .desired_width(180.0)
-                    .hint_text("Search name or PID"),
-            );
-
-            if ui.button("Refresh").clicked() {
-                self.queue_process_refresh(agent_id);
-            }
-
-            if let Some(updated_at) = process_list.and_then(|state| state.updated_at.as_deref()) {
-                ui.separator();
-                ui.label(RichText::new(format!("Updated {updated_at}")).weak());
-            }
-
-            if let Some(pid) = current_pid {
-                ui.separator();
-                ui.label(RichText::new(format!("Agent PID {pid}")).weak());
-            }
-        });
+        self.render_process_list_toolbar(ui, agent_id, state, 180.0, "Search name or PID");
 
         if let Some(message) = process_status {
             ui.add_space(4.0);
@@ -181,7 +260,7 @@ impl ClientApp {
             ui.separator();
             ui.add_space(4.0);
 
-            // ── Toolbar: search + refresh + status ───────────────
+            // ── Toolbar: search + refresh + last refreshed + auto ─
             let process_status = self
                 .session_panel
                 .process_state
@@ -189,24 +268,13 @@ impl ClientApp {
                 .and_then(|s| s.status_message.clone())
                 .or_else(|| process_list.and_then(|s| s.status_message.clone()));
 
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Filter");
-                let filter = &mut self.session_panel.process_state_mut(agent_id).filter;
-                ui.add(
-                    egui::TextEdit::singleline(filter)
-                        .desired_width(220.0)
-                        .hint_text("Search name, PID, or user"),
-                );
-
-                if ui.button("Refresh").clicked() {
-                    self.queue_process_refresh(agent_id);
-                }
-
-                if let Some(updated_at) = process_list.and_then(|s| s.updated_at.as_deref()) {
-                    ui.separator();
-                    ui.label(RichText::new(format!("Updated {updated_at}")).weak());
-                }
-            });
+            self.render_process_list_toolbar(
+                ui,
+                agent_id,
+                state,
+                220.0,
+                "Search name, PID, or user",
+            );
 
             if let Some(message) = process_status {
                 ui.add_space(4.0);

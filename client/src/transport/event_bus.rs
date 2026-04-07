@@ -295,6 +295,8 @@ pub(crate) struct AgentProcessListState {
     pub(crate) rows: Vec<ProcessEntry>,
     pub(crate) status_message: Option<String>,
     pub(crate) updated_at: Option<String>,
+    /// Incremented on each successful process-list parse; used to detect refresh completion.
+    pub(crate) refresh_generation: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

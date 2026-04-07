@@ -676,6 +676,7 @@ fn process_list_response_updates_process_panel_state() {
     assert_eq!(processes.rows[0].pid, 1234);
     assert_eq!(processes.rows[0].name, "explorer.exe");
     assert_eq!(processes.updated_at.as_deref(), Some("10/03/2026 12:00:00"));
+    assert_eq!(processes.refresh_generation, 1);
 }
 
 #[test]

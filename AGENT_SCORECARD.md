@@ -10,21 +10,21 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 1223 | 255 | 72 |
-| Bugs filed against | 224 | 49 | 13 |
-| Bug rate (bugs/task) | 0.18 | 0.19 | 0.18 |
-| Quality score | 82% | 81% | 82% |
+| Bugs filed against | 228 | 49 | 13 |
+| Bug rate (bugs/task) | 0.19 | 0.19 | 0.18 |
+| Quality score | 81% | 81% | 82% |
 
-*Bug rates: Claude 224/1223=0.1831→0.18, Codex 49/255=0.1922→0.19, Cursor 13/72=0.1806→0.18*
+*Bug rates: Claude 228/1223=0.1864→0.19, Codex 49/255=0.1922→0.19, Cursor 13/72=0.1806→0.18*
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
-| unwrap / expect in production | 14 | 0 | 0 |
-| Missing tests / stale tests | 77 | 22 | 6 |
+| unwrap / expect in production | 15 | 0 | 0 |
+| Missing tests / stale tests | 78 | 22 | 6 |
 | Clippy warnings | 13 | 0 | 1 |
 | Protocol errors | 30 | 32 | 4 |
-| Security issues | 61 | 39 | 0 |
+| Security issues | 62 | 39 | 0 |
 | Architecture drift | 38 | 25 | 1 |
 | Memory / resource leaks | 12 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 10 | 0 |
@@ -6247,3 +6247,13 @@ Build: **FAILED** — `cargo check --workspace` exits non-zero. `client/src/pane
 | Cursor | 0 | 0 | No activity. |
 
 Build: **passed** — `cargo check --workspace` clean (2m 55s). Tests/clippy skipped — build lock held by concurrent dev agent cargo processes (15 active).
+
+### QA Review — 2026-04-07 09:30 — f5518de2..47675a14
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 4 | Three tasks (4p1zz, y8o4r, t6gnb) are in_progress with substantial WIP committed but none closed — all sessions ended as "wip: interrupted". Filed naoqr (P1): broken test-binary import `crate::OperatorMessage` in dispatch/pivot.rs tests (lines 1015, 1117) — nextest compile failure; should be `red_cell_common::operator::OperatorMessage`. Filed tdjak (P2): `expect()` in production path — `parse_init_agent` (demon.rs:732) uses `secret_version.expect()` in Versioned mode. Filed 2r506 (P2 security): `derive_session_keys_for_version` in common/src/crypto.rs takes `&[(u8, Vec<u8>)]`, forcing callers to copy `Zeroizing<Vec<u8>>` into plain `Vec<u8>` — secret bytes not zeroed on drop. Filed jd7dd (P3): legacy plaintext-fallback path in `decode_agent_key` (agents.rs) has no test coverage for pre-migration rows. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` **passed** (7m 36s). `cargo clippy` **passed** (4m 38s, zero warnings). `cargo nextest` **FAILED** — test binary compile error: `crate::OperatorMessage` unresolved in two new pivot.rs tests (tracked as naoqr P1).

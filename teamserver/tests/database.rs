@@ -1,7 +1,7 @@
 use red_cell::database::{
-    AgentResponseRecord, AuditLogEntry, AuditLogFilter, Database, LinkRecord, ListenerStatus,
-    LootFilter, LootRecord, PersistedListener, PersistedListenerState, PersistedOperator,
-    TeamserverError,
+    AgentResponseRecord, AuditLogEntry, AuditLogFilter, Database, DbMasterKey, LinkRecord,
+    ListenerStatus, LootFilter, LootRecord, PersistedListener, PersistedListenerState,
+    PersistedOperator, TeamserverError,
 };
 use red_cell::{
     AuditQuery, AuditResultStatus, SessionActivityQuery, audit_details, query_audit_log,
@@ -298,7 +298,11 @@ async fn agent_repository_persists_listener_note_and_ctr_state_across_reload()
 -> Result<(), TeamserverError> {
     let temp_dir = TempDir::new().expect("tempdir should be created");
     let database_path = temp_dir.path().join("agents.sqlite");
-    let database = Database::connect(&database_path).await?;
+    // Use a fixed key so the same key can decrypt at-rest data after the DB is closed
+    // and re-opened.  Database::connect() generates a random ephemeral key each time,
+    // which would make the reload step always fail decryption.
+    let master_key = DbMasterKey::from_bytes([0x42u8; 32]);
+    let database = Database::connect_with_master_key(&database_path, master_key).await?;
     let repository = database.agents();
     let mut first = sample_agent(0x00AB_CDEF);
     let second = sample_agent(0x00AB_CDF0);
@@ -333,7 +337,8 @@ async fn agent_repository_persists_listener_note_and_ctr_state_across_reload()
 
     database.close().await;
 
-    let reloaded = Database::connect(&database_path).await?;
+    let master_key = DbMasterKey::from_bytes([0x42u8; 32]);
+    let reloaded = Database::connect_with_master_key(&database_path, master_key).await?;
     let reloaded_repository = reloaded.agents();
     let reloaded_first = reloaded_repository
         .get_persisted(first.agent_id)

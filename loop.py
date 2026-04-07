@@ -1859,13 +1859,22 @@ def resolve_node_id(args) -> str:
     Resolution order (first wins):
       1. --node-id CLI flag
       2. RC_NODE_ID environment variable
-      3. socket.gethostname()
+      3. .node-id file in the repo root (gitignored, set once per machine)
+      4. socket.gethostname()
+
+    To set permanently on a machine without touching env vars:
+        echo "desktop-dev01" > .node-id
     """
     if args.node_id:
         return args.node_id
     env = os.environ.get("RC_NODE_ID", "").strip()
     if env:
         return env
+    node_id_file = SCRIPT_DIR / ".node-id"
+    if node_id_file.exists():
+        val = node_id_file.read_text().strip()
+        if val:
+            return val
     return socket.gethostname()
 
 

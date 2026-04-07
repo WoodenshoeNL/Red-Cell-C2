@@ -4,6 +4,7 @@ mod callbacks;
 mod script;
 
 use callbacks::{EventCallback, RegisteredAgentCheckinCallback};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,9 +21,15 @@ use red_cell_common::demon::DemonCommand;
 use red_cell_common::operator::{AgentTaskInfo, EventCode, Message, MessageHead, OperatorMessage};
 use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
-use tracing::warn;
+use tracing::{error, warn};
 
 use crate::transport::{AgentSummary, AppState, ListenerSummary, LootItem, SharedAppState};
+
+thread_local! {
+    /// When set, a Python callback or script entrypoint is active on this thread (used for mutex
+    /// poison diagnostics).
+    static PYTHON_CALLBACK_CONTEXT: RefCell<Option<(String, &'static str)>> = RefCell::new(None);
+}
 
 static ACTIVE_RUNTIME: OnceLock<Mutex<Option<Arc<PythonApiState>>>> = OnceLock::new();
 const MAX_SCRIPT_OUTPUT_ENTRIES: usize = 512;
@@ -145,12 +152,24 @@ struct TaskResult {
 }
 
 impl PythonApiState {
-    fn begin_script_execution(&self, script_name: &str) {
+    /// `callback_kind`, when set, is included in ERROR logs if a mutex is poisoned while this
+    /// script runs.
+    pub(super) fn begin_script_execution(
+        &self,
+        script_name: &str,
+        callback_kind: Option<&'static str>,
+    ) {
         *lock_mutex(&self.current_script) = Some(script_name.to_owned());
+        PYTHON_CALLBACK_CONTEXT.with(|c| {
+            *c.borrow_mut() = callback_kind.map(|k| (script_name.to_owned(), k));
+        });
     }
 
     fn end_script_execution(&self) {
         *lock_mutex(&self.current_script) = None;
+        PYTHON_CALLBACK_CONTEXT.with(|c| {
+            *c.borrow_mut() = None;
+        });
     }
 
     fn current_script_name(&self) -> Option<String> {
@@ -510,7 +529,7 @@ impl PythonApiState {
             },
         )
         .map_err(|error| error.to_string())?;
-        self.begin_script_execution(&registered.script_name);
+        self.begin_script_execution(&registered.script_name, Some("registered_command"));
         let bound = registered.callback.bind(py);
         let watchdog = script::spawn_script_watchdog(
             timeout,
@@ -1944,26 +1963,33 @@ fn settablayout(title: String, layout: String) -> PyResult<()> {
     api_state.set_tab_layout(&title, layout)
 }
 
+fn python_callback_context_for_log() -> Option<String> {
+    PYTHON_CALLBACK_CONTEXT
+        .with(|c| c.borrow().as_ref().map(|(script, kind)| format!("{kind} (script `{script}`)")))
+}
+
 fn lock_mutex<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    match mutex.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => {
-            warn!("mutex poisoned in python runtime — recovering with potentially corrupted state");
-            poisoned.into_inner()
-        }
-    }
+    mutex.lock().unwrap_or_else(|poisoned| {
+        let callback_context = python_callback_context_for_log();
+        error!(
+            target: "red_cell_client::python",
+            callback_context = callback_context.as_deref().unwrap_or("(unknown)"),
+            "python runtime mutex poisoned — recovering inner state; previous holder panicked (state may be inconsistent)"
+        );
+        poisoned.into_inner()
+    })
 }
 
 fn lock_app_state(app_state: &SharedAppState) -> std::sync::MutexGuard<'_, AppState> {
-    match app_state.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => {
-            warn!(
-                "app state mutex poisoned in python module — recovering with potentially corrupted state"
-            );
-            poisoned.into_inner()
-        }
-    }
+    app_state.lock().unwrap_or_else(|poisoned| {
+        let callback_context = python_callback_context_for_log();
+        error!(
+            target: "red_cell_client::python",
+            callback_context = callback_context.as_deref().unwrap_or("(unknown)"),
+            "app state mutex poisoned while in python module — recovering inner state; previous holder panicked (state may be inconsistent)"
+        );
+        poisoned.into_inner()
+    })
 }
 
 fn current_operator_username(app_state: &SharedAppState) -> String {
@@ -2179,6 +2205,18 @@ mod tests {
     use super::*;
 
     static TEST_GUARD: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn lock_mutex_recovers_from_poison() {
+        let m = Mutex::new(42u32);
+        let _ = std::panic::catch_unwind(|| {
+            let _g = m.lock().expect("lock for poison test");
+            panic!("intentional test poison");
+        });
+        assert!(m.is_poisoned());
+        let guard = lock_mutex(&m);
+        assert_eq!(*guard, 42);
+    }
 
     fn sample_agent(agent_id: &str) -> AgentSummary {
         AgentSummary {

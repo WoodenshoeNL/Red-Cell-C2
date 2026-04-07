@@ -93,7 +93,7 @@ impl PythonApiState {
         match Py::new(py, PyAgent { agent_id: normalize_agent_id(agent_id) }) {
             Ok(agent) => {
                 for callback in callbacks {
-                    self.begin_script_execution(&callback.script_name);
+                    self.begin_script_execution(&callback.script_name, Some("agent_checkin"));
                     let bound = callback.callback.bind(py);
                     let watchdog = script::spawn_script_watchdog(
                         timeout,
@@ -135,7 +135,7 @@ impl PythonApiState {
         let thread_id = self.python_thread_id.load(Ordering::Relaxed);
         let callbacks = lock_mutex(&self.command_response_callbacks).clone();
         for callback in callbacks {
-            self.begin_script_execution(&callback.script_name);
+            self.begin_script_execution(&callback.script_name, Some("command_response"));
             let watchdog = script::spawn_script_watchdog(
                 timeout,
                 callback.script_name.clone(),
@@ -176,7 +176,7 @@ impl PythonApiState {
             }
         };
         for callback in callbacks {
-            self.begin_script_execution(&callback.script_name);
+            self.begin_script_execution(&callback.script_name, Some("loot_captured"));
             let watchdog = script::spawn_script_watchdog(
                 timeout,
                 callback.script_name.clone(),
@@ -209,7 +209,7 @@ impl PythonApiState {
         let thread_id = self.python_thread_id.load(Ordering::Relaxed);
         let callbacks = lock_mutex(&self.listener_changed_callbacks).clone();
         for callback in callbacks {
-            self.begin_script_execution(&callback.script_name);
+            self.begin_script_execution(&callback.script_name, Some("listener_changed"));
             let watchdog = script::spawn_script_watchdog(
                 timeout,
                 callback.script_name.clone(),

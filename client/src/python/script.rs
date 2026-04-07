@@ -231,7 +231,7 @@ pub(super) fn load_script_at_path(
     api_state.ensure_script_record(&script_name, path.to_path_buf());
     unload_script_bindings(py, api_state, &script_name)?;
 
-    api_state.begin_script_execution(&script_name);
+    api_state.begin_script_execution(&script_name, Some("script_load"));
     let result = load_script(py, path, &script_name).map_err(|error| error.to_string());
     api_state.end_script_execution();
 

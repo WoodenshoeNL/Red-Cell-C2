@@ -2,10 +2,11 @@ use eframe::egui::{self, Color32, Key, RichText, Stroke};
 
 use crate::transport::{AgentConsoleEntry, AgentConsoleEntryKind, AgentFileBrowserState, AppState};
 use crate::{
-    ClientApp, HistoryDirection, agent_arch, agent_os, apply_completion, apply_history_step,
-    blank_if_empty, breadcrumb_segments, build_file_browser_list_task, directory_label,
-    file_entry_label, find_file_entry, format_console_prompt, human_size, parent_remote_path,
-    save_completed_download, selected_remote_directory, short_task_id, upload_destination,
+    ClientApp, CompletedDownloadSaveOutcome, HistoryDirection, agent_arch, agent_os,
+    apply_completion, apply_history_step, blank_if_empty, breadcrumb_segments,
+    build_file_browser_list_task, directory_label, file_entry_label, find_file_entry,
+    format_console_prompt, human_size, parent_remote_path, save_completed_download,
+    selected_remote_directory, short_task_id, upload_destination,
 };
 
 impl ClientApp {
@@ -682,8 +683,16 @@ impl ClientApp {
                         .monospace(),
                 );
                 if ui.button("Save").clicked() {
-                    save_completed_download(remote_path, data);
-                    to_dismiss.push(file_id.clone());
+                    match save_completed_download(remote_path, data) {
+                        CompletedDownloadSaveOutcome::Cancelled => {}
+                        CompletedDownloadSaveOutcome::Saved => {
+                            to_dismiss.push(file_id.clone());
+                        }
+                        CompletedDownloadSaveOutcome::WriteFailed(message) => {
+                            self.session_panel.file_browser_state_mut(agent_id).status_message =
+                                Some(message);
+                        }
+                    }
                 }
                 if ui
                     .add(egui::Button::new("Dismiss").small())

@@ -602,23 +602,49 @@ pub(crate) fn loot_is_downloadable(item: &LootItem) -> bool {
     matches!(item.kind, LootKind::File | LootKind::Screenshot) && item.content_base64.is_some()
 }
 
-/// Opens a native save-file dialog for a completed file-browser download.
-///
-/// The suggested file name is derived from `remote_path`.  If the user accepts, the
-/// bytes are written to the chosen path.  Status messages are shown via the OS dialog.
-pub(crate) fn save_completed_download(remote_path: &str, data: &[u8]) {
-    let file_name = std::path::Path::new(remote_path)
+/// Result of attempting to save a completed file-browser download through the native dialog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CompletedDownloadSaveOutcome {
+    /// User cancelled the dialog or did not choose a path.
+    Cancelled,
+    /// Data was written to the path the user chose.
+    Saved,
+    /// The user chose a path but `std::fs::write` failed (permissions, disk full, etc.).
+    WriteFailed(String),
+}
+
+/// Returns the suggested local file name for a completed remote path (sanitized).
+pub(crate) fn suggested_file_name_for_completed_download(remote_path: &str) -> String {
+    std::path::Path::new(remote_path)
         .file_name()
         .and_then(|n| n.to_str())
         .map(sanitize_file_name)
-        .unwrap_or_else(|| "download.bin".to_owned());
+        .unwrap_or_else(|| "download.bin".to_owned())
+}
+
+/// Opens a native save-file dialog for a completed file-browser download.
+///
+/// The suggested file name is derived from `remote_path`. If the user chooses a path,
+/// bytes are written with [`std::fs::write`]. The dialog only selects the path; write
+/// failures must be surfaced by the caller (for example via file-browser `status_message`).
+pub(crate) fn save_completed_download(
+    remote_path: &str,
+    data: &[u8],
+) -> CompletedDownloadSaveOutcome {
+    let file_name = suggested_file_name_for_completed_download(remote_path);
 
     let Some(destination) = FileDialog::new().set_file_name(&file_name).save_file() else {
-        return;
+        return CompletedDownloadSaveOutcome::Cancelled;
     };
 
-    // Ignore the error — the OS dialog already shows write errors to the user.
-    let _ = std::fs::write(destination, data);
+    if let Err(err) = std::fs::write(&destination, data) {
+        return CompletedDownloadSaveOutcome::WriteFailed(format!(
+            "Failed to save {}: {err}",
+            destination.display()
+        ));
+    }
+
+    CompletedDownloadSaveOutcome::Saved
 }
 
 pub(crate) fn download_loot_item(item: &LootItem) -> std::result::Result<String, String> {
@@ -981,5 +1007,23 @@ mod loot_filter_tests {
             "",
             "",
         ));
+    }
+}
+
+#[cfg(test)]
+mod completed_download_tests {
+    use super::suggested_file_name_for_completed_download;
+
+    #[test]
+    fn suggested_file_name_uses_leaf_and_sanitizes() {
+        assert_eq!(
+            suggested_file_name_for_completed_download("/var/log/app/secrets:file?.txt"),
+            "secrets_file_.txt"
+        );
+    }
+
+    #[test]
+    fn suggested_file_name_fallback_when_no_leaf() {
+        assert_eq!(suggested_file_name_for_completed_download("/"), "download.bin");
     }
 }

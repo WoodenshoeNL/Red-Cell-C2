@@ -334,21 +334,6 @@ pub(crate) struct ProcessInjectionDialogState {
     pub(crate) status_message: Option<String>,
 }
 
-// ── Console layout ───────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum ConsoleLayoutMode {
-    #[default]
-    Tabs,
-    Split,
-}
-
-impl ConsoleLayoutMode {
-    #[allow(dead_code)]
-    pub(crate) const ALL: [(Self, &'static str); 2] =
-        [(Self::Tabs, "Tabs"), (Self::Split, "Split")];
-}
-
 // ── Dock panel ───────────────────────────────────────────────────────────────
 
 /// Identifies a tab in the bottom dock panel.
@@ -486,8 +471,6 @@ pub(crate) struct SessionPanelState {
     pub(crate) descending: bool,
     pub(crate) open_consoles: Vec<String>,
     pub(crate) selected_console: Option<String>,
-    #[allow(dead_code)]
-    pub(crate) console_layout: ConsoleLayoutMode,
     pub(crate) console_state: BTreeMap<String, AgentConsoleState>,
     pub(crate) file_browser_state: BTreeMap<String, AgentFileBrowserUiState>,
     pub(crate) process_state: BTreeMap<String, AgentProcessPanelState>,

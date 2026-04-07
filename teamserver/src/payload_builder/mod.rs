@@ -3415,6 +3415,7 @@ mod tests {
                 logging: None,
                 cert: None,
                 database: None,
+                observability: None,
                 build: Some(red_cell_common::config::BuildConfig {
                     compiler64: Some(compiler_x64.display().to_string()),
                     compiler86: Some(compiler_x86.display().to_string()),

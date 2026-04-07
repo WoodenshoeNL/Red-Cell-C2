@@ -465,7 +465,7 @@ async fn run_receive_loop(
                                     }
                                     None => {
                                         warn!(
-                                            message = %m.info.message,
+                                            message_len = m.info.message.len(),
                                             "InitConnectionSuccess missing SessionToken — \
                                              cannot derive HMAC key; closing connection"
                                         );

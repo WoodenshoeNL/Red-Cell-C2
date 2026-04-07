@@ -34,6 +34,13 @@ pub struct LocalConfig {
     /// log message is emitted.  Defaults to 10 seconds when omitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub python_script_timeout_secs: Option<u64>,
+    /// Directory for daily rolling log files (default: see [`crate::logging::default_log_dir`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_dir: Option<PathBuf>,
+    /// Log filter directives (`info`, `debug`, `warn`, or `target=level` lists).
+    /// Ignored when `RUST_LOG` is set to a valid value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_level: Option<String>,
 }
 
 impl LocalConfig {
@@ -155,6 +162,8 @@ mod tests {
         assert_eq!(config.ca_cert, None);
         assert_eq!(config.cert_fingerprint, None);
         assert_eq!(config.python_script_timeout_secs, None);
+        assert_eq!(config.log_dir, None);
+        assert_eq!(config.log_level, None);
     }
 
     #[test]
@@ -189,6 +198,8 @@ mod tests {
             ca_cert: Some(PathBuf::from("/tmp/ca.pem")),
             cert_fingerprint: Some("abcdef0123456789".to_owned()),
             python_script_timeout_secs: None,
+            log_dir: Some(PathBuf::from("/tmp/red-cell-logs")),
+            log_level: Some("debug".to_owned()),
         };
 
         let serialized = toml::to_string_pretty(&config)
@@ -231,6 +242,8 @@ mod tests {
             ca_cert: None,
             cert_fingerprint: None,
             python_script_timeout_secs: None,
+            log_dir: None,
+            log_level: None,
         };
 
         config.save_to(&path).unwrap_or_else(|e| panic!("save_to should succeed: {e}"));
@@ -271,6 +284,8 @@ mod tests {
             ca_cert: Some(PathBuf::from("/tmp/ca.pem")),
             cert_fingerprint: Some("abcdef0123456789".to_owned()),
             python_script_timeout_secs: None,
+            log_dir: None,
+            log_level: None,
         };
 
         // None path is a documented no-op — must succeed.

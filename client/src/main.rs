@@ -2,6 +2,7 @@ mod actions;
 mod helpers;
 mod known_servers;
 mod local_config;
+mod logging;
 mod login;
 mod panels;
 mod python;
@@ -542,6 +543,8 @@ impl eframe::App for ClientApp {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let local_config = LocalConfig::load();
+    logging::init(&local_config);
 
     // Handle --purge-known-server: remove the entry and exit.
     if let Some(host_port) = &cli.purge_known_server {

@@ -17,6 +17,8 @@ fn local_config_default_round_trips() {
     assert_eq!(cfg.scripts_dir, None);
     assert_eq!(cfg.ca_cert, None);
     assert_eq!(cfg.cert_fingerprint, None);
+    assert_eq!(cfg.log_dir, None);
+    assert_eq!(cfg.log_level, None);
 }
 
 #[test]

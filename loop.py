@@ -1859,11 +1859,14 @@ def resolve_node_id(args) -> str:
     Resolution order (first wins):
       1. --node-id CLI flag
       2. RC_NODE_ID environment variable
-      3. .node-id file in the repo root (gitignored, set once per machine)
-      4. socket.gethostname()
+      3. .node-id file in the repo root (gitignored, auto-created on first run)
 
-    To set permanently on a machine without touching env vars:
-        echo "desktop-dev01" > .node-id
+    On first run (no .node-id file), generates and persists:
+        <hostname>-<4 random lowercase alphanumeric chars>
+    e.g. "ubuntu-c2-dev01-a3kx"
+
+    This guarantees uniqueness across machines with identical hostnames without
+    any manual setup.
     """
     if args.node_id:
         return args.node_id
@@ -1875,7 +1878,13 @@ def resolve_node_id(args) -> str:
         val = node_id_file.read_text().strip()
         if val:
             return val
-    return socket.gethostname()
+    # First run: generate and persist a unique node ID
+    import random as _random
+    import string as _string
+    suffix = "".join(_random.choices(_string.ascii_lowercase + _string.digits, k=4))
+    node_id = f"{socket.gethostname()}-{suffix}"
+    node_id_file.write_text(node_id + "\n")
+    return node_id
 
 
 def main():

@@ -1,5 +1,7 @@
 //! Agent CRUD repository.
 
+use std::sync::Arc;
+
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use red_cell_common::{AgentEncryptionInfo, AgentRecord};
@@ -7,6 +9,7 @@ use sqlx::{FromRow, Sqlite, SqlitePool};
 use zeroize::Zeroizing;
 
 use super::TeamserverError;
+use super::crypto::DbMasterKey;
 
 /// Persisted agent row plus transport state needed by the in-memory registry.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33,13 +36,15 @@ pub struct PersistedAgent {
 #[derive(Clone, Debug)]
 pub struct AgentRepository {
     pool: SqlitePool,
+    /// Master key used to encrypt/decrypt the `aes_key_enc` / `aes_iv_enc` columns.
+    master_key: Arc<DbMasterKey>,
 }
 
 impl AgentRepository {
-    /// Create a new agent repository from a shared pool.
+    /// Create a new agent repository from a shared pool and database master key.
     #[must_use]
-    pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+    pub fn new(pool: SqlitePool, master_key: Arc<DbMasterKey>) -> Self {
+        Self { pool, master_key }
     }
 
     /// Insert a new agent row.
@@ -77,9 +82,19 @@ impl AgentRepository {
         ctr_block_offset: u64,
         legacy_ctr: bool,
     ) -> Result<(), TeamserverError> {
+        let enc_key = self.master_key.encrypt(&agent.encryption.aes_key)?;
+        let enc_iv = self.master_key.encrypt(&agent.encryption.aes_iv)?;
         let mut transaction = self.pool.begin().await?;
-        insert_agent_row(&mut *transaction, agent, listener_name, ctr_block_offset, legacy_ctr)
-            .await?;
+        insert_agent_row(
+            &mut *transaction,
+            agent,
+            listener_name,
+            ctr_block_offset,
+            legacy_ctr,
+            &enc_key,
+            &enc_iv,
+        )
+        .await?;
         transaction.commit().await?;
         Ok(())
     }
@@ -95,10 +110,14 @@ impl AgentRepository {
         agent: &AgentRecord,
         listener_name: &str,
     ) -> Result<(), TeamserverError> {
+        let enc_key = self.master_key.encrypt(&agent.encryption.aes_key)?;
+        let enc_iv = self.master_key.encrypt(&agent.encryption.aes_iv)?;
         let result = sqlx::query(
             r#"
             UPDATE ts_agents SET
-                active = ?, reason = ?, note = ?, aes_key = ?, aes_iv = ?, hostname = ?, username = ?,
+                active = ?, reason = ?, note = ?,
+                aes_key = '', aes_iv = '', aes_key_enc = ?, aes_iv_enc = ?,
+                hostname = ?, username = ?,
                 domain_name = ?, external_ip = ?, internal_ip = ?, process_name = ?, process_path = ?,
                 base_address = ?, process_pid = ?, process_tid = ?, process_ppid = ?,
                 process_arch = ?, elevated = ?, os_version = ?, os_build = ?, os_arch = ?, listener_name = ?, sleep_delay = ?,
@@ -110,8 +129,8 @@ impl AgentRepository {
         .bind(super::bool_to_i64(agent.active))
         .bind(&agent.reason)
         .bind(&agent.note)
-        .bind(BASE64_STANDARD.encode(&*agent.encryption.aes_key))
-        .bind(BASE64_STANDARD.encode(&*agent.encryption.aes_iv))
+        .bind(enc_key)
+        .bind(enc_iv)
         .bind(&agent.hostname)
         .bind(&agent.username)
         .bind(&agent.domain_name)
@@ -155,11 +174,14 @@ impl AgentRepository {
         listener_name: &str,
         legacy_ctr: bool,
     ) -> Result<(), TeamserverError> {
+        let enc_key = self.master_key.encrypt(&agent.encryption.aes_key)?;
+        let enc_iv = self.master_key.encrypt(&agent.encryption.aes_iv)?;
         let result = sqlx::query(
             r#"
             UPDATE ts_agents SET
                 active = 1, reason = '', ctr_block_offset = 0, last_seen_seq = 0, legacy_ctr = ?,
-                aes_key = ?, aes_iv = ?, hostname = ?, username = ?, domain_name = ?,
+                aes_key = '', aes_iv = '', aes_key_enc = ?, aes_iv_enc = ?,
+                hostname = ?, username = ?, domain_name = ?,
                 external_ip = ?, internal_ip = ?, process_name = ?, process_path = ?,
                 base_address = ?, process_pid = ?, process_tid = ?, process_ppid = ?,
                 process_arch = ?, elevated = ?, os_version = ?, os_build = ?, os_arch = ?,
@@ -169,8 +191,8 @@ impl AgentRepository {
             "#,
         )
         .bind(super::bool_to_i64(legacy_ctr))
-        .bind(BASE64_STANDARD.encode(&*agent.encryption.aes_key))
-        .bind(BASE64_STANDARD.encode(&*agent.encryption.aes_iv))
+        .bind(enc_key)
+        .bind(enc_iv)
         .bind(&agent.hostname)
         .bind(&agent.username)
         .bind(&agent.domain_name)
@@ -211,7 +233,7 @@ impl AgentRepository {
             .fetch_optional(&self.pool)
             .await?;
 
-        row.map(TryInto::try_into).transpose()
+        row.map(|r| row_to_agent_record(&r, &self.master_key)).transpose()
     }
 
     /// Return all persisted agents.
@@ -220,7 +242,7 @@ impl AgentRepository {
             .fetch_all(&self.pool)
             .await?;
 
-        rows.into_iter().map(TryInto::try_into).collect()
+        rows.iter().map(|r| row_to_agent_record(r, &self.master_key)).collect()
     }
 
     /// Return only agents still marked active.
@@ -231,7 +253,7 @@ impl AgentRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        rows.into_iter().map(TryInto::try_into).collect()
+        rows.iter().map(|r| row_to_agent_record(r, &self.master_key)).collect()
     }
 
     /// Check whether an agent row exists.
@@ -300,7 +322,7 @@ impl AgentRepository {
             .fetch_optional(&self.pool)
             .await?;
 
-        row.map(TryInto::try_into).transpose()
+        row.map(|r| row_to_persisted_agent(r, &self.master_key)).transpose()
     }
 
     /// Return all persisted agents plus their CTR state.
@@ -309,7 +331,7 @@ impl AgentRepository {
             .fetch_all(&self.pool)
             .await?;
 
-        rows.into_iter().map(TryInto::try_into).collect()
+        rows.into_iter().map(|r| row_to_persisted_agent(r, &self.master_key)).collect()
     }
 
     /// Persist the current CTR block offset for an agent.
@@ -379,15 +401,19 @@ pub(super) async fn insert_agent_row(
     listener_name: &str,
     ctr_block_offset: u64,
     legacy_ctr: bool,
+    enc_key: &str,
+    enc_iv: &str,
 ) -> Result<(), TeamserverError> {
     sqlx::query(
         r#"
         INSERT INTO ts_agents (
-            agent_id, active, reason, note, ctr_block_offset, legacy_ctr, aes_key, aes_iv, hostname, username, domain_name,
+            agent_id, active, reason, note, ctr_block_offset, legacy_ctr,
+            aes_key, aes_iv, aes_key_enc, aes_iv_enc,
+            hostname, username, domain_name,
             external_ip, internal_ip, process_name, process_path, base_address, process_pid, process_tid,
             process_ppid, process_arch, elevated, os_version, os_build, os_arch, listener_name, sleep_delay,
             sleep_jitter, kill_date, working_hours, first_call_in, last_call_in, last_seen_seq, seq_protected
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(i64::from(agent.agent_id))
@@ -396,8 +422,8 @@ pub(super) async fn insert_agent_row(
     .bind(&agent.note)
     .bind(super::i64_from_u64("ctr_block_offset", ctr_block_offset)?)
     .bind(super::bool_to_i64(legacy_ctr))
-    .bind(BASE64_STANDARD.encode(&*agent.encryption.aes_key))
-    .bind(BASE64_STANDARD.encode(&*agent.encryption.aes_iv))
+    .bind(enc_key)
+    .bind(enc_iv)
     .bind(&agent.hostname)
     .bind(&agent.username)
     .bind(&agent.domain_name)
@@ -454,8 +480,15 @@ struct AgentRow {
     reason: String,
     note: String,
     ctr_block_offset: i64,
+    /// Plaintext base64-encoded key.  Non-empty only for rows written before the
+    /// at-rest encryption migration.  Cleared to `''` on the next write.
     aes_key: String,
+    /// Plaintext base64-encoded IV.  Non-empty only for legacy rows.
     aes_iv: String,
+    /// AES-256-GCM encrypted key blob (`base64(nonce || ciphertext)`).
+    aes_key_enc: String,
+    /// AES-256-GCM encrypted IV blob.
+    aes_iv_enc: String,
     hostname: String,
     username: String,
     domain_name: String,
@@ -484,71 +517,106 @@ struct AgentRow {
     seq_protected: i64,
 }
 
-impl TryFrom<AgentRow> for AgentRecord {
-    type Error = TeamserverError;
+/// Decode an agent session key from a persisted row.
+///
+/// Preference order:
+/// 1. `enc_col` non-empty → decrypt with `master_key` (new encrypted path)
+/// 2. `plain_col` non-empty → base64-decode plaintext (legacy fallback for rows
+///    written before the at-rest encryption migration)
+/// 3. Both empty → return empty `Zeroizing<Vec<u8>>`
+fn decode_agent_key(
+    master_key: &DbMasterKey,
+    enc_col: &str,
+    plain_col: &str,
+    field: &'static str,
+) -> Result<Zeroizing<Vec<u8>>, TeamserverError> {
+    if !enc_col.is_empty() {
+        return master_key.decrypt(enc_col).map_err(|e| TeamserverError::InvalidPersistedValue {
+            field,
+            message: format!("at-rest decryption failed: {e}"),
+        });
+    }
+    if !plain_col.is_empty() {
+        return Zeroizing::new(BASE64_STANDARD.decode(plain_col).map_err(|e| {
+            TeamserverError::InvalidPersistedValue {
+                field,
+                message: format!("legacy base64 decode failed: {e}"),
+            }
+        })?)
+        .pipe_ok();
+    }
+    Ok(Zeroizing::new(Vec::new()))
+}
 
-    fn try_from(row: AgentRow) -> Result<Self, Self::Error> {
-        Ok(Self {
-            agent_id: super::u32_from_i64("agent_id", row.agent_id)?,
-            active: super::bool_from_i64("active", row.active)?,
-            reason: row.reason,
-            note: row.note,
-            encryption: AgentEncryptionInfo {
-                aes_key: Zeroizing::new(BASE64_STANDARD.decode(&row.aes_key).map_err(|e| {
-                    TeamserverError::InvalidPersistedValue {
-                        field: "aes_key",
-                        message: format!("base64 decode failed: {e}"),
-                    }
-                })?),
-                aes_iv: Zeroizing::new(BASE64_STANDARD.decode(&row.aes_iv).map_err(|e| {
-                    TeamserverError::InvalidPersistedValue {
-                        field: "aes_iv",
-                        message: format!("base64 decode failed: {e}"),
-                    }
-                })?),
-            },
-            hostname: row.hostname,
-            username: row.username,
-            domain_name: row.domain_name,
-            external_ip: row.external_ip,
-            internal_ip: row.internal_ip,
-            process_name: row.process_name,
-            process_path: row.process_path,
-            base_address: super::u64_from_i64("base_address", row.base_address)?,
-            process_pid: super::u32_from_i64("process_pid", row.process_pid)?,
-            process_tid: super::u32_from_i64("process_tid", row.process_tid)?,
-            process_ppid: super::u32_from_i64("process_ppid", row.process_ppid)?,
-            process_arch: row.process_arch,
-            elevated: super::bool_from_i64("elevated", row.elevated)?,
-            os_version: row.os_version,
-            os_build: super::u32_from_i64("os_build", row.os_build)?,
-            os_arch: row.os_arch,
-            sleep_delay: super::u32_from_i64("sleep_delay", row.sleep_delay)?,
-            sleep_jitter: super::u32_from_i64("sleep_jitter", row.sleep_jitter)?,
-            kill_date: row.kill_date,
-            working_hours: row
-                .working_hours
-                .map(i32::try_from)
-                .transpose()
-                .map_err(|_| super::invalid_value("working_hours", "value does not fit in i32"))?,
-            first_call_in: row.first_call_in,
-            last_call_in: row.last_call_in,
-        })
+/// Extension trait providing `.pipe_ok()` for wrapping an already-owned `Zeroizing<Vec<u8>>`.
+trait PipeOk: Sized {
+    fn pipe_ok(self) -> Result<Self, TeamserverError>;
+}
+impl PipeOk for Zeroizing<Vec<u8>> {
+    fn pipe_ok(self) -> Result<Self, TeamserverError> {
+        Ok(self)
     }
 }
 
-impl TryFrom<AgentRow> for PersistedAgent {
-    type Error = TeamserverError;
+fn row_to_agent_record(
+    row: &AgentRow,
+    master_key: &DbMasterKey,
+) -> Result<AgentRecord, TeamserverError> {
+    let aes_key = decode_agent_key(master_key, &row.aes_key_enc, &row.aes_key, "aes_key")?;
+    let aes_iv = decode_agent_key(master_key, &row.aes_iv_enc, &row.aes_iv, "aes_iv")?;
+    Ok(AgentRecord {
+        agent_id: super::u32_from_i64("agent_id", row.agent_id)?,
+        active: super::bool_from_i64("active", row.active)?,
+        reason: row.reason.clone(),
+        note: row.note.clone(),
+        encryption: AgentEncryptionInfo { aes_key, aes_iv },
+        hostname: row.hostname.clone(),
+        username: row.username.clone(),
+        domain_name: row.domain_name.clone(),
+        external_ip: row.external_ip.clone(),
+        internal_ip: row.internal_ip.clone(),
+        process_name: row.process_name.clone(),
+        process_path: row.process_path.clone(),
+        base_address: super::u64_from_i64("base_address", row.base_address)?,
+        process_pid: super::u32_from_i64("process_pid", row.process_pid)?,
+        process_tid: super::u32_from_i64("process_tid", row.process_tid)?,
+        process_ppid: super::u32_from_i64("process_ppid", row.process_ppid)?,
+        process_arch: row.process_arch.clone(),
+        elevated: super::bool_from_i64("elevated", row.elevated)?,
+        os_version: row.os_version.clone(),
+        os_build: super::u32_from_i64("os_build", row.os_build)?,
+        os_arch: row.os_arch.clone(),
+        sleep_delay: super::u32_from_i64("sleep_delay", row.sleep_delay)?,
+        sleep_jitter: super::u32_from_i64("sleep_jitter", row.sleep_jitter)?,
+        kill_date: row.kill_date,
+        working_hours: row
+            .working_hours
+            .map(i32::try_from)
+            .transpose()
+            .map_err(|_| super::invalid_value("working_hours", "value does not fit in i32"))?,
+        first_call_in: row.first_call_in.clone(),
+        last_call_in: row.last_call_in.clone(),
+    })
+}
 
-    fn try_from(row: AgentRow) -> Result<Self, Self::Error> {
-        let ctr_block_offset = super::u64_from_i64("ctr_block_offset", row.ctr_block_offset)?;
-        let legacy_ctr = super::bool_from_i64("legacy_ctr", row.legacy_ctr)?;
-        let last_seen_seq = super::u64_from_i64("last_seen_seq", row.last_seen_seq)?;
-        let seq_protected = super::bool_from_i64("seq_protected", row.seq_protected)?;
-        let listener_name = row.listener_name.clone();
-        let info = AgentRecord::try_from(row)?;
-        Ok(Self { info, listener_name, ctr_block_offset, legacy_ctr, last_seen_seq, seq_protected })
-    }
+fn row_to_persisted_agent(
+    row: AgentRow,
+    master_key: &DbMasterKey,
+) -> Result<PersistedAgent, TeamserverError> {
+    let ctr_block_offset = super::u64_from_i64("ctr_block_offset", row.ctr_block_offset)?;
+    let legacy_ctr = super::bool_from_i64("legacy_ctr", row.legacy_ctr)?;
+    let last_seen_seq = super::u64_from_i64("last_seen_seq", row.last_seen_seq)?;
+    let seq_protected = super::bool_from_i64("seq_protected", row.seq_protected)?;
+    let listener_name = row.listener_name.clone();
+    let info = row_to_agent_record(&row, master_key)?;
+    Ok(PersistedAgent {
+        info,
+        listener_name,
+        ctr_block_offset,
+        legacy_ctr,
+        last_seen_seq,
+        seq_protected,
+    })
 }
 
 #[cfg(test)]
@@ -649,5 +717,57 @@ mod tests {
             "expected AgentNotFound, got: {err:?}",
         );
         assert!(db.agents().get_persisted(0xDEAD).await.expect("get").is_none());
+    }
+
+    #[tokio::test]
+    async fn session_keys_survive_create_then_read_roundtrip() {
+        let db = Database::connect_in_memory().await.expect("db");
+        let agent = AgentRecord {
+            encryption: AgentEncryptionInfo {
+                aes_key: Zeroizing::new(vec![0xAA; 32]),
+                aes_iv: Zeroizing::new(vec![0xBB; 16]),
+            },
+            ..stub_agent(0x1234)
+        };
+        db.agents().create(&agent).await.expect("create");
+        let loaded = db.agents().get(0x1234).await.expect("get").expect("should exist");
+        assert_eq!(*loaded.encryption.aes_key, vec![0xAA; 32], "aes_key must survive round-trip");
+        assert_eq!(*loaded.encryption.aes_iv, vec![0xBB; 16], "aes_iv must survive round-trip");
+    }
+
+    #[tokio::test]
+    async fn session_keys_survive_update_then_read_roundtrip() {
+        let db = Database::connect_in_memory().await.expect("db");
+        let original = stub_agent(0x5678);
+        db.agents().create(&original).await.expect("create");
+
+        let updated = AgentRecord {
+            encryption: AgentEncryptionInfo {
+                aes_key: Zeroizing::new(vec![0xCC; 32]),
+                aes_iv: Zeroizing::new(vec![0xDD; 16]),
+            },
+            ..original
+        };
+        db.agents().update(&updated).await.expect("update");
+        let loaded = db.agents().get(0x5678).await.expect("get").expect("should exist");
+        assert_eq!(*loaded.encryption.aes_key, vec![0xCC; 32], "aes_key must be updated");
+        assert_eq!(*loaded.encryption.aes_iv, vec![0xDD; 16], "aes_iv must be updated");
+    }
+
+    #[tokio::test]
+    async fn session_keys_survive_reregister_roundtrip() {
+        let db = Database::connect_in_memory().await.expect("db");
+        db.agents().create(&stub_agent(0x9ABC)).await.expect("create");
+        let rereg = AgentRecord {
+            encryption: AgentEncryptionInfo {
+                aes_key: Zeroizing::new(vec![0xEE; 32]),
+                aes_iv: Zeroizing::new(vec![0xFF; 16]),
+            },
+            ..stub_agent(0x9ABC)
+        };
+        db.agents().reregister_full(&rereg, "smb-pipe", false).await.expect("reregister");
+        let loaded = db.agents().get(0x9ABC).await.expect("get").expect("should exist");
+        assert_eq!(*loaded.encryption.aes_key, vec![0xEE; 32]);
+        assert_eq!(*loaded.encryption.aes_iv, vec![0xFF; 16]);
     }
 }

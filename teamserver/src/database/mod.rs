@@ -1,6 +1,7 @@
 //! SQLite-backed persistence for the Red Cell teamserver.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use red_cell_common::demon::DemonProtocolError;
 use sqlx::SqlitePool;
@@ -11,6 +12,7 @@ use tracing::instrument;
 pub mod agent_groups;
 pub mod agents;
 pub mod audit;
+pub mod crypto;
 pub mod jobs;
 pub mod links;
 pub mod listener_access;
@@ -21,6 +23,7 @@ pub mod operators;
 pub use agent_groups::AgentGroupRepository;
 pub use agents::{AgentRepository, PersistedAgent};
 pub use audit::{AuditLogEntry, AuditLogFilter, AuditLogRepository};
+pub use crypto::DbMasterKey;
 pub use jobs::{
     AgentResponseRecord, AgentResponseRepository, PayloadBuildRecord, PayloadBuildRepository,
     PayloadBuildSummary,
@@ -112,6 +115,9 @@ pub enum TeamserverError {
     /// Returned when an AES transport operation fails.
     #[error("agent crypto error: {0}")]
     Crypto(#[from] red_cell_common::crypto::CryptoError),
+    /// Returned when at-rest column encryption or decryption fails.
+    #[error("database column crypto error: {0}")]
+    DbCrypto(#[from] crypto::DbCryptoError),
     /// Returned when the OS random-number generator is unavailable.
     #[error("OS RNG unavailable: {0}")]
     Rng(#[from] getrandom::Error),
@@ -162,37 +168,68 @@ pub enum TeamserverError {
 #[derive(Clone, Debug)]
 pub struct Database {
     pool: SqlitePool,
+    /// Master key used to encrypt/decrypt sensitive columns (agent session keys).
+    master_key: Arc<DbMasterKey>,
 }
 
 impl Database {
-    /// Open a SQLite database at `path`, creating it if needed, and apply migrations.
-    #[instrument(fields(path = %path.as_ref().display()))]
-    pub async fn connect(path: impl AsRef<Path>) -> Result<Self, TeamserverError> {
+    /// Open a SQLite database at `path` with a provided master key.
+    ///
+    /// The master key is used to encrypt and decrypt the `aes_key` / `aes_iv`
+    /// columns in the `ts_agents` table.  It must be loaded from the key file
+    /// before calling this function; see `load_or_create_master_key` in `main.rs`.
+    #[instrument(fields(path = %path.as_ref().display()), skip(master_key))]
+    pub async fn connect_with_master_key(
+        path: impl AsRef<Path>,
+        master_key: DbMasterKey,
+    ) -> Result<Self, TeamserverError> {
         let path = path.as_ref();
         let options =
             SqliteConnectOptions::new().filename(path).create_if_missing(true).foreign_keys(true);
-
-        Self::connect_with_options(options).await
+        Self::connect_with_options_and_key(options, master_key).await
     }
 
-    /// Open an in-memory SQLite database and apply migrations.
+    /// Open a SQLite database at `path` with a **random** ephemeral master key.
+    ///
+    /// Intended for tests and dev tooling.  Do **not** use this in production —
+    /// data written with one ephemeral key cannot be read back after a restart.
+    #[instrument(fields(path = %path.as_ref().display()))]
+    pub async fn connect(path: impl AsRef<Path>) -> Result<Self, TeamserverError> {
+        let key = DbMasterKey::random()?;
+        Self::connect_with_master_key(path, key).await
+    }
+
+    /// Open an in-memory SQLite database with a random ephemeral master key.
+    ///
+    /// All data is lost when the pool is closed.  Used in tests.
     #[instrument]
     pub async fn connect_in_memory() -> Result<Self, TeamserverError> {
+        let key = DbMasterKey::random()?;
         let options = SqliteConnectOptions::new().filename(":memory:").foreign_keys(true);
+        Self::connect_with_options_and_key(options, key).await
+    }
 
-        Self::connect_with_options(options).await
+    /// Build a database pool from fully-specified SQLite connection options and master key.
+    #[instrument(skip(options, master_key))]
+    pub async fn connect_with_options_and_key(
+        options: SqliteConnectOptions,
+        master_key: DbMasterKey,
+    ) -> Result<Self, TeamserverError> {
+        let pool = SqlitePoolOptions::new().max_connections(1).connect_with(options).await?;
+        MIGRATOR.run(&pool).await?;
+        Ok(Self { pool, master_key: Arc::new(master_key) })
     }
 
     /// Build a database pool from fully-specified SQLite connection options.
+    ///
+    /// Generates a random ephemeral master key.  Use [`Self::connect_with_options_and_key`]
+    /// when a stable key is required.
     #[instrument(skip(options))]
     pub async fn connect_with_options(
         options: SqliteConnectOptions,
     ) -> Result<Self, TeamserverError> {
-        let pool = SqlitePoolOptions::new().max_connections(1).connect_with(options).await?;
-
-        MIGRATOR.run(&pool).await?;
-
-        Ok(Self { pool })
+        let key = DbMasterKey::random()?;
+        Self::connect_with_options_and_key(options, key).await
     }
 
     /// Borrow the underlying SQLx connection pool.
@@ -204,7 +241,7 @@ impl Database {
     /// Access agent/session persistence methods.
     #[must_use]
     pub fn agents(&self) -> AgentRepository {
-        AgentRepository::new(self.pool.clone())
+        AgentRepository::new(self.pool.clone(), self.master_key.clone())
     }
 
     /// Access listener persistence methods.

@@ -44,10 +44,11 @@ pub use auth::{
 };
 pub use database::{
     AgentGroupRepository, AgentRepository, AgentResponseRecord, AgentResponseRepository,
-    AuditLogEntry, AuditLogFilter, AuditLogRepository, Database, LinkRecord, LinkRepository,
-    ListenerAccessRepository, ListenerRepository, ListenerStatus, LootRecord, LootRepository,
-    OperatorRepository, PayloadBuildRecord, PayloadBuildRepository, PayloadBuildSummary,
-    PersistedListener, PersistedListenerState, PersistedOperator, TeamserverError,
+    AuditLogEntry, AuditLogFilter, AuditLogRepository, Database, DbMasterKey, LinkRecord,
+    LinkRepository, ListenerAccessRepository, ListenerRepository, ListenerStatus, LootRecord,
+    LootRepository, OperatorRepository, PayloadBuildRecord, PayloadBuildRepository,
+    PayloadBuildSummary, PersistedListener, PersistedListenerState, PersistedOperator,
+    TeamserverError,
 };
 pub use demon::{
     DemonCallbackPackage, DemonPacketParser, DemonParserError, ParsedDemonInit, ParsedDemonPacket,

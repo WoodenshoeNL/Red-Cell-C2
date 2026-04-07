@@ -8,9 +8,10 @@ use axum_server::{Handle, tls_rustls::RustlsConfig};
 use clap::Parser;
 use red_cell::{
     AgentLivenessMonitor, AgentRegistry, ApiRuntime, AuditWebhookNotifier, AuthService,
-    DEFAULT_MAX_REGISTERED_AGENTS, Database, EventBus, ListenerManager, ListenerManagerError,
-    LoginRateLimiter, NormalizedMakeService, OperatorConnectionManager, PayloadBuilderService,
-    PluginRuntime, SocketRelayManager, TeamserverState, build_router, spawn_agent_liveness_monitor,
+    DEFAULT_MAX_REGISTERED_AGENTS, Database, DbMasterKey, EventBus, ListenerManager,
+    ListenerManagerError, LoginRateLimiter, NormalizedMakeService, OperatorConnectionManager,
+    PayloadBuilderService, PluginRuntime, SocketRelayManager, TeamserverState, build_router,
+    spawn_agent_liveness_monitor,
 };
 use red_cell_common::config::{Profile, ProfileValidationError};
 use red_cell_common::tls::{
@@ -57,7 +58,10 @@ async fn main() -> Result<()> {
     }
 
     let database_path = resolve_database_path(&cli.profile, cli.database.as_ref());
-    let database = Database::connect(&database_path)
+    let master_key = load_or_create_master_key(&database_path).with_context(|| {
+        format!("failed to load database master key for {}", database_path.display())
+    })?;
+    let database = Database::connect_with_master_key(&database_path, master_key)
         .await
         .with_context(|| format!("failed to open database {}", database_path.display()))?;
     let agent_registry = AgentRegistry::load_with_max_registered_agents(
@@ -176,6 +180,58 @@ fn resolve_database_path(profile: &Path, configured: Option<&PathBuf>) -> PathBu
         path.set_extension("sqlite");
         path
     })
+}
+
+/// Load the database master key from `<db_path>.key`, creating it on first run.
+///
+/// The key file stores exactly 32 raw bytes with mode 0600.  It must exist on
+/// the same host as the teamserver process but at a different path from the
+/// SQLite database so that exfiltrating the `.sqlite` file alone is not
+/// sufficient to decrypt agent session keys.
+fn load_or_create_master_key(db_path: &Path) -> Result<DbMasterKey> {
+    use std::fs;
+    use std::io::{Read, Write};
+
+    let mut key_path = db_path.to_path_buf();
+    let key_filename = format!("{}.key", db_path.file_name().unwrap_or_default().to_string_lossy());
+    key_path.set_file_name(key_filename);
+
+    if key_path.exists() {
+        let mut file = fs::File::open(&key_path)
+            .with_context(|| format!("failed to open key file {}", key_path.display()))?;
+        let mut raw = zeroize::Zeroizing::new([0u8; 32]);
+        file.read_exact(raw.as_mut()).with_context(|| {
+            format!(
+                "key file {} must contain exactly 32 bytes — it may be corrupt",
+                key_path.display()
+            )
+        })?;
+        info!(path = %key_path.display(), "loaded database master key from key file");
+        Ok(DbMasterKey::from_bytes(*raw))
+    } else {
+        let key = DbMasterKey::random()
+            .context("failed to generate database master key: OS RNG unavailable")?;
+
+        // Write with restricted permissions: owner read/write only.
+        #[cfg(unix)]
+        let mut file = {
+            use std::os::unix::fs::OpenOptionsExt;
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&key_path)
+                .with_context(|| format!("failed to create key file {}", key_path.display()))?
+        };
+        #[cfg(not(unix))]
+        let mut file = fs::File::create_new(&key_path)
+            .with_context(|| format!("failed to create key file {}", key_path.display()))?;
+
+        file.write_all(key.as_bytes())
+            .with_context(|| format!("failed to write key file {}", key_path.display()))?;
+        info!(path = %key_path.display(), "generated new database master key — keep this file safe");
+        Ok(key)
+    }
 }
 
 #[instrument(skip(path), fields(profile_path = %path.display()))]

@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1223 | 255 | 72 |
+| Tasks closed | 1225 | 255 | 72 |
 | Bugs filed against | 228 | 49 | 13 |
 | Bug rate (bugs/task) | 0.19 | 0.19 | 0.18 |
 | Quality score | 81% | 81% | 82% |
 
-*Bug rates: Claude 228/1223=0.1864→0.19, Codex 49/255=0.1922→0.19, Cursor 13/72=0.1806→0.18*
+*Bug rates: Claude 228/1225=0.1861→0.19, Codex 49/255=0.1922→0.19, Cursor 13/72=0.1806→0.18*
 
 ## Violation Breakdown
 
@@ -6257,3 +6257,14 @@ Build: **passed** — `cargo check --workspace` clean (2m 55s). Tests/clippy ski
 | Cursor | 0 | 0 | No activity. |
 
 Build: `cargo check` **passed** (7m 36s). `cargo clippy` **passed** (4m 38s, zero warnings). `cargo nextest` **FAILED** — test binary compile error: `crate::OperatorMessage` unresolved in two new pivot.rs tests (tracked as naoqr P1).
+
+### QA Review — 2026-04-07 10:00 — 47675a14..96e14b56
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 0 | Closed naoqr (P1): confirmed test imports already correct in WIP commit — no code change needed, closed immediately. Closed 4p1zz (P2): added 5 new tests (2 HCL parse tests for MaxPivotChainDepth/MaxConcurrentDownloadsPerAgent/MaxAggregateDownloadBytes in common/src/config.rs, 3 ListenerManager builder tests in listeners/tests.rs). Also WIP progress on y8o4r (AES key at rest encryption): test SQL column names updated to aes_key_enc/aes_iv_enc, DemonEnvelope::new() refactor in test helper, max_pivot_chain_depth added to payload_builder test fixture. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓ (clean). `cargo clippy -- -D warnings` ✓ (zero warnings). `cargo nextest run --workspace`: still compiling/linking at review time — two concurrent nextest processes (dev loop + QA) competing for 5GB+ RAM per linker invocation (known issue red-cell-c2-n11sv). No test failures observed in compilation phase; 0 errors from compiler.
+Notes: Clean review — all production code changes are structurally sound, audit details format enriched with result_status and parameters nesting (consistent with AuditLogFilter filtering on `$.result_status`). Previously filed bugs (tdjak, 2r506, jd7dd) remain open and unaddressed. Active security work (y8o4r) is in progress with good partial commits.

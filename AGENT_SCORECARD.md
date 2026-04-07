@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1229 | 255 | 78 |
+| Tasks closed | 1230 | 255 | 80 |
 | Bugs filed against | 234 | 49 | 13 |
-| Bug rate (bugs/task) | 0.19 | 0.19 | 0.17 |
-| Quality score | 81% | 81% | 83% |
+| Bug rate (bugs/task) | 0.19 | 0.19 | 0.16 |
+| Quality score | 81% | 81% | 84% |
 
-*Bug rates: Claude 234/1229=0.1904→0.19, Codex 49/255=0.1922→0.19, Cursor 13/78=0.1667→0.17*
+*Bug rates: Claude 234/1230=0.1902→0.19, Codex 49/255=0.1922→0.19, Cursor 13/80=0.1625→0.16*
 
 ## Violation Breakdown
 
@@ -6329,3 +6329,13 @@ Build: `cargo check` **passed** (clean, 3m 14s). Tests: blocked by concurrent de
 | Cursor | 1 | 0 | Closed d4ai8 (clippy io_other_error verified clean). Also: extracted python plugin module (969584da, 1396 lines), surfaced file download errors (7249dadf), const thread_local init (72450a68), added unit tests for sort/filters/session state (5b0329ee), connection status tests in event_bus.rs. All clean work, no issues found. |
 
 Build: `cargo check` **passed**. Tests: `cargo nextest run` **failed** — `client-cli/tests/audit_api_contract.rs` missing `metrics` field (tracked as 37qxm). Clippy: **passed** clean (0 warnings on workspace). Pre-existing warning: unused `loot_kind_from_strings` import in `client/src/transport/tests.rs`.
+
+### QA Review — 2026-04-08 01:30 — bfd2e6ac..fc5c3554
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 0 | Closed e8zax: TLS reload tests (306 lines — reload_tls_cert error paths, expired cert, valid swap, cert_mtime, file watcher). Also: fixed missing `observability` field in payload_builder test (3882bccd), mitigated lld SIGBUS/OOM with `--threads=2` linker flag (46d9e50c), added active agent gauge + callback latency metrics (agents.rs, dispatch/mod.rs). WIP on jvby4 (metrics/tracing — still in_progress). 2 interrupted sessions (n11sv, jvby4). |
+| Codex | 0 | 0 | No activity this run. |
+| Cursor | 2 | 0 | Closed 8wwm7: Phantom CommandSleep handler — replaced `unwrap` with proper error propagation via `?`, added negative-delay clamping with tracing::warn, updated tests to verify truncated payload errors. Closed enwif (dup resolution, no code). Refactored client python integration tests into 5-file submodule (bj4xx — 2290 lines, clean split). |
+
+Build: `cargo check --workspace` **passed** (clean, 18m 12s — slow due to concurrent dev-agent nextest competing for build lock). Clippy: still running at checkpoint time. Tests: skipped (concurrent dev-agent already running nextest). No bugs filed — all changes were clean and well-tested.

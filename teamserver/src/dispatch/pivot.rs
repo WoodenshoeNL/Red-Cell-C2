@@ -1,6 +1,7 @@
 use red_cell_common::demon::DemonCommand;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+use tracing::warn;
 
 use crate::agent_events::{agent_mark_event, agent_new_event};
 use crate::{AgentRegistry, DemonPacketParser, EventBus};
@@ -278,13 +279,60 @@ pub(super) async fn dispatch_builtin_packages(
     agent_id: u32,
     packages: &[DemonCallbackPackage],
 ) -> Result<Option<Vec<u8>>, CommandDispatchError> {
-    use crate::agents::MAX_PIVOT_CHAIN_DEPTH;
+    if context.pivot_dispatch_depth >= context.max_pivot_chain_depth {
+        let depth = context.pivot_dispatch_depth;
+        let max_depth = context.max_pivot_chain_depth;
 
-    if context.pivot_dispatch_depth >= MAX_PIVOT_CHAIN_DEPTH {
-        return Err(CommandDispatchError::PivotDispatchDepthExceeded {
-            depth: context.pivot_dispatch_depth,
-            max_depth: MAX_PIVOT_CHAIN_DEPTH,
+        warn!(
+            agent_id = format_args!("0x{:08X}", agent_id),
+            depth, max_depth, "pivot dispatch depth limit reached — dropping recursive dispatch"
+        );
+
+        // Write an audit log entry so operators have a record of which agent
+        // triggered the limit.
+        let occurred_at =
+            OffsetDateTime::now_utc().format(&Rfc3339).unwrap_or_else(|_| String::from("unknown"));
+        let details = serde_json::json!({
+            "depth": depth,
+            "max_depth": max_depth,
         });
+        if let Err(err) = context
+            .database
+            .audit_log()
+            .create(&crate::AuditLogEntry {
+                id: None,
+                actor: format!("agent:{agent_id:08X}"),
+                action: "pivot_depth_exceeded".to_owned(),
+                target_kind: "agent".to_owned(),
+                target_id: Some(format!("{agent_id:08X}")),
+                details: Some(details),
+                occurred_at,
+            })
+            .await
+        {
+            warn!(
+                agent_id = format_args!("0x{:08X}", agent_id),
+                error = %err,
+                "failed to write pivot depth exceeded audit log entry"
+            );
+        }
+
+        // Broadcast an error event so the operator console surfaces this as a
+        // COMMAND_ERROR for the triggering agent.
+        let event = agent_response_event(
+            agent_id,
+            u32::from(DemonCommand::CommandError),
+            0,
+            "Error",
+            &format!(
+                "[Pivot] Dispatch depth limit reached ({depth}/{max_depth}) — \
+                 recursive pivot chain rejected for agent {agent_id:08X}"
+            ),
+            None,
+        )?;
+        context.events.broadcast(event);
+
+        return Ok(None);
     }
 
     let mut dispatcher =
@@ -298,6 +346,7 @@ pub(super) async fn dispatch_builtin_packages(
             downloads: context.downloads.clone(),
             plugins: context.plugins.cloned(),
             pivot_dispatch_depth: context.pivot_dispatch_depth + 1,
+            max_pivot_chain_depth: context.max_pivot_chain_depth,
             allow_legacy_ctr: context.allow_legacy_ctr,
         },
         false,
@@ -740,6 +789,7 @@ mod tests {
             downloads: &downloads,
             plugins: None,
             pivot_dispatch_depth: 0,
+            max_pivot_chain_depth: crate::dispatch::DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
             allow_legacy_ctr: true,
         };
 
@@ -845,6 +895,7 @@ mod tests {
             downloads: &downloads,
             plugins: None,
             pivot_dispatch_depth: 0,
+            max_pivot_chain_depth: crate::dispatch::DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
             allow_legacy_ctr: true,
         };
 
@@ -883,6 +934,7 @@ mod tests {
             downloads: &downloads,
             plugins: None,
             pivot_dispatch_depth: 0,
+            max_pivot_chain_depth: crate::dispatch::DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
             allow_legacy_ctr: true,
         };
 
@@ -920,6 +972,7 @@ mod tests {
             downloads: &downloads,
             plugins: None,
             pivot_dispatch_depth: 0,
+            max_pivot_chain_depth: crate::dispatch::DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
             allow_legacy_ctr: true,
         };
 
@@ -957,19 +1010,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_builtin_packages_at_max_depth_returns_depth_exceeded_error()
+    async fn dispatch_builtin_packages_at_max_depth_logs_audit_and_returns_ok_none()
     -> Result<(), Box<dyn std::error::Error>> {
-        use crate::agents::MAX_PIVOT_CHAIN_DEPTH;
-        use crate::dispatch::CommandDispatchError;
+        use crate::OperatorMessage;
+        use crate::dispatch::DEFAULT_MAX_PIVOT_CHAIN_DEPTH;
 
         let (database, registry, events, sockets, downloads) = setup_dispatch_context().await;
+        let mut rx = events.subscribe();
 
         let child_id: u32 = 0xDEAD_C0DE;
         let child_key = test_key(0xAA);
         let child_iv = test_iv(0xBB);
         registry.insert(sample_agent_info(child_id, child_key, child_iv)).await?;
 
-        // A context that is already AT the depth limit should be rejected.
+        // A context AT the depth limit must be gracefully rejected (Ok(None)) with
+        // an audit log entry written and a COMMAND_ERROR event broadcast.
         let context = BuiltinDispatchContext {
             registry: &registry,
             events: &events,
@@ -977,7 +1032,8 @@ mod tests {
             sockets: &sockets,
             downloads: &downloads,
             plugins: None,
-            pivot_dispatch_depth: MAX_PIVOT_CHAIN_DEPTH,
+            pivot_dispatch_depth: DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
+            max_pivot_chain_depth: DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
             allow_legacy_ctr: true,
         };
 
@@ -988,24 +1044,41 @@ mod tests {
         }];
 
         let result = dispatch_builtin_packages(context, child_id, &packages).await;
-        assert!(result.is_err(), "dispatch at max depth must fail");
-        assert!(
-            matches!(
-                result.expect_err("expected Err"),
-                CommandDispatchError::PivotDispatchDepthExceeded {
-                    depth,
-                    max_depth,
-                } if depth == MAX_PIVOT_CHAIN_DEPTH && max_depth == MAX_PIVOT_CHAIN_DEPTH
-            ),
-            "error must be PivotDispatchDepthExceeded with correct depth values"
+        assert!(result.is_ok(), "dispatch at max depth must return Ok, not Err: {result:?}");
+        assert_eq!(result.expect("must be Ok"), None, "dispatch at max depth must return Ok(None)");
+
+        // An AgentResponse error event must have been broadcast.
+        let event = rx.recv().await.expect("must receive an error event");
+        let OperatorMessage::AgentResponse(msg) = &event else {
+            panic!("expected AgentResponse, got {event:?}");
+        };
+        assert_eq!(
+            msg.info.demon_id,
+            format!("{child_id:08X}"),
+            "event must name triggering agent"
         );
+        assert!(
+            msg.info.output.contains("Pivot") || msg.info.message.to_lowercase().contains("depth"),
+            "error message must mention pivot depth: {:?}",
+            msg.info
+        );
+
+        // An audit log entry must have been persisted.
+        let page = crate::audit::query_audit_log(&database, &crate::audit::AuditQuery::default())
+            .await
+            .expect("audit query must succeed");
+        assert!(
+            page.records.iter().any(|r| r.action == "pivot_depth_exceeded"),
+            "an audit record with action=pivot_depth_exceeded must exist"
+        );
+
         Ok(())
     }
 
     #[tokio::test]
     async fn dispatch_builtin_packages_just_below_max_depth_succeeds()
     -> Result<(), Box<dyn std::error::Error>> {
-        use crate::agents::MAX_PIVOT_CHAIN_DEPTH;
+        use crate::dispatch::DEFAULT_MAX_PIVOT_CHAIN_DEPTH;
 
         let (database, registry, events, sockets, downloads) = setup_dispatch_context().await;
 
@@ -1022,7 +1095,8 @@ mod tests {
             sockets: &sockets,
             downloads: &downloads,
             plugins: None,
-            pivot_dispatch_depth: MAX_PIVOT_CHAIN_DEPTH - 1,
+            pivot_dispatch_depth: DEFAULT_MAX_PIVOT_CHAIN_DEPTH - 1,
+            max_pivot_chain_depth: DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
             allow_legacy_ctr: true,
         };
 
@@ -1034,6 +1108,51 @@ mod tests {
 
         let result = dispatch_builtin_packages(context, child_id, &packages).await;
         assert!(result.is_ok(), "dispatch just below max depth must succeed: {result:?}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dispatch_builtin_packages_uses_configurable_depth_limit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::OperatorMessage;
+
+        let (database, registry, events, sockets, downloads) = setup_dispatch_context().await;
+        let mut rx = events.subscribe();
+
+        let child_id: u32 = 0xCAFE_BABE;
+        let child_key = test_key(0x55);
+        let child_iv = test_iv(0x66);
+        registry.insert(sample_agent_info(child_id, child_key, child_iv)).await?;
+
+        // Custom depth limit of 3: a context at depth 3 must be rejected.
+        let context = BuiltinDispatchContext {
+            registry: &registry,
+            events: &events,
+            database: &database,
+            sockets: &sockets,
+            downloads: &downloads,
+            plugins: None,
+            pivot_dispatch_depth: 3,
+            max_pivot_chain_depth: 3,
+            allow_legacy_ctr: true,
+        };
+
+        let packages = vec![DemonCallbackPackage {
+            command_id: u32::from(DemonCommand::CommandOutput),
+            request_id: 0x03,
+            payload: command_output_payload("must not dispatch"),
+        }];
+
+        let result = dispatch_builtin_packages(context, child_id, &packages).await;
+        assert_eq!(result.expect("must be Ok"), None, "at custom depth limit must return Ok(None)");
+
+        // An error event must have been emitted.
+        let event = rx.recv().await.expect("must receive error event for custom limit");
+        assert!(
+            matches!(event, OperatorMessage::AgentResponse(_)),
+            "must emit AgentResponse error event"
+        );
+
         Ok(())
     }
 
@@ -1687,6 +1806,7 @@ mod tests {
             downloads: &downloads,
             plugins: None,
             pivot_dispatch_depth: 0,
+            max_pivot_chain_depth: crate::dispatch::DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
             allow_legacy_ctr: true,
         };
 
@@ -1709,6 +1829,7 @@ mod tests {
             downloads: &downloads,
             plugins: None,
             pivot_dispatch_depth: 0,
+            max_pivot_chain_depth: crate::dispatch::DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
             allow_legacy_ctr: true,
         };
 
@@ -1734,6 +1855,7 @@ mod tests {
             downloads: &downloads,
             plugins: None,
             pivot_dispatch_depth: 0,
+            max_pivot_chain_depth: crate::dispatch::DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
             allow_legacy_ctr: true,
         };
 

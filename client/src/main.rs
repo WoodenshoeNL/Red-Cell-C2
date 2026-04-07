@@ -23,13 +23,13 @@ pub(crate) use panels::agents::{
 #[cfg(test)]
 use base64::Engine;
 #[cfg(test)]
-use std::collections::BTreeMap;
-#[cfg(test)]
-use std::path::Path;
-#[cfg(test)]
 use python::{ScriptLoadStatus, ScriptOutputStream};
 #[cfg(test)]
 use red_cell_common::operator::ListenerInfo;
+#[cfg(test)]
+use std::collections::BTreeMap;
+#[cfg(test)]
+use std::path::Path;
 #[cfg(test)]
 use transport::{LootKind, ProcessEntry};
 #[cfg(test)]

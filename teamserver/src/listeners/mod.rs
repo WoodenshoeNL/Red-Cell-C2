@@ -607,6 +607,11 @@ pub struct ListenerManager {
     /// `false`; must be explicitly enabled by the operator before the teamserver
     /// will accept agents that do not set `INIT_EXT_MONOTONIC_CTR`.
     demon_allow_legacy_ctr: bool,
+    /// Maximum pivot-chain dispatch nesting depth passed to all dispatchers.
+    ///
+    /// Sourced from `TeamserverConfig.max_pivot_chain_depth`; defaults to
+    /// [`crate::dispatch::DEFAULT_MAX_PIVOT_CHAIN_DEPTH`] when absent.
+    max_pivot_chain_depth: usize,
 }
 
 impl ListenerManager {
@@ -669,6 +674,7 @@ impl ListenerManager {
             watcher_handles: Arc::new(RwLock::new(HashMap::new())),
             demon_init_secret: None,
             demon_allow_legacy_ctr: false,
+            max_pivot_chain_depth: crate::dispatch::DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
         }
     }
 
@@ -688,6 +694,20 @@ impl ListenerManager {
     pub fn with_max_aggregate_download_bytes(mut self, limit: u64) -> Self {
         let limit = usize::try_from(limit).unwrap_or(usize::MAX);
         self.downloads = self.downloads.with_max_aggregate_bytes(limit);
+        self
+    }
+
+    /// Override the maximum pivot-chain dispatch nesting depth.
+    ///
+    /// When an inbound callback tunnels commands through a pivot chain, the
+    /// dispatch depth is incremented on each recursive hop. If this limit is
+    /// reached the dispatch is rejected, an audit log entry is written, and an
+    /// error event is broadcast to operators.
+    ///
+    /// Must be called before any listeners are started.
+    #[must_use]
+    pub fn with_max_pivot_chain_depth(mut self, depth: usize) -> Self {
+        self.max_pivot_chain_depth = depth;
         self
     }
 
@@ -1280,6 +1300,7 @@ impl HttpListenerState {
         reconnect_probe_rate_limiter: ReconnectProbeRateLimiter,
         shutdown: ShutdownController,
         init_secret: Option<Vec<u8>>,
+        max_pivot_chain_depth: usize,
         allow_legacy_ctr: bool,
     ) -> Result<Self, ListenerManagerError> {
         let method = parse_method(config)?;
@@ -1320,6 +1341,7 @@ impl HttpListenerState {
                 sockets,
                 plugins,
                 downloads,
+                max_pivot_chain_depth,
                 allow_legacy_ctr,
             ),
             events,
@@ -1373,6 +1395,7 @@ impl SmbListenerState {
         reconnect_probe_rate_limiter: ReconnectProbeRateLimiter,
         shutdown: ShutdownController,
         init_secret: Option<Vec<u8>>,
+        max_pivot_chain_depth: usize,
         allow_legacy_ctr: bool,
     ) -> Self {
         Self {
@@ -1392,6 +1415,7 @@ impl SmbListenerState {
                 sockets,
                 plugins,
                 downloads,
+                max_pivot_chain_depth,
                 allow_legacy_ctr,
             ),
         }
@@ -1657,6 +1681,7 @@ async fn spawn_http_listener_runtime(
     unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
     reconnect_probe_rate_limiter: ReconnectProbeRateLimiter,
     shutdown: ShutdownController,
+    max_pivot_chain_depth: usize,
     init_secret: Option<Vec<u8>>,
     allow_legacy_ctr: bool,
     tls_configs: Arc<RwLock<HashMap<String, RustlsConfig>>>,
@@ -1675,6 +1700,7 @@ async fn spawn_http_listener_runtime(
         reconnect_probe_rate_limiter,
         shutdown,
         init_secret,
+        max_pivot_chain_depth,
         allow_legacy_ctr,
     )?);
     let address = format!("{}:{}", config.host_bind, config.port_bind);
@@ -2210,6 +2236,7 @@ async fn spawn_smb_listener_runtime(
     reconnect_probe_rate_limiter: ReconnectProbeRateLimiter,
     shutdown: ShutdownController,
     init_secret: Option<Vec<u8>>,
+    max_pivot_chain_depth: usize,
     allow_legacy_ctr: bool,
 ) -> Result<ListenerRuntimeFuture, ListenerManagerError> {
     let state = Arc::new(SmbListenerState::build(
@@ -2224,6 +2251,7 @@ async fn spawn_smb_listener_runtime(
         reconnect_probe_rate_limiter,
         shutdown,
         init_secret,
+        max_pivot_chain_depth,
         allow_legacy_ctr,
     ));
     let listener_name = normalized_smb_pipe_name(&config.pipe_name);
@@ -2446,6 +2474,7 @@ fn spawn_external_listener_runtime(
     shutdown: ShutdownController,
     external_endpoints: Arc<RwLock<BTreeMap<String, Arc<ExternalListenerState>>>>,
     init_secret: Option<Vec<u8>>,
+    max_pivot_chain_depth: usize,
     allow_legacy_ctr: bool,
 ) -> Result<ListenerRuntimeFuture, ListenerManagerError> {
     let state = Arc::new(ExternalListenerState {
@@ -2466,6 +2495,7 @@ fn spawn_external_listener_runtime(
             sockets,
             plugins,
             downloads,
+            max_pivot_chain_depth,
             allow_legacy_ctr,
         ),
     });
@@ -2573,6 +2603,7 @@ impl ListenerManager {
                     self.unknown_callback_probe_audit_limiter.clone(),
                     self.reconnect_probe_rate_limiter.clone(),
                     self.shutdown.clone(),
+                    self.max_pivot_chain_depth,
                     self.demon_init_secret.clone(),
                     self.demon_allow_legacy_ctr,
                     self.tls_configs.clone(),
@@ -2593,6 +2624,7 @@ impl ListenerManager {
                     self.reconnect_probe_rate_limiter.clone(),
                     self.shutdown.clone(),
                     self.demon_init_secret.clone(),
+                    self.max_pivot_chain_depth,
                     self.demon_allow_legacy_ctr,
                 )
                 .await
@@ -2611,6 +2643,7 @@ impl ListenerManager {
                     self.reconnect_probe_rate_limiter.clone(),
                     self.shutdown.clone(),
                     self.demon_init_secret.clone(),
+                    self.max_pivot_chain_depth,
                     self.demon_allow_legacy_ctr,
                 )
                 .await
@@ -2629,6 +2662,7 @@ impl ListenerManager {
                 self.shutdown.clone(),
                 self.external_endpoints.clone(),
                 self.demon_init_secret.clone(),
+                self.max_pivot_chain_depth,
                 self.demon_allow_legacy_ctr,
             ),
         }?;

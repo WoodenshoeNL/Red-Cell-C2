@@ -216,6 +216,7 @@ impl DnsListenerState {
         dns_recon_block_limiter: DnsReconBlockLimiter,
         shutdown: ShutdownController,
         init_secret: Option<Vec<u8>>,
+        max_pivot_chain_depth: usize,
         allow_legacy_ctr: bool,
     ) -> Self {
         Self {
@@ -232,6 +233,7 @@ impl DnsListenerState {
                 sockets,
                 plugins,
                 downloads,
+                max_pivot_chain_depth,
                 allow_legacy_ctr,
             ),
             demon_init_rate_limiter,
@@ -1480,6 +1482,7 @@ pub(crate) async fn spawn_dns_listener_runtime(
     reconnect_probe_rate_limiter: ReconnectProbeRateLimiter,
     shutdown: ShutdownController,
     init_secret: Option<Vec<u8>>,
+    max_pivot_chain_depth: usize,
     allow_legacy_ctr: bool,
 ) -> Result<ListenerRuntimeFuture, ListenerManagerError> {
     if dns_allowed_query_types(&config.record_types).is_none() {
@@ -1506,6 +1509,7 @@ pub(crate) async fn spawn_dns_listener_runtime(
         DnsReconBlockLimiter::new(),
         shutdown,
         init_secret,
+        max_pivot_chain_depth,
         allow_legacy_ctr,
     ));
     let addr = format!("{}:{}", config.host_bind, config.port_bind);

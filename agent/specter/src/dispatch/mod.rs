@@ -277,9 +277,11 @@ mod tests {
 
     use std::path::PathBuf;
 
-    use red_cell_common::demon::{DemonFilesystemCommand, DemonPackage, DemonProcessCommand, DemonTokenCommand};
     use crate::coffeeldr;
     use crate::dotnet;
+    use red_cell_common::demon::{
+        DemonFilesystemCommand, DemonPackage, DemonProcessCommand, DemonTokenCommand,
+    };
 
     use super::assembly::{
         handle_assembly_inline_execute, handle_assembly_list_versions, handle_inline_execute,

@@ -96,6 +96,9 @@ async fn main() -> Result<()> {
     if let Some(limit) = profile.teamserver.max_aggregate_download_bytes {
         listeners = listeners.with_max_aggregate_download_bytes(limit);
     }
+    if let Some(depth) = profile.teamserver.max_pivot_chain_depth {
+        listeners = listeners.with_max_pivot_chain_depth(depth);
+    }
     plugins.attach_listener_manager(listeners.clone()).await;
     let payload_builder = PayloadBuilderService::from_profile(&profile)
         .context("failed to validate Demon build toolchain")?;

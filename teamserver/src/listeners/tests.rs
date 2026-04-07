@@ -3158,6 +3158,7 @@ async fn dns_state(name: &str) -> DnsListenerState {
         DnsReconBlockLimiter::new(),
         ShutdownController::new(),
         None,
+        crate::dispatch::DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
         true,
     )
 }
@@ -3182,6 +3183,7 @@ async fn spawn_test_dns_listener(
         ReconnectProbeRateLimiter::new(),
         ShutdownController::new(),
         None,
+        crate::dispatch::DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
         true,
     )
     .await
@@ -3213,6 +3215,7 @@ async fn spawn_test_smb_runtime(
         ReconnectProbeRateLimiter::new(),
         shutdown,
         None,
+        crate::dispatch::DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
         true,
     )
     .await
@@ -3705,6 +3708,7 @@ async fn dns_listener_runtime_exits_when_shutdown_started_before_first_poll() {
         ReconnectProbeRateLimiter::new(),
         shutdown.clone(),
         None,
+        crate::dispatch::DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
         true,
     )
     .await
@@ -4079,6 +4083,7 @@ async fn dns_listener_start_rejects_unsupported_record_types() {
         ReconnectProbeRateLimiter::new(),
         ShutdownController::new(),
         None,
+        crate::dispatch::DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
         false,
     )
     .await

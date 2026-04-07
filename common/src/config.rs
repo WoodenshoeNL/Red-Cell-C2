@@ -403,6 +403,15 @@ pub struct TeamserverConfig {
     /// Defaults to 4× `MaxDownloadBytes` when absent.
     #[serde(rename = "MaxAggregateDownloadBytes", default)]
     pub max_aggregate_download_bytes: Option<u64>,
+    /// Maximum pivot-chain dispatch nesting depth.
+    ///
+    /// When an inbound callback tunnels commands through a pivot chain, each
+    /// recursive hop increments the dispatch depth. Once this limit is reached
+    /// the pivot is rejected, an audit log entry is written, and an error is
+    /// surfaced to the operator console for the triggering agent. Defaults to
+    /// 10 when absent.
+    #[serde(rename = "MaxPivotChainDepth", default)]
+    pub max_pivot_chain_depth: Option<usize>,
     /// Maximum number of registered agents retained in memory and SQLite.
     #[serde(rename = "MaxRegisteredAgents", default)]
     pub max_registered_agents: Option<usize>,

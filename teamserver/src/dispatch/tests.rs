@@ -3546,6 +3546,7 @@ async fn builtin_filesystem_download_handler_surfaces_concurrent_limit_as_error_
         sockets,
         None,
         tracker,
+        super::DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
         false,
     );
 
@@ -3622,6 +3623,7 @@ async fn builtin_beacon_file_callbacks_surface_concurrent_limit_as_error_event()
         sockets,
         None,
         tracker,
+        super::DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
         false,
     );
 
@@ -8508,7 +8510,14 @@ async fn with_builtin_handlers_and_downloads_registers_all_builtin_commands()
     let custom_cap: usize = 2048;
     let tracker = DownloadTracker::new(custom_cap);
     let dispatcher = CommandDispatcher::with_builtin_handlers_and_downloads(
-        registry, events, database, sockets, None, tracker, true,
+        registry,
+        events,
+        database,
+        sockets,
+        None,
+        tracker,
+        super::DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
+        true,
     );
 
     // Every built-in command must be registered.
@@ -8578,6 +8587,7 @@ async fn with_builtin_handlers_and_downloads_dispatches_known_builtin_command()
         sockets,
         None,
         tracker,
+        super::DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
         true,
     );
 

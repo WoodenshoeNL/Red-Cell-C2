@@ -62,6 +62,9 @@ const DOTNET_INFO_ENTRYPOINT_EXECUTED: u32 = 0x3;
 const DOTNET_INFO_FINISHED: u32 = 0x4;
 const DOTNET_INFO_FAILED: u32 = 0x5;
 
+/// Default maximum pivot-chain dispatch depth used when no profile override is present.
+pub(crate) const DEFAULT_MAX_PIVOT_CHAIN_DEPTH: usize = 10;
+
 #[derive(Clone, Copy)]
 struct BuiltinDispatchContext<'a> {
     registry: &'a AgentRegistry,
@@ -73,6 +76,13 @@ struct BuiltinDispatchContext<'a> {
     /// Current pivot dispatch nesting depth — incremented each time a pivot
     /// command callback is recursively dispatched through a child agent.
     pivot_dispatch_depth: usize,
+    /// Configured maximum allowed pivot dispatch nesting depth.
+    ///
+    /// When `pivot_dispatch_depth` reaches this value the dispatch is rejected,
+    /// an audit log entry is written, and an error event is broadcast to
+    /// operators. Sourced from the profile `Teamserver.MaxPivotChainDepth`
+    /// field; defaults to [`DEFAULT_MAX_PIVOT_CHAIN_DEPTH`] when absent.
+    max_pivot_chain_depth: usize,
     /// Whether to accept pivot-child DEMON_INIT packets that use legacy AES-CTR
     /// (no `INIT_EXT_MONOTONIC_CTR` flag).  Mirrors `DemonConfig::allow_legacy_ctr`.
     allow_legacy_ctr: bool,
@@ -88,6 +98,8 @@ struct BuiltinHandlerDependencies {
     plugins: Option<PluginRuntime>,
     /// Pivot dispatch nesting depth captured at handler-registration time.
     pivot_dispatch_depth: usize,
+    /// Configured maximum allowed pivot dispatch nesting depth.
+    max_pivot_chain_depth: usize,
     /// Mirrors `DemonConfig::allow_legacy_ctr` — controls whether child-agent
     /// pivot registrations may use legacy (non-monotonic) AES-CTR.
     allow_legacy_ctr: bool,
@@ -225,6 +237,7 @@ impl CommandDispatcher {
             downloads,
             plugins,
             pivot_dispatch_depth,
+            max_pivot_chain_depth,
             allow_legacy_ctr,
         } = dependencies;
 
@@ -766,6 +779,7 @@ impl CommandDispatcher {
                         downloads: &downloads,
                         plugins: plugins.as_ref(),
                         pivot_dispatch_depth,
+                        max_pivot_chain_depth,
                         allow_legacy_ctr,
                     };
                     pivot::handle_pivot_callback(context, agent_id, request_id, &payload).await
@@ -810,6 +824,7 @@ impl CommandDispatcher {
             sockets,
             plugins,
             DownloadTracker::from_max_download_bytes(max_download_bytes),
+            DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
             false,
         )
     }
@@ -821,6 +836,7 @@ impl CommandDispatcher {
         sockets: SocketRelayManager,
         plugins: Option<PluginRuntime>,
         downloads: DownloadTracker,
+        max_pivot_chain_depth: usize,
         allow_legacy_ctr: bool,
     ) -> Self {
         let mut dispatcher = Self::with_downloads(downloads);
@@ -833,6 +849,7 @@ impl CommandDispatcher {
                 downloads: dispatcher.downloads.clone(),
                 plugins,
                 pivot_dispatch_depth: 0,
+                max_pivot_chain_depth,
                 allow_legacy_ctr,
             },
             true,

@@ -283,7 +283,9 @@ fn required_permission(message: &OperatorMessage) -> Result<Permission, Authoriz
         | OperatorMessage::ServiceListenerRegister(_)
         | OperatorMessage::TeamserverLog(_)
         | OperatorMessage::DatabaseDegraded(_)
-        | OperatorMessage::DatabaseRecovered(_) => Err(AuthorizationError::UnsupportedWebSocketCommand),
+        | OperatorMessage::DatabaseRecovered(_) => {
+            Err(AuthorizationError::UnsupportedWebSocketCommand)
+        }
         OperatorMessage::ChatMessage(_) => Ok(Permission::Read),
         OperatorMessage::CredentialsAdd(_)
         | OperatorMessage::CredentialsEdit(_)

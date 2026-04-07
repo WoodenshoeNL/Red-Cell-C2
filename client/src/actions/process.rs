@@ -1,7 +1,9 @@
 //! Process-list refresh, process kill, and shellcode injection for `ClientApp`.
 
 use crate::ClientApp;
-use crate::tasks::{build_process_injection_task, build_process_kill_task, build_process_list_task};
+use crate::tasks::{
+    build_process_injection_task, build_process_kill_task, build_process_list_task,
+};
 
 impl ClientApp {
     pub(crate) fn queue_process_refresh(&mut self, agent_id: &str) {

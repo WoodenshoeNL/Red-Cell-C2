@@ -3,6 +3,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use red_cell_common::config::{LogFormat, LogRotation, Profile};
+#[cfg(feature = "otel")]
+use red_cell_common::config::ObservabilityConfig;
 use thiserror::Error;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::EnvFilter;
@@ -13,6 +15,8 @@ use tracing_subscriber::{fmt, registry};
 #[derive(Debug)]
 pub struct LoggingGuard {
     _file_guard: Option<WorkerGuard>,
+    #[cfg(feature = "otel")]
+    _otel_provider: Option<opentelemetry_sdk::trace::SdkTracerProvider>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,6 +41,9 @@ pub enum LoggingInitError {
     CreateLogDirectory { path: PathBuf, source: std::io::Error },
     #[error("failed to initialize tracing subscriber: {message}")]
     InitializeSubscriber { message: String },
+    #[cfg(feature = "otel")]
+    #[error("failed to initialize OpenTelemetry tracer: {message}")]
+    OpenTelemetry { message: String },
 }
 
 pub fn init_tracing(
@@ -52,60 +59,143 @@ pub fn init_tracing(
         }
     })?;
 
+    // Resolve optional OTel provider (only compiled in when the `otel` feature is active).
+    #[cfg(feature = "otel")]
+    let otel_config = profile.and_then(|p| p.teamserver.observability.as_ref());
+    #[cfg(feature = "otel")]
+    let otel_provider = build_otel_provider(otel_config)?;
+    #[cfg(feature = "otel")]
+    let otel_layer = otel_layer_from_provider(&otel_provider);
+
+    // Build the base subscriber with the OTel layer positioned directly on the
+    // registry so that `OpenTelemetryLayer<Registry, T>` matches its `Layer<Registry>`
+    // impl.  The OTel layer is `Option<_>`, so it no-ops when absent.
+    let base = registry();
+    #[cfg(feature = "otel")]
+    let base = base.with(otel_layer);
+
+    let init_err = |error: tracing_subscriber::util::TryInitError| {
+        LoggingInitError::InitializeSubscriber { message: error.to_string() }
+    };
+
     match (format, file) {
         (LogFormat::Pretty, None) => {
-            registry()
-                .with(filter)
+            base.with(filter)
                 .with(
                     fmt::layer().pretty().with_target(false).with_file(true).with_line_number(true),
                 )
                 .try_init()
-                .map_err(|error| LoggingInitError::InitializeSubscriber {
-                    message: error.to_string(),
-                })?;
+                .map_err(init_err)?;
 
-            Ok(LoggingGuard { _file_guard: None })
+            Ok(LoggingGuard {
+                _file_guard: None,
+                #[cfg(feature = "otel")]
+                _otel_provider: otel_provider,
+            })
         }
         (LogFormat::Json, None) => {
-            registry()
-                .with(filter)
+            base.with(filter)
                 .with(fmt::layer().json().with_target(false))
                 .try_init()
-                .map_err(|error| LoggingInitError::InitializeSubscriber {
-                    message: error.to_string(),
-                })?;
+                .map_err(init_err)?;
 
-            Ok(LoggingGuard { _file_guard: None })
+            Ok(LoggingGuard {
+                _file_guard: None,
+                #[cfg(feature = "otel")]
+                _otel_provider: otel_provider,
+            })
         }
         (LogFormat::Pretty, Some(file)) => {
             let (writer, guard) = file_writer(&file)?;
-            registry()
-                .with(filter)
+            base.with(filter)
                 .with(
                     fmt::layer().pretty().with_target(false).with_file(true).with_line_number(true),
                 )
                 .with(fmt::layer().pretty().with_ansi(false).with_target(false).with_writer(writer))
                 .try_init()
-                .map_err(|error| LoggingInitError::InitializeSubscriber {
-                    message: error.to_string(),
-                })?;
+                .map_err(init_err)?;
 
-            Ok(LoggingGuard { _file_guard: Some(guard) })
+            Ok(LoggingGuard {
+                _file_guard: Some(guard),
+                #[cfg(feature = "otel")]
+                _otel_provider: otel_provider,
+            })
         }
         (LogFormat::Json, Some(file)) => {
             let (writer, guard) = file_writer(&file)?;
-            registry()
-                .with(filter)
+            base.with(filter)
                 .with(fmt::layer().json().with_target(false))
                 .with(fmt::layer().json().with_target(false).with_writer(writer))
                 .try_init()
-                .map_err(|error| LoggingInitError::InitializeSubscriber {
-                    message: error.to_string(),
-                })?;
+                .map_err(init_err)?;
 
-            Ok(LoggingGuard { _file_guard: Some(guard) })
+            Ok(LoggingGuard {
+                _file_guard: Some(guard),
+                #[cfg(feature = "otel")]
+                _otel_provider: otel_provider,
+            })
         }
     }
+}
+
+/// Build an OpenTelemetry tracer provider when the `otel` feature is active.
+///
+/// Returns `None` when no OTLP endpoint is configured.  The caller creates
+/// the tracing layer from the returned provider so that the subscriber type
+/// parameter `S` is inferred at the call site.
+#[cfg(feature = "otel")]
+fn build_otel_provider(
+    config: Option<&ObservabilityConfig>,
+) -> Result<Option<opentelemetry_sdk::trace::SdkTracerProvider>, LoggingInitError> {
+    let Some(cfg) = config else {
+        return Ok(None);
+    };
+    let Some(ref endpoint) = cfg.otlp_endpoint else {
+        return Ok(None);
+    };
+
+    use opentelemetry_otlp::WithExportConfig as _;
+    use opentelemetry_sdk::Resource;
+    use opentelemetry_sdk::trace::SdkTracerProvider;
+
+    let service_name = cfg
+        .service_name
+        .as_deref()
+        .unwrap_or("red-cell-teamserver");
+
+    let exporter = opentelemetry_otlp::SpanExporter::builder()
+        .with_tonic()
+        .with_endpoint(endpoint)
+        .build()
+        .map_err(|e: opentelemetry::trace::TraceError| LoggingInitError::OpenTelemetry {
+            message: e.to_string(),
+        })?;
+
+    let provider = SdkTracerProvider::builder()
+        .with_batch_exporter(exporter)
+        .with_resource(
+            Resource::builder()
+                .with_service_name(service_name.to_owned())
+                .build(),
+        )
+        .build();
+
+    Ok(Some(provider))
+}
+
+/// Create a `tracing_opentelemetry` layer from an optional provider.
+///
+/// Returns `None` when no provider is supplied, keeping the subscriber
+/// unmodified (the `Option<Layer>` no-ops in `tracing-subscriber`).
+#[cfg(feature = "otel")]
+fn otel_layer_from_provider(
+    provider: &Option<opentelemetry_sdk::trace::SdkTracerProvider>,
+) -> Option<tracing_opentelemetry::OpenTelemetryLayer<tracing_subscriber::Registry, opentelemetry_sdk::trace::Tracer>> {
+    use opentelemetry::trace::TracerProvider as _;
+    provider.as_ref().map(|p| {
+        let tracer = p.tracer("red-cell-teamserver");
+        tracing_opentelemetry::layer().with_tracer(tracer)
+    })
 }
 
 fn resolve_logging_config(profile: Option<&Profile>, debug_logging: bool) -> ResolvedLoggingConfig {

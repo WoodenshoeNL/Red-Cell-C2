@@ -78,6 +78,18 @@ impl DownloadTracker {
         self.max_download_bytes
     }
 
+    /// Return the aggregate in-memory cap across all active downloads.
+    #[cfg(test)]
+    pub(crate) fn max_total_download_bytes(&self) -> usize {
+        self.max_total_download_bytes
+    }
+
+    /// Return the per-agent concurrent download limit.
+    #[cfg(test)]
+    pub(crate) fn max_concurrent_downloads_per_agent(&self) -> usize {
+        self.max_concurrent_downloads_per_agent
+    }
+
     /// Override the per-agent concurrent download limit.
     ///
     /// Must be called before any downloads are tracked.

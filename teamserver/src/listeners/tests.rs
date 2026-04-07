@@ -6252,3 +6252,58 @@ async fn dns_state_drops_axfr_from_repeat_offender_without_response() {
     let resp = state.handle_dns_packet(&packet, peer_ip).await;
     assert!(resp.is_none(), "repeat offender AXFR must be dropped without response");
 }
+
+// ── ListenerManager builder method tests ─────────────────────────────────────
+
+/// `with_max_concurrent_downloads_per_agent` stores the supplied limit on the
+/// embedded `DownloadTracker` so it is propagated to all spawned dispatchers.
+#[tokio::test]
+async fn listener_manager_with_max_concurrent_downloads_per_agent_stores_limit() {
+    let mgr = manager().await.expect("manager must build");
+    // Default is whatever the hardcoded constant is; just verify the builder changes it.
+    let default_limit = mgr.downloads.max_concurrent_downloads_per_agent();
+
+    let custom_limit: usize = default_limit / 2 + 1;
+    let mgr = mgr.with_max_concurrent_downloads_per_agent(custom_limit);
+    assert_eq!(
+        mgr.downloads.max_concurrent_downloads_per_agent(),
+        custom_limit,
+        "builder must override the concurrent download limit"
+    );
+}
+
+/// `with_max_aggregate_download_bytes` stores the supplied cap (clamped to at
+/// least the per-download cap) on the embedded `DownloadTracker`.
+#[tokio::test]
+async fn listener_manager_with_max_aggregate_download_bytes_stores_limit() {
+    use crate::DEFAULT_MAX_DOWNLOAD_BYTES;
+    let mgr = manager().await.expect("manager must build");
+
+    // A cap well above the per-download limit must be stored as-is.
+    let large_cap: u64 = DEFAULT_MAX_DOWNLOAD_BYTES * 8;
+    let mgr = mgr.with_max_aggregate_download_bytes(large_cap);
+    assert_eq!(
+        mgr.downloads.max_total_download_bytes(),
+        large_cap as usize,
+        "builder must store the supplied aggregate cap"
+    );
+}
+
+/// `with_max_pivot_chain_depth` stores the supplied depth so it is passed to
+/// each dispatcher created when a listener is spawned.
+#[tokio::test]
+async fn listener_manager_with_max_pivot_chain_depth_stores_depth() {
+    use crate::dispatch::DEFAULT_MAX_PIVOT_CHAIN_DEPTH;
+    let mgr = manager().await.expect("manager must build");
+    assert_eq!(
+        mgr.max_pivot_chain_depth, DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
+        "default depth must equal the hardcoded constant"
+    );
+
+    let custom_depth: usize = 3;
+    let mgr = mgr.with_max_pivot_chain_depth(custom_depth);
+    assert_eq!(
+        mgr.max_pivot_chain_depth, custom_depth,
+        "builder must override the pivot chain depth"
+    );
+}

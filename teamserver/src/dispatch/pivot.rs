@@ -1012,8 +1012,8 @@ mod tests {
     #[tokio::test]
     async fn dispatch_builtin_packages_at_max_depth_logs_audit_and_returns_ok_none()
     -> Result<(), Box<dyn std::error::Error>> {
-        use red_cell_common::operator::OperatorMessage;
         use crate::dispatch::DEFAULT_MAX_PIVOT_CHAIN_DEPTH;
+        use red_cell_common::operator::OperatorMessage;
 
         let (database, registry, events, sockets, downloads) = setup_dispatch_context().await;
         let mut rx = events.subscribe();
@@ -1057,12 +1057,8 @@ mod tests {
             format!("{child_id:08X}"),
             "event must name triggering agent"
         );
-        let error_text = msg
-            .info
-            .extra
-            .get("Message")
-            .and_then(|v| v.as_str())
-            .unwrap_or(&msg.info.output);
+        let error_text =
+            msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or(&msg.info.output);
         assert!(
             error_text.contains("Pivot") || error_text.to_lowercase().contains("depth"),
             "error message must mention pivot depth: {:?}",

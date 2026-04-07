@@ -2552,6 +2552,59 @@ mod tests {
     }
 
     #[test]
+    fn parses_teamserver_download_and_pivot_limits() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+              MaxConcurrentDownloadsPerAgent = 8
+              MaxAggregateDownloadBytes = 268435456
+              MaxPivotChainDepth = 5
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        assert_eq!(profile.teamserver.max_concurrent_downloads_per_agent, Some(8));
+        assert_eq!(profile.teamserver.max_aggregate_download_bytes, Some(268_435_456));
+        assert_eq!(profile.teamserver.max_pivot_chain_depth, Some(5));
+    }
+
+    #[test]
+    fn parses_teamserver_download_and_pivot_limits_defaults_to_none_when_absent() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        assert_eq!(profile.teamserver.max_concurrent_downloads_per_agent, None);
+        assert_eq!(profile.teamserver.max_aggregate_download_bytes, None);
+        assert_eq!(profile.teamserver.max_pivot_chain_depth, None);
+    }
+
+    #[test]
     fn parses_teamserver_max_registered_agents() {
         let profile = Profile::parse(
             r#"

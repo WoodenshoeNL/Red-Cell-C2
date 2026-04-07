@@ -189,6 +189,7 @@ pub async fn spawn_test_server(profile: Profile) -> Result<TestServer, Box<dyn s
         started_at: std::time::Instant::now(),
         plugins_loaded: 0,
         plugins_failed: 0,
+        metrics: red_cell::metrics::standalone_metrics_handle(),
     };
 
     let tcp = TcpListener::bind("127.0.0.1:0").await?;

@@ -18,6 +18,11 @@ getrandom = "0.3"
 hmac = "0.12"
 http-body-util = "0.1"
 interprocess = { version = "2.4.0", features = ["tokio"] }
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.16", default-features = false }
+opentelemetry = { version = "0.28", optional = true }
+opentelemetry_sdk = { version = "0.28", features = ["rt-tokio"], optional = true }
+opentelemetry-otlp = { version = "0.28", features = ["tonic"], optional = true }
 red-cell-common = { path = "../common" }
 rustls = { version = "0.23", default-features = false }
 rustls-pki-types = { version = "1", features = ["std"] }
@@ -38,7 +43,8 @@ tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["normalize-path"] }
 tracing = "0.1"
 tracing-appender = "0.2"
-tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter", "json"] }
+tracing-opentelemetry = { version = "0.29", optional = true }
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter", "json", "registry"] }
 utoipa = { version = "5.4", features = ["axum_extras", "uuid"] }
 utoipa-swagger-ui = { version = "9.0", features = ["axum"] }
 uuid = { version = "1.18", features = ["v4"] }
@@ -54,6 +60,8 @@ zeroize = "1"
 ## Run with:
 ##   cargo test --features havoc-compat -p red-cell havoc_compatibility
 havoc-compat = []
+## Enable OpenTelemetry distributed tracing via OTLP export.
+otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry"]
 ## Expose test-only helpers (e.g. StuckDeliveryGuard) for integration tests.
 test-helpers = []
 

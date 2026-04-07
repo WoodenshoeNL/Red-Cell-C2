@@ -15,9 +15,10 @@ use red_cell_common::config::Profile;
 
 use crate::{
     AgentRegistry, ApiRuntime, AuditWebhookNotifier, AuthService, Database, EventBus,
-    ListenerManager, LoginRateLimiter, MAX_AGENT_MESSAGE_LEN, OperatorConnectionManager,
-    PayloadBuilderService, ServiceBridge, ShutdownController, SocketRelayManager, api_routes,
-    handle_external_request, listeners::collect_body_with_magic_precheck, service_routes,
+    ListenerManager, LoginRateLimiter, MAX_AGENT_MESSAGE_LEN, MetricsHandle,
+    OperatorConnectionManager, PayloadBuilderService, ServiceBridge, ShutdownController,
+    SocketRelayManager, api_routes, handle_external_request,
+    listeners::collect_body_with_magic_precheck, service_routes,
 };
 
 /// Shared state injected into Axum routes and middleware.
@@ -57,6 +58,8 @@ pub struct TeamserverState {
     pub plugins_loaded: u32,
     /// Number of Python plugins that failed to load at startup.
     pub plugins_failed: u32,
+    /// Prometheus metrics exporter handle.
+    pub metrics: MetricsHandle,
 }
 
 impl FromRef<TeamserverState> for AuthService {
@@ -128,6 +131,12 @@ impl FromRef<TeamserverState> for LoginRateLimiter {
 impl FromRef<TeamserverState> for ShutdownController {
     fn from_ref(input: &TeamserverState) -> Self {
         input.shutdown.clone()
+    }
+}
+
+impl FromRef<TeamserverState> for MetricsHandle {
+    fn from_ref(input: &TeamserverState) -> Self {
+        input.metrics.clone()
     }
 }
 
@@ -253,6 +262,7 @@ mod tests {
             started_at: Instant::now(),
             plugins_loaded: 0,
             plugins_failed: 0,
+            metrics: crate::metrics::standalone_metrics_handle(),
         }
     }
 

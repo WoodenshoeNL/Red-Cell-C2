@@ -812,6 +812,7 @@ pub fn api_routes(api: ApiRuntime) -> Router<TeamserverState> {
         .route("/payload-cache", post(payload::flush_payload_cache))
         .route("/ws", get(crate::session_ws::session_ws_handler))
         .route("/health", get(get_health))
+        .route("/metrics", get(crate::metrics::get_metrics))
         .route_layer(middleware::from_fn_with_state(api, api_auth_middleware));
 
     Router::new()
@@ -2975,6 +2976,7 @@ mod tests {
             started_at: std::time::Instant::now(),
             plugins_loaded: 0,
             plugins_failed: 0,
+            metrics: crate::metrics::standalone_metrics_handle(),
         });
 
         let response = app
@@ -3723,6 +3725,7 @@ mod tests {
                 started_at: std::time::Instant::now(),
                 plugins_loaded: 0,
                 plugins_failed: 0,
+                metrics: crate::metrics::standalone_metrics_handle(),
             }),
             agent_registry,
             auth,
@@ -4823,6 +4826,7 @@ mod tests {
             started_at: std::time::Instant::now(),
             plugins_loaded: 0,
             plugins_failed: 0,
+            metrics: crate::metrics::standalone_metrics_handle(),
         });
 
         let response = app
@@ -5431,6 +5435,7 @@ mod tests {
             started_at: std::time::Instant::now(),
             plugins_loaded: 0,
             plugins_failed: 0,
+            metrics: crate::metrics::standalone_metrics_handle(),
         });
 
         // Admin creates a listener.

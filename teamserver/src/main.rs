@@ -177,6 +177,8 @@ async fn main() -> Result<()> {
         database.clone(),
         &profile,
     );
+    let metrics_handle = red_cell::install_prometheus_recorder()
+        .map_err(|error| anyhow!("failed to install prometheus metrics: {error}"))?;
     let state = TeamserverState {
         profile: profile.clone(),
         auth: AuthService::from_profile_with_database(&profile, &database).await?,
@@ -199,6 +201,7 @@ async fn main() -> Result<()> {
         started_at: std::time::Instant::now(),
         plugins_loaded,
         plugins_failed: 0,
+        metrics: metrics_handle,
     };
     let router = build_router(state.clone());
     let handle = Handle::new();
@@ -755,6 +758,7 @@ mod tests {
             started_at: std::time::Instant::now(),
             plugins_loaded: 0,
             plugins_failed: 0,
+            metrics: red_cell::metrics::standalone_metrics_handle(),
         };
 
         let _ = AuthService::from_ref(&state);
@@ -1535,6 +1539,7 @@ mod tests {
             started_at: std::time::Instant::now(),
             plugins_loaded: 0,
             plugins_failed: 0,
+            metrics: red_cell::metrics::standalone_metrics_handle(),
         };
 
         (state, shutdown)
@@ -1720,6 +1725,7 @@ mod tests {
             started_at: std::time::Instant::now(),
             plugins_loaded: 0,
             plugins_failed: 0,
+            metrics: red_cell::metrics::standalone_metrics_handle(),
         };
 
         run_shutdown_sequence(handle, shutdown.clone(), state, Duration::from_secs(5))

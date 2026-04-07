@@ -470,6 +470,9 @@ pub struct TeamserverConfig {
     /// Optional database resilience and backup configuration.
     #[serde(rename = "Database", default)]
     pub database: Option<DatabaseConfig>,
+    /// Optional observability configuration for Prometheus metrics and OTel tracing.
+    #[serde(rename = "Observability", default)]
+    pub observability: Option<ObservabilityConfig>,
 }
 
 /// Database resilience and automated backup configuration.
@@ -495,6 +498,19 @@ pub struct DatabaseConfig {
     /// Requires `BackupDir`.  Defaults to 3600 (1 hour).
     #[serde(rename = "BackupIntervalSecs", default)]
     pub backup_interval_secs: Option<u64>,
+}
+
+/// Observability configuration for Prometheus metrics and OpenTelemetry tracing.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ObservabilityConfig {
+    /// Optional OpenTelemetry OTLP exporter endpoint (e.g. `http://localhost:4317`).
+    /// When absent, OTel span export is disabled and no OTel dependencies are loaded
+    /// at runtime.
+    #[serde(rename = "OtlpEndpoint", default)]
+    pub otlp_endpoint: Option<String>,
+    /// Service name reported to the OTel collector.  Defaults to `"red-cell-teamserver"`.
+    #[serde(rename = "ServiceName", default)]
+    pub service_name: Option<String>,
 }
 
 /// Teamserver tracing configuration.

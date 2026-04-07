@@ -2993,6 +2993,7 @@ mod tests {
             started_at: std::time::Instant::now(),
             plugins_loaded: 0,
             plugins_failed: 0,
+            metrics: crate::metrics::standalone_metrics_handle(),
         }
     }
 

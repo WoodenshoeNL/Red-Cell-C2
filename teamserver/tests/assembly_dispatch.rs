@@ -179,6 +179,7 @@ async fn start_server()
         started_at: std::time::Instant::now(),
         plugins_loaded: 0,
         plugins_failed: 0,
+        metrics: red_cell::metrics::standalone_metrics_handle(),
     };
 
     let tcp = TcpListener::bind("127.0.0.1:0").await?;

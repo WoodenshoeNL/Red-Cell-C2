@@ -1,7 +1,9 @@
 //! Embedded Python runtime for client-side automation.
 
+mod callbacks;
 mod script;
 
+use callbacks::{EventCallback, RegisteredAgentCheckinCallback};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -37,20 +39,6 @@ struct RegisteredCommand {
     script_name: String,
     description: Option<String>,
     options: Vec<CommandOption>,
-    callback: Arc<Py<PyAny>>,
-}
-
-#[derive(Clone, Debug)]
-struct RegisteredAgentCheckinCallback {
-    script_name: String,
-    mode: AgentCheckinCallbackMode,
-    callback: Arc<Py<PyAny>>,
-}
-
-/// Generic callback record used for event callbacks with no variant-specific metadata.
-#[derive(Clone, Debug)]
-struct EventCallback {
-    script_name: String,
     callback: Arc<Py<PyAny>>,
 }
 
@@ -98,12 +86,6 @@ struct CommandOption {
     option_type: CommandOptionType,
     required: bool,
     default: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AgentCheckinCallbackMode {
-    Agent,
-    Identifier,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -233,53 +215,6 @@ impl PythonApiState {
         if let Some(record) = lock_mutex(&self.script_records).get_mut(&script_name) {
             record.registered_commands.insert(normalized_name);
         }
-        Ok(())
-    }
-
-    fn register_agent_checkin_callback(
-        &self,
-        callback: Py<PyAny>,
-        mode: AgentCheckinCallbackMode,
-    ) -> PyResult<()> {
-        let script_name = self.current_script_name().ok_or_else(|| {
-            PyRuntimeError::new_err("red_cell.on_agent_checkin must be called while a script loads")
-        })?;
-        lock_mutex(&self.agent_checkin_callbacks).push(RegisteredAgentCheckinCallback {
-            script_name,
-            mode,
-            callback: Arc::new(callback),
-        });
-        Ok(())
-    }
-
-    fn register_command_response_callback(&self, callback: Py<PyAny>) -> PyResult<()> {
-        let script_name = self.current_script_name().ok_or_else(|| {
-            PyRuntimeError::new_err(
-                "red_cell.on_command_response must be called while a script loads",
-            )
-        })?;
-        lock_mutex(&self.command_response_callbacks)
-            .push(EventCallback { script_name, callback: Arc::new(callback) });
-        Ok(())
-    }
-
-    fn register_loot_captured_callback(&self, callback: Py<PyAny>) -> PyResult<()> {
-        let script_name = self.current_script_name().ok_or_else(|| {
-            PyRuntimeError::new_err("red_cell.on_loot_captured must be called while a script loads")
-        })?;
-        lock_mutex(&self.loot_captured_callbacks)
-            .push(EventCallback { script_name, callback: Arc::new(callback) });
-        Ok(())
-    }
-
-    fn register_listener_changed_callback(&self, callback: Py<PyAny>) -> PyResult<()> {
-        let script_name = self.current_script_name().ok_or_else(|| {
-            PyRuntimeError::new_err(
-                "red_cell.on_listener_changed must be called while a script loads",
-            )
-        })?;
-        lock_mutex(&self.listener_changed_callbacks)
-            .push(EventCallback { script_name, callback: Arc::new(callback) });
         Ok(())
     }
 
@@ -526,150 +461,6 @@ impl PythonApiState {
         if let Some(tx) = lock_mutex(&self.task_result_senders).remove(task_id) {
             // Ignore errors: waiter may have timed out and dropped its receiver.
             let _ = tx.send(TaskResult { agent_id, output });
-        }
-    }
-
-    fn invoke_agent_checkin_callbacks(&self, py: Python<'_>, agent_id: &str) {
-        let timeout = Duration::from_secs(self.script_timeout_secs.load(Ordering::Relaxed));
-        let thread_id = self.python_thread_id.load(Ordering::Relaxed);
-        let callbacks = lock_mutex(&self.agent_checkin_callbacks).clone();
-        if callbacks.is_empty() {
-            return;
-        }
-
-        match Py::new(py, PyAgent { agent_id: normalize_agent_id(agent_id) }) {
-            Ok(agent) => {
-                for callback in callbacks {
-                    self.begin_script_execution(&callback.script_name);
-                    let bound = callback.callback.bind(py);
-                    let watchdog = script::spawn_script_watchdog(
-                        timeout,
-                        callback.script_name.clone(),
-                        "agent_checkin",
-                        thread_id,
-                    );
-                    let call_result = match callback.mode {
-                        AgentCheckinCallbackMode::Agent => bound.call1((agent.clone_ref(py),)),
-                        AgentCheckinCallbackMode::Identifier => bound.call1((agent_id,)),
-                    };
-                    drop(watchdog); // callback completed — cancel the watchdog
-                    if let Err(error) = call_result {
-                        let message = format!("agent checkin callback failed: {error}\n");
-                        let _ = self.push_output(
-                            Some(&callback.script_name),
-                            ScriptOutputStream::Stderr,
-                            &message,
-                        );
-                        warn!(agent_id, error = %error, "python agent checkin callback failed");
-                    }
-                    self.end_script_execution();
-                }
-            }
-            Err(error) => {
-                warn!(agent_id, error = %error, "failed to construct python agent proxy");
-            }
-        }
-    }
-
-    fn invoke_command_response_callbacks(
-        &self,
-        py: Python<'_>,
-        agent_id: &str,
-        task_id: &str,
-        output: &str,
-    ) {
-        let timeout = Duration::from_secs(self.script_timeout_secs.load(Ordering::Relaxed));
-        let thread_id = self.python_thread_id.load(Ordering::Relaxed);
-        let callbacks = lock_mutex(&self.command_response_callbacks).clone();
-        for callback in callbacks {
-            self.begin_script_execution(&callback.script_name);
-            let watchdog = script::spawn_script_watchdog(
-                timeout,
-                callback.script_name.clone(),
-                "command_response",
-                thread_id,
-            );
-            let call_result = callback.callback.bind(py).call1((agent_id, task_id, output));
-            drop(watchdog); // callback completed — cancel the watchdog
-            if let Err(error) = call_result {
-                let message = format!("command response callback failed: {error}\n");
-                let _ = self.push_output(
-                    Some(&callback.script_name),
-                    ScriptOutputStream::Stderr,
-                    &message,
-                );
-                warn!(agent_id, task_id, error = %error, "python command response callback failed");
-            }
-            self.end_script_execution();
-        }
-    }
-
-    fn invoke_loot_captured_callbacks(
-        &self,
-        py: Python<'_>,
-        loot_item: &crate::transport::LootItem,
-    ) {
-        let timeout = Duration::from_secs(self.script_timeout_secs.load(Ordering::Relaxed));
-        let thread_id = self.python_thread_id.load(Ordering::Relaxed);
-        let callbacks = lock_mutex(&self.loot_captured_callbacks).clone();
-        if callbacks.is_empty() {
-            return;
-        }
-        let py_loot = match Py::new(py, PyLootItem::from_loot_item(loot_item)) {
-            Ok(item) => item,
-            Err(error) => {
-                warn!(error = %error, "failed to construct python loot item proxy");
-                return;
-            }
-        };
-        for callback in callbacks {
-            self.begin_script_execution(&callback.script_name);
-            let watchdog = script::spawn_script_watchdog(
-                timeout,
-                callback.script_name.clone(),
-                "loot_captured",
-                thread_id,
-            );
-            let call_result =
-                callback.callback.bind(py).call1((&loot_item.agent_id, py_loot.clone_ref(py)));
-            drop(watchdog); // callback completed — cancel the watchdog
-            if let Err(error) = call_result {
-                let message = format!("loot captured callback failed: {error}\n");
-                let _ = self.push_output(
-                    Some(&callback.script_name),
-                    ScriptOutputStream::Stderr,
-                    &message,
-                );
-                warn!(error = %error, "python loot captured callback failed");
-            }
-            self.end_script_execution();
-        }
-    }
-
-    fn invoke_listener_changed_callbacks(&self, py: Python<'_>, listener_name: &str, action: &str) {
-        let timeout = Duration::from_secs(self.script_timeout_secs.load(Ordering::Relaxed));
-        let thread_id = self.python_thread_id.load(Ordering::Relaxed);
-        let callbacks = lock_mutex(&self.listener_changed_callbacks).clone();
-        for callback in callbacks {
-            self.begin_script_execution(&callback.script_name);
-            let watchdog = script::spawn_script_watchdog(
-                timeout,
-                callback.script_name.clone(),
-                "listener_changed",
-                thread_id,
-            );
-            let call_result = callback.callback.bind(py).call1((listener_name, action));
-            drop(watchdog); // callback completed — cancel the watchdog
-            if let Err(error) = call_result {
-                let message = format!("listener changed callback failed: {error}\n");
-                let _ = self.push_output(
-                    Some(&callback.script_name),
-                    ScriptOutputStream::Stderr,
-                    &message,
-                );
-                warn!(listener_name, action, error = %error, "python listener changed callback failed");
-            }
-            self.end_script_execution();
         }
     }
 
@@ -1161,11 +952,13 @@ fn active_api_state() -> PyResult<Arc<PythonApiState>> {
 
 fn populate_api_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(register_command, module)?)?;
-    module.add_function(wrap_pyfunction!(register_callback, module)?)?;
-    module.add_function(wrap_pyfunction!(on_agent_checkin, module)?)?;
-    module.add_function(wrap_pyfunction!(on_command_response, module)?)?;
-    module.add_function(wrap_pyfunction!(on_loot_captured, module)?)?;
-    module.add_function(wrap_pyfunction!(on_listener_changed, module)?)?;
+    module.add_function(wrap_pyfunction!(crate::python::callbacks::register_callback, module)?)?;
+    module.add_function(wrap_pyfunction!(crate::python::callbacks::on_agent_checkin, module)?)?;
+    module
+        .add_function(wrap_pyfunction!(crate::python::callbacks::on_command_response, module)?)?;
+    module.add_function(wrap_pyfunction!(crate::python::callbacks::on_loot_captured, module)?)?;
+    module
+        .add_function(wrap_pyfunction!(crate::python::callbacks::on_listener_changed, module)?)?;
     module.add_function(wrap_pyfunction!(agent, module)?)?;
     module.add_function(wrap_pyfunction!(agents, module)?)?;
     module.add_function(wrap_pyfunction!(listener, module)?)?;
@@ -1176,7 +969,7 @@ fn populate_api_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyAgent>()?;
     module.add_class::<PyCommandContext>()?;
     module.add_class::<PyCommandOption>()?;
-    module.add_class::<PyEventRegistrar>()?;
+    module.add_class::<crate::python::callbacks::PyEventRegistrar>()?;
     module.add_class::<PyListener>()?;
     module.add_class::<PyLootItem>()?;
     module.add("RegisterCommand", module.getattr("register_command")?)?;
@@ -1622,53 +1415,6 @@ impl PyCommandOption {
     }
 }
 
-#[pyclass(name = "Event")]
-#[derive(Clone, Debug)]
-struct PyEventRegistrar {
-    namespace: String,
-}
-
-#[pymethods]
-impl PyEventRegistrar {
-    #[new]
-    fn new(namespace: String) -> Self {
-        Self { namespace }
-    }
-
-    #[pyo3(name = "OnNewSession")]
-    fn on_new_session(&self, callback: Bound<'_, PyAny>) -> PyResult<()> {
-        ensure_callable(&callback)?;
-        let _ = &self.namespace;
-        active_api_state()?.register_agent_checkin_callback(
-            callback.unbind(),
-            AgentCheckinCallbackMode::Identifier,
-        )
-    }
-
-    #[pyo3(name = "OnAgentCheckin")]
-    fn on_agent_checkin(&self, callback: Bound<'_, PyAny>) -> PyResult<()> {
-        self.on_new_session(callback)
-    }
-
-    #[pyo3(name = "OnCommandResponse")]
-    fn on_command_response(&self, callback: Bound<'_, PyAny>) -> PyResult<()> {
-        ensure_callable(&callback)?;
-        active_api_state()?.register_command_response_callback(callback.unbind())
-    }
-
-    #[pyo3(name = "OnLootCaptured")]
-    fn on_loot_captured(&self, callback: Bound<'_, PyAny>) -> PyResult<()> {
-        ensure_callable(&callback)?;
-        active_api_state()?.register_loot_captured_callback(callback.unbind())
-    }
-
-    #[pyo3(name = "OnListenerChanged")]
-    fn on_listener_changed(&self, callback: Bound<'_, PyAny>) -> PyResult<()> {
-        ensure_callable(&callback)?;
-        active_api_state()?.register_listener_changed_callback(callback.unbind())
-    }
-}
-
 #[pyclass(name = "Listener")]
 #[derive(Clone, Debug)]
 struct PyListener {
@@ -2014,56 +1760,6 @@ fn havocui_register_command(
     let request = parse_havocui_register_command_request(args, kwargs)?;
     let api_state = active_api_state()?;
     api_state.register_command(request.name, request.description, request.options, request.callback)
-}
-
-#[pyfunction]
-fn register_callback(event_type: String, callback: Bound<'_, PyAny>) -> PyResult<()> {
-    ensure_callable(&callback)?;
-    let mode = match event_type.trim().to_ascii_lowercase().as_str() {
-        "agent_checkin" | "new_session" => AgentCheckinCallbackMode::Identifier,
-        _ => {
-            return Err(PyValueError::new_err(format!(
-                "unsupported client callback `{event_type}`"
-            )));
-        }
-    };
-    active_api_state()?.register_agent_checkin_callback(callback.unbind(), mode)
-}
-
-#[pyfunction]
-fn on_agent_checkin(callback: Bound<'_, PyAny>) -> PyResult<()> {
-    ensure_callable(&callback)?;
-    let api_state = active_api_state()?;
-    api_state.register_agent_checkin_callback(callback.unbind(), AgentCheckinCallbackMode::Agent)
-}
-
-/// Register a callback that fires whenever any command output arrives from an agent.
-///
-/// The callback receives `(agent_id: str, task_id: str, output: str)`.
-/// `task_id` is empty when the response does not belong to a tracked task.
-#[pyfunction]
-fn on_command_response(callback: Bound<'_, PyAny>) -> PyResult<()> {
-    ensure_callable(&callback)?;
-    active_api_state()?.register_command_response_callback(callback.unbind())
-}
-
-/// Register a callback that fires when a loot item (credential, file, etc.) is captured.
-///
-/// The callback receives `(agent_id: str, loot: LootItem)`.
-#[pyfunction]
-fn on_loot_captured(callback: Bound<'_, PyAny>) -> PyResult<()> {
-    ensure_callable(&callback)?;
-    active_api_state()?.register_loot_captured_callback(callback.unbind())
-}
-
-/// Register a callback that fires when a listener is started, stopped, or edited.
-///
-/// The callback receives `(listener_id: str, action: str)` where `action` is one of
-/// `"start"`, `"stop"`, or `"edit"`.
-#[pyfunction]
-fn on_listener_changed(callback: Bound<'_, PyAny>) -> PyResult<()> {
-    ensure_callable(&callback)?;
-    active_api_state()?.register_listener_changed_callback(callback.unbind())
 }
 
 #[pyfunction]

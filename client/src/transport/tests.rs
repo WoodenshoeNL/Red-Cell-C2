@@ -1,6 +1,6 @@
 use super::operator_msg::{
-    flat_info_string, loot_item_from_flat_info, loot_item_from_response, loot_kind_from_strings,
-    normalize_agent_id, sanitize_text,
+    flat_info_string, loot_item_from_flat_info, loot_item_from_response, normalize_agent_id,
+    sanitize_text,
 };
 use super::*;
 use std::collections::BTreeMap;

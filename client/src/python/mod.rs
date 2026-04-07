@@ -28,7 +28,7 @@ use crate::transport::{AgentSummary, AppState, ListenerSummary, LootItem, Shared
 thread_local! {
     /// When set, a Python callback or script entrypoint is active on this thread (used for mutex
     /// poison diagnostics).
-    static PYTHON_CALLBACK_CONTEXT: RefCell<Option<(String, &'static str)>> = RefCell::new(None);
+    static PYTHON_CALLBACK_CONTEXT: RefCell<Option<(String, &'static str)>> = const { RefCell::new(None) };
 }
 
 static ACTIVE_RUNTIME: OnceLock<Mutex<Option<Arc<PythonApiState>>>> = OnceLock::new();

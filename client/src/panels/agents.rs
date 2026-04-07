@@ -152,7 +152,7 @@ impl ClientApp {
             .event_log
             .entries
             .iter()
-            .filter(|e| active_filter.is_none_or(|k| e.kind == k))
+            .filter(|e| event_matches_kind_filter(active_filter, e.kind))
             .collect();
 
         egui::ScrollArea::vertical().id_salt("event_viewer_scroll").stick_to_bottom(true).show(
@@ -353,6 +353,12 @@ pub(crate) fn sort_agents(
     });
 }
 
+/// Returns whether an event log entry should be shown for the current session filter
+/// (`None` means all kinds are visible).
+pub(crate) fn event_matches_kind_filter(filter: Option<EventKind>, entry_kind: EventKind) -> bool {
+    filter.is_none_or(|k| entry_kind == k)
+}
+
 pub(crate) fn sort_button_label(
     current_column: Option<AgentSortColumn>,
     descending: bool,
@@ -384,4 +390,229 @@ pub(crate) fn ellipsize(value: &str, max_chars: usize) -> String {
     }
     output.push_str("...");
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::AgentSortColumn;
+
+    fn minimal_agent(name_id: &str) -> transport::AgentSummary {
+        transport::AgentSummary {
+            name_id: name_id.to_owned(),
+            status: String::new(),
+            domain_name: String::new(),
+            username: String::new(),
+            internal_ip: String::new(),
+            external_ip: String::new(),
+            hostname: String::new(),
+            process_arch: String::new(),
+            process_name: String::new(),
+            process_pid: String::new(),
+            elevated: false,
+            os_version: String::new(),
+            os_build: String::new(),
+            os_arch: String::new(),
+            sleep_delay: String::new(),
+            sleep_jitter: String::new(),
+            last_call_in: String::new(),
+            note: String::new(),
+            pivot_parent: None,
+            pivot_links: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn event_matches_kind_filter_shows_all_when_none() {
+        assert!(event_matches_kind_filter(None, EventKind::Agent));
+        assert!(event_matches_kind_filter(None, EventKind::Operator));
+        assert!(event_matches_kind_filter(None, EventKind::System));
+    }
+
+    #[test]
+    fn event_matches_kind_filter_partitions_by_kind() {
+        assert!(event_matches_kind_filter(Some(EventKind::Agent), EventKind::Agent));
+        assert!(!event_matches_kind_filter(Some(EventKind::Agent), EventKind::System));
+        assert!(event_matches_kind_filter(Some(EventKind::Operator), EventKind::Operator));
+        assert!(!event_matches_kind_filter(Some(EventKind::Operator), EventKind::Agent));
+    }
+
+    #[test]
+    fn sort_button_label_marks_all_twelve_columns_when_active() {
+        for (column, label) in AgentSortColumn::ALL {
+            let asc = sort_button_label(Some(column), false, column);
+            assert!(
+                asc.starts_with(label) && asc.contains('^'),
+                "unexpected asc label for {column:?}: {asc}"
+            );
+            let desc = sort_button_label(Some(column), true, column);
+            assert!(
+                desc.starts_with(label) && desc.contains('v'),
+                "unexpected desc label for {column:?}: {desc}"
+            );
+        }
+    }
+
+    #[test]
+    fn sort_orders_by_id() {
+        let mut hi = minimal_agent("zzz");
+        let mut lo = minimal_agent("aaa");
+        hi.hostname = "z".to_owned();
+        lo.hostname = "a".to_owned();
+        let mut agents = vec![hi, lo];
+        sort_agents(&mut agents, AgentSortColumn::Id, false);
+        assert_eq!(agents[0].name_id, "aaa");
+        assert_eq!(agents[1].name_id, "zzz");
+        sort_agents(&mut agents, AgentSortColumn::Id, true);
+        assert_eq!(agents[0].name_id, "zzz");
+    }
+
+    #[test]
+    fn sort_orders_by_hostname() {
+        let mut a = minimal_agent("x");
+        a.hostname = "host-b".to_owned();
+        let mut b = minimal_agent("y");
+        b.hostname = "host-a".to_owned();
+        let mut agents = vec![a, b];
+        sort_agents(&mut agents, AgentSortColumn::Hostname, false);
+        assert_eq!(agents[0].hostname, "host-a");
+        sort_agents(&mut agents, AgentSortColumn::Hostname, true);
+        assert_eq!(agents[0].hostname, "host-b");
+    }
+
+    #[test]
+    fn sort_orders_by_username() {
+        let mut a = minimal_agent("x");
+        a.username = "zebra".to_owned();
+        let mut b = minimal_agent("y");
+        b.username = "alice".to_owned();
+        let mut agents = vec![a, b];
+        sort_agents(&mut agents, AgentSortColumn::Username, false);
+        assert_eq!(agents[0].username, "alice");
+    }
+
+    #[test]
+    fn sort_orders_by_domain() {
+        let mut a = minimal_agent("x");
+        a.domain_name = "z.dom".to_owned();
+        let mut b = minimal_agent("y");
+        b.domain_name = "a.dom".to_owned();
+        let mut agents = vec![a, b];
+        sort_agents(&mut agents, AgentSortColumn::Domain, false);
+        assert_eq!(agents[0].domain_name, "a.dom");
+    }
+
+    #[test]
+    fn sort_orders_by_ip_using_agent_ip() {
+        let mut a = minimal_agent("x");
+        a.internal_ip = "10.0.0.2".to_owned();
+        let mut b = minimal_agent("y");
+        b.internal_ip = String::new();
+        b.external_ip = "10.0.0.9".to_owned();
+        let mut agents = vec![a, b];
+        sort_agents(&mut agents, AgentSortColumn::Ip, false);
+        assert_eq!(agent_ip(&agents[0]), "10.0.0.2");
+        assert_eq!(agent_ip(&agents[1]), "10.0.0.9");
+    }
+
+    #[test]
+    fn sort_orders_by_pid_lexicographically() {
+        let mut a = minimal_agent("x");
+        a.process_pid = "20".to_owned();
+        let mut b = minimal_agent("y");
+        b.process_pid = "3".to_owned();
+        let mut agents = vec![a, b];
+        sort_agents(&mut agents, AgentSortColumn::Pid, false);
+        assert_eq!(agents[0].process_pid, "20");
+        assert_eq!(agents[1].process_pid, "3");
+    }
+
+    #[test]
+    fn sort_orders_by_process_name() {
+        let mut a = minimal_agent("x");
+        a.process_name = "zebra.exe".to_owned();
+        let mut b = minimal_agent("y");
+        b.process_name = "agent.exe".to_owned();
+        let mut agents = vec![a, b];
+        sort_agents(&mut agents, AgentSortColumn::Process, false);
+        assert_eq!(agents[0].process_name, "agent.exe");
+    }
+
+    #[test]
+    fn sort_orders_by_arch_prefers_process_arch_then_os_arch() {
+        let mut a = minimal_agent("x");
+        a.process_arch = "x86".to_owned();
+        a.os_arch = "amd64".to_owned();
+        let mut b = minimal_agent("y");
+        b.process_arch = String::new();
+        b.os_arch = "arm64".to_owned();
+        let mut agents = vec![a, b];
+        sort_agents(&mut agents, AgentSortColumn::Arch, false);
+        assert_eq!(agent_arch(&agents[0]), "arm64");
+        assert_eq!(agent_arch(&agents[1]), "x86");
+    }
+
+    #[test]
+    fn sort_orders_by_elevated() {
+        let mut a = minimal_agent("x");
+        a.elevated = true;
+        let mut b = minimal_agent("y");
+        b.elevated = false;
+        let mut agents = vec![a, b];
+        sort_agents(&mut agents, AgentSortColumn::Elevated, false);
+        assert!(!agents[0].elevated);
+        sort_agents(&mut agents, AgentSortColumn::Elevated, true);
+        assert!(agents[0].elevated);
+    }
+
+    #[test]
+    fn sort_orders_by_os_version_and_build() {
+        let mut a = minimal_agent("x");
+        a.os_version = "10".to_owned();
+        a.os_build = "2000".to_owned();
+        let mut b = minimal_agent("y");
+        b.os_version = "10".to_owned();
+        b.os_build = String::new();
+        let mut agents = vec![a, b];
+        sort_agents(&mut agents, AgentSortColumn::Os, false);
+        assert_eq!(agent_os(&agents[0]), "10");
+        assert_eq!(agent_os(&agents[1]), "10 (2000)");
+    }
+
+    #[test]
+    fn sort_orders_by_sleep_jitter_string() {
+        let mut a = minimal_agent("x");
+        a.sleep_delay = "5".to_owned();
+        a.sleep_jitter = "10".to_owned();
+        let mut b = minimal_agent("y");
+        b.sleep_delay = "1".to_owned();
+        b.sleep_jitter = String::new();
+        let mut agents = vec![a, b];
+        sort_agents(&mut agents, AgentSortColumn::SleepJitter, false);
+        assert_eq!(agent_sleep_jitter(&agents[0]), "1");
+        assert_eq!(agent_sleep_jitter(&agents[1]), "5s / 10%");
+    }
+
+    #[test]
+    fn sort_orders_by_last_checkin() {
+        let mut a = minimal_agent("x");
+        a.last_call_in = "2026-04-07T12:00:00".to_owned();
+        let mut b = minimal_agent("y");
+        b.last_call_in = "2026-04-06T12:00:00".to_owned();
+        let mut agents = vec![a, b];
+        sort_agents(&mut agents, AgentSortColumn::LastCheckin, false);
+        assert_eq!(agents[0].last_call_in, "2026-04-06T12:00:00");
+    }
+
+    #[test]
+    fn sort_tie_breaks_using_name_id() {
+        let mut a = minimal_agent("bbb");
+        a.hostname = "same".to_owned();
+        let mut b = minimal_agent("aaa");
+        b.hostname = "same".to_owned();
+        let mut agents = vec![a, b];
+        sort_agents(&mut agents, AgentSortColumn::Hostname, false);
+        assert_eq!(agents[0].name_id, "aaa");
+        assert_eq!(agents[1].name_id, "bbb");
+    }
 }

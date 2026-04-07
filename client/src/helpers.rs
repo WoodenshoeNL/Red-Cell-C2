@@ -841,3 +841,145 @@ pub(crate) fn human_size(size_bytes: u64) -> String {
         format!("{size:.1} {}", UNITS[unit])
     }
 }
+
+#[cfg(test)]
+mod loot_filter_tests {
+    use super::*;
+    use crate::transport::{LootItem, LootKind};
+
+    fn credential_named(name: &str, preview: &str) -> LootItem {
+        LootItem {
+            id: Some(1),
+            kind: LootKind::Credential,
+            name: name.to_owned(),
+            agent_id: "agent-1".to_owned(),
+            source: "proc".to_owned(),
+            collected_at: "2026-04-05T10:00:00Z".to_owned(),
+            file_path: None,
+            size_bytes: None,
+            content_base64: None,
+            preview: Some(preview.to_owned()),
+        }
+    }
+
+    fn file_named(name: &str, path: &str) -> LootItem {
+        LootItem {
+            id: Some(2),
+            kind: LootKind::File,
+            name: name.to_owned(),
+            agent_id: "agent-2".to_owned(),
+            source: "fb".to_owned(),
+            collected_at: "2026-04-06T12:00:00Z".to_owned(),
+            file_path: Some(path.to_owned()),
+            size_bytes: Some(100),
+            content_base64: None,
+            preview: None,
+        }
+    }
+
+    #[test]
+    fn loot_matches_filters_respects_type_agent_date_and_text_together() {
+        let item = credential_named("secret.txt", "NTLM hash abc");
+        assert!(loot_matches_filters(
+            &item,
+            LootTypeFilter::Credentials,
+            CredentialSubFilter::NtlmHash,
+            FileSubFilter::All,
+            "agent-1",
+            "2026-04-01",
+            "2026-04-10",
+            "ntlm",
+        ));
+        assert!(!loot_matches_filters(
+            &item,
+            LootTypeFilter::Credentials,
+            CredentialSubFilter::Plaintext,
+            FileSubFilter::All,
+            "agent-1",
+            "",
+            "",
+            "",
+        ));
+        assert!(!loot_matches_filters(
+            &item,
+            LootTypeFilter::Credentials,
+            CredentialSubFilter::NtlmHash,
+            FileSubFilter::All,
+            "other-agent",
+            "",
+            "",
+            "",
+        ));
+        assert!(!loot_matches_filters(
+            &item,
+            LootTypeFilter::Credentials,
+            CredentialSubFilter::NtlmHash,
+            FileSubFilter::All,
+            "agent-1",
+            "2026-04-06",
+            "",
+            "",
+        ));
+    }
+
+    #[test]
+    fn loot_matches_filters_screenshots_only_kind() {
+        let shot = LootItem {
+            id: Some(3),
+            kind: LootKind::Screenshot,
+            name: "cap.png".to_owned(),
+            agent_id: "a".to_owned(),
+            source: "s".to_owned(),
+            collected_at: "2026-01-01".to_owned(),
+            file_path: None,
+            size_bytes: None,
+            content_base64: Some("AA==".to_owned()),
+            preview: None,
+        };
+        assert!(loot_matches_filters(
+            &shot,
+            LootTypeFilter::Screenshots,
+            CredentialSubFilter::All,
+            FileSubFilter::All,
+            "",
+            "",
+            "",
+            "cap",
+        ));
+        assert!(!loot_matches_filters(
+            &shot,
+            LootTypeFilter::Files,
+            CredentialSubFilter::All,
+            FileSubFilter::Document,
+            "",
+            "",
+            "",
+            "",
+        ));
+    }
+
+    #[test]
+    fn loot_matches_filters_file_subcategory_with_type_files() {
+        let doc = file_named("readme.txt", "/tmp/readme.txt");
+        assert!(loot_matches_filters(
+            &doc,
+            LootTypeFilter::Files,
+            CredentialSubFilter::All,
+            FileSubFilter::Document,
+            "agent-2",
+            "",
+            "",
+            "",
+        ));
+        assert!(!loot_matches_filters(
+            &doc,
+            LootTypeFilter::Files,
+            CredentialSubFilter::All,
+            FileSubFilter::Archive,
+            "",
+            "",
+            "",
+            "",
+        ));
+    }
+}

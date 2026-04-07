@@ -1034,3 +1034,70 @@ pub(crate) enum ScriptManagerAction {
     Reload(String),
     Unload(String),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn toggle_sort_first_click_selects_column_ascending() {
+        let mut s = SessionPanelState::default();
+        s.toggle_sort(AgentSortColumn::Hostname);
+        assert_eq!(s.sort_column, Some(AgentSortColumn::Hostname));
+        assert!(!s.descending);
+    }
+
+    #[test]
+    fn toggle_sort_second_click_on_same_column_flips_descending() {
+        let mut s = SessionPanelState::default();
+        s.toggle_sort(AgentSortColumn::Pid);
+        s.toggle_sort(AgentSortColumn::Pid);
+        assert_eq!(s.sort_column, Some(AgentSortColumn::Pid));
+        assert!(s.descending);
+    }
+
+    #[test]
+    fn toggle_sort_switching_column_resets_to_ascending() {
+        let mut s = SessionPanelState::default();
+        s.toggle_sort(AgentSortColumn::Hostname);
+        s.toggle_sort(AgentSortColumn::Hostname);
+        assert!(s.descending);
+        s.toggle_sort(AgentSortColumn::Pid);
+        assert_eq!(s.sort_column, Some(AgentSortColumn::Pid));
+        assert!(!s.descending);
+    }
+
+    #[test]
+    fn listener_dialog_open_close() {
+        let mut s = SessionPanelState::default();
+        assert!(s.listener_dialog.is_none());
+        s.listener_dialog = Some(ListenerDialogState::new_create());
+        assert!(s.listener_dialog.is_some());
+        s.listener_dialog = None;
+        assert!(s.listener_dialog.is_none());
+    }
+
+    #[test]
+    fn listener_dialog_cancel_discards_edits_next_open_is_fresh() {
+        let mut s = SessionPanelState::default();
+        s.listener_dialog = Some(ListenerDialogState::new_create());
+        if let Some(d) = &mut s.listener_dialog {
+            d.name = "dirty".to_owned();
+        }
+        s.listener_dialog = None;
+        let fresh = ListenerDialogState::new_create();
+        assert!(fresh.name.is_empty());
+        s.listener_dialog = Some(fresh);
+        assert_eq!(s.listener_dialog.as_ref().unwrap().name, "");
+    }
+
+    #[test]
+    fn payload_dialog_open_close() {
+        let mut s = SessionPanelState::default();
+        assert!(s.payload_dialog.is_none());
+        s.payload_dialog = Some(PayloadDialogState::new());
+        assert!(s.payload_dialog.is_some());
+        s.payload_dialog = None;
+        assert!(s.payload_dialog.is_none());
+    }
+}

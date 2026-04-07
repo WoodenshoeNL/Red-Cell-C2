@@ -444,3 +444,33 @@ impl AppState {
         }
     }
 }
+
+#[cfg(test)]
+mod connection_status_tests {
+    use super::*;
+
+    #[test]
+    fn new_app_state_starts_disconnected() {
+        let s = AppState::new("wss://127.0.0.1:40056/havoc".to_owned());
+        assert_eq!(s.connection_status, ConnectionStatus::Disconnected);
+    }
+
+    #[test]
+    fn connection_status_core_phases_have_distinct_labels() {
+        let disconnected = ConnectionStatus::Disconnected.label();
+        let connecting = ConnectionStatus::Connecting.label();
+        let connected = ConnectionStatus::Connected.label();
+        assert_ne!(disconnected, connecting);
+        assert_ne!(connecting, connected);
+        assert_ne!(disconnected, connected);
+    }
+
+    #[test]
+    fn connection_status_error_and_retrying_carry_detail() {
+        let err = ConnectionStatus::Error("bad auth".to_owned());
+        assert_eq!(err.detail(), Some("bad auth"));
+        let retry = ConnectionStatus::Retrying("ws closed".to_owned());
+        assert_eq!(retry.detail(), Some("ws closed"));
+        assert!(ConnectionStatus::Disconnected.detail().is_none());
+    }
+}

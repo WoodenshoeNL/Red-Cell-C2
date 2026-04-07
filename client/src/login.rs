@@ -123,6 +123,16 @@ impl LoginState {
         self.error_message = None;
         self.tls_failure = None;
     }
+
+    /// Zeroizes the password buffer and replaces it with an empty string.
+    ///
+    /// Call this as soon as authentication succeeds so the plaintext password is not retained
+    /// for the rest of the session. Re-authentication (session expiry, reconnect) must collect
+    /// the password from the user again; [`LoginState::new`](Self::new) starts with an empty
+    /// password field.
+    pub fn clear_password(&mut self) {
+        self.password = Zeroizing::new(String::new());
+    }
 }
 
 /// Outcome of a single login dialog render pass.
@@ -528,6 +538,21 @@ mod tests {
         // Confirm we hold a Zeroizing<String> — the explicit type annotation is the assertion.
         let _z: Zeroizing<String> = state.password.clone();
         assert_eq!(*_z, "hunter2");
+    }
+
+    #[test]
+    fn clear_password_removes_secret_and_requires_re_entry_to_submit() {
+        let mut state = default_login_state();
+        state.username = "u".to_owned();
+        *state.password = "secret".to_owned();
+        assert!(state.can_submit());
+
+        state.clear_password();
+        assert!(state.password.is_empty());
+        assert!(!state.can_submit());
+
+        *state.password = "again".to_owned();
+        assert!(state.can_submit());
     }
 
     #[test]

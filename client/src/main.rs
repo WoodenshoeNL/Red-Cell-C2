@@ -318,6 +318,9 @@ impl ClientApp {
         };
 
         if snapshot.operator_info.is_some() {
+            if let AppPhase::Authenticating { login_state, .. } = &mut self.phase {
+                login_state.clear_password();
+            }
             let placeholder =
                 AppPhase::Login(LoginState::new(&self.cli_server_url, &self.local_config));
             let old_phase = std::mem::replace(&mut self.phase, placeholder);
@@ -1790,6 +1793,32 @@ mod tests {
         assert!(
             matches!(app.phase, AppPhase::Authenticating { .. }),
             "should remain in Authenticating when status is Connected but no operator_info"
+        );
+    }
+
+    #[test]
+    fn check_auth_response_success_transitions_to_connected() {
+        use red_cell_common::OperatorInfo;
+
+        let state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+        let app_state: SharedAppState = Arc::new(Mutex::new(state));
+        {
+            let mut s = app_state.lock().unwrap();
+            s.operator_info = Some(OperatorInfo {
+                username: "operator".to_owned(),
+                password_hash: None,
+                role: None,
+                online: true,
+                last_seen: None,
+            });
+        }
+
+        let mut app = app_in_authenticating_phase(app_state);
+        app.check_auth_response();
+
+        assert!(
+            matches!(app.phase, AppPhase::Connected { .. }),
+            "expected Connected after operator_info is populated"
         );
     }
 

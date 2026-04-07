@@ -98,8 +98,9 @@ pub fn extract_and_validate_seq(
         return Err(CallbackSeqError::PayloadTooShort { agent_id, actual: payload.len() });
     }
 
-    let incoming_seq =
-        u64::from_le_bytes(payload[..SEQ_PREFIX_BYTES].try_into().expect("slice length is 8"));
+    let mut seq_bytes = [0u8; SEQ_PREFIX_BYTES];
+    seq_bytes.copy_from_slice(&payload[..SEQ_PREFIX_BYTES]);
+    let incoming_seq = u64::from_le_bytes(seq_bytes);
     let remainder = &payload[SEQ_PREFIX_BYTES..];
 
     validate_seq(agent_id, incoming_seq, last_seen_seq)?;

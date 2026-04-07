@@ -277,6 +277,38 @@ impl Profile {
             }
         }
 
+        if self.demon.init_secret.is_some() && !self.demon.init_secrets.is_empty() {
+            errors.push(
+                "Demon.InitSecret and Demon.InitSecrets are mutually exclusive — \
+                 remove InitSecret and use InitSecrets for rotation support"
+                    .to_owned(),
+            );
+        }
+
+        {
+            let mut seen_versions = std::collections::BTreeSet::new();
+            for entry in &self.demon.init_secrets {
+                if entry.secret.is_empty() {
+                    errors.push(format!(
+                        "Demon.InitSecrets[version={}].Secret must not be empty",
+                        entry.version
+                    ));
+                } else if entry.secret.len() < 16 {
+                    errors.push(format!(
+                        "Demon.InitSecrets[version={}].Secret is {} byte(s); minimum is 16 bytes (128 bits)",
+                        entry.version,
+                        entry.secret.len()
+                    ));
+                }
+                if !seen_versions.insert(entry.version) {
+                    errors.push(format!(
+                        "Demon.InitSecrets contains duplicate version {}",
+                        entry.version
+                    ));
+                }
+            }
+        }
+
         for peer in &self.demon.trusted_proxy_peers {
             let trimmed = peer.trim();
             if trimmed.is_empty() {
@@ -784,6 +816,47 @@ fn deserialize_optional_zeroizing_string<'de, D: Deserializer<'de>>(
     Ok(opt.map(Zeroizing::new))
 }
 
+fn deserialize_zeroizing_string<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Zeroizing<String>, D::Error> {
+    let s = String::deserialize(deserializer)?;
+    Ok(Zeroizing::new(s))
+}
+
+/// One entry in the `InitSecrets` list — a versioned HKDF server secret.
+///
+/// Each entry pairs a 1-byte `Version` identifier with the actual `Secret`
+/// string.  The version byte is sent by compatible agents (Specter / Archon)
+/// in the `DEMON_INIT` envelope so the teamserver can look up the matching
+/// secret and perform the correct HKDF derivation.
+///
+/// # Notes
+///
+/// Legacy Demon agents (C/ASM, frozen) do not emit a version byte and cannot
+/// use versioned secrets.  Leave `InitSecrets` empty (or use the deprecated
+/// single-field `InitSecret`) for pure-Demon deployments.
+#[derive(Clone, PartialEq, Eq, Deserialize)]
+pub struct VersionedInitSecret {
+    /// 1-byte identifier sent by the agent in the `DEMON_INIT` envelope.
+    #[serde(rename = "Version")]
+    pub version: u8,
+    /// Shared HKDF salt — must be at least 16 bytes (128 bits).
+    ///
+    /// Wrapped in [`Zeroizing`] so the secret material is overwritten in heap
+    /// memory when the value is dropped.
+    #[serde(rename = "Secret", deserialize_with = "deserialize_zeroizing_string")]
+    pub secret: Zeroizing<String>,
+}
+
+impl fmt::Debug for VersionedInitSecret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VersionedInitSecret")
+            .field("version", &self.version)
+            .field("secret", &"[redacted]")
+            .finish()
+    }
+}
+
 /// Serde default-value helper that returns `true`.
 fn default_true() -> bool {
     true
@@ -825,13 +898,20 @@ pub struct DemonConfig {
     /// PE/loader binary customization.
     #[serde(rename = "Binary", default)]
     pub binary: Option<BinaryConfig>,
-    /// Optional shared secret for HKDF-based session key derivation.
+    /// Optional shared secret for HKDF-based session key derivation (deprecated).
+    ///
+    /// **Deprecated in favour of `InitSecrets`.**  Use `InitSecrets` when you
+    /// need zero-downtime secret rotation; this single-secret field cannot be
+    /// rotated without simultaneously recompiling all agents.
     ///
     /// When set, the teamserver derives session keys via HKDF-SHA256 over
     /// agent-supplied key material and this secret, rather than using the raw
-    /// agent keys directly.  Compatible agents (Specter / Archon) must embed
-    /// the same secret and perform the matching derivation.  Legacy Demon
-    /// agents do not support this — leave unset for Havoc compatibility.
+    /// agent keys directly.  No version byte is emitted by agents using this
+    /// path — it is the legacy unversioned mode.  Compatible agents (Specter /
+    /// Archon) must embed the same secret and perform the matching derivation.
+    /// Legacy Demon agents do not support HKDF at all.
+    ///
+    /// Setting both `InitSecret` and `InitSecrets` is an error.
     ///
     /// Wrapped in [`Zeroizing`] so the secret material is overwritten in heap
     /// memory when the value is dropped.
@@ -841,6 +921,27 @@ pub struct DemonConfig {
         deserialize_with = "deserialize_optional_zeroizing_string"
     )]
     pub init_secret: Option<Zeroizing<String>>,
+    /// Versioned HKDF secrets for zero-downtime rotation.
+    ///
+    /// Each entry pairs a 1-byte `Version` with a `Secret` string.  Agents
+    /// compiled with `InitSecrets` support send the version byte in the
+    /// `DEMON_INIT` envelope; the teamserver looks up the matching entry and
+    /// uses its secret for HKDF-SHA256 session key derivation.
+    ///
+    /// Rotation procedure:
+    /// 1. Add the new version to this list.
+    /// 2. Compile new agents with the new version.
+    /// 3. Wait for all old agents to retire.
+    /// 4. Remove the old version from this list.
+    ///
+    /// Setting both `InitSecret` and `InitSecrets` is an error.
+    ///
+    /// # Notes
+    ///
+    /// Legacy Demon agents (C/ASM, frozen) cannot emit a version byte and are
+    /// incompatible with this field.  Document this as a Demon limitation.
+    #[serde(rename = "InitSecrets", default)]
+    pub init_secrets: Vec<VersionedInitSecret>,
     /// Whether to trust `X-Forwarded-For`.
     #[serde(rename = "TrustXForwardedFor", default)]
     pub trust_x_forwarded_for: bool,
@@ -897,6 +998,10 @@ impl fmt::Debug for DemonConfig {
             .field("dotnet_name_pipe", &self.dotnet_name_pipe)
             .field("binary", &self.binary)
             .field("init_secret", &self.init_secret.as_ref().map(|_| "[redacted]"))
+            .field(
+                "init_secrets",
+                &self.init_secrets.iter().map(|v| (v.version, "[redacted]")).collect::<Vec<_>>(),
+            )
             .field("trust_x_forwarded_for", &self.trust_x_forwarded_for)
             .field("trusted_proxy_peers", &self.trusted_proxy_peers)
             .field("heap_enc", &self.heap_enc)
@@ -2051,6 +2156,132 @@ mod tests {
         .expect("profile should parse");
 
         profile.validate().expect("absent InitSecret should be accepted");
+    }
+
+    #[test]
+    fn rejects_both_init_secret_and_init_secrets() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Demon {
+              InitSecret = "exactly16bytesok"
+              InitSecrets = [
+                { Version = 1, Secret = "exactly16bytesok" }
+              ]
+            }
+            "#,
+        )
+        .expect("profile should parse");
+
+        let error = profile.validate().expect_err("both fields set should be invalid");
+        assert!(
+            error.errors.iter().any(|msg| msg.contains("mutually exclusive")),
+            "expected a mutually-exclusive error, got: {:?}",
+            error.errors
+        );
+    }
+
+    #[test]
+    fn rejects_init_secrets_with_duplicate_version() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Demon {
+              InitSecrets = [
+                { Version = 1, Secret = "exactly16bytesok" },
+                { Version = 1, Secret = "another16bytes!!" }
+              ]
+            }
+            "#,
+        )
+        .expect("profile should parse");
+
+        let error = profile.validate().expect_err("duplicate version should be invalid");
+        assert!(
+            error.errors.iter().any(|msg| msg.contains("duplicate version")),
+            "expected a duplicate-version error, got: {:?}",
+            error.errors
+        );
+    }
+
+    #[test]
+    fn rejects_init_secrets_with_short_secret() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Demon {
+              InitSecrets = [
+                { Version = 1, Secret = "tooshort" }
+              ]
+            }
+            "#,
+        )
+        .expect("profile should parse");
+
+        let error = profile.validate().expect_err("short secret in InitSecrets should be invalid");
+        assert!(
+            error.errors.iter().any(|msg| msg.contains("InitSecrets") && msg.contains("minimum")),
+            "expected a minimum-length error in InitSecrets, got: {:?}",
+            error.errors
+        );
+    }
+
+    #[test]
+    fn accepts_valid_init_secrets() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Demon {
+              InitSecrets = [
+                { Version = 1, Secret = "old-secret-exactly16" },
+                { Version = 2, Secret = "new-secret-exactly16" }
+              ]
+            }
+            "#,
+        )
+        .expect("profile should parse");
+
+        profile.validate().expect("valid InitSecrets list should be accepted");
     }
 
     #[test]
@@ -3214,6 +3445,7 @@ mod tests {
             dotnet_name_pipe: None,
             binary: None,
             init_secret: secret.map(|s| Zeroizing::new(s.to_owned())),
+            init_secrets: Vec::new(),
             trust_x_forwarded_for: false,
             trusted_proxy_peers: vec![],
             heap_enc: true,

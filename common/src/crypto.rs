@@ -96,6 +96,12 @@ pub enum CryptoError {
     /// HKDF expand step failed (output length too long for the hash function).
     #[error("HKDF expand failed: output length too long")]
     HkdfExpand,
+    /// The version byte in a `DEMON_INIT` envelope does not match any configured secret.
+    #[error("unknown init-secret version {version} — agent compiled with an unrecognised secret")]
+    UnknownSecretVersion {
+        /// The version byte the agent sent.
+        version: u8,
+    },
 }
 
 type AgentCtr = Ctr128BE<Aes256>;
@@ -279,6 +285,33 @@ pub fn derive_session_keys(
     hk.expand(b"red-cell-session-iv", &mut derived_iv).map_err(|_| CryptoError::HkdfExpand)?;
 
     Ok(AgentCryptoMaterial { key: derived_key, iv: derived_iv })
+}
+
+/// Derive session keys using a versioned server secret from a pre-shared list.
+///
+/// Looks up `version` in `secrets` (a slice of `(version_byte, secret_bytes)` pairs)
+/// and calls [`derive_session_keys`] with the matching secret.
+///
+/// This is the multi-secret variant used for zero-downtime rotation: agents emit
+/// a 1-byte version field in the `DEMON_INIT` envelope so the teamserver can select
+/// the correct secret without requiring simultaneous recompilation.
+///
+/// # Errors
+///
+/// Returns [`CryptoError::UnknownSecretVersion`] if no entry in `secrets` matches
+/// `version`.  Returns the same errors as [`derive_session_keys`] otherwise.
+pub fn derive_session_keys_for_version(
+    agent_key: &[u8],
+    agent_iv: &[u8],
+    version: u8,
+    secrets: &[(u8, Vec<u8>)],
+) -> Result<AgentCryptoMaterial, CryptoError> {
+    let secret = secrets
+        .iter()
+        .find(|(v, _)| *v == version)
+        .map(|(_, s)| s.as_slice())
+        .ok_or(CryptoError::UnknownSecretVersion { version })?;
+    derive_session_keys(agent_key, agent_iv, secret)
 }
 
 /// Hash a password with SHA3-256 and return the lowercase hex digest.
@@ -517,9 +550,9 @@ mod tests {
 
     use super::{
         AGENT_IV_LENGTH, AGENT_KEY_LENGTH, AgentCryptoMaterial, CryptoError, ctr_blocks_for_len,
-        decrypt_agent_data, decrypt_agent_data_at_offset, derive_session_keys, encrypt_agent_data,
-        encrypt_agent_data_at_offset, generate_agent_crypto_material, hash_password_sha3,
-        is_weak_aes_iv, is_weak_aes_key,
+        decrypt_agent_data, decrypt_agent_data_at_offset, derive_session_keys,
+        derive_session_keys_for_version, encrypt_agent_data, encrypt_agent_data_at_offset,
+        generate_agent_crypto_material, hash_password_sha3, is_weak_aes_iv, is_weak_aes_key,
     };
 
     #[test]
@@ -1281,6 +1314,67 @@ mod tests {
         assert!(
             message.contains("HKDF expand failed"),
             "HkdfExpand display must contain 'HKDF expand failed', got: {message}"
+        );
+    }
+
+    // ── derive_session_keys_for_version ─────────────────────────────────────
+
+    #[test]
+    fn derive_session_keys_for_version_returns_same_as_derive_session_keys() {
+        let key = [0x11; AGENT_KEY_LENGTH];
+        let iv = [0x22; AGENT_IV_LENGTH];
+        let secret = b"sixteen-byte-sec".to_vec();
+        let secrets = vec![(1u8, secret.clone())];
+
+        let versioned = derive_session_keys_for_version(&key, &iv, 1, &secrets)
+            .expect("version 1 must be found");
+        let direct = derive_session_keys(&key, &iv, &secret).expect("direct derive must succeed");
+
+        assert_eq!(versioned.key, direct.key, "versioned key must match direct derivation");
+        assert_eq!(versioned.iv, direct.iv, "versioned IV must match direct derivation");
+    }
+
+    #[test]
+    fn derive_session_keys_for_version_unknown_version_returns_error() {
+        let key = [0x11; AGENT_KEY_LENGTH];
+        let iv = [0x22; AGENT_IV_LENGTH];
+        let secrets = vec![(1u8, b"sixteen-byte-sec".to_vec())];
+
+        let result = derive_session_keys_for_version(&key, &iv, 2, &secrets);
+        assert!(
+            matches!(result, Err(CryptoError::UnknownSecretVersion { version: 2 })),
+            "unknown version must return UnknownSecretVersion, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn derive_session_keys_for_version_selects_correct_secret_from_list() {
+        let key = [0x33; AGENT_KEY_LENGTH];
+        let iv = [0x44; AGENT_IV_LENGTH];
+        let secret1 = b"secret-version-1".to_vec();
+        let secret2 = b"secret-version-2".to_vec();
+        let secrets = vec![(1u8, secret1.clone()), (2u8, secret2.clone())];
+
+        let derived1 = derive_session_keys_for_version(&key, &iv, 1, &secrets)
+            .expect("version 1 must succeed");
+        let derived2 = derive_session_keys_for_version(&key, &iv, 2, &secrets)
+            .expect("version 2 must succeed");
+
+        assert_ne!(
+            derived1.key, derived2.key,
+            "different secret versions must produce different session keys"
+        );
+    }
+
+    #[test]
+    fn derive_session_keys_for_version_empty_list_returns_error() {
+        let key = [0x55; AGENT_KEY_LENGTH];
+        let iv = [0x66; AGENT_IV_LENGTH];
+
+        let result = derive_session_keys_for_version(&key, &iv, 0, &[]);
+        assert!(
+            matches!(result, Err(CryptoError::UnknownSecretVersion { version: 0 })),
+            "empty secrets list must return UnknownSecretVersion, got: {result:?}"
         );
     }
 

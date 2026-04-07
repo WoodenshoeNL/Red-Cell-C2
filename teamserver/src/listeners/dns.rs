@@ -11,8 +11,9 @@ use tokio::sync::Mutex;
 use tracing::warn;
 
 use crate::{
-    AgentRegistry, CommandDispatcher, Database, DemonPacketParser, PluginRuntime,
-    ShutdownController, SocketRelayManager, dispatch::DownloadTracker, events::EventBus,
+    AgentRegistry, CommandDispatcher, Database, DemonInitSecretConfig, DemonPacketParser,
+    PluginRuntime, ShutdownController, SocketRelayManager, dispatch::DownloadTracker,
+    events::EventBus,
 };
 
 use super::{
@@ -215,7 +216,7 @@ impl DnsListenerState {
         reconnect_probe_rate_limiter: ReconnectProbeRateLimiter,
         dns_recon_block_limiter: DnsReconBlockLimiter,
         shutdown: ShutdownController,
-        init_secret: Option<Vec<u8>>,
+        init_secret_config: DemonInitSecretConfig,
         max_pivot_chain_depth: usize,
         allow_legacy_ctr: bool,
     ) -> Self {
@@ -223,8 +224,11 @@ impl DnsListenerState {
             config: config.clone(),
             registry: registry.clone(),
             database: database.clone(),
-            parser: DemonPacketParser::with_init_secret(registry.clone(), init_secret)
-                .with_allow_legacy_ctr(allow_legacy_ctr),
+            parser: DemonPacketParser::with_init_secret_config(
+                registry.clone(),
+                init_secret_config,
+            )
+            .with_allow_legacy_ctr(allow_legacy_ctr),
             events: events.clone(),
             dispatcher: CommandDispatcher::with_builtin_handlers_and_downloads(
                 registry.clone(),
@@ -1481,7 +1485,7 @@ pub(crate) async fn spawn_dns_listener_runtime(
     unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
     reconnect_probe_rate_limiter: ReconnectProbeRateLimiter,
     shutdown: ShutdownController,
-    init_secret: Option<Vec<u8>>,
+    init_secret_config: DemonInitSecretConfig,
     max_pivot_chain_depth: usize,
     allow_legacy_ctr: bool,
 ) -> Result<ListenerRuntimeFuture, ListenerManagerError> {
@@ -1508,7 +1512,7 @@ pub(crate) async fn spawn_dns_listener_runtime(
         reconnect_probe_rate_limiter,
         DnsReconBlockLimiter::new(),
         shutdown,
-        init_secret,
+        init_secret_config,
         max_pivot_chain_depth,
         allow_legacy_ctr,
     ));

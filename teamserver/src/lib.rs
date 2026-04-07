@@ -51,8 +51,8 @@ pub use database::{
     TeamserverError,
 };
 pub use demon::{
-    DemonCallbackPackage, DemonPacketParser, DemonParserError, ParsedDemonInit, ParsedDemonPacket,
-    build_init_ack, build_reconnect_ack,
+    DemonCallbackPackage, DemonInitSecretConfig, DemonPacketParser, DemonParserError,
+    ParsedDemonInit, ParsedDemonPacket, build_init_ack, build_reconnect_ack,
 };
 /// Default maximum bytes allowed for a single agent download.
 pub const DEFAULT_MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;

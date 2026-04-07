@@ -56,9 +56,9 @@ use zeroize::Zeroizing;
 
 use crate::{
     AgentRegistry, AuditResultStatus, CommandDispatchError, CommandDispatcher, Database,
-    DemonPacketParser, DemonParserError, ListenerRepository, ListenerStatus, ParsedDemonPacket,
-    PersistedListener, PersistedListenerState, PluginRuntime, ShutdownController,
-    SocketRelayManager, TeamserverError,
+    DemonInitSecretConfig, DemonPacketParser, DemonParserError, ListenerRepository, ListenerStatus,
+    ParsedDemonPacket, PersistedListener, PersistedListenerState, PluginRuntime,
+    ShutdownController, SocketRelayManager, TeamserverError,
     agent_events::{agent_new_event, agent_reregistered_event},
     audit_details, build_init_ack, build_reconnect_ack,
     dispatch::DownloadTracker,
@@ -594,13 +594,16 @@ pub struct ListenerManager {
     /// These tasks poll the cert file's mtime and call `reload_from_pem` automatically
     /// when the file changes.  They are aborted when the associated listener stops.
     watcher_handles: Arc<RwLock<HashMap<String, JoinHandle<()>>>>,
-    /// Optional server secret for HKDF-based session key derivation.
+    /// Server-secret configuration for HKDF-based session key derivation.
     ///
-    /// When set, this secret is passed to every [`DemonPacketParser`] so that
-    /// DEMON_INIT key material is mixed with the secret via HKDF-SHA256 before
-    /// being stored as the session key.  Corresponds to `DemonConfig.init_secret`
-    /// in the HCL profile.
-    demon_init_secret: Option<Vec<u8>>,
+    /// Passed to every [`DemonPacketParser`] spawned by this manager.
+    /// `None` → raw agent keys stored directly (Demon / legacy mode).
+    /// `Some((secrets, versioned))` where `versioned` distinguishes the
+    /// single-secret (unversioned) and multi-secret (versioned) modes.
+    ///
+    /// Stored as `(versioned: bool, secrets: Vec<(u8, Vec<u8>)>)` so the
+    /// manager can reconstruct the correct [`DemonInitSecretConfig`] variant.
+    demon_init_secrets: Option<(bool, Vec<(u8, Vec<u8>)>)>,
     /// Whether to accept DEMON_INIT registrations that negotiate legacy CTR mode.
     ///
     /// Mirrors `DemonConfig.allow_legacy_ctr` from the HCL profile.  Defaults to
@@ -672,7 +675,7 @@ impl ListenerManager {
             external_endpoints: Arc::new(RwLock::new(BTreeMap::new())),
             tls_configs: Arc::new(RwLock::new(HashMap::new())),
             watcher_handles: Arc::new(RwLock::new(HashMap::new())),
-            demon_init_secret: None,
+            demon_init_secrets: None,
             demon_allow_legacy_ctr: false,
             max_pivot_chain_depth: crate::dispatch::DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
         }
@@ -711,15 +714,50 @@ impl ListenerManager {
         self
     }
 
-    /// Set the HKDF server secret used by all listener packet parsers.
+    /// Set a single unversioned HKDF server secret for all listener packet parsers.
     ///
-    /// Call this before any listeners are spawned.  All clones of this manager
-    /// (e.g. those handed to the plugin runtime) must be made after this call
-    /// so they inherit the secret.
+    /// This corresponds to `Demon { InitSecret = "..." }` in the profile.  No version
+    /// byte is expected in `DEMON_INIT` packets; use [`with_demon_init_secrets`] when
+    /// you need zero-downtime rotation support.
+    ///
+    /// Call this before any listeners are spawned.
     #[must_use]
     pub fn with_demon_init_secret(mut self, secret: Option<Vec<u8>>) -> Self {
-        self.demon_init_secret = secret;
+        self.demon_init_secrets = secret.map(|s| (false, vec![(0u8, s)]));
         self
+    }
+
+    /// Set versioned HKDF server secrets for all listener packet parsers.
+    ///
+    /// This corresponds to `Demon { InitSecrets = [...] }` in the profile.  Agents
+    /// must emit a 1-byte version field in `DEMON_INIT`; the matching secret is
+    /// selected for HKDF derivation.
+    ///
+    /// Call this before any listeners are spawned.
+    #[must_use]
+    pub fn with_demon_init_secrets(mut self, secrets: Vec<(u8, Vec<u8>)>) -> Self {
+        if secrets.is_empty() {
+            self.demon_init_secrets = None;
+        } else {
+            self.demon_init_secrets = Some((true, secrets));
+        }
+        self
+    }
+
+    /// Build the [`DemonInitSecretConfig`] to pass to listener packet parsers.
+    fn init_secret_config(&self) -> DemonInitSecretConfig {
+        match &self.demon_init_secrets {
+            None => DemonInitSecretConfig::None,
+            Some((false, secrets)) => {
+                // Unversioned single secret: stored as vec with one entry keyed by 0.
+                DemonInitSecretConfig::Unversioned(Zeroizing::new(
+                    secrets.first().map(|(_, s)| s.clone()).unwrap_or_default(),
+                ))
+            }
+            Some((true, secrets)) => DemonInitSecretConfig::Versioned(
+                secrets.iter().map(|(v, s)| (*v, Zeroizing::new(s.clone()))).collect(),
+            ),
+        }
     }
 
     /// Control whether listener parsers accept DEMON_INIT registrations in legacy CTR mode.
@@ -1299,7 +1337,7 @@ impl HttpListenerState {
         unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
         reconnect_probe_rate_limiter: ReconnectProbeRateLimiter,
         shutdown: ShutdownController,
-        init_secret: Option<Vec<u8>>,
+        init_secret_config: DemonInitSecretConfig,
         max_pivot_chain_depth: usize,
         allow_legacy_ctr: bool,
     ) -> Result<Self, ListenerManagerError> {
@@ -1332,8 +1370,11 @@ impl HttpListenerState {
             trusted_proxy_peers,
             registry: registry.clone(),
             database: database.clone(),
-            parser: DemonPacketParser::with_init_secret(registry.clone(), init_secret)
-                .with_allow_legacy_ctr(allow_legacy_ctr),
+            parser: DemonPacketParser::with_init_secret_config(
+                registry.clone(),
+                init_secret_config,
+            )
+            .with_allow_legacy_ctr(allow_legacy_ctr),
             dispatcher: CommandDispatcher::with_builtin_handlers_and_downloads(
                 registry.clone(),
                 events.clone(),
@@ -1394,7 +1435,7 @@ impl SmbListenerState {
         unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
         reconnect_probe_rate_limiter: ReconnectProbeRateLimiter,
         shutdown: ShutdownController,
-        init_secret: Option<Vec<u8>>,
+        init_secret_config: DemonInitSecretConfig,
         max_pivot_chain_depth: usize,
         allow_legacy_ctr: bool,
     ) -> Self {
@@ -1402,8 +1443,11 @@ impl SmbListenerState {
             config: config.clone(),
             registry: registry.clone(),
             database: database.clone(),
-            parser: DemonPacketParser::with_init_secret(registry.clone(), init_secret)
-                .with_allow_legacy_ctr(allow_legacy_ctr),
+            parser: DemonPacketParser::with_init_secret_config(
+                registry.clone(),
+                init_secret_config,
+            )
+            .with_allow_legacy_ctr(allow_legacy_ctr),
             events: events.clone(),
             unknown_callback_probe_audit_limiter,
             reconnect_probe_rate_limiter,
@@ -1682,7 +1726,7 @@ async fn spawn_http_listener_runtime(
     reconnect_probe_rate_limiter: ReconnectProbeRateLimiter,
     shutdown: ShutdownController,
     max_pivot_chain_depth: usize,
-    init_secret: Option<Vec<u8>>,
+    init_secret_config: DemonInitSecretConfig,
     allow_legacy_ctr: bool,
     tls_configs: Arc<RwLock<HashMap<String, RustlsConfig>>>,
     watcher_handles: Arc<RwLock<HashMap<String, JoinHandle<()>>>>,
@@ -1699,7 +1743,7 @@ async fn spawn_http_listener_runtime(
         unknown_callback_probe_audit_limiter,
         reconnect_probe_rate_limiter,
         shutdown,
-        init_secret,
+        init_secret_config,
         max_pivot_chain_depth,
         allow_legacy_ctr,
     )?);
@@ -2235,7 +2279,7 @@ async fn spawn_smb_listener_runtime(
     unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
     reconnect_probe_rate_limiter: ReconnectProbeRateLimiter,
     shutdown: ShutdownController,
-    init_secret: Option<Vec<u8>>,
+    init_secret_config: DemonInitSecretConfig,
     max_pivot_chain_depth: usize,
     allow_legacy_ctr: bool,
 ) -> Result<ListenerRuntimeFuture, ListenerManagerError> {
@@ -2250,7 +2294,7 @@ async fn spawn_smb_listener_runtime(
         unknown_callback_probe_audit_limiter,
         reconnect_probe_rate_limiter,
         shutdown,
-        init_secret,
+        init_secret_config,
         max_pivot_chain_depth,
         allow_legacy_ctr,
     ));
@@ -2473,7 +2517,7 @@ fn spawn_external_listener_runtime(
     reconnect_probe_rate_limiter: ReconnectProbeRateLimiter,
     shutdown: ShutdownController,
     external_endpoints: Arc<RwLock<BTreeMap<String, Arc<ExternalListenerState>>>>,
-    init_secret: Option<Vec<u8>>,
+    init_secret_config: DemonInitSecretConfig,
     max_pivot_chain_depth: usize,
     allow_legacy_ctr: bool,
 ) -> Result<ListenerRuntimeFuture, ListenerManagerError> {
@@ -2481,7 +2525,7 @@ fn spawn_external_listener_runtime(
         config: config.clone(),
         registry: registry.clone(),
         database: database.clone(),
-        parser: DemonPacketParser::with_init_secret(registry.clone(), init_secret)
+        parser: DemonPacketParser::with_init_secret_config(registry.clone(), init_secret_config)
             .with_allow_legacy_ctr(allow_legacy_ctr),
         events: events.clone(),
         demon_init_rate_limiter,
@@ -2604,7 +2648,7 @@ impl ListenerManager {
                     self.reconnect_probe_rate_limiter.clone(),
                     self.shutdown.clone(),
                     self.max_pivot_chain_depth,
-                    self.demon_init_secret.clone(),
+                    self.init_secret_config(),
                     self.demon_allow_legacy_ctr,
                     self.tls_configs.clone(),
                     self.watcher_handles.clone(),
@@ -2623,7 +2667,7 @@ impl ListenerManager {
                     self.unknown_callback_probe_audit_limiter.clone(),
                     self.reconnect_probe_rate_limiter.clone(),
                     self.shutdown.clone(),
-                    self.demon_init_secret.clone(),
+                    self.init_secret_config(),
                     self.max_pivot_chain_depth,
                     self.demon_allow_legacy_ctr,
                 )
@@ -2642,7 +2686,7 @@ impl ListenerManager {
                     self.unknown_callback_probe_audit_limiter.clone(),
                     self.reconnect_probe_rate_limiter.clone(),
                     self.shutdown.clone(),
-                    self.demon_init_secret.clone(),
+                    self.init_secret_config(),
                     self.max_pivot_chain_depth,
                     self.demon_allow_legacy_ctr,
                 )
@@ -2661,7 +2705,7 @@ impl ListenerManager {
                 self.reconnect_probe_rate_limiter.clone(),
                 self.shutdown.clone(),
                 self.external_endpoints.clone(),
-                self.demon_init_secret.clone(),
+                self.init_secret_config(),
                 self.max_pivot_chain_depth,
                 self.demon_allow_legacy_ctr,
             ),

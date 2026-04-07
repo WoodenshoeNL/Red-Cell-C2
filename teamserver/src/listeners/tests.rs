@@ -32,8 +32,8 @@ use super::{
     spawn_smb_listener_runtime,
 };
 use crate::{
-    AgentRegistry, AuditQuery, AuditResultStatus, Database, EventBus, Job, PersistedListenerState,
-    ShutdownController, SocketRelayManager, query_audit_log,
+    AgentRegistry, AuditQuery, AuditResultStatus, Database, DemonInitSecretConfig, EventBus, Job,
+    PersistedListenerState, ShutdownController, SocketRelayManager, query_audit_log,
 };
 use axum::body::Body;
 use axum::http::Request;
@@ -3157,7 +3157,7 @@ async fn dns_state(name: &str) -> DnsListenerState {
         ReconnectProbeRateLimiter::new(),
         DnsReconBlockLimiter::new(),
         ShutdownController::new(),
-        None,
+        DemonInitSecretConfig::None,
         crate::dispatch::DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
         true,
     )
@@ -3182,7 +3182,7 @@ async fn spawn_test_dns_listener(
         UnknownCallbackProbeAuditLimiter::new(),
         ReconnectProbeRateLimiter::new(),
         ShutdownController::new(),
-        None,
+        DemonInitSecretConfig::None,
         crate::dispatch::DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
         true,
     )
@@ -3214,7 +3214,7 @@ async fn spawn_test_smb_runtime(
         UnknownCallbackProbeAuditLimiter::new(),
         ReconnectProbeRateLimiter::new(),
         shutdown,
-        None,
+        DemonInitSecretConfig::None,
         crate::dispatch::DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
         true,
     )

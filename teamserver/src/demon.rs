@@ -4,7 +4,7 @@ use std::borrow::Cow;
 
 use red_cell_common::crypto::{
     AGENT_IV_LENGTH, AGENT_KEY_LENGTH, CryptoError, decrypt_agent_data, derive_session_keys,
-    is_weak_aes_iv, is_weak_aes_key,
+    derive_session_keys_for_version, is_weak_aes_iv, is_weak_aes_key,
 };
 use red_cell_common::demon::{DemonCommand, DemonEnvelope, DemonHeader, DemonProtocolError};
 use red_cell_common::{AgentEncryptionInfo, AgentRecord};
@@ -38,6 +38,29 @@ pub const INIT_EXT_MONOTONIC_CTR: u32 = 1 << 0;
 /// Demon and Archon agents do not set this flag (frozen wire format).
 /// Specter agents set this flag during `DEMON_INIT`.
 pub const INIT_EXT_SEQ_PROTECTED: u32 = 1 << 1;
+
+/// Server-secret configuration for HKDF session key derivation in `DEMON_INIT`.
+///
+/// This enum captures the three possible modes:
+///
+/// - **`None`** — no HKDF; raw agent keys are stored directly (Demon / legacy mode).
+/// - **`Unversioned`** — a single secret; no version byte in the `DEMON_INIT` packet.
+///   Used when the profile specifies `Demon { InitSecret = "..." }`.
+/// - **`Versioned`** — a list of `(version, secret)` pairs; agents emit a 1-byte version
+///   field in `DEMON_INIT` so the teamserver can select the correct secret for rotation.
+///   Used when the profile specifies `Demon { InitSecrets = [...] }`.
+///
+/// Legacy Demon agents (C/ASM, frozen wire format) can only work with `None` or
+/// `Unversioned`.  Versioned mode requires agent-side support (Specter / Archon).
+#[derive(Clone, Debug)]
+pub enum DemonInitSecretConfig {
+    /// No HKDF — raw agent keys stored directly.
+    None,
+    /// Single unversioned secret — no version byte in `DEMON_INIT`.
+    Unversioned(Zeroizing<Vec<u8>>),
+    /// Multiple versioned secrets — requires 1-byte version field in `DEMON_INIT`.
+    Versioned(Vec<(u8, Zeroizing<Vec<u8>>)>),
+}
 
 /// A decrypted Demon callback package parsed from an agent request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,13 +173,11 @@ pub enum DemonParserError {
 #[derive(Clone, Debug)]
 pub struct DemonPacketParser {
     registry: AgentRegistry,
-    /// Optional server secret for HKDF-based session key derivation.
+    /// Server-secret configuration for HKDF-based session key derivation.
     ///
-    /// When set, agent-supplied key material from `DEMON_INIT` is mixed with this
-    /// secret via [`red_cell_common::crypto::derive_session_keys`] before being
-    /// stored as the session key.  Compatible agents (Specter / Archon) must
-    /// perform the same derivation.  Legacy Demon agents do not support this.
-    init_secret: Option<Vec<u8>>,
+    /// See [`DemonInitSecretConfig`] for the three modes.  When `None`, raw
+    /// agent keys are stored directly (Havoc Demon compatibility).
+    init_secret_config: DemonInitSecretConfig,
     /// Whether to accept DEMON_INIT registrations that negotiate legacy CTR mode.
     ///
     /// When `false` (the default), any `DEMON_INIT` that does not set the
@@ -173,20 +194,60 @@ impl DemonPacketParser {
     /// negotiate monotonic CTR are rejected.
     #[must_use]
     pub fn new(registry: AgentRegistry) -> Self {
-        Self { registry, init_secret: None, allow_legacy_ctr: false }
+        Self { registry, init_secret_config: DemonInitSecretConfig::None, allow_legacy_ctr: false }
     }
 
-    /// Create a packet parser with HKDF-based session key derivation enabled.
+    /// Create a packet parser with unversioned HKDF-based session key derivation.
     ///
     /// When `init_secret` is `Some`, the teamserver derives session keys from
-    /// agent-supplied material mixed with the secret via HKDF-SHA256, preventing
-    /// unauthenticated agents from choosing their own session keys.
+    /// agent-supplied material mixed with the secret via HKDF-SHA256.  No version
+    /// byte is present in `DEMON_INIT`; this mode is backward-compatible with agents
+    /// built against the old single-secret `InitSecret` profile field.
+    ///
+    /// For zero-downtime rotation support use [`with_init_secrets`](Self::with_init_secrets).
     ///
     /// Legacy CTR mode is **disabled** by default; use
     /// [`with_allow_legacy_ctr`](Self::with_allow_legacy_ctr) to opt in.
     #[must_use]
     pub fn with_init_secret(registry: AgentRegistry, init_secret: Option<Vec<u8>>) -> Self {
-        Self { registry, init_secret, allow_legacy_ctr: false }
+        let config = match init_secret {
+            Some(s) => DemonInitSecretConfig::Unversioned(Zeroizing::new(s)),
+            None => DemonInitSecretConfig::None,
+        };
+        Self { registry, init_secret_config: config, allow_legacy_ctr: false }
+    }
+
+    /// Create a packet parser from an already-constructed [`DemonInitSecretConfig`].
+    ///
+    /// This is the low-level constructor used internally by the listener manager.
+    /// Prefer [`with_init_secret`](Self::with_init_secret) or
+    /// [`with_init_secrets`](Self::with_init_secrets) for explicit configuration.
+    #[must_use]
+    pub fn with_init_secret_config(registry: AgentRegistry, config: DemonInitSecretConfig) -> Self {
+        Self { registry, init_secret_config: config, allow_legacy_ctr: false }
+    }
+
+    /// Create a packet parser with versioned HKDF-based session key derivation.
+    ///
+    /// Agents compiled with versioned-secret support emit a 1-byte version field
+    /// in the `DEMON_INIT` envelope.  The teamserver looks up the matching entry
+    /// in `secrets` and derives session keys with HKDF-SHA256.  Unknown version
+    /// bytes are rejected.
+    ///
+    /// If `secrets` is empty this is equivalent to [`new`](Self::new) (no HKDF).
+    ///
+    /// Legacy CTR mode is **disabled** by default; use
+    /// [`with_allow_legacy_ctr`](Self::with_allow_legacy_ctr) to opt in.
+    #[must_use]
+    pub fn with_init_secrets(registry: AgentRegistry, secrets: Vec<(u8, Vec<u8>)>) -> Self {
+        let config = if secrets.is_empty() {
+            DemonInitSecretConfig::None
+        } else {
+            DemonInitSecretConfig::Versioned(
+                secrets.into_iter().map(|(v, s)| (v, Zeroizing::new(s))).collect(),
+            )
+        };
+        Self { registry, init_secret_config: config, allow_legacy_ctr: false }
     }
 
     /// Enable or disable acceptance of legacy-CTR DEMON_INIT registrations.
@@ -266,7 +327,7 @@ impl DemonPacketParser {
                     remaining,
                     &external_ip,
                     now,
-                    self.init_secret.as_deref(),
+                    &self.init_secret_config,
                 )?;
 
                 // Guard against key-rotation hijack: the incoming key material must
@@ -320,7 +381,7 @@ impl DemonPacketParser {
                 remaining,
                 &external_ip,
                 now,
-                self.init_secret.as_deref(),
+                &self.init_secret_config,
             )?;
 
             if legacy_ctr && !self.allow_legacy_ctr {
@@ -526,11 +587,33 @@ fn parse_init_agent(
     payload: &[u8],
     external_ip: &str,
     now: OffsetDateTime,
-    init_secret: Option<&[u8]>,
+    secret_config: &DemonInitSecretConfig,
 ) -> Result<(AgentRecord, bool, bool), DemonParserError> {
     let mut offset = 0_usize;
     let key = read_fixed::<AGENT_KEY_LENGTH>(payload, &mut offset, "init AES key")?;
     let iv = read_fixed::<AGENT_IV_LENGTH>(payload, &mut offset, "init AES IV")?;
+
+    // Read the 1-byte version field when in Versioned mode.  The version appears
+    // between the raw key/IV and the encrypted payload so the teamserver can select
+    // the correct HKDF secret before decrypting.
+    let secret_version: Option<u8> = if matches!(secret_config, DemonInitSecretConfig::Versioned(_))
+    {
+        if offset >= payload.len() {
+            warn!(
+                agent_id = format_args!("0x{agent_id:08X}"),
+                "rejecting DEMON_INIT: missing secret-version byte (versioned secrets configured)"
+            );
+            return Err(DemonParserError::InvalidInit(
+                "missing secret-version byte in DEMON_INIT envelope",
+            ));
+        }
+        let v = payload[offset];
+        offset += 1;
+        Some(v)
+    } else {
+        None
+    };
+
     let encrypted = &payload[offset..];
 
     if is_weak_aes_key(&key) {
@@ -621,27 +704,55 @@ fn parse_init_agent(
         now.format(&Rfc3339).map_err(|_| DemonParserError::InvalidInit("invalid timestamp"))?;
     let kill_date = parse_kill_date(kill_date)?;
 
-    // When a server secret is configured, derive the actual session keys via HKDF
-    // so that the stored key material differs from what the agent supplied on the
-    // wire.  This prevents an attacker who can reach the listener from choosing
-    // their own session keys — without the server secret they cannot predict the
-    // derived material.  The init packet itself is still decrypted with the raw
-    // agent keys (above), but all subsequent session traffic uses the derived keys.
-    let encryption = if let Some(secret) = init_secret {
-        let derived = derive_session_keys(&key, &iv, secret)
-            .map_err(|_| DemonParserError::InvalidInit("HKDF session key derivation failed"))?;
-        tracing::info!(
-            agent_id = format_args!("0x{parsed_agent_id:08X}"),
-            "derived session keys via HKDF (init_secret configured)"
-        );
-        AgentEncryptionInfo {
-            aes_key: Zeroizing::new(derived.key.to_vec()),
-            aes_iv: Zeroizing::new(derived.iv.to_vec()),
-        }
-    } else {
-        AgentEncryptionInfo {
+    // Derive session keys via HKDF when a server secret is configured.
+    //
+    // The init packet itself is decrypted with the raw agent keys (above), but
+    // all subsequent session traffic uses the HKDF-derived keys.  This prevents
+    // an attacker who can reach the listener from choosing their own session
+    // keys — without the server secret they cannot predict the derived material.
+    let encryption = match secret_config {
+        DemonInitSecretConfig::None => AgentEncryptionInfo {
             aes_key: Zeroizing::new(key.to_vec()),
             aes_iv: Zeroizing::new(iv.to_vec()),
+        },
+        DemonInitSecretConfig::Unversioned(secret) => {
+            let derived = derive_session_keys(&key, &iv, secret)
+                .map_err(|_| DemonParserError::InvalidInit("HKDF session key derivation failed"))?;
+            tracing::info!(
+                agent_id = format_args!("0x{parsed_agent_id:08X}"),
+                "derived session keys via HKDF (unversioned init_secret)"
+            );
+            AgentEncryptionInfo {
+                aes_key: Zeroizing::new(derived.key.to_vec()),
+                aes_iv: Zeroizing::new(derived.iv.to_vec()),
+            }
+        }
+        DemonInitSecretConfig::Versioned(secrets) => {
+            // secret_version is guaranteed Some when Versioned (read above).
+            let version = secret_version.expect("version byte must be present in Versioned mode");
+            let plain_secrets: Vec<(u8, Vec<u8>)> =
+                secrets.iter().map(|(v, s)| (*v, s.to_vec())).collect();
+            let derived = derive_session_keys_for_version(&key, &iv, version, &plain_secrets)
+                .map_err(|err| match err {
+                    CryptoError::UnknownSecretVersion { version: v } => {
+                        warn!(
+                            agent_id = format_args!("0x{parsed_agent_id:08X}"),
+                            secret_version = v,
+                            "rejecting DEMON_INIT: unknown secret version"
+                        );
+                        DemonParserError::InvalidInit("unknown secret version in DEMON_INIT")
+                    }
+                    _ => DemonParserError::InvalidInit("HKDF session key derivation failed"),
+                })?;
+            tracing::info!(
+                agent_id = format_args!("0x{parsed_agent_id:08X}"),
+                secret_version = version,
+                "derived session keys via HKDF (versioned init_secret)"
+            );
+            AgentEncryptionInfo {
+                aes_key: Zeroizing::new(derived.key.to_vec()),
+                aes_iv: Zeroizing::new(derived.iv.to_vec()),
+            }
         }
     };
 
@@ -2685,6 +2796,124 @@ mod tests {
             init.agent.encryption.aes_iv.as_slice(),
             &iv,
             "session IV must equal raw agent IV when no init_secret"
+        );
+    }
+
+    // ── versioned init_secret tests ──────────────────────────────────────────
+
+    /// Build a DEMON_INIT packet that includes a 1-byte version field between
+    /// the raw key/IV and the encrypted payload — required for versioned mode.
+    fn build_versioned_init_packet(
+        agent_id: u32,
+        key: [u8; AGENT_KEY_LENGTH],
+        iv: [u8; AGENT_IV_LENGTH],
+        secret_version: u8,
+    ) -> Vec<u8> {
+        let metadata = build_init_metadata(agent_id);
+        let mut encrypted = red_cell_common::crypto::encrypt_agent_data(&key, &iv, &metadata)
+            .expect("encryption must succeed");
+
+        // Outer envelope: MAGIC | SIZE | AGENT_ID | COMMAND_ID=DemonInit | REQUEST_ID
+        let command_id = u32::from(DemonCommand::DemonInit);
+        let mut inner = Vec::new();
+        inner.extend_from_slice(&u32_be(command_id));
+        inner.extend_from_slice(&u32_be(0)); // request id
+        inner.extend_from_slice(&key);
+        inner.extend_from_slice(&iv);
+        inner.push(secret_version);
+        inner.append(&mut encrypted);
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&DEMON_MAGIC_VALUE.to_le_bytes());
+        buf.extend_from_slice(&u32_be((inner.len() + 4) as u32)); // size includes agent_id
+        buf.extend_from_slice(&u32_be(agent_id));
+        buf.extend_from_slice(&inner);
+        buf
+    }
+
+    #[tokio::test]
+    async fn parse_init_with_versioned_secrets_derives_correct_keys() {
+        let registry = test_registry().await;
+        let secret1 = b"versioned-secret-v1".to_vec();
+        let secret2 = b"versioned-secret-v2".to_vec();
+        let secrets = vec![(1u8, secret1.clone()), (2u8, secret2.clone())];
+        let parser = DemonPacketParser::with_init_secrets(registry.clone(), secrets)
+            .with_allow_legacy_ctr(true);
+
+        let key = test_key(0x51);
+        let iv = test_iv(0x62);
+        let agent_id = 0x1122_3344_u32;
+        let packet = build_versioned_init_packet(agent_id, key, iv, 1);
+
+        let parsed = parser
+            .parse_at(&packet, "10.0.0.3".to_owned(), datetime!(2026-04-07 10:00:00 UTC))
+            .await
+            .expect("versioned init with version 1 should succeed");
+
+        let ParsedDemonPacket::Init(init) = parsed else {
+            panic!("expected init packet");
+        };
+
+        // Keys must be HKDF-derived using secret1 (version 1).
+        let expected = red_cell_common::crypto::derive_session_keys(&key, &iv, &secret1).unwrap();
+        assert_eq!(
+            init.agent.encryption.aes_key.as_slice(),
+            &expected.key,
+            "versioned key derivation must use the matching secret"
+        );
+        assert_ne!(
+            init.agent.encryption.aes_key.as_slice(),
+            &key,
+            "derived key must differ from raw agent key"
+        );
+    }
+
+    #[tokio::test]
+    async fn parse_init_with_versioned_secrets_unknown_version_rejected() {
+        let registry = test_registry().await;
+        let secrets = vec![(1u8, b"versioned-secret-v1".to_vec())];
+        let parser = DemonPacketParser::with_init_secrets(registry.clone(), secrets)
+            .with_allow_legacy_ctr(true);
+
+        let key = test_key(0x71);
+        let iv = test_iv(0x82);
+        let agent_id = 0x5566_7788_u32;
+        // Send version byte 9 — not in the configured list.
+        let packet = build_versioned_init_packet(agent_id, key, iv, 9);
+
+        let result = parser
+            .parse_at(&packet, "10.0.0.4".to_owned(), datetime!(2026-04-07 10:05:00 UTC))
+            .await;
+
+        assert!(
+            matches!(result, Err(DemonParserError::InvalidInit(_))),
+            "unknown secret version must be rejected with InvalidInit, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn parse_init_versioned_without_version_byte_rejected() {
+        let registry = test_registry().await;
+        let secrets = vec![(1u8, b"versioned-secret-v1".to_vec())];
+        let parser = DemonPacketParser::with_init_secrets(registry.clone(), secrets)
+            .with_allow_legacy_ctr(true);
+
+        let key = test_key(0x81);
+        let iv = test_iv(0x92);
+        let agent_id = 0x9900_AABB_u32;
+        // Build a standard (non-versioned) packet — no version byte after IV.
+        let packet = build_init_packet(agent_id, key, iv);
+
+        let result = parser
+            .parse_at(&packet, "10.0.0.5".to_owned(), datetime!(2026-04-07 10:10:00 UTC))
+            .await;
+
+        // The decrypted payload will fail to parse (the first decrypted byte is
+        // treated as the version, and the remainder as the encrypted payload with
+        // a wrong key).  This must not succeed.
+        assert!(
+            result.is_err(),
+            "versioned parser must not accept a packet without a version byte"
         );
     }
 

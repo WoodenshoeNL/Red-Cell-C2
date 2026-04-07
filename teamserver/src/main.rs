@@ -80,15 +80,31 @@ async fn main() -> Result<()> {
     )
     .await
     .context("failed to initialize embedded Python runtime")?;
-    let mut listeners = ListenerManager::with_max_download_bytes(
+    let base_listeners = ListenerManager::with_max_download_bytes(
         database.clone(),
         agent_registry.clone(),
         events.clone(),
         sockets.clone(),
         Some(plugins.clone()),
         profile.teamserver.max_download_bytes.unwrap_or(512 * 1024 * 1024),
-    )
-    .with_demon_init_secret(profile.demon.init_secret.as_deref().map(|s| s.as_bytes().to_vec()))
+    );
+    // Wire init-secret configuration from profile.
+    // `InitSecrets` (versioned, for rotation) takes precedence over the deprecated
+    // single `InitSecret` field.  Both cannot be set simultaneously (enforced by
+    // profile validation).
+    let mut listeners = if !profile.demon.init_secrets.is_empty() {
+        let versioned: Vec<(u8, Vec<u8>)> = profile
+            .demon
+            .init_secrets
+            .iter()
+            .map(|entry| (entry.version, entry.secret.as_bytes().to_vec()))
+            .collect();
+        base_listeners.with_demon_init_secrets(versioned)
+    } else {
+        base_listeners.with_demon_init_secret(
+            profile.demon.init_secret.as_deref().map(|s| s.as_bytes().to_vec()),
+        )
+    }
     .with_demon_allow_legacy_ctr(profile.demon.allow_legacy_ctr);
     if let Some(limit) = profile.teamserver.max_concurrent_downloads_per_agent {
         listeners = listeners.with_max_concurrent_downloads_per_agent(limit);

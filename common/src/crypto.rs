@@ -396,8 +396,10 @@ impl std::error::Error for WsHmacError {}
 pub fn derive_ws_hmac_key(session_token: &str) -> [u8; 32] {
     let hk = Hkdf::<Sha256>::new(None, session_token.as_bytes());
     let mut key = [0u8; 32];
-    hk.expand(b"red-cell-ws-hmac-v1", &mut key)
-        .expect("HKDF expand with 32-byte output must succeed");
+    // HKDF-SHA256 supports up to 255 × 32 = 8160 bytes output; 32 is always valid.
+    let Ok(()) = hk.expand(b"red-cell-ws-hmac-v1", &mut key) else {
+        unreachable!("HKDF-SHA256 expand to 32 bytes cannot fail");
+    };
     key
 }
 
@@ -406,7 +408,10 @@ pub fn derive_ws_hmac_key(session_token: &str) -> [u8; 32] {
 pub fn seal_ws_frame(key: &[u8; 32], seq: u64, message_json: &str) -> WsEnvelope {
     let payload = BASE64_STANDARD.encode(message_json.as_bytes());
     let input = format!("{seq}:{payload}");
-    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
+    // HMAC accepts any key length — new_from_slice is infallible for Hmac<T>.
+    let Ok(mut mac) = HmacSha256::new_from_slice(key) else {
+        unreachable!("HMAC-SHA256 accepts any key length");
+    };
     mac.update(input.as_bytes());
     let tag = mac.finalize().into_bytes();
     let hmac = tag.iter().fold(String::with_capacity(64), |mut s, b| {
@@ -441,7 +446,10 @@ pub fn open_ws_frame(
 
     // Recompute HMAC.
     let input = format!("{}:{}", envelope.seq, envelope.payload);
-    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
+    // HMAC accepts any key length — new_from_slice is infallible for Hmac<T>.
+    let Ok(mut mac) = HmacSha256::new_from_slice(key) else {
+        unreachable!("HMAC-SHA256 accepts any key length");
+    };
     mac.update(input.as_bytes());
     let expected = mac.finalize().into_bytes();
 

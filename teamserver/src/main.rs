@@ -8,10 +8,11 @@ use axum_server::{Handle, tls_rustls::RustlsConfig};
 use clap::Parser;
 use red_cell::{
     AgentLivenessMonitor, AgentRegistry, ApiRuntime, AuditWebhookNotifier, AuthService,
-    DEFAULT_MAX_REGISTERED_AGENTS, Database, DbMasterKey, EventBus, ListenerManager,
-    ListenerManagerError, LoginRateLimiter, NormalizedMakeService, OperatorConnectionManager,
-    PayloadBuilderService, PluginRuntime, SocketRelayManager, TeamserverState, build_router,
-    spawn_agent_liveness_monitor,
+    DEFAULT_BACKUP_INTERVAL_SECS, DEFAULT_DEGRADED_THRESHOLD, DEFAULT_MAX_REGISTERED_AGENTS,
+    DEFAULT_QUERY_TIMEOUT_SECS, DEFAULT_RECOVERY_PROBE_SECS, Database, DatabaseBackupScheduler,
+    DatabaseHealthMonitor, DbMasterKey, EventBus, ListenerManager, ListenerManagerError,
+    LoginRateLimiter, NormalizedMakeService, OperatorConnectionManager, PayloadBuilderService,
+    PluginRuntime, SocketRelayManager, TeamserverState, build_router, spawn_agent_liveness_monitor,
 };
 use red_cell_common::config::{Profile, ProfileValidationError};
 use red_cell_common::tls::{
@@ -70,6 +71,42 @@ async fn main() -> Result<()> {
     )
     .await?;
     let events = EventBus::default();
+
+    // Spawn database health monitor and optional backup scheduler.
+    let _db_health_monitor = {
+        let db_cfg = profile.teamserver.database.as_ref();
+        let timeout = Duration::from_secs(
+            db_cfg.and_then(|c| c.query_timeout_secs).unwrap_or(DEFAULT_QUERY_TIMEOUT_SECS),
+        );
+        let threshold =
+            db_cfg.and_then(|c| c.degraded_threshold).unwrap_or(DEFAULT_DEGRADED_THRESHOLD);
+        let recovery_probe = Duration::from_secs(
+            db_cfg.and_then(|c| c.recovery_probe_secs).unwrap_or(DEFAULT_RECOVERY_PROBE_SECS),
+        );
+        info!(?timeout, threshold, ?recovery_probe, "starting database health monitor");
+        DatabaseHealthMonitor::spawn(
+            database.clone(),
+            events.clone(),
+            timeout,
+            threshold,
+            recovery_probe,
+        )
+    };
+
+    let _db_backup_scheduler: Option<DatabaseBackupScheduler> = {
+        let db_cfg = profile.teamserver.database.as_ref();
+        if let Some(dir_str) = db_cfg.and_then(|c| c.backup_dir.as_deref()) {
+            let backup_dir = PathBuf::from(dir_str);
+            let interval = Duration::from_secs(
+                db_cfg.and_then(|c| c.backup_interval_secs).unwrap_or(DEFAULT_BACKUP_INTERVAL_SECS),
+            );
+            info!(dir = %backup_dir.display(), ?interval, "starting database backup scheduler");
+            Some(DatabaseBackupScheduler::spawn(database.clone(), backup_dir, interval))
+        } else {
+            None
+        }
+    };
+
     let sockets = SocketRelayManager::new(agent_registry.clone(), events.clone());
     let plugins = PluginRuntime::initialize(
         database.clone(),

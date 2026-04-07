@@ -250,7 +250,9 @@ impl AppState {
             | OperatorMessage::BuildPayloadMsOffice(_)
             | OperatorMessage::ServiceAgentRegister(_)
             | OperatorMessage::ServiceListenerRegister(_)
-            | OperatorMessage::TeamserverProfile(_) => {}
+            | OperatorMessage::TeamserverProfile(_)
+            | OperatorMessage::DatabaseDegraded(_)
+            | OperatorMessage::DatabaseRecovered(_) => {}
         }
         events
     }

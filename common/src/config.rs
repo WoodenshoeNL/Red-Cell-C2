@@ -467,6 +467,34 @@ pub struct TeamserverConfig {
     /// next to the profile file so that subsequent restarts reuse the same material.
     #[serde(rename = "Cert", default)]
     pub cert: Option<HttpListenerCertConfig>,
+    /// Optional database resilience and backup configuration.
+    #[serde(rename = "Database", default)]
+    pub database: Option<DatabaseConfig>,
+}
+
+/// Database resilience and automated backup configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct DatabaseConfig {
+    /// Maximum duration in seconds to wait for a single DB query before treating
+    /// it as a timeout.  Defaults to 5 seconds.
+    #[serde(rename = "QueryTimeoutSecs", default)]
+    pub query_timeout_secs: Option<u64>,
+    /// Number of consecutive probe timeouts before the teamserver enters
+    /// degraded mode and alerts connected operators.  Defaults to 3.
+    #[serde(rename = "DegradedThreshold", default)]
+    pub degraded_threshold: Option<u32>,
+    /// How often the health-monitor probes the database for recovery while in
+    /// degraded mode, in seconds.  Defaults to 10 seconds.
+    #[serde(rename = "RecoveryProbeSecs", default)]
+    pub recovery_probe_secs: Option<u64>,
+    /// Directory to store automated database snapshots.
+    /// When absent, automated backups are disabled.
+    #[serde(rename = "BackupDir", default)]
+    pub backup_dir: Option<String>,
+    /// How often to take an automated hot backup, in seconds.
+    /// Requires `BackupDir`.  Defaults to 3600 (1 hour).
+    #[serde(rename = "BackupIntervalSecs", default)]
+    pub backup_interval_secs: Option<u64>,
 }
 
 /// Teamserver tracing configuration.

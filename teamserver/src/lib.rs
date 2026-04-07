@@ -44,7 +44,9 @@ pub use auth::{
 };
 pub use database::{
     AgentGroupRepository, AgentRepository, AgentResponseRecord, AgentResponseRepository,
-    AuditLogEntry, AuditLogFilter, AuditLogRepository, Database, DbMasterKey, LinkRecord,
+    AuditLogEntry, AuditLogFilter, AuditLogRepository, DEFAULT_BACKUP_INTERVAL_SECS,
+    DEFAULT_DEGRADED_THRESHOLD, DEFAULT_QUERY_TIMEOUT_SECS, DEFAULT_RECOVERY_PROBE_SECS, Database,
+    DatabaseBackupScheduler, DatabaseHealthMonitor, DatabaseHealthState, DbMasterKey, LinkRecord,
     LinkRepository, ListenerAccessRepository, ListenerRepository, ListenerStatus, LootRecord,
     LootRepository, OperatorRepository, PayloadBuildRecord, PayloadBuildRepository,
     PayloadBuildSummary, PersistedListener, PersistedListenerState, PersistedOperator,

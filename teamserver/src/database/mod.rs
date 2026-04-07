@@ -5,14 +5,16 @@ use std::sync::Arc;
 
 use red_cell_common::demon::DemonProtocolError;
 use sqlx::SqlitePool;
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use thiserror::Error;
 use tracing::instrument;
 
 pub mod agent_groups;
 pub mod agents;
 pub mod audit;
+pub mod backup;
 pub mod crypto;
+pub mod health;
 pub mod jobs;
 pub mod links;
 pub mod listener_access;
@@ -23,7 +25,12 @@ pub mod operators;
 pub use agent_groups::AgentGroupRepository;
 pub use agents::{AgentRepository, PersistedAgent};
 pub use audit::{AuditLogEntry, AuditLogFilter, AuditLogRepository};
+pub use backup::{DEFAULT_BACKUP_INTERVAL_SECS, DatabaseBackupScheduler};
 pub use crypto::DbMasterKey;
+pub use health::{
+    DEFAULT_DEGRADED_THRESHOLD, DEFAULT_QUERY_TIMEOUT_SECS, DEFAULT_RECOVERY_PROBE_SECS,
+    DatabaseHealthMonitor, DatabaseHealthState,
+};
 pub use jobs::{
     AgentResponseRecord, AgentResponseRepository, PayloadBuildRecord, PayloadBuildRepository,
     PayloadBuildSummary,
@@ -215,6 +222,10 @@ impl Database {
         options: SqliteConnectOptions,
         master_key: DbMasterKey,
     ) -> Result<Self, TeamserverError> {
+        // WAL mode enables concurrent readers, is required by `VACUUM INTO` hot
+        // backups, and provides better crash-recovery guarantees than the default
+        // delete-journal mode.
+        let options = options.journal_mode(SqliteJournalMode::Wal);
         let pool = SqlitePoolOptions::new().max_connections(1).connect_with(options).await?;
         MIGRATOR.run(&pool).await?;
         Ok(Self { pool, master_key: Arc::new(master_key) })

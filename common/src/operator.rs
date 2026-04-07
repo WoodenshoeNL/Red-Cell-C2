@@ -163,6 +163,8 @@ numeric_code! {
     pub enum TeamserverCode {
         Log = 0x1,
         Profile = 0x2,
+        DatabaseDegraded = 0x3,
+        DatabaseRecovered = 0x4,
     }
 }
 
@@ -560,6 +562,18 @@ pub struct TeamserverProfileInfo {
     pub profile: String,
 }
 
+/// Database health status change payload.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DatabaseStatusInfo {
+    /// Human-readable status message describing the health change.
+    #[serde(rename = "Message")]
+    pub message: String,
+    /// Number of consecutive failures that triggered the degraded transition,
+    /// or zero for a recovery event.
+    #[serde(rename = "ConsecutiveFailures")]
+    pub consecutive_failures: u32,
+}
+
 /// Semantic operator protocol messages mapped onto Havoc wire event/subevent codes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OperatorMessage {
@@ -598,6 +612,8 @@ pub enum OperatorMessage {
     ServiceListenerRegister(Message<ServiceListenerRegistrationInfo>),
     TeamserverLog(Message<TeamserverLogInfo>),
     TeamserverProfile(Message<TeamserverProfileInfo>),
+    DatabaseDegraded(Message<DatabaseStatusInfo>),
+    DatabaseRecovered(Message<DatabaseStatusInfo>),
 }
 
 impl OperatorMessage {
@@ -636,7 +652,10 @@ impl OperatorMessage {
             | Self::AgentUpdate(_)
             | Self::AgentReregistered(_) => EventCode::Session,
             Self::ServiceAgentRegister(_) | Self::ServiceListenerRegister(_) => EventCode::Service,
-            Self::TeamserverLog(_) | Self::TeamserverProfile(_) => EventCode::Teamserver,
+            Self::TeamserverLog(_)
+            | Self::TeamserverProfile(_)
+            | Self::DatabaseDegraded(_)
+            | Self::DatabaseRecovered(_) => EventCode::Teamserver,
         }
     }
 }
@@ -910,6 +929,18 @@ impl Serialize for OperatorMessage {
                 TeamserverCode::Profile.as_u32(),
                 &message.info,
             ),
+            Self::DatabaseDegraded(message) => serialize_message(
+                serializer,
+                &message.head,
+                TeamserverCode::DatabaseDegraded.as_u32(),
+                &message.info,
+            ),
+            Self::DatabaseRecovered(message) => serialize_message(
+                serializer,
+                &message.head,
+                TeamserverCode::DatabaseRecovered.as_u32(),
+                &message.info,
+            ),
         }
     }
 }
@@ -1033,6 +1064,12 @@ impl<'de> Deserialize<'de> for OperatorMessage {
                     return Ok(Self::TeamserverProfile(Message { head, info: parse_info(info)? }));
                 }
                 Ok(Self::TeamserverLog(Message { head, info: parse_info(info)? }))
+            }
+            (EventCode::Teamserver, x) if x == TeamserverCode::DatabaseDegraded.as_u32() => {
+                Ok(Self::DatabaseDegraded(Message { head, info: parse_info(info)? }))
+            }
+            (EventCode::Teamserver, x) if x == TeamserverCode::DatabaseRecovered.as_u32() => {
+                Ok(Self::DatabaseRecovered(Message { head, info: parse_info(info)? }))
             }
             (event, sub_event) => Err(serde::de::Error::custom(format!(
                 "unsupported operator message event={event:?} sub_event={sub_event:#x}"

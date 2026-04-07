@@ -1230,7 +1230,8 @@ def normalize_codex_ids(log: Logger, agent_id: str):
 def dev_loop(args, log: Logger):
     agent = args.agent
     rename_prefix = (agent == "codex")
-    agent_id = f"{socket.gethostname()}-{agent}"
+    node_id = getattr(args, "_node_id_resolved", socket.gethostname())
+    agent_id = f"{node_id}-{agent}"
     stale_secs = args.stale_threshold * 60
 
     # Sleep between tasks: use --sleep if given, else DEV_SLEEP_BETWEEN
@@ -1835,10 +1836,38 @@ examples:
             "(dev loop only, default: 120)"
         ),
     )
+    parser.add_argument(
+        "--node-id",
+        default=None, metavar="ID",
+        help=(
+            "Unique identifier for this machine, used in claim/wip commit tags. "
+            "Overrides the hostname so multiple VMs with the same hostname can be "
+            "distinguished in the git log. "
+            "Can also be set via the RC_NODE_ID environment variable. "
+            "Default: socket.gethostname(). "
+            "Example: --node-id desktop-dev01  →  tags become [desktop-dev01-claude]"
+        ),
+    )
     return parser.parse_args()
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
+
+def resolve_node_id(args) -> str:
+    """
+    Return the node identifier to use in commit tags and log messages.
+    Resolution order (first wins):
+      1. --node-id CLI flag
+      2. RC_NODE_ID environment variable
+      3. socket.gethostname()
+    """
+    if args.node_id:
+        return args.node_id
+    env = os.environ.get("RC_NODE_ID", "").strip()
+    if env:
+        return env
+    return socket.gethostname()
+
 
 def main():
     args = parse_args()
@@ -1847,8 +1876,11 @@ def main():
         print("ERROR: --model is only applicable with --agent claude", file=sys.stderr)
         sys.exit(1)
 
+    node_id = resolve_node_id(args)
+    args._node_id_resolved = node_id   # stash for dev_loop / review_loop
+
     log = Logger(
-        agent_id=f"{socket.gethostname()}-{args.agent}",
+        agent_id=f"{node_id}-{args.agent}",
         log_file=LOG_DIR / f"{args.agent}_{args.loop}.log",
     )
 

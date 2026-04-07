@@ -68,8 +68,14 @@ pub(crate) async fn execute(
         DemonCommand::CommandNoJob => {}
         DemonCommand::CommandSleep => {
             let mut parser = TaskParser::new(&package.payload);
-            let delay_ms = u32::try_from(parser.int32()?).unwrap_or(0);
-            let jitter = u32::try_from(parser.int32().unwrap_or(0)).unwrap_or(0).min(100);
+            let delay_ms = match u32::try_from(parser.int32()?) {
+                Ok(v) => v,
+                Err(_) => {
+                    tracing::warn!("CommandSleep: negative delay clamped to 0");
+                    0
+                }
+            };
+            let jitter = u32::try_from(parser.int32()?).unwrap_or(0).min(100);
             config.sleep_delay_ms = delay_ms;
             config.sleep_jitter = jitter;
             state.queue_callback(PendingCallback::Output {
@@ -350,6 +356,7 @@ mod tests {
         parse_memory_region, parse_user_entries,
     };
     use crate::config::PhantomConfig;
+    use crate::error::PhantomError;
 
     fn utf16_payload(value: &str) -> Vec<u8> {
         let utf16 = value.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<_>>();
@@ -458,18 +465,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn command_sleep_missing_jitter_defaults_to_zero() {
+    async fn command_sleep_missing_jitter_returns_error() {
         let mut payload = Vec::new();
         payload.extend_from_slice(&2000_i32.to_le_bytes());
-        // no jitter field
+        // no jitter field — must not be silently ignored
         let package = DemonPackage::new(DemonCommand::CommandSleep, 2, payload);
         let mut config = PhantomConfig { sleep_jitter: 10, ..PhantomConfig::default() };
         let mut state = PhantomState::default();
 
+        let err = execute(&package, &mut config, &mut state)
+            .await
+            .expect_err("truncated payload must fail");
+        assert!(
+            matches!(err, PhantomError::TaskParse("task payload truncated")),
+            "expected truncated payload error, got: {err:?}"
+        );
+        assert_eq!(config.sleep_delay_ms, PhantomConfig::default().sleep_delay_ms);
+        assert_eq!(config.sleep_jitter, 10);
+    }
+
+    #[tokio::test]
+    async fn command_sleep_negative_delay_clamps_to_zero() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&(-1_i32).to_le_bytes());
+        payload.extend_from_slice(&5_i32.to_le_bytes());
+        let package = DemonPackage::new(DemonCommand::CommandSleep, 3, payload);
+        let mut config = PhantomConfig::default();
+        let mut state = PhantomState::default();
+
         execute(&package, &mut config, &mut state).await.expect("execute");
 
-        assert_eq!(config.sleep_delay_ms, 2000);
-        assert_eq!(config.sleep_jitter, 0, "missing jitter field must default to 0");
+        assert_eq!(config.sleep_delay_ms, 0);
+        assert_eq!(config.sleep_jitter, 5);
     }
 
     #[tokio::test]

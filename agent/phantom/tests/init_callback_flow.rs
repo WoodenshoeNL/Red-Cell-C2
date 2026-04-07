@@ -146,7 +146,8 @@ async fn phantom_agent_init_and_checkin_stay_ctr_synchronised()
             Job {
                 command: u32::from(DemonCommand::CommandSleep),
                 request_id: 0x42,
-                payload: vec![0x0A, 0x00, 0x00, 0x00], // sleep 10ms (LE i32)
+                // delay 10ms + jitter 0 (two LE i32 values)
+                payload: vec![0x0A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
                 command_line: "sleep 10".to_owned(),
                 task_id: "task-42".to_owned(),
                 created_at: "2026-03-31T00:00:00Z".to_owned(),
@@ -166,7 +167,7 @@ async fn phantom_agent_init_and_checkin_stay_ctr_synchronised()
     let remaining = harness.server.agent_registry.queued_jobs(agent.agent_id()).await?;
     assert!(remaining.is_empty(), "job queue must be empty after checkin processed the task");
 
-    // The CommandSleep payload (0x0A 0x00 0x00 0x00 = 10 ms LE i32) must have been executed
+    // The CommandSleep payload (10 ms delay + 0% jitter) must have been executed
     // — i.e. config.sleep_delay_ms updated — which confirms execute() was actually called.
     assert_eq!(
         agent.sleep_delay_ms(),

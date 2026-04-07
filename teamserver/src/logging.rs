@@ -2,9 +2,9 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-use red_cell_common::config::{LogFormat, LogRotation, Profile};
 #[cfg(feature = "otel")]
 use red_cell_common::config::ObservabilityConfig;
+use red_cell_common::config::{LogFormat, LogRotation, Profile};
 use thiserror::Error;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::EnvFilter;
@@ -158,10 +158,7 @@ fn build_otel_provider(
     use opentelemetry_sdk::Resource;
     use opentelemetry_sdk::trace::SdkTracerProvider;
 
-    let service_name = cfg
-        .service_name
-        .as_deref()
-        .unwrap_or("red-cell-teamserver");
+    let service_name = cfg.service_name.as_deref().unwrap_or("red-cell-teamserver");
 
     let exporter = opentelemetry_otlp::SpanExporter::builder()
         .with_tonic()
@@ -173,11 +170,7 @@ fn build_otel_provider(
 
     let provider = SdkTracerProvider::builder()
         .with_batch_exporter(exporter)
-        .with_resource(
-            Resource::builder()
-                .with_service_name(service_name.to_owned())
-                .build(),
-        )
+        .with_resource(Resource::builder().with_service_name(service_name.to_owned()).build())
         .build();
 
     Ok(Some(provider))
@@ -190,7 +183,12 @@ fn build_otel_provider(
 #[cfg(feature = "otel")]
 fn otel_layer_from_provider(
     provider: &Option<opentelemetry_sdk::trace::SdkTracerProvider>,
-) -> Option<tracing_opentelemetry::OpenTelemetryLayer<tracing_subscriber::Registry, opentelemetry_sdk::trace::Tracer>> {
+) -> Option<
+    tracing_opentelemetry::OpenTelemetryLayer<
+        tracing_subscriber::Registry,
+        opentelemetry_sdk::trace::Tracer,
+    >,
+> {
     use opentelemetry::trace::TracerProvider as _;
     provider.as_ref().map(|p| {
         let tracer = p.tracer("red-cell-teamserver");

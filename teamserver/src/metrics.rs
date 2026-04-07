@@ -132,15 +132,9 @@ pub fn inc_plugin_failures(plugin: &str) {
 // ---------------------------------------------------------------------------
 
 /// `GET /api/v1/metrics` — return Prometheus text exposition.
-pub async fn get_metrics(
-    State(handle): State<MetricsHandle>,
-) -> impl IntoResponse {
+pub async fn get_metrics(State(handle): State<MetricsHandle>) -> impl IntoResponse {
     let body = handle.render();
-    (
-        StatusCode::OK,
-        [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
-        body,
-    )
+    (StatusCode::OK, [("content-type", "text/plain; version=0.0.4; charset=utf-8")], body)
 }
 
 // ---------------------------------------------------------------------------

@@ -95,7 +95,11 @@ budget).  When RAM is plentiful the tests link and run successfully.
 cargo nextest run --workspace   # fails after disk/RAM is ~full from earlier compilation
 ```
 
-**Tracking**: needs a beads issue (shell unavailable when first observed 2026-04-05)
+**Tracking**: `red-cell-c2-n11sv`
+
+**Mitigation applied**: `.cargo/config.toml` sets `jobs = 4` (reducing build parallelism)
+and `link-arg=--threads=2` (reducing lld's internal thread count during linking).
+Installing `mold` (much lower peak RAM) would be the best fix but requires sudo.
 
 **Zone**: teamserver
 

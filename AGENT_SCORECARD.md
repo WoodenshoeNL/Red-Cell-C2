@@ -10,25 +10,25 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 1227 | 255 | 72 |
-| Bugs filed against | 231 | 49 | 13 |
+| Bugs filed against | 232 | 49 | 13 |
 | Bug rate (bugs/task) | 0.19 | 0.19 | 0.18 |
 | Quality score | 81% | 81% | 82% |
 
-*Bug rates: Claude 231/1227=0.1883→0.19, Codex 49/255=0.1922→0.19, Cursor 13/72=0.1806→0.18*
+*Bug rates: Claude 232/1227=0.1891→0.19, Codex 49/255=0.1922→0.19, Cursor 13/72=0.1806→0.18*
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 16 | 0 | 0 |
-| Missing tests / stale tests | 79 | 22 | 6 |
+| Missing tests / stale tests | 80 | 22 | 6 |
 | Clippy warnings | 13 | 0 | 1 |
 | Protocol errors | 30 | 32 | 4 |
 | Security issues | 62 | 39 | 0 |
 | Architecture drift | 38 | 25 | 1 |
 | Memory / resource leaks | 12 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 10 | 0 |
-| Test infrastructure / flakiness | 52 | 6 | 1 |
+| Test infrastructure / flakiness | 53 | 6 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 4 | 5 | 0 |
 | Correctness / pagination | 66 | 9 | 1 |
@@ -51,6 +51,16 @@ Each loop run updates the running totals and appends a review entry.
 | Cursor | 0 | 0 | No activity this run. |
 
 Build: **passed** — `cargo check --workspace` clean (~5m 55s). Tests: still running at checkpoint time (nextest compile phase). Clippy: skipped.
+
+### QA Review — 2026-04-07 14:50 — 96e14b56..fcdd437b
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 1 | Closed y8o4r (P2): AES-256-GCM at-rest encryption for agent session keys — DbMasterKey, per-row nonces, encrypt/decrypt in agents.rs, migration 20260407100000, load_or_create_master_key. Closed t6gnb (P3): versioned init-secrets for zero-downtime rotation — DemonInitSecretConfig enum, derive_session_keys_for_version, 1-byte version field in parse_init_agent. WIP on ijuqt (still in_progress): DatabaseHealthMonitor + DatabaseBackupScheduler + DatabaseConfig. Filed tia0a (P1): `write_to_read_only_database_returns_error` test fails — ephemeral master key on reconnect causes decryption error; fix is `connect_with_options_and_key` with stable key. (yyl3f filed then closed as duplicate of mdfln.) |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓ (2m 02s). `cargo clippy -- -D warnings` ✓ (zero warnings, 18m incl. lock wait). `cargo nextest` **FAILED** — `write_to_read_only_database_returns_error` fails (decryption error, regression from y8o4r). 2680/2681 passed. Tracked as tia0a (P1, zone:teamserver).
 
 ### QA Review — 2026-04-06 06:00 — 93e6640d..40ed41be
 
@@ -6277,6 +6287,16 @@ Build: `cargo check` **passed** (7m 36s). `cargo clippy` **passed** (4m 38s, zer
 | Cursor | 0 | 0 | No activity. |
 
 Build: `cargo check` ✓ (clean). `cargo clippy -- -D warnings` ✓ (zero warnings). `cargo nextest run --workspace`: still compiling/linking at review time — two concurrent nextest processes (dev loop + QA) competing for 5GB+ RAM per linker invocation (known issue red-cell-c2-n11sv). No test failures observed in compilation phase; 0 errors from compiler.
+
+### QA Review — 2026-04-07 14:50 — 96e14b56..fcdd437b
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 2 | Closed y8o4r (P2): AES-256-GCM column encryption for agent session keys at rest in SQLite — DbMasterKey, per-row nonces, legacy plaintext fallback, migration 20260407100000, load_or_create_master_key in main.rs. Closed t6gnb (P3): versioned init-secrets for zero-downtime rotation — DemonInitSecretConfig enum, VersionedInitSecret in profile, derive_session_keys_for_version in crypto.rs, 1-byte version field in parse_init_agent. Substantial WIP on ijuqt (P3, still in_progress): DatabaseHealthMonitor circuit-breaker + DatabaseBackupScheduler VACUUM INTO + DatabaseConfig in common/config.rs. Filed tia0a (P1): `write_to_read_only_database_returns_error` fails — uses ephemeral master key on reconnect, gets decryption error instead of successful read; fix: use `connect_with_options_and_key` with stable key. Filed yyl3f (P2): `Database::probe()` (mod.rs:321) and `DatabaseHealthMonitor` circuit-breaker state machine (health.rs) have no behavioral unit tests — only 2 trivial constant checks in health.rs test module. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓ (clean, 2m 02s). `cargo clippy -- -D warnings` ✓ (zero warnings, 18m 42s incl. lock wait). `cargo nextest` **FAILED** — `write_to_read_only_database_returns_error` fails with `InvalidPersistedValue { field: "aes_key", ... }` due to master key mismatch between initial connect and reconnect (regression from y8o4r). Tracked as tia0a (P1). 2680/2681 tests passed.
 Notes: Clean review — all production code changes are structurally sound, audit details format enriched with result_status and parameters nesting (consistent with AuditLogFilter filtering on `$.result_status`). Previously filed bugs (tdjak, 2r506, jd7dd) remain open and unaddressed. Active security work (y8o4r) is in progress with good partial commits.
 
 ### QA Review — 2026-04-07 11:00 — 96e14b56..a04ed612

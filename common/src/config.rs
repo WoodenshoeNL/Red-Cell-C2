@@ -498,6 +498,11 @@ pub struct DatabaseConfig {
     /// Requires `BackupDir`.  Defaults to 3600 (1 hour).
     #[serde(rename = "BackupIntervalSecs", default)]
     pub backup_interval_secs: Option<u64>,
+    /// Maximum number of deferred writes to buffer when the database is in
+    /// degraded mode.  When the buffer fills, the oldest entry is evicted.
+    /// Defaults to 1024.
+    #[serde(rename = "WriteQueueCapacity", default)]
+    pub write_queue_capacity: Option<usize>,
 }
 
 /// Observability configuration for Prometheus metrics and OpenTelemetry tracing.

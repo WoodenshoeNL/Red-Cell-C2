@@ -97,7 +97,13 @@ async fn main() -> Result<()> {
     let events = EventBus::default();
 
     // Create a bounded write queue for deferred DB writes during degraded mode.
-    let write_queue = WriteQueue::new(DEFAULT_WRITE_QUEUE_CAPACITY);
+    let wq_capacity = profile
+        .teamserver
+        .database
+        .as_ref()
+        .and_then(|c| c.write_queue_capacity)
+        .unwrap_or(DEFAULT_WRITE_QUEUE_CAPACITY);
+    let write_queue = WriteQueue::new(wq_capacity);
 
     // Spawn database health monitor with write queue for automatic flush on recovery.
     let _db_health_monitor = {

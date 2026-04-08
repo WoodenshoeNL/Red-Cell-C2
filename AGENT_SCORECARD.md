@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1230 | 255 | 80 |
+| Tasks closed | 1232 | 255 | 81 |
 | Bugs filed against | 235 | 49 | 13 |
 | Bug rate (bugs/task) | 0.19 | 0.19 | 0.16 |
 | Quality score | 81% | 81% | 84% |
 
-*Bug rates: Claude 235/1230=0.1911→0.19, Codex 49/255=0.1922→0.19, Cursor 13/80=0.1625→0.16*
+*Bug rates: Claude 235/1232=0.1907→0.19, Codex 49/255=0.1922→0.19, Cursor 13/81=0.1605→0.16*
 
 ## Violation Breakdown
 
@@ -32,7 +32,7 @@ Each loop run updates the running totals and appends a review entry.
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 4 | 5 | 0 |
 | Correctness / pagination | 66 | 9 | 1 |
-| Workflow / close-hygiene | 38 | 1 | 1 |
+| Workflow / close-hygiene | 38 | 1 | 2 |
 | Code reuse / duplication | 11 | 0 | 0 |
 | Incomplete commits (stranded work) | 6 | 3 | 0 |
 
@@ -41,6 +41,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-08 17:00 — 1db47795..81053794
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 0 | Closed jd7dd (legacy plaintext-fallback test for decode_agent_key) and ijuqt (database graceful degradation/backup integration tests). New files: health.rs +207 lines of integration tests, backup.rs +79 lines of integration tests, agents.rs +27 lines test. All test-only code, well-structured, proper error handling. Also fixed client-cli metrics field in WIP commit edfb5cf5 (work attributed to 37qxm but committed under ijuqt session). |
+| Codex | 0 | 0 | No activity this run. |
+| Cursor | 1 | 0 | Closed 37qxm (client-cli TeamserverState test metrics), but close commit 81053794 only updates issues.jsonl — the actual code fix was done by Claude in edfb5cf5. Workflow/close-hygiene violation: closing work performed by another agent. |
+
+Build: **passed** — `cargo check --workspace` clean (6m 49s), `cargo clippy -- -D warnings` clean (4m 05s, zero warnings). Tests: pending (nextest blocked by concurrent dev-agent build lock contention).
 
 ### QA Review — 2026-04-08 14:30 — 397a3513..1db47795
 

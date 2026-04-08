@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1237 | 255 | 81 |
+| Tasks closed | 1240 | 255 | 81 |
 | Bugs filed against | 235 | 49 | 13 |
 | Bug rate (bugs/task) | 0.19 | 0.19 | 0.16 |
 | Quality score | 81% | 81% | 84% |
 
-*Bug rates: Claude 235/1237=0.1900→0.19, Codex 49/255=0.1922→0.19, Cursor 13/81=0.1605→0.16*
+*Bug rates: Claude 235/1240=0.1895→0.19, Codex 49/255=0.1922→0.19, Cursor 13/81=0.1605→0.16*
 
 ## Violation Breakdown
 
@@ -41,6 +41,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-08 22:00 — 3cf18075..09b1e8c8
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 3 | 0 | Closed gls8f (loot/link test move — confirmed already done), j7xru (extract TeamserverError to error.rs — clean 120-line mechanical move), w3qs7 (replace expect() with infallible Aes256Gcm::new in crypto.rs). All clean — no unwrap, proper error handling, correct re-exports. |
+| Codex | 0 | 0 | No activity this run. |
+| Cursor | 0 | 0 | No activity this run. |
+
+Build: **passed** — `cargo check --workspace` clean (2m 41s). Tests: **blocked** — nextest and clippy both stalled on Cargo build lock contention from concurrent dev agent. Issue d8v7u still in_progress (agent/jobs test move).
 
 ### QA Review — 2026-04-08 19:30 — 43b90351..accb34bf
 

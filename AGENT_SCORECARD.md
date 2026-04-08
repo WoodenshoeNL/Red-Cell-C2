@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1241 | 255 | 81 |
+| Tasks closed | 1243 | 255 | 82 |
 | Bugs filed against | 235 | 49 | 13 |
 | Bug rate (bugs/task) | 0.19 | 0.19 | 0.16 |
 | Quality score | 81% | 81% | 84% |
 
-*Bug rates: Claude 235/1241=0.1894→0.19, Codex 49/255=0.1922→0.19, Cursor 13/81=0.1605→0.16*
+*Bug rates: Claude 235/1243=0.1891→0.19, Codex 49/255=0.1922→0.19, Cursor 13/82=0.1585→0.16*
 
 ## Violation Breakdown
 
@@ -41,6 +41,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-09 00:45 — 80692910..b390460e
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 0 | Closed g2i7a (TOCTOU race in add_link — solid fix: holds write lock for full check-and-insert, adds cycle-depth caps and visited-set guard to child_subtree, includes 50-iteration concurrent race test). Closed mdfln (9 new DatabaseHealthMonitor state-transition tests). Claimed bzqsv. All clean — no unwrap in production, proper error types, consistent lock ordering. |
+| Codex | 0 | 0 | No activity this run. |
+| Cursor | 1 | 0 | Closed 2jdfu (phantom init_callback_flow test stabilization — added yield + 200ms sleep to avoid WebSocket scheduling race). Small, targeted fix. |
+
+Build: **passed** — `cargo check --workspace` clean (8m 18s), `cargo clippy -- -D warnings` clean (3m 55s, zero warnings). Tests: **blocked** — nextest compilation stalled on Cargo build lock contention from concurrent dev agent.
 
 ### QA Review — 2026-04-08 22:30 — 09b1e8c8..80692910
 

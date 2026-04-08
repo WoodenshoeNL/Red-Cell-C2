@@ -105,7 +105,7 @@ async fn run_backup_scheduler(database: Database, backup_dir: PathBuf, interval:
 }
 
 /// Build a snapshot path of the form `<backup_dir>/red-cell-YYYYMMDD-HHMMSS.db`.
-pub(crate) fn snapshot_path(backup_dir: &Path) -> Result<PathBuf, time::error::Format> {
+pub fn snapshot_path(backup_dir: &Path) -> Result<PathBuf, time::error::Format> {
     let now = OffsetDateTime::now_utc();
     let ts = now.format(BACKUP_TS_FORMAT)?;
     Ok(backup_dir.join(format!("red-cell-{ts}.db")))

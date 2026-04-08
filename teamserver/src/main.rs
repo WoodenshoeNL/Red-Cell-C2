@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use axum_server::{Handle, tls_rustls::RustlsConfig};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use red_cell::{
     AgentLivenessMonitor, AgentRegistry, ApiRuntime, AuditWebhookNotifier, AuthService,
     DEFAULT_BACKUP_INTERVAL_SECS, DEFAULT_DEGRADED_THRESHOLD, DEFAULT_MAX_REGISTERED_AGENTS,
@@ -37,6 +37,23 @@ struct Cli {
     /// Enable debug-level logging.
     #[arg(long, default_value_t = false)]
     debug: bool,
+    /// Subcommand to run. If omitted, starts the teamserver.
+    #[command(subcommand)]
+    command: Option<CliCommand>,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum CliCommand {
+    /// Create a hot backup of the SQLite database using VACUUM INTO.
+    ///
+    /// The backup file is named `red-cell-YYYYMMDD-HHMMSS.db` and written to
+    /// the specified output directory.  Safe to run against a live teamserver.
+    #[command(name = "db-backup")]
+    DbBackup {
+        /// Directory to write the backup file into.
+        #[arg(long)]
+        output_dir: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -66,6 +83,12 @@ async fn main() -> Result<()> {
     let database = Database::connect_with_master_key(&database_path, master_key)
         .await
         .with_context(|| format!("failed to open database {}", database_path.display()))?;
+
+    // Handle subcommands that only need the database, then exit.
+    if let Some(cmd) = cli.command {
+        return run_subcommand(cmd, &database).await;
+    }
+
     let mut agent_registry = AgentRegistry::load_with_max_registered_agents(
         database.clone(),
         profile.teamserver.max_registered_agents.unwrap_or(DEFAULT_MAX_REGISTERED_AGENTS),
@@ -240,6 +263,29 @@ async fn main() -> Result<()> {
         .context("shutdown coordinator failed")?;
 
     Ok(())
+}
+
+/// Run a CLI subcommand and return.
+async fn run_subcommand(command: CliCommand, database: &Database) -> Result<()> {
+    match command {
+        CliCommand::DbBackup { output_dir } => {
+            if !output_dir.is_dir() {
+                std::fs::create_dir_all(&output_dir).with_context(|| {
+                    format!("failed to create backup output directory: {}", output_dir.display())
+                })?;
+            }
+            let dest = red_cell::database::backup::snapshot_path(&output_dir)
+                .map_err(|err| anyhow!("failed to build backup filename: {err}"))?;
+            info!(path = %dest.display(), "creating database hot backup");
+            database
+                .backup(&dest)
+                .await
+                .with_context(|| format!("VACUUM INTO failed for {}", dest.display()))?;
+            info!(path = %dest.display(), "database backup completed successfully");
+            println!("{}", dest.display());
+            Ok(())
+        }
+    }
 }
 
 #[instrument(skip(configured), fields(profile_path = %profile.display(), configured_database = configured.as_ref().map(|path| path.display().to_string())))]

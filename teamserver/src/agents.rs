@@ -15,9 +15,12 @@ use red_cell_common::demon::{DemonCommand, DemonMessage, DemonPackage};
 use red_cell_common::{AgentEncryptionInfo, AgentRecord};
 use tokio::sync::{Mutex, RwLock};
 use tracing::{instrument, warn};
+use tracing::error;
 use zeroize::Zeroizing;
 
-use crate::database::{Database, LinkRecord, TeamserverError};
+use crate::database::{
+    Database, DatabaseHealthState, DeferredWrite, LinkRecord, TeamserverError, WriteQueue,
+};
 
 /// Queued agent task payload.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -144,6 +147,10 @@ pub struct AgentRegistry {
     request_contexts: Arc<RwLock<HashMap<(u32, u32), JobContext>>>,
     cleanup_hooks: Arc<StdMutex<Vec<AgentCleanupHook>>>,
     max_registered_agents: usize,
+    /// Shared health state for checking database degradation.
+    health_state: Option<DatabaseHealthState>,
+    /// Write queue for deferring DB writes during degraded mode.
+    write_queue: Option<WriteQueue>,
 }
 
 impl std::fmt::Debug for AgentRegistry {
@@ -180,7 +187,23 @@ impl AgentRegistry {
             request_contexts: Arc::new(RwLock::new(HashMap::new())),
             cleanup_hooks: Arc::new(StdMutex::new(Vec::new())),
             max_registered_agents,
+            health_state: None,
+            write_queue: None,
         }
+    }
+
+    /// Attach database health state and write queue for degraded-mode support.
+    ///
+    /// When the health state indicates degradation, write operations update
+    /// in-memory state optimistically and queue the database write for later
+    /// replay via the [`WriteQueue`].
+    pub fn set_degraded_mode_support(
+        &mut self,
+        health_state: DatabaseHealthState,
+        write_queue: WriteQueue,
+    ) {
+        self.health_state = Some(health_state);
+        self.write_queue = Some(write_queue);
     }
 
     /// Load all persisted agents from SQLite into a new registry.
@@ -232,6 +255,44 @@ impl AgentRegistry {
         drop(parent_links);
         drop(child_links);
         Ok(registry)
+    }
+
+    /// Returns `true` when the database circuit-breaker is open and writes
+    /// should be deferred rather than attempted directly.
+    fn is_degraded(&self) -> bool {
+        self.health_state.as_ref().is_some_and(|hs| hs.is_degraded())
+    }
+
+    /// Attempt to persist a database write.  If the database is in degraded
+    /// mode and a write queue is available, the write is buffered for later
+    /// replay instead of failing the caller.
+    async fn persist_or_queue<F, Fut>(
+        &self,
+        deferred: DeferredWrite,
+        persist: F,
+    ) -> Result<(), TeamserverError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<(), TeamserverError>>,
+    {
+        if self.is_degraded() {
+            if let Some(ref wq) = self.write_queue {
+                wq.enqueue(deferred).await;
+                return Ok(());
+            }
+        }
+
+        let result = persist().await;
+        if let Err(ref err) = result {
+            // If the write failed and we have a queue, try to buffer it.
+            if let Some(ref wq) = self.write_queue {
+                error!(%err, "DB write failed — queueing for later replay");
+                wq.enqueue(deferred).await;
+                return Ok(());
+            }
+        }
+
+        result
     }
 
     /// Insert a newly registered agent and persist it to SQLite.
@@ -314,7 +375,21 @@ impl AgentRegistry {
             );
         }
 
-        self.repository.create_full(&agent, listener_name, ctr_block_offset, legacy_ctr).await?;
+        let deferred = DeferredWrite::AgentCreateFull {
+            agent: agent.clone(),
+            listener_name: listener_name.to_owned(),
+            ctr_block_offset,
+            legacy_ctr,
+        };
+        let repo = self.repository.clone();
+        let ln = listener_name.to_owned();
+        self.persist_or_queue(deferred, || {
+            let agent_ref = agent.clone();
+            let ln = ln.clone();
+            async move { repo.create_full(&agent_ref, &ln, ctr_block_offset, legacy_ctr).await }
+        })
+        .await?;
+
         entries.insert(
             agent.agent_id,
             Arc::new(AgentEntry::new(
@@ -352,8 +427,20 @@ impl AgentRegistry {
             agent.note = old.note.clone();
         }
 
-        // Persist first so that a DB failure leaves in-memory state untouched.
-        self.repository.reregister_full(&agent, listener_name, legacy_ctr).await?;
+        // Persist (or queue if degraded) before updating in-memory state.
+        let deferred = DeferredWrite::AgentReregisterFull {
+            agent: agent.clone(),
+            listener_name: listener_name.to_owned(),
+            legacy_ctr,
+        };
+        let repo = self.repository.clone();
+        let ln = listener_name.to_owned();
+        self.persist_or_queue(deferred, || {
+            let agent_ref = agent.clone();
+            let ln = ln.clone();
+            async move { repo.reregister_full(&agent_ref, &ln, legacy_ctr).await }
+        })
+        .await?;
 
         let mut info = entry.info.write().await;
         *info = agent;
@@ -444,7 +531,19 @@ impl AgentRegistry {
             .await
             .ok_or(TeamserverError::AgentNotFound { agent_id: agent.agent_id })?;
 
-        self.repository.update_with_listener(&agent, listener_name).await?;
+        let deferred = DeferredWrite::AgentUpdate {
+            agent: agent.clone(),
+            listener_name: listener_name.to_owned(),
+        };
+        let repo = self.repository.clone();
+        let ln = listener_name.to_owned();
+        self.persist_or_queue(deferred, || {
+            let agent_ref = agent.clone();
+            let ln = ln.clone();
+            async move { repo.update_with_listener(&agent_ref, &ln).await }
+        })
+        .await?;
+
         let mut info = entry.info.write().await;
         *info = agent;
         drop(info);
@@ -550,9 +649,14 @@ impl AgentRegistry {
     pub async fn set_ctr_offset(&self, agent_id: u32, offset: u64) -> Result<(), TeamserverError> {
         let entry =
             self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
-        // Persist first so that a DB failure leaves in-memory state untouched,
-        // preventing memory/database drift on reconnect.
-        self.repository.set_ctr_block_offset(agent_id, offset).await?;
+
+        let deferred = DeferredWrite::AgentSetCtrOffset { agent_id, offset };
+        let repo = self.repository.clone();
+        self.persist_or_queue(deferred, || async move {
+            repo.set_ctr_block_offset(agent_id, offset).await
+        })
+        .await?;
+
         *entry.ctr_block_offset.lock().await = offset;
         Ok(())
     }
@@ -741,7 +845,14 @@ impl AgentRegistry {
     ) -> Result<(), TeamserverError> {
         let entry =
             self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
-        self.repository.set_last_seen_seq(agent_id, new_seq).await?;
+
+        let deferred = DeferredWrite::AgentSetLastSeenSeq { agent_id, seq: new_seq };
+        let repo = self.repository.clone();
+        self.persist_or_queue(deferred, || async move {
+            repo.set_last_seen_seq(agent_id, new_seq).await
+        })
+        .await?;
+
         *entry.last_seen_seq.lock().await = new_seq;
         Ok(())
     }

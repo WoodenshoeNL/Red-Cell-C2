@@ -173,4 +173,83 @@ mod tests {
         let bad_dest = PathBuf::from("/nonexistent/dir/backup.db");
         assert!(db.backup(&bad_dest).await.is_err(), "backup to missing dir should fail");
     }
+
+    /// Verify the scheduler creates at least one backup file within the interval.
+    #[tokio::test]
+    async fn scheduler_creates_snapshot_on_interval() {
+        use super::super::Database;
+        use super::DatabaseBackupScheduler;
+        use std::time::Duration;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().expect("temp dir");
+        let db_path = tmp.path().join("sched-test.sqlite");
+        let db = Database::connect(&db_path).await.expect("db should open");
+
+        let backup_dir = tmp.path().join("backups");
+        std::fs::create_dir_all(&backup_dir).expect("create backup dir");
+
+        // Very short interval so the test completes quickly.
+        let scheduler =
+            DatabaseBackupScheduler::spawn(db, backup_dir.clone(), Duration::from_millis(50));
+
+        // Wait for at least one interval to fire.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        scheduler.stop().await;
+
+        // Check that at least one backup file was created.
+        let entries: Vec<_> = std::fs::read_dir(&backup_dir)
+            .expect("read backup dir")
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_str()
+                    .is_some_and(|n| n.starts_with("red-cell-") && n.ends_with(".db"))
+            })
+            .collect();
+
+        assert!(!entries.is_empty(), "scheduler should have created at least one backup snapshot");
+
+        // Each backup file should be non-empty (contains valid SQLite data).
+        for entry in &entries {
+            let size = entry.metadata().expect("metadata").len();
+            assert!(size > 0, "backup file should be non-empty: {:?}", entry.path());
+        }
+    }
+
+    /// Verify that backup files created by the scheduler are valid SQLite databases
+    /// that can be opened and queried.
+    #[tokio::test]
+    async fn backup_snapshot_is_valid_sqlite() {
+        use super::super::Database;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().expect("temp dir");
+        let db_path = tmp.path().join("valid-test.sqlite");
+        let db = Database::connect(&db_path).await.expect("db should open");
+
+        // Write some data so the backup has content.
+        db.audit_log()
+            .create(&crate::database::audit::AuditLogEntry {
+                id: None,
+                actor: "backup-test".to_owned(),
+                action: "test.verify".to_owned(),
+                target_kind: "test".to_owned(),
+                target_id: None,
+                details: None,
+                occurred_at: "2026-04-08T12:00:00Z".to_owned(),
+            })
+            .await
+            .expect("insert audit log");
+
+        let backup_path = tmp.path().join("valid-backup.db");
+        db.backup(&backup_path).await.expect("backup should succeed");
+
+        // Open the backup as a new Database and verify the data is there.
+        let backup_db = Database::connect(&backup_path).await.expect("open backup");
+        let entries = backup_db.audit_log().list().await.expect("list audit log from backup");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].actor, "backup-test");
+    }
 }

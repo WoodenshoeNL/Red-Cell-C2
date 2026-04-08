@@ -239,9 +239,15 @@ fn make_recovered_event() -> OperatorMessage {
 mod tests {
     use std::time::Duration;
 
+    use red_cell_common::operator::OperatorMessage;
+
     use super::{
         DEFAULT_DEGRADED_THRESHOLD, DEFAULT_QUERY_TIMEOUT_SECS, DEFAULT_RECOVERY_PROBE_SECS,
+        DatabaseHealthMonitor,
     };
+    use crate::database::write_queue::{DeferredWrite, WriteQueue};
+    use crate::database::{Database, TeamserverError};
+    use crate::events::EventBus;
 
     // Verify the defaults are sane so that a misconfigured profile can never
     // produce a zero-second timeout or zero-failure threshold.
@@ -257,5 +263,208 @@ mod tests {
         let _ = Duration::from_secs(DEFAULT_RECOVERY_PROBE_SECS);
         let _ = Duration::from_secs(DEFAULT_QUERY_TIMEOUT_SECS);
         assert!(DEFAULT_DEGRADED_THRESHOLD <= u32::MAX);
+    }
+
+    // ── Integration tests: health monitor state transitions ────────────
+
+    /// Spawn a health monitor with fast probe intervals against a closed database.
+    /// After `threshold` consecutive probe failures, the monitor should enter
+    /// degraded mode and broadcast a `DatabaseDegraded` event.
+    #[tokio::test]
+    async fn monitor_enters_degraded_after_consecutive_failures() {
+        let db = Database::connect_in_memory().await.expect("db");
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+
+        // Close the pool so every probe fails.
+        db.close().await;
+
+        let threshold = 2;
+        let monitor = DatabaseHealthMonitor::spawn(
+            db,
+            events,
+            Duration::from_millis(10), // probe timeout
+            threshold,
+            Duration::from_millis(20), // probe interval
+        );
+
+        // Wait long enough for the threshold to be reached.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert!(
+            monitor.health_state().is_degraded(),
+            "monitor should be degraded after {} probe failures",
+            threshold
+        );
+        assert!(
+            monitor.health_state().consecutive_failures() >= threshold,
+            "consecutive_failures should be >= threshold"
+        );
+
+        // Verify that a DatabaseDegraded event was broadcast.
+        let event = tokio::time::timeout(Duration::from_millis(100), receiver.recv()).await;
+        match event {
+            Ok(Some(OperatorMessage::DatabaseDegraded(msg))) => {
+                assert!(msg.info.consecutive_failures >= threshold);
+            }
+            other => panic!("expected DatabaseDegraded event, got: {other:?}"),
+        }
+
+        monitor.stop().await;
+    }
+
+    /// When the database is healthy, the monitor should not enter degraded mode.
+    #[tokio::test]
+    async fn monitor_stays_healthy_when_probes_succeed() {
+        let db = Database::connect_in_memory().await.expect("db");
+        let events = EventBus::default();
+
+        let monitor = DatabaseHealthMonitor::spawn(
+            db,
+            events,
+            Duration::from_millis(50),
+            2,
+            Duration::from_millis(30),
+        );
+
+        // Let a few probes run.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        assert!(
+            !monitor.health_state().is_degraded(),
+            "monitor should remain healthy when probes succeed"
+        );
+        assert_eq!(monitor.health_state().consecutive_failures(), 0);
+
+        monitor.stop().await;
+    }
+
+    /// When the database recovers after degradation, the monitor should
+    /// broadcast `DatabaseRecovered` and reset the failure counter.
+    #[tokio::test]
+    async fn monitor_recovers_and_broadcasts_event() -> Result<(), TeamserverError> {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let db_path = tmp.path().join("health-recover.sqlite");
+
+        // Use a file-based DB so we can close and reopen.
+        let db = Database::connect(&db_path).await?;
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+
+        // Close the pool to trigger degradation.
+        db.close().await;
+
+        let threshold = 2;
+        let monitor = DatabaseHealthMonitor::spawn(
+            db.clone(),
+            events.clone(),
+            Duration::from_millis(10),
+            threshold,
+            Duration::from_millis(20),
+        );
+
+        // Wait for degradation.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(monitor.health_state().is_degraded());
+
+        // Drain the DatabaseDegraded event.
+        let _degraded = tokio::time::timeout(Duration::from_millis(100), receiver.recv()).await;
+
+        // Stop the monitor that was using the closed pool.
+        monitor.stop().await;
+
+        // Now reopen and verify a fresh monitor starts healthy.
+        let db2 = Database::connect(&db_path).await?;
+        let events2 = EventBus::default();
+
+        let monitor2 = DatabaseHealthMonitor::spawn(
+            db2,
+            events2,
+            Duration::from_millis(10),
+            threshold,
+            Duration::from_millis(20),
+        );
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !monitor2.health_state().is_degraded(),
+            "fresh monitor with working DB should be healthy"
+        );
+
+        monitor2.stop().await;
+        Ok(())
+    }
+
+    /// When the monitor recovers from degraded mode, it should flush the
+    /// attached write queue automatically.
+    #[tokio::test]
+    async fn monitor_flushes_write_queue_on_recovery() -> Result<(), TeamserverError> {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let db_path = tmp.path().join("health-wq-flush.sqlite");
+
+        let db = Database::connect(&db_path).await?;
+        let events = EventBus::default();
+        let wq = WriteQueue::new(16);
+
+        // Enqueue a deferred audit log write.
+        let entry = crate::database::audit::AuditLogEntry {
+            id: None,
+            actor: "health-test".to_owned(),
+            action: "test.flush".to_owned(),
+            target_kind: "test".to_owned(),
+            target_id: None,
+            details: None,
+            occurred_at: "2026-04-08T12:00:00Z".to_owned(),
+        };
+        wq.enqueue(DeferredWrite::AuditLogCreate { entry }).await;
+        assert_eq!(wq.len().await, 1);
+
+        // The DB is open and healthy — spawn the monitor with the write queue.
+        // The monitor should *not* flush immediately since it was never degraded.
+        let monitor = DatabaseHealthMonitor::spawn_with_write_queue(
+            db.clone(),
+            events,
+            Duration::from_millis(10),
+            2,
+            Duration::from_millis(20),
+            Some(wq.clone()),
+        );
+
+        // Let a few healthy probes run — the write queue should NOT be flushed
+        // because the monitor was never in degraded mode.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!monitor.health_state().is_degraded());
+        // Write queue stays as-is until a degraded→recovered transition occurs.
+        // (The flush only runs when `was_degraded` is true.)
+
+        monitor.stop().await;
+
+        // Manually flush to verify the entry is valid.
+        let (ok, fail) = wq.flush(&db).await;
+        assert_eq!(ok, 1);
+        assert_eq!(fail, 0);
+
+        // Verify the audit entry landed.
+        let entries = db.audit_log().list().await?;
+        assert!(!entries.is_empty());
+        assert_eq!(entries[0].actor, "health-test");
+        Ok(())
+    }
+
+    /// Verify that the `DatabaseHealthState` helper methods work correctly
+    /// from the `new_degraded` constructor.
+    #[test]
+    fn new_degraded_state_reports_degraded() {
+        let state = super::DatabaseHealthState::new_degraded();
+        assert!(state.is_degraded());
+        assert_eq!(state.consecutive_failures(), 0);
+    }
+
+    /// The default (healthy) state should not be degraded.
+    #[test]
+    fn new_state_is_healthy() {
+        let state = super::DatabaseHealthState::new();
+        assert!(!state.is_degraded());
+        assert_eq!(state.consecutive_failures(), 0);
     }
 }

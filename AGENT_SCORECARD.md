@@ -10,11 +10,11 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 1230 | 255 | 80 |
-| Bugs filed against | 234 | 49 | 13 |
+| Bugs filed against | 235 | 49 | 13 |
 | Bug rate (bugs/task) | 0.19 | 0.19 | 0.16 |
 | Quality score | 81% | 81% | 84% |
 
-*Bug rates: Claude 234/1230=0.1902→0.19, Codex 49/255=0.1922→0.19, Cursor 13/80=0.1625→0.16*
+*Bug rates: Claude 235/1230=0.1911→0.19, Codex 49/255=0.1922→0.19, Cursor 13/80=0.1625→0.16*
 
 ## Violation Breakdown
 
@@ -26,7 +26,7 @@ Each loop run updates the running totals and appends a review entry.
 | Protocol errors | 30 | 32 | 4 |
 | Security issues | 62 | 39 | 0 |
 | Architecture drift | 38 | 25 | 1 |
-| Memory / resource leaks | 12 | 11 | 1 |
+| Memory / resource leaks | 13 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 10 | 0 |
 | Test infrastructure / flakiness | 53 | 6 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
@@ -41,6 +41,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-08 — fc5c3554..397a3513
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 1 | 8 WIP commits on ijuqt (degraded-mode write queue, db-backup subcommand, distributed tracing/metrics). Filed bp9xj (P3, WriteQueue uses Vec::remove(0) instead of VecDeque — O(n) eviction). Updated 37qxm to cover all 7 client-cli test files missing `metrics` field (not just audit_api_contract.rs). Build: `cargo check` ✓, `cargo clippy` ✓ (zero warnings). Tests: compilation fails in client-cli tests (37qxm). Code quality good — no unwrap in production, proper error handling, well-tested WriteQueue with 5 unit tests + 3 integration tests in agents.rs. |
+| Codex | 0 | 0 | No activity this run. |
+| Cursor | 0 | 0 | No activity this run. |
+
+Build: **passed** — `cargo check --workspace` clean, `cargo clippy -- -D warnings` clean. Tests: **compilation failure** in `client-cli/tests/` (missing `metrics` field in `TeamserverState` constructors — tracked as 37qxm, P1).
 
 ### QA Review — 2026-04-07 — a04ed612..e7377124
 

@@ -160,4 +160,28 @@ mod tests {
         assert!(LISTENER_ERRORS_TOTAL.starts_with("red_cell_"));
         assert!(PLUGIN_FAILURES_TOTAL.starts_with("red_cell_"));
     }
+
+    #[test]
+    fn standalone_handle_renders_empty_scrape() {
+        let handle = standalone_metrics_handle();
+        let output = handle.render();
+        // A freshly-created standalone handle has no registered metrics.
+        assert!(output.is_empty() || output.starts_with('#'));
+    }
+
+    #[test]
+    fn metrics_init_error_display_contains_message() {
+        let err = MetricsInitError::Install { message: "already set".into() };
+        let display = format!("{err}");
+        assert!(display.contains("already set"), "display should include the message: {display}");
+    }
+
+    #[tokio::test]
+    async fn get_metrics_handler_returns_prometheus_content_type() {
+        let handle = standalone_metrics_handle();
+        let response = get_metrics(State(handle)).await.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let ct = response.headers().get("content-type").map(|v| v.to_str().unwrap_or(""));
+        assert_eq!(ct, Some("text/plain; version=0.0.4; charset=utf-8"));
+    }
 }

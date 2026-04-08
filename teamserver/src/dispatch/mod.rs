@@ -877,6 +877,7 @@ impl CommandDispatcher {
     }
 
     /// Dispatch a single parsed callback package.
+    #[tracing::instrument(skip(self, payload), fields(agent_id = format_args!("0x{:08X}", agent_id), command_id = format_args!("0x{:04X}", command_id), request_id))]
     pub async fn dispatch(
         &self,
         agent_id: u32,
@@ -897,6 +898,7 @@ impl CommandDispatcher {
     }
 
     /// Dispatch multiple parsed callback packages and concatenate any response packages.
+    #[tracing::instrument(skip(self, packages), fields(agent_id = format_args!("0x{:08X}", agent_id), package_count = packages.len()))]
     pub async fn dispatch_packages(
         &self,
         agent_id: u32,

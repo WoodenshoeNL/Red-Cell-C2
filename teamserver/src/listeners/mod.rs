@@ -1832,13 +1832,15 @@ fn spawn_cert_file_watcher(
         // Skip the first (immediate) tick so we don't reload on startup.
         interval.tick().await;
 
-        let mut last_mtime = cert_mtime(&cert_path);
+        let mut last_cert_mtime = cert_mtime(&cert_path);
+        let mut last_key_mtime = cert_mtime(&key_path);
 
         loop {
             interval.tick().await;
 
-            let current_mtime = cert_mtime(&cert_path);
-            if current_mtime == last_mtime {
+            let cur_cert_mtime = cert_mtime(&cert_path);
+            let cur_key_mtime = cert_mtime(&key_path);
+            if cur_cert_mtime == last_cert_mtime && cur_key_mtime == last_key_mtime {
                 continue;
             }
 
@@ -1846,17 +1848,20 @@ fn spawn_cert_file_watcher(
                 Ok(()) => {
                     info!(
                         listener = %listener_name,
-                        path = %cert_path.display(),
-                        "TLS certificate auto-reloaded from file"
+                        cert = %cert_path.display(),
+                        key = %key_path.display(),
+                        "TLS certificate/key auto-reloaded from file"
                     );
-                    last_mtime = current_mtime;
+                    last_cert_mtime = cur_cert_mtime;
+                    last_key_mtime = cur_key_mtime;
                 }
                 Err(message) => {
                     warn!(
                         listener = %listener_name,
-                        path = %cert_path.display(),
+                        cert = %cert_path.display(),
+                        key = %key_path.display(),
                         error = %message,
-                        "TLS certificate auto-reload failed; retaining previous certificate"
+                        "TLS certificate/key auto-reload failed; retaining previous certificate"
                     );
                 }
             }

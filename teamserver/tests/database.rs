@@ -2957,8 +2957,10 @@ async fn write_to_read_only_database_returns_error() -> Result<(), TeamserverErr
     let temp_dir = TempDir::new().expect("tempdir should be created");
     let db_path = temp_dir.path().join("readonly.sqlite");
 
+    // Use a stable master key so both connections can decrypt at-rest data.
     // Create the database and seed it.
-    let database = Database::connect(&db_path).await?;
+    let database =
+        Database::connect_with_master_key(&db_path, DbMasterKey::from_bytes([0x42u8; 32])).await?;
     database.agents().create(&sample_agent(0xCE00_0040)).await?;
     database.close().await;
 
@@ -2967,9 +2969,11 @@ async fn write_to_read_only_database_returns_error() -> Result<(), TeamserverErr
     perms.set_readonly(true);
     std::fs::set_permissions(&db_path, perms).expect("set_permissions");
 
-    // Reconnect to the read-only file.
+    // Reconnect to the read-only file with the same master key.
     let options = SqliteConnectOptions::new().filename(&db_path).foreign_keys(true);
-    let database = Database::connect_with_options(options).await?;
+    let database =
+        Database::connect_with_options_and_key(options, DbMasterKey::from_bytes([0x42u8; 32]))
+            .await?;
 
     let write_err = database
         .agents()

@@ -5,12 +5,13 @@ use thiserror::Error;
 /// Transport magic value used by Havoc Demon packets.
 pub const DEMON_MAGIC_VALUE: u32 = 0xDEAD_BEEF;
 
-/// Minimum number of bytes required to begin parsing a [`DemonEnvelope`].
+/// Minimum number of bytes required to parse a [`DemonEnvelope`].
 ///
-/// A valid envelope must contain at least the 4-byte `Size` field before any
-/// further decoding can proceed.  Buffers shorter than this value are rejected
-/// by [`DemonEnvelope::from_bytes`] before any arithmetic is attempted.
-pub const MIN_ENVELOPE_SIZE: usize = 4;
+/// A valid envelope must contain the full 12-byte [`DemonHeader`]
+/// (size, magic, and agent_id fields).  Buffers shorter than this are
+/// rejected by [`DemonEnvelope::from_bytes`] before any further
+/// decoding is attempted.
+pub const MIN_ENVELOPE_SIZE: usize = 12;
 
 macro_rules! protocol_enum {
     (
@@ -932,7 +933,11 @@ mod tests {
 
         assert_eq!(
             error,
-            DemonProtocolError::BufferTooShort { context: "Demon header", expected: 12, actual: 8 }
+            DemonProtocolError::BufferTooShort {
+                context: "DemonEnvelope",
+                expected: MIN_ENVELOPE_SIZE,
+                actual: 8,
+            }
         );
     }
 

@@ -1086,6 +1086,9 @@ impl AgentRegistry {
     }
 
     /// Persist and register a parent/child SMB pivot relationship.
+    ///
+    /// Holds the `parent_links` write lock for the entire check-and-insert
+    /// sequence to prevent TOCTOU races that could create pivot cycles.
     #[instrument(skip(self), fields(parent_agent_id = format_args!("0x{:08X}", parent_agent_id), link_agent_id = format_args!("0x{:08X}", link_agent_id)))]
     pub async fn add_link(
         &self,
@@ -1104,35 +1107,71 @@ impl AgentRegistry {
                 message: "agent cannot pivot to itself".to_owned(),
             });
         }
-        if self.path_contains(parent_agent_id, link_agent_id).await {
-            return Err(TeamserverError::InvalidPivotLink {
-                message: format!(
-                    "linking 0x{parent_agent_id:08X} -> 0x{link_agent_id:08X} would create a cycle"
-                ),
-            });
+
+        // Hold the write lock for the entire check-and-insert to prevent TOCTOU
+        // races (e.g. concurrent add_link(A,B) + add_link(B,A) both passing
+        // cycle detection before either commits).
+        let mut parent_links = self.parent_links.write().await;
+
+        // Cycle detection: walk ancestors of parent_agent_id looking for link_agent_id.
+        {
+            let mut current = Some(parent_agent_id);
+            let mut steps: usize = 0;
+            while let Some(agent_id) = current {
+                if agent_id == link_agent_id {
+                    return Err(TeamserverError::InvalidPivotLink {
+                        message: format!(
+                            "linking 0x{parent_agent_id:08X} -> 0x{link_agent_id:08X} would create a cycle"
+                        ),
+                    });
+                }
+                steps = steps.saturating_add(1);
+                if steps > MAX_PIVOT_CHAIN_DEPTH {
+                    break;
+                }
+                current = parent_links.get(&agent_id).copied();
+            }
         }
 
-        let parent_depth = self.pivot_chain_depth(parent_agent_id).await;
-        if parent_depth >= MAX_PIVOT_CHAIN_DEPTH {
-            return Err(TeamserverError::InvalidPivotLink {
-                message: format!(
-                    "pivot chain depth would exceed MAX_PIVOT_CHAIN_DEPTH ({MAX_PIVOT_CHAIN_DEPTH})"
-                ),
-            });
+        // Depth enforcement: count ancestors of parent_agent_id.
+        {
+            let mut depth: usize = 0;
+            let mut current = parent_agent_id;
+            while let Some(parent) = parent_links.get(&current).copied() {
+                depth = depth.saturating_add(1);
+                if depth > MAX_PIVOT_CHAIN_DEPTH {
+                    break;
+                }
+                current = parent;
+            }
+            if depth >= MAX_PIVOT_CHAIN_DEPTH {
+                return Err(TeamserverError::InvalidPivotLink {
+                    message: format!(
+                        "pivot chain depth would exceed MAX_PIVOT_CHAIN_DEPTH ({MAX_PIVOT_CHAIN_DEPTH})"
+                    ),
+                });
+            }
         }
 
-        let existing_parent = self.parent_of(link_agent_id).await;
+        let existing_parent = parent_links.get(&link_agent_id).copied();
         if existing_parent == Some(parent_agent_id) {
             return Ok(());
         }
 
         if let Some(previous_parent) = existing_parent {
             self.link_repository.delete(previous_parent, link_agent_id).await?;
-            self.remove_link_from_memory(previous_parent, link_agent_id).await;
+            parent_links.remove(&link_agent_id);
+            let mut child_links = self.child_links.write().await;
+            if let Some(children) = child_links.get_mut(&previous_parent) {
+                children.remove(&link_agent_id);
+                if children.is_empty() {
+                    child_links.remove(&previous_parent);
+                }
+            }
         }
 
         self.link_repository.create(LinkRecord { parent_agent_id, link_agent_id }).await?;
-        self.parent_links.write().await.insert(link_agent_id, parent_agent_id);
+        parent_links.insert(link_agent_id, parent_agent_id);
         self.child_links.write().await.entry(parent_agent_id).or_default().insert(link_agent_id);
         Ok(())
     }
@@ -1369,32 +1408,31 @@ impl AgentRegistry {
     /// Count the number of ancestor hops from `agent_id` to the root of its pivot chain.
     ///
     /// A root agent (no parent) has depth 0; its direct child has depth 1; and so on.
+    /// Capped at `MAX_PIVOT_CHAIN_DEPTH + 1` iterations as a defensive backstop
+    /// against cycles that might exist due to bugs or data corruption.
+    #[cfg(test)]
     async fn pivot_chain_depth(&self, agent_id: u32) -> usize {
         let mut depth = 0usize;
         let mut current = agent_id;
         while let Some(parent) = self.parent_of(current).await {
             depth = depth.saturating_add(1);
+            if depth > MAX_PIVOT_CHAIN_DEPTH {
+                break;
+            }
             current = parent;
         }
         depth
     }
 
-    async fn path_contains(&self, start_agent_id: u32, sought_agent_id: u32) -> bool {
-        let mut current = Some(start_agent_id);
-        while let Some(agent_id) = current {
-            if agent_id == sought_agent_id {
-                return true;
-            }
-            current = self.parent_of(agent_id).await;
-        }
-        false
-    }
-
     async fn child_subtree(&self, agent_id: u32) -> Vec<u32> {
         let mut descendants = Vec::new();
+        let mut visited = std::collections::HashSet::new();
         let mut stack = self.children_of(agent_id).await;
 
         while let Some(child_id) = stack.pop() {
+            if !visited.insert(child_id) {
+                continue;
+            }
             descendants.push(child_id);
             stack.extend(self.children_of(child_id).await);
         }
@@ -3631,6 +3669,61 @@ mod tests {
             result,
             Err(TeamserverError::InvalidPivotLink { ref message }) if message.contains("cycle")
         ));
+        Ok(())
+    }
+
+    /// Verify that concurrent add_link calls for opposite directions cannot
+    /// both succeed and create a cycle (the TOCTOU race from red-cell-c2-g2i7a).
+    #[tokio::test]
+    async fn add_link_concurrent_opposite_links_no_cycle() -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        let registry = Arc::new(AgentRegistry::new(database));
+        let agent_a = sample_agent(0x1000_0F01);
+        let agent_b = sample_agent(0x1000_0F02);
+        registry.insert(agent_a.clone()).await?;
+        registry.insert(agent_b.clone()).await?;
+
+        // Attempt both directions concurrently many times. At least one must
+        // always fail. If the TOCTOU race existed, both could succeed and create
+        // A ↔ B, which would cause infinite loops in chain-walking functions.
+        for _ in 0..50 {
+            let reg1 = Arc::clone(&registry);
+            let reg2 = Arc::clone(&registry);
+            let a_id = agent_a.agent_id;
+            let b_id = agent_b.agent_id;
+
+            let (r1, r2) = tokio::join!(
+                tokio::spawn(async move { reg1.add_link(a_id, b_id).await }),
+                tokio::spawn(async move { reg2.add_link(b_id, a_id).await }),
+            );
+            let r1 = r1.expect("task panicked");
+            let r2 = r2.expect("task panicked");
+
+            // At most one direction may succeed.
+            assert!(
+                r1.is_err() || r2.is_err(),
+                "both add_link(A,B) and add_link(B,A) succeeded — cycle created"
+            );
+
+            // Verify no cycle: walking from A must terminate, and walking from B
+            // must terminate.
+            assert!(
+                registry.pivot_chain_depth(a_id).await <= super::MAX_PIVOT_CHAIN_DEPTH,
+                "chain depth from A exceeded cap — possible cycle"
+            );
+            assert!(
+                registry.pivot_chain_depth(b_id).await <= super::MAX_PIVOT_CHAIN_DEPTH,
+                "chain depth from B exceeded cap — possible cycle"
+            );
+
+            // Clean up for next iteration: remove whichever link was created.
+            if let Some(parent) = registry.parent_of(b_id).await {
+                registry.disconnect_link(parent, b_id, "test cleanup").await?;
+            }
+            if let Some(parent) = registry.parent_of(a_id).await {
+                registry.disconnect_link(parent, a_id, "test cleanup").await?;
+            }
+        }
         Ok(())
     }
 

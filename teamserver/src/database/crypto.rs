@@ -12,7 +12,7 @@
 //! then base64-encoded for storage as a TEXT column.
 
 use aes_gcm::aead::Aead;
-use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use thiserror::Error;
@@ -94,8 +94,8 @@ impl DbMasterKey {
     /// A fresh 12-byte nonce is generated for every call so that two invocations
     /// with the same plaintext produce distinct outputs.
     pub fn encrypt(&self, plaintext: &[u8]) -> Result<String, DbCryptoError> {
-        let cipher = Aes256Gcm::new_from_slice(self.0.as_slice())
-            .expect("DbMasterKey always holds a valid 32-byte key");
+        let key = Key::<Aes256Gcm>::from_slice(self.0.as_slice());
+        let cipher = Aes256Gcm::new(key);
         let mut nonce_bytes = [0u8; NONCE_LEN];
         getrandom::fill(&mut nonce_bytes)?;
         let nonce = Nonce::from(nonce_bytes);
@@ -117,8 +117,8 @@ impl DbMasterKey {
             return Err(DbCryptoError::TooShort { min: MIN_CIPHERTEXT_LEN, got: raw.len() });
         }
         let nonce = Nonce::from_slice(&raw[..NONCE_LEN]);
-        let cipher = Aes256Gcm::new_from_slice(self.0.as_slice())
-            .expect("DbMasterKey always holds a valid 32-byte key");
+        let key = Key::<Aes256Gcm>::from_slice(self.0.as_slice());
+        let cipher = Aes256Gcm::new(key);
         let plaintext =
             cipher.decrypt(nonce, &raw[NONCE_LEN..]).map_err(|_| DbCryptoError::Decrypt)?;
         Ok(Zeroizing::new(plaintext))

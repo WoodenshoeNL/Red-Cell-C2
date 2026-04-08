@@ -6505,8 +6505,11 @@ async fn reload_tls_cert_swaps_config_with_valid_cert() {
 
 #[tokio::test]
 async fn reload_tls_from_files_succeeds_with_valid_cert_files() {
-    use red_cell_common::tls::{TlsKeyAlgorithm, generate_self_signed_tls_identity};
+    use red_cell_common::tls::{
+        TlsKeyAlgorithm, generate_self_signed_tls_identity, install_default_crypto_provider,
+    };
 
+    install_default_crypto_provider();
     let identity =
         generate_self_signed_tls_identity(&["localhost".to_owned()], TlsKeyAlgorithm::EcdsaP256)
             .expect("identity generation must succeed");
@@ -6530,8 +6533,11 @@ async fn reload_tls_from_files_succeeds_with_valid_cert_files() {
 
 #[tokio::test]
 async fn reload_tls_from_files_returns_error_for_missing_cert_file() {
-    use red_cell_common::tls::{TlsKeyAlgorithm, generate_self_signed_tls_identity};
+    use red_cell_common::tls::{
+        TlsKeyAlgorithm, generate_self_signed_tls_identity, install_default_crypto_provider,
+    };
 
+    install_default_crypto_provider();
     let identity =
         generate_self_signed_tls_identity(&["localhost".to_owned()], TlsKeyAlgorithm::EcdsaP256)
             .expect("identity generation must succeed");
@@ -6568,8 +6574,11 @@ fn cert_mtime_returns_some_for_existing_file() {
 
 #[tokio::test]
 async fn spawn_cert_file_watcher_reloads_on_mtime_change() {
-    use red_cell_common::tls::{TlsKeyAlgorithm, generate_self_signed_tls_identity};
+    use red_cell_common::tls::{
+        TlsKeyAlgorithm, generate_self_signed_tls_identity, install_default_crypto_provider,
+    };
 
+    install_default_crypto_provider();
     let identity_a =
         generate_self_signed_tls_identity(&["localhost".to_owned()], TlsKeyAlgorithm::EcdsaP256)
             .expect("identity A generation must succeed");

@@ -21,6 +21,7 @@ pub mod listener_access;
 pub mod listeners;
 pub mod loot;
 pub mod operators;
+pub mod write_queue;
 
 pub use agent_groups::AgentGroupRepository;
 pub use agents::{AgentRepository, PersistedAgent};
@@ -42,6 +43,7 @@ pub use listeners::{
 };
 pub use loot::{LootFilter, LootRecord, LootRepository};
 pub use operators::{OperatorRepository, PersistedOperator};
+pub use write_queue::{DEFAULT_WRITE_QUEUE_CAPACITY, DeferredWrite, WriteQueue};
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 

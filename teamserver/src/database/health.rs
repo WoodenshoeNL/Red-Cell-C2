@@ -15,6 +15,7 @@ use red_cell_common::operator::{
 };
 use tracing::{debug, info, warn};
 
+use super::write_queue::WriteQueue;
 use crate::{Database, EventBus};
 
 /// Default number of consecutive probe failures before entering degraded mode.
@@ -68,12 +69,28 @@ impl DatabaseHealthMonitor {
     /// * `probe_timeout`   — maximum time to wait for each probe query.
     /// * `threshold`       — consecutive failures before emitting `DatabaseDegraded`.
     /// * `recovery_probe`  — interval between probes while in degraded mode.
+    /// * `write_queue`     — optional write queue to flush on recovery.
     pub fn spawn(
         database: Database,
         events: EventBus,
         probe_timeout: Duration,
         threshold: u32,
         recovery_probe: Duration,
+    ) -> Self {
+        Self::spawn_with_write_queue(database, events, probe_timeout, threshold, recovery_probe, None)
+    }
+
+    /// Spawn the health-monitor background task with an attached write queue.
+    ///
+    /// When the database transitions from degraded to healthy, any writes
+    /// buffered in the [`WriteQueue`] are automatically flushed.
+    pub fn spawn_with_write_queue(
+        database: Database,
+        events: EventBus,
+        probe_timeout: Duration,
+        threshold: u32,
+        recovery_probe: Duration,
+        write_queue: Option<WriteQueue>,
     ) -> Self {
         let state = DatabaseHealthState::new();
         let state_clone = state.clone();
@@ -85,6 +102,7 @@ impl DatabaseHealthMonitor {
             threshold,
             recovery_probe,
             state_clone,
+            write_queue,
         ));
 
         Self { handle, state }
@@ -119,6 +137,7 @@ async fn run_health_monitor(
     threshold: u32,
     recovery_probe: Duration,
     state: DatabaseHealthState,
+    write_queue: Option<WriteQueue>,
 ) {
     // While healthy, probe at the recovery_probe interval (same interval is used for
     // both directions — cheap and predictable). We start with a healthy state and probe
@@ -134,6 +153,18 @@ async fn run_health_monitor(
 
             if was_degraded {
                 info!("database health probe succeeded — marking database as recovered");
+
+                // Flush any deferred writes that accumulated during degraded mode.
+                if let Some(ref wq) = write_queue {
+                    let (succeeded, failed) = wq.flush(&database).await;
+                    if succeeded > 0 || failed > 0 {
+                        info!(
+                            succeeded,
+                            failed, "deferred write queue flushed after database recovery"
+                        );
+                    }
+                }
+
                 events.broadcast(make_recovered_event());
             } else {
                 debug!("database health probe ok");

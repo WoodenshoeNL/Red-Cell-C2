@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1240 | 255 | 81 |
+| Tasks closed | 1241 | 255 | 81 |
 | Bugs filed against | 235 | 49 | 13 |
 | Bug rate (bugs/task) | 0.19 | 0.19 | 0.16 |
 | Quality score | 81% | 81% | 84% |
 
-*Bug rates: Claude 235/1240=0.1895→0.19, Codex 49/255=0.1922→0.19, Cursor 13/81=0.1605→0.16*
+*Bug rates: Claude 235/1241=0.1894→0.19, Codex 49/255=0.1922→0.19, Cursor 13/81=0.1605→0.16*
 
 ## Violation Breakdown
 
@@ -41,6 +41,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-08 22:30 — 09b1e8c8..80692910
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 0 | Closed d8v7u (loot/link test move — confirmed already complete, 2585/2586 tests passing). Claimed mdfln (DatabaseHealthMonitor state-transition tests). No Rust source changes in range — all mechanical (beads state + scorecard). |
+| Codex | 0 | 0 | No activity this run. |
+| Cursor | 0 | 0 | No activity this run. |
+
+Build: **passed** — `cargo check --workspace` clean (6m 11s). Tests/clippy: **blocked** — Cargo build lock contention from concurrent dev agent (3 cargo processes running).
 
 ### QA Review — 2026-04-08 22:00 — 3cf18075..09b1e8c8
 

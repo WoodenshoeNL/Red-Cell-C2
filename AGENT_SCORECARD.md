@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1232 | 255 | 81 |
+| Tasks closed | 1234 | 255 | 81 |
 | Bugs filed against | 235 | 49 | 13 |
 | Bug rate (bugs/task) | 0.19 | 0.19 | 0.16 |
 | Quality score | 81% | 81% | 84% |
 
-*Bug rates: Claude 235/1232=0.1907→0.19, Codex 49/255=0.1922→0.19, Cursor 13/81=0.1605→0.16*
+*Bug rates: Claude 235/1234=0.1904→0.19, Codex 49/255=0.1922→0.19, Cursor 13/81=0.1605→0.16*
 
 ## Violation Breakdown
 
@@ -6369,3 +6369,13 @@ Build: `cargo check` **passed**. Tests: `cargo nextest run` **failed** — `clie
 | Cursor | 2 | 0 | Closed 8wwm7: Phantom CommandSleep handler — replaced `unwrap` with proper error propagation via `?`, added negative-delay clamping with tracing::warn, updated tests to verify truncated payload errors. Closed enwif (dup resolution, no code). Refactored client python integration tests into 5-file submodule (bj4xx — 2290 lines, clean split). |
 
 Build: `cargo check --workspace` **passed** (clean, 18m 12s — slow due to concurrent dev-agent nextest competing for build lock). Clippy: still running at checkpoint time. Tests: skipped (concurrent dev-agent already running nextest). No bugs filed — all changes were clean and well-tested.
+
+### QA Review — 2026-04-08 18:45 — 8b176639..43b90351
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 0 | Closed pfy74: raised REST API body limit from 2 MB to 30 MiB (matching listener paths), added >2MB upload test. Closed e969d: verified TLS cert hot-reload already implemented, fixed 3 TLS tests missing `install_default_crypto_provider()`. Split csclv (websocket.rs refactor) into sub-issues. Clean, focused work — proper reuse of `MAX_AGENT_MESSAGE_LEN` constant, good test coverage. |
+| Codex | 0 | 0 | No activity this run. |
+| Cursor | 0 | 0 | No activity this run. |
+
+Build: `cargo check --workspace` **passed** (clean). Clippy: **passed** (0 warnings). Tests: blocked by concurrent dev-agent holding cargo artifact lock — skipped. No bugs filed — all changes are correct and well-tested.

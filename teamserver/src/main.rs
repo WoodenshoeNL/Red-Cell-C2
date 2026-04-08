@@ -9,8 +9,9 @@ use clap::Parser;
 use red_cell::{
     AgentLivenessMonitor, AgentRegistry, ApiRuntime, AuditWebhookNotifier, AuthService,
     DEFAULT_BACKUP_INTERVAL_SECS, DEFAULT_DEGRADED_THRESHOLD, DEFAULT_MAX_REGISTERED_AGENTS,
-    DEFAULT_QUERY_TIMEOUT_SECS, DEFAULT_RECOVERY_PROBE_SECS, Database, DatabaseBackupScheduler,
-    DatabaseHealthMonitor, DbMasterKey, EventBus, ListenerManager, ListenerManagerError,
+    DEFAULT_QUERY_TIMEOUT_SECS, DEFAULT_RECOVERY_PROBE_SECS, DEFAULT_WRITE_QUEUE_CAPACITY, Database,
+    DatabaseBackupScheduler, DatabaseHealthMonitor, DbMasterKey, EventBus, ListenerManager,
+    ListenerManagerError, WriteQueue,
     LoginRateLimiter, NormalizedMakeService, OperatorConnectionManager, PayloadBuilderService,
     PluginRuntime, SocketRelayManager, TeamserverState, build_router, spawn_agent_liveness_monitor,
 };
@@ -65,14 +66,17 @@ async fn main() -> Result<()> {
     let database = Database::connect_with_master_key(&database_path, master_key)
         .await
         .with_context(|| format!("failed to open database {}", database_path.display()))?;
-    let agent_registry = AgentRegistry::load_with_max_registered_agents(
+    let mut agent_registry = AgentRegistry::load_with_max_registered_agents(
         database.clone(),
         profile.teamserver.max_registered_agents.unwrap_or(DEFAULT_MAX_REGISTERED_AGENTS),
     )
     .await?;
     let events = EventBus::default();
 
-    // Spawn database health monitor and optional backup scheduler.
+    // Create a bounded write queue for deferred DB writes during degraded mode.
+    let write_queue = WriteQueue::new(DEFAULT_WRITE_QUEUE_CAPACITY);
+
+    // Spawn database health monitor with write queue for automatic flush on recovery.
     let _db_health_monitor = {
         let db_cfg = profile.teamserver.database.as_ref();
         let timeout = Duration::from_secs(
@@ -84,14 +88,20 @@ async fn main() -> Result<()> {
             db_cfg.and_then(|c| c.recovery_probe_secs).unwrap_or(DEFAULT_RECOVERY_PROBE_SECS),
         );
         info!(?timeout, threshold, ?recovery_probe, "starting database health monitor");
-        DatabaseHealthMonitor::spawn(
+        DatabaseHealthMonitor::spawn_with_write_queue(
             database.clone(),
             events.clone(),
             timeout,
             threshold,
             recovery_probe,
+            Some(write_queue.clone()),
         )
     };
+
+    // Attach degraded-mode support to the agent registry so that writes are
+    // buffered when the database circuit-breaker is open.
+    agent_registry
+        .set_degraded_mode_support(_db_health_monitor.health_state().clone(), write_queue);
 
     let _db_backup_scheduler: Option<DatabaseBackupScheduler> = {
         let db_cfg = profile.teamserver.database.as_ref();

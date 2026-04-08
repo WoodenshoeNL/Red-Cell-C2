@@ -5,6 +5,7 @@
 //! immediately.  Once the database recovers, [`WriteQueue::flush`] replays all
 //! buffered operations in order.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
@@ -83,7 +84,7 @@ pub struct WriteQueue {
 
 #[derive(Debug)]
 struct WriteQueueInner {
-    queue: Vec<DeferredWrite>,
+    queue: VecDeque<DeferredWrite>,
     dropped: u64,
 }
 
@@ -94,7 +95,7 @@ impl WriteQueue {
     #[must_use]
     pub fn new(capacity: usize) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(WriteQueueInner { queue: Vec::new(), dropped: 0 })),
+            inner: Arc::new(Mutex::new(WriteQueueInner { queue: VecDeque::new(), dropped: 0 })),
             capacity,
         }
     }
@@ -107,17 +108,17 @@ impl WriteQueue {
     pub async fn enqueue(&self, write: DeferredWrite) -> bool {
         let mut inner = self.inner.lock().await;
         if inner.queue.len() >= self.capacity {
-            inner.queue.remove(0);
+            inner.queue.pop_front();
             inner.dropped = inner.dropped.saturating_add(1);
             warn!(
                 dropped = inner.dropped,
                 capacity = self.capacity,
                 "write queue at capacity — oldest entry dropped"
             );
-            inner.queue.push(write);
+            inner.queue.push_back(write);
             false
         } else {
-            inner.queue.push(write);
+            inner.queue.push_back(write);
             true
         }
     }

@@ -73,6 +73,7 @@ async fn build_test_state() -> (TeamserverState, Database) {
         started_at: std::time::Instant::now(),
         plugins_loaded: 0,
         plugins_failed: 0,
+        metrics: red_cell::metrics::standalone_metrics_handle(),
     };
     (state, database)
 }

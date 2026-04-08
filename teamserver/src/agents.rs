@@ -14,8 +14,8 @@ use red_cell_common::crypto::{
 use red_cell_common::demon::{DemonCommand, DemonMessage, DemonPackage};
 use red_cell_common::{AgentEncryptionInfo, AgentRecord};
 use tokio::sync::{Mutex, RwLock};
-use tracing::{instrument, warn};
 use tracing::error;
+use tracing::{instrument, warn};
 use zeroize::Zeroizing;
 
 use crate::database::{

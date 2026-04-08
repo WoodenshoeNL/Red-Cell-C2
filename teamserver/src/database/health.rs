@@ -88,7 +88,14 @@ impl DatabaseHealthMonitor {
         threshold: u32,
         recovery_probe: Duration,
     ) -> Self {
-        Self::spawn_with_write_queue(database, events, probe_timeout, threshold, recovery_probe, None)
+        Self::spawn_with_write_queue(
+            database,
+            events,
+            probe_timeout,
+            threshold,
+            recovery_probe,
+            None,
+        )
     }
 
     /// Spawn the health-monitor background task with an attached write queue.

@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq;
 
 use axum::body::{Body, to_bytes};
+use axum::extract::DefaultBodyLimit;
 use axum::extract::{ConnectInfo, FromRequestParts, Request, State};
 use axum::http::HeaderValue;
 use axum::http::Request as HttpRequest;
@@ -49,8 +50,8 @@ use crate::rbac::{
     CanAdminister, CanManageListeners, CanRead, CanTaskAgents, Permission, PermissionMarker,
 };
 use crate::{
-    AuditDetails, AuditWebhookNotifier, Database, PluginHealthEntry, PluginRuntime, audit_details,
-    parameter_object, record_operator_action_with_notifications,
+    AuditDetails, AuditWebhookNotifier, Database, MAX_AGENT_MESSAGE_LEN, PluginHealthEntry,
+    PluginRuntime, audit_details, parameter_object, record_operator_action_with_notifications,
 };
 
 const API_VERSION: &str = "v1";
@@ -813,7 +814,8 @@ pub fn api_routes(api: ApiRuntime) -> Router<TeamserverState> {
         .route("/ws", get(crate::session_ws::session_ws_handler))
         .route("/health", get(get_health))
         .route("/metrics", get(crate::metrics::get_metrics))
-        .route_layer(middleware::from_fn_with_state(api, api_auth_middleware));
+        .route_layer(middleware::from_fn_with_state(api, api_auth_middleware))
+        .layer(DefaultBodyLimit::max(MAX_AGENT_MESSAGE_LEN));
 
     Router::new()
         .route("/", get(api_root))
@@ -8462,6 +8464,48 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn agent_upload_accepts_body_larger_than_2mb() {
+        let (app, registry, _) = test_router_with_registry(Some((
+            60,
+            "tasker",
+            "secret-tasker",
+            OperatorRole::Operator,
+        )))
+        .await;
+
+        let agent_id = 0xDEAD_0011u32;
+        registry.insert(sample_agent(agent_id)).await.expect("insert");
+
+        // Build a payload whose JSON body exceeds 2 MB (the old axum default).
+        // 3 MB of binary → ~4 MB base64 → well over the 2 MB default limit.
+        use base64::Engine;
+        let raw = vec![0x42u8; 3 * 1024 * 1024];
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&raw);
+        let json_body = serde_json::to_string(&serde_json::json!({
+            "remote_path": "C:\\temp\\big_payload.bin",
+            "content": b64,
+        }))
+        .expect("json");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/agents/DEAD0011/upload")
+                    .header(API_KEY_HEADER, "secret-tasker")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(json_body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        // With the raised body limit this should succeed (202 Accepted),
+        // not be rejected with 413 Payload Too Large.
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
     }
 
     // ── POST /agents/{id}/download ──────────────────────────────────────

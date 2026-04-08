@@ -1,9 +1,18 @@
 //! Operator WebSocket endpoint and connection tracking.
 
-use std::collections::{BTreeMap, HashMap};
+mod connection;
+
+use connection::{
+    AUTHENTICATION_FRAME_TIMEOUT, DisconnectKind, FAILED_LOGIN_DELAY, OPERATOR_MAX_MESSAGE_SIZE,
+    SendMessageError, SocketLoopControl, WsSession, send_hmac_message, send_login_error,
+    send_operator_message,
+};
+#[cfg(test)]
+use connection::{LOGIN_WINDOW_DURATION, MAX_FAILED_LOGIN_ATTEMPTS, MAX_LOGIN_ATTEMPT_WINDOWS};
+pub use connection::{LoginRateLimiter, OperatorConnectionManager};
+
+use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use axum::{
     Router,
@@ -16,7 +25,7 @@ use axum::{
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use red_cell_common::crypto::{WsEnvelope, derive_ws_hmac_key, open_ws_frame, seal_ws_frame};
+use red_cell_common::crypto::{WsEnvelope, open_ws_frame};
 use red_cell_common::demon::{
     DemonCommand, DemonFilesystemCommand, DemonInjectWay, DemonKerberosCommand,
     DemonProcessCommand, DemonSocketCommand, DemonTokenCommand,
@@ -29,7 +38,6 @@ use red_cell_common::{AgentRecord, OperatorInfo};
 use serde_json::Value;
 use thiserror::Error;
 use time::OffsetDateTime;
-use tokio::sync::RwLock;
 use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
@@ -37,196 +45,14 @@ use crate::{
     AgentRegistry, AuditResultStatus, AuditWebhookNotifier, AuthError, AuthService,
     AuthenticationFailure, AuthenticationResult, Database, EventBus, Job, ListenerEventAction,
     ListenerManager, PayloadBuildError, PayloadBuilderService, ShutdownController,
-    SocketRelayManager, action_from_mark,
-    agent_events::agent_new_event,
-    audit_details, authorize_agent_group_access, authorize_listener_access,
-    authorize_websocket_command, listener_config_from_operator, listener_error_event,
-    listener_event_for_action, listener_removed_event, login_failure_message, login_parameters,
-    login_success_message, operator_requests_start, parameter_object,
-    rate_limiter::AttemptWindow,
-    rate_limiter::{evict_oldest_windows, prune_expired_windows},
-    record_operator_action_with_notifications,
+    SocketRelayManager, action_from_mark, agent_events::agent_new_event, audit_details,
+    authorize_agent_group_access, authorize_listener_access, authorize_websocket_command,
+    listener_config_from_operator, listener_error_event, listener_event_for_action,
+    listener_removed_event, login_failure_message, login_parameters, login_success_message,
+    operator_requests_start, parameter_object, record_operator_action_with_notifications,
 };
 
 use crate::MAX_AGENT_MESSAGE_LEN;
-
-/// Tracks currently connected operator WebSocket clients.
-#[derive(Debug, Clone, Default)]
-pub struct OperatorConnectionManager {
-    connections: Arc<RwLock<BTreeMap<Uuid, OperatorConnection>>>,
-}
-
-impl OperatorConnectionManager {
-    /// Create an empty connection registry.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Return the number of currently open WebSocket connections.
-    #[instrument(skip(self))]
-    pub async fn connection_count(&self) -> usize {
-        self.connections.read().await.len()
-    }
-
-    /// Return the number of authenticated WebSocket connections.
-    #[instrument(skip(self))]
-    pub async fn authenticated_count(&self) -> usize {
-        self.connections
-            .read()
-            .await
-            .values()
-            .filter(|connection| connection.username.is_some())
-            .count()
-    }
-
-    async fn register(&self, id: Uuid) {
-        self.connections.write().await.insert(id, OperatorConnection { username: None });
-    }
-
-    async fn authenticate(&self, id: Uuid, username: String) {
-        if let Some(connection) = self.connections.write().await.get_mut(&id) {
-            connection.username = Some(username);
-        }
-    }
-
-    async fn unregister(&self, id: Uuid) {
-        self.connections.write().await.remove(&id);
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-struct OperatorConnection {
-    username: Option<String>,
-}
-
-/// Maximum failed login attempts per IP within the sliding window.
-const MAX_FAILED_LOGIN_ATTEMPTS: u32 = 5;
-
-/// Duration of the sliding window for tracking failed login attempts.
-const LOGIN_WINDOW_DURATION: Duration = Duration::from_secs(60);
-
-/// Maximum number of IP windows retained before oldest entries are evicted.
-const MAX_LOGIN_ATTEMPT_WINDOWS: usize = 10_000;
-
-/// Delay applied before responding to a failed login attempt to slow brute-force attacks.
-const FAILED_LOGIN_DELAY: Duration = Duration::from_secs(2);
-
-/// Maximum time an unauthenticated socket may idle before sending the first login frame.
-const AUTHENTICATION_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Maximum operator WebSocket message size accepted by the teamserver.
-const OPERATOR_MAX_MESSAGE_SIZE: usize = 1024 * 1024;
-
-/// Per-source-IP rate limiter for WebSocket operator login attempts.
-///
-/// Tracks failed login attempts in a sliding window per IP address. Once the
-/// maximum number of failures is reached, further attempts from that IP are
-/// rejected until the window expires.
-#[derive(Debug, Clone, Default)]
-pub struct LoginRateLimiter {
-    windows: Arc<tokio::sync::Mutex<HashMap<IpAddr, AttemptWindow>>>,
-}
-
-impl LoginRateLimiter {
-    /// Create an empty rate limiter.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Return `true` if the given IP has not exceeded the failed-attempt threshold.
-    ///
-    /// Read-only check for tests and diagnostics; production code should use
-    /// [`try_acquire`] (which atomically checks **and** reserves a slot).
-    pub async fn is_allowed(&self, ip: IpAddr) -> bool {
-        let mut windows = self.windows.lock().await;
-        let Some(window) = windows.get_mut(&ip) else {
-            return true;
-        };
-
-        if window.window_start.elapsed() >= LOGIN_WINDOW_DURATION {
-            windows.remove(&ip);
-            return true;
-        }
-
-        window.attempts < MAX_FAILED_LOGIN_ATTEMPTS
-    }
-
-    /// Atomically check whether this IP is under the rate-limit threshold and,
-    /// if so, reserve a slot for this attempt.
-    ///
-    /// Returns `true` if the attempt is allowed (and has been pre-counted),
-    /// `false` if the IP is currently rate-limited.
-    ///
-    /// This method is race-free: concurrent calls from the same IP cannot all
-    /// pass the check before any attempt is recorded.
-    ///
-    /// On successful authentication the caller must call [`record_success`] to
-    /// clear the counter.  On failure no further call is needed — the attempt is
-    /// already counted.
-    pub(crate) async fn try_acquire(&self, ip: IpAddr) -> bool {
-        let mut windows = self.windows.lock().await;
-        let now = Instant::now();
-
-        prune_expired_windows(&mut windows, LOGIN_WINDOW_DURATION, now);
-        if !windows.contains_key(&ip) && windows.len() >= MAX_LOGIN_ATTEMPT_WINDOWS {
-            evict_oldest_windows(&mut windows, MAX_LOGIN_ATTEMPT_WINDOWS / 2);
-        }
-
-        let window = windows.entry(ip).or_default();
-
-        if now.duration_since(window.window_start) >= LOGIN_WINDOW_DURATION {
-            // Expired window: reset and allow this attempt as the first.
-            window.attempts = 1;
-            window.window_start = now;
-            return true;
-        }
-
-        if window.attempts >= MAX_FAILED_LOGIN_ATTEMPTS {
-            return false;
-        }
-
-        window.attempts += 1;
-        true
-    }
-
-    /// Record a failed login attempt from the given IP without going through
-    /// the full WebSocket login flow.
-    ///
-    /// Intended for tests that need to pre-populate the limiter without
-    /// incurring `FAILED_LOGIN_DELAY` on every attempt.  Production callers
-    /// should use [`try_acquire`] instead, which atomically checks and records.
-    pub async fn record_failure(&self, ip: IpAddr) {
-        let mut windows = self.windows.lock().await;
-        let now = Instant::now();
-
-        prune_expired_windows(&mut windows, LOGIN_WINDOW_DURATION, now);
-        if !windows.contains_key(&ip) && windows.len() >= MAX_LOGIN_ATTEMPT_WINDOWS {
-            evict_oldest_windows(&mut windows, MAX_LOGIN_ATTEMPT_WINDOWS / 2);
-        }
-
-        let window = windows.entry(ip).or_default();
-
-        if now.duration_since(window.window_start) >= LOGIN_WINDOW_DURATION {
-            window.attempts = 1;
-            window.window_start = now;
-        } else {
-            window.attempts += 1;
-        }
-    }
-
-    /// Clear the failure counter for an IP after a successful login.
-    pub(crate) async fn record_success(&self, ip: IpAddr) {
-        self.windows.lock().await.remove(&ip);
-    }
-
-    /// Return the number of IPs currently tracked (for tests).
-    #[cfg(test)]
-    async fn tracked_ip_count(&self) -> usize {
-        self.windows.lock().await.len()
-    }
-}
 
 /// Register the Havoc-compatible operator WebSocket endpoint at `/`.
 pub fn routes<S>() -> Router<S>
@@ -2793,92 +2619,6 @@ async fn log_operator_action(
     }
 }
 
-async fn send_operator_message(
-    socket: &mut WebSocket,
-    message: &OperatorMessage,
-) -> Result<(), SendMessageError> {
-    let payload = serde_json::to_string(message)?;
-    socket.send(WsMessage::Text(payload.into())).await?;
-    Ok(())
-}
-
-/// Per-connection HMAC state for post-login WebSocket frames.
-struct WsSession {
-    key: [u8; 32],
-    send_seq: u64,
-    recv_seq: Option<u64>,
-}
-
-impl WsSession {
-    fn new(token: &str) -> Self {
-        Self { key: derive_ws_hmac_key(token), send_seq: 0, recv_seq: None }
-    }
-}
-
-/// Send an `OperatorMessage` wrapped in an HMAC `WsEnvelope`.
-async fn send_hmac_message(
-    socket: &mut WebSocket,
-    message: &OperatorMessage,
-    ws_session: &mut WsSession,
-) -> Result<(), SendMessageError> {
-    let inner_json = serde_json::to_string(message)?;
-    let envelope = seal_ws_frame(&ws_session.key, ws_session.send_seq, &inner_json);
-    ws_session.send_seq += 1;
-    let wire = serde_json::to_string(&envelope)?;
-    socket.send(WsMessage::Text(wire.into())).await?;
-    Ok(())
-}
-
-async fn send_login_error(
-    socket: &mut WebSocket,
-    user: &str,
-    failure: AuthenticationFailure,
-    connection_id: Uuid,
-) {
-    if let Err(error) = send_operator_message(socket, &login_failure_message(user, &failure)).await
-    {
-        warn!(%connection_id, %error, "failed to send operator websocket authentication error");
-    }
-
-    if let Err(e) = socket.send(WsMessage::Close(None)).await {
-        debug!(%connection_id, error = %e, "failed to send close frame after auth failure");
-    }
-}
-
-enum SocketLoopControl {
-    Continue,
-    Break,
-}
-
-/// Reason a WebSocket operator connection was closed.
-#[derive(Debug, Clone, Copy)]
-enum DisconnectKind {
-    /// Client sent a clean WebSocket close frame.
-    CleanClose,
-    /// Connection dropped due to a socket or protocol error.
-    Error,
-    /// Teamserver is shutting down and terminated the connection.
-    ServerShutdown,
-}
-
-impl DisconnectKind {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::CleanClose => "clean_close",
-            Self::Error => "error",
-            Self::ServerShutdown => "server_shutdown",
-        }
-    }
-}
-
-#[derive(Debug, Error)]
-enum SendMessageError {
-    #[error("failed to serialize operator message: {0}")]
-    Serialize(#[from] serde_json::Error),
-    #[error("failed to send operator websocket message: {0}")]
-    Socket(#[from] axum::Error),
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -5148,25 +4888,27 @@ mod tests {
         let expired_ip: IpAddr = "192.168.10.10".parse().expect("valid IP");
         let fresh_ip: IpAddr = "192.168.10.11".parse().expect("valid IP");
 
-        {
-            let mut windows = limiter.windows.lock().await;
-            windows.insert(
-                expired_ip,
-                crate::rate_limiter::AttemptWindow {
-                    attempts: 3,
-                    window_start: Instant::now()
-                        - super::LOGIN_WINDOW_DURATION
-                        - Duration::from_secs(1),
-                },
-            );
-        }
+        limiter
+            .with_windows_mut(|windows| {
+                windows.insert(
+                    expired_ip,
+                    crate::rate_limiter::AttemptWindow {
+                        attempts: 3,
+                        window_start: Instant::now()
+                            - super::LOGIN_WINDOW_DURATION
+                            - Duration::from_secs(1),
+                    },
+                );
+            })
+            .await;
 
         limiter.record_failure(fresh_ip).await;
 
-        let windows = limiter.windows.lock().await;
-        assert!(!windows.contains_key(&expired_ip));
-        assert!(windows.contains_key(&fresh_ip));
-        assert_eq!(windows.len(), 1);
+        let has_expired = limiter.window_state(expired_ip).await.is_some();
+        let has_fresh = limiter.window_state(fresh_ip).await.is_some();
+        assert!(!has_expired);
+        assert!(has_fresh);
+        assert_eq!(limiter.tracked_ip_count().await, 1);
     }
 
     #[tokio::test]
@@ -5174,27 +4916,32 @@ mod tests {
         let limiter = LoginRateLimiter::new();
         let now = Instant::now();
 
-        {
-            let mut windows = limiter.windows.lock().await;
-            for i in 0..super::MAX_LOGIN_ATTEMPT_WINDOWS {
-                windows.insert(
-                    IpAddr::from(std::net::Ipv4Addr::from(i as u32)),
-                    crate::rate_limiter::AttemptWindow {
-                        attempts: 1,
-                        window_start: now
-                            - Duration::from_secs((super::MAX_LOGIN_ATTEMPT_WINDOWS - i) as u64),
-                    },
-                );
-            }
-        }
+        limiter
+            .with_windows_mut(|windows| {
+                for i in 0..super::MAX_LOGIN_ATTEMPT_WINDOWS {
+                    windows.insert(
+                        IpAddr::from(std::net::Ipv4Addr::from(i as u32)),
+                        crate::rate_limiter::AttemptWindow {
+                            attempts: 1,
+                            window_start: now
+                                - Duration::from_secs(
+                                    (super::MAX_LOGIN_ATTEMPT_WINDOWS - i) as u64,
+                                ),
+                        },
+                    );
+                }
+            })
+            .await;
 
         let new_ip = IpAddr::from(std::net::Ipv4Addr::new(10, 0, 0, 1));
         limiter.record_failure(new_ip).await;
 
-        let windows = limiter.windows.lock().await;
-        assert!(windows.len() <= (super::MAX_LOGIN_ATTEMPT_WINDOWS / 2) + 1);
-        assert!(windows.contains_key(&new_ip));
-        assert!(!windows.contains_key(&IpAddr::from(std::net::Ipv4Addr::from(0_u32))));
+        let count = limiter.tracked_ip_count().await;
+        assert!(count <= (super::MAX_LOGIN_ATTEMPT_WINDOWS / 2) + 1);
+        assert!(limiter.window_state(new_ip).await.is_some());
+        assert!(
+            limiter.window_state(IpAddr::from(std::net::Ipv4Addr::from(0_u32))).await.is_none()
+        );
     }
 
     #[tokio::test]
@@ -5209,12 +4956,13 @@ mod tests {
         assert!(!limiter.is_allowed(ip).await, "should be locked out after max failures");
 
         // Manually expire the window by backdating its start time.
-        {
-            let mut windows = limiter.windows.lock().await;
-            let window = windows.get_mut(&ip).expect("window should exist");
-            window.window_start =
-                Instant::now() - super::LOGIN_WINDOW_DURATION - Duration::from_secs(1);
-        }
+        limiter
+            .with_windows_mut(|windows| {
+                let window = windows.get_mut(&ip).expect("window should exist");
+                window.window_start =
+                    Instant::now() - super::LOGIN_WINDOW_DURATION - Duration::from_secs(1);
+            })
+            .await;
 
         // is_allowed must detect the expired window and reset, allowing the IP again.
         assert!(limiter.is_allowed(ip).await, "should be allowed after window expiry");
@@ -5227,35 +4975,34 @@ mod tests {
         let ip: IpAddr = "198.51.100.8".parse().expect("valid IP");
 
         // Manually insert an expired window with attempts at MAX.
-        {
-            let mut windows = limiter.windows.lock().await;
-            windows.insert(
-                ip,
-                crate::rate_limiter::AttemptWindow {
-                    attempts: super::MAX_FAILED_LOGIN_ATTEMPTS,
-                    window_start: Instant::now()
-                        - super::LOGIN_WINDOW_DURATION
-                        - Duration::from_secs(1),
-                },
-            );
-        }
+        limiter
+            .with_windows_mut(|windows| {
+                windows.insert(
+                    ip,
+                    crate::rate_limiter::AttemptWindow {
+                        attempts: super::MAX_FAILED_LOGIN_ATTEMPTS,
+                        window_start: Instant::now()
+                            - super::LOGIN_WINDOW_DURATION
+                            - Duration::from_secs(1),
+                    },
+                );
+            })
+            .await;
 
         // Call record_failure on the expired-but-present window.
         limiter.record_failure(ip).await;
 
         // The window should have been reset: attempts = 1, fresh window_start.
-        {
-            let windows = limiter.windows.lock().await;
-            let window = windows.get(&ip).expect("window should still exist after record_failure");
-            assert_eq!(
-                window.attempts, 1,
-                "expired window should reset attempts to 1, not increment stale count"
-            );
-            assert!(
-                window.window_start.elapsed() < Duration::from_secs(2),
-                "window_start should be refreshed to approximately now"
-            );
-        }
+        let (attempts, window_start) =
+            limiter.window_state(ip).await.expect("window should still exist after record_failure");
+        assert_eq!(
+            attempts, 1,
+            "expired window should reset attempts to 1, not increment stale count"
+        );
+        assert!(
+            window_start.elapsed() < Duration::from_secs(2),
+            "window_start should be refreshed to approximately now"
+        );
 
         // The IP should be allowed since attempts = 1 < MAX.
         assert!(

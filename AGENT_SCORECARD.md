@@ -42,6 +42,16 @@ Each loop run updates the running totals and appends a review entry.
 
 <!-- QA and arch loops append entries below this line -->
 
+### QA Review — 2026-04-08 19:30 — 43b90351..accb34bf
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | 3 substantive commits: fix MIN_ENVELOPE_SIZE (4→12 to match DemonHeader), fix TLS watcher to track both cert+key mtime, extract websocket/connection.rs (314 lines) from websocket.rs. All clean — no unwrap, no todo!, no clippy warnings. 3 claim commits (tia0a in_progress). |
+| Codex | 0 | 0 | No activity this run. |
+| Cursor | 0 | 0 | No activity this run. |
+
+Build: **passed** — `cargo check --workspace` clean (7m 07s), `cargo clippy -- -D warnings` clean (4m 22s, zero warnings). Tests: **blocked** — nextest compilation stalled on Cargo build lock contention from concurrent dev agent.
+
 ### QA Review — 2026-04-08 17:00 — 1db47795..81053794
 
 | Agent | Tasks closed | Bugs filed | Notes |

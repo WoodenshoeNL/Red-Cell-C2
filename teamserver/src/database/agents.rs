@@ -770,4 +770,31 @@ mod tests {
         assert_eq!(*loaded.encryption.aes_key, vec![0xEE; 32]);
         assert_eq!(*loaded.encryption.aes_iv, vec![0xFF; 16]);
     }
+
+    #[tokio::test]
+    async fn legacy_plaintext_key_fallback_survives_read() {
+        use base64::Engine as _;
+        use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+
+        let db = Database::connect_in_memory().await.expect("db");
+        db.agents().create(&stub_agent(0x1111)).await.expect("create");
+
+        // Simulate a pre-migration row: plaintext base64 in aes_key/aes_iv,
+        // empty aes_key_enc/aes_iv_enc.
+        let raw_key = vec![0x42u8; 32];
+        let raw_iv = vec![0x13u8; 16];
+        let key_b64 = BASE64_STANDARD.encode(&raw_key);
+        let iv_b64 = BASE64_STANDARD.encode(&raw_iv);
+        sqlx::query("UPDATE ts_agents SET aes_key = ?, aes_iv = ?, aes_key_enc = '', aes_iv_enc = '' WHERE agent_id = ?")
+            .bind(&key_b64)
+            .bind(&iv_b64)
+            .bind(0x1111i64)
+            .execute(db.pool())
+            .await
+            .expect("backdate row to legacy format");
+
+        let loaded = db.agents().get(0x1111).await.expect("get").expect("exists");
+        assert_eq!(*loaded.encryption.aes_key, raw_key, "legacy plaintext key must be read");
+        assert_eq!(*loaded.encryption.aes_iv, raw_iv, "legacy plaintext iv must be read");
+    }
 }

@@ -10,11 +10,14 @@
 #[path = "../../../teamserver/tests/common/mod.rs"]
 mod common;
 
+use std::time::Duration;
+
 use phantom::{PhantomAgent, PhantomConfig};
 use red_cell::Job;
 use red_cell_common::HttpListenerConfig;
 use red_cell_common::config::Profile;
 use red_cell_common::demon::DemonCommand;
+use tokio::time::sleep;
 
 fn demon_test_profile() -> Profile {
     Profile::parse(
@@ -118,6 +121,12 @@ async fn phantom_agent_init_and_checkin_stay_ctr_synchronised()
         ctr_after_init,
         "server and agent CTR must agree after init"
     );
+
+    // `AgentNew` is broadcast while the HTTP init response is in flight; the operator
+    // WebSocket task delivers the HMAC-wrapped frame asynchronously. Yield and wait
+    // briefly so the framed message is queued before we read (avoids recv_msg timeout).
+    tokio::task::yield_now().await;
+    sleep(Duration::from_millis(200)).await;
 
     // Verify the teamserver received the agent registration event.
     let agent_new = common::read_operator_message(&mut harness.socket).await?;

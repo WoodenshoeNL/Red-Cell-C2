@@ -48,6 +48,17 @@ impl DatabaseHealthState {
         self.degraded.load(Ordering::Acquire)
     }
 
+    /// Create a health state that starts in degraded mode.
+    ///
+    /// Intended for tests that need to exercise degraded-mode code paths.
+    #[cfg(test)]
+    #[must_use]
+    pub fn new_degraded() -> Self {
+        let state = Self::new();
+        state.degraded.store(true, Ordering::Release);
+        state
+    }
+
     /// Number of consecutive probe failures recorded so far.
     #[must_use]
     pub fn consecutive_failures(&self) -> u32 {

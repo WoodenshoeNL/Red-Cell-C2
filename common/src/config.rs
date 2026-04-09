@@ -115,10 +115,14 @@ impl Profile {
             if cert.cert.trim().is_empty() {
                 errors
                     .push("Teamserver.Cert.Cert path must not be empty when specified".to_owned());
+            } else if !Path::new(cert.cert.trim()).exists() {
+                errors.push(format!("Teamserver.Cert.Cert file not found: {}", cert.cert.trim()));
             }
 
             if cert.key.trim().is_empty() {
                 errors.push("Teamserver.Cert.Key path must not be empty when specified".to_owned());
+            } else if !Path::new(cert.key.trim()).exists() {
+                errors.push(format!("Teamserver.Cert.Key file not found: {}", cert.key.trim()));
             }
         }
 
@@ -182,6 +186,31 @@ impl Profile {
                     errors.push(format!(
                         "Listeners.Http \"{}\" must define non-empty Cert and Key paths",
                         listener.name
+                    ));
+                } else {
+                    if !Path::new(cert.cert.trim()).exists() {
+                        errors.push(format!(
+                            "Listeners.Http \"{}\" cert file not found: {}",
+                            listener.name,
+                            cert.cert.trim()
+                        ));
+                    }
+                    if !Path::new(cert.key.trim()).exists() {
+                        errors.push(format!(
+                            "Listeners.Http \"{}\" key file not found: {}",
+                            listener.name,
+                            cert.key.trim()
+                        ));
+                    }
+                }
+            }
+
+            if let Some(doh) = &listener.doh_domain {
+                if !doh.trim().is_empty() && !is_valid_fqdn(doh.trim()) {
+                    errors.push(format!(
+                        "Listeners.Http \"{}\" DoHDomain `{}` is not a valid FQDN",
+                        listener.name,
+                        doh.trim()
                     ));
                 }
             }
@@ -352,8 +381,74 @@ impl Profile {
             }
         }
 
+        // Check for listener port conflicts across all listener types.
+        {
+            let mut seen_ports: Vec<(&str, &str, u16)> = Vec::new();
+
+            for listener in &self.listeners.http {
+                if listener.port_bind != 0 {
+                    if let Some((kind, name, _)) =
+                        seen_ports.iter().find(|(_, _, p)| *p == listener.port_bind)
+                    {
+                        errors.push(format!(
+                            "Listeners.Http \"{}\" port {} conflicts with {kind} \"{name}\"",
+                            listener.name, listener.port_bind
+                        ));
+                    } else {
+                        seen_ports.push(("Http", &listener.name, listener.port_bind));
+                    }
+                }
+            }
+
+            for listener in &self.listeners.dns {
+                if listener.port_bind != 0 {
+                    if let Some((kind, name, _)) =
+                        seen_ports.iter().find(|(_, _, p)| *p == listener.port_bind)
+                    {
+                        errors.push(format!(
+                            "Listeners.Dns \"{}\" port {} conflicts with {kind} \"{name}\"",
+                            listener.name, listener.port_bind
+                        ));
+                    } else {
+                        seen_ports.push(("Dns", &listener.name, listener.port_bind));
+                    }
+                }
+            }
+        }
+
         if errors.is_empty() { Ok(()) } else { Err(ProfileValidationError { errors }) }
     }
+}
+
+/// Validate that `s` is a well-formed fully qualified domain name.
+///
+/// A valid FQDN consists of dot-separated labels where each label:
+/// - Is 1–63 characters long
+/// - Contains only ASCII alphanumeric characters and hyphens
+/// - Does not start or end with a hyphen
+///
+/// A trailing dot is tolerated (root label).
+fn is_valid_fqdn(s: &str) -> bool {
+    let s = s.strip_suffix('.').unwrap_or(s);
+    if s.is_empty() || s.len() > 253 {
+        return false;
+    }
+    let labels: Vec<&str> = s.split('.').collect();
+    if labels.len() < 2 {
+        return false;
+    }
+    for label in &labels {
+        if label.is_empty() || label.len() > 63 {
+            return false;
+        }
+        if label.starts_with('-') || label.ends_with('-') {
+            return false;
+        }
+        if !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            return false;
+        }
+    }
+    true
 }
 
 /// Permitted Discord webhook hostnames (scheme must always be `https`).
@@ -3328,36 +3423,46 @@ mod tests {
 
     #[test]
     fn parses_teamserver_tls_certificate_paths() {
-        let profile = Profile::parse(
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cert_path = dir.path().join("server.crt");
+        let key_path = dir.path().join("server.key");
+        std::fs::write(&cert_path, b"fake-cert").expect("write cert");
+        std::fs::write(&key_path, b"fake-key").expect("write key");
+
+        let hcl = format!(
             r#"
-            Teamserver {
+            Teamserver {{
               Host = "0.0.0.0"
               Port = 40056
 
-              Cert {
-                Cert = "/tmp/server.crt"
-                Key = "/tmp/server.key"
-              }
-            }
+              Cert {{
+                Cert = "{}"
+                Key = "{}"
+              }}
+            }}
 
-            Operators {
-              user "Neo" {
+            Operators {{
+              user "Neo" {{
                 Password = "password1234"
-              }
-            }
+              }}
+            }}
 
-            Listeners {}
+            Listeners {{}}
 
-            Demon {}
+            Demon {{}}
             "#,
-        )
-        .expect("profile with teamserver cert block should parse");
+            cert_path.display(),
+            key_path.display()
+        );
+
+        let profile =
+            Profile::parse(&hcl).expect("profile with teamserver cert block should parse");
 
         let cert =
             profile.teamserver.cert.as_ref().expect("teamserver cert block should be present");
 
-        assert_eq!(cert.cert, "/tmp/server.crt");
-        assert_eq!(cert.key, "/tmp/server.key");
+        assert_eq!(cert.cert, cert_path.display().to_string());
+        assert_eq!(cert.key, key_path.display().to_string());
 
         profile.validate().expect("profile with valid cert paths should pass validation");
     }
@@ -3611,5 +3716,352 @@ mod tests {
 
         assert_eq!(canonical.demon.amsi_etw_patching.as_deref(), Some("patch"));
         assert_eq!(legacy.demon.amsi_etw_patching.as_deref(), Some("hwbp"));
+    }
+
+    // --- Semantic validation tests ---
+
+    #[test]
+    fn rejects_teamserver_cert_file_not_found() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+              Cert {
+                Cert = "/nonexistent/path/cert.pem"
+                Key = "/nonexistent/path/key.pem"
+              }
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        let error = profile.validate().expect_err("profile should be invalid");
+        assert!(
+            error.errors.iter().any(|m| m.contains("Teamserver.Cert.Cert file not found")),
+            "expected cert file not found error; got: {error:?}"
+        );
+        assert!(
+            error.errors.iter().any(|m| m.contains("Teamserver.Cert.Key file not found")),
+            "expected key file not found error; got: {error:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_teamserver_cert_paths_that_exist() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cert_path = dir.path().join("cert.pem");
+        let key_path = dir.path().join("key.pem");
+        std::fs::write(&cert_path, b"fake-cert").expect("write cert");
+        std::fs::write(&key_path, b"fake-key").expect("write key");
+
+        let hcl = format!(
+            r#"
+            Teamserver {{
+              Host = "127.0.0.1"
+              Port = 40056
+              Cert {{
+                Cert = "{}"
+                Key = "{}"
+              }}
+            }}
+
+            Operators {{
+              user "neo" {{
+                Password = "password1234"
+              }}
+            }}
+
+            Demon {{}}
+            "#,
+            cert_path.display(),
+            key_path.display()
+        );
+
+        let profile = Profile::parse(&hcl).expect("profile should parse");
+        profile.validate().expect("profile with existing cert paths should pass validation");
+    }
+
+    #[test]
+    fn rejects_http_listener_cert_file_not_found() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Listeners {
+              Http {
+                Name = "edge"
+                Hosts = ["listener.local"]
+                HostBind = "127.0.0.1"
+                HostRotation = "round-robin"
+                PortBind = 443
+                Secure = true
+
+                Cert {
+                  Cert = "/nonexistent/cert.pem"
+                  Key = "/nonexistent/key.pem"
+                }
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        let error = profile.validate().expect_err("profile should be invalid");
+        assert!(
+            error.errors.iter().any(|m| m.contains("Listeners.Http \"edge\" cert file not found")),
+            "expected listener cert not found error; got: {error:?}"
+        );
+        assert!(
+            error.errors.iter().any(|m| m.contains("Listeners.Http \"edge\" key file not found")),
+            "expected listener key not found error; got: {error:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_doh_domain() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Listeners {
+              Http {
+                Name = "edge"
+                Hosts = ["listener.local"]
+                HostBind = "127.0.0.1"
+                HostRotation = "round-robin"
+                PortBind = 443
+                DoHDomain = "not a domain!"
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        let error = profile.validate().expect_err("profile should be invalid");
+        assert!(
+            error.errors.iter().any(|m| m.contains("DoHDomain") && m.contains("not a valid FQDN")),
+            "expected DoHDomain FQDN error; got: {error:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_valid_doh_domain() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Listeners {
+              Http {
+                Name = "edge"
+                Hosts = ["listener.local"]
+                HostBind = "127.0.0.1"
+                HostRotation = "round-robin"
+                PortBind = 443
+                DoHDomain = "c2.example.com"
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        profile.validate().expect("profile with valid DoHDomain should pass");
+    }
+
+    #[test]
+    fn rejects_duplicate_listener_ports() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Listeners {
+              Http {
+                Name = "first"
+                Hosts = ["listener.local"]
+                HostBind = "127.0.0.1"
+                HostRotation = "round-robin"
+                PortBind = 443
+              }
+
+              Http {
+                Name = "second"
+                Hosts = ["listener2.local"]
+                HostBind = "127.0.0.1"
+                HostRotation = "round-robin"
+                PortBind = 443
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        let error = profile.validate().expect_err("profile should be invalid");
+        assert!(
+            error.errors.iter().any(|m| m.contains("port 443 conflicts")),
+            "expected port conflict error; got: {error:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_dns_listener_port_conflict_with_http() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Listeners {
+              Http {
+                Name = "web"
+                Hosts = ["listener.local"]
+                HostBind = "127.0.0.1"
+                HostRotation = "round-robin"
+                PortBind = 8080
+              }
+
+              Dns {
+                Name = "dns-c2"
+                Domain = "c2.example.com"
+                PortBind = 8080
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        let error = profile.validate().expect_err("profile should be invalid");
+        assert!(
+            error.errors.iter().any(|m| m.contains("Dns") && m.contains("port 8080 conflicts")),
+            "expected DNS/HTTP port conflict error; got: {error:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_listeners_on_different_ports() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Listeners {
+              Http {
+                Name = "web"
+                Hosts = ["listener.local"]
+                HostBind = "127.0.0.1"
+                HostRotation = "round-robin"
+                PortBind = 443
+              }
+
+              Http {
+                Name = "alt"
+                Hosts = ["listener2.local"]
+                HostBind = "127.0.0.1"
+                HostRotation = "round-robin"
+                PortBind = 8443
+              }
+
+              Dns {
+                Name = "dns-c2"
+                Domain = "c2.example.com"
+                PortBind = 53
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        profile.validate().expect("listeners on different ports should pass");
+    }
+
+    #[test]
+    fn is_valid_fqdn_accepts_valid_domains() {
+        assert!(is_valid_fqdn("example.com"));
+        assert!(is_valid_fqdn("c2.example.com"));
+        assert!(is_valid_fqdn("sub.domain.example.com"));
+        assert!(is_valid_fqdn("example.com."));
+        assert!(is_valid_fqdn("my-domain.example.com"));
+    }
+
+    #[test]
+    fn is_valid_fqdn_rejects_invalid_domains() {
+        assert!(!is_valid_fqdn(""));
+        assert!(!is_valid_fqdn("localhost"));
+        assert!(!is_valid_fqdn(".example.com"));
+        assert!(!is_valid_fqdn("example..com"));
+        assert!(!is_valid_fqdn("-example.com"));
+        assert!(!is_valid_fqdn("example-.com"));
+        assert!(!is_valid_fqdn("exam ple.com"));
+        assert!(!is_valid_fqdn("example.com/path"));
     }
 }

@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1245 | 255 | 82 |
+| Tasks closed | 1246 | 255 | 82 |
 | Bugs filed against | 235 | 49 | 13 |
 | Bug rate (bugs/task) | 0.19 | 0.19 | 0.16 |
 | Quality score | 81% | 81% | 84% |
 
-*Bug rates: Claude 235/1245=0.1888→0.19, Codex 49/255=0.1922→0.19, Cursor 13/82=0.1585→0.16*
+*Bug rates: Claude 235/1246=0.1886→0.19, Codex 49/255=0.1922→0.19, Cursor 13/82=0.1585→0.16*
 
 ## Violation Breakdown
 
@@ -41,6 +41,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-09 06:30 — dd7e9410..992a9c31
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 0 | Closed epdkv (expect() already fixed in prior refactor). Committed 39e4a96: replaced `expect()` with proper `match`+error return in `parse_init_agent` Versioned branch — clean fix, no remaining `expect()` in production paths. Claimed 2r506 (Zeroizing secret leak). |
+| Codex | 0 | 0 | No activity this run. |
+| Cursor | 0 | 0 | No activity this run. |
+
+Build: **passed** — `cargo check --workspace` clean (2m 42s). Tests: **blocked** — Cargo build lock contention from concurrent dev agent. Clippy: **blocked** — same lock contention.
 
 ### QA Review — 2026-04-09 03:45 — b390460e..dd7e9410
 

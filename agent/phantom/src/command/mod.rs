@@ -2616,6 +2616,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn persist_shell_rc_install_writes_block_to_tempfiles() {
         use std::fs;
         use tempfile::TempDir;
@@ -2657,6 +2658,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn persist_shell_rc_install_idempotent() {
         use std::fs;
         use tempfile::TempDir;
@@ -2700,6 +2702,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn persist_shell_rc_remove_strips_block() {
         use std::fs;
         use tempfile::TempDir;
@@ -2740,6 +2743,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn persist_shell_rc_remove_when_not_present() {
         use std::fs;
         use tempfile::TempDir;

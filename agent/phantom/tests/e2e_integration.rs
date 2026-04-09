@@ -38,10 +38,20 @@ struct MockCrypto {
 
 impl MockCrypto {
     /// Extract crypto material from a DEMON_INIT packet body.
+    ///
+    /// Matches [`phantom::protocol::build_init_packet`]: payload is
+    /// `[command_id:4][request_id:4][raw_key:32][raw_iv:16][encrypted_metadata...]`
+    /// (command/request are big-endian; same layout as the Demon reference).
     fn from_init_body(body: &[u8]) -> Self {
         let envelope = DemonEnvelope::from_bytes(body).expect("parse init envelope");
         let agent_id = envelope.header.agent_id;
-        // payload layout: [command_id:4][request_id:4][raw_key:32][raw_iv:16][encrypted_metadata...]
+        const PREFIX: usize = 8 + AGENT_KEY_LENGTH + AGENT_IV_LENGTH;
+        assert!(
+            envelope.payload.len() >= PREFIX,
+            "init payload too short: {} bytes (need at least {} for command, request, key, IV)",
+            envelope.payload.len(),
+            PREFIX
+        );
         let key = envelope.payload[8..8 + AGENT_KEY_LENGTH].to_vec();
         let iv =
             envelope.payload[8 + AGENT_KEY_LENGTH..8 + AGENT_KEY_LENGTH + AGENT_IV_LENGTH].to_vec();
@@ -224,6 +234,7 @@ fn read_http_body(stream: &mut std::net::TcpStream) -> Vec<u8> {
     let mut buffer = [0u8; 8192];
     let mut header_end = None;
     let mut content_length = 0usize;
+    let mut sent_100_continue = false;
 
     loop {
         let read = stream.read(&mut buffer).expect("read from stream");
@@ -237,12 +248,30 @@ fn read_http_body(stream: &mut std::net::TcpStream) -> Vec<u8> {
             if let Some(end) = header_end {
                 let headers =
                     std::str::from_utf8(&request[..end]).expect("headers are valid UTF-8");
+
+                // Hyper/reqwest may send `Expect: 100-continue` and wait for this before the body.
+                if !sent_100_continue
+                    && headers.lines().any(|line| {
+                        line.split_once(':')
+                            .map(|(name, value)| {
+                                name.eq_ignore_ascii_case("expect")
+                                    && value.trim().eq_ignore_ascii_case("100-continue")
+                            })
+                            .unwrap_or(false)
+                    })
+                {
+                    stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").expect("write 100 Continue");
+                    sent_100_continue = true;
+                }
+
+                // If duplicates exist, last Content-Length wins (RFC 7230).
                 content_length = headers
                     .lines()
-                    .find_map(|line| {
+                    .filter_map(|line| {
                         let (name, value) = line.split_once(':')?;
                         name.eq_ignore_ascii_case("content-length").then_some(value.trim())
                     })
+                    .next_back()
                     .unwrap_or("0")
                     .parse::<usize>()
                     .expect("valid content-length");
@@ -256,7 +285,14 @@ fn read_http_body(stream: &mut std::net::TcpStream) -> Vec<u8> {
         }
     }
 
-    header_end.map_or_else(Vec::new, |end| request[end..].to_vec())
+    let Some(end) = header_end else {
+        return Vec::new();
+    };
+    // Return the full suffix after the header block, not `..end+content_length`. The break
+    // condition still uses Content-Length to know when to stop reading from the socket, but
+    // slicing to `content_length` can truncate a valid Demon envelope when the declared length
+    // is wrong (too small) while the same TCP read already buffered the full POST body.
+    request[end..].to_vec()
 }
 
 fn write_http_ok(stream: &mut std::net::TcpStream, body: &[u8]) {

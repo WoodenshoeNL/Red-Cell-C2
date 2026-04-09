@@ -138,6 +138,7 @@ mod tests {
         let mut buffer = [0_u8; 4096];
         let mut header_end = None;
         let mut content_length = 0_usize;
+        let mut sent_100_continue = false;
 
         loop {
             let read = stream.read(&mut buffer)?;
@@ -153,12 +154,28 @@ mod tests {
                     .map(|index| index + 4);
                 if let Some(end) = header_end {
                     let headers = std::str::from_utf8(&request[..end])?;
+
+                    if !sent_100_continue
+                        && headers.lines().any(|line| {
+                            line.split_once(':')
+                                .map(|(name, value)| {
+                                    name.eq_ignore_ascii_case("expect")
+                                        && value.trim().eq_ignore_ascii_case("100-continue")
+                                })
+                                .unwrap_or(false)
+                        })
+                    {
+                        stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n")?;
+                        sent_100_continue = true;
+                    }
+
                     content_length = headers
                         .lines()
-                        .find_map(|line| {
+                        .filter_map(|line| {
                             let (name, value) = line.split_once(':')?;
                             name.eq_ignore_ascii_case("content-length").then_some(value.trim())
                         })
+                        .next_back()
                         .unwrap_or("0")
                         .parse::<usize>()?;
                 }
@@ -171,7 +188,13 @@ mod tests {
             }
         }
 
-        Ok(header_end.map_or_else(Vec::new, |end| request[end..].to_vec()))
+        let Some(end) = header_end else {
+            return Ok(Vec::new());
+        };
+        // Same rationale as `e2e_integration::read_http_body`: return the full suffix after
+        // headers. `content_length` only gates when we stop reading from the socket; slicing
+        // to it can truncate when the declared length is too small but the buffer is full.
+        Ok(request[end..].to_vec())
     }
 
     fn write_http_response(

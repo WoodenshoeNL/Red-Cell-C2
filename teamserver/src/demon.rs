@@ -728,8 +728,14 @@ fn parse_init_agent(
             }
         }
         DemonInitSecretConfig::Versioned(secrets) => {
-            // secret_version is guaranteed Some when Versioned (read above).
-            let version = secret_version.expect("version byte must be present in Versioned mode");
+            let version = match secret_version {
+                Some(v) => v,
+                None => {
+                    return Err(DemonParserError::InvalidInit(
+                        "internal: missing version byte in Versioned mode",
+                    ));
+                }
+            };
             let plain_secrets: Vec<(u8, Vec<u8>)> =
                 secrets.iter().map(|(v, s)| (*v, s.to_vec())).collect();
             let derived = derive_session_keys_for_version(&key, &iv, version, &plain_secrets)

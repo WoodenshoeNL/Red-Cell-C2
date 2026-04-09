@@ -177,14 +177,31 @@ mod tests {
     use super::*;
     use crate::{
         AgentRegistry, AuditResultStatus, AuthService, Database, EventBus, Job, ListenerManager,
-        LootRecord, OperatorConnectionManager, SocketRelayManager,
+        LootRecord, OperatorConnectionManager, SocketRelayManager, audit_details, parameter_object,
     };
+
+    // Items that moved from mod.rs into sub-modules during the split.
+    use super::auth::{
+        API_KEY_HEADER, ApiKeyDigest, MAX_FAILED_API_AUTH_ATTEMPTS, RATE_LIMIT_WINDOW,
+        RateLimitSubject, RateLimitWindow,
+    };
+    use crate::rate_limiter::AttemptWindow;
+
+    use std::collections::{BTreeMap, HashMap};
+    use std::net::{IpAddr, SocketAddr};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use axum::extract::ConnectInfo;
+    use axum::http::header::{AUTHORIZATION, CONTENT_DISPOSITION, CONTENT_TYPE, RETRY_AFTER};
+    use axum::response::Response;
+    use red_cell_common::config::{OperatorRole, Profile};
+    use tokio::sync::Mutex;
+
     use agents::AgentApiError;
-    use axum::http::header::{AUTHORIZATION, CONTENT_DISPOSITION};
     use loot::{CredentialQuery, LootQuery};
     use payload::{cli_format_to_havoc, normalize_agent_type, validate_agent_format_combination};
     use red_cell_common::AgentRecord;
-    use red_cell_common::config::OperatorRole;
     use red_cell_common::crypto::hash_password_sha3;
     use red_cell_common::demon::DemonCommand;
     use uuid::Uuid;

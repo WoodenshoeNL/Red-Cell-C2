@@ -33,9 +33,9 @@ use super::errors::json_error_response;
 
 pub(crate) const API_KEY_HEADER: &str = "x-api-key";
 const BEARER_PREFIX: &str = "Bearer ";
-const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
+pub(crate) const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
 /// Maximum number of failed API-key auth attempts from one IP before that IP is blocked.
-const MAX_FAILED_API_AUTH_ATTEMPTS: u32 = 5;
+pub(crate) const MAX_FAILED_API_AUTH_ATTEMPTS: u32 = 5;
 /// Maximum number of per-IP auth-failure windows retained before the oldest are evicted.
 const MAX_API_AUTH_FAILURE_WINDOWS: usize = 10_000;
 const API_KEY_HASH_SECRET_SIZE: usize = 32;
@@ -43,10 +43,10 @@ const API_KEY_HASH_SECRET_SIZE: usize = 32;
 type ApiKeyMac = Hmac<Sha256>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct ApiKeyDigest([u8; 32]);
+pub(crate) struct ApiKeyDigest(pub(crate) [u8; 32]);
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-enum RateLimitSubject {
+pub(crate) enum RateLimitSubject {
     ClientIp(IpAddr),
     PresentedCredential(ApiKeyDigest),
     MissingApiKey,
@@ -67,9 +67,9 @@ impl ApiRateLimit {
 }
 
 #[derive(Debug, Clone)]
-struct RateLimitWindow {
-    started_at: Instant,
-    request_count: u32,
+pub(crate) struct RateLimitWindow {
+    pub(crate) started_at: Instant,
+    pub(crate) request_count: u32,
 }
 
 impl Default for RateLimitWindow {
@@ -97,14 +97,14 @@ pub struct ApiIdentity {
 /// Shared REST API authentication and rate-limiting runtime state.
 #[derive(Debug, Clone)]
 pub struct ApiRuntime {
-    key_hash_secret: Arc<[u8; API_KEY_HASH_SECRET_SIZE]>,
+    pub(crate) key_hash_secret: Arc<[u8; API_KEY_HASH_SECRET_SIZE]>,
     /// Stored as a flat list so lookup can always visit every entry, enabling
     /// constant-time comparison via [`subtle::ConstantTimeEq`].
-    keys: Arc<Vec<(ApiKeyDigest, ApiIdentity)>>,
-    rate_limit: ApiRateLimit,
-    windows: Arc<Mutex<BTreeMap<RateLimitSubject, RateLimitWindow>>>,
+    pub(crate) keys: Arc<Vec<(ApiKeyDigest, ApiIdentity)>>,
+    pub(crate) rate_limit: ApiRateLimit,
+    pub(crate) windows: Arc<Mutex<BTreeMap<RateLimitSubject, RateLimitWindow>>>,
     /// Per-IP sliding windows tracking failed API-key auth attempts (wrong key presented).
-    auth_failure_windows: Arc<Mutex<HashMap<IpAddr, AttemptWindow>>>,
+    pub(crate) auth_failure_windows: Arc<Mutex<HashMap<IpAddr, AttemptWindow>>>,
 }
 
 impl ApiRuntime {
@@ -156,7 +156,7 @@ impl ApiRuntime {
         self.rate_limit
     }
 
-    async fn authenticate(
+    pub(crate) async fn authenticate(
         &self,
         headers: &HeaderMap,
         client_ip: Option<IpAddr>,
@@ -211,7 +211,7 @@ impl ApiRuntime {
     }
 
     /// Return `true` if the given IP has not exceeded the failed-auth attempt threshold.
-    async fn is_auth_failure_allowed(&self, ip: IpAddr) -> bool {
+    pub(crate) async fn is_auth_failure_allowed(&self, ip: IpAddr) -> bool {
         let mut windows = self.auth_failure_windows.lock().await;
         let Some(window) = windows.get_mut(&ip) else {
             return true;
@@ -224,7 +224,7 @@ impl ApiRuntime {
     }
 
     /// Record a failed API-key auth attempt from the given IP.
-    async fn record_auth_failure(&self, ip: IpAddr) {
+    pub(crate) async fn record_auth_failure(&self, ip: IpAddr) {
         let mut windows = self.auth_failure_windows.lock().await;
         let now = Instant::now();
         prune_expired_windows(&mut windows, RATE_LIMIT_WINDOW, now);
@@ -241,7 +241,7 @@ impl ApiRuntime {
     }
 
     /// Clear the failure counter for an IP after a successful authentication.
-    async fn record_auth_success(&self, ip: IpAddr) {
+    pub(crate) async fn record_auth_success(&self, ip: IpAddr) {
         self.auth_failure_windows.lock().await.remove(&ip);
     }
 
@@ -250,7 +250,7 @@ impl ApiRuntime {
     /// Every entry in `keys` is always visited regardless of whether a match is
     /// found, so the duration of this function does not reveal whether (or at
     /// which index) a matching digest exists.
-    fn lookup_key_ct(
+    pub(crate) fn lookup_key_ct(
         keys: &[(ApiKeyDigest, ApiIdentity)],
         digest: &ApiKeyDigest,
     ) -> Option<ApiIdentity> {
@@ -264,7 +264,10 @@ impl ApiRuntime {
         found
     }
 
-    fn hash_api_key(secret: &[u8; API_KEY_HASH_SECRET_SIZE], api_key: &str) -> ApiKeyDigest {
+    pub(crate) fn hash_api_key(
+        secret: &[u8; API_KEY_HASH_SECRET_SIZE],
+        api_key: &str,
+    ) -> ApiKeyDigest {
         let mut mac = ApiKeyMac::new_from_slice(secret)
             .unwrap_or_else(|_| unreachable!("hmac accepts arbitrary secret lengths"));
         mac.update(api_key.as_bytes());
@@ -274,13 +277,17 @@ impl ApiRuntime {
         ApiKeyDigest(bytes)
     }
 
-    fn generate_key_hash_secret() -> Result<[u8; API_KEY_HASH_SECRET_SIZE], getrandom::Error> {
+    pub(crate) fn generate_key_hash_secret()
+    -> Result<[u8; API_KEY_HASH_SECRET_SIZE], getrandom::Error> {
         let mut bytes = [0_u8; API_KEY_HASH_SECRET_SIZE];
         getrandom::fill(&mut bytes)?;
         Ok(bytes)
     }
 
-    async fn check_rate_limit(&self, subject: &RateLimitSubject) -> Result<(), ApiAuthError> {
+    pub(crate) async fn check_rate_limit(
+        &self,
+        subject: &RateLimitSubject,
+    ) -> Result<(), ApiAuthError> {
         if self.rate_limit.disabled() {
             return Ok(());
         }

@@ -736,9 +736,9 @@ fn parse_init_agent(
                     ));
                 }
             };
-            let plain_secrets: Vec<(u8, Vec<u8>)> =
-                secrets.iter().map(|(v, s)| (*v, s.to_vec())).collect();
-            let derived = derive_session_keys_for_version(&key, &iv, version, &plain_secrets)
+            let secret_refs: Vec<(u8, &[u8])> =
+                secrets.iter().map(|(v, s)| (*v, s.as_slice())).collect();
+            let derived = derive_session_keys_for_version(&key, &iv, version, &secret_refs)
                 .map_err(|err| match err {
                     CryptoError::UnknownSecretVersion { version: v } => {
                         warn!(

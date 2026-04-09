@@ -304,12 +304,12 @@ pub fn derive_session_keys_for_version(
     agent_key: &[u8],
     agent_iv: &[u8],
     version: u8,
-    secrets: &[(u8, Vec<u8>)],
+    secrets: &[(u8, &[u8])],
 ) -> Result<AgentCryptoMaterial, CryptoError> {
     let secret = secrets
         .iter()
         .find(|(v, _)| *v == version)
-        .map(|(_, s)| s.as_slice())
+        .map(|(_, s)| *s)
         .ok_or(CryptoError::UnknownSecretVersion { version })?;
     derive_session_keys(agent_key, agent_iv, secret)
 }
@@ -1331,12 +1331,12 @@ mod tests {
     fn derive_session_keys_for_version_returns_same_as_derive_session_keys() {
         let key = [0x11; AGENT_KEY_LENGTH];
         let iv = [0x22; AGENT_IV_LENGTH];
-        let secret = b"sixteen-byte-sec".to_vec();
-        let secrets = vec![(1u8, secret.clone())];
+        let secret = b"sixteen-byte-sec";
+        let secrets = vec![(1u8, secret.as_slice())];
 
         let versioned = derive_session_keys_for_version(&key, &iv, 1, &secrets)
             .expect("version 1 must be found");
-        let direct = derive_session_keys(&key, &iv, &secret).expect("direct derive must succeed");
+        let direct = derive_session_keys(&key, &iv, secret).expect("direct derive must succeed");
 
         assert_eq!(versioned.key, direct.key, "versioned key must match direct derivation");
         assert_eq!(versioned.iv, direct.iv, "versioned IV must match direct derivation");
@@ -1346,7 +1346,7 @@ mod tests {
     fn derive_session_keys_for_version_unknown_version_returns_error() {
         let key = [0x11; AGENT_KEY_LENGTH];
         let iv = [0x22; AGENT_IV_LENGTH];
-        let secrets = vec![(1u8, b"sixteen-byte-sec".to_vec())];
+        let secrets = vec![(1u8, b"sixteen-byte-sec".as_slice())];
 
         let result = derive_session_keys_for_version(&key, &iv, 2, &secrets);
         assert!(
@@ -1359,9 +1359,9 @@ mod tests {
     fn derive_session_keys_for_version_selects_correct_secret_from_list() {
         let key = [0x33; AGENT_KEY_LENGTH];
         let iv = [0x44; AGENT_IV_LENGTH];
-        let secret1 = b"secret-version-1".to_vec();
-        let secret2 = b"secret-version-2".to_vec();
-        let secrets = vec![(1u8, secret1.clone()), (2u8, secret2.clone())];
+        let secret1 = b"secret-version-1";
+        let secret2 = b"secret-version-2";
+        let secrets = vec![(1u8, secret1.as_slice()), (2u8, secret2.as_slice())];
 
         let derived1 = derive_session_keys_for_version(&key, &iv, 1, &secrets)
             .expect("version 1 must succeed");

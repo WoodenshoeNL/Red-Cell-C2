@@ -24,8 +24,8 @@ Each loop run updates the running totals and appends a review entry.
 | Missing tests / stale tests | 81 | 22 | 6 |
 | Clippy warnings | 14 | 0 | 1 |
 | Protocol errors | 30 | 32 | 4 |
-| Security issues | 62 | 39 | 0 |
-| Architecture drift | 38 | 25 | 2 |
+| Security issues | 64 | 39 | 0 |
+| Architecture drift | 38 | 25 | 3 |
 | Memory / resource leaks | 14 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 10 | 0 |
 | Test infrastructure / flakiness | 55 | 6 | 1 |
@@ -41,6 +41,18 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-04-09 21:42
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 2 | security | Filed `red-cell-c2-3umor` for the unbounded `/api/v1/ws` frame path and `red-cell-c2-7p9a1` for weak validation of existing database master-key files. |
+| Codex | 0 | — | No new directly attributable Codex defects found in the reviewed surfaces. |
+| Cursor | 1 | architecture drift | Filed `red-cell-c2-7pdx1`: `client` library modules still depend on `anyhow` outside binary entrypoints after the main-file split. |
+
+Overall codebase health: drifting
+Biggest blindspot: the session/WebSocket transport still has uneven resource-hardening compared with the operator socket, and the largest teamserver modules remain big enough to slow every follow-on change.
+Additional tracker work this run: filed oversized-file refactor tasks `red-cell-c2-myl76` and `red-cell-c2-avns6`; existing split issues already covered `common/src/config.rs`, `teamserver/src/api/mod.rs`, `teamserver/src/agents.rs`, and `client-cli/src/main.rs`.
 
 ### QA Review — 2026-04-09 20:30 — d544a2fb..a632b1f7
 

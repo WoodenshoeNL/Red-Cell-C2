@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1249 | 255 | 83 |
-| Bugs filed against | 237 | 49 | 13 |
+| Tasks closed | 1251 | 255 | 83 |
+| Bugs filed against | 238 | 49 | 13 |
 | Bug rate (bugs/task) | 0.19 | 0.19 | 0.16 |
 | Quality score | 81% | 81% | 84% |
 
-*Bug rates: Claude 237/1249=0.1898→0.19, Codex 49/255=0.1922→0.19, Cursor 13/83=0.1566→0.16*
+*Bug rates: Claude 238/1251=0.1903→0.19, Codex 49/255=0.1922→0.19, Cursor 13/83=0.1566→0.16*
 
 ## Violation Breakdown
 
@@ -34,13 +34,23 @@ Each loop run updates the running totals and appends a review entry.
 | Correctness / pagination | 66 | 9 | 1 |
 | Workflow / close-hygiene | 38 | 1 | 2 |
 | Code reuse / duplication | 11 | 0 | 0 |
-| Incomplete commits (stranded work) | 6 | 3 | 0 |
+| Incomplete commits (stranded work) | 7 | 3 | 0 |
 
 ---
 
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-09 17:45 — d544a2fb..a632b1f7
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 1 | Closed jh2xx (split domain.rs into domain/ module) and k6wy8 (split operator.rs into operator/ module). WIP commit a632b1f7 started api/mod.rs split but left 185 test compilation errors (filed red-cell-c2-w35n1). |
+| Codex | 0 | 0 | No activity this run. |
+| Cursor | 0 | 0 | No activity this run. |
+
+Build: **passed** — `cargo check --workspace` clean. Tests: **failed** — 185 compilation errors in teamserver test code after WIP api/mod.rs split (missing imports for moved symbols: API_KEY_HEADER, audit_details, ConnectInfo, RateLimitSubject, etc.). Clippy: **blocked** — build lock contention from test compilation.
 
 ### QA Review — 2026-04-09 15:00 — 41ea1eca..d544a2fb
 

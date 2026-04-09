@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1248 | 255 | 82 |
+| Tasks closed | 1249 | 255 | 82 |
 | Bugs filed against | 236 | 49 | 13 |
 | Bug rate (bugs/task) | 0.19 | 0.19 | 0.16 |
 | Quality score | 81% | 81% | 84% |
 
-*Bug rates: Claude 236/1248=0.1891→0.19, Codex 49/255=0.1922→0.19, Cursor 13/82=0.1585→0.16*
+*Bug rates: Claude 236/1249=0.1889→0.19, Codex 49/255=0.1922→0.19, Cursor 13/82=0.1585→0.16*
 
 ## Violation Breakdown
 
@@ -41,6 +41,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-09 12:15 — efb35120..41ea1eca
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 0 | Closed 74uko (audit tests already present). Renamed `recovery_probe_secs` → `probe_secs` (clean cross-file rename). Made `ReconnectProbeRateLimiter` configurable for tests (proper builder pattern, `#[must_use]`). |
+| Codex | 0 | 0 | No activity this run. |
+| Cursor | 0 | 0 | Claimed nwcf2 (client/main.rs split). No code committed yet. |
+
+Build: **passed** — `cargo check --workspace` clean. Tests: **blocked** — Cargo build lock contention from concurrent Cursor agent. Clippy: **blocked** — same lock contention.
 
 ### Arch Review — 2026-04-09 11:50
 

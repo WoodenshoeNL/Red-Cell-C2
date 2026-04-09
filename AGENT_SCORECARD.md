@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1249 | 255 | 82 |
-| Bugs filed against | 236 | 49 | 13 |
+| Tasks closed | 1249 | 255 | 83 |
+| Bugs filed against | 237 | 49 | 13 |
 | Bug rate (bugs/task) | 0.19 | 0.19 | 0.16 |
 | Quality score | 81% | 81% | 84% |
 
-*Bug rates: Claude 236/1249=0.1889→0.19, Codex 49/255=0.1922→0.19, Cursor 13/82=0.1585→0.16*
+*Bug rates: Claude 237/1249=0.1898→0.19, Codex 49/255=0.1922→0.19, Cursor 13/83=0.1566→0.16*
 
 ## Violation Breakdown
 
@@ -28,7 +28,7 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 38 | 25 | 2 |
 | Memory / resource leaks | 14 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 10 | 0 |
-| Test infrastructure / flakiness | 54 | 6 | 1 |
+| Test infrastructure / flakiness | 55 | 6 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 4 | 5 | 0 |
 | Correctness / pagination | 66 | 9 | 1 |
@@ -41,6 +41,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-09 15:00 — 41ea1eca..d544a2fb
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 1 | Added plugin health-tracking unit tests (b26cc544). Added semantic config validation — cert file existence, FQDN validation, port conflict detection (2f9480a9). Bug filed: red-cell-c2-9lbtw (phantom init_callback_flow timeout). |
+| Codex | 0 | 0 | No activity this run. |
+| Cursor | 1 | 0 | Closed nwcf2: split client/src/main.rs into app.rs, bootstrap.rs, known_servers_ui.rs, login_flow.rs (f032921f). Fixed phantom e2e mock 100-continue + POST body read (f30b004e, closing 6k393). |
+
+Build: **passed** — `cargo check --workspace` clean. Tests: **1 failure** — `phantom::init_callback_flow phantom_agent_init_and_checkin_stay_ctr_synchronised` times out with `Elapsed(())` after 79s (filed red-cell-c2-9lbtw). Clippy: **passed** — zero warnings.
 
 ### QA Review — 2026-04-09 12:15 — efb35120..41ea1eca
 

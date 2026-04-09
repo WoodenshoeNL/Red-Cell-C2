@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1243 | 255 | 82 |
+| Tasks closed | 1245 | 255 | 82 |
 | Bugs filed against | 235 | 49 | 13 |
 | Bug rate (bugs/task) | 0.19 | 0.19 | 0.16 |
 | Quality score | 81% | 81% | 84% |
 
-*Bug rates: Claude 235/1243=0.1891→0.19, Codex 49/255=0.1922→0.19, Cursor 13/82=0.1585→0.16*
+*Bug rates: Claude 235/1245=0.1888→0.19, Codex 49/255=0.1922→0.19, Cursor 13/82=0.1585→0.16*
 
 ## Violation Breakdown
 
@@ -41,6 +41,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-09 03:45 — b390460e..dd7e9410
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 0 | Closed p5dgf (split database.rs tests into domain-specific files — 6 new files, 3091→66 lines in database.rs, shared helpers in database_common.rs). Closed bzqsv (extract toolchain.rs from payload_builder.rs — 319 lines, clean move with visibility adjustments, 13 unit tests moved). Both are pure mechanical refactors, no new logic. No unwrap/expect in production code. |
+| Codex | 0 | 0 | No activity this run. |
+| Cursor | 0 | 0 | No activity this run. |
+
+Build: **passed** — `cargo check --workspace` clean. Tests/clippy: **blocked** — Cargo build lock contention from concurrent dev agent (40+ cargo processes competing for lock).
 
 ### QA Review — 2026-04-09 00:45 — 80692910..b390460e
 

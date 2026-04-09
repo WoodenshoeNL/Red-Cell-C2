@@ -42,6 +42,16 @@ Each loop run updates the running totals and appends a review entry.
 
 <!-- QA and arch loops append entries below this line -->
 
+### QA Review — 2026-04-10 01:30 — a632b1f7..e09ec097
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | WIP commit e09ec097: made auth internals pub(crate) to fix test visibility after api/mod.rs split (red-cell-c2-94ykk). Reasonable approach — no violations found. |
+| Codex | 0 | 0 | No activity this run. |
+| Cursor | 0 | 0 | No activity this run. |
+
+Build: **passed** — `cargo check --workspace` clean. Tests: **blocked** — concurrent dev agent holds cargo build lock; nextest and clippy could not compile. No new code-quality issues in the reviewed diff.
+
 ### Arch Review — 2026-04-09 21:42
 
 | Agent | Findings | Categories | Notes |

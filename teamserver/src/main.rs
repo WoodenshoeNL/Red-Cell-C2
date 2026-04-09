@@ -9,11 +9,11 @@ use clap::{Parser, Subcommand};
 use red_cell::{
     AgentLivenessMonitor, AgentRegistry, ApiRuntime, AuditWebhookNotifier, AuthService,
     DEFAULT_BACKUP_INTERVAL_SECS, DEFAULT_DEGRADED_THRESHOLD, DEFAULT_MAX_REGISTERED_AGENTS,
-    DEFAULT_QUERY_TIMEOUT_SECS, DEFAULT_RECOVERY_PROBE_SECS, DEFAULT_WRITE_QUEUE_CAPACITY,
-    Database, DatabaseBackupScheduler, DatabaseHealthMonitor, DbMasterKey, EventBus,
-    ListenerManager, ListenerManagerError, LoginRateLimiter, NormalizedMakeService,
-    OperatorConnectionManager, PayloadBuilderService, PluginRuntime, SocketRelayManager,
-    TeamserverState, WriteQueue, build_router, spawn_agent_liveness_monitor,
+    DEFAULT_PROBE_SECS, DEFAULT_QUERY_TIMEOUT_SECS, DEFAULT_WRITE_QUEUE_CAPACITY, Database,
+    DatabaseBackupScheduler, DatabaseHealthMonitor, DbMasterKey, EventBus, ListenerManager,
+    ListenerManagerError, LoginRateLimiter, NormalizedMakeService, OperatorConnectionManager,
+    PayloadBuilderService, PluginRuntime, SocketRelayManager, TeamserverState, WriteQueue,
+    build_router, spawn_agent_liveness_monitor,
 };
 use red_cell_common::config::{Profile, ProfileValidationError};
 use red_cell_common::tls::{
@@ -113,16 +113,15 @@ async fn main() -> Result<()> {
         );
         let threshold =
             db_cfg.and_then(|c| c.degraded_threshold).unwrap_or(DEFAULT_DEGRADED_THRESHOLD);
-        let recovery_probe = Duration::from_secs(
-            db_cfg.and_then(|c| c.recovery_probe_secs).unwrap_or(DEFAULT_RECOVERY_PROBE_SECS),
-        );
-        info!(?timeout, threshold, ?recovery_probe, "starting database health monitor");
+        let probe_interval =
+            Duration::from_secs(db_cfg.and_then(|c| c.probe_secs).unwrap_or(DEFAULT_PROBE_SECS));
+        info!(?timeout, threshold, ?probe_interval, "starting database health monitor");
         DatabaseHealthMonitor::spawn_with_write_queue(
             database.clone(),
             events.clone(),
             timeout,
             threshold,
-            recovery_probe,
+            probe_interval,
             Some(write_queue.clone()),
         )
     };

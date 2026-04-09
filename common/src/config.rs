@@ -486,10 +486,10 @@ pub struct DatabaseConfig {
     /// degraded mode and alerts connected operators.  Defaults to 3.
     #[serde(rename = "DegradedThreshold", default)]
     pub degraded_threshold: Option<u32>,
-    /// How often the health-monitor probes the database for recovery while in
-    /// degraded mode, in seconds.  Defaults to 10 seconds.
-    #[serde(rename = "RecoveryProbeSecs", default)]
-    pub recovery_probe_secs: Option<u64>,
+    /// Interval between database health-monitor probe cycles (both healthy and
+    /// degraded states), in seconds.  Defaults to 10 seconds.
+    #[serde(rename = "ProbeSecs", default)]
+    pub probe_secs: Option<u64>,
     /// Directory to store automated database snapshots.
     /// When absent, automated backups are disabled.
     #[serde(rename = "BackupDir", default)]

@@ -21,8 +21,8 @@ use crate::{Database, EventBus};
 /// Default number of consecutive probe failures before entering degraded mode.
 pub const DEFAULT_DEGRADED_THRESHOLD: u32 = 3;
 
-/// Default interval between recovery probes while in degraded mode, in seconds.
-pub const DEFAULT_RECOVERY_PROBE_SECS: u64 = 10;
+/// Default interval between health-monitor probe cycles (all states), in seconds.
+pub const DEFAULT_PROBE_SECS: u64 = 10;
 
 /// Default single-probe timeout, in seconds.
 pub const DEFAULT_QUERY_TIMEOUT_SECS: u64 = 5;
@@ -79,21 +79,21 @@ impl DatabaseHealthMonitor {
     ///
     /// * `probe_timeout`   — maximum time to wait for each probe query.
     /// * `threshold`       — consecutive failures before emitting `DatabaseDegraded`.
-    /// * `recovery_probe`  — interval between probes while in degraded mode.
+    /// * `probe_interval`  — interval between all probe cycles (healthy and degraded).
     /// * `write_queue`     — optional write queue to flush on recovery.
     pub fn spawn(
         database: Database,
         events: EventBus,
         probe_timeout: Duration,
         threshold: u32,
-        recovery_probe: Duration,
+        probe_interval: Duration,
     ) -> Self {
         Self::spawn_with_write_queue(
             database,
             events,
             probe_timeout,
             threshold,
-            recovery_probe,
+            probe_interval,
             None,
         )
     }
@@ -107,7 +107,7 @@ impl DatabaseHealthMonitor {
         events: EventBus,
         probe_timeout: Duration,
         threshold: u32,
-        recovery_probe: Duration,
+        probe_interval: Duration,
         write_queue: Option<WriteQueue>,
     ) -> Self {
         let state = DatabaseHealthState::new();
@@ -118,7 +118,7 @@ impl DatabaseHealthMonitor {
             events,
             probe_timeout,
             threshold,
-            recovery_probe,
+            probe_interval,
             state_clone,
             write_queue,
         ));
@@ -153,15 +153,15 @@ async fn run_health_monitor(
     events: EventBus,
     probe_timeout: Duration,
     threshold: u32,
-    recovery_probe: Duration,
+    probe_interval: Duration,
     state: DatabaseHealthState,
     write_queue: Option<WriteQueue>,
 ) {
-    // While healthy, probe at the recovery_probe interval (same interval is used for
-    // both directions — cheap and predictable). We start with a healthy state and probe
-    // continuously so that we can detect degradation in a timely fashion.
+    // Same interval is used for both healthy and degraded states — cheap and predictable.
+    // We start with a healthy state and probe continuously so that we can detect
+    // degradation in a timely fashion.
     loop {
-        tokio::time::sleep(recovery_probe).await;
+        tokio::time::sleep(probe_interval).await;
 
         let ok = database.probe(probe_timeout).await;
 
@@ -242,7 +242,7 @@ mod tests {
     use red_cell_common::operator::OperatorMessage;
 
     use super::{
-        DEFAULT_DEGRADED_THRESHOLD, DEFAULT_QUERY_TIMEOUT_SECS, DEFAULT_RECOVERY_PROBE_SECS,
+        DEFAULT_DEGRADED_THRESHOLD, DEFAULT_PROBE_SECS, DEFAULT_QUERY_TIMEOUT_SECS,
         DatabaseHealthMonitor,
     };
     use crate::database::write_queue::{DeferredWrite, WriteQueue};
@@ -254,13 +254,13 @@ mod tests {
     #[test]
     fn defaults_are_non_zero() {
         assert!(DEFAULT_DEGRADED_THRESHOLD > 0);
-        assert!(DEFAULT_RECOVERY_PROBE_SECS > 0);
+        assert!(DEFAULT_PROBE_SECS > 0);
         assert!(DEFAULT_QUERY_TIMEOUT_SECS > 0);
     }
 
     #[test]
     fn default_threshold_fits_in_u32() {
-        let _ = Duration::from_secs(DEFAULT_RECOVERY_PROBE_SECS);
+        let _ = Duration::from_secs(DEFAULT_PROBE_SECS);
         let _ = Duration::from_secs(DEFAULT_QUERY_TIMEOUT_SECS);
         assert!(DEFAULT_DEGRADED_THRESHOLD <= u32::MAX);
     }

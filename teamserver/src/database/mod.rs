@@ -29,7 +29,7 @@ pub use backup::{DEFAULT_BACKUP_INTERVAL_SECS, DatabaseBackupScheduler};
 pub use crypto::DbMasterKey;
 pub use error::TeamserverError;
 pub use health::{
-    DEFAULT_DEGRADED_THRESHOLD, DEFAULT_QUERY_TIMEOUT_SECS, DEFAULT_RECOVERY_PROBE_SECS,
+    DEFAULT_DEGRADED_THRESHOLD, DEFAULT_PROBE_SECS, DEFAULT_QUERY_TIMEOUT_SECS,
     DatabaseHealthMonitor, DatabaseHealthState,
 };
 pub use jobs::{

@@ -25,8 +25,8 @@ Each loop run updates the running totals and appends a review entry.
 | Clippy warnings | 14 | 0 | 1 |
 | Protocol errors | 30 | 32 | 4 |
 | Security issues | 62 | 39 | 0 |
-| Architecture drift | 38 | 25 | 1 |
-| Memory / resource leaks | 13 | 11 | 1 |
+| Architecture drift | 38 | 25 | 2 |
+| Memory / resource leaks | 14 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 10 | 0 |
 | Test infrastructure / flakiness | 54 | 6 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
@@ -41,6 +41,18 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-04-09 11:50
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 1 | memory / resource leaks | Filed `red-cell-c2-d4eag`: `/api/v1/ws` session wrapper reads REST responses with `to_bytes(..., usize::MAX)` and base64-encodes octet-stream bodies, creating an unbounded RAM path for `loot.download` / `payload.download` over the WebSocket session bridge. |
+| Codex | 0 | — | No new directly attributable Codex defects found in the reviewed surfaces. |
+| Cursor | 1 | architecture drift | Filed `red-cell-c2-f14zw`: `client-cli` session mode sends locally generated unknown-command failures to stdout, diverging from the CLI-wide stdout/stderr contract in `AGENTS.md`. |
+
+Overall codebase health: drifting
+Biggest blindspot: the `/api/v1/ws` session bridge can still be used to materialize arbitrarily large REST download responses in memory because it wraps them into one JSON WebSocket frame with no size cap.
+Additional tracker work this run: filed oversized-file refactor tasks `red-cell-c2-mw1q7`, `red-cell-c2-94ykk`, `red-cell-c2-vu8io`, `red-cell-c2-um074`, `red-cell-c2-we4rj`, `red-cell-c2-nwcf2`, `red-cell-c2-epwsr`, `red-cell-c2-jh2xx`, `red-cell-c2-k6wy8`, and `red-cell-c2-aaczu` for mixed-ownership context-budget debt not cleanly attributable to a single agent.
 
 ### QA Review — 2026-04-09 09:00 — 992a9c31..efb35120
 

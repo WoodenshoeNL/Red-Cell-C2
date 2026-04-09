@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1246 | 255 | 82 |
-| Bugs filed against | 235 | 49 | 13 |
+| Tasks closed | 1248 | 255 | 82 |
+| Bugs filed against | 236 | 49 | 13 |
 | Bug rate (bugs/task) | 0.19 | 0.19 | 0.16 |
 | Quality score | 81% | 81% | 84% |
 
-*Bug rates: Claude 235/1246=0.1886→0.19, Codex 49/255=0.1922→0.19, Cursor 13/82=0.1585→0.16*
+*Bug rates: Claude 236/1248=0.1891→0.19, Codex 49/255=0.1922→0.19, Cursor 13/82=0.1585→0.16*
 
 ## Violation Breakdown
 
@@ -28,7 +28,7 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 38 | 25 | 1 |
 | Memory / resource leaks | 13 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 10 | 0 |
-| Test infrastructure / flakiness | 53 | 6 | 1 |
+| Test infrastructure / flakiness | 54 | 6 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 4 | 5 | 0 |
 | Correctness / pagination | 66 | 9 | 1 |
@@ -41,6 +41,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-09 09:00 — 992a9c31..efb35120
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 1 | Closed vrx84 (HeaderConfig import already removed) and jtpjr (lifetime fix already applied). Refactored websocket/command_enc.rs extraction (96eaf3cd). Fixed crypto API to accept borrowed slices (eed7764f). Claimed xtst9. |
+| Codex | 0 | 0 | No activity this run. |
+| Cursor | 0 | 0 | No activity this run. |
+
+Build: **passed** — `cargo check --workspace` clean. Tests: **1 failure** — `phantom::scenario_6_network_sessions` panics on short init payload (pre-existing, filed red-cell-c2-6k393). Clippy: **passed** — zero warnings.
 
 ### QA Review — 2026-04-09 06:30 — dd7e9410..992a9c31
 

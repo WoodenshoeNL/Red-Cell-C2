@@ -2,6 +2,7 @@ mod common;
 
 use std::time::Duration;
 
+use red_cell::ListenerManager;
 use red_cell_common::HttpListenerConfig;
 use red_cell_common::config::Profile;
 use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, decrypt_agent_data_at_offset};
@@ -40,6 +41,59 @@ async fn spawn_server_with_http_listener(
     listener_name: &str,
 ) -> Result<DemonTestHarness, Box<dyn std::error::Error>> {
     let server = common::spawn_test_server(demon_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
+    let client = reqwest::Client::new();
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
+    common::login(&mut socket).await?;
+
+    server
+        .listeners
+        .create(red_cell_common::ListenerConfig::from(HttpListenerConfig {
+            name: listener_name.to_owned(),
+            kill_date: None,
+            working_hours: None,
+            hosts: vec!["127.0.0.1".to_owned()],
+            host_bind: "127.0.0.1".to_owned(),
+            host_rotation: "round-robin".to_owned(),
+            port_bind: listener_port,
+            port_conn: Some(listener_port),
+            method: Some("POST".to_owned()),
+            behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
+            user_agent: None,
+            headers: Vec::new(),
+            uris: vec!["/".to_owned()],
+            host_header: None,
+            secure: false,
+            cert: None,
+            response: None,
+            proxy: None,
+            ja3_randomize: None,
+            doh_domain: None,
+            doh_provider: None,
+        }))
+        .await?;
+    drop(listener_guard);
+    server.listeners.start(listener_name).await?;
+    common::wait_for_listener(listener_port).await?;
+
+    Ok(DemonTestHarness {
+        server,
+        listener_port,
+        listener_name: listener_name.to_owned(),
+        client,
+        socket,
+    })
+}
+
+/// Like [`spawn_server_with_http_listener`], but applies `customize` to the
+/// [`ListenerManager`] before the listener is created.
+async fn spawn_server_with_http_listener_custom(
+    listener_name: &str,
+    customize: impl FnOnce(ListenerManager) -> ListenerManager,
+) -> Result<DemonTestHarness, Box<dyn std::error::Error>> {
+    let server = common::spawn_test_server_custom(demon_test_profile(), customize).await?;
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
     let (raw_socket_, _) = connect_async(server.ws_url()).await?;
@@ -1567,7 +1621,10 @@ async fn reconnect_probe_interleaved_with_callbacks_preserves_sync()
 #[tokio::test]
 async fn rapid_reconnect_callback_cycles_no_counter_drift() -> Result<(), Box<dyn std::error::Error>>
 {
-    let mut harness = spawn_server_with_http_listener("edge-http-rapid-cycles").await?;
+    let mut harness = spawn_server_with_http_listener_custom("edge-http-rapid-cycles", |lm| {
+        lm.with_reconnect_probe_limit(100)
+    })
+    .await?;
     let listener_port = harness.listener_port;
 
     let agent_id = 0xCAFE_0003_u32;

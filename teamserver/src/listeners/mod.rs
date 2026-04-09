@@ -142,15 +142,28 @@ impl DemonInitRateLimiter {
 /// still throttled.  Exceeding the limit results in an HTTP 429 response, making
 /// the DoS signal visible to operators while avoiding the SQLite write that a
 /// successful probe would trigger.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub(crate) struct ReconnectProbeRateLimiter {
     windows: Arc<Mutex<HashMap<u32, AttemptWindow>>>,
+    max_probes: u32,
+}
+
+impl Default for ReconnectProbeRateLimiter {
+    fn default() -> Self {
+        Self { windows: Arc::default(), max_probes: MAX_RECONNECT_PROBES_PER_AGENT }
+    }
 }
 
 impl ReconnectProbeRateLimiter {
     #[must_use]
     fn new() -> Self {
         Self::default()
+    }
+
+    /// Create a rate limiter with a custom per-agent probe limit.
+    #[must_use]
+    fn with_max_probes(max_probes: u32) -> Self {
+        Self { max_probes, ..Self::default() }
     }
 
     async fn allow(&self, agent_id: u32) -> bool {
@@ -168,7 +181,7 @@ impl ReconnectProbeRateLimiter {
             window.window_start = now;
         }
 
-        if window.attempts >= MAX_RECONNECT_PROBES_PER_AGENT {
+        if window.attempts >= self.max_probes {
             return false;
         }
 
@@ -768,6 +781,16 @@ impl ListenerManager {
     #[must_use]
     pub fn with_demon_allow_legacy_ctr(mut self, allow: bool) -> Self {
         self.demon_allow_legacy_ctr = allow;
+        self
+    }
+
+    /// Override the maximum number of reconnect probes allowed per agent per window.
+    ///
+    /// The default is [`MAX_RECONNECT_PROBES_PER_AGENT`] (10).  Integration tests that
+    /// send many rapid reconnect probes can raise this to avoid hitting the rate limiter.
+    #[must_use]
+    pub fn with_reconnect_probe_limit(mut self, max_probes: u32) -> Self {
+        self.reconnect_probe_rate_limiter = ReconnectProbeRateLimiter::with_max_probes(max_probes);
         self
     }
 

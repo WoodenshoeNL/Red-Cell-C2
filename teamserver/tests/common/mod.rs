@@ -157,18 +157,30 @@ impl TestServer {
 /// Bind a free TCP port, start a teamserver from `profile`, and return a
 /// [`TestServer`] with the socket address and shared handles.
 pub async fn spawn_test_server(profile: Profile) -> Result<TestServer, Box<dyn std::error::Error>> {
+    spawn_test_server_custom(profile, |lm| lm).await
+}
+
+/// Like [`spawn_test_server`], but applies `customize` to the [`ListenerManager`]
+/// before it is cloned into the router state.  Useful for overriding rate-limit
+/// thresholds in integration tests.
+pub async fn spawn_test_server_custom(
+    profile: Profile,
+    customize: impl FnOnce(ListenerManager) -> ListenerManager,
+) -> Result<TestServer, Box<dyn std::error::Error>> {
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let listeners = ListenerManager::new(
-        database.clone(),
-        registry.clone(),
-        events.clone(),
-        sockets.clone(),
-        None,
-    )
-    .with_demon_allow_legacy_ctr(profile.demon.allow_legacy_ctr);
+    let listeners = customize(
+        ListenerManager::new(
+            database.clone(),
+            registry.clone(),
+            events.clone(),
+            sockets.clone(),
+            None,
+        )
+        .with_demon_allow_legacy_ctr(profile.demon.allow_legacy_ctr),
+    );
     let webhooks = AuditWebhookNotifier::from_profile(&profile);
     let rate_limiter = LoginRateLimiter::new();
     let state = TeamserverState {

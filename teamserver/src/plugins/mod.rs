@@ -4223,4 +4223,132 @@ havoc.RegisterCommand("scan", "second scan", run_scan)
         }
         Ok(())
     }
+
+    // ── Health-tracking / auto-disable unit tests ──────────────────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn health_summary_empty_for_fresh_runtime() -> Result<(), Box<dyn std::error::Error>> {
+        let (_db, _reg, _ev, _sock, runtime) = runtime_fixture("health-summary-empty").await?;
+        let summary = runtime.plugin_health_summary();
+        assert!(summary.is_empty(), "expected empty summary, got {summary:?}");
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn record_failure_increments_count_without_disabling()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_db, _reg, _ev, _sock, runtime) = runtime_fixture("health-single-failure").await?;
+        let disabled = runtime.record_callback_failure("test_plugin");
+        assert!(!disabled, "one failure should not disable the plugin");
+        assert!(!runtime.is_plugin_disabled("test_plugin"));
+
+        let counts = runtime.inner.failure_counts.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(*counts.get("test_plugin").unwrap_or(&0), 1);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn plugin_auto_disabled_after_max_consecutive_failures()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_db, _reg, _ev, _sock, runtime) = runtime_fixture("health-auto-disable").await?;
+
+        // Record failures up to threshold - 1: should not disable.
+        for i in 1..DEFAULT_MAX_CONSECUTIVE_FAILURES {
+            let disabled = runtime.record_callback_failure("fragile_plugin");
+            assert!(
+                !disabled,
+                "failure #{i} of {DEFAULT_MAX_CONSECUTIVE_FAILURES} should not disable",
+            );
+        }
+        assert!(!runtime.is_plugin_disabled("fragile_plugin"));
+
+        // The threshold-th failure should disable.
+        let disabled = runtime.record_callback_failure("fragile_plugin");
+        assert!(disabled, "failure at threshold should disable the plugin");
+        assert!(runtime.is_plugin_disabled("fragile_plugin"));
+
+        // Further failures should not return `true` again (already disabled).
+        let disabled_again = runtime.record_callback_failure("fragile_plugin");
+        assert!(!disabled_again, "already-disabled plugin should not re-trigger");
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn success_resets_failure_count_and_re_enables() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (_db, _reg, _ev, _sock, runtime) = runtime_fixture("health-success-reset").await?;
+
+        // Accumulate some failures (but not enough to disable).
+        for _ in 0..3 {
+            runtime.record_callback_failure("recovering_plugin");
+        }
+        {
+            let counts = runtime.inner.failure_counts.lock().unwrap_or_else(|e| e.into_inner());
+            assert_eq!(*counts.get("recovering_plugin").unwrap_or(&0), 3);
+        }
+
+        // A success should reset the count.
+        runtime.record_callback_success("recovering_plugin");
+        {
+            let counts = runtime.inner.failure_counts.lock().unwrap_or_else(|e| e.into_inner());
+            assert!(
+                !counts.contains_key("recovering_plugin"),
+                "success should remove the failure counter",
+            );
+        }
+        assert!(!runtime.is_plugin_disabled("recovering_plugin"));
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn health_summary_lists_plugins_with_callbacks_and_commands()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_db, _reg, _ev, _sock, runtime) = runtime_fixture("health-summary-list").await?;
+
+        // Insert fake callback entries directly into the inner state.
+        {
+            let mut callbacks = runtime.inner.callbacks.write().await;
+            callbacks.entry("agent_checkin").or_default().push(NamedCallback {
+                plugin_name: "plugin_alpha".to_owned(),
+                callback: Arc::new(pyo3::Python::with_gil(|py| py.None().into())),
+            });
+        }
+        {
+            let mut commands = runtime.inner.commands.write().await;
+            commands.insert(
+                "my_cmd".to_owned(),
+                RegisteredCommand {
+                    description: "test command".to_owned(),
+                    callback: Arc::new(pyo3::Python::with_gil(|py| py.None().into())),
+                    plugin_name: "plugin_beta".to_owned(),
+                },
+            );
+        }
+
+        // Record a failure for plugin_alpha so we can verify the counts appear.
+        runtime.record_callback_failure("plugin_alpha");
+
+        let summary = runtime.plugin_health_summary();
+        assert_eq!(summary.len(), 2, "expected 2 plugins in summary, got {summary:?}");
+
+        let alpha = summary.iter().find(|e| e.plugin_name == "plugin_alpha");
+        let beta = summary.iter().find(|e| e.plugin_name == "plugin_beta");
+
+        let alpha = alpha.expect("plugin_alpha missing from summary");
+        assert_eq!(alpha.consecutive_failures, 1);
+        assert!(!alpha.disabled);
+
+        let beta = beta.expect("plugin_beta missing from summary");
+        assert_eq!(beta.consecutive_failures, 0);
+        assert!(!beta.disabled);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn is_plugin_disabled_returns_false_for_unknown_plugin()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_db, _reg, _ev, _sock, runtime) = runtime_fixture("health-unknown-plugin").await?;
+        assert!(!runtime.is_plugin_disabled("nonexistent_plugin"));
+        Ok(())
+    }
 }

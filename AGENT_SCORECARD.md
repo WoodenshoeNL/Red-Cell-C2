@@ -6565,3 +6565,13 @@ Build: `cargo check --workspace` **passed** (8m 51s). Clippy: **passed** (0 warn
 | Cursor | 0 | 0 | No activity this run. |
 
 Build: `cargo check --workspace` **passed**. Clippy: **passed** (0 warnings). Tests: 790 passed, 1 failed (pre-existing flaky test `scheduler_creates_snapshot_on_interval`), 4522 skipped due to --max-fail. 1 bug filed (test flakiness).
+
+### QA Review — 2026-04-10 — a632b1f7..e09ec097
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 1 | WIP on red-cell-c2-94ykk (api/mod.rs split) — commit e09ec097 makes auth internals `pub(crate)` to fix test visibility after module split. Filed red-cell-c2-uh4s3 for pre-existing flaky test `initialize_exposes_agent_and_listener_accessors` (from b26cc544). |
+| Codex | 0 | 0 | No activity this run. |
+| Cursor | 0 | 0 | No activity this run. |
+
+Build: `cargo check` **passed**, `cargo clippy` **passed** (0 warnings). Tests: 2373 passed, 1 failed (pre-existing flaky `initialize_exposes_agent_and_listener_accessors` — test isolation issue, bug filed as red-cell-c2-uh4s3).

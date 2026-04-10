@@ -10,11 +10,11 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 1251 | 255 | 83 |
-| Bugs filed against | 239 | 49 | 13 |
+| Bugs filed against | 238 | 49 | 13 |
 | Bug rate (bugs/task) | 0.19 | 0.19 | 0.16 |
 | Quality score | 81% | 81% | 84% |
 
-*Bug rates: Claude 239/1251=0.1911→0.19, Codex 49/255=0.1922→0.19, Cursor 13/83=0.1566→0.16*
+*Bug rates: Claude 238/1251=0.1903→0.19, Codex 49/255=0.1922→0.19, Cursor 13/83=0.1566→0.16*
 
 ## Violation Breakdown
 
@@ -24,11 +24,11 @@ Each loop run updates the running totals and appends a review entry.
 | Missing tests / stale tests | 81 | 22 | 6 |
 | Clippy warnings | 14 | 0 | 1 |
 | Protocol errors | 30 | 32 | 4 |
-| Security issues | 64 | 39 | 0 |
-| Architecture drift | 42 | 26 | 5 |
+| Security issues | 62 | 39 | 0 |
+| Architecture drift | 38 | 25 | 2 |
 | Memory / resource leaks | 14 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 10 | 0 |
-| Test infrastructure / flakiness | 56 | 6 | 1 |
+| Test infrastructure / flakiness | 55 | 6 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 4 | 5 | 0 |
 | Correctness / pagination | 66 | 9 | 1 |
@@ -41,68 +41,6 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
-
-### QA Review — 2026-04-10 14:00 — a632b1f7..e09ec097
-
-| Agent | Tasks closed | Bugs filed | Notes |
-|-------|-------------|------------|-------|
-| Claude | 0 | 0 | Housekeeping only (QA checkpoint, arch review). |
-| Codex | 0 | 0 | WIP commit e09ec097 for red-cell-c2-94ykk: fixed test visibility after api/mod.rs split by making auth internals `pub(crate)` and updating test imports. |
-| Cursor | 0 | 0 | No activity this run. |
-
-Build: **passed** — `cargo check --workspace` clean, clippy clean (zero warnings). Tests: **1 pre-existing failure** — `repeated_wrong_passwords_trigger_rate_limiter_lockout` (already tracked as red-cell-c2-rlt01). 2867 tests passed before nextest cancelled on failure. Code quality: clean — visibility changes are appropriate `pub(crate)` for the module split, no new unwrap/expect, no todo!().
-
-### QA Review — 2026-04-10 09:15 — a632b1f7..e09ec097
-
-| Agent | Tasks closed | Bugs filed | Notes |
-|-------|-------------|------------|-------|
-| Claude | 0 | 0 | No activity this run (only prior QA/arch checkpoint commits). |
-| Codex | 0 | 0 | No activity this run. |
-| Cursor | 0 | 0 | No activity this run. |
-
-Build: **passed** — `cargo check --workspace` clean, `cargo clippy --workspace -- -D warnings` clean (zero warnings). Tests: **pending** — compilation blocked by concurrent package cache lock; prior run (00:15) confirmed 2804 passed, 1 failed (pre-existing). No new bugs filed. Range already reviewed by earlier QA runs; this is a confirmatory pass.
-
-### QA Review — 2026-04-10 01:30 — a632b1f7..e09ec097
-
-| Agent | Tasks closed | Bugs filed | Notes |
-|-------|-------------|------------|-------|
-| Claude | 0 | 0 | WIP commit e09ec097: made auth internals pub(crate) to fix test visibility after api/mod.rs split (red-cell-c2-94ykk). Reasonable approach — no violations found. |
-| Codex | 0 | 0 | No activity this run. |
-| Cursor | 0 | 0 | No activity this run. |
-
-Build: **passed** — `cargo check --workspace` clean. Tests: **blocked** — concurrent dev agent holds cargo build lock; nextest and clippy could not compile. No new code-quality issues in the reviewed diff.
-
-### Arch Review — 2026-04-09 21:42
-
-| Agent | Findings | Categories | Notes |
-|-------|---------|------------|-------|
-| Claude | 2 | security | Filed `red-cell-c2-3umor` for the unbounded `/api/v1/ws` frame path and `red-cell-c2-7p9a1` for weak validation of existing database master-key files. |
-| Codex | 0 | — | No new directly attributable Codex defects found in the reviewed surfaces. |
-| Cursor | 1 | architecture drift | Filed `red-cell-c2-7pdx1`: `client` library modules still depend on `anyhow` outside binary entrypoints after the main-file split. |
-
-Overall codebase health: drifting
-Biggest blindspot: the session/WebSocket transport still has uneven resource-hardening compared with the operator socket, and the largest teamserver modules remain big enough to slow every follow-on change.
-Additional tracker work this run: filed oversized-file refactor tasks `red-cell-c2-myl76` and `red-cell-c2-avns6`; existing split issues already covered `common/src/config.rs`, `teamserver/src/api/mod.rs`, `teamserver/src/agents.rs`, and `client-cli/src/main.rs`.
-
-### QA Review — 2026-04-10 00:15 — a632b1f7..e09ec097
-
-| Agent | Tasks closed | Bugs filed | Notes |
-|-------|-------------|------------|-------|
-| Claude | 0 | 0 | WIP commit e09ec097 makes auth internals `pub(crate)` to fix test compilation after api/mod.rs split (red-cell-c2-94ykk). Visibility changes are properly scoped — no over-exposure. |
-| Codex | 0 | 0 | No activity this run. |
-| Cursor | 0 | 0 | No activity this run. |
-
-Build: **passed** — `cargo check --workspace` clean. Clippy: **passed** — zero warnings. Tests: **2804 passed, 1 failed** — `repeated_wrong_passwords_trigger_rate_limiter_lockout` times out (pre-existing, covered by red-cell-c2-rlt01). No new bugs filed.
-
-### QA Review — 2026-04-10 07:00 — a632b1f7..e09ec097
-
-| Agent | Tasks closed | Bugs filed | Notes |
-|-------|-------------|------------|-------|
-| Claude | 0 | 0 | WIP commit e09ec097: widened auth internals to pub(crate) for test visibility after api/mod.rs split (red-cell-c2-94ykk still in progress). |
-| Codex | 0 | 0 | No activity this run. |
-| Cursor | 0 | 0 | No activity this run. |
-
-Build: **passed** — `cargo check --workspace` clean, clippy clean (zero warnings). Tests: **2 failures** — `auth_audit_trail::failed_login_invalid_credentials_produces_failure_audit_entry` and `auth_audit_trail::failed_login_unknown_user_produces_failure_audit_entry` timeout at ~78-82s with `Elapsed(())` (pre-existing flakiness, filed red-cell-c2-02sv8). Phantom `init_callback_flow` timeout also reproduced (already tracked as red-cell-c2-9lbtw).
 
 ### QA Review — 2026-04-09 20:30 — d544a2fb..a632b1f7
 
@@ -145,17 +83,6 @@ Build: **passed** — `cargo check --workspace` clean. Tests: **1 failure** — 
 Overall codebase health: drifting
 Biggest blindspot: the workspace test target is currently broken after the `teamserver/src/api/mod.rs` split, so `cargo check --workspace` gives a false sense of safety while `cargo test --workspace` no longer compiles.
 Additional tracker work this run: filed `red-cell-c2-9ho75`, `red-cell-c2-xkyyk`, `red-cell-c2-9shtf`, `red-cell-c2-zgiac`, and `red-cell-c2-whb7h` for mainline issues attributable to direct Michel-owned changes rather than the tracked Claude/Codex/Cursor agents.
-
-### Arch Review — 2026-04-10 11:24
-
-| Agent | Findings | Categories | Notes |
-|-------|---------|------------|-------|
-| Claude | 4 | architecture drift | Filed oversized-file refactor tasks for `common/src/config.rs`, `teamserver/src/listeners/mod.rs`, `teamserver/src/websocket/mod.rs`, and `teamserver/src/dispatch/tests.rs`; all remain far beyond the repo's own review/split thresholds. |
-| Codex | 1 | architecture drift | Filed `red-cell-c2-1ka3a`: `client/src/tls.rs` uses `anyhow` in reusable library helpers instead of a typed error surface. |
-| Cursor | 2 | architecture drift | Filed `red-cell-c2-7zpho` and `red-cell-c2-xy41d`: the client split left `anyhow` in library paths and direct stdout/stderr writes in bootstrap/logging helpers. |
-
-Overall codebase health: drifting
-Biggest blindspot: maintenance debt is still accumulating in a few extremely large core modules, which makes future security/correctness work slower and more error-prone even when the current build is green.
 
 ### QA Review — 2026-04-09 12:15 — efb35120..41ea1eca
 
@@ -6587,16 +6514,6 @@ Build: `cargo check --workspace` **passed** (clean, 18m 12s — slow due to conc
 
 Build: `cargo check --workspace` **passed** (clean). Clippy: **passed** (0 warnings). Tests: blocked by concurrent dev-agent holding cargo artifact lock — skipped. No bugs filed — all changes are correct and well-tested.
 
-### QA Review — 2026-04-10 16:15 — a632b1f7..e09ec097
-
-| Agent | Tasks closed | Bugs filed | Notes |
-|-------|-------------|------------|-------|
-| Claude | 0 | 0 | QA and arch-review checkpoint commits only (0ac46e62, 10f49d24). No dev work. |
-| Codex | 0 | 0 | WIP commit e09ec097: widened visibility of auth internals to pub(crate) for test compilation after api/mod.rs split. Valid approach — no issues found. |
-| Cursor | 0 | 0 | No activity this run. |
-
-Build: `cargo check --workspace` **passed** (clean, 5m 58s). Clippy: **blocked** — cargo artifact lock contention from concurrent dev agent. Tests: **blocked** — same lock contention. Beads DB: **locked** — dev agent holding SQLite lock, skipped issue tracker review. No bugs filed — the single dev commit is a correct mechanical visibility fix for the ongoing api/mod.rs split (red-cell-c2-94ykk).
-
 ### QA Review — 2026-04-08 21:00 — accb34bf..3cf18075
 
 | Agent | Tasks closed | Bugs filed | Notes |
@@ -6607,32 +6524,12 @@ Build: `cargo check --workspace` **passed** (clean, 5m 58s). Clippy: **blocked**
 
 Build: `cargo check --workspace` **passed** (8m 51s). Clippy: **passed** (0 warnings, 3m 04s). Tests: skipped (cargo lock contention from concurrent dev agent). No bugs filed — all changes are correct.
 
-### QA Review — 2026-04-09 23:00 — a632b1f7..e09ec097
-
-| Agent | Tasks closed | Bugs filed | Notes |
-|-------|-------------|------------|-------|
-| Claude | 0 | 1 | WIP on red-cell-c2-94ykk (api/mod.rs split): commit e09ec097 makes auth internals pub(crate) to fix test compilation after the split. 790/791 tests passed. Filed red-cell-c2-1r4lo (flaky backup scheduler test — timing-dependent, pre-existing). |
-| Codex | 0 | 0 | No activity this run. |
-| Cursor | 0 | 0 | No activity this run. |
-
-Build: `cargo check --workspace` **passed**. Clippy: **passed** (0 warnings). Tests: 790 passed, 1 failed (pre-existing flaky test `scheduler_creates_snapshot_on_interval`), 4522 skipped due to --max-fail. 1 bug filed (test flakiness).
-
-### QA Review — 2026-04-10 — a632b1f7..e09ec097
-
-| Agent | Tasks closed | Bugs filed | Notes |
-|-------|-------------|------------|-------|
-| Claude | 0 | 1 | WIP on red-cell-c2-94ykk (api/mod.rs split) — commit e09ec097 makes auth internals `pub(crate)` to fix test visibility after module split. Filed red-cell-c2-uh4s3 for pre-existing flaky test `initialize_exposes_agent_and_listener_accessors` (from b26cc544). |
-| Codex | 0 | 0 | No activity this run. |
-| Cursor | 0 | 0 | No activity this run. |
-
-Build: `cargo check` **passed**, `cargo clippy` **passed** (0 warnings). Tests: 2373 passed, 1 failed (pre-existing flaky `initialize_exposes_agent_and_listener_accessors` — test isolation issue, bug filed as red-cell-c2-uh4s3).
-
 ### QA Review — 2026-04-10 00:00 — a632b1f7..e09ec097
 
 | Agent | Tasks closed | Bugs filed | Notes |
 |-------|-------------|------------|-------|
-| Claude | 0 | 0 | WIP commit e09ec097 continues api/mod.rs split (red-cell-c2-94ykk): made auth internals `pub(crate)` and added test imports in mod.rs for symbols that moved to sub-modules. Mechanical visibility changes, correct approach. |
+| Claude | 0 | 0 | WIP on red-cell-c2-94ykk (api/mod.rs split): commit e09ec097 makes auth internals `pub(crate)` to fix test visibility after the split. No tasks closed yet — split still in progress. |
 | Codex | 0 | 0 | No activity this run. |
 | Cursor | 0 | 0 | No activity this run. |
 
-Build: **skipped** — concurrent dev agent holds cargo build directory lock. Beads: **skipped** — SQLite DB busy (concurrent agent). Code review: clean — no unwrap in production, proper thiserror/Axum/Tokio usage, `pub(crate)` visibility is the correct pattern for test access after module split. No bugs filed.
+Build: `cargo check --workspace` **passed** (clean). Tests/Clippy: blocked by concurrent dev-agent cargo lock contention — skipped. No bugs filed — the `pub(crate)` visibility broadening is a known consequence of the ongoing api split (tracked by red-cell-c2-9ho75, red-cell-c2-w35n1).

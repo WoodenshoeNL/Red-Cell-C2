@@ -24,8 +24,9 @@ Each loop run updates the running totals and appends a review entry.
 | Missing tests / stale tests | 81 | 22 | 6 |
 | Clippy warnings | 14 | 0 | 1 |
 | Protocol errors | 30 | 32 | 4 |
+<<<<<<< HEAD
 | Security issues | 64 | 39 | 0 |
-| Architecture drift | 38 | 25 | 3 |
+| Architecture drift | 42 | 26 | 5 |
 | Memory / resource leaks | 14 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 10 | 0 |
 | Test infrastructure / flakiness | 56 | 6 | 1 |
@@ -125,6 +126,17 @@ Build: **passed** — `cargo check --workspace` clean. Tests: **1 failure** — 
 Overall codebase health: drifting
 Biggest blindspot: the workspace test target is currently broken after the `teamserver/src/api/mod.rs` split, so `cargo check --workspace` gives a false sense of safety while `cargo test --workspace` no longer compiles.
 Additional tracker work this run: filed `red-cell-c2-9ho75`, `red-cell-c2-xkyyk`, `red-cell-c2-9shtf`, `red-cell-c2-zgiac`, and `red-cell-c2-whb7h` for mainline issues attributable to direct Michel-owned changes rather than the tracked Claude/Codex/Cursor agents.
+
+### Arch Review — 2026-04-10 11:24
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 4 | architecture drift | Filed oversized-file refactor tasks for `common/src/config.rs`, `teamserver/src/listeners/mod.rs`, `teamserver/src/websocket/mod.rs`, and `teamserver/src/dispatch/tests.rs`; all remain far beyond the repo's own review/split thresholds. |
+| Codex | 1 | architecture drift | Filed `red-cell-c2-1ka3a`: `client/src/tls.rs` uses `anyhow` in reusable library helpers instead of a typed error surface. |
+| Cursor | 2 | architecture drift | Filed `red-cell-c2-7zpho` and `red-cell-c2-xy41d`: the client split left `anyhow` in library paths and direct stdout/stderr writes in bootstrap/logging helpers. |
+
+Overall codebase health: drifting
+Biggest blindspot: maintenance debt is still accumulating in a few extremely large core modules, which makes future security/correctness work slower and more error-prone even when the current build is green.
 
 ### QA Review — 2026-04-09 12:15 — efb35120..41ea1eca
 

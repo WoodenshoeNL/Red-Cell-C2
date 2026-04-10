@@ -24,7 +24,6 @@ Each loop run updates the running totals and appends a review entry.
 | Missing tests / stale tests | 81 | 22 | 6 |
 | Clippy warnings | 14 | 0 | 1 |
 | Protocol errors | 30 | 32 | 4 |
-<<<<<<< HEAD
 | Security issues | 64 | 39 | 0 |
 | Architecture drift | 42 | 26 | 5 |
 | Memory / resource leaks | 14 | 11 | 1 |
@@ -42,6 +41,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-10 14:00 — a632b1f7..e09ec097
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | Housekeeping only (QA checkpoint, arch review). |
+| Codex | 0 | 0 | WIP commit e09ec097 for red-cell-c2-94ykk: fixed test visibility after api/mod.rs split by making auth internals `pub(crate)` and updating test imports. |
+| Cursor | 0 | 0 | No activity this run. |
+
+Build: **passed** — `cargo check --workspace` clean, clippy clean (zero warnings). Tests: **1 pre-existing failure** — `repeated_wrong_passwords_trigger_rate_limiter_lockout` (already tracked as red-cell-c2-rlt01). 2867 tests passed before nextest cancelled on failure. Code quality: clean — visibility changes are appropriate `pub(crate)` for the module split, no new unwrap/expect, no todo!().
 
 ### QA Review — 2026-04-10 09:15 — a632b1f7..e09ec097
 

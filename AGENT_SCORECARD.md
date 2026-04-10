@@ -94,6 +94,16 @@ Additional tracker work this run: filed oversized-file refactor tasks `red-cell-
 
 Build: **passed** — `cargo check --workspace` clean. Clippy: **passed** — zero warnings. Tests: **2804 passed, 1 failed** — `repeated_wrong_passwords_trigger_rate_limiter_lockout` times out (pre-existing, covered by red-cell-c2-rlt01). No new bugs filed.
 
+### QA Review — 2026-04-10 07:00 — a632b1f7..e09ec097
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | WIP commit e09ec097: widened auth internals to pub(crate) for test visibility after api/mod.rs split (red-cell-c2-94ykk still in progress). |
+| Codex | 0 | 0 | No activity this run. |
+| Cursor | 0 | 0 | No activity this run. |
+
+Build: **passed** — `cargo check --workspace` clean, clippy clean (zero warnings). Tests: **2 failures** — `auth_audit_trail::failed_login_invalid_credentials_produces_failure_audit_entry` and `auth_audit_trail::failed_login_unknown_user_produces_failure_audit_entry` timeout at ~78-82s with `Elapsed(())` (pre-existing flakiness, filed red-cell-c2-02sv8). Phantom `init_callback_flow` timeout also reproduced (already tracked as red-cell-c2-9lbtw).
+
 ### QA Review — 2026-04-09 20:30 — d544a2fb..a632b1f7
 
 | Agent | Tasks closed | Bugs filed | Notes |

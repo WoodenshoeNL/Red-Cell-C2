@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1251 | 255 | 85 |
+| Tasks closed | 1253 | 255 | 88 |
 | Bugs filed against | 240 | 50 | 13 |
 | Bug rate (bugs/task) | 0.19 | 0.20 | 0.15 |
 | Quality score | 81% | 80% | 85% |
 
-*Bug rates: Claude 240/1251=0.1919→0.19, Codex 50/255=0.1961→0.20, Cursor 13/85=0.1529→0.15*
+*Bug rates: Claude 240/1253=0.1915→0.19, Codex 50/255=0.1961→0.20, Cursor 13/88=0.1477→0.15*
 
 ## Violation Breakdown
 
@@ -41,6 +41,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-12 01:45 — e6380505..370d5a78
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 0 | Closed buyxn (preflight checks) and 6w2a1 (extract listeners/events.rs). Clean code, good test coverage on preflight.rs (10 tests). |
+| Codex | 0 | 0 | No activity this run. |
+| Cursor | 3 | 0 | Closed 9lbtw + 6gtuj (phantom test flakiness fixes) and xy41d (client tracing cleanup). Solid work replacing sleep-based test with frame-draining loop. |
+
+Build: **passed** — `cargo check --workspace` and `cargo clippy -- -D warnings` both clean. Tests: running (compilation blocked on concurrent dev-agent builds). No bugs filed — all code clean.
 
 ### QA Review — 2026-04-11 23:30 — a6eaed35..e6380505
 

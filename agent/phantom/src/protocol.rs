@@ -462,7 +462,8 @@ mod tests {
         let crypto = generate_agent_crypto_material().expect("crypto");
         let agent_id = 0x1122_3344_u32;
         let version = 7_u8;
-        let packet = build_init_packet(agent_id, &crypto, &metadata(), Some(version)).expect("packet");
+        let packet =
+            build_init_packet(agent_id, &crypto, &metadata(), Some(version)).expect("packet");
         let envelope = red_cell_common::demon::DemonEnvelope::from_bytes(&packet).expect("env");
         // command_id(4) + request_id(4) + key(32) + iv(16) = 56; then version byte.
         assert!(
@@ -472,10 +473,7 @@ mod tests {
         assert_eq!(envelope.payload[56], version);
         let encrypted = &envelope.payload[57..];
         let plaintext = decrypt_agent_data(&crypto.key, &crypto.iv, encrypted).expect("decrypt");
-        assert!(
-            plaintext.len() >= 4,
-            "decrypted metadata should include agent_id prefix"
-        );
+        assert!(plaintext.len() >= 4, "decrypted metadata should include agent_id prefix");
     }
 
     #[test]

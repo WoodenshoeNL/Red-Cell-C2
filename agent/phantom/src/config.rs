@@ -71,9 +71,7 @@ impl PhantomConfig {
             return Err(PhantomError::InvalidConfig("init_secret must not be empty"));
         }
         if self.init_secret_version.is_some() && self.init_secret.is_none() {
-            return Err(PhantomError::InvalidConfig(
-                "init_secret_version requires init_secret",
-            ));
+            return Err(PhantomError::InvalidConfig("init_secret_version requires init_secret"));
         }
         if self.sleep_jitter > 100 {
             return Err(PhantomError::InvalidConfig("sleep_jitter must be between 0 and 100"));
@@ -121,7 +119,8 @@ impl PhantomConfig {
                     self.init_secret = Some(parse_os_string(value, "PHANTOM_INIT_SECRET")?);
                 }
                 Some("PHANTOM_INIT_SECRET_VERSION") => {
-                    self.init_secret_version = Some(parse_os_value(&value, "PHANTOM_INIT_SECRET_VERSION")?);
+                    self.init_secret_version =
+                        Some(parse_os_value(&value, "PHANTOM_INIT_SECRET_VERSION")?);
                 }
                 Some("PHANTOM_USER_AGENT") => {
                     self.user_agent = parse_os_string(value, "PHANTOM_USER_AGENT")?;
@@ -291,11 +290,8 @@ mod tests {
 
     #[test]
     fn init_secret_version_without_init_secret_is_rejected() {
-        let config = PhantomConfig {
-            init_secret: None,
-            init_secret_version: Some(1),
-            ..Default::default()
-        };
+        let config =
+            PhantomConfig { init_secret: None, init_secret_version: Some(1), ..Default::default() };
         assert!(config.validate().is_err());
     }
 

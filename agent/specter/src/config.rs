@@ -12,6 +12,9 @@ pub struct SpecterConfig {
     pub callback_url: String,
     /// Optional HKDF init secret matching the listener's `init_secret` setting.
     pub init_secret: Option<String>,
+    /// When set, the 1-byte secret version in `DEMON_INIT` for `InitSecrets = [...]`.
+    /// Requires [`Self::init_secret`].
+    pub init_secret_version: Option<u8>,
     /// PEM-encoded certificate to pin for TLS connections to the teamserver.
     ///
     /// When set, only the teamserver presenting this certificate (or one signed by it) is
@@ -70,7 +73,8 @@ impl SpecterConfig {
     /// Build a configuration from command-line arguments and environment variables.
     ///
     /// Environment variables are applied first and may be overridden by CLI flags:
-    /// `SPECTER_CALLBACK_URL`, `SPECTER_INIT_SECRET`, `SPECTER_USER_AGENT`,
+    /// `SPECTER_CALLBACK_URL`, `SPECTER_INIT_SECRET`, `SPECTER_INIT_SECRET_VERSION`,
+    /// `SPECTER_USER_AGENT`,
     /// `SPECTER_SLEEP_DELAY_MS`, `SPECTER_SLEEP_JITTER`, `SPECTER_KILL_DATE`,
     /// and `SPECTER_WORKING_HOURS`.
     pub fn from_sources<I, S, J, K, V>(args: I, env: J) -> Result<Self, SpecterError>
@@ -96,6 +100,9 @@ impl SpecterConfig {
         if matches!(self.init_secret.as_deref(), Some("")) {
             return Err(SpecterError::InvalidConfig("init_secret must not be empty"));
         }
+        if self.init_secret_version.is_some() && self.init_secret.is_none() {
+            return Err(SpecterError::InvalidConfig("init_secret_version requires init_secret"));
+        }
         if self.sleep_jitter > 100 {
             return Err(SpecterError::InvalidConfig("sleep_jitter must be 0–100"));
         }
@@ -109,6 +116,7 @@ impl SpecterConfig {
             "Options:\n",
             "  --callback-url URL       Teamserver callback endpoint\n",
             "  --init-secret SECRET     HKDF listener init secret\n",
+            "  --init-secret-version N  Secret version byte (0-255) for InitSecrets rotation\n",
             "  --user-agent VALUE       HTTP User-Agent header\n",
             "  --sleep-delay-ms N       Base sleep interval in milliseconds\n",
             "  --sleep-jitter N         Sleep jitter percentage (0-100)\n",
@@ -118,7 +126,8 @@ impl SpecterConfig {
             "  --doh-provider NAME      DoH resolver: cloudflare (default) or google\n",
             "  -h, --help               Show this help text\n\n",
             "Environment:\n",
-            "  SPECTER_CALLBACK_URL, SPECTER_INIT_SECRET, SPECTER_USER_AGENT,\n",
+            "  SPECTER_CALLBACK_URL, SPECTER_INIT_SECRET, SPECTER_INIT_SECRET_VERSION,\n",
+            "  SPECTER_USER_AGENT,\n",
             "  SPECTER_SLEEP_DELAY_MS, SPECTER_SLEEP_JITTER, SPECTER_KILL_DATE,\n",
             "  SPECTER_WORKING_HOURS, SPECTER_PINNED_CERT_PEM,\n",
             "  SPECTER_DOH_DOMAIN, SPECTER_DOH_PROVIDER\n",
@@ -140,6 +149,10 @@ impl SpecterConfig {
                 }
                 Some("SPECTER_INIT_SECRET") => {
                     self.init_secret = Some(parse_os_string(value, "SPECTER_INIT_SECRET")?);
+                }
+                Some("SPECTER_INIT_SECRET_VERSION") => {
+                    self.init_secret_version =
+                        Some(parse_os_value(&value, "SPECTER_INIT_SECRET_VERSION")?);
                 }
                 Some("SPECTER_USER_AGENT") => {
                     self.user_agent = parse_os_string(value, "SPECTER_USER_AGENT")?;
@@ -205,6 +218,9 @@ impl SpecterConfig {
             match flag {
                 "--callback-url" => self.callback_url = value,
                 "--init-secret" => self.init_secret = Some(value),
+                "--init-secret-version" => {
+                    self.init_secret_version = Some(parse_string_value(&value, flag)?);
+                }
                 "--user-agent" => self.user_agent = value,
                 "--sleep-delay-ms" => {
                     self.sleep_delay_ms = parse_string_value(&value, flag)?;
@@ -235,6 +251,7 @@ impl Default for SpecterConfig {
         Self {
             callback_url: String::from("https://127.0.0.1:40056/"),
             init_secret: None,
+            init_secret_version: None,
             // Baked in at compile time — set SPECTER_PINNED_CERT_PEM when building the implant.
             pinned_cert_pem: option_env!("SPECTER_PINNED_CERT_PEM").map(str::to_string),
             user_agent: String::from(
@@ -324,6 +341,13 @@ mod tests {
     }
 
     #[test]
+    fn init_secret_version_without_init_secret_is_invalid() {
+        let config =
+            SpecterConfig { init_secret: None, init_secret_version: Some(1), ..Default::default() };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
     fn from_sources_applies_environment_values() {
         let config = SpecterConfig::from_sources(
             ["specter"],
@@ -335,6 +359,7 @@ mod tests {
                 ("SPECTER_KILL_DATE", "1700000000"),
                 ("SPECTER_WORKING_HOURS", "255"),
                 ("SPECTER_INIT_SECRET", "sekrit"),
+                ("SPECTER_INIT_SECRET_VERSION", "2"),
             ],
         )
         .expect("config");
@@ -346,6 +371,7 @@ mod tests {
         assert_eq!(config.kill_date, Some(1_700_000_000));
         assert_eq!(config.working_hours, Some(255));
         assert_eq!(config.init_secret.as_deref(), Some("sekrit"));
+        assert_eq!(config.init_secret_version, Some(2));
         assert!(config.pinned_cert_pem.is_none());
     }
 

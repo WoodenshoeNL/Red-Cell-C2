@@ -5,9 +5,7 @@ use red_cell::AgentRegistry;
 use red_cell::Database;
 use red_cell::DemonPacketParser;
 use red_cell::ParsedDemonPacket;
-use red_cell_common::crypto::{
-    derive_session_keys_for_version, generate_agent_crypto_material,
-};
+use red_cell_common::crypto::{derive_session_keys_for_version, generate_agent_crypto_material};
 
 fn sample_metadata() -> AgentMetadata {
     AgentMetadata {
@@ -46,11 +44,16 @@ async fn versioned_demon_init_parses_and_derives_matching_session_keys() {
     let raw = generate_agent_crypto_material().expect("raw keys");
     let agent_id = 0xAABB_CCDD_u32;
     let version = 1_u8;
-    let packet = build_init_packet(agent_id, &raw, &sample_metadata(), Some(version))
-        .expect("build init");
+    let packet =
+        build_init_packet(agent_id, &raw, &sample_metadata(), Some(version)).expect("build init");
 
-    let expected = derive_session_keys_for_version(&raw.key, &raw.iv, version, &[(version, secret.as_slice())])
-        .expect("derive expected session keys");
+    let expected = derive_session_keys_for_version(
+        &raw.key,
+        &raw.iv,
+        version,
+        &[(version, secret.as_slice())],
+    )
+    .expect("derive expected session keys");
 
     let parsed = parser
         .parse(&packet, "10.0.0.1")

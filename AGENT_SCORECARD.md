@@ -10,11 +10,11 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 1251 | 255 | 83 |
-| Bugs filed against | 239 | 50 | 13 |
+| Bugs filed against | 240 | 50 | 13 |
 | Bug rate (bugs/task) | 0.19 | 0.20 | 0.16 |
 | Quality score | 81% | 80% | 84% |
 
-*Bug rates: Claude 239/1251=0.1912→0.19, Codex 50/255=0.1961→0.20, Cursor 13/83=0.1566→0.16*
+*Bug rates: Claude 240/1251=0.1919→0.19, Codex 50/255=0.1961→0.20, Cursor 13/83=0.1566→0.16*
 
 ## Violation Breakdown
 
@@ -28,7 +28,7 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 38 | 25 | 2 |
 | Memory / resource leaks | 14 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 10 | 0 |
-| Test infrastructure / flakiness | 56 | 6 | 1 |
+| Test infrastructure / flakiness | 57 | 6 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 4 | 5 | 0 |
 | Correctness / pagination | 66 | 9 | 1 |
@@ -41,6 +41,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-11 18:30 — a632b1f7..e09ec097
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 1 | WIP commit e09ec097 fixes test visibility for api/mod.rs split by making auth internals pub(crate). Filed red-cell-c2-a9ovq (socks test failure, pre-existing). |
+| Codex | 0 | 0 | No activity this run. |
+| Cursor | 0 | 0 | No activity this run. |
+
+Build: **passed** — `cargo check --workspace` clean, clippy clean (zero warnings). Tests: **1 failure** — `sockets::tests::write_client_data_delivers_bytes_to_local_socks_client` fails with "SOCKS5 client 0xCAFE0001 not found for agent 0xDEADBEEF" (pre-existing, filed red-cell-c2-a9ovq). 2460/5313 tests ran, 2460 passed before cancellation.
 
 ### QA Review — 2026-04-11 12:00 — a632b1f7..e09ec097
 

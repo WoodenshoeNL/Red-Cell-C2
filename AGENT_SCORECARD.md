@@ -42,6 +42,16 @@ Each loop run updates the running totals and appends a review entry.
 
 <!-- QA and arch loops append entries below this line -->
 
+### QA Review — 2026-04-11 14:00 — a632b1f7..e09ec097
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | No agent-attributed commits this run. |
+| Codex | 0 | 0 | No activity this run. |
+| Cursor | 0 | 0 | No activity this run. |
+
+Build: **passed** — `cargo check --workspace` clean, clippy clean (zero warnings). Tests: **1 known failure** — `repeated_wrong_passwords_trigger_rate_limiter_lockout` (already tracked as red-cell-c2-rlt01); 2853 passed, nextest stopped at 2854/5313 due to fail-fast. Only code change: Michel-owned commit e09ec097 making auth internals `pub(crate)` to fix test visibility after api/mod.rs split — correct intermediate step, no issues. Beads DB was locked by concurrent dev agent for part of the review.
+
 ### QA Review — 2026-04-09 20:30 — d544a2fb..a632b1f7
 
 | Agent | Tasks closed | Bugs filed | Notes |

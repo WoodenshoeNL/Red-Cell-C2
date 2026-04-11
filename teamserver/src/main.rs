@@ -24,6 +24,7 @@ use tokio::net::lookup_host;
 use tracing::{info, instrument, warn};
 
 mod logging;
+mod preflight;
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = "red-cell", about = "Red Cell teamserver")]
@@ -80,6 +81,10 @@ async fn main() -> Result<()> {
     let master_key = load_or_create_master_key(&database_path).with_context(|| {
         format!("failed to load database master key for {}", database_path.display())
     })?;
+
+    preflight::run(&profile, &master_key, &database_path)
+        .context("startup preflight checks failed")?;
+
     let database = Database::connect_with_master_key(&database_path, master_key)
         .await
         .with_context(|| format!("failed to open database {}", database_path.display()))?;

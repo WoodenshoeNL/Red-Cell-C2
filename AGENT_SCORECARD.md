@@ -42,6 +42,16 @@ Each loop run updates the running totals and appends a review entry.
 
 <!-- QA and arch loops append entries below this line -->
 
+### QA Review — 2026-04-11 12:00 — a632b1f7..e09ec097
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | Only QA/arch checkpoint commits in this range. |
+| Codex | 0 | 0 | WIP commit e09ec097: made auth internals `pub(crate)` to fix test visibility after api/mod.rs split (red-cell-c2-94ykk still in_progress). |
+| Cursor | 0 | 0 | No activity this run. |
+
+Build: **passed** — `cargo check --workspace` clean, clippy clean (zero warnings). Tests: **1 infra failure** — `agents::tests::mark_dead_on_already_dead_agent_is_idempotent` failed with `No such file or directory` (test binary deleted mid-run by concurrent dev agent build, not a code defect). 315/316 tests that ran passed. No new bugs filed — existing issues red-cell-c2-9ho75 and red-cell-c2-w35n1 already cover the test compilation work.
+
 ### QA Review — 2026-04-11 06:00 — a632b1f7..e09ec097
 
 | Agent | Tasks closed | Bugs filed | Notes |

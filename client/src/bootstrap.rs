@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use clap::Parser;
 use eframe::egui;
 
+use tracing::info;
+
 use crate::ClientError;
 use crate::app::ClientApp;
 use crate::known_servers::KnownServersStore;
@@ -56,9 +58,9 @@ pub(crate) fn run() -> Result<(), ClientError> {
         let mut store = KnownServersStore::load();
         if store.remove(host_port) {
             store.save()?;
-            println!("Removed {host_port} from known servers.");
+            info!(host = %host_port, "removed host from known servers");
         } else {
-            println!("No entry found for {host_port} in known servers.");
+            info!(host = %host_port, "no known-servers entry for host");
         }
         return Ok(());
     }

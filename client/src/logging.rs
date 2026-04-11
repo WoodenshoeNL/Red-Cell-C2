@@ -46,8 +46,10 @@ pub fn env_filter_for_config(config: &LocalConfig) -> EnvFilter {
 
 /// Initialize `tracing` with stderr and a daily rolling file (7 days retention).
 ///
-/// If the file appender cannot be created, logs only go to stderr and a short
-/// message is printed to stderr (before tracing is fully initialized).
+/// If the file appender cannot be created, logs only go to stderr and the
+/// failure is reported as a `tracing` warning. If the combined subscriber
+/// cannot be registered (for example tracing was already initialized), a
+/// warning is emitted through whatever subscriber is active.
 pub fn init(config: &LocalConfig) {
     let filter = env_filter_for_config(config);
     let stderr_layer = fmt::layer().with_writer(std::io::stderr).with_ansi(true);
@@ -60,14 +62,19 @@ pub fn init(config: &LocalConfig) {
             if let Err(err) =
                 Registry::default().with(filter).with(stderr_layer).with(file_layer).try_init()
             {
-                eprintln!("red-cell-client: tracing already initialized ({err}); continuing");
+                tracing::warn!(
+                    error = %err,
+                    "red-cell-client: tracing already initialized; continuing"
+                );
             }
         }
         Err(err) => {
-            eprintln!("red-cell-client: file logging disabled ({err}); stderr only");
-            if let Err(init_err) = Registry::default().with(filter).with(stderr_layer).try_init() {
-                eprintln!("red-cell-client: tracing already initialized ({init_err}); continuing");
-            }
+            // Register stderr first so file-appender failures are visible through tracing.
+            let _ = Registry::default().with(filter).with(stderr_layer).try_init();
+            tracing::warn!(
+                error = %err,
+                "red-cell-client: file logging disabled; stderr only"
+            );
         }
     }
 }
@@ -89,7 +96,21 @@ fn rolling_file_appender(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
+
+    /// `init` sets a process-global subscriber; keep tests that call it serialized.
+    static INIT_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn init_with_temp_log_dir_does_not_panic() {
+        let _guard = INIT_TEST_LOCK.lock().unwrap_or_else(|e| panic!("lock: {e}"));
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+        let config =
+            LocalConfig { log_dir: Some(dir.path().to_path_buf()), ..LocalConfig::default() };
+        init(&config);
+    }
 
     #[test]
     fn default_log_dir_ends_with_red_cell_logs() {

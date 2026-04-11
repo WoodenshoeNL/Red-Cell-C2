@@ -10,14 +10,13 @@
 #[path = "../../../teamserver/tests/common/mod.rs"]
 mod common;
 
-use std::time::Duration;
-
 use phantom::{PhantomAgent, PhantomConfig};
 use red_cell::Job;
 use red_cell_common::HttpListenerConfig;
 use red_cell_common::config::Profile;
 use red_cell_common::demon::DemonCommand;
-use tokio::time::sleep;
+use red_cell_common::operator::OperatorMessage;
+use tokio::time::timeout;
 
 fn demon_test_profile() -> Profile {
     Profile::parse(
@@ -97,11 +96,50 @@ async fn spawn_server_with_http_listener(
     Ok(DemonTestHarness { server, listener_port, listener_name: listener_name.to_owned(), socket })
 }
 
+/// `login` consumes `InitConnectionSuccess` plus the first HMAC snapshot frame, but
+/// `send_session_snapshot` on the teamserver emits additional HMAC frames (listener
+/// summaries, retained teamserver logs, active agent snapshots). Those frames stay queued
+/// on the WebSocket until read; the next read after `DEMON_INIT` would otherwise return
+/// `TeamserverLog` (or similar) instead of `AgentNew`, or desynchronise HMAC `recv_seq`.
+///
+/// Drain with a short outer timeout so we do not block on [`common::WsSession::recv_msg`]'s
+/// inner 30s `socket.next` wait when the buffer is already empty.
+async fn drain_buffered_operator_messages(
+    socket: &mut common::WsClient,
+) -> Result<(), Box<dyn std::error::Error>> {
+    loop {
+        match timeout(std::time::Duration::from_millis(10), socket.recv_msg()).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => return Err(e),
+            Err(_) => break,
+        }
+    }
+    Ok(())
+}
+
+/// Read until `AgentNew` so any stray frames that remain after [`drain_buffered_operator_messages`]
+/// (or delivered concurrently with the HTTP init) do not fail the assertion.
+async fn read_until_agent_new(
+    socket: &mut common::WsClient,
+) -> Result<
+    red_cell_common::operator::Message<red_cell_common::operator::AgentInfo>,
+    Box<dyn std::error::Error>,
+> {
+    for _ in 0..64 {
+        let msg = common::read_operator_message(socket).await?;
+        if let OperatorMessage::AgentNew(message) = msg {
+            return Ok(*message);
+        }
+    }
+    Err("did not observe AgentNew within 64 operator WebSocket frames".into())
+}
+
 /// Phantom agent init + checkin against the real teamserver stays CTR-synchronised.
 #[tokio::test]
 async fn phantom_agent_init_and_checkin_stay_ctr_synchronised()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut harness = spawn_server_with_http_listener("phantom-http").await?;
+    drain_buffered_operator_messages(&mut harness.socket).await?;
     let callback_url = format!("http://127.0.0.1:{}/", harness.listener_port);
     let mut agent = PhantomAgent::new(PhantomConfig {
         callback_url,
@@ -122,17 +160,8 @@ async fn phantom_agent_init_and_checkin_stay_ctr_synchronised()
         "server and agent CTR must agree after init"
     );
 
-    // `AgentNew` is broadcast while the HTTP init response is in flight; the operator
-    // WebSocket task delivers the HMAC-wrapped frame asynchronously. Yield and wait
-    // briefly so the framed message is queued before we read (avoids recv_msg timeout).
-    tokio::task::yield_now().await;
-    sleep(Duration::from_millis(200)).await;
-
     // Verify the teamserver received the agent registration event.
-    let agent_new = common::read_operator_message(&mut harness.socket).await?;
-    let red_cell_common::operator::OperatorMessage::AgentNew(message) = agent_new else {
-        panic!("expected agent registration event, got: {agent_new:?}");
-    };
+    let message = read_until_agent_new(&mut harness.socket).await?;
     assert_eq!(message.info.name_id, format!("{:08X}", agent.agent_id()));
     assert_eq!(message.info.listener, "phantom-http");
     assert!(!message.info.hostname.is_empty());

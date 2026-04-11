@@ -1,6 +1,7 @@
 mod actions;
 mod app;
 mod bootstrap;
+mod error;
 mod helpers;
 mod known_servers;
 mod known_servers_ui;
@@ -28,6 +29,7 @@ pub(crate) use app::{
 pub(crate) use bootstrap::Cli;
 #[cfg(test)]
 pub(crate) use bootstrap::DEFAULT_SERVER_URL;
+pub(crate) use error::ClientError;
 
 // Re-export agent helpers defined in the agents panel so that the inline test
 // module (which uses `use super::*`) can find them without modification.
@@ -55,7 +57,7 @@ use transport::{LootKind, ProcessEntry};
 use zeroize::Zeroizing;
 
 fn main() -> anyhow::Result<()> {
-    bootstrap::run()
+    Ok(bootstrap::run()?)
 }
 #[cfg(test)]
 mod tests {

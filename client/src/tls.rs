@@ -1,7 +1,6 @@
 //! TLS certificate validation and verification-mode resolution.
 
-use anyhow::{Result, anyhow};
-
+use crate::ClientError;
 use crate::known_servers::{KnownServersStore, host_port_from_url};
 use crate::local_config::LocalConfig;
 use crate::transport::TlsVerification;
@@ -9,18 +8,17 @@ use crate::transport::TlsVerification;
 /// Validate that a certificate fingerprint is a well-formed SHA-256 hex digest.
 ///
 /// Returns the fingerprint unchanged if valid, or an error describing why it is malformed.
-pub(crate) fn validate_fingerprint(fingerprint: &str, source: &str) -> Result<String> {
+pub(crate) fn validate_fingerprint(fingerprint: &str, source: &str) -> Result<String, ClientError> {
     if fingerprint.len() != 64 {
-        return Err(anyhow!(
-            "invalid certificate fingerprint from {source}: expected 64 hex characters \
-             (SHA-256 digest), got {} characters",
-            fingerprint.len()
-        ));
+        return Err(ClientError::InvalidFingerprintLength {
+            fingerprint_source: source.to_owned(),
+            got: fingerprint.len(),
+        });
     }
     if !fingerprint.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(anyhow!(
-            "invalid certificate fingerprint from {source}: contains non-hex characters"
-        ));
+        return Err(ClientError::InvalidFingerprintNonHex {
+            fingerprint_source: source.to_owned(),
+        });
     }
     Ok(fingerprint.to_owned())
 }
@@ -38,7 +36,7 @@ pub(crate) fn resolve_tls_verification(
     config: &LocalConfig,
     known_servers: &KnownServersStore,
     server_url: &str,
-) -> Result<TlsVerification> {
+) -> Result<TlsVerification, ClientError> {
     if cli.accept_invalid_certs {
         tracing::warn!("--accept-invalid-certs is deprecated; TOFU is now the default TLS mode");
         return Ok(TlsVerification::DangerousSkipVerify);

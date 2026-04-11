@@ -3,10 +3,10 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::Result;
 use eframe::egui;
 use red_cell_common::operator::OperatorMessage;
 
+use crate::ClientError;
 use crate::bootstrap::Cli;
 use crate::known_servers::KnownServersStore;
 use crate::local_config::LocalConfig;
@@ -63,7 +63,7 @@ pub(crate) struct ClientApp {
 }
 
 impl ClientApp {
-    pub(crate) fn new(cli: Cli) -> Result<Self> {
+    pub(crate) fn new(cli: Cli) -> Result<Self, ClientError> {
         let local_config = LocalConfig::load();
         let known_servers = KnownServersStore::load();
         let login_state = LoginState::new(&cli.server, &local_config);

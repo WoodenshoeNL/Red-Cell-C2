@@ -2,10 +2,10 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Result, anyhow};
 use clap::Parser;
 use eframe::egui;
 
+use crate::ClientError;
 use crate::app::ClientApp;
 use crate::known_servers::KnownServersStore;
 use crate::local_config::LocalConfig;
@@ -46,7 +46,7 @@ pub(crate) struct Cli {
 }
 
 /// Entry point after [`Cli`] parsing: optional purge, then GUI.
-pub(crate) fn run() -> Result<()> {
+pub(crate) fn run() -> Result<(), ClientError> {
     let cli = Cli::parse();
     let local_config = LocalConfig::load();
     logging::init(&local_config);
@@ -55,7 +55,7 @@ pub(crate) fn run() -> Result<()> {
     if let Some(host_port) = &cli.purge_known_server {
         let mut store = KnownServersStore::load();
         if store.remove(host_port) {
-            store.save().map_err(|e| anyhow::anyhow!("failed to save known-servers: {e}"))?;
+            store.save()?;
             println!("Removed {host_port} from known servers.");
         } else {
             println!("No entry found for {host_port} in known servers.");
@@ -66,7 +66,7 @@ pub(crate) fn run() -> Result<()> {
     launch_client(cli)
 }
 
-pub(crate) fn launch_client(cli: Cli) -> Result<()> {
+pub(crate) fn launch_client(cli: Cli) -> Result<(), ClientError> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size(INITIAL_WINDOW_SIZE)
@@ -84,5 +84,6 @@ pub(crate) fn launch_client(cli: Cli) -> Result<()> {
             Ok(Box::new(app) as Box<dyn eframe::App>)
         }),
     )
-    .map_err(|error| anyhow!("failed to start egui application: {error}"))
+    .map_err(|e| ClientError::EguiStartup(e.to_string()))?;
+    Ok(())
 }

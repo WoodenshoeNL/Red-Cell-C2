@@ -1,4 +1,7 @@
-//! Typed errors for the operator client binary (library-style modules under `src/`).
+//! Typed errors for the operator client (`src/` modules and `main`).
+//!
+//! Library-style paths (`app`, `bootstrap`, TLS, etc.) return [`ClientError`]. The binary entry
+//! point also returns `Result<(), ClientError>` so failures stay typed end-to-end (no `anyhow`).
 
 use thiserror::Error;
 

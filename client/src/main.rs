@@ -56,8 +56,8 @@ use transport::{LootKind, ProcessEntry};
 #[cfg(test)]
 use zeroize::Zeroizing;
 
-fn main() -> anyhow::Result<()> {
-    Ok(bootstrap::run()?)
+fn main() -> Result<(), ClientError> {
+    bootstrap::run()
 }
 #[cfg(test)]
 mod tests {

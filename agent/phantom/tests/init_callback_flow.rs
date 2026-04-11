@@ -16,7 +16,6 @@ use red_cell_common::HttpListenerConfig;
 use red_cell_common::config::Profile;
 use red_cell_common::demon::DemonCommand;
 use red_cell_common::operator::OperatorMessage;
-use tokio::time::timeout;
 
 fn demon_test_profile() -> Profile {
     Profile::parse(
@@ -96,29 +95,8 @@ async fn spawn_server_with_http_listener(
     Ok(DemonTestHarness { server, listener_port, listener_name: listener_name.to_owned(), socket })
 }
 
-/// `login` consumes `InitConnectionSuccess` plus the first HMAC snapshot frame, but
-/// `send_session_snapshot` on the teamserver emits additional HMAC frames (listener
-/// summaries, retained teamserver logs, active agent snapshots). Those frames stay queued
-/// on the WebSocket until read; the next read after `DEMON_INIT` would otherwise return
-/// `TeamserverLog` (or similar) instead of `AgentNew`, or desynchronise HMAC `recv_seq`.
-///
-/// Drain with a short outer timeout so we do not block on [`common::WsSession::recv_msg`]'s
-/// inner 30s `socket.next` wait when the buffer is already empty.
-async fn drain_buffered_operator_messages(
-    socket: &mut common::WsClient,
-) -> Result<(), Box<dyn std::error::Error>> {
-    loop {
-        match timeout(std::time::Duration::from_millis(10), socket.recv_msg()).await {
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => return Err(e),
-            Err(_) => break,
-        }
-    }
-    Ok(())
-}
-
-/// Read until `AgentNew` so any stray frames that remain after [`drain_buffered_operator_messages`]
-/// (or delivered concurrently with the HTTP init) do not fail the assertion.
+/// Read until `AgentNew` so queued snapshot / log frames (or frames delivered concurrently
+/// with the HTTP init) do not fail the assertion.
 async fn read_until_agent_new(
     socket: &mut common::WsClient,
 ) -> Result<
@@ -139,7 +117,6 @@ async fn read_until_agent_new(
 async fn phantom_agent_init_and_checkin_stay_ctr_synchronised()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut harness = spawn_server_with_http_listener("phantom-http").await?;
-    drain_buffered_operator_messages(&mut harness.socket).await?;
     let callback_url = format!("http://127.0.0.1:{}/", harness.listener_port);
     let mut agent = PhantomAgent::new(PhantomConfig {
         callback_url,

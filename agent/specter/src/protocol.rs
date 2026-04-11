@@ -416,6 +416,27 @@ mod tests {
     }
 
     #[test]
+    fn build_init_packet_versioned_inserts_secret_version_before_encrypted_metadata() {
+        let crypto = generate_agent_crypto_material().expect("keygen");
+        let agent_id = 0x1122_3344;
+        let metadata = test_metadata();
+        let version = 9_u8;
+        let packet = build_init_packet(agent_id, &crypto, &metadata, Some(version)).expect("build");
+
+        let envelope = DemonEnvelope::from_bytes(&packet).expect("parse");
+        let key_start = 8;
+        let key_end = key_start + AGENT_KEY_LENGTH;
+        let iv_end = key_end + AGENT_IV_LENGTH;
+        assert_eq!(&envelope.payload[key_start..key_end], &crypto.key);
+        assert_eq!(&envelope.payload[key_end..iv_end], &crypto.iv);
+        assert_eq!(envelope.payload[iv_end], version);
+        let encrypted = &envelope.payload[iv_end + 1..];
+        let decrypted = decrypt_agent_data(&crypto.key, &crypto.iv, encrypted).expect("decrypt");
+        let parsed_id = u32::from_be_bytes(decrypted[0..4].try_into().expect("id"));
+        assert_eq!(parsed_id, agent_id);
+    }
+
+    #[test]
     fn init_metadata_has_monotonic_ctr_and_seq_protected_flags() {
         let agent_id = 0x1111_2222;
         let metadata = test_metadata();

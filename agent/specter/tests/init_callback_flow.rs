@@ -29,10 +29,89 @@ fn demon_test_profile() -> Profile {
     .expect("test profile should parse")
 }
 
+/// Profile with `Demon.InitSecrets` (versioned HKDF), matching a real rotation-ready listener.
+fn demon_versioned_init_secrets_profile() -> Profile {
+    Profile::parse(
+        r#"
+        Teamserver {
+          Host = "127.0.0.1"
+          Port = 0
+        }
+
+        Operators {
+          user "operator" {
+            Password = "password1234"
+            Role = "Operator"
+          }
+        }
+
+        Demon {
+          InitSecrets = [
+            { Version = 1, Secret = "old-secret-exactly16" },
+            { Version = 2, Secret = "new-secret-exactly16" }
+          ]
+        }
+        "#,
+    )
+    .expect("test profile should parse")
+}
+
 async fn spawn_server_with_http_listener(
     listener_name: &str,
 ) -> Result<DemonTestHarness, Box<dyn std::error::Error>> {
     let server = common::spawn_test_server(demon_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
+    common::login(&mut socket).await?;
+
+    server
+        .listeners
+        .create(red_cell_common::ListenerConfig::from(HttpListenerConfig {
+            name: listener_name.to_owned(),
+            kill_date: None,
+            working_hours: None,
+            hosts: vec!["127.0.0.1".to_owned()],
+            host_bind: "127.0.0.1".to_owned(),
+            host_rotation: "round-robin".to_owned(),
+            port_bind: listener_port,
+            port_conn: Some(listener_port),
+            method: Some("POST".to_owned()),
+            behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
+            user_agent: None,
+            headers: Vec::new(),
+            uris: vec!["/".to_owned()],
+            host_header: None,
+            secure: false,
+            cert: None,
+            response: None,
+            proxy: None,
+            ja3_randomize: None,
+            doh_domain: None,
+            doh_provider: None,
+        }))
+        .await?;
+    drop(listener_guard);
+    server.listeners.start(listener_name).await?;
+    common::wait_for_listener(listener_port).await?;
+
+    Ok(DemonTestHarness { server, listener_port, listener_name: listener_name.to_owned(), socket })
+}
+
+async fn spawn_server_with_versioned_init_secrets_listener(
+    listener_name: &str,
+) -> Result<DemonTestHarness, Box<dyn std::error::Error>> {
+    let profile = demon_versioned_init_secrets_profile();
+    let versioned: Vec<(u8, Vec<u8>)> = profile
+        .demon
+        .init_secrets
+        .iter()
+        .map(|entry| (entry.version, entry.secret.as_bytes().to_vec()))
+        .collect();
+    let server =
+        common::spawn_test_server_custom(profile, |lm| lm.with_demon_init_secrets(versioned))
+            .await?;
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let (raw_socket_, _) = connect_async(server.ws_url()).await?;
     let mut socket = common::WsSession::new(raw_socket_);
@@ -146,6 +225,42 @@ async fn specter_agent_init_checkin_and_get_job_stay_ctr_synchronised()
     assert_eq!(tasking.packages[0].payload, vec![0x05, 0x00, 0x00, 0x00]);
     // CTR offset must have advanced after the job round-trip.
     assert!(agent.ctr_offset() > ctr_before_job, "CTR must advance after get_job");
+
+    harness.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn specter_agent_registers_against_init_secrets_profile_with_version_byte()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut harness =
+        spawn_server_with_versioned_init_secrets_listener("specter-http-vsec").await?;
+    let callback_url = format!("http://127.0.0.1:{}/", harness.listener_port);
+    let mut agent = SpecterAgent::new(SpecterConfig {
+        callback_url,
+        init_secret: Some(String::from("old-secret-exactly16")),
+        init_secret_version: Some(1),
+        sleep_delay_ms: 1,
+        ..Default::default()
+    })?;
+
+    agent.init_handshake().await?;
+
+    let ctr_after_init = agent.ctr_offset();
+    assert_eq!(ctr_after_init, 1, "shared CTR must be 1 after init ACK");
+    assert_eq!(
+        harness.server.agent_registry.ctr_offset(agent.agent_id()).await?,
+        ctr_after_init,
+        "server and agent CTR must agree after init"
+    );
+
+    let agent_new = common::read_operator_message(&mut harness.socket).await?;
+    let red_cell_common::operator::OperatorMessage::AgentNew(message) = agent_new else {
+        panic!("expected agent registration event");
+    };
+    assert_eq!(message.info.name_id, format!("{:08X}", agent.agent_id()));
+    assert_eq!(message.info.listener, "specter-http-vsec");
+    assert!(!message.info.hostname.is_empty());
 
     harness.shutdown().await?;
     Ok(())

@@ -10,11 +10,11 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 1251 | 255 | 83 |
-| Bugs filed against | 238 | 49 | 13 |
+| Bugs filed against | 239 | 49 | 13 |
 | Bug rate (bugs/task) | 0.19 | 0.19 | 0.16 |
 | Quality score | 81% | 81% | 84% |
 
-*Bug rates: Claude 238/1251=0.1903→0.19, Codex 49/255=0.1922→0.19, Cursor 13/83=0.1566→0.16*
+*Bug rates: Claude 239/1251=0.1912→0.19, Codex 49/255=0.1922→0.19, Cursor 13/83=0.1566→0.16*
 
 ## Violation Breakdown
 
@@ -28,7 +28,7 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 38 | 25 | 2 |
 | Memory / resource leaks | 14 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 10 | 0 |
-| Test infrastructure / flakiness | 55 | 6 | 1 |
+| Test infrastructure / flakiness | 56 | 6 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 4 | 5 | 0 |
 | Correctness / pagination | 66 | 9 | 1 |
@@ -41,6 +41,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-11 06:00 — a632b1f7..e09ec097
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 1 | WIP on red-cell-c2-94ykk (api/mod.rs split): e09ec097 makes auth internals `pub(crate)` for test visibility. Filed red-cell-c2-v79c5 (flaky backup scheduler test). |
+| Codex | 0 | 0 | No activity this run. |
+| Cursor | 0 | 0 | No activity this run. |
+
+Build: **passed** — `cargo check --workspace` clean. Clippy: **passed** — zero warnings. Tests: **1 failure** — `database::backup::tests::scheduler_creates_snapshot_on_interval` panics on empty backup file (pre-existing flaky test, filed red-cell-c2-v79c5). 791/792 tests passed before cancellation.
 
 ### QA Review — 2026-04-11 05:05 — a632b1f7..e09ec097
 

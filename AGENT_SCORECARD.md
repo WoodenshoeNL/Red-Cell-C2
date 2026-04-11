@@ -62,6 +62,18 @@ Build: **passed** — `cargo check --workspace` clean. Tests: **blocked** — co
 
 Build: **passed** — `cargo check --workspace` clean, clippy clean (zero warnings). Tests: **skipped** — disk full (126GB partition at 100%); freed 16GB by removing stale `/tmp/red-cell-review-target`. No code-level test failures observed. Code quality: clean — no unwrap/expect in production code, no todo!(), proper thiserror usage, Axum framework throughout.
 
+### Arch Review — 2026-04-11 07:07
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 0 | — | No new directly attributable Claude defects found in the reviewed surfaces. |
+| Codex | 0 | — | No new directly attributable Codex defects found in the reviewed surfaces. |
+| Cursor | 0 | — | No new directly attributable Cursor defects found in the reviewed surfaces. |
+
+Overall codebase health: drifting
+Biggest blindspot: the operator-facing health contract is inconsistent across surfaces: `GET /api/v1/health` exists, but both `red-cell-cli status` and session-mode `status` still route to API-root metadata, so automated health checks can miss degraded database/plugin state.
+Additional tracker work this run: filed `red-cell-c2-madkf`, `red-cell-c2-f5y94`, `red-cell-c2-1fzfv`, `red-cell-c2-3wj2l`, `red-cell-c2-5nnkr`, and `red-cell-c2-gl40g`; confirmed existing open issue `red-cell-c2-d4eag` already covers the session-response buffering memory path.
+
 ### QA Review — 2026-04-09 17:45 — d544a2fb..a632b1f7
 
 | Agent | Tasks closed | Bugs filed | Notes |

@@ -42,15 +42,15 @@ Each loop run updates the running totals and appends a review entry.
 
 <!-- QA and arch loops append entries below this line -->
 
-### QA Review — 2026-04-11 14:00 — a632b1f7..e09ec097
+### QA Review — 2026-04-11 05:05 — a632b1f7..e09ec097
 
 | Agent | Tasks closed | Bugs filed | Notes |
 |-------|-------------|------------|-------|
-| Claude | 0 | 0 | No agent-attributed commits this run. |
+| Claude | 0 | 0 | WIP commit e09ec097 on red-cell-c2-94ykk (api/mod.rs split): made auth internals `pub(crate)` to restore test compilation after module split. Addresses existing bug red-cell-c2-9ho75. Reasonable interim fix — long-term the tests should move into auth.rs. |
 | Codex | 0 | 0 | No activity this run. |
 | Cursor | 0 | 0 | No activity this run. |
 
-Build: **passed** — `cargo check --workspace` clean, clippy clean (zero warnings). Tests: **1 known failure** — `repeated_wrong_passwords_trigger_rate_limiter_lockout` (already tracked as red-cell-c2-rlt01); 2853 passed, nextest stopped at 2854/5313 due to fail-fast. Only code change: Michel-owned commit e09ec097 making auth internals `pub(crate)` to fix test visibility after api/mod.rs split — correct intermediate step, no issues. Beads DB was locked by concurrent dev agent for part of the review.
+Build: **passed** — `cargo check --workspace` clean. Tests: **blocked** — compilation still in progress at checkpoint time (large workspace rebuild). Clippy: **blocked** — waiting on build lock from test compilation. No new bugs filed — existing bug red-cell-c2-9ho75 already tracks the test compilation issue being fixed.
 
 ### QA Review — 2026-04-09 20:30 — d544a2fb..a632b1f7
 
@@ -6533,13 +6533,3 @@ Build: `cargo check --workspace` **passed** (clean). Clippy: **passed** (0 warni
 | Cursor | 0 | 0 | No activity this run. |
 
 Build: `cargo check --workspace` **passed** (8m 51s). Clippy: **passed** (0 warnings, 3m 04s). Tests: skipped (cargo lock contention from concurrent dev agent). No bugs filed — all changes are correct.
-
-### QA Review — 2026-04-10 00:00 — a632b1f7..e09ec097
-
-| Agent | Tasks closed | Bugs filed | Notes |
-|-------|-------------|------------|-------|
-| Claude | 0 | 0 | WIP on red-cell-c2-94ykk (api/mod.rs split): commit e09ec097 makes auth internals `pub(crate)` to fix test visibility after the split. No tasks closed yet — split still in progress. |
-| Codex | 0 | 0 | No activity this run. |
-| Cursor | 0 | 0 | No activity this run. |
-
-Build: `cargo check --workspace` **passed** (clean). Tests/Clippy: blocked by concurrent dev-agent cargo lock contention — skipped. No bugs filed — the `pub(crate)` visibility broadening is a known consequence of the ongoing api split (tracked by red-cell-c2-9ho75, red-cell-c2-w35n1).

@@ -10,11 +10,11 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 1251 | 255 | 83 |
-| Bugs filed against | 239 | 49 | 13 |
-| Bug rate (bugs/task) | 0.19 | 0.19 | 0.16 |
-| Quality score | 81% | 81% | 84% |
+| Bugs filed against | 239 | 50 | 13 |
+| Bug rate (bugs/task) | 0.19 | 0.20 | 0.16 |
+| Quality score | 81% | 80% | 84% |
 
-*Bug rates: Claude 239/1251=0.1912→0.19, Codex 49/255=0.1922→0.19, Cursor 13/83=0.1566→0.16*
+*Bug rates: Claude 239/1251=0.1912→0.19, Codex 50/255=0.1961→0.20, Cursor 13/83=0.1566→0.16*
 
 ## Violation Breakdown
 
@@ -24,7 +24,7 @@ Each loop run updates the running totals and appends a review entry.
 | Missing tests / stale tests | 81 | 22 | 6 |
 | Clippy warnings | 14 | 0 | 1 |
 | Protocol errors | 30 | 32 | 4 |
-| Security issues | 62 | 39 | 0 |
+| Security issues | 62 | 40 | 0 |
 | Architecture drift | 38 | 25 | 2 |
 | Memory / resource leaks | 14 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 10 | 0 |
@@ -6565,3 +6565,13 @@ Build: `cargo check --workspace` **passed** (clean). Clippy: **passed** (0 warni
 | Cursor | 0 | 0 | No activity this run. |
 
 Build: `cargo check --workspace` **passed** (8m 51s). Clippy: **passed** (0 warnings, 3m 04s). Tests: skipped (cargo lock contention from concurrent dev agent). No bugs filed — all changes are correct.
+
+### QA Review — 2026-04-11 — a632b1f7..e09ec097
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | QA/arch checkpoint commits only (0ac46e62, 10f49d24, f1960d5c). No code changes. |
+| Codex | 0 | 1 | e09ec097: blanket pub(crate) on ApiRuntime internals to fix test compilation after api/mod.rs split. Filed red-cell-c2-fki1q (security encapsulation concern — key_hash_secret and other sensitive fields exposed). Still working on red-cell-c2-94ykk (api/mod.rs split). |
+| Cursor | 0 | 0 | No activity this run. |
+
+Build: `cargo check --workspace` **passed**. Clippy: **passed** (0 warnings). Tests: 5313 nextest — 1 failure (`repeated_wrong_passwords_trigger_rate_limiter_lockout`, known: red-cell-c2-rlt01); `cargo test` — 2373 passed, 1 failed (`initialize_exposes_agent_and_listener_accessors` PyO3 test, filed red-cell-c2-khn1j as pre-existing/flaky). Filed 1 new bug against Codex (red-cell-c2-fki1q: security encapsulation), 1 unattributed (red-cell-c2-khn1j: plugin test).

@@ -16,6 +16,9 @@ use tracing::instrument;
 use crate::api::{api_routes, extract_api_key, session_api_dispatch_line};
 use crate::app::TeamserverState;
 
+/// Maximum session WebSocket message size accepted by the teamserver (1 MiB).
+pub(crate) const SESSION_MAX_MESSAGE_SIZE: usize = 1024 * 1024;
+
 /// WebSocket upgrade handler for `/api/v1/ws`.
 ///
 /// Requires a valid `x-api-key` (or `Authorization: Bearer`) header; the
@@ -40,7 +43,7 @@ pub(crate) async fn session_ws_handler(
     let client_ip = addr;
     let state_for_socket = state.clone();
 
-    ws.on_upgrade(move |socket| async move {
+    ws.max_message_size(SESSION_MAX_MESSAGE_SIZE).on_upgrade(move |socket| async move {
         run_session_socket(socket, state_for_socket, client_ip, api_key).await;
     })
 }

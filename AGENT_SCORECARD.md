@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1255 | 255 | 89 |
-| Bugs filed against | 240 | 50 | 13 |
-| Bug rate (bugs/task) | 0.19 | 0.20 | 0.15 |
-| Quality score | 81% | 80% | 85% |
+| Tasks closed | 1257 | 255 | 90 |
+| Bugs filed against | 241 | 50 | 14 |
+| Bug rate (bugs/task) | 0.19 | 0.20 | 0.16 |
+| Quality score | 81% | 80% | 84% |
 
-*Bug rates: Claude 240/1255=0.1912→0.19, Codex 50/255=0.1961→0.20, Cursor 13/89=0.1461→0.15*
+*Bug rates: Claude 241/1257=0.1917→0.19, Codex 50/255=0.1961→0.20, Cursor 14/90=0.1556→0.16*
 
 ## Violation Breakdown
 
@@ -22,13 +22,13 @@ Each loop run updates the running totals and appends a review entry.
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 16 | 0 | 0 |
 | Missing tests / stale tests | 81 | 22 | 6 |
-| Clippy warnings | 14 | 0 | 1 |
+| Clippy warnings | 14 | 0 | 2 |
 | Protocol errors | 30 | 32 | 4 |
 | Security issues | 62 | 40 | 0 |
 | Architecture drift | 38 | 25 | 2 |
 | Memory / resource leaks | 14 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 10 | 0 |
-| Test infrastructure / flakiness | 57 | 6 | 1 |
+| Test infrastructure / flakiness | 58 | 6 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 4 | 5 | 0 |
 | Correctness / pagination | 66 | 9 | 1 |
@@ -6665,3 +6665,13 @@ Build: `cargo check --workspace` **passed** (8m 51s). Clippy: **passed** (0 warn
 | Cursor | 0 | 0 | No activity this run. |
 
 Build: `cargo check --workspace` **passed**. Clippy: **passed** (0 warnings). Tests: 5313 nextest — 1 failure (`repeated_wrong_passwords_trigger_rate_limiter_lockout`, known: red-cell-c2-rlt01); `cargo test` — 2373 passed, 1 failed (`initialize_exposes_agent_and_listener_accessors` PyO3 test, filed red-cell-c2-khn1j as pre-existing/flaky). Filed 1 new bug against Codex (red-cell-c2-fki1q: security encapsulation), 1 unattributed (red-cell-c2-khn1j: plugin test).
+
+### QA Review — 2026-04-12 17:15 — 70cfd8a0..8e5ddf4c
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 1 | Closed red-cell-c2-w35n1 + red-cell-c2-9ho75 (api/mod.rs test compilation fix). Continuing red-cell-c2-gl40g (dispatch/tests split): extracted 4 test modules (output, filesystem, network_token_kerberos, pivot_socket_transfer) + cleaned up unused imports. Left missing `AsyncReadExt`/`AsyncWriteExt` import in pivot_socket_transfer.rs (filed red-cell-c2-rry4o). Claimed red-cell-c2-fvdeh (audit log retention). |
+| Codex | 0 | 0 | No activity this run. |
+| Cursor | 1 | 1 | Closed red-cell-c2-1awhz. Fixed client transport test modules after split (0af7919a). Working on red-cell-c2-f5y94 (status command /health). Introduced dead_code clippy warnings in status.rs (filed red-cell-c2-gmkam). |
+
+Build: `cargo check --workspace` **passed** (3m 17s, warnings only). Clippy: **failed** (3 dead_code errors in client-cli/src/commands/status.rs). Tests: **failed to compile** (5 errors in teamserver dispatch/tests/pivot_socket_transfer.rs — missing tokio::io imports).

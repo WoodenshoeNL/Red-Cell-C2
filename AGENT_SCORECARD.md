@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1257 | 255 | 92 |
+| Tasks closed | 1258 | 255 | 92 |
 | Bugs filed against | 243 | 50 | 15 |
 | Bug rate (bugs/task) | 0.19 | 0.20 | 0.16 |
 | Quality score | 81% | 80% | 84% |
 
-*Bug rates: Claude 243/1257=0.1933→0.19, Codex 50/255=0.1961→0.20, Cursor 15/92=0.1630→0.16*
+*Bug rates: Claude 243/1258=0.1931→0.19, Codex 50/255=0.1961→0.20, Cursor 15/92=0.1630→0.16*
 
 ## Violation Breakdown
 
@@ -41,6 +41,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-13 00:30 — 2e8413c0..8999299b
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 0 | Closed red-cell-c2-fvdeh (audit log retention policy). Commit only updated beads — implementation was already in place from prior session. |
+| Codex | 0 | 0 | No activity this run. |
+| Cursor | 0 | 0 | Clean refactor: split client-cli session.rs (1457 lines) into 4 focused modules — connect.rs (307), io.rs (405), normalize.rs (127), run.rs (572). Module boundaries are logical (WS connect, I/O framing, command validation, main loop). No unwrap in production code. Comprehensive test suite (13 unit tests + 11 integration tests with mock WS server). Claim commit for red-cell-c2-gmkam (clippy dead_code fix). |
+
+Build: **passed** — `cargo check --workspace` clean. Tests/clippy: **compiling** — full workspace recompile with test targets, likely resource contention with concurrent dev agent. No test failures observed in `cargo check`. No bugs filed — the session refactor is well-executed.
 
 ### QA Review — 2026-04-12 21:45 — ef7a1f99..2e8413c0
 

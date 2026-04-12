@@ -110,3 +110,57 @@ pub async fn dispatch(cli: Cli) -> i32 {
         Commands::Help { .. } => EXIT_SUCCESS,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::dispatch;
+    use crate::cli::{Cli, Commands};
+    use crate::error::EXIT_SUCCESS;
+    use crate::output::OutputFormat;
+
+    /// Regression: `Commands::Status` must keep calling [`crate::commands::status::run`].
+    /// Exercised at the dispatch layer (no subprocess) so refactors cannot strand the handler.
+    #[tokio::test]
+    async fn dispatch_status_wires_through_to_status_run() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"version": "v1"})),
+            )
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/health"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "ok",
+                "uptime_secs": 1u64,
+                "agents": { "active": 0, "total": 0 },
+                "listeners": { "running": 0, "stopped": 0 },
+                "database": "ok",
+                "plugins": { "loaded": 0, "failed": 0, "disabled": 0 },
+                "plugin_health": [],
+            })))
+            .mount(&server)
+            .await;
+
+        let cli = Cli {
+            server: Some(server.uri()),
+            token: Some("tok".into()),
+            output: OutputFormat::Json,
+            timeout: None,
+            ca_cert: None,
+            cert_fingerprint: None,
+            pin_intermediate: false,
+            command: Some(Commands::Status),
+        };
+
+        let code = dispatch(cli).await;
+        assert_eq!(code, EXIT_SUCCESS);
+    }
+}

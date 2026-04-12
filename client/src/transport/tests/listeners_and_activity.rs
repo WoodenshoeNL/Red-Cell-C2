@@ -1,26 +1,12 @@
-use super::super::operator_msg::{
-    flat_info_string, loot_item_from_flat_info, loot_item_from_response, normalize_agent_id,
-    sanitize_text,
-};
 use super::super::*;
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use super::helpers::head;
-use base64::Engine as _;
-use futures_util::SinkExt;
-use red_cell_common::OperatorInfo;
-use red_cell_common::demon::DemonCommand;
 use red_cell_common::operator::{
-    AgentInfo as OperatorAgentInfo, AgentPivotsInfo, AgentResponseInfo, AgentUpdateInfo,
-    BuildPayloadMessageInfo, BuildPayloadResponseInfo, ChatCode, EventCode, FlatInfo,
-    InitConnectionCode, ListenerCode, ListenerErrorInfo, ListenerInfo, ListenerMarkInfo, LoginInfo,
-    Message, MessageHead, MessageInfo, NameInfo, SessionCode, TeamserverLogInfo,
+    BuildPayloadMessageInfo, ChatCode, EventCode, FlatInfo, InitConnectionCode, ListenerCode,
+    ListenerErrorInfo, LoginInfo, Message, MessageHead, MessageInfo, SessionCode,
 };
-use red_cell_common::tls::{TlsKeyAlgorithm, generate_self_signed_tls_identity};
-use serde_json::Value;
-use tokio::net::TcpListener;
-use tokio_tungstenite::{accept_async, tungstenite::Message as TungsteniteMessage};
 #[test]
 fn listener_error_updates_existing_listener_status_and_pushes_chat() {
     let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());

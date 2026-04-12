@@ -1,26 +1,12 @@
 use super::super::operator_msg::{
-    flat_info_string, loot_item_from_flat_info, loot_item_from_response, normalize_agent_id,
-    sanitize_text,
+    flat_info_string, loot_item_from_flat_info, normalize_agent_id, sanitize_text,
 };
 use super::super::*;
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
 
 use super::helpers::{flat_info, head, make_agent_info, make_flat_info};
-use base64::Engine as _;
-use futures_util::SinkExt;
-use red_cell_common::OperatorInfo;
-use red_cell_common::demon::DemonCommand;
-use red_cell_common::operator::{
-    AgentInfo as OperatorAgentInfo, AgentPivotsInfo, AgentResponseInfo, AgentUpdateInfo,
-    BuildPayloadMessageInfo, BuildPayloadResponseInfo, ChatCode, EventCode, FlatInfo,
-    InitConnectionCode, ListenerCode, ListenerErrorInfo, ListenerInfo, ListenerMarkInfo, LoginInfo,
-    Message, MessageHead, MessageInfo, NameInfo, SessionCode, TeamserverLogInfo,
-};
-use red_cell_common::tls::{TlsKeyAlgorithm, generate_self_signed_tls_identity};
+use red_cell_common::operator::{AgentResponseInfo, EventCode, Message, MessageHead};
 use serde_json::Value;
-use tokio::net::TcpListener;
-use tokio_tungstenite::{accept_async, tungstenite::Message as TungsteniteMessage};
 // ── normalize_agent_id ──────────────────────────────────────────
 
 #[test]
@@ -88,16 +74,6 @@ fn sanitize_text_trims_leading_and_trailing_whitespace() {
 }
 
 // ── CredentialsAdd / CredentialsEdit ──────────────────────────────
-
-/// Helper: build a `FlatInfo` from key-value pairs.
-fn flat_info(pairs: &[(&str, &str)]) -> FlatInfo {
-    FlatInfo {
-        fields: pairs
-            .iter()
-            .map(|(k, v)| ((*k).to_owned(), Value::String((*v).to_owned())))
-            .collect(),
-    }
-}
 
 #[test]
 fn credentials_add_inserts_loot_and_emits_event() {
@@ -288,11 +264,6 @@ fn agent_task_returns_no_events() {
 }
 
 // ── flat_info_string ─────────────────────────────────────────────
-
-fn make_flat_info(pairs: &[(&str, serde_json::Value)]) -> FlatInfo {
-    let fields = pairs.iter().map(|(k, v)| ((*k).to_owned(), v.clone())).collect();
-    FlatInfo { fields }
-}
 
 #[test]
 fn flat_info_string_returns_first_matching_key() {

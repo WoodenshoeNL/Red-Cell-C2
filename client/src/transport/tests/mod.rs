@@ -1,4 +1,6 @@
 //! Transport layer unit tests split by concern.
+#![allow(clippy::unwrap_used)]
+
 mod helpers;
 
 mod app_state;

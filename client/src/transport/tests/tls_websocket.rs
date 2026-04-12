@@ -1,25 +1,11 @@
-use super::super::operator_msg::{
-    flat_info_string, loot_item_from_flat_info, loot_item_from_response, normalize_agent_id,
-    sanitize_text,
-};
 use super::super::*;
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use super::super::ClientWebSocket;
-use base64::Engine as _;
 use futures_util::SinkExt;
 use futures_util::StreamExt;
-use red_cell_common::OperatorInfo;
-use red_cell_common::demon::DemonCommand;
-use red_cell_common::operator::{
-    AgentInfo as OperatorAgentInfo, AgentPivotsInfo, AgentResponseInfo, AgentUpdateInfo,
-    BuildPayloadMessageInfo, BuildPayloadResponseInfo, ChatCode, EventCode, FlatInfo,
-    InitConnectionCode, ListenerCode, ListenerErrorInfo, ListenerInfo, ListenerMarkInfo, LoginInfo,
-    Message, MessageHead, MessageInfo, NameInfo, SessionCode, TeamserverLogInfo,
-};
+use red_cell_common::operator::{EventCode, Message, MessageHead, TeamserverLogInfo};
 use red_cell_common::tls::{TlsKeyAlgorithm, generate_self_signed_tls_identity};
-use serde_json::Value;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::protocol::Message as WebSocketMessage;
 use tokio_tungstenite::{accept_async, tungstenite::Message as TungsteniteMessage};

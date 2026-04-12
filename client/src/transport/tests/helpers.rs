@@ -1,27 +1,9 @@
-use super::super::operator_msg::{
-    flat_info_string, loot_item_from_flat_info, loot_item_from_response, normalize_agent_id,
-    sanitize_text,
-};
-use super::super::*;
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
-
-use base64::Engine as _;
-use futures_util::SinkExt;
-use red_cell_common::OperatorInfo;
-use red_cell_common::demon::DemonCommand;
 use red_cell_common::operator::{
-    AgentInfo as OperatorAgentInfo, AgentPivotsInfo, AgentResponseInfo, AgentUpdateInfo,
-    BuildPayloadMessageInfo, BuildPayloadResponseInfo, ChatCode, EventCode, FlatInfo,
-    InitConnectionCode, ListenerCode, ListenerErrorInfo, ListenerInfo, ListenerMarkInfo, LoginInfo,
-    Message, MessageHead, MessageInfo, NameInfo, SessionCode, TeamserverLogInfo,
+    AgentInfo as OperatorAgentInfo, AgentPivotsInfo, EventCode, FlatInfo, MessageHead,
 };
-use red_cell_common::tls::{TlsKeyAlgorithm, generate_self_signed_tls_identity};
 use serde_json::Value;
-use tokio::net::TcpListener;
-use tokio_tungstenite::{accept_async, tungstenite::Message as TungsteniteMessage};
 
-fn head(event: EventCode) -> MessageHead {
+pub(super) fn head(event: EventCode) -> MessageHead {
     MessageHead {
         event,
         user: "operator".to_owned(),
@@ -30,7 +12,7 @@ fn head(event: EventCode) -> MessageHead {
     }
 }
 
-fn flat_info(pairs: &[(&str, &str)]) -> FlatInfo {
+pub(super) fn flat_info(pairs: &[(&str, &str)]) -> FlatInfo {
     FlatInfo {
         fields: pairs
             .iter()
@@ -39,13 +21,13 @@ fn flat_info(pairs: &[(&str, &str)]) -> FlatInfo {
     }
 }
 
-fn make_flat_info(pairs: &[(&str, serde_json::Value)]) -> FlatInfo {
+pub(super) fn make_flat_info(pairs: &[(&str, serde_json::Value)]) -> FlatInfo {
     let fields = pairs.iter().map(|(k, v)| ((*k).to_owned(), v.clone())).collect();
     FlatInfo { fields }
 }
 
 /// `hostname`, using sensible defaults for all other fields.
-fn make_agent_info(name_id: &str, hostname: &str) -> OperatorAgentInfo {
+pub(super) fn make_agent_info(name_id: &str, hostname: &str) -> OperatorAgentInfo {
     OperatorAgentInfo {
         active: "true".to_owned(),
         background_check: false,

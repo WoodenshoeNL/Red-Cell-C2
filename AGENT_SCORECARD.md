@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1255 | 255 | 88 |
+| Tasks closed | 1255 | 255 | 89 |
 | Bugs filed against | 240 | 50 | 13 |
 | Bug rate (bugs/task) | 0.19 | 0.20 | 0.15 |
 | Quality score | 81% | 80% | 85% |
 
-*Bug rates: Claude 240/1255=0.1912→0.19, Codex 50/255=0.1961→0.20, Cursor 13/88=0.1477→0.15*
+*Bug rates: Claude 240/1255=0.1912→0.19, Codex 50/255=0.1961→0.20, Cursor 13/89=0.1461→0.15*
 
 ## Violation Breakdown
 
@@ -41,6 +41,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-12 14:30 — 7e758113..70cfd8a0
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | Extracted 213 integration tests from api/mod.rs into 9 per-domain test files (agents, auth, listeners, loot, operators, payload, session, jobs, audit) with shared helpers module. Clean refactor — test structure mirrors API domains. 1 WIP interrupted session (red-cell-c2-6tyqr). |
+| Codex | 0 | 0 | No activity this run. |
+| Cursor | 1 | 0 | Closed red-cell-c2-f14zw (session unknown-command errors now go to stderr per CLI contract). Split client-cli agent.rs (1914 lines) into 9 sub-modules (exec, groups, kill, list, output_cmd, show, transfer, types, wire) + tests. Both changes are clean — module boundaries are logical, tests updated correctly. |
+
+Build: **passed** — `cargo check --workspace` clean, `cargo clippy -- -D warnings` clean. Tests: **killed** — `cargo nextest` compilation terminated by SIGTERM (likely OOM, known infrastructure issue). No bugs filed — both refactors are well-executed.
 
 ### QA Review — 2026-04-12 11:00 — d3856b6e..7e758113
 

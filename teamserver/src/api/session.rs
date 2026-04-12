@@ -180,6 +180,30 @@ fn build_session_rest_request(
                 .map_err(|e| SessionBuildError::InvalidBody(e.to_string()))?;
             build("POST", &format!("/agents/{id}/download"), Body::from(bytes))
         }
+        "agent.groups" => {
+            let id = val
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| SessionBuildError::missing(cmd, "id"))?;
+            Ok(HttpRequest::builder()
+                .method("GET")
+                .uri(format!("/agents/{id}/groups"))
+                .body(Body::empty())
+                .map_err(|e| SessionBuildError::InvalidBody(e.to_string()))?)
+        }
+        "agent.set_groups" => {
+            let id = val
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| SessionBuildError::missing(cmd, "id"))?;
+            let mut body_val = session_strip_meta_object(val)?;
+            if let Some(obj) = body_val.as_object_mut() {
+                obj.remove("id");
+            }
+            let bytes = serde_json::to_vec(&body_val)
+                .map_err(|e| SessionBuildError::InvalidBody(e.to_string()))?;
+            build("PUT", &format!("/agents/{id}/groups"), Body::from(bytes))
+        }
         "listener.list" => Ok(HttpRequest::builder()
             .method("GET")
             .uri("/listeners")
@@ -267,6 +291,30 @@ fn build_session_rest_request(
             .map_err(|e| SessionBuildError::InvalidBody(e.to_string()))?;
             build("POST", &format!("/listeners/{name}/mark"), Body::from(body))
         }
+        "listener.access" => {
+            let name = val
+                .get("name")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| SessionBuildError::missing(cmd, "name"))?;
+            Ok(HttpRequest::builder()
+                .method("GET")
+                .uri(format!("/listeners/{name}/access"))
+                .body(Body::empty())
+                .map_err(|e| SessionBuildError::InvalidBody(e.to_string()))?)
+        }
+        "listener.set_access" => {
+            let name = val
+                .get("name")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| SessionBuildError::missing(cmd, "name"))?;
+            let mut body_val = session_strip_meta_object(val)?;
+            if let Some(obj) = body_val.as_object_mut() {
+                obj.remove("name");
+            }
+            let bytes = serde_json::to_vec(&body_val)
+                .map_err(|e| SessionBuildError::InvalidBody(e.to_string()))?;
+            build("PUT", &format!("/listeners/{name}/access"), Body::from(bytes))
+        }
         "operator.list" => Ok(HttpRequest::builder()
             .method("GET")
             .uri("/operators")
@@ -302,7 +350,31 @@ fn build_session_rest_request(
                 .map_err(|e| SessionBuildError::InvalidBody(e.to_string()))?;
             build("PUT", &format!("/operators/{username}/role"), Body::from(bytes))
         }
-        "audit.list" | "log.list" => {
+        "operator.show_agent_groups" => {
+            let username = val
+                .get("username")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| SessionBuildError::missing(cmd, "username"))?;
+            Ok(HttpRequest::builder()
+                .method("GET")
+                .uri(format!("/operators/{username}/agent-groups"))
+                .body(Body::empty())
+                .map_err(|e| SessionBuildError::InvalidBody(e.to_string()))?)
+        }
+        "operator.set_agent_groups" => {
+            let username = val
+                .get("username")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| SessionBuildError::missing(cmd, "username"))?;
+            let mut body_val = session_strip_meta_object(val)?;
+            if let Some(obj) = body_val.as_object_mut() {
+                obj.remove("username");
+            }
+            let bytes = serde_json::to_vec(&body_val)
+                .map_err(|e| SessionBuildError::InvalidBody(e.to_string()))?;
+            build("PUT", &format!("/operators/{username}/agent-groups"), Body::from(bytes))
+        }
+        "audit.list" | "log.list" | "log.tail" => {
             let qs = session_query_string_from_value(val)?;
             let uri = if qs.is_empty() { "/audit".to_owned() } else { format!("/audit?{qs}") };
             Ok(HttpRequest::builder()
@@ -551,4 +623,144 @@ pub(crate) async fn session_api_dispatch_line(
         }
     };
     session_ws_envelope_response(cmd, response).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every command that the client-cli advertises in `SESSION_KNOWN_COMMANDS`
+    /// must be handled by `build_session_rest_request` (i.e. must not return
+    /// `SessionBuildError::UnknownCommand`).  When a new session command is
+    /// added to the client allowlist, this test fails until the teamserver
+    /// router is updated, preventing contract drift.
+    #[test]
+    fn session_router_handles_all_advertised_commands() {
+        let advertised: &[&str] = &[
+            "status",
+            "agent.list",
+            "agent.show",
+            "agent.exec",
+            "agent.output",
+            "agent.kill",
+            "agent.upload",
+            "agent.download",
+            "agent.groups",
+            "agent.set_groups",
+            "listener.list",
+            "listener.show",
+            "listener.create",
+            "listener.update",
+            "listener.start",
+            "listener.stop",
+            "listener.delete",
+            "listener.mark",
+            "listener.access",
+            "listener.set_access",
+            "operator.list",
+            "operator.create",
+            "operator.delete",
+            "operator.set_role",
+            "operator.show_agent_groups",
+            "operator.set_agent_groups",
+            "audit.list",
+            "log.list",
+            "log.tail",
+            "session_activity.list",
+            "credential.list",
+            "credential.show",
+            "job.list",
+            "job.show",
+            "loot.list",
+            "loot.download",
+            "loot.show",
+            "payload.list",
+            "payload.build",
+            "payload.job",
+            "payload.download",
+            "payload_cache.flush",
+            "payload-cache.flush",
+            "webhooks.stats",
+        ];
+
+        let empty = serde_json::json!({});
+        let mut unknown = Vec::new();
+        for cmd in advertised {
+            match build_session_rest_request(cmd, &empty) {
+                Err(SessionBuildError::UnknownCommand(_)) => unknown.push(*cmd),
+                _ => {}
+            }
+        }
+
+        assert!(
+            unknown.is_empty(),
+            "session router does not handle commands advertised by client-cli: {unknown:?}\n\
+             Add match arms in `build_session_rest_request` for each missing command.",
+        );
+    }
+
+    #[test]
+    fn agent_groups_produces_correct_request() {
+        let val = serde_json::json!({"id": "DEADBEEF"});
+        let req = build_session_rest_request("agent.groups", &val).unwrap();
+        assert_eq!(req.method(), "GET");
+        assert_eq!(req.uri(), "/agents/DEADBEEF/groups");
+    }
+
+    #[test]
+    fn agent_set_groups_produces_correct_request() {
+        let val = serde_json::json!({"id": "DEADBEEF", "groups": ["red", "blue"]});
+        let req = build_session_rest_request("agent.set_groups", &val).unwrap();
+        assert_eq!(req.method(), "PUT");
+        assert_eq!(req.uri(), "/agents/DEADBEEF/groups");
+    }
+
+    #[test]
+    fn listener_access_produces_correct_request() {
+        let val = serde_json::json!({"name": "http-1"});
+        let req = build_session_rest_request("listener.access", &val).unwrap();
+        assert_eq!(req.method(), "GET");
+        assert_eq!(req.uri(), "/listeners/http-1/access");
+    }
+
+    #[test]
+    fn listener_set_access_produces_correct_request() {
+        let val = serde_json::json!({"name": "http-1", "allowed_operators": ["alice"]});
+        let req = build_session_rest_request("listener.set_access", &val).unwrap();
+        assert_eq!(req.method(), "PUT");
+        assert_eq!(req.uri(), "/listeners/http-1/access");
+    }
+
+    #[test]
+    fn operator_show_agent_groups_produces_correct_request() {
+        let val = serde_json::json!({"username": "alice"});
+        let req = build_session_rest_request("operator.show_agent_groups", &val).unwrap();
+        assert_eq!(req.method(), "GET");
+        assert_eq!(req.uri(), "/operators/alice/agent-groups");
+    }
+
+    #[test]
+    fn operator_set_agent_groups_produces_correct_request() {
+        let val = serde_json::json!({"username": "alice", "allowed_groups": ["ops"]});
+        let req = build_session_rest_request("operator.set_agent_groups", &val).unwrap();
+        assert_eq!(req.method(), "PUT");
+        assert_eq!(req.uri(), "/operators/alice/agent-groups");
+    }
+
+    #[test]
+    fn log_tail_maps_to_audit_endpoint() {
+        let val = serde_json::json!({});
+        let req = build_session_rest_request("log.tail", &val).unwrap();
+        assert_eq!(req.method(), "GET");
+        assert_eq!(req.uri(), "/audit");
+    }
+
+    #[test]
+    fn log_tail_with_params_passes_query_string() {
+        let val = serde_json::json!({"limit": 10});
+        let req = build_session_rest_request("log.tail", &val).unwrap();
+        assert_eq!(req.method(), "GET");
+        assert!(req.uri().to_string().starts_with("/audit?"));
+        assert!(req.uri().to_string().contains("limit=10"));
+    }
 }

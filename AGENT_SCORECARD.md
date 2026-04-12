@@ -9,20 +9,20 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1257 | 255 | 90 |
-| Bugs filed against | 241 | 50 | 14 |
-| Bug rate (bugs/task) | 0.19 | 0.20 | 0.16 |
-| Quality score | 81% | 80% | 84% |
+| Tasks closed | 1257 | 255 | 91 |
+| Bugs filed against | 243 | 50 | 14 |
+| Bug rate (bugs/task) | 0.19 | 0.20 | 0.15 |
+| Quality score | 81% | 80% | 85% |
 
-*Bug rates: Claude 241/1257=0.1917→0.19, Codex 50/255=0.1961→0.20, Cursor 14/90=0.1556→0.16*
+*Bug rates: Claude 243/1257=0.1933→0.19, Codex 50/255=0.1961→0.20, Cursor 14/91=0.1538→0.15*
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 16 | 0 | 0 |
-| Missing tests / stale tests | 81 | 22 | 6 |
-| Clippy warnings | 14 | 0 | 2 |
+| Missing tests / stale tests | 82 | 22 | 6 |
+| Clippy warnings | 15 | 0 | 2 |
 | Protocol errors | 30 | 32 | 4 |
 | Security issues | 62 | 40 | 0 |
 | Architecture drift | 38 | 25 | 3 |
@@ -6686,3 +6686,13 @@ Build: `cargo check --workspace` **passed** (3m 17s, warnings only). Clippy: **f
 
 Overall codebase health: drifting
 Biggest blindspot: session-mode contract drift between `client-cli` and the `/api/v1/ws` bridge is not covered by a parity test, so documented NDJSON commands can silently degrade or fail at runtime.
+
+### QA Review — 2026-04-12 19:00 — 8e5ddf4c..ef7a1f99
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 2 | Refactored dispatch/tests.rs into per-command modules (config.rs, moved checkin tests). Left 5 unused imports across mod.rs and filesystem.rs (`red-cell-c2-ceofs`). Also found pre-existing missing `#[tokio::test]` attribute on `builtin_net_and_transfer_handlers_format_operator_output` in network_token_kerberos.rs (`red-cell-c2-xh18e`). WIP audit-log pruner (audit_pruner.rs + API purge endpoint + config fields) — solid implementation with good tests, but session was interrupted. |
+| Codex | 0 | 0 | No activity this run. |
+| Cursor | 1 | 0 | Closed `red-cell-c2-dga6a` (transport test helper visibility). Hardened phantom init_callback_flow to filter AgentNew by agent ID with increased retry count. Clean fix. Active on client-cli status/health migration (`red-cell-c2-f5y94`, `red-cell-c2-gmkam`). |
+
+Build: cargo check passed; tests/clippy blocked by concurrent cargo build lock contention (shared CARGO_TARGET_DIR)

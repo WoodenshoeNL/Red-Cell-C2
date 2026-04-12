@@ -14,26 +14,15 @@ use super::util::{
     windows_version_label as checkin_windows_version_label,
 };
 use super::{
-    CommandDispatchError, CommandDispatcher, DownloadState, DownloadTracker, LootContext,
-    loot_context, non_empty_option,
+    CommandDispatchError, CommandDispatcher, DownloadTracker, LootContext, loot_context,
+    non_empty_option,
 };
 use crate::{AgentRegistry, Database, EventBus, Job, SocketRelayManager};
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use red_cell_common::crypto::decrypt_agent_data;
-use red_cell_common::demon::{
-    DemonCallback, DemonCallbackError, DemonCommand, DemonConfigKey, DemonFilesystemCommand,
-    DemonInfoClass, DemonInjectError, DemonJobCommand, DemonKerberosCommand, DemonMessage,
-    DemonNetCommand, DemonPivotCommand, DemonProcessCommand, DemonSocketCommand, DemonSocketType,
-    DemonTokenCommand, DemonTransferCommand,
-};
+use red_cell_common::demon::{DemonCallback, DemonCommand, DemonConfigKey, DemonMessage};
 use red_cell_common::operator::OperatorMessage;
 use serde_json::Value;
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
-    time::{Duration, timeout},
-};
+use tokio::time::{Duration, timeout};
 
 #[tokio::test]
 async fn dispatch_errors_for_unregistered_commands() {

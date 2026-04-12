@@ -49,6 +49,7 @@ struct HealthListenerCounts {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct HealthPluginCounts {
     loaded: u32,
     failed: u32,
@@ -56,6 +57,7 @@ struct HealthPluginCounts {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct HealthPluginEntryWire {
     name: String,
     consecutive_failures: u32,

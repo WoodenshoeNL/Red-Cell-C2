@@ -3,8 +3,8 @@
 use super::common::*;
 
 use super::super::{
-    CommandDispatchError, CommandDispatcher, DEFAULT_MAX_PIVOT_CHAIN_DEPTH, DownloadState,
-    DownloadTracker,
+    CommandDispatchError, CommandDispatcher, DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
+    DOWNLOAD_TRACKER_AGGREGATE_CAP_MULTIPLIER, DownloadState, DownloadTracker,
 };
 use crate::{AgentRegistry, Database, EventBus, Job, SocketRelayManager};
 use base64::Engine as _;
@@ -1890,4 +1890,43 @@ async fn with_builtin_handlers_and_max_download_bytes_zero_ceiling()
     );
     assert!(database.loot().list_for_agent(0xABCD_EF62).await?.is_empty());
     Ok(())
+}
+
+// -----------------------------------------------------------------
+// DownloadTracker::from_max_download_bytes
+// -----------------------------------------------------------------
+
+#[test]
+fn download_tracker_from_max_download_bytes_normal_value() {
+    let tracker = DownloadTracker::from_max_download_bytes(1024);
+    assert_eq!(tracker.max_download_bytes, 1024);
+    assert_eq!(tracker.max_total_download_bytes, 1024 * DOWNLOAD_TRACKER_AGGREGATE_CAP_MULTIPLIER,);
+}
+
+#[test]
+fn download_tracker_from_max_download_bytes_saturates_large_u64() {
+    // A value larger than usize::MAX (on any platform) must saturate to usize::MAX.
+    let huge: u64 = u64::MAX;
+    let tracker = DownloadTracker::from_max_download_bytes(huge);
+
+    // The per-file cap saturates to usize::MAX.
+    assert_eq!(tracker.max_download_bytes, usize::MAX);
+    // The aggregate cap is at least the per-file cap (saturating_mul overflows to
+    // usize::MAX, and .max() ensures it is >= max_download_bytes).
+    assert!(tracker.max_total_download_bytes >= tracker.max_download_bytes);
+}
+
+#[test]
+fn download_tracker_from_max_download_bytes_zero() {
+    let tracker = DownloadTracker::from_max_download_bytes(0);
+    assert_eq!(tracker.max_download_bytes, 0);
+    // 0 * multiplier = 0, .max(0) = 0
+    assert_eq!(tracker.max_total_download_bytes, 0);
+}
+
+#[test]
+fn download_tracker_from_max_download_bytes_one() {
+    let tracker = DownloadTracker::from_max_download_bytes(1);
+    assert_eq!(tracker.max_download_bytes, 1);
+    assert_eq!(tracker.max_total_download_bytes, DOWNLOAD_TRACKER_AGGREGATE_CAP_MULTIPLIER,);
 }

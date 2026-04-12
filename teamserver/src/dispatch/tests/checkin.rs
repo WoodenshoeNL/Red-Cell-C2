@@ -9,6 +9,10 @@ use red_cell_common::demon::DemonCommand;
 use red_cell_common::operator::OperatorMessage;
 use tokio::time::{Duration, timeout};
 
+use super::super::util::{
+    windows_arch_label as checkin_windows_arch_label,
+    windows_version_label as checkin_windows_version_label,
+};
 use super::super::{CommandDispatchError, CommandDispatcher};
 use crate::{AgentRegistry, Database, EventBus, SocketRelayManager, TeamserverError};
 
@@ -628,4 +632,92 @@ async fn builtin_checkin_handler_records_agent_checkin_audit_entry()
     assert_eq!(details["command"], "checkin");
     assert_eq!(details["agent_id"], "ABCD1234");
     Ok(())
+}
+
+// -----------------------------------------------------------------
+// checkin_windows_arch_label
+// -----------------------------------------------------------------
+
+#[test]
+fn windows_arch_label_known_values() {
+    let cases: &[(u32, &str)] =
+        &[(0, "x86"), (9, "x64/AMD64"), (5, "ARM"), (12, "ARM64"), (6, "Itanium-based")];
+    for &(value, expected) in cases {
+        assert_eq!(
+            checkin_windows_arch_label(value),
+            expected,
+            "arch value {value} should map to \"{expected}\""
+        );
+    }
+}
+
+#[test]
+fn windows_arch_label_unknown_falls_back() {
+    for value in [2_u32, 3, 7, 8, 10, 11, 99, u32::MAX] {
+        assert_eq!(
+            checkin_windows_arch_label(value),
+            "Unknown",
+            "arch value {value} should map to \"Unknown\""
+        );
+    }
+}
+
+// -----------------------------------------------------------------
+// checkin_windows_version_label
+// -----------------------------------------------------------------
+
+#[test]
+fn windows_version_label_known_versions() {
+    const WORKSTATION: u32 = 1;
+    const SERVER: u32 = 3; // any value != VER_NT_WORKSTATION (1)
+
+    let cases: &[((u32, u32, u32, u32, u32), &str)] = &[
+        // (major, minor, product_type, service_pack, build) → expected prefix
+        ((10, 0, SERVER, 0, 20_348), "Windows 2022 Server 22H2"),
+        ((10, 0, SERVER, 0, 17_763), "Windows 2019 Server"),
+        ((10, 0, WORKSTATION, 0, 22_000), "Windows 11"),
+        ((10, 0, WORKSTATION, 0, 22_621), "Windows 11"),
+        ((10, 0, SERVER, 0, 99_999), "Windows 2016 Server"),
+        ((10, 0, WORKSTATION, 0, 19_045), "Windows 10"),
+        ((6, 3, SERVER, 0, 0), "Windows Server 2012 R2"),
+        ((6, 3, WORKSTATION, 0, 0), "Windows 8.1"),
+        ((6, 2, SERVER, 0, 0), "Windows Server 2012"),
+        ((6, 2, WORKSTATION, 0, 0), "Windows 8"),
+        ((6, 1, SERVER, 0, 0), "Windows Server 2008 R2"),
+        ((6, 1, WORKSTATION, 0, 0), "Windows 7"),
+    ];
+    for &((major, minor, product_type, sp, build), expected) in cases {
+        let label = checkin_windows_version_label(major, minor, product_type, sp, build);
+        assert_eq!(
+            label, expected,
+            "({major}, {minor}, {product_type}, {sp}, {build}) should produce \"{expected}\""
+        );
+    }
+}
+
+#[test]
+fn windows_version_label_appends_service_pack() {
+    // Windows 7 workstation with SP1
+    let label = checkin_windows_version_label(6, 1, 1, 1, 0);
+    assert_eq!(label, "Windows 7 Service Pack 1");
+
+    // Windows Server 2008 R2 with SP2
+    let label = checkin_windows_version_label(6, 1, 3, 2, 0);
+    assert_eq!(label, "Windows Server 2008 R2 Service Pack 2");
+}
+
+#[test]
+fn windows_version_label_no_service_pack_suffix_when_zero() {
+    let label = checkin_windows_version_label(6, 1, 1, 0, 0);
+    assert!(!label.contains("Service Pack"), "label should not contain service pack suffix");
+}
+
+#[test]
+fn windows_version_label_unknown_falls_back() {
+    let label = checkin_windows_version_label(5, 1, 1, 0, 0);
+    assert_eq!(label, "Unknown");
+
+    // Build in Windows 11 range but wrong product type for 2022 or 2019
+    let label = checkin_windows_version_label(99, 0, 1, 0, 0);
+    assert_eq!(label, "Unknown");
 }

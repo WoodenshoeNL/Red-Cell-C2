@@ -25,14 +25,14 @@ Each loop run updates the running totals and appends a review entry.
 | Clippy warnings | 15 | 0 | 2 |
 | Protocol errors | 30 | 32 | 4 |
 | Security issues | 62 | 40 | 0 |
-| Architecture drift | 38 | 25 | 3 |
+| Architecture drift | 42 | 25 | 4 |
 | Memory / resource leaks | 14 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 10 | 0 |
 | Test infrastructure / flakiness | 58 | 6 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 4 | 5 | 0 |
 | Correctness / pagination | 67 | 9 | 1 |
-| Workflow / close-hygiene | 38 | 1 | 2 |
+| Workflow / close-hygiene | 39 | 1 | 2 |
 | Code reuse / duplication | 11 | 0 | 0 |
 | Incomplete commits (stranded work) | 7 | 3 | 0 |
 
@@ -183,6 +183,17 @@ Build: **passed** — `cargo check --workspace` clean, clippy clean (zero warnin
 Overall codebase health: drifting
 Biggest blindspot: the operator-facing health contract is inconsistent across surfaces: `GET /api/v1/health` exists, but both `red-cell-cli status` and session-mode `status` still route to API-root metadata, so automated health checks can miss degraded database/plugin state.
 Additional tracker work this run: filed `red-cell-c2-madkf`, `red-cell-c2-f5y94`, `red-cell-c2-1fzfv`, `red-cell-c2-3wj2l`, `red-cell-c2-5nnkr`, and `red-cell-c2-gl40g`; confirmed existing open issue `red-cell-c2-d4eag` already covers the session-response buffering memory path.
+
+### Arch Review — 2026-04-12 20:40
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 5 | workflow / close-hygiene, architecture drift | Filed `red-cell-c2-uko7r` for the now-broken `red-cell-cli status` dispatch path after the split/refactor left `client-cli/src/commands/status.rs` empty. Filed `red-cell-c2-6mev7`, `red-cell-c2-mw5uf`, and `red-cell-c2-8jcco` for oversized-file split work in `teamserver/src/demon.rs`, `teamserver/src/listeners/mod.rs`, and `client-cli/src/commands/session.rs`; also confirmed existing open issue `red-cell-c2-w1gs4` already covers the oversized `common/src/config.rs` split. |
+| Codex | 0 | — | No new directly attributable Codex defects found in the reviewed surfaces. |
+| Cursor | 1 | architecture drift | Filed `red-cell-c2-cc4tr` because `client-cli/src/bootstrap.rs` prints clap parse failures as human text via `e.print()` instead of the documented structured JSON stderr envelope. |
+
+Overall codebase health: drifting
+Biggest blindspot: `red-cell-cli` contract coverage is weaker than the rest of the workspace, so command-surface refactors can break machine-consumption guarantees and even workspace compilation without a fast contract test catching it.
 
 ### QA Review — 2026-04-09 17:45 — d544a2fb..a632b1f7
 

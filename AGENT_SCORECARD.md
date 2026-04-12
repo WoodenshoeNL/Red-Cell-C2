@@ -25,13 +25,13 @@ Each loop run updates the running totals and appends a review entry.
 | Clippy warnings | 14 | 0 | 2 |
 | Protocol errors | 30 | 32 | 4 |
 | Security issues | 62 | 40 | 0 |
-| Architecture drift | 38 | 25 | 2 |
+| Architecture drift | 38 | 25 | 3 |
 | Memory / resource leaks | 14 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 10 | 0 |
 | Test infrastructure / flakiness | 58 | 6 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 4 | 5 | 0 |
-| Correctness / pagination | 66 | 9 | 1 |
+| Correctness / pagination | 67 | 9 | 1 |
 | Workflow / close-hygiene | 38 | 1 | 2 |
 | Code reuse / duplication | 11 | 0 | 0 |
 | Incomplete commits (stranded work) | 7 | 3 | 0 |
@@ -6675,3 +6675,14 @@ Build: `cargo check --workspace` **passed**. Clippy: **passed** (0 warnings). Te
 | Cursor | 1 | 1 | Closed red-cell-c2-1awhz. Fixed client transport test modules after split (0af7919a). Working on red-cell-c2-f5y94 (status command /health). Introduced dead_code clippy warnings in status.rs (filed red-cell-c2-gmkam). |
 
 Build: `cargo check --workspace` **passed** (3m 17s, warnings only). Clippy: **failed** (3 dead_code errors in client-cli/src/commands/status.rs). Tests: **failed to compile** (5 errors in teamserver dispatch/tests/pivot_socket_transfer.rs — missing tokio::io imports).
+
+### Arch Review — 2026-04-12 17:20
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 1 | correctness / pagination | Filed `red-cell-c2-q9h4m`: `teamserver/src/api/session.rs` strips `wait=true` from `agent.exec` and always returns task submission, violating the documented session protocol. |
+| Codex | 0 | — | No new directly attributable Codex defects found in the reviewed surfaces. |
+| Cursor | 1 | architecture drift | Filed `red-cell-c2-s8k2v`: `client-cli` advertises session commands (`agent.groups`, listener/operator access, `log.tail`) that `teamserver/src/api/session.rs` does not implement. |
+
+Overall codebase health: drifting
+Biggest blindspot: session-mode contract drift between `client-cli` and the `/api/v1/ws` bridge is not covered by a parity test, so documented NDJSON commands can silently degrade or fail at runtime.

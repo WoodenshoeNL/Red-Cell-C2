@@ -16,10 +16,7 @@ use super::{
 };
 use crate::{AgentRegistry, Database, EventBus, Job, SocketRelayManager};
 use red_cell_common::crypto::decrypt_agent_data;
-use red_cell_common::demon::{DemonCallback, DemonCommand, DemonMessage};
-use red_cell_common::operator::OperatorMessage;
-use serde_json::Value;
-use tokio::time::{Duration, timeout};
+use red_cell_common::demon::{DemonCommand, DemonMessage};
 
 #[tokio::test]
 async fn dispatch_errors_for_unregistered_commands() {

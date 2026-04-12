@@ -1307,6 +1307,7 @@ mod tests {
         runtime.attach_listener_manager(listeners).await;
 
         let handle = std::thread::spawn(move || {
+            let _cb_guard = CallbackRuntimeGuard::enter(&runtime);
             Python::with_gil(|py| -> PyResult<()> {
                 runtime.install_api_module(py)?;
 
@@ -1483,6 +1484,7 @@ havoc.RegisterCallback("agent_checkin", on_checkin)
         let handle = std::thread::spawn({
             let runtime = runtime.clone();
             move || {
+                let _cb_guard = CallbackRuntimeGuard::enter(&runtime);
                 Python::with_gil(|py| -> PyResult<()> {
                     runtime.install_api_module(py)?;
                     let module = py.import("red_cell")?;
@@ -1539,6 +1541,7 @@ havoc.RegisterCallback("agent_checkin", on_checkin)
         let handle = std::thread::spawn({
             let runtime = runtime.clone();
             move || {
+                let _cb_guard = CallbackRuntimeGuard::enter(&runtime);
                 Python::with_gil(|py| -> PyResult<()> {
                     runtime.install_api_module(py)?;
                     let helper = PyModule::from_code(
@@ -1609,6 +1612,7 @@ havoc.RegisterCommand(\n\
         let handle = std::thread::spawn({
             let runtime = runtime.clone();
             move || {
+                let _cb_guard = CallbackRuntimeGuard::enter(&runtime);
                 Python::with_gil(|py| -> PyResult<()> {
                     runtime.install_api_module(py)?;
                     let module = py.import("red_cell")?;
@@ -2032,6 +2036,7 @@ havoc.RegisterCommand(\n\
         let handle = std::thread::spawn({
             let runtime = runtime.clone();
             move || {
+                let _cb_guard = CallbackRuntimeGuard::enter(&runtime);
                 Python::with_gil(|py| -> PyResult<String> {
                     runtime.install_api_module(py)?;
                     let module = py.import("havoc")?;
@@ -2062,6 +2067,7 @@ havoc.RegisterCommand(\n\
         let handle = std::thread::spawn({
             let runtime = runtime.clone();
             move || {
+                let _cb_guard = CallbackRuntimeGuard::enter(&runtime);
                 Python::with_gil(|py| -> PyResult<String> {
                     runtime.install_api_module(py)?;
                     let module = py.import("havoc")?;
@@ -2178,6 +2184,7 @@ havoc.RegisterCommand(\n\
         let handle = std::thread::spawn({
             let runtime = runtime.clone();
             move || {
+                let _cb_guard = CallbackRuntimeGuard::enter(&runtime);
                 Python::with_gil(|py| -> PyResult<()> {
                     runtime.install_api_module(py)?;
                     let module = py.import("red_cell")?;
@@ -2942,6 +2949,7 @@ havoc.RegisterCommand("scan", "second scan", run_scan)
         let handle = std::thread::spawn({
             let runtime = runtime.clone();
             move || {
+                let _cb_guard = CallbackRuntimeGuard::enter(&runtime);
                 Python::with_gil(|py| -> PyResult<()> {
                     runtime.install_api_module(py)?;
                     let module = py.import("red_cell")?;
@@ -3375,6 +3383,7 @@ havoc.RegisterCommand("scan", "second scan", run_scan)
         let handle = std::thread::spawn({
             let runtime = runtime.clone();
             move || {
+                let _cb_guard = CallbackRuntimeGuard::enter(&runtime);
                 Python::with_gil(|py| -> PyResult<()> {
                     runtime.install_api_module(py)?;
                     let module = py.import("red_cell")?;
@@ -3416,6 +3425,7 @@ havoc.RegisterCommand("scan", "second scan", run_scan)
         let handle = std::thread::spawn({
             let runtime = runtime.clone();
             move || {
+                let _cb_guard = CallbackRuntimeGuard::enter(&runtime);
                 Python::with_gil(|py| -> PyResult<()> {
                     runtime.install_api_module(py)?;
                     let module = py.import("red_cell")?;
@@ -3449,6 +3459,7 @@ havoc.RegisterCommand("scan", "second scan", run_scan)
         let handle = std::thread::spawn({
             let runtime = runtime.clone();
             move || {
+                let _cb_guard = CallbackRuntimeGuard::enter(&runtime);
                 Python::with_gil(|py| -> PyResult<()> {
                     runtime.install_api_module(py)?;
                     let module = py.import("red_cell")?;
@@ -3957,6 +3968,7 @@ havoc.RegisterCommand("scan", "second scan", run_scan)
         let handle = std::thread::spawn({
             let runtime = runtime.clone();
             move || {
+                let _cb_guard = CallbackRuntimeGuard::enter(&runtime);
                 Python::with_gil(|py| -> PyResult<()> {
                     runtime.install_api_module(py)?;
                     let module = py.import("havoc")?;
@@ -3996,6 +4008,7 @@ havoc.RegisterCommand("scan", "second scan", run_scan)
         let handle = std::thread::spawn({
             let runtime = runtime.clone();
             move || {
+                let _cb_guard = CallbackRuntimeGuard::enter(&runtime);
                 Python::with_gil(|py| -> PyResult<String> {
                     runtime.install_api_module(py)?;
                     let module = py.import("havoc")?;
@@ -4109,6 +4122,7 @@ havoc.RegisterCommand("scan", "second scan", run_scan)
         let handle = std::thread::spawn({
             let runtime = runtime.clone();
             move || {
+                let _cb_guard = CallbackRuntimeGuard::enter(&runtime);
                 Python::with_gil(|py| -> PyResult<()> {
                     runtime.install_api_module(py)?;
                     // Havoc positional: RegisterCommand(function, module, command, description)
@@ -4150,6 +4164,7 @@ havoc.RegisterCommand("scan", "second scan", run_scan)
         let handle = std::thread::spawn({
             let runtime = runtime.clone();
             move || {
+                let _cb_guard = CallbackRuntimeGuard::enter(&runtime);
                 Python::with_gil(|py| -> PyResult<()> {
                     runtime.install_api_module(py)?;
                     let helper = PyModule::from_code(
@@ -4189,6 +4204,7 @@ havoc.RegisterCommand("scan", "second scan", run_scan)
         let handle = std::thread::spawn({
             let runtime = runtime.clone();
             move || {
+                let _cb_guard = CallbackRuntimeGuard::enter(&runtime);
                 Python::with_gil(|py| -> PyResult<()> {
                     runtime.install_api_module(py)?;
                     let module = py.import("havoc")?;

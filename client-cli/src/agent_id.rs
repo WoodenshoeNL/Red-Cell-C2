@@ -24,12 +24,14 @@ impl AgentId {
 
     /// Return the wire-format numeric identifier.
     #[must_use]
+    #[allow(dead_code)] // Public surface; not all call sites live in this crate.
     pub const fn as_u32(self) -> u32 {
         self.0
     }
 
     /// Format the agent identifier as uppercase hexadecimal.
     #[must_use]
+    #[allow(dead_code)] // Public surface; not all call sites are in this crate graph.
     pub fn format_hex(self, prefix: bool) -> String {
         if prefix { format!("0x{:08X}", self.0) } else { self.to_string() }
     }

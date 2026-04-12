@@ -618,7 +618,7 @@ mod tests {
     #[test]
     fn set_role_help_documents_only_valid_roles() {
         use clap::CommandFactory;
-        let cmd = crate::Cli::command();
+        let cmd = crate::cli::Cli::command();
         let operator = cmd
             .get_subcommands()
             .find(|c| c.get_name() == "operator")

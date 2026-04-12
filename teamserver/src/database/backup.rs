@@ -193,12 +193,34 @@ mod tests {
         let scheduler =
             DatabaseBackupScheduler::spawn(db, backup_dir.clone(), Duration::from_millis(50));
 
-        // Wait for at least one interval to fire.
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Poll until at least one non-empty backup file appears, with a generous timeout
+        // to avoid flakiness under CI load.
+        let found = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let has_nonempty_backup = std::fs::read_dir(&backup_dir)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| {
+                        e.file_name()
+                            .to_str()
+                            .is_some_and(|n| n.starts_with("red-cell-") && n.ends_with(".db"))
+                    })
+                    .any(|e| e.metadata().is_ok_and(|m| m.len() > 0));
+
+                if has_nonempty_backup {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await;
 
         scheduler.stop().await;
 
-        // Check that at least one backup file was created.
+        assert!(found.is_ok(), "timed out waiting for a non-empty backup snapshot");
+
+        // Verify all backup files are non-empty.
         let entries: Vec<_> = std::fs::read_dir(&backup_dir)
             .expect("read backup dir")
             .filter_map(|e| e.ok())
@@ -211,7 +233,6 @@ mod tests {
 
         assert!(!entries.is_empty(), "scheduler should have created at least one backup snapshot");
 
-        // Each backup file should be non-empty (contains valid SQLite data).
         for entry in &entries {
             let size = entry.metadata().expect("metadata").len();
             assert!(size > 0, "backup file should be non-empty: {:?}", entry.path());

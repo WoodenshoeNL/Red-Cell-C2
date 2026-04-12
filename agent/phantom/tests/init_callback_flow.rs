@@ -10,12 +10,15 @@
 #[path = "../../../teamserver/tests/common/mod.rs"]
 mod common;
 
+use std::time::Duration;
+
 use phantom::{PhantomAgent, PhantomConfig};
 use red_cell::Job;
 use red_cell_common::HttpListenerConfig;
 use red_cell_common::config::Profile;
 use red_cell_common::demon::DemonCommand;
 use red_cell_common::operator::OperatorMessage;
+use tokio::time::sleep;
 
 fn demon_test_profile() -> Profile {
     Profile::parse(
@@ -95,21 +98,35 @@ async fn spawn_server_with_http_listener(
     Ok(DemonTestHarness { server, listener_port, listener_name: listener_name.to_owned(), socket })
 }
 
-/// Read until `AgentNew` so queued snapshot / log frames (or frames delivered concurrently
-/// with the HTTP init) do not fail the assertion.
-async fn read_until_agent_new(
+/// Read until an `AgentNew` for `expected_agent_id` so queued snapshot / log frames (or
+/// unrelated `AgentNew` events) do not fail the assertion.
+///
+/// After [`PhantomAgent::init_handshake`], the teamserver broadcasts `AgentNew` asynchronously.
+/// Yield and a short sleep before reading so the frame is usually already queued and the
+/// 30s per-frame timeout in [`common::read_operator_message`] is not hit under load.
+async fn read_agent_new_for_id(
     socket: &mut common::WsClient,
+    expected_agent_id: u32,
 ) -> Result<
     red_cell_common::operator::Message<red_cell_common::operator::AgentInfo>,
     Box<dyn std::error::Error>,
 > {
-    for _ in 0..64 {
+    let expected_name = format!("{expected_agent_id:08X}");
+    tokio::task::yield_now().await;
+    sleep(Duration::from_millis(250)).await;
+
+    for _ in 0..128 {
         let msg = common::read_operator_message(socket).await?;
         if let OperatorMessage::AgentNew(message) = msg {
-            return Ok(*message);
+            if message.info.name_id == expected_name {
+                return Ok(*message);
+            }
         }
     }
-    Err("did not observe AgentNew within 64 operator WebSocket frames".into())
+    Err(format!(
+        "did not observe AgentNew for {expected_name} within 128 operator WebSocket frames"
+    )
+    .into())
 }
 
 /// Phantom agent init + checkin against the real teamserver stays CTR-synchronised.
@@ -138,7 +155,7 @@ async fn phantom_agent_init_and_checkin_stay_ctr_synchronised()
     );
 
     // Verify the teamserver received the agent registration event.
-    let message = read_until_agent_new(&mut harness.socket).await?;
+    let message = read_agent_new_for_id(&mut harness.socket, agent.agent_id()).await?;
     assert_eq!(message.info.name_id, format!("{:08X}", agent.agent_id()));
     assert_eq!(message.info.listener, "phantom-http");
     assert!(!message.info.hostname.is_empty());

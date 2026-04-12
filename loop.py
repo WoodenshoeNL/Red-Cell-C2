@@ -28,11 +28,12 @@ LOG_DIR = SCRIPT_DIR / "logs"
 
 # Default sleep between iterations (seconds) when --sleep is not specified
 DEFAULT_SLEEP = {
-    "dev":      0,
-    "qa":       20 * 60,    # 20 minutes
-    "arch":     120 * 60,   # 120 minutes
-    "quality":  30 * 60,    # 30 minutes
-    "coverage": 30 * 60,    # 30 minutes
+    "dev":         0,
+    "qa":          20 * 60,    # 20 minutes
+    "arch":        120 * 60,   # 120 minutes
+    "quality":     30 * 60,    # 30 minutes
+    "coverage":    30 * 60,    # 30 minutes
+    "maintenance": 60 * 60,    # 60 minutes
 }
 
 # Dev loop timing constants (seconds)
@@ -1605,6 +1606,408 @@ def dev_zone_target_dir(effective_zones: list) -> "Path | None":
     return Path(f"{DEV_ZONE_TARGET_PREFIX}{suffix}")
 
 
+# ── Maintenance loop ──────────────────────────────────────────────────────────
+
+MAINTENANCE_STASH_MAX_AGE_DAYS = 14   # prune git stashes older than this
+MAINTENANCE_PROGRESS_FILE = SCRIPT_DIR / ".maintenance-progress.json"
+
+
+def _free_disk_gb() -> float:
+    stat = os.statvfs(SCRIPT_DIR)
+    return (stat.f_bavail * stat.f_frsize) / (1024 ** 3)
+
+
+def _find_loop_processes() -> list[dict]:
+    """Find running loop.py processes and their loop types."""
+    result = subprocess.run(
+        ["pgrep", "-af", "loop.py"],
+        capture_output=True, text=True,
+    )
+    loops = []
+    our_pid = os.getpid()
+    for line in result.stdout.splitlines():
+        parts = line.split(None, 1)
+        if not parts:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        if pid == our_pid:
+            continue
+        cmdline = parts[1] if len(parts) > 1 else ""
+        loop_type = "unknown"
+        for lt in ["dev", "qa", "arch", "quality", "coverage", "maintenance"]:
+            if f"--loop {lt}" in cmdline or f"--loop={lt}" in cmdline:
+                loop_type = lt
+                break
+        loops.append({"pid": pid, "type": loop_type, "cmd": cmdline})
+    return loops
+
+
+def _git_has_conflicts() -> bool:
+    r = git(["status", "--porcelain"])
+    return any(line.startswith("UU ") or line.startswith("AA ") for line in r.stdout.splitlines())
+
+
+def _git_has_stale_rebase() -> bool:
+    return (SCRIPT_DIR / ".git" / "rebase-merge").exists() or \
+           (SCRIPT_DIR / ".git" / "rebase-apply").exists()
+
+
+def _git_is_diverged() -> bool:
+    r = git(["status", "--porcelain", "-b"])
+    first_line = r.stdout.splitlines()[0] if r.stdout.strip() else ""
+    return "diverged" in first_line
+
+
+def _dev_loop_is_running(loops: list[dict]) -> bool:
+    return any(lp["type"] == "dev" for lp in loops)
+
+
+def _last_commit_age_secs() -> float:
+    r = git(["log", "-1", "--format=%ct"])
+    if r.returncode != 0 or not r.stdout.strip():
+        return 0
+    try:
+        return time.time() - int(r.stdout.strip())
+    except ValueError:
+        return 0
+
+
+def _load_progress() -> dict:
+    try:
+        return json.loads(MAINTENANCE_PROGRESS_FILE.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_progress(data: dict):
+    MAINTENANCE_PROGRESS_FILE.write_text(json.dumps(data, indent=2) + "\n")
+
+
+def maint_check_disk(log: Logger) -> list[str]:
+    """Check disk space and clean up if needed. Returns list of actions taken."""
+    actions = []
+    free = _free_disk_gb()
+    log.log(f"disk: {free:.1f} GB free")
+
+    if free >= MIN_FREE_DISK_GB:
+        return actions
+
+    log.log(f"disk: LOW — {free:.1f} GB free (threshold: {MIN_FREE_DISK_GB} GB)")
+
+    # 1. Clean /tmp worktrees (biggest wins, safe)
+    clean_tmp_worktrees(log)
+    clean_tmp_cargo_targets(log)
+    free = _free_disk_gb()
+    actions.append(f"cleaned tmp worktrees/cargo ({free:.1f} GB free after)")
+
+    if free >= MIN_FREE_DISK_GB:
+        return actions
+
+    # 2. Clean main target/ build artifacts (only if no cargo build running)
+    target_root = SCRIPT_DIR / "target"
+    if target_root.exists() and not _cargo_target_locked(target_root):
+        clean_build_artifacts(log)
+        free = _free_disk_gb()
+        actions.append(f"cleaned main target/ ({free:.1f} GB free after)")
+
+    if free >= MIN_FREE_DISK_GB:
+        return actions
+
+    # 3. Clean claude task output files in /tmp
+    import glob as _glob
+    import shutil as _shutil
+    for d in _glob.glob("/tmp/claude-*"):
+        p = Path(d)
+        if p.is_dir():
+            try:
+                age = time.time() - p.stat().st_mtime
+                if age > 3600:  # older than 1 hour
+                    _shutil.rmtree(p, ignore_errors=True)
+                    actions.append(f"removed {p.name}")
+            except OSError:
+                pass
+
+    free = _free_disk_gb()
+    if free < MIN_FREE_DISK_GB:
+        log.log(f"disk: CRITICAL — still only {free:.1f} GB free after cleanup")
+        actions.append("CRITICAL: disk still low after all cleanup attempts")
+
+    return actions
+
+
+def maint_check_git(log: Logger, loops: list[dict]) -> list[str]:
+    """Check and fix git issues. Returns list of actions taken."""
+    actions = []
+    dev_running = _dev_loop_is_running(loops)
+
+    # 1. Stale rebase state (exactly what broke the user's pull)
+    if _git_has_stale_rebase():
+        if dev_running:
+            log.log("git: stale rebase-merge dir found but dev loop is running — deferring")
+            actions.append("deferred: stale rebase state (dev loop active)")
+        else:
+            log.log("git: aborting stale rebase")
+            git(["rebase", "--abort"])
+            actions.append("aborted stale rebase")
+
+    # 2. Merge conflicts in tracked files
+    if _git_has_conflicts():
+        # Check if it's just .beads/issues.jsonl (safe to auto-resolve)
+        r = git(["diff", "--name-only", "--diff-filter=U"])
+        conflicted = [f.strip() for f in r.stdout.splitlines() if f.strip()]
+
+        if conflicted == [".beads/issues.jsonl"]:
+            log.log("git: auto-resolving .beads/issues.jsonl conflict (accept theirs)")
+            git(["checkout", "--theirs", ".beads/issues.jsonl"])
+            git(["add", ".beads/issues.jsonl"])
+            # Check if we're in a rebase
+            if _git_has_stale_rebase():
+                git(["rebase", "--continue"])
+                actions.append("auto-resolved .beads conflict during rebase")
+            else:
+                git(["commit", "--no-edit"])
+                actions.append("auto-resolved .beads conflict")
+        elif dev_running:
+            log.log(f"git: merge conflicts in {conflicted} — dev loop running, deferring")
+            actions.append(f"deferred: merge conflicts in {conflicted}")
+        else:
+            log.log(f"git: merge conflicts in {conflicted} — accepting theirs")
+            for f in conflicted:
+                git(["checkout", "--theirs", f])
+                git(["add", f])
+            if _git_has_stale_rebase():
+                git(["rebase", "--continue"])
+            else:
+                git(["commit", "-m", "chore(maintenance): auto-resolve merge conflicts"])
+            actions.append(f"auto-resolved conflicts in {conflicted}")
+
+    # 3. Diverged branch — try to rebase
+    if _git_is_diverged():
+        if dev_running:
+            log.log("git: branch diverged but dev loop is running — deferring")
+            actions.append("deferred: branch diverged (dev loop active)")
+        else:
+            log.log("git: branch diverged — attempting rebase")
+            r = git(["pull", "--rebase"])
+            if r.returncode == 0:
+                actions.append("rebased diverged branch")
+            else:
+                log.log(f"git: rebase failed: {r.stderr.strip()}")
+                git(["rebase", "--abort"])
+                actions.append("rebase failed, aborted — needs manual attention")
+
+    # 4. Try a pull to ensure we're up to date
+    if not _git_has_conflicts() and not _git_has_stale_rebase():
+        r = git(["pull", "--ff-only", "--quiet"])
+        if r.returncode == 0:
+            log.log("git: pull --ff-only OK")
+        else:
+            # ff-only failed — not critical, dev loop will handle it
+            log.log("git: pull --ff-only failed (non-fast-forward) — dev loop will handle")
+
+    # 5. Remote reachability
+    r = git(["ls-remote", "--exit-code", "--quiet", "origin", "HEAD"])
+    if r.returncode != 0:
+        log.log("git: WARNING — cannot reach remote origin")
+        actions.append("WARNING: remote unreachable")
+    else:
+        log.log("git: remote OK")
+
+    return actions
+
+
+def maint_check_stop_file(log: Logger) -> list[str]:
+    """Remove stale .stop file (>1h) and push the removal to unblock remote agents."""
+    actions = []
+    stop_file = SCRIPT_DIR / ".stop"
+    if not stop_file.exists():
+        return actions
+
+    try:
+        age_hours = (time.time() - stop_file.stat().st_mtime) / 3600
+    except OSError:
+        actions.append(".stop file present (could not check age)")
+        return actions
+
+    if age_hours < 1:
+        log.log(f"stop: .stop file exists ({age_hours:.1f}h old) — too recent to remove")
+        actions.append(f".stop file present ({age_hours:.1f}h old)")
+        return actions
+
+    log.log(f"stop: .stop file is {age_hours:.1f}h old — removing and pushing")
+    stop_file.unlink()
+    git(["add", ".stop"])
+    git(["commit", "-m", "chore(maintenance): remove stale .stop file"])
+    r = git(["push"])
+    if r.returncode == 0:
+        log.log("stop: .stop removed and pushed")
+        actions.append(f"removed stale .stop file ({age_hours:.1f}h old) and pushed")
+    else:
+        log.log(f"stop: .stop removed locally but push failed: {r.stderr.strip()}")
+        actions.append(f"removed stale .stop file locally (push failed)")
+    return actions
+
+
+def maint_check_processes(log: Logger, loops: list[dict]) -> list[str]:
+    """Check loop processes and stale cargo processes."""
+    actions = []
+
+    # Report running loops
+    if loops:
+        for lp in loops:
+            log.log(f"process: loop.py PID {lp['pid']} type={lp['type']}")
+    else:
+        log.log("process: no other loop.py processes found")
+        actions.append("WARNING: no dev/qa/arch loops running")
+
+    dev_loops = [lp for lp in loops if lp["type"] == "dev"]
+    if not dev_loops:
+        actions.append("WARNING: no dev loop running")
+
+    # Check for progress — is the last commit older than 2 hours?
+    # (suggests loops are stuck, not just idle)
+    if dev_loops:
+        age = _last_commit_age_secs()
+        age_hours = age / 3600
+        log.log(f"process: last commit {age_hours:.1f}h ago")
+
+        progress = _load_progress()
+        prev_head = progress.get("last_head", "")
+        r = git(["rev-parse", "HEAD"])
+        current_head = r.stdout.strip() if r.returncode == 0 else ""
+
+        if prev_head and current_head == prev_head:
+            stall_count = progress.get("stall_count", 0) + 1
+            progress["stall_count"] = stall_count
+            hours_stalled = stall_count  # each maint run ≈ 1 hour
+            if hours_stalled >= 3:
+                log.log(
+                    f"process: WARNING — HEAD unchanged for {hours_stalled} maintenance cycles "
+                    f"({hours_stalled}h) — dev loops may be stuck"
+                )
+                actions.append(f"WARNING: no commits for {hours_stalled} consecutive checks")
+        else:
+            progress["stall_count"] = 0
+
+        progress["last_head"] = current_head
+        _save_progress(progress)
+
+    # Kill stale cargo processes
+    kill_stale_cargo_processes(log)
+
+    return actions
+
+
+def maint_prune_stashes(log: Logger) -> list[str]:
+    """Prune git stashes older than MAINTENANCE_STASH_MAX_AGE_DAYS."""
+    actions = []
+    r = git(["stash", "list", "--format=%gd %ci"])
+    if r.returncode != 0 or not r.stdout.strip():
+        return actions
+
+    cutoff = time.time() - MAINTENANCE_STASH_MAX_AGE_DAYS * 86400
+    stale_indices = []
+    for line in r.stdout.splitlines():
+        parts = line.split(None, 1)
+        if len(parts) < 2:
+            continue
+        ref = parts[0]  # stash@{N}
+        date_str = parts[1].strip()
+        try:
+            dt = datetime.fromisoformat(date_str.replace(" +", "+").replace(" -", "-"))
+            if dt.timestamp() < cutoff:
+                stale_indices.append(ref)
+        except ValueError:
+            continue
+
+    if not stale_indices:
+        log.log(f"stash: {r.stdout.strip().count(chr(10)) + 1} stash(es), none older than {MAINTENANCE_STASH_MAX_AGE_DAYS}d")
+        return actions
+
+    # Drop from highest index to lowest to avoid shifting
+    log.log(f"stash: dropping {len(stale_indices)} stash(es) older than {MAINTENANCE_STASH_MAX_AGE_DAYS}d")
+    for ref in reversed(stale_indices):
+        git(["stash", "drop", ref])
+    actions.append(f"pruned {len(stale_indices)} old stash(es)")
+    return actions
+
+
+def maintenance_loop(args, log: Logger):
+    """
+    Maintenance loop — keeps the development environment healthy.
+
+    Runs hourly by default. Checks disk space, git state, running processes,
+    and cleans up stale artifacts. Goal: maximize unattended dev loop uptime.
+    """
+    if args.sleep is not None:
+        sleep_secs = args.sleep * 60
+    else:
+        sleep_secs = DEFAULT_SLEEP["maintenance"]
+    jitter_secs = args.jitter * 60
+    max_iters = args.iterations
+
+    log.banner([
+        "Maintenance loop starting",
+        f"Interval:  {sleep_secs / 60:.0f}m",
+        f"Max runs:  {'unlimited' if max_iters == 0 else max_iters}",
+    ])
+
+    iteration = 0
+
+    while True:
+        if stop_requested():
+            log.log("STOP signal detected. Exiting.")
+            sys.exit(0)
+
+        if max_iters > 0 and iteration >= max_iters:
+            log.log(f"Reached max iterations ({max_iters}). Exiting.")
+            sys.exit(0)
+
+        iteration += 1
+        log.log(f"=== Maintenance run {iteration} ===")
+        all_actions = []
+
+        # Discover running loops first — many checks depend on this
+        loops = _find_loop_processes()
+
+        # 1. Stop file check
+        all_actions.extend(maint_check_stop_file(log))
+
+        # 2. Disk space — fix first, everything else depends on having disk
+        all_actions.extend(maint_check_disk(log))
+
+        # 3. Git health — unblock pulls so dev loops can pick up new work
+        all_actions.extend(maint_check_git(log, loops))
+
+        # 4. Process health — stale cargo, stuck loops
+        all_actions.extend(maint_check_processes(log, loops))
+
+        # 5. Stash pruning
+        all_actions.extend(maint_prune_stashes(log))
+
+        # 6. Worktree and tmp cleanup (even if disk is fine, prevent accumulation)
+        clean_tmp_worktrees(log)
+        clean_tmp_cargo_targets(log)
+
+        # Summary
+        if all_actions:
+            log.log("--- Actions this run ---")
+            for a in all_actions:
+                log.log(f"  • {a}")
+        else:
+            log.log("--- All clear, no issues found ---")
+
+        log.log(f"=== Maintenance run {iteration} complete ===")
+
+        if max_iters > 0 and iteration >= max_iters:
+            break
+
+        do_sleep(sleep_secs, jitter_secs, log)
+
+
 def create_review_worktree(loop_type: str, log: Logger) -> Path | None:
     """
     Create a temporary git worktree at HEAD for a single review loop run.
@@ -1754,11 +2157,12 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 loop types:
-  dev       Development — claims beads tasks and implements them
-  qa        QA review   — reviews recent commits, files issues (default sleep: 20m)
-  arch      Architecture review — deep full-codebase analysis  (default sleep: 120m)
-  quality   Test quality review — evaluates quality of existing tests (default sleep: 30m)
-  coverage  Test coverage scan  — finds untested public functions    (default sleep: 30m)
+  dev          Development — claims beads tasks and implements them
+  qa           QA review   — reviews recent commits, files issues (default sleep: 20m)
+  arch         Architecture review — deep full-codebase analysis  (default sleep: 120m)
+  quality      Test quality review — evaluates quality of existing tests (default sleep: 30m)
+  coverage     Test coverage scan  — finds untested public functions    (default sleep: 30m)
+  maintenance  Infrastructure health — disk, git, process checks       (default sleep: 60m)
 
 examples:
   ./loop.py --agent claude --loop dev
@@ -1771,6 +2175,8 @@ examples:
   ./loop.py --agent claude --loop arch --sleep 120 --jitter 15
   ./loop.py --agent cursor --loop coverage --zone common --iterations 3
   ./loop.py --agent claude --loop dev  --pre-sleep 5 --model claude-opus-4-6
+  ./loop.py --loop maintenance                        # hourly health checks
+  ./loop.py --loop maintenance --sleep 30             # every 30 minutes
 """,
     )
     parser.add_argument(
@@ -1781,7 +2187,7 @@ examples:
     )
     parser.add_argument(
         "--loop",
-        choices=["dev", "qa", "arch", "quality", "coverage"],
+        choices=["dev", "qa", "arch", "quality", "coverage", "maintenance"],
         default="dev",
         help="Loop type to run (default: dev)",
     )
@@ -1897,10 +2303,17 @@ def main():
     node_id = resolve_node_id(args)
     args._node_id_resolved = node_id   # stash for dev_loop / review_loop
 
-    log = Logger(
-        agent_id=f"{node_id}-{args.agent}",
-        log_file=LOG_DIR / f"{args.agent}_{args.loop}.log",
-    )
+    # Maintenance loop doesn't use an agent — use a fixed log identity
+    if args.loop == "maintenance":
+        log = Logger(
+            agent_id=f"{node_id}-maintenance",
+            log_file=LOG_DIR / "maintenance.log",
+        )
+    else:
+        log = Logger(
+            agent_id=f"{node_id}-{args.agent}",
+            log_file=LOG_DIR / f"{args.agent}_{args.loop}.log",
+        )
 
     if args.pre_sleep > 0:
         log.log(f"Pre-sleep: waiting {args.pre_sleep}m before first run...")
@@ -1908,6 +2321,8 @@ def main():
 
     if args.loop == "dev":
         dev_loop(args, log)
+    elif args.loop == "maintenance":
+        maintenance_loop(args, log)
     else:
         review_loop(args, log)
 

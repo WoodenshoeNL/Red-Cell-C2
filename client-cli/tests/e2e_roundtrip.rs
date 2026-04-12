@@ -192,6 +192,44 @@ struct ApiRootResponse {
     version: String,
 }
 
+/// Mirrors `client-cli/src/commands/status.rs::HealthAgentCounts` (health JSON).
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct HealthAgentCountsWire {
+    active: u64,
+    total: u64,
+}
+
+/// Mirrors `client-cli/src/commands/status.rs::HealthListenerCounts` (health JSON).
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct HealthListenerCountsWire {
+    running: u64,
+    stopped: u64,
+}
+
+/// Mirrors `client-cli/src/commands/status.rs::HealthPluginCounts` (health JSON).
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct HealthPluginCountsWire {
+    loaded: u32,
+    failed: u32,
+    disabled: u32,
+}
+
+/// Mirrors the `GET /api/v1/health` body deserialized by `status::run`.
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct HealthResponseWire {
+    status: String,
+    uptime_secs: u64,
+    agents: HealthAgentCountsWire,
+    listeners: HealthListenerCountsWire,
+    database: String,
+    plugins: HealthPluginCountsWire,
+    plugin_health: Vec<serde_json::Value>,
+}
+
 /// Mirrors `client-cli/src/commands/payload.rs::BuildSubmitResponse`.
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
@@ -374,9 +412,8 @@ fn sample_agent(agent_id: u32) -> AgentRecord {
 // Status command group
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// The `status` command calls `GET /api/v1/` (anon), `GET /api/v1/agents`, and
-/// `GET /api/v1/listeners` in sequence.  Verify the full round-trip through
-/// real TCP + reqwest.
+/// The `status` command calls `GET /api/v1/` (anon) then `GET /api/v1/health`.
+/// Verify the full round-trip through real TCP + reqwest.
 ///
 /// Note: The CLI's `get_anon("/")` constructs `{base_url}/api/v1/` (trailing
 /// slash).  Axum's `nest("/api/v1", ...)` may or may not match this depending
@@ -393,17 +430,18 @@ async fn status_roundtrip_through_real_tcp() {
     let root: ApiRootResponse = resp.json().await.expect("deserialize ApiRootResponse");
     assert!(!root.version.is_empty(), "version must be non-empty");
 
-    // Step 2: authenticated agent list (same as status::run step 2)
-    let resp = h.get("/agents").await;
-    assert_eq!(resp.status(), 200, "GET /agents must return 200");
-    let agents: Vec<serde_json::Value> = resp.json().await.expect("deserialize agent list");
-    assert_eq!(agents.len(), 0, "fresh server has no agents");
-
-    // Step 3: authenticated listener list (same as status::run step 3)
-    let resp = h.get("/listeners").await;
-    assert_eq!(resp.status(), 200, "GET /listeners must return 200");
-    let listeners: Vec<serde_json::Value> = resp.json().await.expect("deserialize listener list");
-    assert_eq!(listeners.len(), 0, "fresh server has no listeners");
+    // Step 2: authenticated health snapshot (same as status::run step 2)
+    let resp = h.get("/health").await;
+    assert_eq!(resp.status(), 200, "GET /health must return 200");
+    let health: HealthResponseWire = resp.json().await.expect("deserialize health");
+    assert_eq!(health.agents.total, 0, "fresh server has no agents");
+    assert_eq!(
+        health.listeners.running + health.listeners.stopped,
+        0,
+        "fresh server has no listeners"
+    );
+    assert!(!health.database.is_empty(), "database field must be present");
+    assert!(!health.status.is_empty(), "status field must be present");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

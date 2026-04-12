@@ -2,8 +2,12 @@
 
 use super::common::*;
 
-use super::super::{CommandDispatcher, DownloadState, DownloadTracker};
+use super::super::{
+    CommandDispatchError, CommandDispatcher, DownloadState, DownloadTracker,
+    DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
+};
 use crate::{AgentRegistry, Database, EventBus, Job, SocketRelayManager};
+use tokio::time::{Duration, timeout};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use red_cell_common::demon::{DemonCallback, DemonCommand, DemonFilesystemCommand};
@@ -1550,7 +1554,7 @@ async fn builtin_filesystem_download_handler_surfaces_concurrent_limit_as_error_
         sockets,
         None,
         tracker,
-        super::DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
+        DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
         false,
     );
 
@@ -1627,7 +1631,7 @@ async fn builtin_beacon_file_callbacks_surface_concurrent_limit_as_error_event()
         sockets,
         None,
         tracker,
-        super::DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
+        DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
         false,
     );
 

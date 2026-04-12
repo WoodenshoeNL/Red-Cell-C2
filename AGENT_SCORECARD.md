@@ -9,19 +9,19 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1257 | 255 | 91 |
-| Bugs filed against | 243 | 50 | 14 |
-| Bug rate (bugs/task) | 0.19 | 0.20 | 0.15 |
-| Quality score | 81% | 80% | 85% |
+| Tasks closed | 1257 | 255 | 92 |
+| Bugs filed against | 243 | 50 | 15 |
+| Bug rate (bugs/task) | 0.19 | 0.20 | 0.16 |
+| Quality score | 81% | 80% | 84% |
 
-*Bug rates: Claude 243/1257=0.1933→0.19, Codex 50/255=0.1961→0.20, Cursor 14/91=0.1538→0.15*
+*Bug rates: Claude 243/1257=0.1933→0.19, Codex 50/255=0.1961→0.20, Cursor 15/92=0.1630→0.16*
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 16 | 0 | 0 |
-| Missing tests / stale tests | 82 | 22 | 6 |
+| Missing tests / stale tests | 82 | 22 | 7 |
 | Clippy warnings | 15 | 0 | 2 |
 | Protocol errors | 30 | 32 | 4 |
 | Security issues | 62 | 40 | 0 |
@@ -41,6 +41,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-12 21:45 — ef7a1f99..2e8413c0
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | WIP session router commands (agent.groups, listener.access, operator.show_agent_groups + set variants, log.tail). Good test coverage including contract-drift guard test. Removed unused imports in dispatch tests. 2 interrupted WIP commits. |
+| Codex | 0 | 0 | No activity this run. |
+| Cursor | 1 | 1 | Closed red-cell-c2-f5y94 (status uses /health with full snapshot). Enriched StatusData with structured agent/listener/plugin counts + plugin health entries. Deleted 6 wiremock integration tests for run() error paths — filed red-cell-c2-e09za. Binary-level tests partially compensate. |
+
+Build: **passed** (cargo check clean) — Tests/clippy: **blocked** — full workspace recompile after disk-full cleanup, sccache contention with concurrent dev agent build. No test failures observed. 1 bug filed: red-cell-c2-e09za (lost wiremock error-path tests, Cursor).
 
 ### QA Review — 2026-04-12 14:30 — 7e758113..70cfd8a0
 

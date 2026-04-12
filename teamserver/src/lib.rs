@@ -45,7 +45,8 @@ pub use auth::{
 };
 pub use database::{
     AgentGroupRepository, AgentRepository, AgentResponseRecord, AgentResponseRepository,
-    AuditLogEntry, AuditLogFilter, AuditLogRepository, DEFAULT_BACKUP_INTERVAL_SECS,
+    AuditLogEntry, AuditLogFilter, AuditLogPruner, AuditLogRepository,
+    DEFAULT_AUDIT_PRUNE_INTERVAL_SECS, DEFAULT_AUDIT_RETENTION_DAYS, DEFAULT_BACKUP_INTERVAL_SECS,
     DEFAULT_DEGRADED_THRESHOLD, DEFAULT_PROBE_SECS, DEFAULT_QUERY_TIMEOUT_SECS,
     DEFAULT_WRITE_QUEUE_CAPACITY, Database, DatabaseBackupScheduler, DatabaseHealthMonitor,
     DatabaseHealthState, DbMasterKey, DeferredWrite, LinkRecord, LinkRepository,

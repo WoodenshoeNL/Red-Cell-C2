@@ -442,6 +442,11 @@ async fn status_roundtrip_through_real_tcp() {
     );
     assert!(!health.database.is_empty(), "database field must be present");
     assert!(!health.status.is_empty(), "status field must be present");
+    assert!(
+        health.uptime_secs < 86_400,
+        "regression: /health must include uptime_secs (fresh server should be well under 1 day); got {}",
+        health.uptime_secs
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

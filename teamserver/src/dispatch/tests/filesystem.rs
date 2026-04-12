@@ -3,16 +3,16 @@
 use super::common::*;
 
 use super::super::{
-    CommandDispatchError, CommandDispatcher, DownloadState, DownloadTracker,
-    DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
+    CommandDispatchError, CommandDispatcher, DEFAULT_MAX_PIVOT_CHAIN_DEPTH, DownloadState,
+    DownloadTracker,
 };
 use crate::{AgentRegistry, Database, EventBus, Job, SocketRelayManager};
-use tokio::time::{Duration, timeout};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use red_cell_common::demon::{DemonCallback, DemonCommand, DemonFilesystemCommand};
 use red_cell_common::operator::OperatorMessage;
 use serde_json::Value;
+use tokio::time::{Duration, timeout};
 
 #[tokio::test]
 async fn builtin_filesystem_download_handler_persists_loot_and_progress()

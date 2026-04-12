@@ -41,6 +41,7 @@ struct HealthApiResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct HealthAgentCounts {
     active: u64,
     total: u64,
@@ -53,6 +54,7 @@ struct HealthListenerCounts {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct HealthPluginCounts {
     loaded: u32,
     failed: u32,
@@ -60,6 +62,7 @@ struct HealthPluginCounts {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct HealthPluginEntry {
     name: String,
     consecutive_failures: u32,

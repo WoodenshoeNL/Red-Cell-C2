@@ -7,7 +7,8 @@ use anyhow::{Context, Result, anyhow};
 use axum_server::{Handle, tls_rustls::RustlsConfig};
 use clap::{Parser, Subcommand};
 use red_cell::{
-    AgentLivenessMonitor, AgentRegistry, ApiRuntime, AuditWebhookNotifier, AuthService,
+    AgentLivenessMonitor, AgentRegistry, ApiRuntime, AuditLogPruner, AuditWebhookNotifier,
+    AuthService, DEFAULT_AUDIT_PRUNE_INTERVAL_SECS, DEFAULT_AUDIT_RETENTION_DAYS,
     DEFAULT_BACKUP_INTERVAL_SECS, DEFAULT_DEGRADED_THRESHOLD, DEFAULT_MAX_REGISTERED_AGENTS,
     DEFAULT_PROBE_SECS, DEFAULT_QUERY_TIMEOUT_SECS, DEFAULT_WRITE_QUEUE_CAPACITY, Database,
     DatabaseBackupScheduler, DatabaseHealthMonitor, DbMasterKey, EventBus, ListenerManager,
@@ -146,6 +147,24 @@ async fn main() -> Result<()> {
             info!(dir = %backup_dir.display(), ?interval, "starting database backup scheduler");
             Some(DatabaseBackupScheduler::spawn(database.clone(), backup_dir, interval))
         } else {
+            None
+        }
+    };
+
+    let _audit_log_pruner: Option<AuditLogPruner> = {
+        let db_cfg = profile.teamserver.database.as_ref();
+        let retention_days =
+            db_cfg.and_then(|c| c.audit_retention_days).unwrap_or(DEFAULT_AUDIT_RETENTION_DAYS);
+        if retention_days > 0 {
+            let interval = Duration::from_secs(
+                db_cfg
+                    .and_then(|c| c.audit_prune_interval_secs)
+                    .unwrap_or(DEFAULT_AUDIT_PRUNE_INTERVAL_SECS),
+            );
+            info!(retention_days, ?interval, "starting audit-log retention pruner");
+            Some(AuditLogPruner::spawn(database.clone(), retention_days, interval))
+        } else {
+            info!("audit-log retention pruning disabled (retention_days = 0)");
             None
         }
     };

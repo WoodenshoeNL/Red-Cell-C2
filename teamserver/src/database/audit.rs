@@ -115,6 +115,17 @@ impl AuditLogRepository {
         Ok(row.get::<i64, _>(0))
     }
 
+    /// Delete audit-log rows whose `occurred_at` is strictly before `cutoff`.
+    ///
+    /// Returns the number of deleted rows.
+    pub async fn delete_older_than(&self, cutoff: &str) -> Result<u64, TeamserverError> {
+        let result = sqlx::query("DELETE FROM ts_audit_log WHERE occurred_at < ?")
+            .bind(cutoff)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
+    }
+
     /// Return the latest timestamp for each actor across the supplied actions.
     pub async fn latest_timestamps_by_actor_for_actions(
         &self,

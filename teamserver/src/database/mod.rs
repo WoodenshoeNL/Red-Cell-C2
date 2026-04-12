@@ -10,6 +10,7 @@ use tracing::instrument;
 pub mod agent_groups;
 pub mod agents;
 pub mod audit;
+pub mod audit_pruner;
 pub mod backup;
 pub mod crypto;
 pub mod error;
@@ -25,6 +26,9 @@ pub mod write_queue;
 pub use agent_groups::AgentGroupRepository;
 pub use agents::{AgentRepository, PersistedAgent};
 pub use audit::{AuditLogEntry, AuditLogFilter, AuditLogRepository};
+pub use audit_pruner::{
+    AuditLogPruner, DEFAULT_AUDIT_PRUNE_INTERVAL_SECS, DEFAULT_AUDIT_RETENTION_DAYS,
+};
 pub use backup::{DEFAULT_BACKUP_INTERVAL_SECS, DatabaseBackupScheduler};
 pub use crypto::DbMasterKey;
 pub use error::TeamserverError;

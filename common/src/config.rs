@@ -598,6 +598,14 @@ pub struct DatabaseConfig {
     /// Defaults to 1024.
     #[serde(rename = "WriteQueueCapacity", default)]
     pub write_queue_capacity: Option<usize>,
+    /// Number of days to retain audit-log rows before automatic pruning.
+    /// Defaults to 90 days.  Set to `0` to disable automatic pruning.
+    #[serde(rename = "AuditRetentionDays", default)]
+    pub audit_retention_days: Option<u32>,
+    /// How often (in seconds) the audit-log pruner checks for expired rows.
+    /// Defaults to 3600 (1 hour).  Only relevant when retention is enabled.
+    #[serde(rename = "AuditPruneIntervalSecs", default)]
+    pub audit_prune_interval_secs: Option<u64>,
 }
 
 /// Observability configuration for Prometheus metrics and OpenTelemetry tracing.

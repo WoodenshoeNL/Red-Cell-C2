@@ -21,6 +21,19 @@ fn base_cmd() -> Command {
     c
 }
 
+/// Minimal `GET /api/v1/health` body aligned with `teamserver::api::health::HealthResponse`.
+fn sample_health_ok_json() -> Value {
+    serde_json::json!({
+        "status": "ok",
+        "uptime_secs": 1u64,
+        "agents": { "active": 0, "total": 0 },
+        "listeners": { "running": 0, "stopped": 0 },
+        "database": "ok",
+        "plugins": { "loaded": 0, "failed": 0, "disabled": 0 },
+        "plugin_health": [],
+    })
+}
+
 fn first_json_object(s: &str) -> Value {
     let trimmed = s.trim();
     if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
@@ -50,14 +63,8 @@ async fn status_success_exits_0_json_on_stdout() {
         .await;
 
     Mock::given(method("GET"))
-        .and(path("/api/v1/agents"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
-        .mount(&server)
-        .await;
-
-    Mock::given(method("GET"))
-        .and(path("/api/v1/listeners"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .and(path("/api/v1/health"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(sample_health_ok_json()))
         .mount(&server)
         .await;
 
@@ -86,7 +93,7 @@ async fn status_invalid_token_exits_3_not_0_or_4() {
         .await;
 
     Mock::given(method("GET"))
-        .and(path("/api/v1/agents"))
+        .and(path("/api/v1/health"))
         .respond_with(ResponseTemplate::new(401))
         .mount(&server)
         .await;
@@ -121,14 +128,8 @@ async fn status_success_output_text_not_json_envelope() {
         .await;
 
     Mock::given(method("GET"))
-        .and(path("/api/v1/agents"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
-        .mount(&server)
-        .await;
-
-    Mock::given(method("GET"))
-        .and(path("/api/v1/listeners"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .and(path("/api/v1/health"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(sample_health_ok_json()))
         .mount(&server)
         .await;
 

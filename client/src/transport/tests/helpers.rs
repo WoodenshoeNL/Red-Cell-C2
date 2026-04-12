@@ -3,7 +3,8 @@ use red_cell_common::operator::{
 };
 use serde_json::Value;
 
-pub(super) fn head(event: EventCode) -> MessageHead {
+/// Test fixture: minimal [`MessageHead`] for operator messages.
+pub fn head(event: EventCode) -> MessageHead {
     MessageHead {
         event,
         user: "operator".to_owned(),
@@ -12,7 +13,8 @@ pub(super) fn head(event: EventCode) -> MessageHead {
     }
 }
 
-pub(super) fn flat_info(pairs: &[(&str, &str)]) -> FlatInfo {
+/// Test fixture: [`FlatInfo`] from string key/value pairs.
+pub fn flat_info(pairs: &[(&str, &str)]) -> FlatInfo {
     FlatInfo {
         fields: pairs
             .iter()
@@ -21,13 +23,14 @@ pub(super) fn flat_info(pairs: &[(&str, &str)]) -> FlatInfo {
     }
 }
 
-pub(super) fn make_flat_info(pairs: &[(&str, serde_json::Value)]) -> FlatInfo {
+/// Test fixture: [`FlatInfo`] with arbitrary JSON values per field.
+pub fn make_flat_info(pairs: &[(&str, serde_json::Value)]) -> FlatInfo {
     let fields = pairs.iter().map(|(k, v)| ((*k).to_owned(), v.clone())).collect();
     FlatInfo { fields }
 }
 
-/// `hostname`, using sensible defaults for all other fields.
-pub(super) fn make_agent_info(name_id: &str, hostname: &str) -> OperatorAgentInfo {
+/// Test fixture: [`OperatorAgentInfo`] with `hostname`, using sensible defaults for other fields.
+pub fn make_agent_info(name_id: &str, hostname: &str) -> OperatorAgentInfo {
     OperatorAgentInfo {
         active: "true".to_owned(),
         background_check: false,

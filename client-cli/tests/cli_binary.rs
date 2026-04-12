@@ -78,6 +78,51 @@ async fn status_success_exits_0_json_on_stdout() {
     let v = first_json_object(&stdout);
     assert_eq!(v["ok"], true);
     assert!(v.get("data").is_some());
+    let data = &v["data"];
+    assert_eq!(data["uptime_secs"], 1);
+    assert_eq!(data["database"], "ok");
+    assert_eq!(data["status"], "ok");
+}
+
+/// Health snapshot can report `database: degraded` while still returning HTTP 200 — CLI must surface it.
+#[tokio::test]
+async fn status_degraded_database_exits_0_and_surfaces_health_json() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"version": "v1"})),
+        )
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/health"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "status": "degraded",
+            "uptime_secs": 99u64,
+            "agents": { "active": 0, "total": 0 },
+            "listeners": { "running": 0, "stopped": 0 },
+            "database": "degraded",
+            "plugins": { "loaded": 0, "failed": 0, "disabled": 0 },
+            "plugin_health": [],
+        })))
+        .mount(&server)
+        .await;
+
+    let out = base_cmd()
+        .args(["--server", &server.uri(), "--token", "tok", "status"])
+        .output()
+        .expect("spawn red-cell-cli");
+
+    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    let v = first_json_object(&String::from_utf8_lossy(&out.stdout));
+    assert_eq!(v["ok"], true);
+    let data = &v["data"];
+    assert_eq!(data["status"], "degraded");
+    assert_eq!(data["database"], "degraded");
+    assert_eq!(data["uptime_secs"], 99);
 }
 
 #[tokio::test]

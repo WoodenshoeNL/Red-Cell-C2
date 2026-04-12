@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1253 | 255 | 88 |
+| Tasks closed | 1255 | 255 | 88 |
 | Bugs filed against | 240 | 50 | 13 |
 | Bug rate (bugs/task) | 0.19 | 0.20 | 0.15 |
 | Quality score | 81% | 80% | 85% |
 
-*Bug rates: Claude 240/1253=0.1915→0.19, Codex 50/255=0.1961→0.20, Cursor 13/88=0.1477→0.15*
+*Bug rates: Claude 240/1255=0.1912→0.19, Codex 50/255=0.1961→0.20, Cursor 13/88=0.1477→0.15*
 
 ## Violation Breakdown
 
@@ -41,6 +41,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-12 04:15 — 370d5a78..effbe294
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 0 | Closed red-cell-c2-uh4s3 (flaky plugin test race — added CallbackRuntimeGuard to all test threads) and red-cell-c2-3umor (session WS max message size — 1 MiB cap). Both fixes clean, well-documented. |
+| Codex | 0 | 0 | No activity this run. |
+| Cursor | 0 | 0 | No activity this run. |
+
+Build: **passed** — `cargo check --workspace` clean. Tests/clippy: **running** — compilation ongoing due to concurrent dev-agent builds (6 rustc processes active). Beads DB: **locked** by concurrent dev agent — issue state review skipped. No bugs filed — both code changes are well-structured with proper error handling.
 
 ### QA Review — 2026-04-12 01:45 — e6380505..370d5a78
 

@@ -174,9 +174,9 @@ pub enum Commands {
 
     /// Start a persistent JSON-pipe session for long-running agent interactions.
     ///
-    /// Reads newline-delimited JSON commands from stdin and writes JSON
-    /// responses to stdout.  Keeps a single authenticated connection open so
-    /// re-auth overhead is paid only once.
+    /// Reads newline-delimited JSON commands from stdin and writes successful
+    /// JSON responses to stdout and structured errors to stderr.  Keeps a
+    /// single authenticated connection open so re-auth overhead is paid only once.
     ///
     /// If --agent is given, commands that require an agent ID will use it as
     /// the default when "id" is not present in the JSON message.

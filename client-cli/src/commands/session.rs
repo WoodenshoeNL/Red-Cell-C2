@@ -2,8 +2,9 @@
 //!
 //! Establishes a single authenticated WebSocket connection to the teamserver's
 //! `/api/v1/ws` endpoint and relays newline-delimited JSON between stdin and
-//! the server.  Each command sent on stdin produces exactly one response line
-//! on stdout.
+//! the server.  Successful responses are written to stdout; failures (including
+//! locally rejected commands) go to stderr, consistent with the global CLI
+//! contract.
 //!
 //! # Authentication
 //!
@@ -53,9 +54,9 @@
 //!
 //! Any other `cmd` must match a known session command (same names as the
 //! `red-cell-cli` surface and the teamserver session router).  Unknown
-//! commands produce a single local JSON line on **stdout** (same `ok`/`cmd`/
-//! `error`/`message` envelope as other session errors, written to stdout) and
-//! are not sent to the server:
+//! commands produce a single local JSON line on **stderr** (same `ok`/`cmd`/
+//! `error`/`message` envelope as other session errors) and are not sent to the
+//! server:
 //! ```json
 //! {"ok": false, "cmd": "agent.lst", "error": "UNKNOWN_COMMAND", "message": "unknown command `agent.lst`"}
 //! ```
@@ -427,7 +428,7 @@ struct SessionClosedEvent {
 /// - Invalid JSON produces a local error response and continues.
 /// - `{"cmd":"ping"}` is answered immediately without a server round-trip.
 /// - `{"cmd":"exit"}` sends a WebSocket close frame and exits cleanly.
-/// - Unknown `cmd` values produce a local JSON error on stdout (no forward).
+/// - Unknown `cmd` values produce a local JSON error on stderr (no forward).
 /// - All other commands have the default agent id injected (if applicable) and
 ///   are forwarded to the server as a WebSocket text frame.
 async fn process_stdin_line<Out, ErrOut, Si>(
@@ -489,7 +490,7 @@ where
             }
 
             if !is_known_session_command(&cmd) {
-                if emit_error_to(stdout, &cmd, &CliError::UnknownSessionCommand(cmd.clone()))
+                if emit_error_to(stderr, &cmd, &CliError::UnknownSessionCommand(cmd.clone()))
                     .is_err()
                 {
                     return LoopControl::Exit(EXIT_GENERAL);
@@ -872,7 +873,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_session_command_uses_error_envelope_on_stdout() {
+    fn unknown_session_command_error_envelope_format() {
         let mut buf = Vec::new();
         let err = CliError::UnknownSessionCommand("agent.lst".to_owned());
         emit_error_to(&mut buf, "agent.lst", &err).expect("write");
@@ -1035,8 +1036,8 @@ mod tests {
         let code = run_with_io(reader, &mut stdout, &mut stderr, ws, None).await;
         assert_eq!(code, EXIT_SUCCESS);
 
-        assert!(stderr.is_empty(), "local unknown-command error must not hit stderr");
-        let line = String::from_utf8(stdout).expect("utf8");
+        assert!(stdout.is_empty(), "local unknown-command error must not hit stdout");
+        let line = String::from_utf8(stderr).expect("utf8");
         let val: serde_json::Value = serde_json::from_str(line.trim()).expect("json");
         assert_eq!(val["ok"], false);
         assert_eq!(val["cmd"], "agent.lst");

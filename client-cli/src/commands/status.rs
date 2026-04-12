@@ -85,16 +85,22 @@ pub struct StatusListenerCounts {
 /// Python plugin load counts from the health snapshot.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct StatusPluginCounts {
+    /// Plugins successfully loaded at startup.
     pub loaded: u32,
+    /// Plugins that failed to load at startup.
     pub failed: u32,
+    /// Plugins auto-disabled due to repeated runtime failures.
     pub disabled: u32,
 }
 
 /// Per-plugin runtime health entry (mirrors the REST health payload).
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct StatusPluginHealthEntry {
+    /// Python module name (without `.py` extension).
     pub name: String,
+    /// Consecutive callback/command failures since the last success.
     pub consecutive_failures: u32,
+    /// Whether the plugin was automatically disabled.
     pub disabled: bool,
 }
 
@@ -109,8 +115,11 @@ pub struct StatusData {
     pub status: String,
     /// Database probe result — `"ok"` or `"degraded"`.
     pub database: String,
+    /// Agent inventory from the health snapshot.
     pub agents: StatusAgentCounts,
+    /// Listener lifecycle counts from the health snapshot.
     pub listeners: StatusListenerCounts,
+    /// Python plugin load counts from the health snapshot.
     pub plugins: StatusPluginCounts,
     /// Per-plugin runtime health (empty when no plugins are loaded).
     #[serde(skip_serializing_if = "Vec::is_empty", default)]

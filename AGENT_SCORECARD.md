@@ -6737,3 +6737,13 @@ Biggest blindspot: session-mode contract drift between `client-cli` and the `/ap
 | Cursor | 1 | 0 | Closed `red-cell-c2-dga6a` (transport test helper visibility). Hardened phantom init_callback_flow to filter AgentNew by agent ID with increased retry count. Clean fix. Active on client-cli status/health migration (`red-cell-c2-f5y94`, `red-cell-c2-gmkam`). |
 
 Build: cargo check passed; tests/clippy blocked by concurrent cargo build lock contention (shared CARGO_TARGET_DIR)
+
+### QA Review — 2026-04-13 06:45 — da710916..b0925b3a
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | Only prior QA checkpoint commit in range. |
+| Codex | 0 | 0 | No activity this run. |
+| Cursor | 0 | 0 | `1fb96bbf` — clap parse failures now emit JSON error envelope (`INVALID_ARGS`) on stderr instead of plain text. Proper separation: `--help`/`--version` still use plain text. Added `cli_error_from_clap_parse()` with `#[must_use]`, 2 unit tests, 3 integration tests. Clean, well-tested fix. |
+
+Build: **passed** — `cargo check --workspace` clean. Tests/clippy: **compiling** — full workspace recompile in progress, clippy blocked by build lock. No test failures observed. No bugs filed — change is solid.

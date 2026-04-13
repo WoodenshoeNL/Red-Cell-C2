@@ -119,6 +119,28 @@ pub enum CliError {
     General(String),
 }
 
+/// Convert a [`clap::Error`] from [`clap::Parser::try_parse`] into [`CliError`].
+///
+/// Callers must handle [`clap::error::ErrorKind::DisplayHelp`] and
+/// [`clap::error::ErrorKind::DisplayVersion`] separately (typically `clap::Error::print()` and
+/// exit `0`), because those are not API failures.
+#[must_use]
+pub(crate) fn cli_error_from_clap_parse(e: &clap::Error) -> CliError {
+    use clap::error::ErrorKind;
+    match e.kind() {
+        ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => CliError::General(
+            "internal: DisplayHelp/DisplayVersion must be handled before mapping".to_owned(),
+        ),
+        ErrorKind::Io | ErrorKind::Format => CliError::General(format!("invalid arguments: {e}")),
+        _ => CliError::InvalidArgs(normalize_clap_message(e)),
+    }
+}
+
+fn normalize_clap_message(e: &clap::Error) -> String {
+    let s = e.to_string();
+    s.strip_prefix("error: ").map(|rest| rest.trim_start().to_owned()).unwrap_or(s)
+}
+
 impl CliError {
     /// Return the process exit code that corresponds to this error.
     #[must_use]
@@ -296,5 +318,31 @@ mod tests {
         .into();
         assert_eq!(err.exit_code(), EXIT_GENERAL);
         assert_eq!(err.error_code(), ERROR_CODE_GENERAL);
+    }
+
+    #[test]
+    fn clap_unknown_subcommand_maps_to_invalid_args() {
+        use clap::Parser;
+        let e = match crate::cli::Cli::try_parse_from(["red-cell-cli", "xyzzy-plugh"]) {
+            Ok(_) => panic!("expected parse failure"),
+            Err(e) => e,
+        };
+        let err = super::cli_error_from_clap_parse(&e);
+        assert!(matches!(err, CliError::InvalidArgs(_)));
+        assert_eq!(err.error_code(), ERROR_CODE_INVALID_ARGS);
+        assert!(err.to_string().to_lowercase().contains("subcommand"));
+    }
+
+    #[test]
+    fn clap_missing_required_args_maps_to_invalid_args() {
+        use clap::Parser;
+        let e = match crate::cli::Cli::try_parse_from(["red-cell-cli", "agent", "exec"]) {
+            Ok(_) => panic!("expected parse failure"),
+            Err(e) => e,
+        };
+        let err = super::cli_error_from_clap_parse(&e);
+        assert!(matches!(err, CliError::InvalidArgs(_)));
+        assert_eq!(err.error_code(), ERROR_CODE_INVALID_ARGS);
+        assert!(err.to_string().to_lowercase().contains("required"));
     }
 }

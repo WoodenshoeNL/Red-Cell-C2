@@ -201,10 +201,46 @@ fn missing_required_positional_exits_1() {
     assert_eq!(out.status.code(), Some(1));
 }
 
+/// Clap parse failures must use the JSON error envelope on stderr (not clap's plain text).
+#[test]
+fn unknown_subcommand_emits_json_error_on_stderr() {
+    let out = base_cmd().args(["not-a-real-subcommand"]).output().expect("spawn red-cell-cli");
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).trim().is_empty(),
+        "parse errors must not write to stdout"
+    );
+    let err = first_json_object(&String::from_utf8_lossy(&out.stderr));
+    assert_eq!(err["ok"], false);
+    assert_eq!(err["error"], "INVALID_ARGS");
+    assert!(err["message"].as_str().unwrap_or("").to_lowercase().contains("subcommand"));
+}
+
+#[test]
+fn missing_required_exec_args_emits_json_error_on_stderr() {
+    let out = base_cmd().args(["agent", "exec"]).output().expect("spawn red-cell-cli");
+    assert_eq!(out.status.code(), Some(1));
+    let err = first_json_object(&String::from_utf8_lossy(&out.stderr));
+    assert_eq!(err["ok"], false);
+    assert_eq!(err["error"], "INVALID_ARGS");
+    assert!(err["message"].as_str().unwrap_or("").to_lowercase().contains("required"));
+}
+
 #[test]
 fn help_flag_exits_0() {
     let out = base_cmd().args(["--help"]).output().expect("spawn red-cell-cli");
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("red-cell-cli") || stdout.contains("Red Cell"));
+}
+
+#[test]
+fn version_flag_exits_0_without_json_error_envelope() {
+    let out = base_cmd().args(["--version"]).output().expect("spawn red-cell-cli");
+    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.trim().starts_with('{'),
+        "--version must not emit JSON errors to stderr: {stderr:?}"
+    );
 }

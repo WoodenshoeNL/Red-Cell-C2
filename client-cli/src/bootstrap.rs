@@ -28,7 +28,12 @@ pub fn run() {
                 ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => EXIT_SUCCESS,
                 _ => EXIT_GENERAL,
             };
-            let _ = e.print();
+            if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
+                let _ = e.print();
+            } else {
+                let mapped = error::cli_error_from_clap_parse(&e);
+                let _ = output::print_error(&mapped);
+            }
             std::process::exit(code);
         }
     };

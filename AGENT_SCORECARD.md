@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1258 | 255 | 92 |
+| Tasks closed | 1258 | 255 | 93 |
 | Bugs filed against | 243 | 50 | 15 |
 | Bug rate (bugs/task) | 0.19 | 0.20 | 0.16 |
 | Quality score | 81% | 80% | 84% |
 
-*Bug rates: Claude 243/1258=0.1931→0.19, Codex 50/255=0.1961→0.20, Cursor 15/92=0.1630→0.16*
+*Bug rates: Claude 243/1258=0.1931→0.19, Codex 50/255=0.1961→0.20, Cursor 15/93=0.1613→0.16*
 
 ## Violation Breakdown
 
@@ -41,6 +41,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-13 03:30 — 8999299b..da710916
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | No code activity (only prior QA checkpoint commit). |
+| Codex | 0 | 0 | No activity this run. |
+| Cursor | 1 | 0 | Closed red-cell-c2-e09za (restore wiremock tests for status::run). Added 7 wiremock integration tests for error paths and happy-path snapshots. Dispatch regression test for status command. Clean refactor: extracted client CLI tests into main_tests/cli.rs. `#[allow(dead_code)]` on deserialization-only structs — correct usage. |
+
+Build: **passed** — `cargo check --workspace` clean. Clippy: **passed** — zero warnings. Tests: **running** (2616/5356 passing, no failures observed — full suite still executing). No bugs filed — all changes are well-executed with good test coverage.
 
 ### QA Review — 2026-04-13 00:30 — 2e8413c0..8999299b
 

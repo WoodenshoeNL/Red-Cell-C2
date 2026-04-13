@@ -6777,3 +6777,13 @@ Build: cargo check passed; tests/clippy blocked by concurrent cargo build lock c
 | Cursor | 0 | 0 | `1fb96bbf` — clap parse failures now emit JSON error envelope (`INVALID_ARGS`) on stderr instead of plain text. Proper separation: `--help`/`--version` still use plain text. Added `cli_error_from_clap_parse()` with `#[must_use]`, 2 unit tests, 3 integration tests. Clean, well-tested fix. |
 
 Build: **passed** — `cargo check --workspace` clean. Tests/clippy: **compiling** — full workspace recompile in progress, clippy blocked by build lock. No test failures observed. No bugs filed — change is solid.
+
+### QA Review — 2026-04-13 10:00 — 95740d7a..0e79e265
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | No activity. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **skipped** — no new dev code changes since last review. Only prior QA checkpoint commit in range.

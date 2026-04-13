@@ -212,6 +212,19 @@ pub async fn run(client: &ApiClient) -> Result<StatusData, CliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ResolvedConfig;
+    use crate::error::CliError;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn mock_cfg(server_uri: &str) -> ResolvedConfig {
+        ResolvedConfig {
+            server: server_uri.to_owned(),
+            token: "test-token".to_owned(),
+            timeout: 5,
+            tls_mode: crate::config::TlsMode::SystemRoots,
+        }
+    }
 
     fn sample_healthy() -> StatusData {
         StatusData {
@@ -285,5 +298,190 @@ mod tests {
         data.status = "degraded".to_owned();
         let output = data.render_text();
         assert!(output.contains("degraded"), "text output must show degraded database:\n{output}");
+    }
+
+    /// `GET /api/v1/` fails with a transport error — `run` surfaces [`CliError::ServerUnreachable`].
+    #[tokio::test]
+    async fn run_server_unreachable_on_get_root() {
+        let cfg = mock_cfg("http://127.0.0.1:1");
+        let client = crate::client::ApiClient::new(&cfg).expect("build client");
+        let result = run(&client).await;
+        assert!(
+            matches!(result, Err(CliError::ServerUnreachable(_))),
+            "expected ServerUnreachable when root GET cannot connect; got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_auth_failure_on_get_health() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"version": "v1"})),
+            )
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/health"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+
+        let client = crate::client::ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
+        let result = run(&client).await;
+        assert!(
+            matches!(result, Err(CliError::AuthFailure(_))),
+            "expected AuthFailure on health 401; got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_auth_failure_on_get_health_403() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"version": "v1"})),
+            )
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/health"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+
+        let client = crate::client::ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
+        let result = run(&client).await;
+        assert!(
+            matches!(result, Err(CliError::AuthFailure(_))),
+            "expected AuthFailure on health 403; got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_server_error_on_get_health() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"version": "v1"})),
+            )
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/health"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&server)
+            .await;
+
+        let client = crate::client::ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
+        let result = run(&client).await;
+        assert!(
+            matches!(result, Err(CliError::ServerError(_))),
+            "expected ServerError on health 500; got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_success_healthy_snapshot() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"version": "2.0.0-test"})),
+            )
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/health"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "ok",
+                "uptime_secs": 3600u64,
+                "agents": { "active": 3, "total": 10 },
+                "listeners": { "running": 2, "stopped": 1 },
+                "database": "ok",
+                "plugins": { "loaded": 2, "failed": 0, "disabled": 1 },
+                "plugin_health": [
+                    { "name": "plug_a", "consecutive_failures": 0, "disabled": false },
+                    { "name": "plug_b", "consecutive_failures": 3, "disabled": true },
+                ],
+            })))
+            .mount(&server)
+            .await;
+
+        let client = crate::client::ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
+        let data = run(&client).await.expect("status run");
+
+        assert_eq!(data.version, "2.0.0-test");
+        assert_eq!(data.uptime_secs, 3600);
+        assert_eq!(data.status, "ok");
+        assert_eq!(data.database, "ok");
+        assert_eq!(data.agents, StatusAgentCounts { active: 3, total: 10 });
+        assert_eq!(data.listeners, StatusListenerCounts { running: 2, stopped: 1 });
+        assert_eq!(data.plugins, StatusPluginCounts { loaded: 2, failed: 0, disabled: 1 });
+        assert_eq!(
+            data.plugin_health,
+            vec![
+                StatusPluginHealthEntry {
+                    name: "plug_a".to_owned(),
+                    consecutive_failures: 0,
+                    disabled: false,
+                },
+                StatusPluginHealthEntry {
+                    name: "plug_b".to_owned(),
+                    consecutive_failures: 3,
+                    disabled: true,
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn run_success_degraded_database_snapshot() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"version": "v1"})),
+            )
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/health"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "degraded",
+                "uptime_secs": 99u64,
+                "agents": { "active": 0, "total": 5 },
+                "listeners": { "running": 0, "stopped": 2 },
+                "database": "degraded",
+                "plugins": { "loaded": 1, "failed": 0, "disabled": 0 },
+                "plugin_health": [],
+            })))
+            .mount(&server)
+            .await;
+
+        let client = crate::client::ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
+        let data = run(&client).await.expect("status run");
+
+        assert_eq!(data.status, "degraded");
+        assert_eq!(data.database, "degraded");
+        assert_eq!(data.uptime_secs, 99);
+        assert_eq!(data.agents, StatusAgentCounts { active: 0, total: 5 });
+        assert_eq!(data.listeners, StatusListenerCounts { running: 0, stopped: 2 });
+        assert_eq!(data.plugins, StatusPluginCounts { loaded: 1, failed: 0, disabled: 0 });
+        assert!(data.plugin_health.is_empty());
     }
 }

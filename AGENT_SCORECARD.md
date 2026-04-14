@@ -10,11 +10,11 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 1258 | 255 | 93 |
-| Bugs filed against | 243 | 50 | 15 |
+| Bugs filed against | 244 | 50 | 15 |
 | Bug rate (bugs/task) | 0.19 | 0.20 | 0.16 |
 | Quality score | 81% | 80% | 84% |
 
-*Bug rates: Claude 243/1258=0.1931→0.19, Codex 50/255=0.1961→0.20, Cursor 15/93=0.1613→0.16*
+*Bug rates: Claude 244/1258=0.1939→0.19, Codex 50/255=0.1961→0.20, Cursor 15/93=0.1613→0.16*
 
 ## Violation Breakdown
 
@@ -28,7 +28,7 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 42 | 25 | 4 |
 | Memory / resource leaks | 14 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 10 | 0 |
-| Test infrastructure / flakiness | 58 | 6 | 1 |
+| Test infrastructure / flakiness | 59 | 6 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 4 | 5 | 0 |
 | Correctness / pagination | 67 | 9 | 1 |
@@ -41,6 +41,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-14 18:15 — 6db89395..3571db67
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 1 | Flaky TLS test — port TOCTOU race (red-cell-c2-dmza4) |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **passed** — `cargo check` and `cargo clippy` clean. `cargo nextest` had 1 flaky failure (port race in `reload_tls_cert_returns_tls_cert_error_for_expired_cert`). 1965/1966 tests passed, 3395 skipped due to fail-fast. No new dev commits — only prior QA checkpoint in range.
 
 ### QA Review — 2026-04-14 16:30 — 57bc3c4c..bbf0c646
 

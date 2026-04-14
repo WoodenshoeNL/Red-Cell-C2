@@ -313,9 +313,7 @@ pub fn resolve_or_persist_tls_identity(
     if cert_path.exists() && key_path.exists() {
         // Re-apply 0600 so keys written by older builds with a permissive umask
         // are hardened on every subsequent boot, not just on first generation.
-        fs::set_permissions(key_path, fs::Permissions::from_mode(0o600)).map_err(|source| {
-            PersistTlsError::HardenPermissions { path: key_path.display().to_string(), source }
-        })?;
+        harden_private_key_permissions(key_path)?;
         return load_tls_identity_from_files(cert_path, key_path).map_err(PersistTlsError::Tls);
     }
 
@@ -338,7 +336,18 @@ pub fn resolve_or_persist_tls_identity(
             source,
         })?;
 
+    // `OpenOptions::mode` applies only when the file is created; truncation of an
+    // existing permissive key (partial state: cert missing) leaves stale mode bits.
+    harden_private_key_permissions(key_path)?;
+
     Ok(identity)
+}
+
+// Ensure PEM private key material on disk is not group/world readable (Unix mode 0600).
+fn harden_private_key_permissions(key_path: &Path) -> Result<(), PersistTlsError> {
+    fs::set_permissions(key_path, fs::Permissions::from_mode(0o600)).map_err(|source| {
+        PersistTlsError::HardenPermissions { path: key_path.display().to_string(), source }
+    })
 }
 
 #[cfg(test)]
@@ -1090,6 +1099,15 @@ mod tests {
         std::fs::write(&key_path, stale_identity.private_key_pem())
             .expect("stale private key should be written");
 
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&key_path).expect("key metadata").permissions();
+            perms.set_mode(0o644);
+            std::fs::set_permissions(&key_path, perms)
+                .expect("world-readable key simulates unsafe partial state");
+        }
+
         assert!(!cert_path.exists(), "precondition: cert file should not exist");
         assert!(key_path.exists(), "precondition: key file should exist");
 
@@ -1122,6 +1140,18 @@ mod tests {
             stale_identity.private_key_pem(),
             "stale private key should be replaced by a fresh one"
         );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode =
+                std::fs::metadata(&key_path).expect("key metadata").permissions().mode() & 0o777;
+            assert_eq!(
+                mode, 0o600,
+                "regenerated key must be chmod 0600 even when truncating a permissive file"
+            );
+        }
+
         identity.server_config().expect("regenerated identity must produce a valid rustls config");
     }
 

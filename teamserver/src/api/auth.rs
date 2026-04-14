@@ -43,7 +43,7 @@ const API_KEY_HASH_SECRET_SIZE: usize = 32;
 type ApiKeyMac = Hmac<Sha256>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct ApiKeyDigest(pub(crate) [u8; 32]);
+pub(crate) struct ApiKeyDigest([u8; 32]);
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum RateLimitSubject {
@@ -97,14 +97,14 @@ pub struct ApiIdentity {
 /// Shared REST API authentication and rate-limiting runtime state.
 #[derive(Debug, Clone)]
 pub struct ApiRuntime {
-    pub(crate) key_hash_secret: Arc<[u8; API_KEY_HASH_SECRET_SIZE]>,
+    key_hash_secret: Arc<[u8; API_KEY_HASH_SECRET_SIZE]>,
     /// Stored as a flat list so lookup can always visit every entry, enabling
     /// constant-time comparison via [`subtle::ConstantTimeEq`].
-    pub(crate) keys: Arc<Vec<(ApiKeyDigest, ApiIdentity)>>,
-    pub(crate) rate_limit: ApiRateLimit,
-    pub(crate) windows: Arc<Mutex<BTreeMap<RateLimitSubject, RateLimitWindow>>>,
+    keys: Arc<Vec<(ApiKeyDigest, ApiIdentity)>>,
+    rate_limit: ApiRateLimit,
+    windows: Arc<Mutex<BTreeMap<RateLimitSubject, RateLimitWindow>>>,
     /// Per-IP sliding windows tracking failed API-key auth attempts (wrong key presented).
-    pub(crate) auth_failure_windows: Arc<Mutex<HashMap<IpAddr, AttemptWindow>>>,
+    auth_failure_windows: Arc<Mutex<HashMap<IpAddr, AttemptWindow>>>,
 }
 
 impl ApiRuntime {
@@ -531,5 +531,39 @@ const fn api_role_allows(role: OperatorRole, permission: Permission) -> bool {
             )
         }
         OperatorRole::Analyst => matches!(permission, Permission::Read),
+    }
+}
+
+#[cfg(test)]
+impl ApiKeyDigest {
+    pub(crate) fn new_for_test(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+}
+
+#[cfg(test)]
+impl ApiRuntime {
+    /// Construct an `ApiRuntime` from raw parts for testing.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_for_test(
+        key_hash_secret: Arc<[u8; API_KEY_HASH_SECRET_SIZE]>,
+        keys: Arc<Vec<(ApiKeyDigest, ApiIdentity)>>,
+        rate_limit: ApiRateLimit,
+        windows: Arc<Mutex<BTreeMap<RateLimitSubject, RateLimitWindow>>>,
+        auth_failure_windows: Arc<Mutex<HashMap<IpAddr, AttemptWindow>>>,
+    ) -> Self {
+        Self { key_hash_secret, keys, rate_limit, windows, auth_failure_windows }
+    }
+
+    pub(crate) fn key_hash_secret(&self) -> &[u8; API_KEY_HASH_SECRET_SIZE] {
+        &self.key_hash_secret
+    }
+
+    pub(crate) fn windows(&self) -> &Mutex<BTreeMap<RateLimitSubject, RateLimitWindow>> {
+        &self.windows
+    }
+
+    pub(crate) fn auth_failure_windows(&self) -> &Mutex<HashMap<IpAddr, AttemptWindow>> {
+        &self.auth_failure_windows
     }
 }

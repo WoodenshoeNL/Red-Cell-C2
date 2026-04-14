@@ -26,7 +26,7 @@ use super::helpers::*;
 // ---- lookup_key_ct unit tests ----
 
 fn make_digest(byte: u8) -> ApiKeyDigest {
-    ApiKeyDigest([byte; 32])
+    ApiKeyDigest::new_for_test([byte; 32])
 }
 
 fn make_identity(key_id: &str) -> ApiIdentity {
@@ -400,13 +400,11 @@ async fn rate_limiting_rejects_repeated_missing_api_keys() {
 
 #[tokio::test]
 async fn rate_limiting_prunes_expired_windows_for_inactive_keys() {
-    let api = ApiRuntime {
-        key_hash_secret: Arc::new(
-            ApiRuntime::generate_key_hash_secret().expect("rng should work in tests"),
-        ),
-        keys: Arc::new(Vec::new()),
-        rate_limit: ApiRateLimit { requests_per_minute: 60 },
-        windows: Arc::new(Mutex::new(BTreeMap::from([
+    let api = ApiRuntime::new_for_test(
+        Arc::new(ApiRuntime::generate_key_hash_secret().expect("rng should work in tests")),
+        Arc::new(Vec::new()),
+        ApiRateLimit { requests_per_minute: 60 },
+        Arc::new(Mutex::new(BTreeMap::from([
             (
                 RateLimitSubject::MissingApiKey,
                 RateLimitWindow {
@@ -419,21 +417,21 @@ async fn rate_limiting_prunes_expired_windows_for_inactive_keys() {
                 RateLimitWindow { started_at: Instant::now(), request_count: 1 },
             ),
         ]))),
-        auth_failure_windows: Arc::new(Mutex::new(HashMap::new())),
-    };
+        Arc::new(Mutex::new(HashMap::new())),
+    );
 
     api.check_rate_limit(&RateLimitSubject::PresentedCredential(ApiRuntime::hash_api_key(
-        api.key_hash_secret.as_ref(),
+        api.key_hash_secret(),
         "new-key",
     )))
     .await
     .expect("rate limit should allow request");
 
-    let windows = api.windows.lock().await;
+    let windows = api.windows().lock().await;
     assert!(!windows.contains_key(&RateLimitSubject::MissingApiKey));
     assert!(windows.contains_key(&RateLimitSubject::InvalidAuthorizationHeader));
     assert!(windows.contains_key(&RateLimitSubject::PresentedCredential(
-        ApiRuntime::hash_api_key(api.key_hash_secret.as_ref(), "new-key")
+        ApiRuntime::hash_api_key(api.key_hash_secret(), "new-key")
     )));
     assert_eq!(windows.len(), 2);
 }
@@ -599,15 +597,13 @@ async fn missing_route_returns_json_not_found() {
 /// rate-limit, suitable for testing the auth-failure and rate-limit
 /// internals in isolation.
 fn test_api_runtime(requests_per_minute: u32) -> ApiRuntime {
-    ApiRuntime {
-        key_hash_secret: Arc::new(
-            ApiRuntime::generate_key_hash_secret().expect("rng should work in tests"),
-        ),
-        keys: Arc::new(Vec::new()),
-        rate_limit: ApiRateLimit { requests_per_minute },
-        windows: Arc::new(Mutex::new(BTreeMap::new())),
-        auth_failure_windows: Arc::new(Mutex::new(HashMap::new())),
-    }
+    ApiRuntime::new_for_test(
+        Arc::new(ApiRuntime::generate_key_hash_secret().expect("rng should work in tests")),
+        Arc::new(Vec::new()),
+        ApiRateLimit { requests_per_minute },
+        Arc::new(Mutex::new(BTreeMap::new())),
+        Arc::new(Mutex::new(HashMap::new())),
+    )
 }
 
 fn test_ip(last_octet: u8) -> IpAddr {
@@ -667,7 +663,7 @@ async fn auth_success_clears_failure_state() {
     );
 
     // Verify the window is completely removed, not just zeroed.
-    let windows = api.auth_failure_windows.lock().await;
+    let windows = api.auth_failure_windows().lock().await;
     assert!(!windows.contains_key(&ip), "window entry must be removed on success");
 }
 
@@ -678,7 +674,7 @@ async fn auth_failure_window_expiry_resets_allowance() {
 
     // Manually insert an expired window that exceeded the failure threshold.
     {
-        let mut windows = api.auth_failure_windows.lock().await;
+        let mut windows = api.auth_failure_windows().lock().await;
         windows.insert(
             ip,
             AttemptWindow {
@@ -694,7 +690,7 @@ async fn auth_failure_window_expiry_resets_allowance() {
     );
 
     // The expired entry should have been removed from the map.
-    let windows = api.auth_failure_windows.lock().await;
+    let windows = api.auth_failure_windows().lock().await;
     assert!(!windows.contains_key(&ip), "expired window must be removed");
 }
 
@@ -705,7 +701,7 @@ async fn auth_failure_record_resets_window_after_expiry() {
 
     // Insert an expired window with many failures.
     {
-        let mut windows = api.auth_failure_windows.lock().await;
+        let mut windows = api.auth_failure_windows().lock().await;
         windows.insert(
             ip,
             AttemptWindow {
@@ -718,7 +714,7 @@ async fn auth_failure_record_resets_window_after_expiry() {
     // Recording a new failure should start a fresh window with attempts=1.
     api.record_auth_failure(ip).await;
 
-    let windows = api.auth_failure_windows.lock().await;
+    let windows = api.auth_failure_windows().lock().await;
     let window = windows.get(&ip).expect("window must exist after recording failure");
     assert_eq!(window.attempts, 1, "expired window must reset to 1 attempt");
 }
@@ -732,7 +728,7 @@ async fn auth_failure_sequential_from_same_ip_count_correctly() {
     // that they increment linearly — no double-counting.
     for expected in 1..=MAX_FAILED_API_AUTH_ATTEMPTS {
         api.record_auth_failure(ip).await;
-        let windows = api.auth_failure_windows.lock().await;
+        let windows = api.auth_failure_windows().lock().await;
         let window = windows.get(&ip).expect("window must exist");
         assert_eq!(
             window.attempts, expected,
@@ -826,7 +822,7 @@ async fn rate_limit_window_expiry_resets_count() {
 
     // Simulate window expiry by back-dating the window.
     {
-        let mut windows = api.windows.lock().await;
+        let mut windows = api.windows().lock().await;
         if let Some(w) = windows.get_mut(&subject) {
             w.started_at = Instant::now() - RATE_LIMIT_WINDOW - Duration::from_secs(1);
         }
@@ -839,7 +835,7 @@ async fn rate_limit_window_expiry_resets_count() {
     );
 
     // The window should be reset with count = 1.
-    let windows = api.windows.lock().await;
+    let windows = api.windows().lock().await;
     let w = windows.get(&subject).expect("window must exist");
     assert_eq!(w.request_count, 1, "request count must be 1 after window reset");
 }

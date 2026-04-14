@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1258 | 255 | 93 |
+| Tasks closed | 1259 | 255 | 93 |
 | Bugs filed against | 244 | 50 | 15 |
 | Bug rate (bugs/task) | 0.19 | 0.20 | 0.16 |
 | Quality score | 81% | 80% | 84% |
 
-*Bug rates: Claude 244/1258=0.1939→0.19, Codex 50/255=0.1961→0.20, Cursor 15/93=0.1613→0.16*
+*Bug rates: Claude 244/1259=0.1938→0.19, Codex 50/255=0.1961→0.20, Cursor 15/93=0.1613→0.16*
 
 ## Violation Breakdown
 
@@ -41,6 +41,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-15 00:50 — d1d0f8c8..bbcbc00a
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 0 | Closed red-cell-c2-0dq6f. Two large clean refactors: split config.rs (4075→7 modules), crypto.rs (→3 modules), operator/messages.rs (2158→10 modules). Proper error handling, secret redaction, test coverage throughout. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | 3 claims (aaczu, mw1q7, sed90) but no completed tasks in this range. |
+
+Build: **passed** (`cargo check --workspace` clean). Tests/clippy blocked by cargo lock contention with 6+ concurrent cargo processes from dev agents — skipped this run.
 
 ### QA Review — 2026-04-14 19:45 — 3571db67..941135ca
 

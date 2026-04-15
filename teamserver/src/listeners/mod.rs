@@ -1284,6 +1284,7 @@ struct SmbListenerState {
     dispatcher: CommandDispatcher,
     unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
     reconnect_probe_rate_limiter: ReconnectProbeRateLimiter,
+    demon_init_rate_limiter: DemonInitRateLimiter,
     shutdown: ShutdownController,
 }
 
@@ -1422,6 +1423,7 @@ impl SmbListenerState {
         downloads: DownloadTracker,
         unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
         reconnect_probe_rate_limiter: ReconnectProbeRateLimiter,
+        demon_init_rate_limiter: DemonInitRateLimiter,
         shutdown: ShutdownController,
         init_secret_config: DemonInitSecretConfig,
         max_pivot_chain_depth: usize,
@@ -1439,6 +1441,7 @@ impl SmbListenerState {
             events: events.clone(),
             unknown_callback_probe_audit_limiter,
             reconnect_probe_rate_limiter,
+            demon_init_rate_limiter,
             shutdown,
             dispatcher: CommandDispatcher::with_builtin_handlers_and_downloads(
                 registry.clone(),
@@ -1785,6 +1788,7 @@ async fn process_demon_transport(
     dispatcher: &CommandDispatcher,
     unknown_callback_probe_audit_limiter: &UnknownCallbackProbeAuditLimiter,
     reconnect_probe_rate_limiter: &ReconnectProbeRateLimiter,
+    demon_init_rate_limiter: &DemonInitRateLimiter,
     body: &[u8],
     external_ip: String,
 ) -> Result<ProcessedDemonResponse, ListenerManagerError> {
@@ -1908,30 +1912,56 @@ async fn process_demon_transport(
             })
         }
         Ok(ParsedDemonPacket::Reconnect { header, .. }) => {
-            if !reconnect_probe_rate_limiter.allow(header.agent_id).await {
-                warn!(
-                    listener = listener_name,
-                    agent_id = format_args!("{:08X}", header.agent_id),
-                    external_ip,
-                    max_probes = MAX_RECONNECT_PROBES_PER_AGENT,
-                    window_seconds = RECONNECT_PROBE_WINDOW_DURATION.as_secs(),
-                    "reconnect probe rate limit exceeded — possible probe spam"
-                );
-                return Ok(ProcessedDemonResponse {
-                    agent_id: header.agent_id,
-                    payload: Vec::new(),
-                    http_disposition: DemonHttpDisposition::TooManyRequests,
-                });
-            }
+            let agent_known = registry.get(header.agent_id).await.is_some();
 
-            let (payload, http_disposition) = if registry.get(header.agent_id).await.is_some() {
-                build_reconnect_ack(registry, header.agent_id)
-                    .await
-                    .map_err(|error| ListenerManagerError::InvalidConfig {
-                        message: format!("failed to build reconnect ack: {error}"),
-                    })
-                    .map(|payload| (payload, DemonHttpDisposition::Ok))?
+            if agent_known {
+                if !reconnect_probe_rate_limiter.allow(header.agent_id).await {
+                    warn!(
+                        listener = listener_name,
+                        agent_id = format_args!("{:08X}", header.agent_id),
+                        external_ip,
+                        max_probes = MAX_RECONNECT_PROBES_PER_AGENT,
+                        window_seconds = RECONNECT_PROBE_WINDOW_DURATION.as_secs(),
+                        "reconnect probe rate limit exceeded — possible probe spam"
+                    );
+                    return Ok(ProcessedDemonResponse {
+                        agent_id: header.agent_id,
+                        payload: Vec::new(),
+                        http_disposition: DemonHttpDisposition::TooManyRequests,
+                    });
+                }
+
+                let payload =
+                    build_reconnect_ack(registry, header.agent_id).await.map_err(|error| {
+                        ListenerManagerError::InvalidConfig {
+                            message: format!("failed to build reconnect ack: {error}"),
+                        }
+                    })?;
+                Ok(ProcessedDemonResponse {
+                    agent_id: header.agent_id,
+                    payload,
+                    http_disposition: DemonHttpDisposition::Ok,
+                })
             } else {
+                // Unknown agent IDs must go through the per-IP init rate limiter
+                // to prevent unauthenticated sources from spraying random agent IDs
+                // and bypassing the stricter per-IP DEMON_INIT throttle.
+                let ip: IpAddr =
+                    external_ip.parse().unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+                if !demon_init_rate_limiter.allow(ip).await {
+                    warn!(
+                        listener = listener_name,
+                        agent_id = format_args!("{:08X}", header.agent_id),
+                        external_ip,
+                        "unknown-agent reconnect probe rejected by per-IP rate limiter"
+                    );
+                    return Ok(ProcessedDemonResponse {
+                        agent_id: header.agent_id,
+                        payload: Vec::new(),
+                        http_disposition: DemonHttpDisposition::Fake404,
+                    });
+                }
+
                 if unknown_callback_probe_audit_limiter.allow(listener_name, &external_ip).await {
                     warn!(
                         listener = listener_name,
@@ -1954,10 +1984,12 @@ async fn process_demon_transport(
                         "suppressing unknown reconnect probe audit row after per-source limit"
                     );
                 }
-                (Vec::new(), DemonHttpDisposition::Fake404)
-            };
-
-            Ok(ProcessedDemonResponse { agent_id: header.agent_id, payload, http_disposition })
+                Ok(ProcessedDemonResponse {
+                    agent_id: header.agent_id,
+                    payload: Vec::new(),
+                    http_disposition: DemonHttpDisposition::Fake404,
+                })
+            }
         }
         Ok(ParsedDemonPacket::Callback { header, packages }) => {
             let payload = build_callback_response(dispatcher, header.agent_id, &packages).await?;
@@ -2158,6 +2190,7 @@ async fn spawn_smb_listener_runtime(
     downloads: DownloadTracker,
     unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
     reconnect_probe_rate_limiter: ReconnectProbeRateLimiter,
+    demon_init_rate_limiter: DemonInitRateLimiter,
     shutdown: ShutdownController,
     init_secret_config: DemonInitSecretConfig,
     max_pivot_chain_depth: usize,
@@ -2173,6 +2206,7 @@ async fn spawn_smb_listener_runtime(
         downloads,
         unknown_callback_probe_audit_limiter,
         reconnect_probe_rate_limiter,
+        demon_init_rate_limiter,
         shutdown,
         init_secret_config,
         max_pivot_chain_depth,
@@ -2273,6 +2307,7 @@ async fn handle_smb_connection(state: Arc<SmbListenerState>, mut stream: LocalSo
             &state.dispatcher,
             &state.unknown_callback_probe_audit_limiter,
             &state.reconnect_probe_rate_limiter,
+            &state.demon_init_rate_limiter,
             &frame.payload,
             client_ip.to_string(),
         )
@@ -2419,6 +2454,7 @@ impl ListenerManager {
                     self.downloads.clone(),
                     self.unknown_callback_probe_audit_limiter.clone(),
                     self.reconnect_probe_rate_limiter.clone(),
+                    self.demon_init_rate_limiter.clone(),
                     self.shutdown.clone(),
                     self.init_secret_config(),
                     self.max_pivot_chain_depth,
@@ -2637,6 +2673,7 @@ async fn http_listener_handler(
         &state.dispatcher,
         &state.unknown_callback_probe_audit_limiter,
         &state.reconnect_probe_rate_limiter,
+        &state.demon_init_rate_limiter,
         &body,
         external_ip.to_string(),
     )

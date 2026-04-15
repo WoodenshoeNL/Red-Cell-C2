@@ -1880,7 +1880,7 @@ async fn http_listener_unknown_reconnect_probe_is_rate_limited_before_auditing()
 }
 
 #[tokio::test]
-async fn http_listener_reconnect_probe_returns_429_after_per_agent_limit()
+async fn http_listener_unknown_reconnect_probes_share_per_ip_budget()
 -> Result<(), Box<dyn std::error::Error>> {
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
@@ -1890,14 +1890,15 @@ async fn http_listener_reconnect_probe_returns_429_after_per_agent_limit()
         .with_demon_allow_legacy_ctr(true);
     let port = available_port()?;
     let client = Client::new();
-    let agent_id = 0xCAFE_BABE_u32;
 
     manager.create(http_listener("edge-http-probe-limit", port)).await?;
     manager.start("edge-http-probe-limit").await?;
     wait_for_listener(port, false).await?;
 
-    // Send MAX_RECONNECT_PROBES_PER_AGENT probes — all must succeed (404, unknown agent).
-    for i in 0..MAX_RECONNECT_PROBES_PER_AGENT {
+    // Send MAX_DEMON_INIT_ATTEMPTS_PER_IP probes with *different* unknown agent IDs from the
+    // same source IP. Each must return 404 and consume one slot from the shared per-IP budget.
+    for i in 0..MAX_DEMON_INIT_ATTEMPTS_PER_IP {
+        let agent_id = 0xCAFE_0000_u32 + i;
         let resp = client
             .post(format!("http://127.0.0.1:{port}/"))
             .body(valid_demon_request_body(agent_id))
@@ -1910,28 +1911,18 @@ async fn http_listener_reconnect_probe_returns_429_after_per_agent_limit()
         );
     }
 
-    // The (MAX+1)-th probe must be rate-limited with 429.
+    // The (MAX+1)-th probe — with yet another random agent_id — must also return 404.
+    // It is silently dropped by the per-IP limiter (no 429 to avoid leaking rate-limit state
+    // to unauthenticated sources).
     let limited = client
         .post(format!("http://127.0.0.1:{port}/"))
-        .body(valid_demon_request_body(agent_id))
+        .body(valid_demon_request_body(0xDEAD_BEEF))
         .send()
         .await?;
     assert_eq!(
         limited.status(),
-        StatusCode::TOO_MANY_REQUESTS,
-        "probe exceeding per-agent limit must return 429"
-    );
-
-    // A different agent_id must still be allowed (limit is per agent_id).
-    let other = client
-        .post(format!("http://127.0.0.1:{port}/"))
-        .body(valid_demon_request_body(agent_id.wrapping_add(1)))
-        .send()
-        .await?;
-    assert_eq!(
-        other.status(),
         StatusCode::NOT_FOUND,
-        "probe for a different agent_id must still be allowed"
+        "unknown-agent probe exceeding per-IP limit must return 404"
     );
 
     manager.stop("edge-http-probe-limit").await?;
@@ -3214,6 +3205,7 @@ async fn spawn_test_smb_runtime(
         DownloadTracker::from_max_download_bytes(crate::DEFAULT_MAX_DOWNLOAD_BYTES),
         UnknownCallbackProbeAuditLimiter::new(),
         ReconnectProbeRateLimiter::new(),
+        DemonInitRateLimiter::default(),
         shutdown,
         DemonInitSecretConfig::None,
         crate::dispatch::DEFAULT_MAX_PIVOT_CHAIN_DEPTH,

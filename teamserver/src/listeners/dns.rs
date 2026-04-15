@@ -418,6 +418,7 @@ impl DnsListenerState {
             &self.dispatcher,
             &self.unknown_callback_probe_audit_limiter,
             &self.reconnect_probe_rate_limiter,
+            &self.demon_init_rate_limiter,
             &assembled,
             peer_ip.to_string(),
         )
@@ -715,6 +716,7 @@ impl DnsListenerState {
             &self.dispatcher,
             &self.unknown_callback_probe_audit_limiter,
             &self.reconnect_probe_rate_limiter,
+            &self.demon_init_rate_limiter,
             &assembled,
             peer_ip.to_string(),
         )

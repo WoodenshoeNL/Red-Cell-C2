@@ -164,6 +164,7 @@ pub async fn handle_external_request(
         &state.dispatcher,
         &state.unknown_callback_probe_audit_limiter,
         &state.reconnect_probe_rate_limiter,
+        &state.demon_init_rate_limiter,
         body,
         peer.ip().to_string(),
     )

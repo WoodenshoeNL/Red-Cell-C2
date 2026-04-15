@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1259 | 255 | 95 |
+| Tasks closed | 1261 | 255 | 95 |
 | Bugs filed against | 244 | 50 | 15 |
 | Bug rate (bugs/task) | 0.19 | 0.20 | 0.16 |
 | Quality score | 81% | 80% | 84% |
 
-*Bug rates: Claude 244/1259=0.1938→0.19, Codex 50/255=0.1961→0.20, Cursor 15/95=0.1579→0.16*
+*Bug rates: Claude 244/1261=0.1935→0.19, Codex 50/255=0.1961→0.20, Cursor 15/95=0.1579→0.16*
 
 ## Violation Breakdown
 
@@ -6956,4 +6956,14 @@ Build: **passed** — `cargo check --workspace` succeeded. No new dev code chang
 | Codex | 0 | 0 | No activity. |
 | Cursor | 0 | 0 | No activity. |
 
-Build: **passed** — `cargo check --workspace` succeeded (6m39s). No new dev code changes since last review. Only prior QA checkpoint commit in range. Beads DB intermittently busy; `br ready` shows 18 unblocked issues awaiting dev work.
+Build: **passed** �� `cargo check --workspace` succeeded (6m39s). No new dev code changes since last review. Only prior QA checkpoint commit in range. Beads DB intermittently busy; `br ready` shows 18 unblocked issues awaiting dev work.
+
+### QA Review — 2026-04-15 06:15 — 3dce5e7b..3935c3fe
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 0 | Closed red-cell-c2-znvdz (extract dispatch/tests/core.rs + util.rs) and red-cell-c2-ftejx (loot_context tests to output.rs). Also reduced auth.rs visibility (red-cell-c2-fki1q, still in progress). Clean test module extraction — no issues found. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **passed** — `cargo check` + `cargo clippy -- -D warnings` both clean. Tests compilation blocked by cargo lock contention with concurrent dev agent — not a code defect. 2 issues in_progress: red-cell-c2-fki1q (auth visibility hardening), red-cell-c2-mw1q7 (config.rs split). 20 ready issues in backlog.

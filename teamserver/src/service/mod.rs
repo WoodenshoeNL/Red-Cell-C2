@@ -17,13 +17,11 @@
 //! - `Agent` — agent task, response, output, registration, and build messages
 //! - `Listener` — listener management (add, start, ExternalC2)
 
+mod auth;
 mod logging;
 
+use auth::authenticate;
 use logging::{log_service_action, service_log_event};
-
-use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
-use std::time::Duration;
 
 use axum::{
     Router,
@@ -42,6 +40,8 @@ use red_cell_common::operator::{
     OperatorMessage, ServiceAgentRegistrationInfo, ServiceListenerRegistrationInfo,
 };
 use serde_json::Value;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use thiserror::Error;
 use time::OffsetDateTime;
 use tokio::sync::RwLock;
@@ -50,7 +50,7 @@ use uuid::Uuid;
 
 use crate::agent_events::agent_new_event;
 use crate::audit::{AuditResultStatus, audit_details};
-use crate::auth::{AuthError, password_hashes_match, password_verifier_for_sha3};
+use crate::auth::{AuthError, password_verifier_for_sha3};
 use crate::database::TeamserverError;
 use crate::{AgentRegistry, AuditWebhookNotifier, Database, EventBus, LoginRateLimiter, PivotInfo};
 
@@ -72,19 +72,11 @@ const BODY_AGENT_OUTPUT: &str = "AgentOutput";
 const BODY_LISTENER_ADD: &str = "ListenerAdd";
 const BODY_LISTENER_START: &str = "ListenerStart";
 
-/// Delay applied before responding to a failed service auth attempt.
-const FAILED_AUTH_DELAY: Duration = Duration::from_secs(2);
-
 /// Maximum service bridge WebSocket message size accepted by the teamserver (1 MiB).
 ///
 /// This matches the operator WebSocket limit and prevents a service client from
 /// causing unbounded memory allocation via oversized frames.
 const SERVICE_MAX_MESSAGE_SIZE: usize = 1024 * 1024;
-
-/// Maximum time a service client has to send the initial Register frame before
-/// the connection is closed. Mirrors `AUTHENTICATION_FRAME_TIMEOUT` on the
-/// operator WebSocket path.
-const SERVICE_AUTH_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 
 // ── Error types ──────────────────────────────────────────────────────
 
@@ -375,76 +367,6 @@ async fn handle_service_socket(
 
     let log_event = service_log_event("service client disconnected");
     state.events.broadcast(log_event);
-}
-
-// ── Authentication ───────────────────────────────────────────────────
-
-/// Authenticate a service client using Argon2id-wrapped SHA3-256 verification.
-///
-/// Expects a JSON message: `{"Head":{"Type":"Register"},"Body":{"Password":"..."}}`
-/// Responds with: `{"Head":{"Type":"Register"},"Body":{"Success":true/false}}`
-///
-/// `server_verifier` is the Argon2id PHC string derived from `SHA3-256(password)`.
-/// Rate limiting is enforced per source IP using the shared [`LoginRateLimiter`].
-async fn authenticate(
-    socket: &mut WebSocket,
-    server_verifier: &str,
-    rate_limiter: &LoginRateLimiter,
-    client_ip: IpAddr,
-) -> Result<Uuid, ServiceBridgeError> {
-    // Atomically check and reserve a slot; rate_limiter.record_failure is not
-    // needed afterwards — try_acquire already counted this attempt.
-    if !rate_limiter.try_acquire(client_ip).await {
-        warn!(%client_ip, "service auth rate limited");
-        return Err(ServiceBridgeError::RateLimited);
-    }
-
-    let message = match tokio::time::timeout(SERVICE_AUTH_FRAME_TIMEOUT, socket.recv()).await {
-        Ok(Some(Ok(WsMessage::Text(text)))) => text,
-        Err(_) => {
-            warn!(%client_ip, "service auth timed out waiting for Register frame");
-            let _ = socket.send(WsMessage::Close(None)).await;
-            return Err(ServiceBridgeError::AuthenticationTimeout);
-        }
-        _ => return Err(ServiceBridgeError::AuthenticationFailed),
-    };
-
-    let parsed: Value = serde_json::from_str(&message)?;
-
-    let head_type =
-        parsed.get("Head").and_then(|h| h.get("Type")).and_then(Value::as_str).unwrap_or_default();
-
-    if head_type != HEAD_REGISTER {
-        return Err(ServiceBridgeError::AuthenticationFailed);
-    }
-
-    let client_password = parsed
-        .get("Body")
-        .and_then(|b| b.get("Password"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-
-    let client_hash = hash_password_sha3(client_password);
-    let success = password_hashes_match(&client_hash, server_verifier);
-
-    let response = serde_json::json!({
-        "Head": { "Type": HEAD_REGISTER },
-        "Body": { "Success": success },
-    });
-
-    let response_text = serde_json::to_string(&response)?;
-    socket
-        .send(WsMessage::Text(response_text.into()))
-        .await
-        .map_err(ServiceBridgeError::WebSocket)?;
-
-    if success {
-        rate_limiter.record_success(client_ip).await;
-        Ok(Uuid::new_v4())
-    } else {
-        tokio::time::sleep(FAILED_AUTH_DELAY).await;
-        Err(ServiceBridgeError::AuthenticationFailed)
-    }
 }
 
 // ── Message dispatch ─────────────────────────────────────────────────
@@ -1150,6 +1072,7 @@ async fn handle_listener_start(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     /// Create a test database and webhook notifier pair for audit logging tests.
     async fn test_audit_deps() -> (Database, AuditWebhookNotifier) {
@@ -2822,7 +2745,7 @@ mod tests {
         );
         // Should complete within a reasonable margin of the timeout.
         assert!(
-            elapsed < SERVICE_AUTH_FRAME_TIMEOUT + Duration::from_secs(2),
+            elapsed < auth::SERVICE_AUTH_FRAME_TIMEOUT + Duration::from_secs(2),
             "took too long: {elapsed:?}"
         );
     }

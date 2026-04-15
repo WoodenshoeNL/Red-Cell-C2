@@ -31,11 +31,11 @@ use crate::{audit_details, parameter_object, record_operator_action_with_notific
 
 use super::errors::json_error_response;
 
-pub(crate) const API_KEY_HEADER: &str = "x-api-key";
+pub(super) const API_KEY_HEADER: &str = "x-api-key";
 const BEARER_PREFIX: &str = "Bearer ";
 const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
 /// Maximum number of failed API-key auth attempts from one IP before that IP is blocked.
-pub(crate) const MAX_FAILED_API_AUTH_ATTEMPTS: u32 = 5;
+pub(super) const MAX_FAILED_API_AUTH_ATTEMPTS: u32 = 5;
 /// Maximum number of per-IP auth-failure windows retained before the oldest are evicted.
 const MAX_API_AUTH_FAILURE_WINDOWS: usize = 10_000;
 const API_KEY_HASH_SECRET_SIZE: usize = 32;
@@ -61,7 +61,7 @@ pub struct ApiRateLimit {
 }
 
 impl ApiRateLimit {
-    pub(crate) fn disabled(self) -> bool {
+    pub(super) fn disabled(self) -> bool {
         self.requests_per_minute == 0
     }
 }

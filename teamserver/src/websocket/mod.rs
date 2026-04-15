@@ -2,6 +2,7 @@
 
 mod command_enc;
 mod connection;
+mod snapshot;
 
 #[cfg(test)]
 use crate::MAX_AGENT_MESSAGE_LEN;
@@ -13,12 +14,12 @@ use command_enc::{
 
 use connection::{
     AUTHENTICATION_FRAME_TIMEOUT, DisconnectKind, FAILED_LOGIN_DELAY, OPERATOR_MAX_MESSAGE_SIZE,
-    SendMessageError, SocketLoopControl, WsSession, send_hmac_message, send_login_error,
-    send_operator_message,
+    SocketLoopControl, WsSession, send_hmac_message, send_login_error, send_operator_message,
 };
 #[cfg(test)]
 use connection::{LOGIN_WINDOW_DURATION, MAX_FAILED_LOGIN_ATTEMPTS, MAX_LOGIN_ATTEMPT_WINDOWS};
 pub use connection::{LoginRateLimiter, OperatorConnectionManager};
+use snapshot::send_session_snapshot;
 
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
@@ -40,7 +41,6 @@ use red_cell_common::operator::{
     BuildPayloadMessageInfo, BuildPayloadResponseInfo, EventCode, FlatInfo, Message, MessageHead,
     OperatorMessage, TeamserverLogInfo,
 };
-use red_cell_common::{AgentRecord, OperatorInfo};
 use serde_json::Value;
 use thiserror::Error;
 use time::OffsetDateTime;
@@ -51,11 +51,11 @@ use crate::{
     AgentRegistry, AuditResultStatus, AuditWebhookNotifier, AuthError, AuthService,
     AuthenticationFailure, AuthenticationResult, Database, EventBus, ListenerEventAction,
     ListenerManager, PayloadBuildError, PayloadBuilderService, ShutdownController,
-    SocketRelayManager, action_from_mark, agent_events::agent_new_event, audit_details,
-    authorize_agent_group_access, authorize_listener_access, authorize_websocket_command,
-    listener_config_from_operator, listener_error_event, listener_event_for_action,
-    listener_removed_event, login_failure_message, login_parameters, login_success_message,
-    operator_requests_start, parameter_object, record_operator_action_with_notifications,
+    SocketRelayManager, action_from_mark, audit_details, authorize_agent_group_access,
+    authorize_listener_access, authorize_websocket_command, listener_config_from_operator,
+    listener_error_event, listener_event_for_action, listener_removed_event, login_failure_message,
+    login_parameters, login_success_message, operator_requests_start, parameter_object,
+    record_operator_action_with_notifications,
 };
 
 /// Register the Havoc-compatible operator WebSocket endpoint at `/`.
@@ -1537,88 +1537,6 @@ fn build_payload_response_event(
             file_name: file_name.to_owned(),
         },
     })
-}
-
-#[derive(Debug, Error)]
-enum SnapshotSyncError {
-    #[error(transparent)]
-    Send(#[from] SendMessageError),
-    #[error(transparent)]
-    Serialize(#[from] serde_json::Error),
-    #[error(transparent)]
-    Listener(#[from] crate::ListenerManagerError),
-    #[error(transparent)]
-    Teamserver(#[from] crate::TeamserverError),
-    #[error(transparent)]
-    Auth(#[from] AuthError),
-}
-
-async fn send_session_snapshot(
-    socket: &mut WebSocket,
-    auth: &AuthService,
-    events: &EventBus,
-    listeners: &ListenerManager,
-    registry: &AgentRegistry,
-    ws_session: &mut WsSession,
-) -> Result<(), SnapshotSyncError> {
-    let operators = auth
-        .operator_inventory()
-        .await?
-        .into_iter()
-        .map(|entry| entry.as_operator_info())
-        .collect();
-    send_hmac_message(socket, &operator_snapshot_event(operators)?, ws_session).await?;
-
-    for summary in listeners.list().await?.into_iter() {
-        send_hmac_message(
-            socket,
-            &listener_event_for_action("teamserver", &summary, ListenerEventAction::Created),
-            ws_session,
-        )
-        .await?;
-    }
-
-    for message in events.recent_teamserver_logs() {
-        send_hmac_message(socket, &message, ws_session).await?;
-    }
-
-    for agent in registry.list_active().await {
-        let pivots = registry.pivots(agent.agent_id).await;
-        let listener_name =
-            registry.listener_name(agent.agent_id).await.unwrap_or_else(|| "null".to_owned());
-        send_hmac_message(
-            socket,
-            &agent_snapshot_event(&listener_name, &agent, &pivots),
-            ws_session,
-        )
-        .await?;
-    }
-
-    Ok(())
-}
-
-fn agent_snapshot_event(
-    listener_name: &str,
-    agent: &AgentRecord,
-    pivots: &crate::PivotInfo,
-) -> OperatorMessage {
-    agent_new_event(listener_name, red_cell_common::demon::DEMON_MAGIC_VALUE, agent, pivots)
-}
-
-fn operator_snapshot_event(
-    operators: Vec<OperatorInfo>,
-) -> Result<OperatorMessage, serde_json::Error> {
-    Ok(OperatorMessage::InitConnectionInfo(Message {
-        head: MessageHead {
-            event: EventCode::InitConnection,
-            user: String::new(),
-            timestamp: String::new(),
-            one_time: String::new(),
-        },
-        info: FlatInfo {
-            fields: BTreeMap::from([("Operators".to_owned(), serde_json::to_value(operators)?)]),
-        },
-    }))
 }
 
 async fn cleanup_connection(

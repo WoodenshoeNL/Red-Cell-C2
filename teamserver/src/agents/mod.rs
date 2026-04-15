@@ -16,15 +16,13 @@ use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use red_cell_common::demon::DemonCommand;
 use red_cell_common::AgentRecord;
+use red_cell_common::demon::DemonCommand;
 use tokio::sync::{Mutex, RwLock};
 use tracing::error;
 use tracing::{instrument, warn};
 
-use crate::database::{
-    Database, DatabaseHealthState, DeferredWrite, TeamserverError, WriteQueue,
-};
+use crate::database::{Database, DatabaseHealthState, DeferredWrite, TeamserverError, WriteQueue};
 
 #[derive(Debug)]
 struct AgentEntry {
@@ -730,10 +728,7 @@ impl AgentRegistry {
             hook(agent_id).await;
         }
     }
-
 }
-
-
 
 #[cfg(test)]
 mod tests {

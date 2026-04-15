@@ -184,10 +184,7 @@ impl AgentRegistry {
         descendants
     }
 
-    pub(super) async fn clear_links_for_agent(
-        &self,
-        agent_id: u32,
-    ) -> Result<(), TeamserverError> {
+    pub(super) async fn clear_links_for_agent(&self, agent_id: u32) -> Result<(), TeamserverError> {
         if let Some(parent_agent_id) = self.parent_of(agent_id).await {
             self.link_repository.delete(parent_agent_id, agent_id).await?;
             self.remove_link_from_memory(parent_agent_id, agent_id).await;
@@ -202,11 +199,7 @@ impl AgentRegistry {
         Ok(())
     }
 
-    pub(super) async fn remove_link_from_memory(
-        &self,
-        parent_agent_id: u32,
-        link_agent_id: u32,
-    ) {
+    pub(super) async fn remove_link_from_memory(&self, parent_agent_id: u32, link_agent_id: u32) {
         self.parent_links.write().await.remove(&link_agent_id);
         let mut child_links = self.child_links.write().await;
         if let Some(children) = child_links.get_mut(&parent_agent_id) {

@@ -4,12 +4,12 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use red_cell_common::AgentEncryptionInfo;
 use red_cell_common::crypto::{
     AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len, decrypt_agent_data_at_offset,
     encrypt_agent_data_at_offset, is_weak_aes_key,
 };
 use red_cell_common::demon::{DemonMessage, DemonPackage};
-use red_cell_common::AgentEncryptionInfo;
 use tracing::{instrument, warn};
 use zeroize::Zeroizing;
 

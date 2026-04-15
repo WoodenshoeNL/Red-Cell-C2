@@ -341,6 +341,22 @@ fn load_or_create_master_key(db_path: &Path) -> Result<DbMasterKey> {
     key_path.set_file_name(key_filename);
 
     if key_path.exists() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let meta = fs::metadata(&key_path)
+                .with_context(|| format!("failed to stat key file {}", key_path.display()))?;
+            let mode = meta.permissions().mode() & 0o777;
+            anyhow::ensure!(
+                mode == 0o600,
+                "key file {} has mode {:#05o} — expected 0600; \
+                 fix with: chmod 600 {}",
+                key_path.display(),
+                mode,
+                key_path.display(),
+            );
+        }
+
         let mut file = fs::File::open(&key_path)
             .with_context(|| format!("failed to open key file {}", key_path.display()))?;
         let mut raw = zeroize::Zeroizing::new([0u8; 32]);
@@ -350,6 +366,15 @@ fn load_or_create_master_key(db_path: &Path) -> Result<DbMasterKey> {
                 key_path.display()
             )
         })?;
+
+        let mut extra = [0u8; 1];
+        if file.read(&mut extra)? != 0 {
+            anyhow::bail!(
+                "key file {} contains more than 32 bytes — it may be corrupt or tampered with",
+                key_path.display(),
+            );
+        }
+
         info!(path = %key_path.display(), "loaded database master key from key file");
         Ok(DbMasterKey::from_bytes(*raw))
     } else {
@@ -568,8 +593,8 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        Cli, build_tls_config, first_resolved_addr, load_profile, profile_listener_names,
-        resolve_bind_addr, resolve_database_path, run_shutdown_sequence,
+        Cli, build_tls_config, first_resolved_addr, load_or_create_master_key, load_profile,
+        profile_listener_names, resolve_bind_addr, resolve_database_path, run_shutdown_sequence,
         start_new_profile_listeners, tls_subject_alt_names,
     };
     use axum::extract::FromRef;
@@ -1879,6 +1904,113 @@ mod tests {
         assert!(
             pool.is_closed(),
             "database should be closed after external callback guard is dropped"
+        );
+    }
+
+    #[test]
+    fn master_key_rejects_oversized_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.sqlite");
+
+        // Create a key file with 33 bytes (32 valid + 1 trailing)
+        let key_path = dir.path().join("test.sqlite.key");
+        let data = vec![0xABu8; 33];
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&key_path)
+                .unwrap();
+            std::io::Write::write_all(&mut f, &data).unwrap();
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(&key_path, &data).unwrap();
+        }
+
+        let err = load_or_create_master_key(&db_path).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("more than 32 bytes"), "expected trailing-byte error, got: {msg}",);
+    }
+
+    #[test]
+    fn master_key_accepts_exact_32_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.sqlite");
+        let key_path = dir.path().join("test.sqlite.key");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&key_path)
+                .unwrap();
+            std::io::Write::write_all(&mut f, &[0xCDu8; 32]).unwrap();
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(&key_path, &[0xCDu8; 32]).unwrap();
+        }
+
+        let key = load_or_create_master_key(&db_path).expect("exact 32-byte file should succeed");
+        assert_eq!(key.as_bytes(), &[0xCDu8; 32]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn master_key_rejects_loose_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.sqlite");
+        let key_path = dir.path().join("test.sqlite.key");
+
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o644)
+                .open(&key_path)
+                .unwrap();
+            std::io::Write::write_all(&mut f, &[0xABu8; 32]).unwrap();
+        }
+
+        let err = load_or_create_master_key(&db_path).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("mode") && msg.contains("0600"),
+            "expected permission error, got: {msg}",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn master_key_rejects_world_readable_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.sqlite");
+        let key_path = dir.path().join("test.sqlite.key");
+
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o604)
+                .open(&key_path)
+                .unwrap();
+            std::io::Write::write_all(&mut f, &[0xABu8; 32]).unwrap();
+        }
+
+        let err = load_or_create_master_key(&db_path).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("mode") && msg.contains("0600"),
+            "expected permission error for world-readable, got: {msg}",
         );
     }
 }

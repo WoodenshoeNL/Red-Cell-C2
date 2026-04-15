@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1261 | 255 | 95 |
-| Bugs filed against | 244 | 50 | 15 |
+| Tasks closed | 1267 | 255 | 96 |
+| Bugs filed against | 245 | 50 | 15 |
 | Bug rate (bugs/task) | 0.19 | 0.20 | 0.16 |
 | Quality score | 81% | 80% | 84% |
 
-*Bug rates: Claude 244/1261=0.1935→0.19, Codex 50/255=0.1961→0.20, Cursor 15/95=0.1579→0.16*
+*Bug rates: Claude 245/1267=0.1933→0.19, Codex 50/255=0.1961→0.20, Cursor 15/96=0.1563→0.16*
 
 ## Violation Breakdown
 
@@ -28,7 +28,7 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 42 | 25 | 4 |
 | Memory / resource leaks | 14 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 10 | 0 |
-| Test infrastructure / flakiness | 59 | 6 | 1 |
+| Test infrastructure / flakiness | 60 | 6 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 4 | 5 | 0 |
 | Correctness / pagination | 67 | 9 | 1 |
@@ -6967,3 +6967,13 @@ Build: **passed** �� `cargo check --workspace` succeeded (6m39s). No new dev
 | Cursor | 0 | 0 | No activity. |
 
 Build: **passed** — `cargo check` + `cargo clippy -- -D warnings` both clean. Tests compilation blocked by cargo lock contention with concurrent dev agent — not a code defect. 2 issues in_progress: red-cell-c2-fki1q (auth visibility hardening), red-cell-c2-mw1q7 (config.rs split). 20 ready issues in backlog.
+
+### QA Review — 2026-04-15 22:30 — 3935c3fe..d5df20f2
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 6 | 1 | Closed k3ye5, aiyo8, q9y92, qmujb, isht4, 72rsw. Major refactoring: split agents.rs (crypto, jobs, pivot, seq), auth.rs (messages, password, session), demon.rs (ack, callback, init, parser), service.rs (agent, auth, listeners, logging), extracted dispatch socket tests, extracted listeners/external.rs. Security fix: per-IP rate limiter for unknown-agent reconnect probes. Master-key file validation (size + Unix permissions). Auth visibility narrowed to pub(super). 1 bug filed: test flakiness (job_suspend timeout). |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 1 | 0 | Closed red-cell-c2-mw1q7 (common config refactor). |
+
+Build: **passed** — `cargo check` + `cargo clippy -- -D warnings` both clean. 1 test failure: `job_suspend_success_broadcasts_good_response` times out with `Elapsed(())` (filed red-cell-c2-nj616). 63/64 tests passed. 1 task in_progress: red-cell-c2-3149a (extract external.rs — work appears complete but interrupted before close). 30+ ready issues in backlog.

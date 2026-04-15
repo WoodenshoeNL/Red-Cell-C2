@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1259 | 255 | 93 |
+| Tasks closed | 1259 | 255 | 95 |
 | Bugs filed against | 244 | 50 | 15 |
 | Bug rate (bugs/task) | 0.19 | 0.20 | 0.16 |
 | Quality score | 81% | 80% | 84% |
 
-*Bug rates: Claude 244/1259=0.1938→0.19, Codex 50/255=0.1961→0.20, Cursor 15/93=0.1613→0.16*
+*Bug rates: Claude 244/1259=0.1938→0.19, Codex 50/255=0.1961→0.20, Cursor 15/95=0.1579→0.16*
 
 ## Violation Breakdown
 
@@ -41,6 +41,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-15 03:00 — bbcbc00a..3dce5e7b
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | QA checkpoint only. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 2 | 0 | Closed red-cell-c2-aaczu (crypto split) and red-cell-c2-sed90 (operator messages split). Fix commit: hardened TLS key permissions after partial identity regeneration — clean refactor with test coverage. |
+
+Build: **passed** (`cargo check` + `cargo clippy` clean). Tests failed to link due to transient disk space exhaustion during concurrent compilation — not a code defect.
 
 ### QA Review — 2026-04-15 00:50 — d1d0f8c8..bbcbc00a
 

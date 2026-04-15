@@ -5,67 +5,15 @@ use axum::http::{Request, StatusCode};
 use serde_json::Value;
 use tower::ServiceExt;
 
-use std::collections::{BTreeMap, HashMap};
-use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::net::SocketAddr;
 
 use red_cell_common::config::OperatorRole;
-use tokio::sync::Mutex;
 
 use crate::Database;
-use crate::api::auth::{
-    API_KEY_HEADER, ApiAuthError, ApiIdentity, ApiKeyDigest, ApiRateLimit, ApiRuntime,
-    MAX_FAILED_API_AUTH_ATTEMPTS, RATE_LIMIT_WINDOW, RateLimitSubject, RateLimitWindow,
-};
+use crate::api::auth::{API_KEY_HEADER, MAX_FAILED_API_AUTH_ATTEMPTS};
 use crate::api::json_error_response;
-use crate::rate_limiter::AttemptWindow;
 
 use super::helpers::*;
-
-// ---- lookup_key_ct unit tests ----
-
-fn make_digest(byte: u8) -> ApiKeyDigest {
-    ApiKeyDigest::new_for_test([byte; 32])
-}
-
-fn make_identity(key_id: &str) -> ApiIdentity {
-    ApiIdentity { key_id: key_id.to_owned(), role: OperatorRole::Analyst }
-}
-
-#[test]
-fn lookup_key_ct_returns_matching_identity() {
-    let keys = vec![
-        (make_digest(0xAA), make_identity("key-a")),
-        (make_digest(0xBB), make_identity("key-b")),
-    ];
-    let result = ApiRuntime::lookup_key_ct(&keys, &make_digest(0xBB));
-    assert_eq!(result.expect("unwrap").key_id, "key-b");
-}
-
-#[test]
-fn lookup_key_ct_returns_none_for_unknown_digest() {
-    let keys = vec![(make_digest(0xAA), make_identity("key-a"))];
-    let result = ApiRuntime::lookup_key_ct(&keys, &make_digest(0xFF));
-    assert!(result.is_none());
-}
-
-#[test]
-fn lookup_key_ct_returns_none_for_empty_key_list() {
-    let result = ApiRuntime::lookup_key_ct(&[], &make_digest(0x01));
-    assert!(result.is_none());
-}
-
-#[test]
-fn lookup_key_ct_scans_all_entries_and_returns_last_match() {
-    // Two entries with identical digests: the second one should win because
-    // the scan never short-circuits after finding the first match.
-    let digest = make_digest(0x42);
-    let keys = vec![(digest, make_identity("first")), (digest, make_identity("second"))];
-    let result = ApiRuntime::lookup_key_ct(&keys, &digest);
-    // Always visits every entry; last match wins.
-    assert_eq!(result.expect("unwrap").key_id, "second");
-}
 
 #[tokio::test]
 async fn json_error_response_returns_status_and_documented_body_shape() {
@@ -284,7 +232,7 @@ async fn permission_denied_audit_record_created_when_analyst_key_attempts_write(
     assert!(required.is_some(), "permission_denied record should include required permission");
 }
 
-// ---- rate_limiting tests ----
+// ---- rate_limiting integration tests ----
 
 #[tokio::test]
 async fn rate_limiting_rejects_excess_requests() {
@@ -398,53 +346,13 @@ async fn rate_limiting_rejects_repeated_missing_api_keys() {
     assert_eq!(body["error"]["code"], "rate_limited");
 }
 
-#[tokio::test]
-async fn rate_limiting_prunes_expired_windows_for_inactive_keys() {
-    let api = ApiRuntime::new_for_test(
-        Arc::new(ApiRuntime::generate_key_hash_secret().expect("rng should work in tests")),
-        Arc::new(Vec::new()),
-        ApiRateLimit { requests_per_minute: 60 },
-        Arc::new(Mutex::new(BTreeMap::from([
-            (
-                RateLimitSubject::MissingApiKey,
-                RateLimitWindow {
-                    started_at: Instant::now() - RATE_LIMIT_WINDOW - Duration::from_secs(1),
-                    request_count: 1,
-                },
-            ),
-            (
-                RateLimitSubject::InvalidAuthorizationHeader,
-                RateLimitWindow { started_at: Instant::now(), request_count: 1 },
-            ),
-        ]))),
-        Arc::new(Mutex::new(HashMap::new())),
-    );
-
-    api.check_rate_limit(&RateLimitSubject::PresentedCredential(ApiRuntime::hash_api_key(
-        api.key_hash_secret(),
-        "new-key",
-    )))
-    .await
-    .expect("rate limit should allow request");
-
-    let windows = api.windows().lock().await;
-    assert!(!windows.contains_key(&RateLimitSubject::MissingApiKey));
-    assert!(windows.contains_key(&RateLimitSubject::InvalidAuthorizationHeader));
-    assert!(windows.contains_key(&RateLimitSubject::PresentedCredential(
-        ApiRuntime::hash_api_key(api.key_hash_secret(), "new-key")
-    )));
-    assert_eq!(windows.len(), 2);
-}
-
-// ---- auth_failure_rate_limiter tests ----
+// ---- auth_failure_rate_limiter integration tests ----
 
 #[tokio::test]
 async fn auth_failure_rate_limiter_blocks_after_max_failed_attempts() {
-    // Use a high per-request limit so only the auth-failure limiter fires.
     let app = test_router(Some((1000, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
     let client_ip = SocketAddr::from(([192, 0, 2, 42], 1234));
 
-    // Exhaust the allowed failure budget.
     for _ in 0..MAX_FAILED_API_AUTH_ATTEMPTS {
         let response = app
             .clone()
@@ -463,7 +371,6 @@ async fn auth_failure_rate_limiter_blocks_after_max_failed_attempts() {
         assert_eq!(body["error"]["code"], "invalid_api_key");
     }
 
-    // The next attempt must be blocked before any HMAC work.
     let blocked = app
         .oneshot(
             Request::builder()
@@ -485,7 +392,6 @@ async fn auth_failure_rate_limiter_resets_on_successful_auth() {
     let app = test_router(Some((1000, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
     let client_ip = SocketAddr::from(([192, 0, 2, 43], 1234));
 
-    // Record some failures but stay below the threshold.
     for _ in 0..MAX_FAILED_API_AUTH_ATTEMPTS - 1 {
         let response = app
             .clone()
@@ -502,7 +408,6 @@ async fn auth_failure_rate_limiter_resets_on_successful_auth() {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
-    // Successful auth clears the failure counter.
     let ok = app
         .clone()
         .oneshot(
@@ -517,7 +422,6 @@ async fn auth_failure_rate_limiter_resets_on_successful_auth() {
         .expect("response");
     assert_eq!(ok.status(), StatusCode::OK);
 
-    // After the reset, a full fresh budget is available — the first wrong attempt is allowed.
     let after_reset = app
         .oneshot(
             Request::builder()
@@ -536,8 +440,6 @@ async fn auth_failure_rate_limiter_resets_on_successful_auth() {
 
 #[tokio::test]
 async fn auth_failure_rate_limiter_is_not_applied_without_client_ip() {
-    // Without a ConnectInfo extension there is no IP to track.  A series of
-    // unique wrong keys should each produce invalid_api_key, not rate_limited.
     let app = test_router(Some((1000, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
 
     for i in 0..MAX_FAILED_API_AUTH_ATTEMPTS + 1 {
@@ -589,268 +491,6 @@ async fn missing_route_returns_json_not_found() {
 
     let body = read_json(response).await;
     assert_eq!(body["error"]["code"], "not_found");
-}
-
-// ---- Unit tests for auth failure tracking (is_auth_failure_allowed / record_auth_failure / record_auth_success) ----
-
-/// Build a minimal `ApiRuntime` with no API keys and a disabled request
-/// rate-limit, suitable for testing the auth-failure and rate-limit
-/// internals in isolation.
-fn test_api_runtime(requests_per_minute: u32) -> ApiRuntime {
-    ApiRuntime::new_for_test(
-        Arc::new(ApiRuntime::generate_key_hash_secret().expect("rng should work in tests")),
-        Arc::new(Vec::new()),
-        ApiRateLimit { requests_per_minute },
-        Arc::new(Mutex::new(BTreeMap::new())),
-        Arc::new(Mutex::new(HashMap::new())),
-    )
-}
-
-fn test_ip(last_octet: u8) -> IpAddr {
-    IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, last_octet))
-}
-
-#[tokio::test]
-async fn auth_failure_n_minus_1_attempts_still_allowed() {
-    let api = test_api_runtime(0);
-    let ip = test_ip(1);
-
-    for _ in 0..MAX_FAILED_API_AUTH_ATTEMPTS - 1 {
-        api.record_auth_failure(ip).await;
-    }
-
-    assert!(api.is_auth_failure_allowed(ip).await, "N-1 failures must still be allowed");
-}
-
-#[tokio::test]
-async fn auth_failure_nth_attempt_triggers_lockout() {
-    let api = test_api_runtime(0);
-    let ip = test_ip(2);
-
-    for _ in 0..MAX_FAILED_API_AUTH_ATTEMPTS {
-        api.record_auth_failure(ip).await;
-    }
-
-    assert!(!api.is_auth_failure_allowed(ip).await, "Nth failure must trigger lockout");
-}
-
-#[tokio::test]
-async fn auth_failure_unknown_ip_is_always_allowed() {
-    let api = test_api_runtime(0);
-    assert!(
-        api.is_auth_failure_allowed(test_ip(99)).await,
-        "IP with no failure history must be allowed"
-    );
-}
-
-#[tokio::test]
-async fn auth_success_clears_failure_state() {
-    let api = test_api_runtime(0);
-    let ip = test_ip(3);
-
-    // Accumulate failures up to the lockout threshold.
-    for _ in 0..MAX_FAILED_API_AUTH_ATTEMPTS {
-        api.record_auth_failure(ip).await;
-    }
-    assert!(!api.is_auth_failure_allowed(ip).await);
-
-    // A successful auth must clear the failure window entirely.
-    api.record_auth_success(ip).await;
-
-    assert!(
-        api.is_auth_failure_allowed(ip).await,
-        "successful auth must reset the failure counter"
-    );
-
-    // Verify the window is completely removed, not just zeroed.
-    let windows = api.auth_failure_windows().lock().await;
-    assert!(!windows.contains_key(&ip), "window entry must be removed on success");
-}
-
-#[tokio::test]
-async fn auth_failure_window_expiry_resets_allowance() {
-    let api = test_api_runtime(0);
-    let ip = test_ip(4);
-
-    // Manually insert an expired window that exceeded the failure threshold.
-    {
-        let mut windows = api.auth_failure_windows().lock().await;
-        windows.insert(
-            ip,
-            AttemptWindow {
-                attempts: MAX_FAILED_API_AUTH_ATTEMPTS + 10,
-                window_start: Instant::now() - RATE_LIMIT_WINDOW - Duration::from_secs(1),
-            },
-        );
-    }
-
-    assert!(
-        api.is_auth_failure_allowed(ip).await,
-        "expired window must be pruned, allowing the IP again"
-    );
-
-    // The expired entry should have been removed from the map.
-    let windows = api.auth_failure_windows().lock().await;
-    assert!(!windows.contains_key(&ip), "expired window must be removed");
-}
-
-#[tokio::test]
-async fn auth_failure_record_resets_window_after_expiry() {
-    let api = test_api_runtime(0);
-    let ip = test_ip(5);
-
-    // Insert an expired window with many failures.
-    {
-        let mut windows = api.auth_failure_windows().lock().await;
-        windows.insert(
-            ip,
-            AttemptWindow {
-                attempts: MAX_FAILED_API_AUTH_ATTEMPTS,
-                window_start: Instant::now() - RATE_LIMIT_WINDOW - Duration::from_secs(1),
-            },
-        );
-    }
-
-    // Recording a new failure should start a fresh window with attempts=1.
-    api.record_auth_failure(ip).await;
-
-    let windows = api.auth_failure_windows().lock().await;
-    let window = windows.get(&ip).expect("window must exist after recording failure");
-    assert_eq!(window.attempts, 1, "expired window must reset to 1 attempt");
-}
-
-#[tokio::test]
-async fn auth_failure_sequential_from_same_ip_count_correctly() {
-    let api = test_api_runtime(0);
-    let ip = test_ip(6);
-
-    // Record failures one at a time (serialised by the mutex) and verify
-    // that they increment linearly — no double-counting.
-    for expected in 1..=MAX_FAILED_API_AUTH_ATTEMPTS {
-        api.record_auth_failure(ip).await;
-        let windows = api.auth_failure_windows().lock().await;
-        let window = windows.get(&ip).expect("window must exist");
-        assert_eq!(
-            window.attempts, expected,
-            "attempt count must equal {expected} after {expected} sequential failures"
-        );
-    }
-}
-
-#[tokio::test]
-async fn auth_failure_different_ips_are_independent() {
-    let api = test_api_runtime(0);
-    let ip_a = test_ip(10);
-    let ip_b = test_ip(11);
-
-    // Lock out ip_a.
-    for _ in 0..MAX_FAILED_API_AUTH_ATTEMPTS {
-        api.record_auth_failure(ip_a).await;
-    }
-
-    // ip_b should be unaffected.
-    assert!(!api.is_auth_failure_allowed(ip_a).await);
-    assert!(api.is_auth_failure_allowed(ip_b).await);
-}
-
-#[tokio::test]
-async fn auth_failure_success_on_one_ip_does_not_affect_another() {
-    let api = test_api_runtime(0);
-    let ip_a = test_ip(20);
-    let ip_b = test_ip(21);
-
-    for _ in 0..MAX_FAILED_API_AUTH_ATTEMPTS {
-        api.record_auth_failure(ip_a).await;
-        api.record_auth_failure(ip_b).await;
-    }
-
-    // Clear only ip_a.
-    api.record_auth_success(ip_a).await;
-
-    assert!(api.is_auth_failure_allowed(ip_a).await);
-    assert!(!api.is_auth_failure_allowed(ip_b).await);
-}
-
-// ---- Unit tests for check_rate_limit ----
-
-#[tokio::test]
-async fn rate_limit_allows_requests_under_limit() {
-    let api = test_api_runtime(10);
-    let subject = RateLimitSubject::ClientIp(test_ip(1));
-
-    for _ in 0..10 {
-        assert!(api.check_rate_limit(&subject).await.is_ok());
-    }
-}
-
-#[tokio::test]
-async fn rate_limit_blocks_at_limit() {
-    let api = test_api_runtime(3);
-    let subject = RateLimitSubject::ClientIp(test_ip(2));
-
-    for _ in 0..3 {
-        api.check_rate_limit(&subject).await.expect("should be allowed");
-    }
-
-    let err = api.check_rate_limit(&subject).await.expect_err("expected Err");
-    assert!(
-        matches!(err, ApiAuthError::RateLimited { retry_after_seconds: 60 }),
-        "4th request must be rate-limited, got {err:?}"
-    );
-}
-
-#[tokio::test]
-async fn rate_limit_disabled_allows_everything() {
-    let api = test_api_runtime(0); // 0 means disabled
-    let subject = RateLimitSubject::ClientIp(test_ip(3));
-
-    for _ in 0..100 {
-        assert!(api.check_rate_limit(&subject).await.is_ok());
-    }
-}
-
-#[tokio::test]
-async fn rate_limit_window_expiry_resets_count() {
-    let api = test_api_runtime(2);
-    let subject = RateLimitSubject::ClientIp(test_ip(4));
-
-    // Exhaust the limit.
-    for _ in 0..2 {
-        api.check_rate_limit(&subject).await.expect("should be allowed");
-    }
-    assert!(api.check_rate_limit(&subject).await.is_err());
-
-    // Simulate window expiry by back-dating the window.
-    {
-        let mut windows = api.windows().lock().await;
-        if let Some(w) = windows.get_mut(&subject) {
-            w.started_at = Instant::now() - RATE_LIMIT_WINDOW - Duration::from_secs(1);
-        }
-    }
-
-    // After expiry, a new window starts and the request should succeed.
-    assert!(
-        api.check_rate_limit(&subject).await.is_ok(),
-        "request must be allowed after window expiry"
-    );
-
-    // The window should be reset with count = 1.
-    let windows = api.windows().lock().await;
-    let w = windows.get(&subject).expect("window must exist");
-    assert_eq!(w.request_count, 1, "request count must be 1 after window reset");
-}
-
-#[tokio::test]
-async fn rate_limit_different_subjects_are_independent() {
-    let api = test_api_runtime(1);
-    let subject_a = RateLimitSubject::ClientIp(test_ip(5));
-    let subject_b = RateLimitSubject::ClientIp(test_ip(6));
-
-    api.check_rate_limit(&subject_a).await.expect("first request for A");
-    assert!(api.check_rate_limit(&subject_a).await.is_err(), "A must be rate-limited");
-
-    // B should still be allowed.
-    assert!(api.check_rate_limit(&subject_b).await.is_ok(), "B must be independent");
 }
 
 #[tokio::test]

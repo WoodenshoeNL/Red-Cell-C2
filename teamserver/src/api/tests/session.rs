@@ -8,7 +8,9 @@ use red_cell_common::config::OperatorRole;
 use crate::AuditResultStatus;
 use crate::Database;
 use crate::api::auth::API_KEY_HEADER;
-use crate::api::session::session_api_dispatch_line;
+use crate::api::session::{
+    SESSION_MAX_RESPONSE_BODY, session_api_dispatch_line, session_ws_envelope_response,
+};
 use crate::{audit_details, parameter_object};
 
 use super::helpers::*;
@@ -326,4 +328,84 @@ async fn session_activity_filters_by_time_window() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = read_json(response).await;
     assert_eq!(body["total"], 0);
+}
+
+// ── session response body size limit tests ──────────────────────────
+
+#[tokio::test]
+async fn session_envelope_rejects_oversized_response_body() {
+    use axum::http::header::CONTENT_TYPE;
+    use axum::response::Response;
+
+    let oversized = vec![0xABu8; SESSION_MAX_RESPONSE_BODY + 1];
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "application/octet-stream")
+        .body(Body::from(oversized))
+        .expect("build response");
+
+    let envelope = session_ws_envelope_response("payload.download", response).await;
+    let parsed: Value = serde_json::from_str(&envelope).expect("valid json");
+    assert_eq!(parsed["ok"], false);
+    assert_eq!(parsed["error"], "RESPONSE_TOO_LARGE");
+    assert!(parsed["message"].as_str().expect("message string").contains("session limit"),);
+}
+
+#[tokio::test]
+async fn session_envelope_accepts_response_at_size_limit() {
+    use axum::http::header::CONTENT_TYPE;
+    use axum::response::Response;
+
+    let at_limit = vec![0xCDu8; SESSION_MAX_RESPONSE_BODY];
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "application/octet-stream")
+        .body(Body::from(at_limit))
+        .expect("build response");
+
+    let envelope = session_ws_envelope_response("payload.download", response).await;
+    let parsed: Value = serde_json::from_str(&envelope).expect("valid json");
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["cmd"], "payload.download");
+    assert_eq!(parsed["data"]["encoding"], "base64");
+    assert!(parsed["data"]["data"].as_str().expect("base64 string").len() > 0);
+}
+
+#[tokio::test]
+async fn session_envelope_accepts_small_json_response() {
+    use axum::http::header::CONTENT_TYPE;
+    use axum::response::Response;
+
+    let json_body = serde_json::json!({"status": "ok"}).to_string();
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(json_body))
+        .expect("build response");
+
+    let envelope = session_ws_envelope_response("status", response).await;
+    let parsed: Value = serde_json::from_str(&envelope).expect("valid json");
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["data"]["status"], "ok");
+}
+
+#[tokio::test]
+async fn session_envelope_error_response_not_affected_by_size_limit() {
+    use axum::http::header::CONTENT_TYPE;
+    use axum::response::Response;
+
+    let error_body = serde_json::json!({
+        "error": {"code": "NOT_FOUND", "message": "resource not found"}
+    })
+    .to_string();
+    let response = Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(error_body))
+        .expect("build response");
+
+    let envelope = session_ws_envelope_response("loot.download", response).await;
+    let parsed: Value = serde_json::from_str(&envelope).expect("valid json");
+    assert_eq!(parsed["ok"], false);
+    assert_eq!(parsed["error"], "NOT_FOUND");
 }

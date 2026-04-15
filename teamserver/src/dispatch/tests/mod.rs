@@ -10,10 +10,7 @@ mod pivot_socket_transfer;
 mod process;
 use common::*;
 
-use super::{
-    CommandDispatchError, CommandDispatcher, DownloadTracker, LootContext, loot_context,
-    non_empty_option,
-};
+use super::{CommandDispatchError, CommandDispatcher, DownloadTracker, non_empty_option};
 use crate::{AgentRegistry, Database, EventBus, Job, SocketRelayManager};
 use red_cell_common::crypto::decrypt_agent_data;
 use red_cell_common::demon::{DemonCommand, DemonMessage};
@@ -367,45 +364,4 @@ fn non_empty_option_whitespace_only_returns_some() {
 #[test]
 fn non_empty_option_single_char_returns_some() {
     assert_eq!(non_empty_option("x"), Some("x".to_owned()));
-}
-
-// ---- loot_context tests ----
-
-#[tokio::test]
-async fn loot_context_unknown_agent_returns_default() {
-    let database = Database::connect_in_memory().await.expect("database should initialize");
-    let registry = AgentRegistry::new(database);
-    let unknown_agent_id = 0xDEAD_0001;
-    let request_id = 42;
-
-    let ctx = loot_context(&registry, unknown_agent_id, request_id).await;
-
-    assert_eq!(ctx, LootContext::default());
-    assert!(ctx.operator.is_empty());
-    assert!(ctx.command_line.is_empty());
-    assert!(ctx.task_id.is_empty());
-    assert!(ctx.queued_at.is_empty());
-}
-
-#[tokio::test]
-async fn loot_context_known_agent_unknown_request_id_returns_default() {
-    let database = Database::connect_in_memory().await.expect("database should initialize");
-    let registry = AgentRegistry::new(database);
-
-    // Register an agent so the agent_id is known.
-    let agent_id = 0x1234_5678;
-    let key = test_key(0xAA);
-    let iv = test_iv(0xBB);
-    let info = sample_agent_info(agent_id, key, iv);
-    registry.insert(info).await.expect("agent should register");
-
-    // Use a request_id that was never enqueued.
-    let unknown_request_id = 0xFFFF;
-    let ctx = loot_context(&registry, agent_id, unknown_request_id).await;
-
-    assert_eq!(ctx, LootContext::default());
-    assert!(ctx.operator.is_empty());
-    assert!(ctx.command_line.is_empty());
-    assert!(ctx.task_id.is_empty());
-    assert!(ctx.queued_at.is_empty());
 }

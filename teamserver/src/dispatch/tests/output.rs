@@ -3,8 +3,8 @@
 use super::common::*;
 
 use super::super::{
-    CommandDispatcher, extract_credentials, looks_like_credential_line, looks_like_inline_secret,
-    looks_like_pwdump_hash,
+    CommandDispatcher, LootContext, extract_credentials, looks_like_credential_line,
+    looks_like_inline_secret, looks_like_pwdump_hash, loot_context,
 };
 use crate::{AgentRegistry, Database, EventBus, Job, SocketRelayManager};
 use base64::Engine as _;
@@ -323,5 +323,48 @@ async fn builtin_screenshot_handler_persists_loot_and_broadcasts_misc_fields()
         message.info.extra.get("MiscData"),
         Some(&Value::String(BASE64_STANDARD.encode(&png)))
     );
+    Ok(())
+}
+
+// ---- loot_context tests ----
+
+#[tokio::test]
+async fn loot_context_unknown_agent_returns_default() -> anyhow::Result<()> {
+    let database = Database::connect_in_memory().await?;
+    let registry = AgentRegistry::new(database);
+    let unknown_agent_id = 0xDEAD_0001;
+    let request_id = 42;
+
+    let ctx = loot_context(&registry, unknown_agent_id, request_id).await;
+
+    assert_eq!(ctx, LootContext::default());
+    assert!(ctx.operator.is_empty());
+    assert!(ctx.command_line.is_empty());
+    assert!(ctx.task_id.is_empty());
+    assert!(ctx.queued_at.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn loot_context_known_agent_unknown_request_id_returns_default() -> anyhow::Result<()> {
+    let database = Database::connect_in_memory().await?;
+    let registry = AgentRegistry::new(database);
+
+    // Register an agent so the agent_id is known.
+    let agent_id = 0x1234_5678;
+    let key = test_key(0xAA);
+    let iv = test_iv(0xBB);
+    let info = sample_agent_info(agent_id, key, iv);
+    registry.insert(info).await?;
+
+    // Use a request_id that was never enqueued.
+    let unknown_request_id = 0xFFFF;
+    let ctx = loot_context(&registry, agent_id, unknown_request_id).await;
+
+    assert_eq!(ctx, LootContext::default());
+    assert!(ctx.operator.is_empty());
+    assert!(ctx.command_line.is_empty());
+    assert!(ctx.task_id.is_empty());
+    assert!(ctx.queued_at.is_empty());
     Ok(())
 }

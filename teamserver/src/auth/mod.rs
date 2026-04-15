@@ -1,23 +1,28 @@
 //! Operator authentication and session tracking.
 
+mod messages;
+mod password;
+mod session;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use argon2::password_hash::phc::PasswordHash;
-use argon2::{Algorithm, Argon2, ParamsBuilder, PasswordHasher, PasswordVerifier, Version};
-use red_cell_common::OperatorInfo;
 use red_cell_common::config::{OperatorRole, Profile};
 use red_cell_common::crypto::hash_password_sha3;
-use red_cell_common::operator::{
-    EventCode, LoginInfo, Message, MessageHead, MessageInfo, OperatorMessage,
-};
-use subtle::ConstantTimeEq;
+use red_cell_common::operator::OperatorMessage;
 use thiserror::Error;
 use tokio::sync::RwLock;
 use tracing::{instrument, warn};
 use uuid::Uuid;
 
 use crate::{Database, OperatorRepository, PersistedOperator, TeamserverError};
+
+pub use messages::{OperatorPresence, login_failure_message, login_success_message};
+pub(crate) use password::{password_hashes_match, password_verifier_for_sha3};
+pub use session::{MAX_OPERATOR_SESSIONS, MAX_SESSIONS_PER_ACCOUNT, OperatorSession};
+
+use password::{generate_dummy_verifier, normalize_persisted_verifier};
+use session::SessionRegistry;
 
 /// Errors returned while preparing or validating operator authentication state.
 #[derive(Debug, Error)]
@@ -102,18 +107,6 @@ pub struct AuthenticationSuccess {
     pub token: String,
 }
 
-/// Maximum number of simultaneously authenticated operator sessions across all accounts.
-///
-/// Keeping N small ensures that the constant-time O(N) token scan in [`SessionRegistry`]
-/// provides meaningful timing protection. Beyond this limit new logins are rejected.
-pub const MAX_OPERATOR_SESSIONS: usize = 64;
-
-/// Maximum number of simultaneously authenticated sessions per individual operator account.
-///
-/// This prevents a single compromised account from consuming the entire global session pool
-/// and allows other operators to authenticate even under targeted abuse.
-pub const MAX_SESSIONS_PER_ACCOUNT: usize = 8;
-
 /// Failed login result mapped onto Havoc-compatible error responses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthenticationFailure {
@@ -143,44 +136,10 @@ pub enum AuthenticationResult {
     Failure(AuthenticationFailure),
 }
 
-/// Authenticated operator session metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OperatorSession {
-    /// Stable token returned to the operator after login.
-    pub token: String,
-    /// Username for the authenticated operator.
-    pub username: String,
-    /// RBAC role assigned to the operator account.
-    pub role: OperatorRole,
-    /// Connection identifier used by the current WebSocket.
-    pub connection_id: Uuid,
-}
-
-/// Operator account inventory entry with current presence metadata.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OperatorPresence {
-    /// Operator username.
-    pub username: String,
-    /// RBAC role assigned to the operator account.
-    pub role: OperatorRole,
-    /// Whether the operator currently has an authenticated session.
-    pub online: bool,
-    /// Most recent persisted operator activity timestamp.
-    pub last_seen: Option<String>,
-}
-
-impl OperatorPresence {
-    /// Convert the operator-presence entry into the shared wire/domain representation.
-    #[must_use]
-    pub fn as_operator_info(&self) -> OperatorInfo {
-        OperatorInfo {
-            username: self.username.clone(),
-            password_hash: None,
-            role: Some(operator_role_name(self.role).to_owned()),
-            online: self.online,
-            last_seen: self.last_seen.clone(),
-        }
-    }
+struct OperatorAccount {
+    password_verifier: String,
+    role: OperatorRole,
 }
 
 /// In-memory operator credential store and active session registry.
@@ -227,7 +186,7 @@ impl AuthService {
     pub async fn authenticate_login(
         &self,
         connection_id: Uuid,
-        login: &LoginInfo,
+        login: &red_cell_common::operator::LoginInfo,
     ) -> AuthenticationResult {
         let credentials = self.credentials.read().await;
         let account = credentials.get(&login.user);
@@ -324,22 +283,17 @@ impl AuthService {
             return Err(AuthError::OperatorNotFound { username: username.to_owned() });
         }
 
-        // Only runtime operators (those persisted in the database) can be deleted.
         let Some(runtime_operators) = &self.runtime_operators else {
             return Err(AuthError::ProfileOperator { username: username.to_owned() });
         };
 
         let deleted = runtime_operators.delete(username).await?;
         if !deleted {
-            // The operator exists in credentials but not in the runtime database,
-            // meaning it was loaded from the profile configuration.
             return Err(AuthError::ProfileOperator { username: username.to_owned() });
         }
 
         credentials.remove(username);
 
-        // Revoke all active sessions so the deleted operator cannot continue using
-        // previously issued tokens.
         let revoked = self.sessions.write().await.remove_by_username(username);
         if !revoked.is_empty() {
             tracing::info!(
@@ -384,8 +338,6 @@ impl AuthService {
             account.role = role;
         }
 
-        // Update the role on all active sessions so subsequent authorization checks
-        // observe the new role immediately rather than using the stale login-time copy.
         self.sessions.write().await.update_role_by_username(username, role);
 
         Ok(())
@@ -509,127 +461,6 @@ impl AuthService {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct OperatorAccount {
-    password_verifier: String,
-    role: OperatorRole,
-}
-
-#[derive(Debug, Default)]
-struct SessionRegistry {
-    by_token: BTreeMap<String, OperatorSession>,
-    token_by_connection: BTreeMap<Uuid, String>,
-}
-
-impl SessionRegistry {
-    fn insert(&mut self, session: OperatorSession) {
-        if let Some(previous_token) =
-            self.token_by_connection.insert(session.connection_id, session.token.clone())
-        {
-            self.by_token.remove(&previous_token);
-        }
-
-        self.by_token.insert(session.token.clone(), session);
-    }
-
-    fn remove_by_connection(&mut self, connection_id: Uuid) -> Option<OperatorSession> {
-        let token = self.token_by_connection.remove(&connection_id)?;
-        self.by_token.remove(&token)
-    }
-
-    fn get_by_connection(&self, connection_id: Uuid) -> Option<&OperatorSession> {
-        let token = self.token_by_connection.get(&connection_id)?;
-        self.by_token.get(token)
-    }
-
-    /// Retrieve a session by its token using a constant-time byte comparison.
-    ///
-    /// `BTreeMap::get` short-circuits on the first unequal byte, which can leak
-    /// timing information allowing an attacker to enumerate valid tokens. This
-    /// implementation performs a linear scan comparing every token with
-    /// [`subtle::ConstantTimeEq`] so that the per-byte comparison time does not
-    /// depend on where the mismatch occurs.
-    fn get_by_token(&self, token: &str) -> Option<&OperatorSession> {
-        let token_bytes = token.as_bytes();
-        let mut found: Option<&OperatorSession> = None;
-        for session in self.by_token.values() {
-            let is_match: bool = session.token.as_bytes().ct_eq(token_bytes).into();
-            if is_match {
-                found = Some(session);
-            }
-        }
-        found
-    }
-
-    fn len(&self) -> usize {
-        self.by_token.len()
-    }
-
-    /// Count the number of active sessions belonging to `username`.
-    fn sessions_for_account(&self, username: &str) -> usize {
-        self.by_token.values().filter(|s| s.username == username).count()
-    }
-
-    fn list(&self) -> Vec<OperatorSession> {
-        self.by_token.values().cloned().collect()
-    }
-
-    /// Remove all sessions belonging to `username`, returning the removed sessions.
-    fn remove_by_username(&mut self, username: &str) -> Vec<OperatorSession> {
-        let tokens_to_remove: Vec<String> = self
-            .by_token
-            .iter()
-            .filter(|(_, session)| session.username == username)
-            .map(|(token, _)| token.clone())
-            .collect();
-
-        let mut removed = Vec::with_capacity(tokens_to_remove.len());
-        for token in tokens_to_remove {
-            if let Some(session) = self.by_token.remove(&token) {
-                self.token_by_connection.remove(&session.connection_id);
-                removed.push(session);
-            }
-        }
-        removed
-    }
-
-    /// Update the role on all sessions belonging to `username`.
-    fn update_role_by_username(&mut self, username: &str, role: OperatorRole) {
-        for session in self.by_token.values_mut() {
-            if session.username == username {
-                session.role = role;
-            }
-        }
-    }
-}
-
-/// Build a success response for an authenticated login handshake.
-#[must_use]
-pub fn login_success_message(user: &str, token: &str) -> OperatorMessage {
-    OperatorMessage::InitConnectionSuccess(Message {
-        head: login_response_head(user),
-        info: MessageInfo { message: format!("Successful Authenticated; SessionToken={token}") },
-    })
-}
-
-/// Build an error response for a rejected login handshake.
-#[must_use]
-pub fn login_failure_message(user: &str, failure: &AuthenticationFailure) -> OperatorMessage {
-    OperatorMessage::InitConnectionError(Message {
-        head: login_response_head(user),
-        info: MessageInfo { message: failure.message().to_owned() },
-    })
-}
-
-fn login_response_head(user: &str) -> MessageHead {
-    MessageHead {
-        event: EventCode::InitConnection,
-        user: user.to_owned(),
-        timestamp: String::new(),
-        one_time: String::new(),
-    }
-}
-
 fn configured_credentials(
     profile: &Profile,
 ) -> Result<BTreeMap<String, OperatorAccount>, AuthError> {
@@ -651,214 +482,6 @@ fn configured_credentials(
         .collect()
 }
 
-/// Construct an [`Argon2`] instance with OWASP-recommended parameters.
-///
-/// Uses Argon2id with m_cost=65536 (64 MiB), t_cost=3, p_cost=4 — the
-/// recommended configuration from the OWASP Password Storage Cheat Sheet.
-///
-/// In test builds, minimal Argon2 parameters are used instead to keep tests
-/// fast. The production-strength parameters are only needed for brute-force
-/// resistance; the hashing/verification code paths exercised in tests are
-/// identical regardless of cost parameters.
-fn argon2_hasher() -> Result<Argon2<'static>, AuthError> {
-    #[cfg(not(test))]
-    let params = ParamsBuilder::new()
-        .m_cost(65536)
-        .t_cost(3)
-        .p_cost(4)
-        .build()
-        .map_err(|e| AuthError::PasswordVerifier(format!("Argon2 parameter error: {e}")))?;
-    #[cfg(test)]
-    let params = ParamsBuilder::new()
-        .m_cost(256)
-        .t_cost(1)
-        .p_cost(1)
-        .build()
-        .map_err(|e| AuthError::PasswordVerifier(format!("Argon2 parameter error: {e}")))?;
-    Ok(Argon2::new(Algorithm::Argon2id, Version::V0x13, params))
-}
-
-pub(crate) fn password_hashes_match(submitted: &str, expected: &str) -> bool {
-    #[cfg(test)]
-    return password_hashes_match_cached(submitted, expected);
-    #[cfg(not(test))]
-    return password_hashes_match_impl(submitted, expected);
-}
-
-fn password_hashes_match_impl(submitted: &str, expected: &str) -> bool {
-    let submitted = submitted.to_ascii_lowercase();
-    let Ok(parsed_hash) = PasswordHash::new(expected) else {
-        return false;
-    };
-    let Ok(hasher) = argon2_hasher() else {
-        return false;
-    };
-
-    hasher.verify_password(submitted.as_bytes(), &parsed_hash).is_ok()
-}
-
-/// Test-only cached wrapper around [`password_hashes_match_impl`].
-///
-/// Argon2 verification is intentionally slow (~1-2 s per call with production
-/// parameters). Tests that create many sessions (e.g. the global session cap
-/// test with 64+ verifications) become pathologically slow without caching.
-/// The cache key is `(submitted_lowercase, expected_verifier)` and values are
-/// append-only, so mutex poisoning is safe to recover from.
-#[cfg(test)]
-fn password_hashes_match_cached(submitted: &str, expected: &str) -> bool {
-    use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
-
-    static CACHE: OnceLock<Mutex<HashMap<(String, String), bool>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-
-    let key = (submitted.to_ascii_lowercase(), expected.to_owned());
-    {
-        let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(&cached) = guard.get(&key) {
-            return cached;
-        }
-    }
-
-    let result = password_hashes_match_impl(submitted, expected);
-    cache.lock().unwrap_or_else(|e| e.into_inner()).insert(key, result);
-    result
-}
-
-pub(crate) fn password_verifier_for_sha3(password_hash: &str) -> Result<String, AuthError> {
-    #[cfg(test)]
-    return password_verifier_for_sha3_cached(password_hash);
-    #[cfg(not(test))]
-    return password_verifier_for_sha3_impl(password_hash);
-}
-
-fn password_verifier_for_sha3_impl(password_hash: &str) -> Result<String, AuthError> {
-    argon2_hasher()?
-        .hash_password(password_hash.to_ascii_lowercase().as_bytes())
-        .map(|hash| hash.to_string())
-        .map_err(|error| AuthError::PasswordVerifier(error.to_string()))
-}
-
-/// Test-only cached wrapper around `password_verifier_for_sha3_impl`.
-///
-/// Argon2 hashing is intentionally slow (memory-hard), which makes full test
-/// suite runs infeasible when every `AuthService::from_profile` call hashes
-/// N profile operators + 1 dummy verifier. This cache computes each Argon2
-/// verifier at most once per unique SHA3 input across the entire test process,
-/// keeping individual test setup instantaneous after the first warm-up.
-///
-/// The production path via `password_verifier_for_sha3_impl` is unaffected.
-#[cfg(test)]
-fn password_verifier_for_sha3_cached(password_hash: &str) -> Result<String, AuthError> {
-    use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
-
-    static CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-
-    let key = password_hash.to_ascii_lowercase();
-    {
-        // Safety: poison recovery is acceptable here because the cache is append-only
-        // (values are never modified after insertion). A poisoned state means a prior
-        // thread panicked while inserting, leaving the HashMap in a valid-but-incomplete
-        // state — missing one entry at worst, never corrupted.
-        let guard = cache.lock().unwrap_or_else(|e| {
-            tracing::warn!(
-                "password verifier cache mutex poisoned — recovering (append-only cache)"
-            );
-            e.into_inner()
-        });
-        if let Some(cached) = guard.get(&key) {
-            return Ok(cached.clone());
-        }
-    }
-
-    let verifier = password_verifier_for_sha3_impl(password_hash)?;
-    cache
-        .lock()
-        .unwrap_or_else(|e| {
-            tracing::warn!(
-                "password verifier cache mutex poisoned — recovering (append-only cache)"
-            );
-            e.into_inner()
-        })
-        .entry(key)
-        .or_insert_with(|| verifier.clone());
-    Ok(verifier)
-}
-
-async fn normalize_persisted_verifier(
-    runtime_operators: &OperatorRepository,
-    operator: &PersistedOperator,
-) -> Result<String, AuthError> {
-    if is_legacy_sha3_digest(&operator.password_verifier) {
-        let password_verifier = password_verifier_for_sha3(&operator.password_verifier)?;
-        runtime_operators.update_password_verifier(&operator.username, &password_verifier).await?;
-        return Ok(password_verifier);
-    }
-
-    PasswordHash::new(&operator.password_verifier).map_err(|error| {
-        AuthError::Persistence(TeamserverError::InvalidPersistedValue {
-            field: "ts_runtime_operators.password_verifier",
-            message: format!("invalid password verifier: {error}"),
-        })
-    })?;
-    Ok(operator.password_verifier.clone())
-}
-
-fn is_legacy_sha3_digest(value: &str) -> bool {
-    value.len() == 64 && value.as_bytes().iter().all(u8::is_ascii_hexdigit)
-}
-
-/// Generate a one-time Argon2id PHC hash from random bytes for timing equalization.
-///
-/// When a login attempt uses an unknown username the service verifies the submitted
-/// credential against this dummy hash instead of returning immediately.  The hash
-/// must be a syntactically valid Argon2 PHC string so that [`password_hashes_match`]
-/// runs the full Argon2 computation rather than failing on a parse error in
-/// microseconds — which would otherwise expose user-enumeration via timing.
-///
-/// The password material is 16 bytes from the OS CSPRNG (via [`Uuid::new_v4`]), so
-/// the resulting hash is unpredictable and cannot be precomputed by an attacker.
-fn generate_dummy_verifier() -> Result<String, AuthError> {
-    #[cfg(test)]
-    return generate_dummy_verifier_cached();
-    #[cfg(not(test))]
-    return generate_dummy_verifier_impl();
-}
-
-fn generate_dummy_verifier_impl() -> Result<String, AuthError> {
-    let random_bytes = Uuid::new_v4();
-    argon2_hasher()?
-        .hash_password(random_bytes.as_bytes())
-        .map(|h| h.to_string())
-        .map_err(|e| AuthError::PasswordVerifier(e.to_string()))
-}
-
-/// Test-only cached wrapper around [`generate_dummy_verifier_impl`].
-///
-/// The dummy hash must be a valid Argon2 PHC string, but its exact value is
-/// irrelevant for correctness tests — reusing one across the test process avoids
-/// paying the Argon2 memory-hard cost on every [`AuthService`] construction.
-#[cfg(test)]
-fn generate_dummy_verifier_cached() -> Result<String, AuthError> {
-    use std::sync::OnceLock;
-    static DUMMY: OnceLock<Result<String, String>> = OnceLock::new();
-    DUMMY
-        .get_or_init(|| generate_dummy_verifier_impl().map_err(|e| e.to_string()))
-        .as_ref()
-        .cloned()
-        .map_err(|e| AuthError::PasswordVerifier(e.clone()))
-}
-
-const fn operator_role_name(role: OperatorRole) -> &'static str {
-    match role {
-        OperatorRole::Admin => "Admin",
-        OperatorRole::Operator => "Operator",
-        OperatorRole::Analyst => "Analyst",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use crate::{Database, PersistedOperator};
@@ -871,9 +494,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        AuthError, AuthService, AuthenticationFailure, AuthenticationResult,
-        generate_dummy_verifier, login_failure_message, login_success_message,
-        password_hashes_match, password_verifier_for_sha3,
+        AuthError, AuthService, AuthenticationFailure, AuthenticationResult, login_failure_message,
+        login_success_message, password_hashes_match, password_verifier_for_sha3,
     };
 
     fn profile() -> Profile {
@@ -903,46 +525,6 @@ mod tests {
             "#,
         )
         .expect("test profile should parse")
-    }
-
-    #[test]
-    fn hash_password_matches_havoc_sha3_256() {
-        assert_eq!(
-            hash_password_sha3("password1234"),
-            "2f7d3e77d0786c5d305c0afadd4c1a2a6869a3210956c963ad2420c52e797022"
-        );
-    }
-
-    /// `argon2_hasher` must return `Ok` with the configured test parameters and must
-    /// never panic — parameter construction failures are mapped to `AuthError`.
-    #[test]
-    fn argon2_hasher_returns_ok_and_maps_errors_to_auth_error() {
-        use super::argon2_hasher;
-
-        let hasher = argon2_hasher();
-        assert!(hasher.is_ok(), "argon2_hasher() should succeed with valid parameters");
-
-        // Verify the error variant used for parameter failures is PasswordVerifier.
-        let err = AuthError::PasswordVerifier("Argon2 parameter error: test".to_owned());
-        assert!(
-            matches!(err, AuthError::PasswordVerifier(ref msg) if msg.contains("Argon2 parameter")),
-            "Argon2 parameter errors should map to AuthError::PasswordVerifier"
-        );
-    }
-
-    /// Regression test: the dummy verifier used for unknown-username timing equalization must be
-    /// a syntactically valid Argon2 PHC string so that `password_hashes_match` always runs the
-    /// full Argon2 computation rather than returning `false` immediately on a PHC parse error.
-    #[test]
-    fn dummy_verifier_is_valid_argon2_phc_string() {
-        use argon2::password_hash::phc::PasswordHash;
-
-        let verifier = generate_dummy_verifier().expect("dummy verifier should be generated");
-        PasswordHash::new(&verifier).expect("dummy verifier must be a valid Argon2 PHC string");
-        assert!(
-            verifier.starts_with("$argon2"),
-            "dummy verifier must use the argon2 algorithm family"
-        );
     }
 
     #[tokio::test]
@@ -1150,7 +732,6 @@ mod tests {
             AuthService::from_profile(&profile()).expect("auth service should initialize");
         let connection_id = Uuid::new_v4();
 
-        // First authentication on the connection.
         let first = service
             .authenticate_login(
                 connection_id,
@@ -1165,7 +746,6 @@ mod tests {
         };
         assert_eq!(service.session_count().await, 1);
 
-        // Second authentication on the same connection (re-auth / protocol reconnect).
         let second = service
             .authenticate_login(
                 connection_id,
@@ -1179,16 +759,13 @@ mod tests {
             panic!("expected successful second authentication");
         };
 
-        // Session count must remain 1 — the old entry must have been evicted.
         assert_eq!(service.session_count().await, 1);
 
-        // The old token must no longer be in the registry.
         assert!(
             service.session_for_token(&first_success.token).await.is_none(),
             "stale token must not be retrievable after re-authentication"
         );
 
-        // The new token must be retrievable and bound to the same connection.
         let new_session = service
             .session_for_token(&second_success.token)
             .await
@@ -1463,144 +1040,6 @@ mod tests {
         assert_eq!(operator.last_seen.as_deref(), Some("2026-03-11T08:00:00Z"));
     }
 
-    #[test]
-    fn operator_presence_as_operator_info_preserves_wire_fields() {
-        let presence = super::OperatorPresence {
-            username: "operator".to_owned(),
-            role: OperatorRole::Admin,
-            online: true,
-            last_seen: Some("2026-03-11T08:00:00Z".to_owned()),
-        };
-
-        let info = presence.as_operator_info();
-
-        assert_eq!(info.username, "operator");
-        assert_eq!(info.password_hash, None);
-        assert_eq!(info.role.as_deref(), Some("Admin"));
-        assert!(info.online);
-        assert_eq!(info.last_seen.as_deref(), Some("2026-03-11T08:00:00Z"));
-    }
-
-    #[test]
-    fn operator_presence_as_operator_info_keeps_unusual_username_without_password_material() {
-        let presence = super::OperatorPresence {
-            username: "MiXeD-Case_99@example.local".to_owned(),
-            role: OperatorRole::Operator,
-            online: true,
-            last_seen: Some("2026-03-12T09:30:00Z".to_owned()),
-        };
-
-        let info = presence.as_operator_info();
-        let payload = serde_json::to_value(&info).expect("operator info should serialize");
-
-        assert_eq!(info.username, "MiXeD-Case_99@example.local");
-        assert_eq!(info.role.as_deref(), Some("Operator"));
-        assert_eq!(info.last_seen.as_deref(), Some("2026-03-12T09:30:00Z"));
-        assert_eq!(payload["Username"], json!("MiXeD-Case_99@example.local"));
-        assert_eq!(payload["Role"], json!("Operator"));
-        assert_eq!(payload["Online"], json!(true));
-        assert_eq!(payload["LastSeen"], json!("2026-03-12T09:30:00Z"));
-        assert!(payload.get("PasswordHash").is_none());
-    }
-
-    #[test]
-    fn operator_presence_as_operator_info_supports_offline_operator_without_last_seen() {
-        let presence = super::OperatorPresence {
-            username: "analyst".to_owned(),
-            role: OperatorRole::Analyst,
-            online: false,
-            last_seen: None,
-        };
-
-        let info = presence.as_operator_info();
-        let payload = serde_json::to_value(&info).expect("operator info should serialize");
-
-        assert_eq!(info.username, "analyst");
-        assert_eq!(info.role.as_deref(), Some("Analyst"));
-        assert!(!info.online);
-        assert_eq!(info.last_seen, None);
-        assert_eq!(payload["Username"], json!("analyst"));
-        assert_eq!(payload["Role"], json!("Analyst"));
-        assert_eq!(payload["Online"], json!(false));
-        assert!(payload.get("LastSeen").is_none());
-        assert!(payload.get("PasswordHash").is_none());
-    }
-
-    #[test]
-    fn login_success_message_uses_init_connection_success_wire_shape() {
-        let message = login_success_message("operator", "token-123");
-        let value = serde_json::to_value(&message).expect("message should serialize");
-
-        assert_eq!(value["Head"]["Event"], json!(EventCode::InitConnection.as_u32()));
-        assert_eq!(value["Body"]["SubEvent"], json!(InitConnectionCode::Success.as_u32()));
-        assert_eq!(
-            value["Body"]["Info"]["Message"],
-            json!("Successful Authenticated; SessionToken=token-123")
-        );
-    }
-
-    #[test]
-    fn authentication_failure_invalid_credentials_message_returns_expected_string() {
-        assert_eq!(AuthenticationFailure::InvalidCredentials.message(), "Authentication failed");
-    }
-
-    #[test]
-    fn login_failure_message_embeds_variant_message_unchanged() {
-        let variants =
-            [AuthenticationFailure::InvalidCredentials, AuthenticationFailure::SessionCapExceeded];
-        for variant in &variants {
-            let msg = login_failure_message("user", variant);
-            let value = serde_json::to_value(&msg).expect("message should serialize");
-            assert_eq!(
-                value["Body"]["Info"]["Message"],
-                json!(variant.message()),
-                "login_failure_message must embed {variant:?}.message() unchanged"
-            );
-        }
-    }
-
-    #[test]
-    fn login_failure_message_uses_generic_authentication_error_text() {
-        let message = login_failure_message("ghost", &AuthenticationFailure::InvalidCredentials);
-        let value = serde_json::to_value(&message).expect("message should serialize");
-
-        assert_eq!(value["Body"]["SubEvent"], json!(InitConnectionCode::Error.as_u32()));
-        assert_eq!(value["Body"]["Info"]["Message"], json!("Authentication failed"));
-    }
-
-    #[test]
-    fn authentication_failure_session_cap_exceeded_message_returns_expected_string() {
-        assert_eq!(
-            AuthenticationFailure::SessionCapExceeded.message(),
-            "Too many active sessions; try again later"
-        );
-    }
-
-    #[test]
-    fn login_failure_message_session_cap_exceeded_uses_init_connection_error_wire_shape() {
-        let message =
-            login_failure_message("overloaded", &AuthenticationFailure::SessionCapExceeded);
-        let value = serde_json::to_value(&message).expect("message should serialize");
-
-        assert_eq!(value["Body"]["SubEvent"], json!(InitConnectionCode::Error.as_u32()));
-        assert_eq!(
-            value["Body"]["Info"]["Message"],
-            json!("Too many active sessions; try again later")
-        );
-    }
-
-    #[test]
-    fn all_authentication_failure_variants_have_non_empty_messages() {
-        let variants =
-            [AuthenticationFailure::InvalidCredentials, AuthenticationFailure::SessionCapExceeded];
-        for variant in &variants {
-            assert!(
-                !variant.message().is_empty(),
-                "AuthenticationFailure::{variant:?} must have a non-empty message"
-            );
-        }
-    }
-
     #[tokio::test]
     async fn from_profile_with_database_upgrades_legacy_runtime_operator_digests() {
         let database = Database::connect_in_memory().await.expect("database should initialize");
@@ -1639,6 +1078,7 @@ mod tests {
     async fn session_for_token_returns_none_for_unknown_token() {
         let service =
             AuthService::from_profile(&profile()).expect("auth service should initialize");
+
         let result = service
             .authenticate_login(
                 Uuid::new_v4(),
@@ -1650,15 +1090,17 @@ mod tests {
             .await;
         assert!(matches!(result, AuthenticationResult::Success(_)));
 
-        // A token that is the right length but wrong value must not match.
-        let fake_token = "00000000-0000-0000-0000-000000000000";
-        assert!(service.session_for_token(fake_token).await.is_none());
+        assert!(
+            service.session_for_token("nonexistent-token").await.is_none(),
+            "unknown token should not match any session"
+        );
     }
 
     #[tokio::test]
     async fn session_for_token_returns_none_for_wrong_length_token() {
         let service =
             AuthService::from_profile(&profile()).expect("auth service should initialize");
+
         let result = service
             .authenticate_login(
                 Uuid::new_v4(),
@@ -1668,15 +1110,20 @@ mod tests {
                 },
             )
             .await;
-        assert!(matches!(result, AuthenticationResult::Success(_)));
+        let AuthenticationResult::Success(success) = result else {
+            panic!("expected successful authentication");
+        };
 
-        // Tokens shorter or longer than a UUID must not match any session.
-        assert!(service.session_for_token("short").await.is_none());
+        let truncated = &success.token[..success.token.len() - 1];
         assert!(
-            service
-                .session_for_token("this-is-a-much-longer-string-that-is-not-a-uuid-token")
-                .await
-                .is_none()
+            service.session_for_token(truncated).await.is_none(),
+            "truncated token should not match"
+        );
+
+        let extended = format!("{}x", success.token);
+        assert!(
+            service.session_for_token(&extended).await.is_none(),
+            "extended token should not match"
         );
     }
 
@@ -1685,45 +1132,26 @@ mod tests {
         let service =
             AuthService::from_profile(&profile()).expect("auth service should initialize");
 
-        let conn_a = Uuid::new_v4();
-        let conn_b = Uuid::new_v4();
+        let mut tokens = Vec::new();
+        let users = [("operator", "password1234"), ("admin", "adminpw"), ("analyst", "readonly")];
+        for (user, password) in &users {
+            let result = service
+                .authenticate_login(
+                    Uuid::new_v4(),
+                    &LoginInfo { user: (*user).to_owned(), password: hash_password_sha3(password) },
+                )
+                .await;
+            let AuthenticationResult::Success(success) = result else {
+                panic!("expected successful authentication for {user}");
+            };
+            tokens.push(((*user).to_owned(), success.token));
+        }
 
-        let result_a = service
-            .authenticate_login(
-                conn_a,
-                &LoginInfo {
-                    user: "operator".to_owned(),
-                    password: hash_password_sha3("password1234"),
-                },
-            )
-            .await;
-        let AuthenticationResult::Success(success_a) = result_a else {
-            panic!("expected successful authentication for operator");
-        };
-
-        let result_b = service
-            .authenticate_login(
-                conn_b,
-                &LoginInfo { user: "admin".to_owned(), password: hash_password_sha3("adminpw") },
-            )
-            .await;
-        let AuthenticationResult::Success(success_b) = result_b else {
-            panic!("expected successful authentication for admin");
-        };
-
-        let session_a = service
-            .session_for_token(&success_a.token)
-            .await
-            .expect("operator session should be found");
-        assert_eq!(session_a.username, "operator");
-        assert_eq!(session_a.connection_id, conn_a);
-
-        let session_b = service
-            .session_for_token(&success_b.token)
-            .await
-            .expect("admin session should be found");
-        assert_eq!(session_b.username, "admin");
-        assert_eq!(session_b.connection_id, conn_b);
+        for (expected_user, token) in &tokens {
+            let session =
+                service.session_for_token(token).await.expect("token should match a session");
+            assert_eq!(&session.username, expected_user, "token should map to the correct user");
+        }
     }
 
     #[tokio::test]
@@ -1733,7 +1161,6 @@ mod tests {
         let service =
             AuthService::from_profile(&profile()).expect("auth service should initialize");
 
-        // Fill the per-account cap for "operator".
         for _ in 0..MAX_SESSIONS_PER_ACCOUNT {
             let result = service
                 .authenticate_login(
@@ -1749,7 +1176,6 @@ mod tests {
 
         assert_eq!(service.session_count().await, MAX_SESSIONS_PER_ACCOUNT);
 
-        // The next login for the same account must be rejected.
         let result = service
             .authenticate_login(
                 Uuid::new_v4(),
@@ -1764,7 +1190,6 @@ mod tests {
             result,
             AuthenticationResult::Failure(AuthenticationFailure::SessionCapExceeded)
         );
-        // Session count must not have grown.
         assert_eq!(service.session_count().await, MAX_SESSIONS_PER_ACCOUNT);
     }
 
@@ -1772,9 +1197,6 @@ mod tests {
     async fn authenticate_login_rejects_when_global_cap_reached() {
         use super::{AuthenticationFailure, MAX_OPERATOR_SESSIONS, MAX_SESSIONS_PER_ACCOUNT};
 
-        // Build a profile with enough distinct accounts to reach the global cap without
-        // hitting the per-account cap.  We need ceil(MAX_OPERATOR_SESSIONS /
-        // MAX_SESSIONS_PER_ACCOUNT) accounts.
         let accounts_needed = MAX_OPERATOR_SESSIONS.div_ceil(MAX_SESSIONS_PER_ACCOUNT);
 
         let mut hcl =
@@ -1789,7 +1211,6 @@ mod tests {
         let profile = Profile::parse(&hcl).expect("test profile should parse");
         let service = AuthService::from_profile(&profile).expect("auth service should initialize");
 
-        // Authenticate sessions until the global cap is exactly hit.
         let mut sessions_created = 0usize;
         'outer: for i in 0..accounts_needed {
             let username = format!("op{i}");
@@ -1817,7 +1238,6 @@ mod tests {
 
         assert_eq!(service.session_count().await, MAX_OPERATOR_SESSIONS);
 
-        // Any further login (any account) must be rejected.
         let result = service
             .authenticate_login(
                 Uuid::new_v4(),
@@ -1841,7 +1261,6 @@ mod tests {
 
         let mut connection_ids: Vec<Uuid> = Vec::new();
 
-        // Fill the per-account cap.
         for _ in 0..MAX_SESSIONS_PER_ACCOUNT {
             let conn = Uuid::new_v4();
             connection_ids.push(conn);
@@ -1857,7 +1276,6 @@ mod tests {
             assert!(matches!(result, AuthenticationResult::Success(_)));
         }
 
-        // Verify cap is enforced.
         let over_cap = service
             .authenticate_login(
                 Uuid::new_v4(),
@@ -1872,11 +1290,9 @@ mod tests {
             AuthenticationResult::Failure(AuthenticationFailure::SessionCapExceeded)
         );
 
-        // Remove one session.
         service.remove_connection(connection_ids[0]).await;
         assert_eq!(service.session_count().await, MAX_SESSIONS_PER_ACCOUNT - 1);
 
-        // A new login should now succeed.
         let result = service
             .authenticate_login(
                 Uuid::new_v4(),
@@ -1924,8 +1340,6 @@ mod tests {
     #[tokio::test]
     async fn from_profile_with_database_does_not_override_profile_operators() {
         let database = Database::connect_in_memory().await.expect("database should initialize");
-        // Persist a runtime operator whose username collides with a profile operator.
-        // Use a different password AND role so we can assert both are rejected.
         database
             .operators()
             .create(&PersistedOperator {
@@ -1941,7 +1355,6 @@ mod tests {
             .await
             .expect("auth service should load without error");
 
-        // The profile password ("password1234") should still work — profile takes precedence.
         let connection_id = Uuid::new_v4();
         let result = service
             .authenticate_login(
@@ -1957,8 +1370,6 @@ mod tests {
             "profile operator credentials should take precedence over persisted runtime duplicate"
         );
 
-        // The session role must be the profile-defined role (Operator), not the
-        // persisted runtime role (Analyst).
         let session = service
             .session_for_connection(connection_id)
             .await
@@ -1969,7 +1380,6 @@ mod tests {
             "session role must reflect the profile-configured role, not the persisted runtime role"
         );
 
-        // The persisted password should NOT authenticate.
         let result = service
             .authenticate_login(
                 Uuid::new_v4(),
@@ -1988,10 +1398,6 @@ mod tests {
         );
     }
 
-    // ------------------------------------------------------------------
-    // is_legacy_sha3_digest boundary tests
-    // ------------------------------------------------------------------
-
     #[tokio::test]
     async fn operator_inventory_returns_none_last_seen_with_empty_audit_log() {
         let database = Database::connect_in_memory().await.expect("database should initialize");
@@ -1999,7 +1405,6 @@ mod tests {
             .await
             .expect("auth service should initialize");
 
-        // No audit rows inserted — every operator should have last_seen: None.
         let inventory = service
             .operator_inventory()
             .await
@@ -2021,20 +1426,21 @@ mod tests {
             .await
             .expect("auth service should initialize");
 
-        // Close the database — the audit log query must fail loudly (no fake empty last_seen map).
         database.close().await;
 
-        let err = service
-            .operator_inventory()
-            .await
-            .expect_err("operator inventory should fail when audit log cannot be queried");
-        assert!(matches!(err, AuthError::AuditLog(_)), "expected AuditLog error, got {err:?}");
+        let result = service.operator_inventory().await;
+        assert!(
+            matches!(result, Err(AuthError::AuditLog(_))),
+            "expected AuditLog error after database close, got {result:?}"
+        );
     }
 
     #[tokio::test]
     async fn create_operator_rejects_duplicate_profile_configured_username() {
-        let service =
-            AuthService::from_profile(&profile()).expect("auth service should initialize");
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        let service = AuthService::from_profile_with_database(&profile(), &database)
+            .await
+            .expect("auth service should initialize");
 
         let error = service
             .create_operator(
@@ -2046,49 +1452,6 @@ mod tests {
             .expect_err("duplicate profile-configured username should be rejected");
 
         assert_eq!(error, AuthError::DuplicateUser { username: "operator".to_owned() });
-    }
-
-    #[test]
-    fn is_legacy_sha3_digest_accepts_valid_64_char_hex() {
-        assert!(super::is_legacy_sha3_digest(
-            "2f7d3e77d0786c5d305c0afadd4c1a2a6869a3210956c963ad2420c52e797022"
-        ));
-    }
-
-    #[test]
-    fn is_legacy_sha3_digest_rejects_63_char_hex() {
-        // One char too short.
-        assert!(!super::is_legacy_sha3_digest(
-            "2f7d3e77d0786c5d305c0afadd4c1a2a6869a3210956c963ad2420c52e79702"
-        ));
-    }
-
-    #[test]
-    fn is_legacy_sha3_digest_rejects_65_char_hex() {
-        // One char too long.
-        assert!(!super::is_legacy_sha3_digest(
-            "2f7d3e77d0786c5d305c0afadd4c1a2a6869a3210956c963ad2420c52e7970220"
-        ));
-    }
-
-    #[test]
-    fn is_legacy_sha3_digest_rejects_non_hex_char_at_position_32() {
-        // 'g' at position 32 is not a hex digit.
-        let mut s = "2f7d3e77d0786c5d305c0afadd4c1a2a".to_owned();
-        s.push('g');
-        s.push_str("869a3210956c963ad2420c52e797022");
-        assert_eq!(s.len(), 64);
-        assert!(!super::is_legacy_sha3_digest(&s));
-    }
-
-    #[test]
-    fn is_legacy_sha3_digest_rejects_argon2_phc_string() {
-        assert!(!super::is_legacy_sha3_digest("$argon2id$v=19$m=19456,t=2,p=1$salt$hash"));
-    }
-
-    #[test]
-    fn is_legacy_sha3_digest_rejects_empty_string() {
-        assert!(!super::is_legacy_sha3_digest(""));
     }
 
     // ---- AuthService::delete_operator tests ----
@@ -2161,7 +1524,6 @@ mod tests {
             .await
             .expect("create should succeed");
 
-        // Authenticate to obtain a session token.
         let connection_id = Uuid::new_v4();
         let result = auth
             .authenticate_login(
@@ -2173,13 +1535,10 @@ mod tests {
             panic!("expected successful authentication");
         };
 
-        // Session exists before deletion.
         assert!(auth.session_for_token(&success.token).await.is_some());
 
-        // Delete the operator.
         auth.delete_operator("victim").await.expect("delete should succeed");
 
-        // Session must be revoked.
         assert!(
             auth.session_for_token(&success.token).await.is_none(),
             "session should be revoked after operator deletion"
@@ -2200,7 +1559,6 @@ mod tests {
             .await
             .expect("create should succeed");
 
-        // Create two sessions for the same operator.
         let mut tokens = Vec::new();
         for _ in 0..2 {
             let cid = Uuid::new_v4();
@@ -2223,7 +1581,6 @@ mod tests {
 
         auth.delete_operator("multi").await.expect("delete should succeed");
 
-        // Both sessions must be gone.
         for token in &tokens {
             assert!(
                 auth.session_for_token(token).await.is_none(),
@@ -2303,7 +1660,6 @@ mod tests {
             .await
             .expect("create should succeed");
 
-        // Login to get a session with Admin role.
         let connection_id = Uuid::new_v4();
         let result = auth
             .authenticate_login(
@@ -2318,16 +1674,13 @@ mod tests {
             panic!("expected successful authentication");
         };
 
-        // Verify initial role is Admin.
         let session = auth.session_for_token(&success.token).await.expect("session should exist");
         assert_eq!(session.role, OperatorRole::Admin);
 
-        // Downgrade to Analyst.
         auth.update_operator_role("rbac_user", OperatorRole::Analyst)
             .await
             .expect("update should succeed");
 
-        // Session must now reflect the new role.
         let session =
             auth.session_for_token(&success.token).await.expect("session should still exist");
         assert_eq!(
@@ -2336,7 +1689,6 @@ mod tests {
             "session role should be updated to Analyst after downgrade"
         );
 
-        // Also verify via connection lookup.
         let session = auth
             .session_for_connection(connection_id)
             .await
@@ -2354,7 +1706,6 @@ mod tests {
             .await
             .expect("create should succeed");
 
-        // Create two sessions.
         let mut tokens = Vec::new();
         for _ in 0..2 {
             let cid = Uuid::new_v4();
@@ -2373,12 +1724,10 @@ mod tests {
             tokens.push(success.token);
         }
 
-        // Downgrade to Analyst.
         auth.update_operator_role("multi_role", OperatorRole::Analyst)
             .await
             .expect("update should succeed");
 
-        // Both sessions must reflect the new role.
         for token in &tokens {
             let session = auth.session_for_token(token).await.expect("session should exist");
             assert_eq!(
@@ -2402,7 +1751,6 @@ mod tests {
             .await
             .expect("create bystander");
 
-        // Login both.
         let _target_result = auth
             .authenticate_login(
                 Uuid::new_v4(),
@@ -2423,12 +1771,10 @@ mod tests {
             panic!("expected bystander auth success");
         };
 
-        // Downgrade target only.
         auth.update_operator_role("target", OperatorRole::Analyst)
             .await
             .expect("update should succeed");
 
-        // Bystander should still be Admin.
         let bystander_session = auth
             .session_for_token(&bystander_success.token)
             .await

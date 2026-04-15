@@ -9,4 +9,5 @@ mod network_token_kerberos;
 mod output;
 mod pivot_socket_transfer;
 mod process;
+mod socket;
 mod util;

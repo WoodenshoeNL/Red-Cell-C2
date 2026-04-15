@@ -1124,6 +1124,7 @@ async fn token_find_tokens_callback_rejects_truncated_row() -> Result<(), Box<dy
     Ok(())
 }
 
+#[tokio::test]
 async fn builtin_net_and_transfer_handlers_format_operator_output()
 -> Result<(), Box<dyn std::error::Error>> {
     let database = Database::connect_in_memory().await?;

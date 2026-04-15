@@ -17,6 +17,10 @@
 //! - `Agent` — agent task, response, output, registration, and build messages
 //! - `Listener` — listener management (add, start, ExternalC2)
 
+mod logging;
+
+use logging::{log_service_action, service_log_event};
+
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,7 +40,6 @@ use red_cell_common::demon::DEMON_MAGIC_VALUE;
 use red_cell_common::operator::{
     AgentResponseInfo, EventCode, ListenerErrorInfo, ListenerMarkInfo, Message, MessageHead,
     OperatorMessage, ServiceAgentRegistrationInfo, ServiceListenerRegistrationInfo,
-    TeamserverLogInfo,
 };
 use serde_json::Value;
 use thiserror::Error;
@@ -46,13 +49,10 @@ use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
 use crate::agent_events::agent_new_event;
-use crate::audit::{AuditDetails, AuditResultStatus, audit_details};
+use crate::audit::{AuditResultStatus, audit_details};
 use crate::auth::{AuthError, password_hashes_match, password_verifier_for_sha3};
 use crate::database::TeamserverError;
-use crate::{
-    AgentRegistry, AuditWebhookNotifier, Database, EventBus, LoginRateLimiter, PivotInfo,
-    record_operator_action_with_notifications,
-};
+use crate::{AgentRegistry, AuditWebhookNotifier, Database, EventBus, LoginRateLimiter, PivotInfo};
 
 // ── Constants ────────────────────────────────────────────────────────
 
@@ -1145,46 +1145,6 @@ async fn handle_listener_start(
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-/// Persist a structured audit-log entry for a service bridge action.
-///
-/// This mirrors `log_operator_action` in `websocket.rs` but uses the actor
-/// `"service"` to distinguish service bridge actions from operator actions.
-async fn log_service_action(
-    database: &Database,
-    webhooks: &AuditWebhookNotifier,
-    action: &str,
-    target_kind: &str,
-    target_id: Option<String>,
-    details: AuditDetails,
-) {
-    if let Err(error) = record_operator_action_with_notifications(
-        database,
-        webhooks,
-        "service",
-        action,
-        target_kind,
-        target_id,
-        details,
-    )
-    .await
-    {
-        warn!(action, %error, "failed to persist service audit log entry");
-    }
-}
-
-/// Build a teamserver log event attributed to the service bridge.
-fn service_log_event(text: &str) -> OperatorMessage {
-    OperatorMessage::TeamserverLog(Message {
-        head: MessageHead {
-            event: EventCode::Teamserver,
-            user: "service".to_owned(),
-            timestamp: OffsetDateTime::now_utc().unix_timestamp().to_string(),
-            one_time: String::new(),
-        },
-        info: TeamserverLogInfo { text: text.to_owned() },
-    })
-}
-
 // ── Tests ────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1282,19 +1242,6 @@ mod tests {
         assert!(!bridge.agent_exists("agent-a").await);
         let inner = bridge.inner.read().await;
         assert!(inner.registered_listeners.is_empty());
-    }
-
-    #[test]
-    fn service_log_event_creates_valid_operator_message() {
-        let event = service_log_event("hello");
-        match event {
-            OperatorMessage::TeamserverLog(msg) => {
-                assert_eq!(msg.info.text, "hello");
-                assert_eq!(msg.head.user, "service");
-                assert_eq!(msg.head.event, EventCode::Teamserver);
-            }
-            _ => panic!("expected TeamserverLog variant"),
-        }
     }
 
     #[test]

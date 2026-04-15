@@ -596,7 +596,7 @@ def repair_db_if_needed(log: Logger, rename_prefix: bool):
 
 
 DEBUG_SIZE_LIMIT_GB   = 8      # nuke target/* build subdirs when total target/ exceeds this size
-MIN_FREE_DISK_GB      = 5.0   # bail if less than this many GB free before starting a session
+MIN_FREE_DISK_GB      = 30.0  # bail if less than this many GB free before starting a session
 
 
 def check_disk_space(log: Logger) -> bool:

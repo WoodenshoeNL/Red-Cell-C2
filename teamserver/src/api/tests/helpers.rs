@@ -67,6 +67,44 @@ pub(super) async fn test_router_with_database(
     )
 }
 
+pub(super) async fn build_router_from_profile(profile: Profile, database: Database) -> Router {
+    let agent_registry = AgentRegistry::new(database.clone());
+    let events = EventBus::default();
+    let sockets = SocketRelayManager::new(agent_registry.clone(), events.clone());
+    let listeners = ListenerManager::new(
+        database.clone(),
+        agent_registry.clone(),
+        events.clone(),
+        sockets.clone(),
+        None,
+    )
+    .with_demon_allow_legacy_ctr(true);
+
+    let api = ApiRuntime::from_profile(&profile).expect("rng should work in tests");
+    let auth = AuthService::from_profile_with_database(&profile, &database).await.expect("auth");
+
+    api_routes(api.clone()).with_state(TeamserverState {
+        profile: profile.clone(),
+        database,
+        auth,
+        api,
+        events,
+        connections: OperatorConnectionManager::new(),
+        agent_registry,
+        listeners,
+        payload_builder: crate::PayloadBuilderService::disabled_for_tests(),
+        sockets,
+        webhooks: crate::AuditWebhookNotifier::from_profile(&profile),
+        login_rate_limiter: crate::LoginRateLimiter::new(),
+        shutdown: crate::ShutdownController::new(),
+        service_bridge: None,
+        started_at: std::time::Instant::now(),
+        plugins_loaded: 0,
+        plugins_failed: 0,
+        metrics: crate::metrics::standalone_metrics_handle(),
+    })
+}
+
 pub(super) async fn test_router_with_registry(
     api_key: Option<(u32, &str, &str, OperatorRole)>,
 ) -> (Router, AgentRegistry, AuthService) {

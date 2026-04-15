@@ -188,9 +188,7 @@ impl ApiRuntime {
         };
 
         let presented_key_digest = Self::hash_api_key(&self.key_hash_secret, &presented_key);
-        let rate_limit_subject = client_ip
-            .map(RateLimitSubject::ClientIp)
-            .unwrap_or(RateLimitSubject::PresentedCredential(presented_key_digest));
+        let rate_limit_subject = RateLimitSubject::PresentedCredential(presented_key_digest);
 
         self.check_rate_limit(&rate_limit_subject).await?;
 
@@ -856,5 +854,30 @@ mod tests {
         assert!(api.check_rate_limit(&subject_a).await.is_err(), "A must be rate-limited");
 
         assert!(api.check_rate_limit(&subject_b).await.is_ok(), "B must be independent");
+    }
+
+    #[tokio::test]
+    async fn two_api_keys_from_same_ip_do_not_share_rate_limit_bucket() {
+        let api = test_api_runtime(2);
+        let key_a = RateLimitSubject::PresentedCredential(make_digest(0xAA));
+        let key_b = RateLimitSubject::PresentedCredential(make_digest(0xBB));
+
+        for _ in 0..2 {
+            api.check_rate_limit(&key_a).await.expect("key A should be allowed");
+        }
+        assert!(
+            api.check_rate_limit(&key_a).await.is_err(),
+            "key A must be rate-limited after exhausting its quota"
+        );
+
+        for _ in 0..2 {
+            api.check_rate_limit(&key_b)
+                .await
+                .expect("key B must not be affected by key A's exhausted quota");
+        }
+        assert!(
+            api.check_rate_limit(&key_b).await.is_err(),
+            "key B must be rate-limited after exhausting its own quota"
+        );
     }
 }

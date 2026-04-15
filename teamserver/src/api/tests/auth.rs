@@ -7,7 +7,7 @@ use tower::ServiceExt;
 
 use std::net::SocketAddr;
 
-use red_cell_common::config::OperatorRole;
+use red_cell_common::config::{OperatorRole, Profile};
 
 use crate::Database;
 use crate::api::auth::{API_KEY_HEADER, MAX_FAILED_API_AUTH_ATTEMPTS};
@@ -292,7 +292,11 @@ async fn rate_limiting_rejects_repeated_invalid_api_keys() {
     let body = read_json(first).await;
     assert_eq!(body["error"]["code"], "invalid_api_key");
 
+    // A different invalid key from the same IP gets its own rate-limit bucket
+    // (rate limiter is keyed by credential digest, not IP). The per-IP auth
+    // failure tracker still catches brute-force attempts separately.
     let second = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/listeners")
@@ -304,8 +308,25 @@ async fn rate_limiting_rejects_repeated_invalid_api_keys() {
         .await
         .expect("response");
 
-    assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(second.status(), StatusCode::UNAUTHORIZED);
     let body = read_json(second).await;
+    assert_eq!(body["error"]["code"], "invalid_api_key");
+
+    // But repeating the same invalid key exceeds that credential's rate limit.
+    let third = app
+        .oneshot(
+            Request::builder()
+                .uri("/listeners")
+                .header(API_KEY_HEADER, "wrong-key")
+                .extension(ConnectInfo(client_ip))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(third.status(), StatusCode::TOO_MANY_REQUESTS);
+    let body = read_json(third).await;
     assert_eq!(body["error"]["code"], "rate_limited");
 }
 
@@ -512,4 +533,86 @@ async fn disabled_api_rejects_authenticated_request() {
 
     let body = read_json(response).await;
     assert_eq!(body["error"]["code"], "api_disabled");
+}
+
+#[tokio::test]
+async fn two_valid_api_keys_from_same_ip_do_not_share_rate_limit_bucket() {
+    let profile = Profile::parse(
+        r#"
+        Teamserver {
+          Host = "127.0.0.1"
+          Port = 40056
+        }
+        Operators {
+          user "Neo" {
+            Password = "password1234"
+          }
+        }
+        Api {
+          RateLimitPerMinute = 1
+          key "key-alpha" {
+            Value = "secret-alpha"
+            Role = "Admin"
+          }
+          key "key-beta" {
+            Value = "secret-beta"
+            Role = "Admin"
+          }
+        }
+        Demon {}
+        "#,
+    )
+    .expect("profile");
+    let database = Database::connect_in_memory().await.expect("database");
+    let app = super::helpers::build_router_from_profile(profile, database).await;
+    let shared_ip = SocketAddr::from(([198, 51, 100, 99], 443));
+
+    let resp_a = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/listeners")
+                .header(API_KEY_HEADER, "secret-alpha")
+                .extension(ConnectInfo(shared_ip))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(resp_a.status(), StatusCode::OK, "first request with key-alpha must succeed");
+
+    let resp_b = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/listeners")
+                .header(API_KEY_HEADER, "secret-beta")
+                .extension(ConnectInfo(shared_ip))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(
+        resp_b.status(),
+        StatusCode::OK,
+        "key-beta from the same IP must not be blocked by key-alpha's exhausted quota"
+    );
+
+    let resp_a2 = app
+        .oneshot(
+            Request::builder()
+                .uri("/listeners")
+                .header(API_KEY_HEADER, "secret-alpha")
+                .extension(ConnectInfo(shared_ip))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(
+        resp_a2.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "key-alpha's second request must be rate-limited (limit=1)"
+    );
 }

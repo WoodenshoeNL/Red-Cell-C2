@@ -145,7 +145,10 @@ mod tests {
     use tokio::io::AsyncReadExt;
     use tokio::net::{TcpListener, TcpStream};
 
-    use super::super::types::SocketRelayError;
+    use super::super::types::{
+        SOCKS_REPLY_COMMAND_NOT_SUPPORTED, SOCKS_REPLY_GENERAL_FAILURE, SOCKS_REPLY_SUCCEEDED,
+        SocketRelayError,
+    };
 
     async fn connected_write_half_and_reader() -> io::Result<(
         Arc<tokio::sync::Mutex<tokio::net::tcp::OwnedWriteHalf>>,
@@ -178,7 +181,7 @@ mod tests {
 
         super::send_socks_connect_reply(
             &writer,
-            super::SOCKS_REPLY_SUCCEEDED,
+            SOCKS_REPLY_SUCCEEDED,
             super::SOCKS_ATYP_DOMAIN,
             &oversized_domain,
             8080,
@@ -192,7 +195,7 @@ mod tests {
             response,
             [
                 super::SOCKS_VERSION,
-                super::SOCKS_REPLY_GENERAL_FAILURE,
+                SOCKS_REPLY_GENERAL_FAILURE,
                 0,
                 super::SOCKS_ATYP_IPV4,
                 0,
@@ -214,7 +217,7 @@ mod tests {
 
         super::send_socks_connect_reply(
             &writer,
-            super::SOCKS_REPLY_SUCCEEDED,
+            SOCKS_REPLY_SUCCEEDED,
             super::SOCKS_ATYP_DOMAIN,
             domain,
             443,
@@ -226,7 +229,7 @@ mod tests {
         reader.read_exact(&mut response).await?;
 
         assert_eq!(response[0], super::SOCKS_VERSION);
-        assert_eq!(response[1], super::SOCKS_REPLY_SUCCEEDED);
+        assert_eq!(response[1], SOCKS_REPLY_SUCCEEDED);
         assert_eq!(response[2], 0); // reserved
         assert_eq!(response[3], super::SOCKS_ATYP_DOMAIN);
         assert_eq!(response[4], 11); // length prefix for "example.com"
@@ -424,7 +427,7 @@ mod tests {
             response,
             [
                 super::SOCKS_VERSION,
-                super::SOCKS_REPLY_COMMAND_NOT_SUPPORTED,
+                SOCKS_REPLY_COMMAND_NOT_SUPPORTED,
                 0,
                 super::SOCKS_ATYP_IPV4,
                 0,

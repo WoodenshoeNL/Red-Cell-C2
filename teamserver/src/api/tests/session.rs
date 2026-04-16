@@ -80,7 +80,7 @@ async fn session_activity_endpoint_returns_only_persisted_operator_session_event
 }
 
 #[tokio::test]
-async fn session_dispatch_status_matches_api_root() {
+async fn session_dispatch_status_returns_health_payload() {
     let (app, _, _) =
         test_router_with_registry(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin)))
             .await;
@@ -96,7 +96,16 @@ async fn session_dispatch_status_matches_api_root() {
     let parsed: Value = serde_json::from_str(&line).expect("session line json");
     assert_eq!(parsed["ok"], true);
     assert_eq!(parsed["cmd"], "status");
-    assert_eq!(parsed["data"]["prefix"], "/api/v1");
+    assert!(
+        parsed["data"]["status"].is_string(),
+        "health payload must include a `status` field, got: {}",
+        parsed["data"]
+    );
+    assert!(
+        parsed["data"]["uptime_secs"].is_number(),
+        "health payload must include `uptime_secs`, got: {}",
+        parsed["data"]
+    );
 }
 
 #[tokio::test]

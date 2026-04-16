@@ -99,7 +99,7 @@ fn build_session_rest_request(
         "status" => {
             let req = HttpRequest::builder()
                 .method("GET")
-                .uri("/")
+                .uri("/health")
                 .body(Body::empty())
                 .map_err(|e| SessionBuildError::InvalidBody(e.to_string()))?;
             Ok(req)
@@ -775,5 +775,13 @@ mod tests {
         assert_eq!(req.method(), "GET");
         assert!(req.uri().to_string().starts_with("/audit?"));
         assert!(req.uri().to_string().contains("limit=10"));
+    }
+
+    #[test]
+    fn status_routes_to_health_endpoint() {
+        let val = serde_json::json!({});
+        let req = build_session_rest_request("status", &val).unwrap();
+        assert_eq!(req.method(), "GET");
+        assert_eq!(req.uri(), "/health");
     }
 }

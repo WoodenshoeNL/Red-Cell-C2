@@ -95,8 +95,14 @@ impl WsSession {
     ///
     /// On the first successful `InitConnectionSuccess` frame the session key
     /// is derived from the embedded token and stored for all subsequent frames.
+    //
+    // The 120s ceiling accommodates failed-login paths under workspace-wide
+    // load: the server adds `FAILED_LOGIN_DELAY` (2 s) after each rejected
+    // attempt on top of Argon2 verification, and when many tests run in
+    // parallel Argon2 queues behind other CPU-bound work. A 60 s ceiling was
+    // observed to flake (red-cell-c2-02sv8).
     pub async fn recv_msg(&mut self) -> Result<OperatorMessage, Box<dyn std::error::Error>> {
-        let next = timeout(Duration::from_secs(60), self.socket.next()).await?;
+        let next = timeout(Duration::from_secs(120), self.socket.next()).await?;
         let frame = next.ok_or_else(|| "missing websocket frame".to_owned())??;
         match frame {
             ClientMessage::Text(payload) => {

@@ -99,6 +99,33 @@ fn http_listener(name: &str, port: u16) -> ListenerConfig {
     })
 }
 
+fn https_listener(name: &str, port: u16) -> ListenerConfig {
+    ListenerConfig::from(HttpListenerConfig {
+        name: name.to_owned(),
+        kill_date: None,
+        working_hours: None,
+        hosts: vec!["localhost".to_owned()],
+        host_bind: "127.0.0.1".to_owned(),
+        host_rotation: "round-robin".to_owned(),
+        port_bind: port,
+        port_conn: Some(port),
+        method: None,
+        behind_redirector: false,
+        trusted_proxy_peers: Vec::new(),
+        user_agent: None,
+        headers: Vec::new(),
+        uris: vec!["/".to_owned()],
+        host_header: None,
+        secure: true,
+        cert: None,
+        response: None,
+        proxy: None,
+        ja3_randomize: None,
+        doh_domain: None,
+        doh_provider: None,
+    })
+}
+
 fn http_listener_with_redirector(
     name: &str,
     port: u16,
@@ -2726,6 +2753,37 @@ async fn create_and_start_http(
         }
     }
     Err(format!("failed to start listener `{name}` after {MAX_ATTEMPTS} port attempts").into())
+}
+
+/// Same as [`create_and_start_http`] but creates an HTTPS/TLS listener.
+async fn create_and_start_https(
+    manager: &ListenerManager,
+    name: &str,
+) -> Result<u16, Box<dyn std::error::Error>> {
+    const MAX_ATTEMPTS: usize = 5;
+    for attempt in 0..MAX_ATTEMPTS {
+        let port = available_port()?;
+        manager.create(https_listener(name, port)).await?;
+        match manager.start(name).await {
+            Ok(_) => return Ok(port),
+            Err(ListenerManagerError::StartFailed { ref message, .. })
+                if message.contains("Address already in use")
+                    || message.contains("os error 98") =>
+            {
+                tracing::debug!(
+                    %name,
+                    %port,
+                    %attempt,
+                    "port conflict during start, retrying with a new port"
+                );
+                manager.delete(name).await?;
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(format!("failed to start HTTPS listener `{name}` after {MAX_ATTEMPTS} port attempts")
+        .into())
 }
 
 async fn wait_for_listener_status(
@@ -6402,35 +6460,7 @@ async fn reload_tls_cert_returns_tls_cert_error_for_expired_cert() {
     install_default_crypto_provider();
 
     let mgr = manager().await.expect("manager must build");
-    let port = available_port().expect("port must be available");
-
-    let config = ListenerConfig::from(HttpListenerConfig {
-        name: "tls-expired".to_owned(),
-        kill_date: None,
-        working_hours: None,
-        hosts: vec!["localhost".to_owned()],
-        host_bind: "127.0.0.1".to_owned(),
-        host_rotation: "round-robin".to_owned(),
-        port_bind: port,
-        port_conn: Some(port),
-        method: None,
-        behind_redirector: false,
-        trusted_proxy_peers: Vec::new(),
-        user_agent: None,
-        headers: Vec::new(),
-        uris: vec!["/".to_owned()],
-        host_header: None,
-        secure: true,
-        cert: None,
-        response: None,
-        proxy: None,
-        ja3_randomize: None,
-        doh_domain: None,
-        doh_provider: None,
-    });
-
-    mgr.create(config).await.expect("create must succeed");
-    mgr.start("tls-expired").await.expect("start must succeed");
+    let port = create_and_start_https(&mgr, "tls-expired").await.expect("listener must start");
     wait_for_listener(port, true).await.expect("listener must be ready");
 
     let result = mgr.reload_tls_cert("tls-expired", EXPIRED_CERT_PEM, EXPIRED_KEY_PEM).await;
@@ -6447,35 +6477,7 @@ async fn reload_tls_cert_swaps_config_with_valid_cert() {
     use red_cell_common::tls::{TlsKeyAlgorithm, generate_self_signed_tls_identity};
 
     let mgr = manager().await.expect("manager must build");
-    let port = available_port().expect("port must be available");
-
-    let config = ListenerConfig::from(HttpListenerConfig {
-        name: "tls-reload-ok".to_owned(),
-        kill_date: None,
-        working_hours: None,
-        hosts: vec!["localhost".to_owned()],
-        host_bind: "127.0.0.1".to_owned(),
-        host_rotation: "round-robin".to_owned(),
-        port_bind: port,
-        port_conn: Some(port),
-        method: None,
-        behind_redirector: false,
-        trusted_proxy_peers: Vec::new(),
-        user_agent: None,
-        headers: Vec::new(),
-        uris: vec!["/".to_owned()],
-        host_header: None,
-        secure: true,
-        cert: None,
-        response: None,
-        proxy: None,
-        ja3_randomize: None,
-        doh_domain: None,
-        doh_provider: None,
-    });
-
-    mgr.create(config).await.expect("create must succeed");
-    mgr.start("tls-reload-ok").await.expect("start must succeed");
+    let port = create_and_start_https(&mgr, "tls-reload-ok").await.expect("listener must start");
     wait_for_listener(port, true).await.expect("listener must be ready");
 
     // Generate a fresh valid certificate and reload it.

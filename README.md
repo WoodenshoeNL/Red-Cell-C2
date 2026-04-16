@@ -12,9 +12,9 @@ A Rust rewrite of the [Havoc C2 framework](https://github.com/HavocFramework/Hav
 |---|---|---|
 | **Teamserver** | Rust (Axum + Tokio) | In development |
 | **Operator client** | Rust (egui) | In development |
-| **Demon agent** | C + x86/x64 ASM | Unchanged — `./src/Havoc` |
+| **Demon agent** | C + x86/x64 ASM | Unchanged — `./agent/demon` |
 
-The original Havoc source lives at `./src/Havoc` and serves as the reference implementation. It is not modified.
+See [HAVOC_ATTRIBUTION.md](HAVOC_ATTRIBUTION.md) for Havoc-derived files and licensing.
 
 ---
 
@@ -315,8 +315,7 @@ Red-Cell-C2/
 ├── teamserver/              # Axum-based C2 server (red-cell binary)
 ├── client/                  # egui operator client (red-cell-client binary)
 ├── common/                  # Shared types: protocol, crypto, config
-├── src/
-│   └── Havoc/               # Original Havoc source — read-only reference, do not modify
+├── agent/                   # Agent source: demon/, archon/, phantom/, specter/
 ├── logs/                    # Agent loop log output (gitignored)
 ├── .beads/                  # Issue tracker database
 │   └── issues.jsonl         # Issues — committed to git for sync

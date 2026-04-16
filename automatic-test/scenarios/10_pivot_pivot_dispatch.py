@@ -20,7 +20,7 @@ Test steps (full path — requires ctx.windows and ctx.windows2):
  11. Verify child agent transitions to inactive / unreachable
  12. Cleanup: kill agents, stop + delete listeners, remove payload files
 
-Demon pivot implementation details (from src/Havoc/teamserver/pkg/agent/demons.go):
+Demon pivot implementation details (from upstream Havoc: https://github.com/HavocFramework/Havoc, teamserver/pkg/agent/demons.go):
   COMMAND_PIVOT / DEMON_PIVOT_SMB_CONNECT  = 2520 / 10
   DEMON_PIVOT_SMB_DISCONNECT               = 2520 / 11
   DEMON_PIVOT_SMB_COMMAND                  = 2520 / 12

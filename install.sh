@@ -297,7 +297,7 @@ echo ""
 
 if [[ "$INSTALL_TEAMSERVER" -eq 1 ]]; then
     echo "Teamserver:"
-    echo "  ./target/release/red-cell --profile src/Havoc/profiles/havoc.yaotl"
+    echo "  ./target/release/red-cell --profile profiles/havoc.yaotl"
     echo ""
 fi
 

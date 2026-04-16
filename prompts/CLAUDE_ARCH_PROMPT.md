@@ -129,7 +129,7 @@ Work through each of these categories methodically. For each finding, note the f
 
 ### 5b — Protocol Correctness
 
-Verify against the Demon protocol (reference: `./src/Havoc/teamserver/`):
+Verify against the Demon protocol (reference: https://github.com/HavocFramework/Havoc):
 - Magic: `0xDEADBEEF`
 - Packet layout: `Size(u32) | Magic(u32) | AgentID(u32) | encrypted_payload`
 - AES-256-CTR with per-agent key+IV

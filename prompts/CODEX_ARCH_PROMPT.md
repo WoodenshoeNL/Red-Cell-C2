@@ -133,7 +133,7 @@ For each finding, note the exact file and line.
 
 ### 5b — Protocol Correctness
 
-Verify against `./src/Havoc/teamserver/`:
+Verify against the upstream Havoc repo (https://github.com/HavocFramework/Havoc):
 - Magic: `0xDEADBEEF`
 - Packet layout: `Size(u32) | Magic(u32) | AgentID(u32) | encrypted_payload`
 - AES-256-CTR with per-agent key+IV

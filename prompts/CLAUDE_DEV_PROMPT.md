@@ -29,12 +29,9 @@ Read the full context before starting:
 cat AGENTS.md
 ```
 
-The original Havoc source is at `./src/Havoc` — use it as reference for:
-- The Demon binary protocol (packet format, command IDs, AES handshake)
-- The Go teamserver logic (`./src/Havoc/teamserver/`) you are rewriting in Rust
-- The existing HCL profile schema (`./src/Havoc/profiles/`) you must parse
-
-**Do not modify anything under `./src/Havoc`.**
+The Demon agent source is at `./agent/demon/`, with payload templates at `./agent/demon/payloads/`.
+For the original Havoc reference implementation (Go teamserver, HCL profiles, Demon protocol),
+consult the upstream repo: https://github.com/HavocFramework/Havoc
 
 ---
 
@@ -108,8 +105,9 @@ br show <id>
 ```
 
 Check what this issue blocks and what blocks it. If the task involves the Demon protocol or
-existing Havoc logic, read the relevant source files under `./src/Havoc` first. Do not
-guess at protocol details — verify them from the source.
+existing Havoc logic, consult the upstream Havoc repo (https://github.com/HavocFramework/Havoc)
+and the local Demon agent source at `./agent/demon/`. Do not guess at protocol details —
+verify them from the source.
 
 ### 3a. Read surgically — do not read files top to bottom
 

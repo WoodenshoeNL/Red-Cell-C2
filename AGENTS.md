@@ -2,7 +2,7 @@
 
 ## Goal
 
-**Phase 1 — Complete.** Rust rewrite of the [Havoc C2 framework](./src/Havoc):
+**Phase 1 — Complete.** Rust rewrite of the [Havoc C2 framework](https://github.com/HavocFramework/Havoc):
 teamserver, operator GUI client (`red-cell-client`), and AI-agent CLI client
 (`red-cell-cli`). The original Demon agent (C/ASM) is kept as-is; Demon protocol
 compatibility is maintained.
@@ -200,7 +200,10 @@ The QA, arch, quality, and coverage loops review all zones by default, but can b
 
 ---
 
-The original Havoc source lives in `./src/Havoc` as reference only — **do not modify it, do not stage it, do not delete it**. It is committed to git for cross-machine sync, but it is **read-only**. Agents must never edit, create, or delete any file under `./src/`. It is there purely so the code can be read as a reference implementation.
+The original Havoc source has been removed from this repo. The Demon agent source
+and pre-built payload templates live in `./agent/demon/` (see `HAVOC_ATTRIBUTION.md`
+for provenance). The upstream Havoc repo at https://github.com/HavocFramework/Havoc
+can be consulted as a reference implementation when needed.
 
 ### Profiles
 

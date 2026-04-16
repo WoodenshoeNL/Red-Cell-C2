@@ -202,11 +202,11 @@ impl PayloadBuilderService {
             nasm_version,
         };
 
-        let source_root = repo_root.join("src/Havoc/payloads/Demon");
+        let source_root = repo_root.join("agent/demon");
         let archon_source_root = repo_root.join("agent/archon");
-        let shellcode_x64_template = repo_root.join("src/Havoc/payloads/Shellcode.x64.bin");
-        let shellcode_x86_template = repo_root.join("src/Havoc/payloads/Shellcode.x86.bin");
-        let dllldr_x64_template = repo_root.join("src/Havoc/payloads/DllLdr.x64.bin");
+        let shellcode_x64_template = repo_root.join("agent/demon/payloads/Shellcode.x64.bin");
+        let shellcode_x86_template = repo_root.join("agent/demon/payloads/Shellcode.x86.bin");
+        let dllldr_x64_template = repo_root.join("agent/demon/payloads/DllLdr.x64.bin");
         let stager_template = repo_root.join("payloads/templates/MainStager.c");
 
         for required_path in [
@@ -398,13 +398,13 @@ impl PayloadBuilderService {
                     nasm: PathBuf::from("/nonexistent/nasm"),
                     nasm_version: unknown_version,
                 },
-                source_root: root.join("src/Havoc/payloads/Demon"),
+                source_root: root.join("agent/demon"),
                 archon_source_root: PathBuf::from("/nonexistent/agent/archon"),
                 phantom_source_root: PathBuf::from("/nonexistent/agent/phantom"),
                 specter_source_root: PathBuf::from("/nonexistent/agent/specter"),
-                shellcode_x64_template: root.join("src/Havoc/payloads/Shellcode.x64.bin"),
-                shellcode_x86_template: root.join("src/Havoc/payloads/Shellcode.x86.bin"),
-                dllldr_x64_template: root.join("src/Havoc/payloads/DllLdr.x64.bin"),
+                shellcode_x64_template: root.join("agent/demon/payloads/Shellcode.x64.bin"),
+                shellcode_x86_template: root.join("agent/demon/payloads/Shellcode.x86.bin"),
+                dllldr_x64_template: root.join("agent/demon/payloads/DllLdr.x64.bin"),
                 stager_template: root.join("payloads/templates/MainStager.c"),
                 default_demon: DemonConfig {
                     sleep: None,
@@ -1028,14 +1028,14 @@ mod tests {
         assert_eq!(service.inner.toolchain.nasm, nasm.canonicalize()?);
         assert_eq!(service.inner.toolchain.compiler_x64_version.major, 12);
         assert_eq!(service.inner.toolchain.nasm_version.major, 2);
-        assert_eq!(service.inner.source_root, repo_root.join("src/Havoc/payloads/Demon"));
+        assert_eq!(service.inner.source_root, repo_root.join("agent/demon"));
         assert_eq!(
             service.inner.shellcode_x64_template,
-            repo_root.join("src/Havoc/payloads/Shellcode.x64.bin")
+            repo_root.join("agent/demon/payloads/Shellcode.x64.bin")
         );
         assert_eq!(
             service.inner.shellcode_x86_template,
-            repo_root.join("src/Havoc/payloads/Shellcode.x86.bin")
+            repo_root.join("agent/demon/payloads/Shellcode.x86.bin")
         );
         assert_eq!(service.inner.default_demon, profile.demon);
         Ok(())
@@ -1072,18 +1072,18 @@ mod tests {
             service.inner.toolchain.nasm_version,
             ToolchainVersion { major: 2, minor: 16, patch: 1, raw: "2.16.01".to_owned() }
         );
-        assert_eq!(service.inner.source_root, temp.path().join("src/Havoc/payloads/Demon"));
+        assert_eq!(service.inner.source_root, temp.path().join("agent/demon"));
         assert_eq!(
             service.inner.shellcode_x64_template,
-            temp.path().join("src/Havoc/payloads/Shellcode.x64.bin")
+            temp.path().join("agent/demon/payloads/Shellcode.x64.bin")
         );
         assert_eq!(
             service.inner.shellcode_x86_template,
-            temp.path().join("src/Havoc/payloads/Shellcode.x86.bin")
+            temp.path().join("agent/demon/payloads/Shellcode.x86.bin")
         );
         assert_eq!(
             service.inner.dllldr_x64_template,
-            temp.path().join("src/Havoc/payloads/DllLdr.x64.bin")
+            temp.path().join("agent/demon/payloads/DllLdr.x64.bin")
         );
         assert_eq!(
             service.inner.stager_template,
@@ -1176,7 +1176,7 @@ mod tests {
         let compiler_x86 = write_fake_gcc(&temp.path().join("bin/x86-gcc"))?;
         let nasm = write_fake_nasm(&temp.path().join("bin/nasm"))?;
         create_payload_assets(temp.path())?;
-        std::fs::remove_file(temp.path().join("src/Havoc/payloads/Shellcode.x86.bin"))?;
+        std::fs::remove_file(temp.path().join("agent/demon/payloads/Shellcode.x86.bin"))?;
         let profile = constructor_test_profile(&compiler_x64, &compiler_x86, &nasm);
 
         let error = PayloadBuilderService::from_profile_with_repo_root_impl(
@@ -1990,7 +1990,7 @@ mod tests {
     }
 
     fn create_payload_assets(repo_root: &Path) -> Result<(), Box<dyn std::error::Error>> {
-        let payload_root = repo_root.join("src/Havoc/payloads");
+        let payload_root = repo_root.join("agent/demon/payloads");
         std::fs::create_dir_all(payload_root.join("Demon"))?;
         std::fs::write(payload_root.join("Shellcode.x64.bin"), [0x90, 0x90])?;
         std::fs::write(payload_root.join("Shellcode.x86.bin"), [0x90, 0x90])?;
@@ -2296,8 +2296,8 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = TempDir::new()?;
         let bin_dir = temp.path().join("bin");
-        let source_root = temp.path().join("src/Havoc/payloads/Demon");
-        let shellcode_root = temp.path().join("src/Havoc/payloads");
+        let source_root = temp.path().join("agent/demon");
+        let shellcode_root = temp.path().join("agent/demon/payloads");
         let cache_dir = temp.path().join("payload-cache");
         std::fs::create_dir_all(&bin_dir)?;
         std::fs::create_dir_all(source_root.join("src/core"))?;
@@ -2424,8 +2424,8 @@ mod tests {
         let temp = TempDir::new()?;
         let bin_dir = temp.path().join("bin");
         let cache_dir = temp.path().join("payload-cache");
-        let source_root = temp.path().join("src/Havoc/payloads/Demon");
-        let shellcode_root = temp.path().join("src/Havoc/payloads");
+        let source_root = temp.path().join("agent/demon");
+        let shellcode_root = temp.path().join("agent/demon/payloads");
         let nasm_args = temp.path().join("nasm.args");
         let gcc_x64_args = temp.path().join("gcc-x64.args");
         let gcc_x86_args = temp.path().join("gcc-x86.args");
@@ -2742,8 +2742,8 @@ mod tests {
     > {
         let bin_dir = temp.path().join("bin");
         let cache_dir = temp.path().join("payload-cache");
-        let source_root = temp.path().join("src/Havoc/payloads/Demon");
-        let shellcode_root = temp.path().join("src/Havoc/payloads");
+        let source_root = temp.path().join("agent/demon");
+        let shellcode_root = temp.path().join("agent/demon/payloads");
         std::fs::create_dir_all(&bin_dir)?;
         std::fs::create_dir_all(source_root.join("src/core"))?;
         std::fs::create_dir_all(source_root.join("src/crypt"))?;
@@ -3324,8 +3324,8 @@ mod tests {
         let temp = TempDir::new()?;
         let bin_dir = temp.path().join("bin");
         let cache_dir = temp.path().join("payload-cache");
-        let source_root = temp.path().join("src/Havoc/payloads/Demon");
-        let shellcode_root = temp.path().join("src/Havoc/payloads");
+        let source_root = temp.path().join("agent/demon");
+        let shellcode_root = temp.path().join("agent/demon/payloads");
         let gcc_x86_args = temp.path().join("gcc-x86.args");
 
         std::fs::create_dir_all(&bin_dir)?;

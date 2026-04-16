@@ -11,7 +11,10 @@
 [test-groups]
 assembly-dispatch-serial = { max-threads = 1 }
 net-dispatch-serial = { max-threads = 1 }
-output-dispatch-serial = { max-threads = 1 }
+output-dispatch-basic-serial = { max-threads = 1 }
+output-dispatch-command-serial = { max-threads = 1 }
+output-dispatch-config-serial = { max-threads = 1 }
+output-dispatch-harvest-serial = { max-threads = 1 }
 service-bridge-serial = { max-threads = 1 }
 client-cli-contract-serial = { max-threads = 1 }
 
@@ -24,8 +27,20 @@ filter = 'package(red-cell) & binary(net_dispatch)'
 test-group = 'net-dispatch-serial'
 
 [[profile.default.overrides]]
-filter = 'package(red-cell) & binary(output_dispatch)'
-test-group = 'output-dispatch-serial'
+filter = 'package(red-cell) & binary(output_dispatch_basic)'
+test-group = 'output-dispatch-basic-serial'
+
+[[profile.default.overrides]]
+filter = 'package(red-cell) & binary(output_dispatch_command)'
+test-group = 'output-dispatch-command-serial'
+
+[[profile.default.overrides]]
+filter = 'package(red-cell) & binary(output_dispatch_config)'
+test-group = 'output-dispatch-config-serial'
+
+[[profile.default.overrides]]
+filter = 'package(red-cell) & binary(output_dispatch_harvest)'
+test-group = 'output-dispatch-harvest-serial'
 
 [[profile.default.overrides]]
 filter = 'package(red-cell) & binary(service_bridge)'

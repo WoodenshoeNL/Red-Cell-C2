@@ -88,6 +88,15 @@ pub struct SetListenerAccessRequest {
     pub allowed_operators: Vec<String>,
 }
 
+/// Response body for the operator logout/session-revocation endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct OperatorLogoutResponse {
+    /// Operator whose active sessions were revoked.
+    pub username: String,
+    /// Number of active sessions that were invalidated by this request.
+    pub revoked_sessions: usize,
+}
+
 // ── Error type ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Error)]
@@ -426,6 +435,85 @@ pub(super) async fn active_operators(
         })
         .collect();
     Json(entries)
+}
+
+// ── Logout / session revocation handler ───────────────────────────────────────
+
+#[utoipa::path(
+    post,
+    path = "/operators/{username}/logout",
+    context_path = "/api/v1",
+    tag = "operators",
+    security(("api_key" = [])),
+    params(
+        ("username" = String, Path, description = "Operator whose active sessions should be revoked")
+    ),
+    responses(
+        (status = 200, description = "Active operator sessions revoked", body = OperatorLogoutResponse),
+        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
+        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
+        (status = 404, description = "Operator not found", body = ApiErrorBody),
+        (status = 429, description = "Rate limit exceeded", body = ApiErrorBody)
+    )
+)]
+pub(super) async fn logout_operator(
+    State(state): State<TeamserverState>,
+    identity: AdminApiAccess,
+    Path(username): Path<String>,
+) -> Result<Json<OperatorLogoutResponse>, OperatorApiError> {
+    if !state.auth.is_operator_configured(&username).await {
+        record_audit_entry(
+            &state.database,
+            &state.webhooks,
+            &identity.key_id,
+            "operator.logout",
+            "operator",
+            Some(username.clone()),
+            audit_details(
+                AuditResultStatus::Failure,
+                None,
+                Some("logout"),
+                Some(parameter_object([
+                    ("username", Value::String(username.clone())),
+                    ("error", Value::String("operator_not_found".to_owned())),
+                ])),
+            ),
+        )
+        .await;
+        return Err(OperatorApiError::Auth(AuthError::OperatorNotFound { username }));
+    }
+
+    let revoked = state.auth.revoke_sessions_for_username(&username).await;
+    let revoked_connection_ids: Vec<Value> = revoked
+        .iter()
+        .map(|session| Value::String(session.connection_id.to_string()))
+        .collect();
+    let revoked_count = revoked.len();
+
+    record_audit_entry(
+        &state.database,
+        &state.webhooks,
+        &identity.key_id,
+        "operator.logout",
+        "operator",
+        Some(username.clone()),
+        audit_details(
+            AuditResultStatus::Success,
+            None,
+            Some("logout"),
+            Some(parameter_object([
+                ("username", Value::String(username.clone())),
+                (
+                    "revoked_sessions",
+                    Value::Number(serde_json::Number::from(revoked_count)),
+                ),
+                ("connection_ids", Value::Array(revoked_connection_ids)),
+            ])),
+        ),
+    )
+    .await;
+
+    Ok(Json(OperatorLogoutResponse { username, revoked_sessions: revoked_count }))
 }
 
 // ── Agent group access handlers ───────────────────────────────────────────────

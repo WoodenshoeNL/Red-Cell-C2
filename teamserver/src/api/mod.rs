@@ -77,6 +77,7 @@ pub fn api_routes(api: ApiRuntime) -> Router<TeamserverState> {
         .route("/operators/active", get(operators::active_operators))
         .route("/operators/{username}", delete(operators::delete_operator))
         .route("/operators/{username}/role", put(operators::update_operator_role))
+        .route("/operators/{username}/logout", post(operators::logout_operator))
         .route(
             "/operators/{username}/agent-groups",
             get(operators::get_operator_agent_groups).put(operators::set_operator_agent_groups),

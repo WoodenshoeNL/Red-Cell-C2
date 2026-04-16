@@ -506,6 +506,28 @@ impl AuthService {
         self.sessions.write().await.touch_activity(connection_id, now, &self.session_policy)
     }
 
+    /// Revoke every authenticated session belonging to `username`.
+    ///
+    /// Returns the sessions that were removed from the registry so the caller
+    /// can record an audit entry describing which tokens/connections were
+    /// invalidated. The underlying WebSocket is not closed synchronously; the
+    /// operator session loop detects the revocation via
+    /// [`SessionActivity::NotFound`] on the next authenticated frame and
+    /// terminates the connection.
+    #[instrument(skip(self), fields(username = %username))]
+    pub async fn revoke_sessions_for_username(&self, username: &str) -> Vec<OperatorSession> {
+        self.sessions.write().await.remove_by_username(username)
+    }
+
+    /// Return whether an operator account is configured with the given username.
+    ///
+    /// Covers both profile-configured and runtime-created operators; does not
+    /// consider whether the account currently has an active session.
+    #[instrument(skip(self), fields(username = %username))]
+    pub async fn is_operator_configured(&self, username: &str) -> bool {
+        self.credentials.read().await.contains_key(username)
+    }
+
     async fn load_runtime_operators(&self) -> Result<(), AuthError> {
         let Some(runtime_operators) = &self.runtime_operators else {
             return Ok(());

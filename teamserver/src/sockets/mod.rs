@@ -1,27 +1,25 @@
 //! Teamserver-managed socket relay runtime for Demon `COMMAND_SOCKET` tasks.
 
+mod relay;
 mod socks_proto;
 mod types;
 
 use std::collections::HashMap;
-use std::io;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::AtomicU32;
 
-use red_cell_common::demon::{DemonCommand, DemonSocketCommand};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpListener;
 use tokio::runtime::Handle;
-use tokio::sync::{Mutex, RwLock, oneshot};
-use tracing::{debug, warn};
+use tokio::sync::{RwLock, oneshot};
+use tracing::warn;
 
-use crate::{AgentRegistry, EventBus, Job, TeamserverError};
+use crate::{AgentRegistry, EventBus};
 
 pub use types::SocketRelayError;
 use types::{
-    AgentSocketState, MAX_GLOBAL_SOCKETS, MAX_RELAY_LISTENERS, MAX_SOCKETS_PER_AGENT,
-    PendingClient, RelayStateSweeper, SOCKS_REPLY_GENERAL_FAILURE, SOCKS_REPLY_SUCCEEDED,
-    STALE_AGENT_SWEEP_INTERVAL, SocksConnectRequest, SocksServerHandle, io_error, parse_port,
+    AgentSocketState, MAX_RELAY_LISTENERS, RelayStateSweeper, SOCKS_REPLY_GENERAL_FAILURE,
+    SOCKS_REPLY_SUCCEEDED, STALE_AGENT_SWEEP_INTERVAL, SocksServerHandle, parse_port,
 };
 
 /// Teamserver-owned SOCKS5 listeners and pending reverse-proxy client sockets.
@@ -322,228 +320,6 @@ impl SocketRelayManager {
         }
         Ok(())
     }
-
-    async fn handle_socks_client(
-        &self,
-        agent_id: u32,
-        server_port: u16,
-        mut stream: TcpStream,
-    ) -> Result<(), io::Error> {
-        socks_proto::negotiate_socks5(&mut stream).await?;
-        let request = socks_proto::read_socks_connect_request(&mut stream).await?;
-        let socket_id = self.next_socket_id.fetch_add(1, Ordering::Relaxed);
-        let (read_half, write_half) = stream.into_split();
-
-        self.register_client(
-            agent_id,
-            socket_id,
-            PendingClient {
-                server_port,
-                atyp: request.atyp,
-                address: request.address.clone(),
-                port: request.port,
-                connected: false,
-                writer: Arc::new(Mutex::new(write_half)),
-                read_half: Some(read_half),
-            },
-        )
-        .await
-        .map_err(|e| io::Error::other(e.to_string()))?;
-        self.enqueue_connect_job(agent_id, socket_id, &request).await.map_err(io_error)?;
-        Ok(())
-    }
-
-    async fn register_client(
-        &self,
-        agent_id: u32,
-        socket_id: u32,
-        client: PendingClient,
-    ) -> Result<(), SocketRelayError> {
-        let mut state = self.state.write().await;
-
-        let global_count: usize = state.values().map(|s| s.clients.len()).sum();
-        if global_count >= MAX_GLOBAL_SOCKETS {
-            warn!(
-                agent_id = format_args!("{agent_id:08X}"),
-                global_count,
-                limit = MAX_GLOBAL_SOCKETS,
-                "global SOCKS connection limit reached — rejecting new client"
-            );
-            return Err(SocketRelayError::GlobalConnectionLimit { limit: MAX_GLOBAL_SOCKETS });
-        }
-
-        let agent_state = state.entry(agent_id).or_default();
-        if agent_state.clients.len() >= MAX_SOCKETS_PER_AGENT {
-            warn!(
-                agent_id = format_args!("{agent_id:08X}"),
-                agent_count = agent_state.clients.len(),
-                limit = MAX_SOCKETS_PER_AGENT,
-                "per-agent SOCKS connection limit reached — rejecting new client"
-            );
-            return Err(SocketRelayError::AgentConnectionLimit {
-                agent_id,
-                limit: MAX_SOCKETS_PER_AGENT,
-            });
-        }
-
-        agent_state.clients.insert(socket_id, client);
-        Ok(())
-    }
-
-    async fn spawn_client_reader(
-        &self,
-        agent_id: u32,
-        socket_id: u32,
-        mut reader: tokio::net::tcp::OwnedReadHalf,
-    ) {
-        let manager = self.clone();
-        tokio::spawn(async move {
-            let mut buf = vec![0_u8; 4096];
-            loop {
-                match reader.read(&mut buf).await {
-                    Ok(0) => {
-                        if let Err(e) = manager.enqueue_close_job(agent_id, socket_id).await {
-                            warn!(agent_id = format_args!("{agent_id:08X}"), socket_id = format_args!("{socket_id:08X}"), error = %e, "SOCKS5 read EOF: enqueue_close_job failed");
-                        }
-                        if let Err(e) = manager.remove_client(agent_id, socket_id).await {
-                            warn!(agent_id = format_args!("{agent_id:08X}"), socket_id = format_args!("{socket_id:08X}"), error = %e, "SOCKS5 read EOF: remove_client failed");
-                        }
-                        break;
-                    }
-                    Ok(read) => {
-                        if manager
-                            .enqueue_write_job(agent_id, socket_id, &buf[..read])
-                            .await
-                            .is_err()
-                        {
-                            if let Err(e) = manager.remove_client(agent_id, socket_id).await {
-                                warn!(agent_id = format_args!("{agent_id:08X}"), socket_id = format_args!("{socket_id:08X}"), error = %e, "SOCKS5 write failure: remove_client failed");
-                            }
-                            break;
-                        }
-                    }
-                    Err(error) => {
-                        debug!(agent_id = format_args!("{agent_id:08X}"), socket_id = format_args!("{socket_id:08X}"), %error, "SOCKS5 client read loop failed");
-                        if let Err(e) = manager.enqueue_close_job(agent_id, socket_id).await {
-                            warn!(agent_id = format_args!("{agent_id:08X}"), socket_id = format_args!("{socket_id:08X}"), error = %e, "SOCKS5 read error: enqueue_close_job failed");
-                        }
-                        if let Err(e) = manager.remove_client(agent_id, socket_id).await {
-                            warn!(agent_id = format_args!("{agent_id:08X}"), socket_id = format_args!("{socket_id:08X}"), error = %e, "SOCKS5 read error: remove_client failed");
-                        }
-                        break;
-                    }
-                }
-            }
-        });
-    }
-
-    async fn enqueue_connect_job(
-        &self,
-        agent_id: u32,
-        socket_id: u32,
-        request: &SocksConnectRequest,
-    ) -> Result<(), TeamserverError> {
-        let mut payload = Vec::new();
-        payload.extend_from_slice(&u32::from(DemonSocketCommand::Connect).to_le_bytes());
-        payload.extend_from_slice(&socket_id.to_le_bytes());
-        payload.push(request.atyp);
-        socks_proto::write_len_prefixed_bytes(&mut payload, &request.address)?;
-        payload.extend_from_slice(&request.port.to_le_bytes());
-        self.enqueue_socket_job(agent_id, socket_id, payload, "socket connect").await
-    }
-
-    async fn enqueue_write_job(
-        &self,
-        agent_id: u32,
-        socket_id: u32,
-        data: &[u8],
-    ) -> Result<(), TeamserverError> {
-        let mut payload = Vec::new();
-        payload.extend_from_slice(&u32::from(DemonSocketCommand::Write).to_le_bytes());
-        payload.extend_from_slice(&socket_id.to_le_bytes());
-        socks_proto::write_len_prefixed_bytes(&mut payload, data)?;
-        self.enqueue_socket_job(agent_id, socket_id, payload, "socket write").await
-    }
-
-    async fn enqueue_close_job(
-        &self,
-        agent_id: u32,
-        socket_id: u32,
-    ) -> Result<(), TeamserverError> {
-        let mut payload = Vec::new();
-        payload.extend_from_slice(&u32::from(DemonSocketCommand::Close).to_le_bytes());
-        payload.extend_from_slice(&socket_id.to_le_bytes());
-        self.enqueue_socket_job(agent_id, socket_id, payload, "socket close").await
-    }
-
-    async fn enqueue_socket_job(
-        &self,
-        agent_id: u32,
-        socket_id: u32,
-        payload: Vec<u8>,
-        command_line: &str,
-    ) -> Result<(), TeamserverError> {
-        self.registry
-            .enqueue_job(
-                agent_id,
-                Job {
-                    command: u32::from(DemonCommand::CommandSocket),
-                    request_id: 0,
-                    payload,
-                    command_line: command_line.to_owned(),
-                    task_id: format!("relay-{socket_id:08X}"),
-                    created_at: "0".to_owned(),
-                    operator: String::new(),
-                },
-            )
-            .await
-    }
-
-    async fn remove_client(
-        &self,
-        agent_id: u32,
-        socket_id: u32,
-    ) -> Result<PendingClient, SocketRelayError> {
-        let mut state = self.state.write().await;
-        let Some(agent_state) = state.get_mut(&agent_id) else {
-            return Err(SocketRelayError::ClientNotFound { agent_id, socket_id });
-        };
-        agent_state
-            .clients
-            .remove(&socket_id)
-            .ok_or(SocketRelayError::ClientNotFound { agent_id, socket_id })
-    }
-
-    async fn close_clients_for_port(
-        &self,
-        agent_id: u32,
-        port: u16,
-    ) -> Result<(), SocketRelayError> {
-        let socket_ids = {
-            let state = self.state.read().await;
-            let Some(agent_state) = state.get(&agent_id) else {
-                return Ok(());
-            };
-            agent_state
-                .clients
-                .iter()
-                .filter_map(|(socket_id, client)| {
-                    (client.server_port == port).then_some(*socket_id)
-                })
-                .collect::<Vec<_>>()
-        };
-
-        for socket_id in socket_ids {
-            if let Err(e) = self.enqueue_close_job(agent_id, socket_id).await {
-                warn!(agent_id = format_args!("{agent_id:08X}"), socket_id = format_args!("{socket_id:08X}"), error = %e, "SOCKS5 prune: enqueue_close_job failed");
-            }
-            if let Err(e) = self.close_client(agent_id, socket_id).await {
-                warn!(agent_id = format_args!("{agent_id:08X}"), socket_id = format_args!("{socket_id:08X}"), error = %e, "SOCKS5 prune: close_client failed");
-            }
-        }
-
-        Ok(())
-    }
 }
 
 fn spawn_stale_agent_sweeper(
@@ -620,7 +396,10 @@ mod tests {
     use tokio::sync::oneshot;
     use zeroize::Zeroizing;
 
-    use super::types::{SOCKS_ATYP_IPV4, SOCKS_VERSION};
+    use super::types::{
+        MAX_GLOBAL_SOCKETS, MAX_SOCKETS_PER_AGENT, PendingClient, SOCKS_ATYP_IPV4,
+        SOCKS_REPLY_GENERAL_FAILURE, SOCKS_REPLY_SUCCEEDED, SOCKS_VERSION,
+    };
     use super::{SocketRelayError, SocketRelayManager, SocksServerHandle};
     use crate::{AgentRegistry, Database, EventBus};
 
@@ -981,7 +760,7 @@ mod tests {
             let agent_state = state.entry(agent_id).or_default();
             agent_state.clients.insert(
                 socket_id,
-                super::PendingClient {
+                PendingClient {
                     server_port: 1080,
                     atyp: SOCKS_ATYP_IPV4,
                     address: vec![127, 0, 0, 1],
@@ -1023,7 +802,7 @@ mod tests {
         peer_read.read_exact(&mut response).await?;
         assert_eq!(
             response,
-            [SOCKS_VERSION, super::SOCKS_REPLY_SUCCEEDED, 0, SOCKS_ATYP_IPV4, 127, 0, 0, 1, 0, 80,],
+            [SOCKS_VERSION, SOCKS_REPLY_SUCCEEDED, 0, SOCKS_ATYP_IPV4, 127, 0, 0, 1, 0, 80,],
             "finish_connect(success=true) must send SOCKS_REPLY_SUCCEEDED to the client"
         );
 
@@ -1101,8 +880,7 @@ mod tests {
         let mut response = [0_u8; 10];
         peer_read.read_exact(&mut response).await?;
         assert_eq!(
-            response[1],
-            super::SOCKS_REPLY_GENERAL_FAILURE,
+            response[1], SOCKS_REPLY_GENERAL_FAILURE,
             "error_code values that do not fit in u8 must fall back to SOCKS_REPLY_GENERAL_FAILURE"
         );
 
@@ -1343,7 +1121,7 @@ mod tests {
         let agent_id: u32 = 0xDEAD_BEEF;
 
         // Fill up to the per-agent limit by inserting fake clients directly.
-        for i in 0..super::MAX_SOCKETS_PER_AGENT {
+        for i in 0..MAX_SOCKETS_PER_AGENT {
             let socket_id = i as u32;
             let (_peer_read, _peer_write) =
                 register_pending_client(&manager, agent_id, socket_id).await?;
@@ -1353,7 +1131,7 @@ mod tests {
         {
             let state = manager.state.read().await;
             let agent_state = state.get(&agent_id).expect("agent state present");
-            assert_eq!(agent_state.clients.len(), super::MAX_SOCKETS_PER_AGENT);
+            assert_eq!(agent_state.clients.len(), MAX_SOCKETS_PER_AGENT);
         }
 
         // The next registration must be rejected.
@@ -1369,7 +1147,7 @@ mod tests {
             .register_client(
                 agent_id,
                 0xFFFF_FFFF,
-                super::PendingClient {
+                PendingClient {
                     server_port: 1080,
                     atyp: SOCKS_ATYP_IPV4,
                     address: vec![127, 0, 0, 1],
@@ -1385,7 +1163,7 @@ mod tests {
             matches!(
                 result,
                 Err(SocketRelayError::AgentConnectionLimit { agent_id: id, limit })
-                    if id == agent_id && limit == super::MAX_SOCKETS_PER_AGENT
+                    if id == agent_id && limit == MAX_SOCKETS_PER_AGENT
             ),
             "expected AgentConnectionLimit, got: {result:?}"
         );
@@ -1400,8 +1178,8 @@ mod tests {
 
         // Spread clients across multiple agents to hit the global limit without hitting
         // the per-agent limit. We need MAX_GLOBAL_SOCKETS total clients.
-        let agents_needed = super::MAX_GLOBAL_SOCKETS.div_ceil(super::MAX_SOCKETS_PER_AGENT);
-        let clients_per_agent = super::MAX_GLOBAL_SOCKETS / agents_needed;
+        let agents_needed = MAX_GLOBAL_SOCKETS.div_ceil(MAX_SOCKETS_PER_AGENT);
+        let clients_per_agent = MAX_GLOBAL_SOCKETS / agents_needed;
 
         for agent_idx in 0..agents_needed {
             let agent_id = (agent_idx as u32) + 1;
@@ -1414,8 +1192,8 @@ mod tests {
         let mut total_inserted = 0_usize;
         for agent_idx in 0..agents_needed {
             let agent_id = (agent_idx as u32) + 1;
-            let to_insert = if total_inserted + clients_per_agent > super::MAX_GLOBAL_SOCKETS {
-                super::MAX_GLOBAL_SOCKETS - total_inserted
+            let to_insert = if total_inserted + clients_per_agent > MAX_GLOBAL_SOCKETS {
+                MAX_GLOBAL_SOCKETS - total_inserted
             } else {
                 clients_per_agent
             };
@@ -1425,7 +1203,7 @@ mod tests {
                     register_pending_client(&manager, agent_id, socket_id).await?;
             }
             total_inserted += to_insert;
-            if total_inserted >= super::MAX_GLOBAL_SOCKETS {
+            if total_inserted >= MAX_GLOBAL_SOCKETS {
                 break;
             }
         }
@@ -1434,7 +1212,7 @@ mod tests {
         {
             let state = manager.state.read().await;
             let global_count: usize = state.values().map(|s| s.clients.len()).sum();
-            assert_eq!(global_count, super::MAX_GLOBAL_SOCKETS);
+            assert_eq!(global_count, MAX_GLOBAL_SOCKETS);
         }
 
         // The next registration on any agent must fail with GlobalConnectionLimit.
@@ -1451,7 +1229,7 @@ mod tests {
             .register_client(
                 target_agent,
                 0xFFFF_FFFF,
-                super::PendingClient {
+                PendingClient {
                     server_port: 1080,
                     atyp: SOCKS_ATYP_IPV4,
                     address: vec![127, 0, 0, 1],
@@ -1467,7 +1245,7 @@ mod tests {
             matches!(
                 result,
                 Err(SocketRelayError::GlobalConnectionLimit { limit })
-                    if limit == super::MAX_GLOBAL_SOCKETS
+                    if limit == MAX_GLOBAL_SOCKETS
             ),
             "expected GlobalConnectionLimit, got: {result:?}"
         );
@@ -1661,7 +1439,7 @@ mod tests {
                     .register_client(
                         agent_id,
                         socket_id,
-                        super::PendingClient {
+                        PendingClient {
                             server_port: 1080,
                             atyp: SOCKS_ATYP_IPV4,
                             address: vec![127, 0, 0, 1],
@@ -1710,7 +1488,7 @@ mod tests {
 
         let agent_id: u32 = 0xDEAD_BEEF;
         // Try to register more than the limit concurrently.
-        let attempt_count = super::MAX_SOCKETS_PER_AGENT + 50;
+        let attempt_count = MAX_SOCKETS_PER_AGENT + 50;
 
         let mut handles = Vec::with_capacity(attempt_count);
         for i in 0..attempt_count {
@@ -1730,7 +1508,7 @@ mod tests {
                     .register_client(
                         agent_id,
                         socket_id,
-                        super::PendingClient {
+                        PendingClient {
                             server_port: 1080,
                             atyp: SOCKS_ATYP_IPV4,
                             address: vec![127, 0, 0, 1],
@@ -1753,14 +1531,13 @@ mod tests {
         }
 
         assert_eq!(
-            success_count,
-            super::MAX_SOCKETS_PER_AGENT,
+            success_count, MAX_SOCKETS_PER_AGENT,
             "exactly MAX_SOCKETS_PER_AGENT registrations should succeed"
         );
 
         let state = manager.state.read().await;
         let agent_state = state.get(&agent_id).expect("agent state present");
-        assert_eq!(agent_state.clients.len(), super::MAX_SOCKETS_PER_AGENT);
+        assert_eq!(agent_state.clients.len(), MAX_SOCKETS_PER_AGENT);
 
         Ok(())
     }
@@ -2037,7 +1814,7 @@ mod tests {
         // Consume the SOCKS5 CONNECT reply (10 bytes for IPv4).
         let mut reply = [0_u8; 10];
         peer_read.read_exact(&mut reply).await?;
-        assert_eq!(reply[1], super::SOCKS_REPLY_SUCCEEDED, "SOCKS reply must indicate success");
+        assert_eq!(reply[1], SOCKS_REPLY_SUCCEEDED, "SOCKS reply must indicate success");
 
         // --- Direction 1: SOCKS client → agent (produces a write job) ---
         let client_payload = b"hello from client";

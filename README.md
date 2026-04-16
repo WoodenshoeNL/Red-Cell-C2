@@ -4,6 +4,25 @@ A Rust rewrite of the [Havoc C2 framework](https://github.com/HavocFramework/Hav
 
 > **Status**: Planning complete, implementation in progress. See [issue tracker](#issue-tracker) for current state.
 
+> **This is a vibe-coded hobby project.** The entire codebase is written by AI agent
+> loops (Claude, Codex, Cursor) with human direction. It is not production-grade
+> software — use it for learning, experimentation, and authorized security testing
+> only.
+
+## Disclaimer
+
+This software is provided for **authorized security testing, research, and educational
+purposes only**. It is intended for use by security professionals in controlled
+environments with proper authorization.
+
+- Do not use this tool against systems you do not own or have explicit written
+  permission to test.
+- The authors assume no liability for misuse or damage caused by this software.
+- Users are solely responsible for compliance with all applicable local, state,
+  national, and international laws.
+
+By using this software you agree to these terms.
+
 ---
 
 ## Overview
@@ -337,4 +356,6 @@ Red-Cell-C2/
 
 ## Status
 
-This is a personal hobby project and is not open for contributions. Feel free to follow along or use it as inspiration, but please do not open pull requests.
+This is a vibe-coded personal hobby project — built entirely by AI agent loops with
+human direction. It is not open for contributions. Feel free to follow along or use
+it as inspiration, but please do not open pull requests.

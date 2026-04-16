@@ -68,18 +68,6 @@ this test's window, causing it to be rate-limited before the expected reconnect 
 **Workaround**: Run in isolation. Do not treat a failure here as a regression unless you
 changed rate-limiter code.
 
-### `repeated_wrong_passwords_trigger_rate_limiter_lockout`
-
-**File**: `teamserver/src/auth.rs`
-
-**Symptom**: Receives `Close(None)` instead of the expected `InitConnectionError` frame.
-The close is sent by the rate limiter before the full error response is written when
-another test has recently exhausted the same global limiter bucket.
-
-**Tracking**: red-cell-c2-rlt01 (open)
-
-**Workaround**: Run in isolation. Do not conflate with auth logic regressions.
-
 ---
 
 ## Category 3 — Timing / sleep-dependent tests

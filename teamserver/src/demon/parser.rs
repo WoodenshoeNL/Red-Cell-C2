@@ -260,28 +260,32 @@ impl DemonPacketParser {
 
         // For seq-protected agents (Specter/Archon with INIT_EXT_SEQ_PROTECTED), extract and
         // validate the 8-byte little-endian sequence number that prefixes the decrypted body.
-        let (callback_body, incoming_seq): (Cow<'_, [u8]>, Option<u64>) =
-            if self.registry.is_seq_protected(agent_id).await {
-                use red_cell_common::callback_seq::SEQ_PREFIX_BYTES;
+        let callback_body: Cow<'_, [u8]> = if self.registry.is_seq_protected(agent_id).await {
+            use red_cell_common::callback_seq::SEQ_PREFIX_BYTES;
 
-                if decrypted.len() < SEQ_PREFIX_BYTES {
-                    return Err(DemonParserError::Registry(
-                        TeamserverError::InvalidPersistedValue {
-                            field: "callback_seq_prefix",
-                            message: format!(
-                                "payload too short: {} bytes < {SEQ_PREFIX_BYTES} required",
-                                decrypted.len()
-                            ),
-                        },
-                    ));
-                }
+            if decrypted.len() < SEQ_PREFIX_BYTES {
+                return Err(DemonParserError::Registry(TeamserverError::InvalidPersistedValue {
+                    field: "callback_seq_prefix",
+                    message: format!(
+                        "payload too short: {} bytes < {SEQ_PREFIX_BYTES} required",
+                        decrypted.len()
+                    ),
+                }));
+            }
 
-                let mut seq_bytes = [0u8; SEQ_PREFIX_BYTES];
-                seq_bytes.copy_from_slice(&decrypted[..SEQ_PREFIX_BYTES]);
-                let incoming_seq = u64::from_le_bytes(seq_bytes);
-                let body = decrypted[SEQ_PREFIX_BYTES..].to_vec();
+            let mut seq_bytes = [0u8; SEQ_PREFIX_BYTES];
+            seq_bytes.copy_from_slice(&decrypted[..SEQ_PREFIX_BYTES]);
+            let incoming_seq = u64::from_le_bytes(seq_bytes);
+            let body = decrypted[SEQ_PREFIX_BYTES..].to_vec();
 
-                self.registry.check_callback_seq(agent_id, incoming_seq).await.map_err(|e| {
+            // Atomic check-and-advance: holding the per-agent last_seen_seq mutex
+            // across validation and persistence closes the TOCTOU window that would
+            // otherwise let two concurrent callbacks with the same seq both pass.
+            // Consuming the seq slot here (before parse) is safe because the payload
+            // is already AES-CTR-authenticated — a genuine agent will not resend a
+            // callback whose body we fail to parse.
+            self.registry.check_and_advance_callback_seq(agent_id, incoming_seq).await.map_err(
+                |e| {
                     match &e {
                         TeamserverError::CallbackSeqReplay { .. }
                         | TeamserverError::CallbackSeqGapTooLarge { .. } => {
@@ -293,22 +297,18 @@ impl DemonPacketParser {
                         _ => {}
                     }
                     DemonParserError::Registry(e)
-                })?;
+                },
+            )?;
 
-                (Cow::Owned(body), Some(incoming_seq))
-            } else {
-                (Cow::Borrowed(decrypted.as_slice()), None)
-            };
+            Cow::Owned(body)
+        } else {
+            Cow::Borrowed(decrypted.as_slice())
+        };
 
         let packages = parse_callback_packages(command_id, request_id, &callback_body)?;
 
         // Parse succeeded: advance the CTR offset now that we know the payload was genuine.
         self.registry.advance_ctr_for_agent(agent_id, remaining.len()).await?;
-
-        // Advance the sequence number only after a successful parse.
-        if let Some(seq) = incoming_seq {
-            self.registry.advance_last_seen_seq(agent_id, seq).await?;
-        }
 
         Ok(ParsedDemonPacket::Callback { header: envelope.header, packages })
     }

@@ -3824,6 +3824,96 @@ mod tests {
         assert!(!registry.is_seq_protected(0xDEAD_BEEF).await);
     }
 
+    #[tokio::test]
+    async fn check_and_advance_callback_seq_accepts_and_advances() -> Result<(), TeamserverError> {
+        let registry = AgentRegistry::new(test_database().await?);
+        let agent = sample_agent_with_crypto(0x200A_0007, test_key(0xE7), test_iv(0xF7));
+        registry.insert(agent.clone()).await?;
+
+        registry.check_and_advance_callback_seq(agent.agent_id, 1).await?;
+
+        // Same seq must now be rejected as a replay.
+        let err = registry
+            .check_and_advance_callback_seq(agent.agent_id, 1)
+            .await
+            .expect_err("replay of seq=1 must be rejected");
+        assert!(matches!(err, TeamserverError::CallbackSeqReplay { .. }), "got: {err:?}");
+
+        // Forward progress still works.
+        registry.check_and_advance_callback_seq(agent.agent_id, 2).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn check_and_advance_callback_seq_rejects_replay_without_persisting()
+    -> Result<(), TeamserverError> {
+        // A rejected seq must not advance the stored value — a later legitimate callback
+        // with that seq must still be accepted.
+        let database = test_database().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let agent = sample_agent_with_crypto(0x200A_0008, test_key(0xE8), test_iv(0xF8));
+        registry.insert(agent.clone()).await?;
+
+        registry.check_and_advance_callback_seq(agent.agent_id, 5).await?;
+
+        // Replay attempt at seq=5 must fail and must NOT touch stored state.
+        let err = registry
+            .check_and_advance_callback_seq(agent.agent_id, 5)
+            .await
+            .expect_err("replay must be rejected");
+        assert!(matches!(err, TeamserverError::CallbackSeqReplay { .. }));
+
+        let persisted =
+            database.agents().get_persisted(agent.agent_id).await?.expect("agent must exist");
+        assert_eq!(persisted.last_seen_seq, 5, "rejected replay must not advance last_seen_seq");
+        Ok(())
+    }
+
+    /// Regression test for red-cell-c2-6ae3y: split check/advance created a TOCTOU window
+    /// where two concurrent callbacks with the same seq could both pass validation.
+    /// With the atomic check-and-advance, exactly one concurrent caller must succeed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn check_and_advance_callback_seq_is_atomic_under_concurrency()
+    -> Result<(), TeamserverError> {
+        let registry = Arc::new(AgentRegistry::new(test_database().await?));
+        let agent = sample_agent_with_crypto(0x200A_0009, test_key(0xE9), test_iv(0xF9));
+        registry.insert(agent.clone()).await?;
+
+        const CONCURRENT_CALLERS: usize = 16;
+        const TARGET_SEQ: u64 = 1;
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(CONCURRENT_CALLERS));
+        let mut handles = Vec::with_capacity(CONCURRENT_CALLERS);
+        for _ in 0..CONCURRENT_CALLERS {
+            let registry = Arc::clone(&registry);
+            let barrier = Arc::clone(&barrier);
+            let agent_id = agent.agent_id;
+            handles.push(tokio::spawn(async move {
+                // Synchronise tasks so all calls pile up on the same seq simultaneously.
+                barrier.wait().await;
+                registry.check_and_advance_callback_seq(agent_id, TARGET_SEQ).await
+            }));
+        }
+
+        let mut successes = 0usize;
+        let mut replays = 0usize;
+        for h in handles {
+            match h.await.expect("task must not panic") {
+                Ok(()) => successes += 1,
+                Err(TeamserverError::CallbackSeqReplay { .. }) => replays += 1,
+                Err(other) => panic!("unexpected error from concurrent caller: {other:?}"),
+            }
+        }
+
+        assert_eq!(successes, 1, "exactly one concurrent caller must advance the seq");
+        assert_eq!(
+            replays,
+            CONCURRENT_CALLERS - 1,
+            "all other concurrent callers must be rejected as replays"
+        );
+        Ok(())
+    }
+
     // ── Degraded-mode write queue tests ────────────────────────────────
 
     #[tokio::test]

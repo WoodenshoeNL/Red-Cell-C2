@@ -282,8 +282,12 @@ impl DnsReconBlockLimiter {
             window.window_start = now;
         }
 
+        if window.attempts >= MAX_DNS_RECON_QUERIES_PER_IP {
+            return false;
+        }
+
         window.attempts += 1;
-        window.attempts <= MAX_DNS_RECON_QUERIES_PER_IP
+        true
     }
 
     #[cfg(test)]

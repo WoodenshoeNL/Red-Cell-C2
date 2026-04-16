@@ -812,66 +812,65 @@ pub(crate) async fn session_api_dispatch_line(
 mod tests {
     use super::*;
 
+    /// Source text of the client-cli session allowlist, included at compile
+    /// time so this test tracks the actual CLI file rather than a local copy.
+    /// If the file moves or is renamed, update this path and the parser below.
+    const CLIENT_CLI_SESSION_ALLOWLIST_SRC: &str =
+        include_str!("../../../client-cli/src/commands/session/normalize.rs");
+
+    /// Extract the string literals inside the `HashSet::from([...])` block that
+    /// initialises `SESSION_KNOWN_COMMANDS` in the client-cli source.  The
+    /// parser is intentionally strict: it fails loudly if the file's shape
+    /// changes in a way the test can no longer understand, so drift between
+    /// the allowlist definition and this parity check is surfaced immediately.
+    fn parse_client_allowlist(src: &str) -> Vec<String> {
+        let anchor = "SESSION_KNOWN_COMMANDS";
+        let anchor_pos =
+            src.find(anchor).unwrap_or_else(|| panic!("`{anchor}` not found in client-cli source"));
+        let after_anchor = &src[anchor_pos..];
+        let open = after_anchor
+            .find("HashSet::from([")
+            .unwrap_or_else(|| panic!("`HashSet::from([` not found after `{anchor}`"));
+        let tail = &after_anchor[open + "HashSet::from([".len()..];
+        let close = tail
+            .find("])")
+            .unwrap_or_else(|| panic!("`])` closing `HashSet::from([` not found in client-cli"));
+        let block = &tail[..close];
+
+        let mut out = Vec::new();
+        let mut rest = block;
+        while let Some(start) = rest.find('"') {
+            let after = &rest[start + 1..];
+            let end = after
+                .find('"')
+                .expect("unterminated string literal in client-cli SESSION_KNOWN_COMMANDS");
+            out.push(after[..end].to_owned());
+            rest = &after[end + 1..];
+        }
+        out
+    }
+
     /// Every command that the client-cli advertises in `SESSION_KNOWN_COMMANDS`
     /// must be handled by `build_session_rest_request` (i.e. must not return
-    /// `SessionBuildError::UnknownCommand`).  When a new session command is
-    /// added to the client allowlist, this test fails until the teamserver
-    /// router is updated, preventing contract drift.
+    /// `SessionBuildError::UnknownCommand`).  The advertised list is parsed
+    /// directly from the client-cli source at compile time, so adding a
+    /// command to the CLI allowlist without a matching server match arm fails
+    /// this test — preventing contract drift between the two sides.
     #[test]
     fn session_router_handles_all_advertised_commands() {
-        let advertised: &[&str] = &[
-            "status",
-            "agent.list",
-            "agent.show",
-            "agent.exec",
-            "agent.output",
-            "agent.kill",
-            "agent.upload",
-            "agent.download",
-            "agent.groups",
-            "agent.set_groups",
-            "listener.list",
-            "listener.show",
-            "listener.create",
-            "listener.update",
-            "listener.start",
-            "listener.stop",
-            "listener.delete",
-            "listener.mark",
-            "listener.access",
-            "listener.set_access",
-            "operator.list",
-            "operator.create",
-            "operator.delete",
-            "operator.set_role",
-            "operator.show_agent_groups",
-            "operator.set_agent_groups",
-            "audit.list",
-            "log.list",
-            "log.tail",
-            "session_activity.list",
-            "credential.list",
-            "credential.show",
-            "job.list",
-            "job.show",
-            "loot.list",
-            "loot.download",
-            "loot.show",
-            "payload.list",
-            "payload.build",
-            "payload.job",
-            "payload.download",
-            "payload_cache.flush",
-            "payload-cache.flush",
-            "webhooks.stats",
-        ];
+        let advertised = parse_client_allowlist(CLIENT_CLI_SESSION_ALLOWLIST_SRC);
+        assert!(
+            !advertised.is_empty(),
+            "parsed empty allowlist from client-cli source — parser likely broken",
+        );
 
         let empty = serde_json::json!({});
         let mut unknown = Vec::new();
-        for cmd in advertised {
-            match build_session_rest_request(cmd, &empty) {
-                Err(SessionBuildError::UnknownCommand(_)) => unknown.push(*cmd),
-                _ => {}
+        for cmd in &advertised {
+            if let Err(SessionBuildError::UnknownCommand(_)) =
+                build_session_rest_request(cmd, &empty)
+            {
+                unknown.push(cmd.clone());
             }
         }
 
@@ -880,6 +879,26 @@ mod tests {
             "session router does not handle commands advertised by client-cli: {unknown:?}\n\
              Add match arms in `build_session_rest_request` for each missing command.",
         );
+    }
+
+    #[test]
+    fn client_allowlist_parser_finds_known_sentinels() {
+        let advertised = parse_client_allowlist(CLIENT_CLI_SESSION_ALLOWLIST_SRC);
+        for expected in [
+            "status",
+            "agent.list",
+            "agent.groups",
+            "listener.access",
+            "operator.show_agent_groups",
+            "log.tail",
+            "payload-cache.flush",
+            "webhooks.stats",
+        ] {
+            assert!(
+                advertised.iter().any(|c| c == expected),
+                "expected `{expected}` in parsed client allowlist, got {advertised:?}",
+            );
+        }
     }
 
     #[test]

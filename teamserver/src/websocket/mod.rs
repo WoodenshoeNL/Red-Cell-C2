@@ -16,13 +16,13 @@ use crate::MAX_AGENT_MESSAGE_LEN;
 use command_enc::{build_job, build_jobs, encode_utf16, write_len_prefixed_bytes, write_u32};
 
 #[cfg(test)]
+use connection::DisconnectKind;
+#[cfg(test)]
 use connection::{
     AUTHENTICATION_FRAME_TIMEOUT, LOGIN_WINDOW_DURATION, MAX_FAILED_LOGIN_ATTEMPTS,
     MAX_LOGIN_ATTEMPT_WINDOWS, OPERATOR_MAX_MESSAGE_SIZE,
 };
 pub use connection::{ActiveOperatorInfo, LoginRateLimiter, OperatorConnectionManager};
-#[cfg(test)]
-use connection::DisconnectKind;
 #[cfg(test)]
 use dispatch::serialize_for_audit;
 pub(crate) use dispatch::{AgentCommandError, execute_agent_task};

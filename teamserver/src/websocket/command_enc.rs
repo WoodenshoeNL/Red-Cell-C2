@@ -15,7 +15,7 @@ use tracing::debug;
 use uuid::Uuid;
 
 use super::AgentCommandError;
-use crate::{Job, MAX_AGENT_MESSAGE_LEN};
+use crate::Job;
 
 // ── Job builders ────────────────────────────────────────────────────────────
 
@@ -126,49 +126,7 @@ fn task_payload(
     Ok(Vec::new())
 }
 
-pub(super) fn build_upload_jobs(
-    info: &red_cell_common::operator::AgentTaskInfo,
-    request_id: u32,
-    created_at: &str,
-    operator: &str,
-) -> Result<Vec<Job>, AgentCommandError> {
-    let remote_path = upload_remote_path(info)?;
-    let content = upload_content(info)?;
-    let memfile_id = random_u32();
-    let mut jobs = Vec::new();
-
-    for chunk in content.chunks(MAX_AGENT_MESSAGE_LEN) {
-        let mut payload = Vec::new();
-        write_u32(&mut payload, memfile_id);
-        write_u64(&mut payload, content.len() as u64);
-        write_len_prefixed_bytes(&mut payload, chunk)?;
-        jobs.push(Job {
-            command: u32::from(DemonCommand::CommandMemFile),
-            request_id: random_u32(),
-            payload,
-            command_line: info.command_line.clone(),
-            task_id: info.task_id.clone(),
-            created_at: created_at.to_owned(),
-            operator: operator.to_owned(),
-        });
-    }
-
-    let mut payload = Vec::new();
-    write_u32(&mut payload, u32::from(DemonFilesystemCommand::Upload));
-    write_len_prefixed_bytes(&mut payload, &encode_utf16(&remote_path))?;
-    write_u32(&mut payload, memfile_id);
-    jobs.push(Job {
-        command: u32::from(DemonCommand::CommandFs),
-        request_id,
-        payload,
-        command_line: info.command_line.clone(),
-        task_id: info.task_id.clone(),
-        created_at: created_at.to_owned(),
-        operator: operator.to_owned(),
-    });
-
-    Ok(jobs)
-}
+pub(super) use super::upload::build_upload_jobs;
 
 // ── Note / exit helpers ─────────────────────────────────────────────────────
 
@@ -397,7 +355,7 @@ fn encode_fs_payload(
             write_len_prefixed_bytes(&mut payload, &encode_utf16(&path))?;
         }
         DemonFilesystemCommand::Upload => {
-            let remote_path = upload_remote_path(info)?;
+            let remote_path = super::upload::upload_remote_path(info)?;
             let memfile_id = required_u32(info, &["MemFileId"], "MemFileId")?;
             write_len_prefixed_bytes(&mut payload, &encode_utf16(&remote_path))?;
             write_u32(&mut payload, memfile_id);
@@ -894,26 +852,6 @@ pub(super) fn write_len_prefixed_bytes(
     write_u32(buf, len);
     buf.extend_from_slice(value);
     Ok(())
-}
-
-pub(super) fn upload_remote_path(
-    info: &red_cell_common::operator::AgentTaskInfo,
-) -> Result<String, AgentCommandError> {
-    let args = required_string(info, &["Arguments"], "Arguments")?;
-    let remote =
-        args.split(';').next().ok_or(AgentCommandError::MissingField { field: "Arguments" })?;
-    let remote = decode_base64_field("Arguments[0]", remote)?;
-    Ok(String::from_utf8_lossy(&remote).into_owned())
-}
-
-pub(super) fn upload_content(
-    info: &red_cell_common::operator::AgentTaskInfo,
-) -> Result<Vec<u8>, AgentCommandError> {
-    let args = required_string(info, &["Arguments"], "Arguments")?;
-    let mut parts = args.splitn(2, ';');
-    let _remote = parts.next().ok_or(AgentCommandError::MissingField { field: "Arguments" })?;
-    let content = parts.next().ok_or(AgentCommandError::MissingField { field: "Arguments" })?;
-    decode_base64_field("Arguments[1]", content)
 }
 
 pub(super) fn random_u32() -> u32 {

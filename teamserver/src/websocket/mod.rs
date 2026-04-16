@@ -6,6 +6,7 @@ mod connection;
 mod dispatch;
 mod lifecycle;
 mod snapshot;
+mod upload;
 
 #[cfg(test)]
 use crate::MAX_AGENT_MESSAGE_LEN;
@@ -1680,55 +1681,6 @@ mod tests {
             [u32::from(DemonTokenCommand::PrivsGetOrList).to_le_bytes(), 1_u32.to_le_bytes(),]
                 .concat()
         );
-    }
-
-    #[test]
-    fn build_jobs_splits_upload_into_memfile_chunks_and_final_fs_job() {
-        let content = vec![0x41; MAX_AGENT_MESSAGE_LEN + 16];
-        let jobs = build_jobs(
-            &AgentTaskInfo {
-                task_id: "2F".to_owned(),
-                command_line: "upload local.bin remote.bin".to_owned(),
-                demon_id: "DEADBEEF".to_owned(),
-                command_id: u32::from(DemonCommand::CommandFs).to_string(),
-                sub_command: Some("upload".to_owned()),
-                arguments: Some(format!(
-                    "{};{}",
-                    BASE64_STANDARD.encode("C:\\Temp\\remote.bin"),
-                    BASE64_STANDARD.encode(&content)
-                )),
-                ..AgentTaskInfo::default()
-            },
-            "",
-        )
-        .expect("filesystem upload should encode");
-
-        assert_eq!(jobs.len(), 3);
-        assert_eq!(jobs[0].command, u32::from(DemonCommand::CommandMemFile));
-        assert_eq!(jobs[1].command, u32::from(DemonCommand::CommandMemFile));
-        assert_eq!(jobs[2].command, u32::from(DemonCommand::CommandFs));
-        assert_eq!(jobs[2].request_id, 0x2F);
-
-        let memfile_id =
-            u32::from_le_bytes(jobs[0].payload[0..4].try_into().expect("memfile id should exist"));
-        assert_eq!(
-            u64::from_le_bytes(
-                jobs[0].payload[4..12].try_into().expect("memfile size should exist")
-            ),
-            u64::try_from(content.len()).expect("content length should fit"),
-        );
-        assert_eq!(
-            u32::from_le_bytes(
-                jobs[2].payload[0..4].try_into().expect("upload command should exist")
-            ),
-            u32::from(DemonFilesystemCommand::Upload)
-        );
-        let final_memfile_id = u32::from_le_bytes(
-            jobs[2].payload[jobs[2].payload.len() - 4..]
-                .try_into()
-                .expect("final memfile id should exist"),
-        );
-        assert_eq!(memfile_id, final_memfile_id);
     }
 
     #[test]

@@ -41,6 +41,9 @@ profiles/*.sqlite
 profiles/*.tls.crt
 profiles/*.tls.key
 
+# Claude Code worktrees (ephemeral, machine-local)
+.claude/worktrees/
+
 # Temporary files and runtime artifacts
 .tmp/
 Running

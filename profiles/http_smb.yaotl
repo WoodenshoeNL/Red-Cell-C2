@@ -23,7 +23,7 @@ Listeners {
     Http {
         Name         = "teams profile - http"
         Hosts        = [
-            "5pider.net", # our callback host.
+            "red-cell.nl", # our callback host.
         ]
         HostBind     = "0.0.0.0" # the address where the listener should bind to. 
         HostRotation = "round-robin"

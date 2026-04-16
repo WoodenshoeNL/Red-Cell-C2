@@ -11,6 +11,7 @@ use crate::api::auth::API_KEY_HEADER;
 use crate::api::session::{
     SESSION_MAX_RESPONSE_BODY, session_api_dispatch_line, session_ws_envelope_response,
 };
+use crate::database::AgentResponseRecord;
 use crate::{audit_details, parameter_object};
 
 use super::helpers::*;
@@ -417,4 +418,160 @@ async fn session_envelope_error_response_not_affected_by_size_limit() {
     let parsed: Value = serde_json::from_str(&envelope).expect("valid json");
     assert_eq!(parsed["ok"], false);
     assert_eq!(parsed["error"], "NOT_FOUND");
+}
+
+// ── agent.exec wait semantics ─────────────────────────────────────
+
+#[tokio::test]
+async fn session_agent_exec_without_wait_returns_task_submission() {
+    let (app, registry, _) =
+        test_router_with_registry(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin)))
+            .await;
+    registry.insert(sample_agent(0xDEAD_BEEF)).await.expect("insert agent");
+
+    let value = serde_json::json!({
+        "cmd": "agent.exec",
+        "id": "DEADBEEF",
+        "command": "whoami",
+    });
+    let line = session_api_dispatch_line(
+        &app,
+        "agent.exec",
+        &value,
+        std::net::SocketAddr::from(([127, 0, 0, 1], 12345)),
+        "secret-admin",
+    )
+    .await;
+    let parsed: Value = serde_json::from_str(&line).expect("session line json");
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["cmd"], "agent.exec");
+    // Without wait, the response is the raw task submission envelope.
+    assert_eq!(parsed["data"]["agent_id"], "DEADBEEF");
+    assert!(parsed["data"]["queued_jobs"].is_number(), "expected queued_jobs in submit response");
+}
+
+#[tokio::test]
+async fn session_agent_exec_wait_returns_output_when_available() {
+    let database = Database::connect_in_memory().await.expect("database");
+    let agent_id = 0xDEAD_0010u32;
+
+    let (app, registry, _) = test_router_with_database(
+        database.clone(),
+        Some((60, "rest-admin", "secret-admin", OperatorRole::Admin)),
+    )
+    .await;
+    registry.insert(sample_agent(agent_id)).await.expect("insert agent");
+
+    // Spawn a background task that inserts the output after a brief delay,
+    // simulating the agent callback.
+    let db_clone = database.clone();
+    let inserter = tokio::spawn(async move {
+        // Give the wait loop time to submit the task and start polling.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Look up the task_id from the agent registry's job queue.
+        let queue = registry.queued_jobs(agent_id).await.expect("queue lookup");
+        assert!(!queue.is_empty(), "expected at least one queued job");
+        let task_id = queue[0].task_id.clone();
+        let request_id = queue[0].request_id;
+
+        // Insert an output entry that matches the submitted task.
+        let record = AgentResponseRecord {
+            id: None,
+            agent_id,
+            command_id: 21,
+            request_id,
+            response_type: "Good".to_owned(),
+            message: "Process Output".to_owned(),
+            output: "root".to_owned(),
+            command_line: Some("whoami".to_owned()),
+            task_id: Some(task_id),
+            operator: Some("neo".to_owned()),
+            received_at: "2026-04-16T00:00:00Z".to_owned(),
+            extra: Some(serde_json::json!({"ExitCode": 0})),
+        };
+        db_clone.agent_responses().create(&record).await.expect("insert output");
+    });
+
+    let value = serde_json::json!({
+        "cmd": "agent.exec",
+        "id": "DEAD0010",
+        "command": "whoami",
+        "wait": true,
+        "timeout": 5,
+    });
+    let line = session_api_dispatch_line(
+        &app,
+        "agent.exec",
+        &value,
+        std::net::SocketAddr::from(([127, 0, 0, 1], 12345)),
+        "secret-admin",
+    )
+    .await;
+
+    inserter.await.expect("inserter should complete");
+
+    let parsed: Value = serde_json::from_str(&line).expect("session line json");
+    assert_eq!(parsed["ok"], true, "expected ok=true, got: {parsed}");
+    assert_eq!(parsed["cmd"], "agent.exec");
+    assert_eq!(parsed["data"]["output"], "root");
+    assert_eq!(parsed["data"]["agent_id"], "DEAD0010");
+    assert_eq!(parsed["data"]["exit_code"], 0);
+}
+
+#[tokio::test]
+async fn session_agent_exec_wait_times_out_when_no_output() {
+    let (app, registry, _) =
+        test_router_with_registry(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin)))
+            .await;
+    registry.insert(sample_agent(0xDEAD_0011)).await.expect("insert agent");
+
+    let value = serde_json::json!({
+        "cmd": "agent.exec",
+        "id": "DEAD0011",
+        "command": "whoami",
+        "wait": true,
+        "timeout": 1,
+    });
+    let line = session_api_dispatch_line(
+        &app,
+        "agent.exec",
+        &value,
+        std::net::SocketAddr::from(([127, 0, 0, 1], 12345)),
+        "secret-admin",
+    )
+    .await;
+
+    let parsed: Value = serde_json::from_str(&line).expect("session line json");
+    assert_eq!(parsed["ok"], false);
+    assert_eq!(parsed["error"], "EXEC_TIMEOUT");
+    assert_eq!(parsed["data"]["agent_id"], "DEAD0011");
+}
+
+#[tokio::test]
+async fn session_agent_exec_wait_false_behaves_like_no_wait() {
+    let (app, registry, _) =
+        test_router_with_registry(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin)))
+            .await;
+    registry.insert(sample_agent(0xDEAD_0012)).await.expect("insert agent");
+
+    let value = serde_json::json!({
+        "cmd": "agent.exec",
+        "id": "DEAD0012",
+        "command": "whoami",
+        "wait": false,
+    });
+    let line = session_api_dispatch_line(
+        &app,
+        "agent.exec",
+        &value,
+        std::net::SocketAddr::from(([127, 0, 0, 1], 12345)),
+        "secret-admin",
+    )
+    .await;
+    let parsed: Value = serde_json::from_str(&line).expect("session line json");
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["cmd"], "agent.exec");
+    assert_eq!(parsed["data"]["agent_id"], "DEAD0012");
+    assert!(parsed["data"]["queued_jobs"].is_number());
 }

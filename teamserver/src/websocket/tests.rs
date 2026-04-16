@@ -279,8 +279,9 @@ async fn connection_manager_tracks_registered_and_authenticated_clients() {
     let first = Uuid::new_v4();
     let second = Uuid::new_v4();
 
-    manager.register(first).await;
-    manager.register(second).await;
+    let test_ip: std::net::IpAddr = [127, 0, 0, 1].into();
+    manager.register(first, test_ip).await;
+    manager.register(second, test_ip).await;
     manager.authenticate(first, "operator".to_owned()).await;
 
     assert_eq!(manager.connection_count().await, 2);
@@ -291,6 +292,29 @@ async fn connection_manager_tracks_registered_and_authenticated_clients() {
 
     assert_eq!(manager.connection_count().await, 0);
     assert_eq!(manager.authenticated_count().await, 0);
+}
+
+#[tokio::test]
+async fn connection_manager_active_operators_returns_authenticated_only() {
+    let manager = OperatorConnectionManager::new();
+
+    let authed_id = Uuid::new_v4();
+    let unauthed_id = Uuid::new_v4();
+    let ip_a: std::net::IpAddr = [10, 0, 0, 1].into();
+    let ip_b: std::net::IpAddr = [10, 0, 0, 2].into();
+
+    manager.register(authed_id, ip_a).await;
+    manager.register(unauthed_id, ip_b).await;
+    manager.authenticate(authed_id, "alice".to_owned()).await;
+
+    let active = manager.active_operators().await;
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].username, "alice");
+    assert_eq!(active[0].remote_addr, ip_a);
+
+    manager.unregister(authed_id).await;
+    let active = manager.active_operators().await;
+    assert!(active.is_empty(), "unregistered connection should be gone");
 }
 
 #[tokio::test]

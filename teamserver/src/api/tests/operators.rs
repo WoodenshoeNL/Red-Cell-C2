@@ -1,3 +1,5 @@
+use std::net::IpAddr;
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use serde_json::Value;
@@ -605,4 +607,125 @@ async fn update_operator_role_creates_audit_record() {
     let record = &page.items[0];
     assert_eq!(record.action, "operator.update_role");
     assert_eq!(record.result_status, crate::AuditResultStatus::Success);
+}
+
+// ── Active operators endpoint tests ─────────────────────────────────────────
+
+#[tokio::test]
+async fn active_operators_returns_empty_list_when_no_connections() {
+    let app = test_router(Some((60, "key", "secret", OperatorRole::Operator))).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/operators/active")
+                .header(API_KEY_HEADER, "secret")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    let entries = body.as_array().expect("array");
+    assert!(entries.is_empty(), "no connected operators expected");
+}
+
+#[tokio::test]
+async fn active_operators_returns_authenticated_connections() {
+    let (app, _, _auth, connections) =
+        test_router_with_connections(Some((60, "key", "secret", OperatorRole::Operator))).await;
+
+    let conn_id = Uuid::new_v4();
+    let ip: IpAddr = [10, 0, 0, 1].into();
+    connections.register(conn_id, ip).await;
+    connections.authenticate(conn_id, "Neo".to_owned()).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/operators/active")
+                .header(API_KEY_HEADER, "secret")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    let entries = body.as_array().expect("array");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["username"], "Neo");
+    assert_eq!(entries[0]["remote_addr"], "10.0.0.1");
+    assert!(entries[0]["connect_time"].as_str().is_some(), "connect_time should be a string");
+}
+
+#[tokio::test]
+async fn active_operators_excludes_unauthenticated_connections() {
+    let (app, _, _auth, connections) =
+        test_router_with_connections(Some((60, "key", "secret", OperatorRole::Operator))).await;
+
+    // Register but do not authenticate
+    let conn_id = Uuid::new_v4();
+    let ip: IpAddr = [10, 0, 0, 2].into();
+    connections.register(conn_id, ip).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/operators/active")
+                .header(API_KEY_HEADER, "secret")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    let entries = body.as_array().expect("array");
+    assert!(entries.is_empty(), "unauthenticated connections should not appear");
+}
+
+#[tokio::test]
+async fn active_operators_requires_api_key() {
+    let app = test_router(Some((60, "key", "secret", OperatorRole::Operator))).await;
+
+    let response = app
+        .oneshot(Request::builder().uri("/operators/active").body(Body::empty()).expect("request"))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn health_endpoint_includes_active_operators_count() {
+    let (app, _, _auth, connections) =
+        test_router_with_connections(Some((60, "key", "secret", OperatorRole::Operator))).await;
+
+    // Register and authenticate two operators
+    for ip_last_octet in [1u8, 2] {
+        let conn_id = Uuid::new_v4();
+        let ip: IpAddr = [10, 0, 0, ip_last_octet].into();
+        connections.register(conn_id, ip).await;
+        connections.authenticate(conn_id, format!("op{ip_last_octet}")).await;
+    }
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .header(API_KEY_HEADER, "secret")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["active_operators"], 2);
 }

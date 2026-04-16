@@ -19,11 +19,11 @@ use connection::{
     AUTHENTICATION_FRAME_TIMEOUT, LOGIN_WINDOW_DURATION, MAX_FAILED_LOGIN_ATTEMPTS,
     MAX_LOGIN_ATTEMPT_WINDOWS,
 };
+pub use connection::{ActiveOperatorInfo, LoginRateLimiter, OperatorConnectionManager};
 use connection::{
     DisconnectKind, OPERATOR_MAX_MESSAGE_SIZE, SocketLoopControl, WsSession, send_hmac_message,
     send_operator_message,
 };
-pub use connection::{LoginRateLimiter, OperatorConnectionManager};
 use dispatch::dispatch_operator_command;
 pub(crate) use dispatch::{AgentCommandError, execute_agent_task};
 #[cfg(test)]
@@ -135,7 +135,7 @@ where
         return;
     }
 
-    connections.register(connection_id).await;
+    connections.register(connection_id, client_ip).await;
 
     if handle_authentication(
         &auth,

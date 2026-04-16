@@ -15,7 +15,7 @@ use crate::app::TeamserverState;
 use crate::listeners::ListenerManagerError;
 use crate::{AuditResultStatus, AuthError, TeamserverError, audit_details, parameter_object};
 
-use super::{AdminApiAccess, ApiErrorBody, json_error_response, record_audit_entry};
+use super::{AdminApiAccess, ApiErrorBody, ReadApiAccess, json_error_response, record_audit_entry};
 
 // ── Request / response DTOs ───────────────────────────────────────────────────
 
@@ -25,6 +25,17 @@ pub(super) struct OperatorSummary {
     pub(super) role: OperatorRole,
     pub(super) online: bool,
     pub(super) last_seen: Option<String>,
+}
+
+/// A currently connected operator with session details.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub(super) struct ActiveOperatorEntry {
+    /// Operator username.
+    pub(super) username: String,
+    /// ISO 8601 timestamp when the operator connected.
+    pub(super) connect_time: String,
+    /// Remote IP address of the operator.
+    pub(super) remote_addr: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, ToSchema)]
@@ -381,6 +392,40 @@ pub(super) async fn update_operator_role(
             Err(error.into())
         }
     }
+}
+
+// ── Active operators handler ─────────────────────────────────────────────────
+
+#[utoipa::path(
+    get,
+    path = "/operators/active",
+    context_path = "/api/v1",
+    tag = "operators",
+    security(("api_key" = [])),
+    responses(
+        (status = 200, description = "List of currently connected operators", body = [ActiveOperatorEntry]),
+        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
+        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
+        (status = 429, description = "Rate limit exceeded", body = ApiErrorBody)
+    )
+)]
+pub(super) async fn active_operators(
+    State(state): State<TeamserverState>,
+    _identity: ReadApiAccess,
+) -> Json<Vec<ActiveOperatorEntry>> {
+    let active = state.connections.active_operators().await;
+    let entries = active
+        .into_iter()
+        .map(|info| ActiveOperatorEntry {
+            username: info.username,
+            connect_time: info
+                .connect_time
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_else(|_| info.connect_time.to_string()),
+            remote_addr: info.remote_addr.to_string(),
+        })
+        .collect();
+    Json(entries)
 }
 
 // ── Agent group access handlers ───────────────────────────────────────────────

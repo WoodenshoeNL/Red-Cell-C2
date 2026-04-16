@@ -95,5 +95,6 @@ pub use webhook::AuditWebhookNotifier;
 #[cfg(feature = "test-helpers")]
 pub use webhook::StuckDeliveryGuard;
 pub use websocket::{
-    LoginRateLimiter, OperatorConnectionManager, routes as websocket_routes, websocket_handler,
+    ActiveOperatorInfo, LoginRateLimiter, OperatorConnectionManager, routes as websocket_routes,
+    websocket_handler,
 };

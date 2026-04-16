@@ -112,6 +112,53 @@ pub(super) async fn test_router_with_registry(
     test_router_with_database(database, api_key).await
 }
 
+/// Like [`test_router_with_registry`] but also returns the shared
+/// [`OperatorConnectionManager`] so tests can pre-populate connected operators.
+pub(super) async fn test_router_with_connections(
+    api_key: Option<(u32, &str, &str, OperatorRole)>,
+) -> (Router, AgentRegistry, AuthService, OperatorConnectionManager) {
+    let database = Database::connect_in_memory().await.expect("database");
+    let profile = test_profile(api_key);
+    let agent_registry = AgentRegistry::new(database.clone());
+    let events = EventBus::default();
+    let sockets = SocketRelayManager::new(agent_registry.clone(), events.clone());
+    let listeners = ListenerManager::new(
+        database.clone(),
+        agent_registry.clone(),
+        events.clone(),
+        sockets.clone(),
+        None,
+    )
+    .with_demon_allow_legacy_ctr(true);
+
+    let api = ApiRuntime::from_profile(&profile).expect("rng should work in tests");
+    let auth = AuthService::from_profile_with_database(&profile, &database).await.expect("auth");
+    let connections = OperatorConnectionManager::new();
+
+    let router = api_routes(api.clone()).with_state(TeamserverState {
+        profile: profile.clone(),
+        database,
+        auth: auth.clone(),
+        api,
+        events,
+        connections: connections.clone(),
+        agent_registry: agent_registry.clone(),
+        listeners,
+        payload_builder: crate::PayloadBuilderService::disabled_for_tests(),
+        sockets,
+        webhooks: crate::AuditWebhookNotifier::from_profile(&profile),
+        login_rate_limiter: crate::LoginRateLimiter::new(),
+        shutdown: crate::ShutdownController::new(),
+        service_bridge: None,
+        started_at: std::time::Instant::now(),
+        plugins_loaded: 0,
+        plugins_failed: 0,
+        metrics: crate::metrics::standalone_metrics_handle(),
+    });
+
+    (router, agent_registry, auth, connections)
+}
+
 pub(super) fn test_profile(api_key: Option<(u32, &str, &str, OperatorRole)>) -> Profile {
     let api_block = api_key.map_or_else(String::new, |(limit, name, value, role)| {
         format!(

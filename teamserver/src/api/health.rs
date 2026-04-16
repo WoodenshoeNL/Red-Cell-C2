@@ -67,6 +67,8 @@ pub(super) struct HealthResponse {
     status: String,
     /// Seconds since the teamserver process started.
     uptime_secs: u64,
+    /// Number of operators currently connected via WebSocket.
+    active_operators: u64,
     /// Agent inventory counts.
     agents: HealthAgentCounts,
     /// Listener lifecycle counts.
@@ -97,6 +99,7 @@ pub(super) async fn get_health(
     _identity: ReadApiAccess,
 ) -> Json<HealthResponse> {
     let uptime_secs = state.started_at.elapsed().as_secs();
+    let active_operators = state.connections.authenticated_count().await as u64;
 
     let all_agents = state.agent_registry.list().await;
     let active = all_agents.iter().filter(|a| a.active).count() as u64;
@@ -125,6 +128,7 @@ pub(super) async fn get_health(
     Json(HealthResponse {
         status: overall,
         uptime_secs,
+        active_operators,
         agents: HealthAgentCounts { active, total },
         listeners: HealthListenerCounts { running, stopped },
         database: db_status,

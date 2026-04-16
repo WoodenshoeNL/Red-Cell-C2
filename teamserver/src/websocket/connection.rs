@@ -5,6 +5,8 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use time::OffsetDateTime;
+
 use axum::extract::ws::{Message as WsMessage, WebSocket};
 use red_cell_common::crypto::{derive_ws_hmac_key, seal_ws_frame};
 use red_cell_common::operator::OperatorMessage;
@@ -38,6 +40,17 @@ pub(super) const OPERATOR_MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 
 // ── OperatorConnectionManager ────────────────────────────────────────────────
 
+/// Summary of a currently connected and authenticated operator.
+#[derive(Debug, Clone)]
+pub struct ActiveOperatorInfo {
+    /// Operator username.
+    pub username: String,
+    /// Timestamp when the WebSocket connection was established.
+    pub connect_time: OffsetDateTime,
+    /// Remote IP address of the operator.
+    pub remote_addr: IpAddr,
+}
+
 /// Tracks currently connected operator WebSocket clients.
 #[derive(Debug, Clone, Default)]
 pub struct OperatorConnectionManager {
@@ -68,11 +81,35 @@ impl OperatorConnectionManager {
             .count()
     }
 
-    pub(super) async fn register(&self, id: Uuid) {
-        self.connections.write().await.insert(id, OperatorConnection { username: None });
+    /// Return details for all currently authenticated operator connections.
+    pub async fn active_operators(&self) -> Vec<ActiveOperatorInfo> {
+        self.connections
+            .read()
+            .await
+            .values()
+            .filter_map(|conn| {
+                let username = conn.username.as_ref()?;
+                Some(ActiveOperatorInfo {
+                    username: username.clone(),
+                    connect_time: conn.connect_time,
+                    remote_addr: conn.remote_addr,
+                })
+            })
+            .collect()
     }
 
-    pub(super) async fn authenticate(&self, id: Uuid, username: String) {
+    pub(crate) async fn register(&self, id: Uuid, remote_addr: IpAddr) {
+        self.connections.write().await.insert(
+            id,
+            OperatorConnection {
+                username: None,
+                connect_time: OffsetDateTime::now_utc(),
+                remote_addr,
+            },
+        );
+    }
+
+    pub(crate) async fn authenticate(&self, id: Uuid, username: String) {
         if let Some(connection) = self.connections.write().await.get_mut(&id) {
             connection.username = Some(username);
         }
@@ -83,9 +120,11 @@ impl OperatorConnectionManager {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 struct OperatorConnection {
     username: Option<String>,
+    connect_time: OffsetDateTime,
+    remote_addr: IpAddr,
 }
 
 // ── LoginRateLimiter ─────────────────────────────────────────────────────────

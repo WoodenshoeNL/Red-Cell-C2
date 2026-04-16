@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use super::super::pe_patch::replace_all;
 use super::*;
 
 // ── replace_all byte replacement tests ──────────────────────────────

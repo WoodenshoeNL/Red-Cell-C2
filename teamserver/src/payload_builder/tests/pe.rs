@@ -1,3 +1,4 @@
+use super::super::pe_patch::patch_payload;
 use super::*;
 use red_cell_common::config::BinaryConfig;
 

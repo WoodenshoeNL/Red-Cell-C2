@@ -1,3 +1,4 @@
+use super::super::pe_patch::parse_header_u32_field;
 use super::*;
 use red_cell_common::HttpListenerProxyConfig as DomainHttpListenerProxyConfig;
 use red_cell_common::config::DemonConfig;

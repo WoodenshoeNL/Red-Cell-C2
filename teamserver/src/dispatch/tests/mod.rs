@@ -7,7 +7,7 @@ mod core;
 mod filesystem;
 mod network_token_kerberos;
 mod output;
-mod pivot_socket_transfer;
+mod pivot;
 mod process;
 mod socket;
 mod util;

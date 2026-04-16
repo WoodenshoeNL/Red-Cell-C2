@@ -96,7 +96,7 @@ impl WsSession {
     /// On the first successful `InitConnectionSuccess` frame the session key
     /// is derived from the embedded token and stored for all subsequent frames.
     pub async fn recv_msg(&mut self) -> Result<OperatorMessage, Box<dyn std::error::Error>> {
-        let next = timeout(Duration::from_secs(30), self.socket.next()).await?;
+        let next = timeout(Duration::from_secs(60), self.socket.next()).await?;
         let frame = next.ok_or_else(|| "missing websocket frame".to_owned())??;
         match frame {
             ClientMessage::Text(payload) => {

@@ -14,7 +14,7 @@ use crate::TeamserverError;
 use super::types::{
     SOCKS_ATYP_DOMAIN, SOCKS_ATYP_IPV4, SOCKS_ATYP_IPV6, SOCKS_COMMAND_CONNECT,
     SOCKS_METHOD_NO_AUTH, SOCKS_METHOD_NOT_ACCEPTABLE, SOCKS_REPLY_COMMAND_NOT_SUPPORTED,
-    SOCKS_REPLY_GENERAL_FAILURE, SOCKS_REPLY_SUCCEEDED, SOCKS_VERSION, SocksConnectRequest,
+    SOCKS_REPLY_GENERAL_FAILURE, SOCKS_VERSION, SocksConnectRequest,
 };
 
 pub(super) async fn negotiate_socks5(stream: &mut TcpStream) -> Result<(), io::Error> {

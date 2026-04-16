@@ -1,14 +1,9 @@
-use std::collections::BTreeMap;
-
-use red_cell_common::operator::{
-    EventCode, FlatInfo, Message, MessageHead, OperatorMessage, TeamserverLogInfo,
-};
 use serde_json::Value;
-use time::OffsetDateTime;
 use tracing::warn;
 use uuid::Uuid;
 
 use super::connection::{DisconnectKind, OperatorConnectionManager};
+use super::events::chat_presence_event;
 use crate::{
     AuditResultStatus, AuditWebhookNotifier, AuthService, Database, EventBus, audit_details,
     parameter_object, record_operator_action_with_notifications,
@@ -57,53 +52,6 @@ pub(super) async fn first_online_session(auth: &AuthService, username: &str) -> 
 
 pub(super) async fn last_online_session(auth: &AuthService, username: &str) -> bool {
     auth.active_sessions().await.into_iter().all(|session| session.username != username)
-}
-
-pub(super) fn chat_presence_event(user: &str, online: bool) -> OperatorMessage {
-    let message = Message {
-        head: MessageHead {
-            event: EventCode::Chat,
-            user: "teamserver".to_owned(),
-            timestamp: OffsetDateTime::now_utc().unix_timestamp().to_string(),
-            one_time: String::new(),
-        },
-        info: red_cell_common::operator::ChatUserInfo { user: user.to_owned() },
-    };
-
-    if online {
-        OperatorMessage::ChatUserConnected(message)
-    } else {
-        OperatorMessage::ChatUserDisconnected(message)
-    }
-}
-
-pub(super) fn chat_message_event(user: &str, text: &str) -> OperatorMessage {
-    OperatorMessage::ChatMessage(Message {
-        head: MessageHead {
-            event: EventCode::Chat,
-            user: user.to_owned(),
-            timestamp: OffsetDateTime::now_utc().unix_timestamp().to_string(),
-            one_time: String::new(),
-        },
-        info: FlatInfo {
-            fields: BTreeMap::from([
-                ("User".to_owned(), Value::String(user.to_owned())),
-                ("Message".to_owned(), Value::String(text.to_owned())),
-            ]),
-        },
-    })
-}
-
-pub(super) fn teamserver_shutdown_event() -> OperatorMessage {
-    OperatorMessage::TeamserverLog(Message {
-        head: MessageHead {
-            event: EventCode::Teamserver,
-            user: "teamserver".to_owned(),
-            timestamp: OffsetDateTime::now_utc().unix_timestamp().to_string(),
-            one_time: String::new(),
-        },
-        info: TeamserverLogInfo { text: "teamserver shutting down".to_owned() },
-    })
 }
 
 pub(super) async fn log_operator_action(

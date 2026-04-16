@@ -4,6 +4,7 @@ mod auth;
 mod command_enc;
 mod connection;
 mod dispatch;
+mod events;
 mod lifecycle;
 mod snapshot;
 mod upload;
@@ -25,13 +26,13 @@ use connection::{
     send_operator_message,
 };
 use dispatch::dispatch_operator_command;
+#[cfg(test)]
+use dispatch::serialize_for_audit;
 pub(crate) use dispatch::{AgentCommandError, execute_agent_task};
 #[cfg(test)]
-use dispatch::{serialize_for_audit, teamserver_log_event};
-use lifecycle::{
-    chat_presence_event, cleanup_connection, first_online_session, log_operator_action,
-    teamserver_shutdown_event,
-};
+use events::teamserver_log_event;
+use events::{chat_presence_event, teamserver_shutdown_event};
+use lifecycle::{cleanup_connection, first_online_session, log_operator_action};
 use snapshot::send_session_snapshot;
 
 use std::net::{IpAddr, SocketAddr};

@@ -1,14 +1,11 @@
-use std::collections::BTreeMap;
-
 use axum::extract::ws::WebSocket;
-use red_cell_common::operator::{EventCode, FlatInfo, Message, MessageHead, OperatorMessage};
-use red_cell_common::{AgentRecord, OperatorInfo};
 use thiserror::Error;
 
 use super::connection::{SendMessageError, WsSession, send_hmac_message};
+use super::events::{agent_snapshot_event, operator_snapshot_event};
 use crate::{
     AgentRegistry, AuthError, AuthService, EventBus, ListenerEventAction, ListenerManager,
-    agent_events::agent_new_event, listener_event_for_action,
+    listener_event_for_action,
 };
 
 #[derive(Debug, Error)]
@@ -67,28 +64,4 @@ pub(super) async fn send_session_snapshot(
     }
 
     Ok(())
-}
-
-pub(super) fn agent_snapshot_event(
-    listener_name: &str,
-    agent: &AgentRecord,
-    pivots: &crate::PivotInfo,
-) -> OperatorMessage {
-    agent_new_event(listener_name, red_cell_common::demon::DEMON_MAGIC_VALUE, agent, pivots)
-}
-
-fn operator_snapshot_event(
-    operators: Vec<OperatorInfo>,
-) -> Result<OperatorMessage, serde_json::Error> {
-    Ok(OperatorMessage::InitConnectionInfo(Message {
-        head: MessageHead {
-            event: EventCode::InitConnection,
-            user: String::new(),
-            timestamp: String::new(),
-            one_time: String::new(),
-        },
-        info: FlatInfo {
-            fields: BTreeMap::from([("Operators".to_owned(), serde_json::to_value(operators)?)]),
-        },
-    }))
 }

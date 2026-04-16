@@ -1,19 +1,17 @@
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use red_cell_common::demon::DemonCommand;
-use red_cell_common::operator::{
-    BuildPayloadMessageInfo, BuildPayloadResponseInfo, EventCode, FlatInfo, Message, MessageHead,
-    OperatorMessage, TeamserverLogInfo,
-};
+use red_cell_common::operator::{FlatInfo, Message, OperatorMessage};
 use serde_json::Value;
 use thiserror::Error;
-use time::OffsetDateTime;
 use tracing::{debug, warn};
 
 use super::command_enc::{
     build_jobs, flat_info_string, note_from_task, parse_agent_id, required_string, socket_command,
 };
-use super::lifecycle::{chat_message_event, log_operator_action};
+use super::events::{
+    build_payload_message_event, build_payload_response_event, chat_message_event,
+    format_diagnostic, teamserver_log_event,
+};
+use super::lifecycle::log_operator_action;
 use crate::{
     AgentRegistry, AuditResultStatus, AuditWebhookNotifier, Database, EventBus,
     ListenerEventAction, ListenerManager, PayloadBuildError, PayloadBuilderService,
@@ -857,62 +855,4 @@ async fn handle_teamserver_socket_task(
     };
 
     Ok(result)
-}
-
-pub(super) fn teamserver_log_event(user: &str, text: &str) -> OperatorMessage {
-    OperatorMessage::TeamserverLog(Message {
-        head: MessageHead {
-            event: EventCode::Teamserver,
-            user: user.to_owned(),
-            timestamp: OffsetDateTime::now_utc().unix_timestamp().to_string(),
-            one_time: String::new(),
-        },
-        info: TeamserverLogInfo { text: text.to_owned() },
-    })
-}
-
-/// Format a [`CompilerDiagnostic`] as a single human-readable string.
-///
-/// Produces output compatible with what GCC/NASM print natively:
-/// `filename:line[:col]: severity: message`
-fn format_diagnostic(diag: &red_cell_common::operator::CompilerDiagnostic) -> String {
-    let loc = match diag.column {
-        Some(col) => format!("{}:{}:{}", diag.filename, diag.line, col),
-        None => format!("{}:{}", diag.filename, diag.line),
-    };
-    let code_suffix = diag.error_code.as_deref().map(|c| format!(" [{c}]")).unwrap_or_default();
-    format!("{loc}: {}: {}{code_suffix}", diag.severity, diag.message)
-}
-
-fn build_payload_message_event(user: &str, level: &str, text: &str) -> OperatorMessage {
-    OperatorMessage::BuildPayloadMessage(Message {
-        head: MessageHead {
-            event: EventCode::Gate,
-            user: user.to_owned(),
-            timestamp: OffsetDateTime::now_utc().unix_timestamp().to_string(),
-            one_time: String::new(),
-        },
-        info: BuildPayloadMessageInfo { message_type: level.to_owned(), message: text.to_owned() },
-    })
-}
-
-fn build_payload_response_event(
-    user: &str,
-    file_name: &str,
-    format: &str,
-    bytes: &[u8],
-) -> OperatorMessage {
-    OperatorMessage::BuildPayloadResponse(Message {
-        head: MessageHead {
-            event: EventCode::Gate,
-            user: user.to_owned(),
-            timestamp: OffsetDateTime::now_utc().unix_timestamp().to_string(),
-            one_time: String::new(),
-        },
-        info: BuildPayloadResponseInfo {
-            payload_array: BASE64_STANDARD.encode(bytes),
-            format: format.to_owned(),
-            file_name: file_name.to_owned(),
-        },
-    })
 }

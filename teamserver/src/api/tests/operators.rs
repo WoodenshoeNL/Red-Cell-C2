@@ -729,3 +729,290 @@ async fn health_endpoint_includes_active_operators_count() {
     let body = read_json(response).await;
     assert_eq!(body["active_operators"], 2);
 }
+
+// ── POST /operators/{username}/logout tests ─────────────────────────────────
+
+#[tokio::test]
+async fn logout_operator_revokes_active_sessions() {
+    let (app, _, auth) =
+        test_router_with_registry(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin)))
+            .await;
+
+    auth.authenticate_login(
+        Uuid::new_v4(),
+        &red_cell_common::operator::LoginInfo {
+            user: "Neo".to_owned(),
+            password: hash_password_sha3("password1234"),
+        },
+    )
+    .await;
+    auth.authenticate_login(
+        Uuid::new_v4(),
+        &red_cell_common::operator::LoginInfo {
+            user: "Neo".to_owned(),
+            password: hash_password_sha3("password1234"),
+        },
+    )
+    .await;
+    assert_eq!(auth.session_count().await, 2);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/operators/Neo/logout")
+                .header(API_KEY_HEADER, "secret-admin")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["username"], "Neo");
+    assert_eq!(body["revoked_sessions"], 2);
+    assert_eq!(auth.session_count().await, 0);
+}
+
+#[tokio::test]
+async fn logout_operator_succeeds_with_zero_when_no_active_sessions() {
+    let (app, _, auth) =
+        test_router_with_registry(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin)))
+            .await;
+
+    assert_eq!(auth.session_count().await, 0);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/operators/Neo/logout")
+                .header(API_KEY_HEADER, "secret-admin")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["username"], "Neo");
+    assert_eq!(body["revoked_sessions"], 0);
+}
+
+#[tokio::test]
+async fn logout_operator_returns_not_found_for_unknown_user() {
+    let app = test_router(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/operators/ghost/logout")
+                .header(API_KEY_HEADER, "secret-admin")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = read_json(response).await;
+    assert_eq!(body["error"]["code"], "operator_not_found");
+}
+
+#[tokio::test]
+async fn logout_operator_only_revokes_target_user_sessions() {
+    let (app, _, auth) =
+        test_router_with_registry(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin)))
+            .await;
+
+    // Create a second runtime operator and authenticate sessions for both.
+    create_runtime_operator(&app, "secret-admin", "trinity", "zion1234", "Operator").await;
+
+    auth.authenticate_login(
+        Uuid::new_v4(),
+        &red_cell_common::operator::LoginInfo {
+            user: "Neo".to_owned(),
+            password: hash_password_sha3("password1234"),
+        },
+    )
+    .await;
+    auth.authenticate_login(
+        Uuid::new_v4(),
+        &red_cell_common::operator::LoginInfo {
+            user: "trinity".to_owned(),
+            password: hash_password_sha3("zion1234"),
+        },
+    )
+    .await;
+    assert_eq!(auth.session_count().await, 2);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/operators/Neo/logout")
+                .header(API_KEY_HEADER, "secret-admin")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["revoked_sessions"], 1);
+
+    // trinity's session must remain intact.
+    assert_eq!(auth.session_count().await, 1);
+    let remaining = auth.active_sessions().await;
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].username, "trinity");
+}
+
+#[tokio::test]
+async fn logout_operator_is_admin_only() {
+    let (app, _, auth) = test_router_with_registry(Some((
+        60,
+        "rest-analyst",
+        "secret-analyst",
+        OperatorRole::Analyst,
+    )))
+    .await;
+
+    auth.authenticate_login(
+        Uuid::new_v4(),
+        &red_cell_common::operator::LoginInfo {
+            user: "Neo".to_owned(),
+            password: hash_password_sha3("password1234"),
+        },
+    )
+    .await;
+    assert_eq!(auth.session_count().await, 1);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/operators/Neo/logout")
+                .header(API_KEY_HEADER, "secret-analyst")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = read_json(response).await;
+    assert_eq!(body["error"]["code"], "forbidden");
+
+    // The session must NOT have been revoked because the request was rejected.
+    assert_eq!(auth.session_count().await, 1);
+}
+
+#[tokio::test]
+async fn logout_operator_requires_api_key() {
+    let app = test_router(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/operators/Neo/logout")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn logout_operator_creates_audit_record() {
+    let database = Database::connect_in_memory().await.expect("database");
+    let (app, _, auth) = test_router_with_database(
+        database.clone(),
+        Some((60, "rest-admin", "secret-admin", OperatorRole::Admin)),
+    )
+    .await;
+
+    auth.authenticate_login(
+        Uuid::new_v4(),
+        &red_cell_common::operator::LoginInfo {
+            user: "Neo".to_owned(),
+            password: hash_password_sha3("password1234"),
+        },
+    )
+    .await;
+
+    let _resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/operators/Neo/logout")
+                .header(API_KEY_HEADER, "secret-admin")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    let page = crate::query_audit_log(
+        &database,
+        &crate::AuditQuery {
+            action: Some("operator.logout".to_owned()),
+            ..crate::AuditQuery::default()
+        },
+    )
+    .await
+    .expect("audit query should succeed");
+
+    assert_eq!(page.total, 1, "one operator.logout audit record expected");
+    let record = &page.items[0];
+    assert_eq!(record.action, "operator.logout");
+    assert_eq!(record.target_kind, "operator");
+    assert_eq!(record.target_id.as_deref(), Some("Neo"));
+    assert_eq!(record.result_status, crate::AuditResultStatus::Success);
+    let parameters = record.parameters.as_ref().expect("audit parameters");
+    assert_eq!(parameters["revoked_sessions"], 1);
+}
+
+#[tokio::test]
+async fn logout_operator_audit_records_failure_for_unknown_user() {
+    let database = Database::connect_in_memory().await.expect("database");
+    let (app, _, _auth) = test_router_with_database(
+        database.clone(),
+        Some((60, "rest-admin", "secret-admin", OperatorRole::Admin)),
+    )
+    .await;
+
+    let _resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/operators/ghost/logout")
+                .header(API_KEY_HEADER, "secret-admin")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    let page = crate::query_audit_log(
+        &database,
+        &crate::AuditQuery {
+            action: Some("operator.logout".to_owned()),
+            ..crate::AuditQuery::default()
+        },
+    )
+    .await
+    .expect("audit query should succeed");
+
+    assert_eq!(page.total, 1, "failure audit record expected");
+    let record = &page.items[0];
+    assert_eq!(record.result_status, crate::AuditResultStatus::Failure);
+    assert_eq!(record.target_id.as_deref(), Some("ghost"));
+}

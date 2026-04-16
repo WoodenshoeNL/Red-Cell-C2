@@ -484,10 +484,8 @@ pub(super) async fn logout_operator(
     }
 
     let revoked = state.auth.revoke_sessions_for_username(&username).await;
-    let revoked_connection_ids: Vec<Value> = revoked
-        .iter()
-        .map(|session| Value::String(session.connection_id.to_string()))
-        .collect();
+    let revoked_connection_ids: Vec<Value> =
+        revoked.iter().map(|session| Value::String(session.connection_id.to_string())).collect();
     let revoked_count = revoked.len();
 
     record_audit_entry(
@@ -503,10 +501,7 @@ pub(super) async fn logout_operator(
             Some("logout"),
             Some(parameter_object([
                 ("username", Value::String(username.clone())),
-                (
-                    "revoked_sessions",
-                    Value::Number(serde_json::Number::from(revoked_count)),
-                ),
+                ("revoked_sessions", Value::Number(serde_json::Number::from(revoked_count))),
                 ("connection_ids", Value::Array(revoked_connection_ids)),
             ])),
         ),

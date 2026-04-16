@@ -35,6 +35,7 @@ fn constructor_test_profile(compiler_x64: &Path, compiler_x86: &Path, nasm: &Pat
                     role: red_cell_common::config::OperatorRole::Admin,
                 },
             )]),
+            ..Default::default()
         },
         listeners: red_cell_common::config::ListenersConfig::default(),
         demon: DemonConfig {

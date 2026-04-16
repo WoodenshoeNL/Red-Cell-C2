@@ -6,9 +6,9 @@ mod session;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use red_cell_common::config::{OperatorRole, Profile};
+use red_cell_common::config::{OperatorRole, OperatorsConfig, Profile};
 use red_cell_common::crypto::hash_password_sha3;
 use red_cell_common::operator::OperatorMessage;
 use thiserror::Error;
@@ -159,6 +159,20 @@ pub struct AuthService {
     session_policy: SessionPolicy,
 }
 
+fn session_policy_from_operators(operators: &OperatorsConfig) -> SessionPolicy {
+    let defaults = SessionPolicy::default();
+    SessionPolicy {
+        ttl: operators
+            .session_ttl_hours
+            .map(|hours| Duration::from_secs(hours.saturating_mul(3600)))
+            .or(defaults.ttl),
+        idle_timeout: operators
+            .idle_timeout_minutes
+            .map(|minutes| Duration::from_secs(minutes.saturating_mul(60)))
+            .or(defaults.idle_timeout),
+    }
+}
+
 impl AuthService {
     /// Build an authentication service from a validated profile.
     pub fn from_profile(profile: &Profile) -> Result<Self, AuthError> {
@@ -168,7 +182,7 @@ impl AuthService {
             sessions: Arc::new(RwLock::new(SessionRegistry::default())),
             runtime_operators: None,
             audit_log: None,
-            session_policy: SessionPolicy::default(),
+            session_policy: session_policy_from_operators(&profile.operators),
         })
     }
 
@@ -183,7 +197,7 @@ impl AuthService {
             sessions: Arc::new(RwLock::new(SessionRegistry::default())),
             runtime_operators: Some(database.operators()),
             audit_log: Some(database.audit_log()),
-            session_policy: SessionPolicy::default(),
+            session_policy: session_policy_from_operators(&profile.operators),
         };
 
         service.load_runtime_operators().await?;
@@ -1853,6 +1867,35 @@ mod tests {
             Some(std::time::Duration::from_secs(30 * 60)),
             "default idle timeout should be 30 min"
         );
+    }
+
+    #[tokio::test]
+    async fn from_profile_applies_operators_session_policy_from_hcl() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              SessionTtlHours = 48
+              IdleTimeoutMinutes = 45
+              user "operator" {
+                Password = "password1234"
+                Role = "Operator"
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        let service = AuthService::from_profile(&profile).expect("auth service should initialize");
+        let policy = service.session_policy();
+        assert_eq!(policy.ttl, Some(std::time::Duration::from_secs(48 * 3600)));
+        assert_eq!(policy.idle_timeout, Some(std::time::Duration::from_secs(45 * 60)));
     }
 
     #[tokio::test]

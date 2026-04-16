@@ -131,6 +131,8 @@ fn parses_base_havoc_profile() {
         Some("/usr/bin/nasm")
     );
     assert_eq!(profile.operators.users.len(), 2);
+    assert!(profile.operators.session_ttl_hours.is_none());
+    assert!(profile.operators.idle_timeout_minutes.is_none());
     assert_eq!(
         profile.operators.users.get("Neo").map(|operator| operator.password.as_str()),
         Some("password1234")
@@ -152,6 +154,83 @@ fn parses_base_havoc_profile() {
     assert!(profile.listeners.external.is_empty());
     assert!(profile.service.is_none());
     assert!(profile.webhook.is_none());
+}
+
+#[test]
+fn parses_operators_session_policy_fields() {
+    let profile = Profile::parse(
+        r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              SessionTtlHours = 48
+              IdleTimeoutMinutes = 90
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Demon {}
+            "#,
+    )
+    .expect("profile with operator session policy should parse");
+
+    assert_eq!(profile.operators.session_ttl_hours, Some(48));
+    assert_eq!(profile.operators.idle_timeout_minutes, Some(90));
+    assert!(profile.validate().is_ok());
+}
+
+#[test]
+fn rejects_zero_operators_session_ttl_hours() {
+    let profile = Profile::parse(
+        r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              SessionTtlHours = 0
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Demon {}
+            "#,
+    )
+    .expect("profile should parse");
+
+    let error = profile.validate().expect_err("zero SessionTtlHours should fail validation");
+    assert!(error.errors.iter().any(|message| message.contains("SessionTtlHours")));
+}
+
+#[test]
+fn rejects_zero_operators_idle_timeout_minutes() {
+    let profile = Profile::parse(
+        r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              IdleTimeoutMinutes = 0
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Demon {}
+            "#,
+    )
+    .expect("profile should parse");
+
+    let error = profile.validate().expect_err("zero IdleTimeoutMinutes should fail validation");
+    assert!(error.errors.iter().any(|message| message.contains("IdleTimeoutMinutes")));
 }
 
 #[test]

@@ -225,7 +225,10 @@ mod tests {
                 database: None,
                 observability: None,
             },
-            operators: OperatorsConfig { users: std::collections::BTreeMap::new() },
+            operators: OperatorsConfig {
+                users: std::collections::BTreeMap::new(),
+                ..Default::default()
+            },
             listeners: red_cell_common::config::ListenersConfig::default(),
             demon: DemonConfig {
                 sleep: None,

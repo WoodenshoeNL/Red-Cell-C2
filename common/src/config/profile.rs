@@ -143,6 +143,20 @@ impl Profile {
             }
         }
 
+        if self.operators.session_ttl_hours == Some(0) {
+            errors.push(
+                "Operators.SessionTtlHours must be greater than zero when specified — omit the field to use the teamserver default"
+                    .to_owned(),
+            );
+        }
+
+        if self.operators.idle_timeout_minutes == Some(0) {
+            errors.push(
+                "Operators.IdleTimeoutMinutes must be greater than zero when specified — omit the field to use the teamserver default"
+                    .to_owned(),
+            );
+        }
+
         for listener in &self.listeners.http {
             if listener.name.trim().is_empty() {
                 errors.push("Listeners.Http.Name must not be empty".to_owned());

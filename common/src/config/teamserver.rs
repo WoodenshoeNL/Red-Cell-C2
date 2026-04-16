@@ -193,8 +193,20 @@ pub struct BuildConfig {
 }
 
 /// Operator accounts defined in the profile.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 pub struct OperatorsConfig {
+    /// Maximum wall-clock lifetime of an authenticated operator WebSocket session, in hours.
+    ///
+    /// When omitted, the teamserver applies its default session TTL. Set to a positive value to
+    /// override. Zero is rejected at validation (use the teamserver default by omitting the key).
+    #[serde(rename = "SessionTtlHours", default)]
+    pub session_ttl_hours: Option<u64>,
+    /// Disconnect an authenticated session after this many minutes without inbound traffic.
+    ///
+    /// When omitted, the teamserver applies its default idle timeout. Zero is rejected at
+    /// validation.
+    #[serde(rename = "IdleTimeoutMinutes", default)]
+    pub idle_timeout_minutes: Option<u64>,
     /// Operators keyed by their block label.
     #[serde(rename = "user", default)]
     pub users: BTreeMap<String, OperatorConfig>,

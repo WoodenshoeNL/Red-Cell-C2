@@ -2,7 +2,7 @@ use super::super::pe_patch::parse_header_u32_field;
 use super::*;
 use red_cell_common::HttpListenerProxyConfig as DomainHttpListenerProxyConfig;
 use red_cell_common::config::DemonConfig;
-use serde_json::json;
+use serde_json::{Map, Value, json};
 use zeroize::Zeroizing;
 
 // ── Cursor / binary reader helpers ──────────────────────────────────

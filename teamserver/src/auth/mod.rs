@@ -6,6 +6,7 @@ mod session;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use red_cell_common::config::{OperatorRole, Profile};
 use red_cell_common::crypto::hash_password_sha3;
@@ -17,9 +18,14 @@ use uuid::Uuid;
 
 use crate::{Database, OperatorRepository, PersistedOperator, TeamserverError};
 
-pub use messages::{OperatorPresence, login_failure_message, login_success_message};
+pub use messages::{
+    OperatorPresence, login_failure_message, login_success_message, session_expired_message,
+};
 pub(crate) use password::{password_hashes_match, password_verifier_for_sha3};
-pub use session::{MAX_OPERATOR_SESSIONS, MAX_SESSIONS_PER_ACCOUNT, OperatorSession};
+pub use session::{
+    DEFAULT_IDLE_TIMEOUT, DEFAULT_SESSION_TTL, MAX_OPERATOR_SESSIONS, MAX_SESSIONS_PER_ACCOUNT,
+    OperatorSession, SessionActivity, SessionExpiryReason, SessionPolicy,
+};
 
 use password::{generate_dummy_verifier, normalize_persisted_verifier};
 use session::SessionRegistry;
@@ -150,6 +156,7 @@ pub struct AuthService {
     sessions: Arc<RwLock<SessionRegistry>>,
     runtime_operators: Option<OperatorRepository>,
     audit_log: Option<crate::AuditLogRepository>,
+    session_policy: SessionPolicy,
 }
 
 impl AuthService {
@@ -161,6 +168,7 @@ impl AuthService {
             sessions: Arc::new(RwLock::new(SessionRegistry::default())),
             runtime_operators: None,
             audit_log: None,
+            session_policy: SessionPolicy::default(),
         })
     }
 
@@ -175,10 +183,27 @@ impl AuthService {
             sessions: Arc::new(RwLock::new(SessionRegistry::default())),
             runtime_operators: Some(database.operators()),
             audit_log: Some(database.audit_log()),
+            session_policy: SessionPolicy::default(),
         };
 
         service.load_runtime_operators().await?;
         Ok(service)
+    }
+
+    /// Override the session expiry policy.
+    ///
+    /// Used by integration tests and by the teamserver bootstrap to wire through
+    /// operator-configured TTL and idle-timeout values before sessions are issued.
+    #[must_use]
+    pub fn with_session_policy(mut self, policy: SessionPolicy) -> Self {
+        self.session_policy = policy;
+        self
+    }
+
+    /// Return the active session policy.
+    #[must_use]
+    pub fn session_policy(&self) -> SessionPolicy {
+        self.session_policy
     }
 
     /// Authenticate a parsed login payload and create a session on success.
@@ -203,11 +228,14 @@ impl AuthService {
         };
 
         let token = Uuid::new_v4().to_string();
+        let now = Instant::now();
         let session = OperatorSession {
             token: token.clone(),
             username: login.user.clone(),
             role: account.role,
             connection_id,
+            created_at: now,
+            last_activity_at: now,
         };
 
         {
@@ -440,6 +468,28 @@ impl AuthService {
     #[instrument(skip(self))]
     pub async fn session_count(&self) -> usize {
         self.sessions.read().await.len()
+    }
+
+    /// Validate the session bound to `connection_id` against the active policy
+    /// and, if still valid, refresh its last-activity timestamp. Expired
+    /// sessions are removed before returning.
+    ///
+    /// The caller is responsible for notifying the operator and terminating the
+    /// underlying WebSocket when [`SessionActivity::Expired`] is returned.
+    #[instrument(skip(self), fields(connection_id = %connection_id))]
+    pub async fn touch_session_activity(&self, connection_id: Uuid) -> SessionActivity {
+        self.touch_session_activity_at(connection_id, Instant::now()).await
+    }
+
+    /// Test-only variant of [`AuthService::touch_session_activity`] that
+    /// accepts an injected monotonic instant, enabling deterministic expiry
+    /// assertions without sleeping.
+    pub async fn touch_session_activity_at(
+        &self,
+        connection_id: Uuid,
+        now: Instant,
+    ) -> SessionActivity {
+        self.sessions.write().await.touch_activity(connection_id, now, &self.session_policy)
     }
 
     async fn load_runtime_operators(&self) -> Result<(), AuthError> {

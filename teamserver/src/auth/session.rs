@@ -1,6 +1,7 @@
 //! Operator session tracking and connection registry.
 
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 use red_cell_common::config::OperatorRole;
 use subtle::ConstantTimeEq;
@@ -18,6 +19,87 @@ pub const MAX_OPERATOR_SESSIONS: usize = 64;
 /// and allows other operators to authenticate even under targeted abuse.
 pub const MAX_SESSIONS_PER_ACCOUNT: usize = 8;
 
+/// Default absolute session lifetime before the operator is forced to re-authenticate.
+pub const DEFAULT_SESSION_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Default idle timeout after which an inactive session is revoked.
+pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
+/// Policy controlling when an authenticated operator session expires.
+///
+/// `None` on either field disables that expiry dimension. By default both
+/// a 24-hour absolute TTL and a 30-minute idle timeout are enforced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionPolicy {
+    /// Absolute session lifetime measured from the time of successful login.
+    pub ttl: Option<Duration>,
+    /// Maximum permissible gap between authenticated operator activities.
+    pub idle_timeout: Option<Duration>,
+}
+
+impl Default for SessionPolicy {
+    fn default() -> Self {
+        Self { ttl: Some(DEFAULT_SESSION_TTL), idle_timeout: Some(DEFAULT_IDLE_TIMEOUT) }
+    }
+}
+
+impl SessionPolicy {
+    /// Build a policy with no expiry — used by tests that need long-lived sessions.
+    #[must_use]
+    pub const fn unbounded() -> Self {
+        Self { ttl: None, idle_timeout: None }
+    }
+}
+
+/// Reason an authenticated operator session was considered expired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionExpiryReason {
+    /// The absolute session lifetime (policy TTL) has been exceeded.
+    TtlExceeded,
+    /// No authenticated activity within the configured idle window.
+    IdleTimeout,
+}
+
+impl SessionExpiryReason {
+    /// Short machine-readable identifier used as the audit log `reason`.
+    #[must_use]
+    pub const fn as_reason_str(self) -> &'static str {
+        match self {
+            Self::TtlExceeded => "ttl_exceeded",
+            Self::IdleTimeout => "idle_timeout",
+        }
+    }
+
+    /// Operator-facing message included in the `InitConnectionError` payload.
+    #[must_use]
+    pub const fn client_message(self) -> &'static str {
+        match self {
+            Self::TtlExceeded => {
+                "Session expired: maximum lifetime exceeded; please re-authenticate"
+            }
+            Self::IdleTimeout => "Session expired: inactivity timeout; please re-authenticate",
+        }
+    }
+}
+
+/// Outcome of [`SessionRegistry::touch_activity`] and
+/// [`crate::AuthService::touch_session_activity`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionActivity {
+    /// Session is valid; its last-activity timestamp has been refreshed.
+    Ok,
+    /// Session was expired. The session has been removed from the registry;
+    /// the caller should notify the operator and close the connection.
+    Expired {
+        /// Reason the session was revoked.
+        reason: SessionExpiryReason,
+        /// Username of the expired session (for audit logging).
+        username: String,
+    },
+    /// No session matched the supplied connection id.
+    NotFound,
+}
+
 /// Authenticated operator session metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OperatorSession {
@@ -29,6 +111,29 @@ pub struct OperatorSession {
     pub role: OperatorRole,
     /// Connection identifier used by the current WebSocket.
     pub connection_id: Uuid,
+    /// Monotonic instant at which the session was first issued.
+    pub created_at: Instant,
+    /// Monotonic instant of the most recent authenticated activity.
+    pub last_activity_at: Instant,
+}
+
+impl OperatorSession {
+    /// Returns the expiry reason if the session violates `policy` at `now`,
+    /// otherwise returns `None`.
+    #[must_use]
+    pub fn expiry_at(&self, now: Instant, policy: &SessionPolicy) -> Option<SessionExpiryReason> {
+        if let Some(ttl) = policy.ttl
+            && now.saturating_duration_since(self.created_at) >= ttl
+        {
+            return Some(SessionExpiryReason::TtlExceeded);
+        }
+        if let Some(idle) = policy.idle_timeout
+            && now.saturating_duration_since(self.last_activity_at) >= idle
+        {
+            return Some(SessionExpiryReason::IdleTimeout);
+        }
+        None
+    }
 }
 
 #[derive(Debug, Default)]
@@ -116,5 +221,172 @@ impl SessionRegistry {
                 session.role = role;
             }
         }
+    }
+
+    /// Validate the session bound to `connection_id` against `policy` and, if
+    /// still valid, refresh its last-activity timestamp to `now`. Expired
+    /// sessions are removed from the registry and their identity is returned so
+    /// the caller can log the revocation and notify the client.
+    pub(super) fn touch_activity(
+        &mut self,
+        connection_id: Uuid,
+        now: Instant,
+        policy: &SessionPolicy,
+    ) -> SessionActivity {
+        let Some(token) = self.token_by_connection.get(&connection_id).cloned() else {
+            return SessionActivity::NotFound;
+        };
+        let Some(session) = self.by_token.get_mut(&token) else {
+            // Registry invariant broken; treat as missing.
+            self.token_by_connection.remove(&connection_id);
+            return SessionActivity::NotFound;
+        };
+
+        if let Some(reason) = session.expiry_at(now, policy) {
+            let username = session.username.clone();
+            self.by_token.remove(&token);
+            self.token_by_connection.remove(&connection_id);
+            return SessionActivity::Expired { reason, username };
+        }
+
+        session.last_activity_at = now;
+        SessionActivity::Ok
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_session(now: Instant, username: &str) -> OperatorSession {
+        OperatorSession {
+            token: format!("token-{username}"),
+            username: username.to_owned(),
+            role: OperatorRole::Operator,
+            connection_id: Uuid::new_v4(),
+            created_at: now,
+            last_activity_at: now,
+        }
+    }
+
+    #[test]
+    fn default_policy_applies_24h_ttl_and_30m_idle() {
+        let policy = SessionPolicy::default();
+        assert_eq!(policy.ttl, Some(DEFAULT_SESSION_TTL));
+        assert_eq!(policy.idle_timeout, Some(DEFAULT_IDLE_TIMEOUT));
+        assert_eq!(DEFAULT_SESSION_TTL, Duration::from_secs(86_400));
+        assert_eq!(DEFAULT_IDLE_TIMEOUT, Duration::from_secs(1_800));
+    }
+
+    #[test]
+    fn expiry_at_returns_ttl_exceeded_when_session_older_than_ttl() {
+        let now = Instant::now();
+        let session = make_session(now, "op");
+        let policy = SessionPolicy {
+            ttl: Some(Duration::from_secs(10)),
+            idle_timeout: Some(Duration::from_secs(60)),
+        };
+
+        assert_eq!(session.expiry_at(now, &policy), None);
+        assert_eq!(
+            session.expiry_at(now + Duration::from_secs(10), &policy),
+            Some(SessionExpiryReason::TtlExceeded),
+        );
+    }
+
+    #[test]
+    fn expiry_at_returns_idle_timeout_when_last_activity_stale() {
+        let now = Instant::now();
+        let mut session = make_session(now, "op");
+        session.last_activity_at = now - Duration::from_secs(120);
+        let policy = SessionPolicy {
+            ttl: Some(Duration::from_secs(3600)),
+            idle_timeout: Some(Duration::from_secs(60)),
+        };
+
+        assert_eq!(session.expiry_at(now, &policy), Some(SessionExpiryReason::IdleTimeout),);
+    }
+
+    #[test]
+    fn expiry_at_prefers_ttl_over_idle_when_both_breached() {
+        // TTL is reported first so an operator forced to re-auth after the
+        // maximum lifetime sees the more accurate reason even if idle also
+        // fires at the same wall-clock instant.
+        let now = Instant::now();
+        let mut session = make_session(now, "op");
+        session.last_activity_at = now - Duration::from_secs(120);
+        let policy = SessionPolicy {
+            ttl: Some(Duration::from_secs(30)),
+            idle_timeout: Some(Duration::from_secs(60)),
+        };
+
+        assert_eq!(
+            session.expiry_at(now + Duration::from_secs(30), &policy),
+            Some(SessionExpiryReason::TtlExceeded),
+        );
+    }
+
+    #[test]
+    fn expiry_at_never_expires_when_policy_unbounded() {
+        let now = Instant::now();
+        let mut session = make_session(now, "op");
+        session.last_activity_at = now - Duration::from_secs(86_400);
+        assert_eq!(
+            session.expiry_at(now + Duration::from_secs(86_400 * 7), &SessionPolicy::unbounded()),
+            None,
+        );
+    }
+
+    #[test]
+    fn touch_activity_refreshes_last_activity_when_valid() {
+        let now = Instant::now();
+        let mut registry = SessionRegistry::default();
+        let session = make_session(now, "op");
+        let connection_id = session.connection_id;
+        registry.insert(session);
+
+        let later = now + Duration::from_secs(5);
+        assert_eq!(
+            registry.touch_activity(connection_id, later, &SessionPolicy::default()),
+            SessionActivity::Ok,
+        );
+
+        let refreshed =
+            registry.get_by_connection(connection_id).expect("session should still be present");
+        assert_eq!(refreshed.last_activity_at, later);
+        assert_eq!(refreshed.created_at, now);
+    }
+
+    #[test]
+    fn touch_activity_removes_expired_session_and_returns_reason() {
+        let now = Instant::now();
+        let mut registry = SessionRegistry::default();
+        let session = make_session(now, "op");
+        let connection_id = session.connection_id;
+        let token = session.token.clone();
+        registry.insert(session);
+
+        let policy = SessionPolicy { ttl: Some(Duration::from_secs(10)), idle_timeout: None };
+        let later = now + Duration::from_secs(15);
+
+        match registry.touch_activity(connection_id, later, &policy) {
+            SessionActivity::Expired { reason, username } => {
+                assert_eq!(reason, SessionExpiryReason::TtlExceeded);
+                assert_eq!(username, "op");
+            }
+            other => panic!("expected Expired, got {other:?}"),
+        }
+
+        assert!(registry.get_by_connection(connection_id).is_none());
+        assert!(registry.get_by_token(&token).is_none());
+    }
+
+    #[test]
+    fn touch_activity_returns_not_found_for_unknown_connection() {
+        let mut registry = SessionRegistry::default();
+        assert_eq!(
+            registry.touch_activity(Uuid::new_v4(), Instant::now(), &SessionPolicy::default(),),
+            SessionActivity::NotFound,
+        );
     }
 }

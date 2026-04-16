@@ -53,8 +53,9 @@ use uuid::Uuid;
 
 use crate::{
     AgentRegistry, AuditResultStatus, AuditWebhookNotifier, AuthService, Database, EventBus,
-    ListenerManager, PayloadBuilderService, ShutdownController, SocketRelayManager, audit_details,
-    authorize_websocket_command, parameter_object,
+    ListenerManager, PayloadBuilderService, SessionActivity, SessionExpiryReason,
+    ShutdownController, SocketRelayManager, audit_details, authorize_websocket_command,
+    parameter_object, session_expired_message,
 };
 
 /// Register the Havoc-compatible operator WebSocket endpoint at `/`.
@@ -294,6 +295,7 @@ async fn handle_incoming_frame<S>(
 ) -> Result<SocketLoopControl, ()>
 where
     S: Clone + Send + Sync + 'static,
+    AuthService: FromRef<S>,
     EventBus: FromRef<S>,
     ListenerManager: FromRef<S>,
     AgentRegistry: FromRef<S>,
@@ -358,6 +360,27 @@ where
                     return Err(());
                 }
             };
+
+            let auth = AuthService::from_ref(state);
+            match auth.touch_session_activity(session.connection_id).await {
+                SessionActivity::Ok => {}
+                SessionActivity::Expired { reason, username } => {
+                    report_session_expired(state, socket, session, ws_session, reason, &username)
+                        .await;
+                    return Err(());
+                }
+                SessionActivity::NotFound => {
+                    warn!(
+                        connection_id = %session.connection_id,
+                        username = %session.username,
+                        "session no longer registered; closing operator connection"
+                    );
+                    if let Err(e) = socket.send(WsMessage::Close(None)).await {
+                        debug!(%e, "failed to send close frame after session_not_found");
+                    }
+                    return Err(());
+                }
+            }
 
             match authorize_websocket_command(session, &message) {
                 Ok(permission) => {
@@ -426,6 +449,61 @@ where
             );
             Err(())
         }
+    }
+}
+
+/// Notify the operator that their authenticated session has been revoked
+/// server-side, record an audit entry, and close the WebSocket.
+///
+/// Used when [`AuthService::touch_session_activity`] reports that the session's
+/// TTL or idle timeout has elapsed between frames.
+async fn report_session_expired<S>(
+    state: &S,
+    socket: &mut WebSocket,
+    session: &crate::OperatorSession,
+    ws_session: &mut WsSession,
+    reason: SessionExpiryReason,
+    username: &str,
+) where
+    S: Clone + Send + Sync + 'static,
+    AuditWebhookNotifier: FromRef<S>,
+    Database: FromRef<S>,
+{
+    warn!(
+        connection_id = %session.connection_id,
+        username,
+        reason = reason.as_reason_str(),
+        "operator session expired; revoking"
+    );
+
+    let database = Database::from_ref(state);
+    let webhooks = AuditWebhookNotifier::from_ref(state);
+    log_operator_action(
+        &database,
+        &webhooks,
+        username,
+        "operator.session_timeout",
+        "operator",
+        Some(username.to_owned()),
+        audit_details(
+            AuditResultStatus::Failure,
+            None,
+            Some(reason.as_reason_str()),
+            Some(parameter_object([
+                ("connection_id", Value::String(session.connection_id.to_string())),
+                ("reason", Value::String(reason.as_reason_str().to_owned())),
+            ])),
+        ),
+    )
+    .await;
+
+    if let Err(error) =
+        send_hmac_message(socket, &session_expired_message(username, reason), ws_session).await
+    {
+        debug!(%error, "failed to send session-expired message to operator");
+    }
+    if let Err(e) = socket.send(WsMessage::Close(None)).await {
+        debug!(%e, "failed to send close frame after session expiry");
     }
 }
 

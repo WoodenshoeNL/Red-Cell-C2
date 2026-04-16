@@ -41,7 +41,9 @@ pub use audit::{
 };
 pub use auth::{
     AuthError, AuthService, AuthenticationFailure, AuthenticationResult, AuthenticationSuccess,
-    OperatorSession, login_failure_message, login_success_message,
+    DEFAULT_IDLE_TIMEOUT, DEFAULT_SESSION_TTL, OperatorSession, SessionActivity,
+    SessionExpiryReason, SessionPolicy, login_failure_message, login_success_message,
+    session_expired_message,
 };
 pub use database::{
     AgentGroupRepository, AgentRepository, AgentResponseRecord, AgentResponseRepository,

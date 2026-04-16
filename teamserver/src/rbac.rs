@@ -440,11 +440,14 @@ mod tests {
     }
 
     fn session(role: OperatorRole) -> OperatorSession {
+        let now = std::time::Instant::now();
         OperatorSession {
             token: "session-token".to_owned(),
             username: format!("{role:?}").to_lowercase(),
             role,
             connection_id: Uuid::new_v4(),
+            created_at: now,
+            last_activity_at: now,
         }
     }
 

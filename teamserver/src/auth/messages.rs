@@ -4,7 +4,7 @@ use red_cell_common::OperatorInfo;
 use red_cell_common::config::OperatorRole;
 use red_cell_common::operator::{EventCode, Message, MessageHead, MessageInfo, OperatorMessage};
 
-use super::AuthenticationFailure;
+use super::{AuthenticationFailure, SessionExpiryReason};
 
 /// Operator account inventory entry with current presence metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +48,16 @@ pub fn login_failure_message(user: &str, failure: &AuthenticationFailure) -> Ope
     OperatorMessage::InitConnectionError(Message {
         head: login_response_head(user),
         info: MessageInfo { message: failure.message().to_owned() },
+    })
+}
+
+/// Build an `InitConnectionError` delivered when an authenticated operator
+/// session is revoked server-side for exceeding its TTL or idle timeout.
+#[must_use]
+pub fn session_expired_message(user: &str, reason: SessionExpiryReason) -> OperatorMessage {
+    OperatorMessage::InitConnectionError(Message {
+        head: login_response_head(user),
+        info: MessageInfo { message: reason.client_message().to_owned() },
     })
 }
 

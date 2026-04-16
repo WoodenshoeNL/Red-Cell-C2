@@ -294,6 +294,39 @@ impl IntoResponse for AgentApiError {
     }
 }
 
+// ── ACL helpers ───────────────────────────────────────────────────────────────
+
+/// Authorize agent access for read/mutation handlers by composing both the
+/// agent-group and listener-access checks.  Returns the underlying
+/// [`AuthorizationError`] on denial so the handler maps to 403.
+async fn authorize_agent_access(
+    state: &TeamserverState,
+    username: &str,
+    agent_id: u32,
+) -> Result<(), AuthorizationError> {
+    authorize_agent_group_access(&state.database, username, agent_id).await?;
+    if let Some(listener_name) = state.agent_registry.listener_name(agent_id).await {
+        authorize_listener_access(&state.database, username, &listener_name).await?;
+    }
+    Ok(())
+}
+
+/// Non-raising variant of [`authorize_agent_access`] used by list endpoints to
+/// skip agents the caller cannot see.  Database errors are logged and treated
+/// as non-visible so a partial result is returned rather than leaking other
+/// operators' agents.
+async fn operator_may_access_agent(state: &TeamserverState, username: &str, agent_id: u32) -> bool {
+    match authorize_agent_access(state, username, agent_id).await {
+        Ok(()) => true,
+        Err(AuthorizationError::AgentGroupDenied { .. })
+        | Err(AuthorizationError::ListenerAccessDenied { .. }) => false,
+        Err(err) => {
+            tracing::warn!(%username, agent_id, %err, "agent ACL check failed; hiding agent");
+            false
+        }
+    }
+}
+
 // ── Agent list / show handlers ────────────────────────────────────────────────
 
 #[utoipa::path(
@@ -311,9 +344,16 @@ impl IntoResponse for AgentApiError {
 )]
 pub(super) async fn list_agents(
     State(state): State<TeamserverState>,
-    _identity: ReadApiAccess,
+    identity: ReadApiAccess,
 ) -> Json<Vec<ApiAgentInfo>> {
-    Json(state.agent_registry.list().await.into_iter().map(ApiAgentInfo::from).collect())
+    let agents = state.agent_registry.list().await;
+    let mut visible = Vec::with_capacity(agents.len());
+    for agent in agents {
+        if operator_may_access_agent(&state, &identity.key_id, agent.agent_id).await {
+            visible.push(ApiAgentInfo::from(agent));
+        }
+    }
+    Json(visible)
 }
 
 #[utoipa::path(
@@ -333,7 +373,7 @@ pub(super) async fn list_agents(
 )]
 pub(super) async fn get_agent(
     State(state): State<TeamserverState>,
-    _identity: ReadApiAccess,
+    identity: ReadApiAccess,
     Path(id): Path<String>,
 ) -> Result<Json<ApiAgentInfo>, AgentApiError> {
     let agent_id = parse_api_agent_id(&id)?;
@@ -342,6 +382,7 @@ pub(super) async fn get_agent(
         .get(agent_id)
         .await
         .ok_or(crate::TeamserverError::AgentNotFound { agent_id })?;
+    authorize_agent_access(&state, &identity.key_id, agent_id).await?;
     Ok(Json(ApiAgentInfo::from(agent)))
 }
 
@@ -579,7 +620,7 @@ pub(super) async fn queue_agent_task(
 )]
 pub(super) async fn get_agent_output(
     State(state): State<TeamserverState>,
-    _identity: ReadApiAccess,
+    identity: ReadApiAccess,
     Path(id): Path<String>,
     Query(query): Query<AgentOutputQuery>,
 ) -> Result<Json<AgentOutputPage>, AgentApiError> {
@@ -591,6 +632,7 @@ pub(super) async fn get_agent_output(
         .get(agent_id)
         .await
         .ok_or(crate::TeamserverError::AgentNotFound { agent_id })?;
+    authorize_agent_access(&state, &identity.key_id, agent_id).await?;
 
     let records = state
         .database
@@ -877,10 +919,11 @@ pub(super) async fn agent_download(
 
 pub(super) async fn get_agent_groups(
     State(state): State<TeamserverState>,
-    _identity: ReadApiAccess,
+    identity: ReadApiAccess,
     Path(id): Path<String>,
 ) -> Result<Json<AgentGroupsResponse>, AgentApiError> {
     let agent_id = parse_api_agent_id(&id)?;
+    authorize_agent_access(&state, &identity.key_id, agent_id).await?;
     let groups = state.database.agent_groups().groups_for_agent(agent_id).await?;
     Ok(Json(AgentGroupsResponse { agent_id: format!("{agent_id:08X}"), groups }))
 }

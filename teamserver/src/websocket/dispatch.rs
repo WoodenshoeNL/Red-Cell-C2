@@ -189,6 +189,32 @@ pub(super) async fn dispatch_operator_command<S>(
         OperatorMessage::ListenerEdit(message) => {
             let name = message.info.name.clone().unwrap_or_default();
             let parameters = serialize_for_audit(&message.info, "listener.update");
+            if !name.is_empty() {
+                if let Err(error) =
+                    authorize_listener_access(&database, &session.username, &name).await
+                {
+                    log_operator_action(
+                        &database,
+                        &webhooks,
+                        &session.username,
+                        "listener.update",
+                        "listener",
+                        Some(name.clone()),
+                        audit_details(
+                            AuditResultStatus::Failure,
+                            None,
+                            Some("update"),
+                            Some(parameter_object([
+                                ("config", parameters.clone().unwrap_or(Value::Null)),
+                                ("error", Value::String(error.to_string())),
+                            ])),
+                        ),
+                    )
+                    .await;
+                    events.broadcast(teamserver_log_event(&session.username, &error.to_string()));
+                    return;
+                }
+            }
             match listener_config_from_operator(&message.info) {
                 Ok(config) => match listeners.update(config).await {
                     Ok(summary) => {
@@ -260,6 +286,32 @@ pub(super) async fn dispatch_operator_command<S>(
         }
         OperatorMessage::ListenerRemove(message) => {
             let name = message.info.name;
+            if !name.is_empty() {
+                if let Err(error) =
+                    authorize_listener_access(&database, &session.username, &name).await
+                {
+                    log_operator_action(
+                        &database,
+                        &webhooks,
+                        &session.username,
+                        "listener.delete",
+                        "listener",
+                        Some(name.clone()),
+                        audit_details(
+                            AuditResultStatus::Failure,
+                            None,
+                            Some("delete"),
+                            Some(parameter_object([
+                                ("name", Value::String(name.clone())),
+                                ("error", Value::String(error.to_string())),
+                            ])),
+                        ),
+                    )
+                    .await;
+                    events.broadcast(teamserver_log_event(&session.username, &error.to_string()));
+                    return;
+                }
+            }
             match listeners.delete(&name).await {
                 Ok(()) => {
                     log_operator_action(
@@ -305,6 +357,39 @@ pub(super) async fn dispatch_operator_command<S>(
         OperatorMessage::ListenerMark(message) => {
             let name = message.info.name.clone();
             let mark = message.info.mark.clone();
+            if !name.is_empty() {
+                if let Err(error) =
+                    authorize_listener_access(&database, &session.username, &name).await
+                {
+                    let audit_action = if mark.eq_ignore_ascii_case("start")
+                        || mark.eq_ignore_ascii_case("online")
+                    {
+                        "listener.start"
+                    } else {
+                        "listener.stop"
+                    };
+                    log_operator_action(
+                        &database,
+                        &webhooks,
+                        &session.username,
+                        audit_action,
+                        "listener",
+                        Some(name.clone()),
+                        audit_details(
+                            AuditResultStatus::Failure,
+                            None,
+                            Some(mark.as_str()),
+                            Some(parameter_object([
+                                ("mark", Value::String(mark.clone())),
+                                ("error", Value::String(error.to_string())),
+                            ])),
+                        ),
+                    )
+                    .await;
+                    events.broadcast(teamserver_log_event(&session.username, &error.to_string()));
+                    return;
+                }
+            }
             let result = match action_from_mark(&message.info.mark) {
                 Ok(ListenerEventAction::Started) => listeners.start(&message.info.name).await,
                 Ok(ListenerEventAction::Stopped) => listeners.stop(&message.info.name).await,
@@ -415,6 +500,31 @@ pub(super) async fn dispatch_operator_command<S>(
             let listener_name = message.info.listener.clone();
             let arch = message.info.arch.clone();
             let format = message.info.format.clone();
+
+            if let Err(error) = authorize_listener_access(&database, &actor, &listener_name).await {
+                events.broadcast(build_payload_message_event(&actor, "Error", &error.to_string()));
+                log_operator_action(
+                    &database,
+                    &webhooks,
+                    &actor,
+                    "payload.build",
+                    "payload",
+                    Some(listener_name.clone()),
+                    audit_details(
+                        AuditResultStatus::Failure,
+                        None,
+                        None,
+                        Some(parameter_object([
+                            ("listener", Value::String(listener_name.clone())),
+                            ("arch", Value::String(arch.clone())),
+                            ("format", Value::String(format.clone())),
+                            ("error", Value::String(error.to_string())),
+                        ])),
+                    ),
+                )
+                .await;
+                return;
+            }
 
             tokio::spawn(async move {
                 let summary = match listeners.summary(&listener_name).await {

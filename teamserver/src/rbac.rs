@@ -45,7 +45,7 @@ impl Permission {
 }
 
 /// Errors returned by RBAC checks.
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum AuthorizationError {
     /// No session token was present on the request.
     #[error("missing session token")]

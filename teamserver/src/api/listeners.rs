@@ -11,7 +11,9 @@ use red_cell_common::ListenerConfig;
 
 use crate::app::TeamserverState;
 use crate::listeners::{ListenerManagerError, ListenerMarkRequest, ListenerSummary};
-use crate::{AuditResultStatus, ListenerStatus, audit_details, parameter_object};
+use crate::{
+    AuditResultStatus, ListenerStatus, audit_details, authorize_listener_access, parameter_object,
+};
 
 use super::{
     AdminApiAccess, ApiErrorBody, ListenerManagementApiAccess, ReadApiAccess, now_rfc3339,
@@ -44,9 +46,21 @@ pub struct TlsCertReloadRequest {
 )]
 pub(super) async fn list_listeners(
     State(state): State<TeamserverState>,
-    _identity: ReadApiAccess,
+    identity: ReadApiAccess,
 ) -> Result<Json<Vec<ListenerSummary>>, ListenerManagerError> {
-    Ok(Json(state.listeners.list().await?))
+    let summaries = state.listeners.list().await?;
+    let mut visible = Vec::with_capacity(summaries.len());
+    for summary in summaries {
+        if state
+            .database
+            .listener_access()
+            .operator_may_use_listener(&identity.key_id, &summary.name)
+            .await?
+        {
+            visible.push(summary);
+        }
+    }
+    Ok(Json(visible))
 }
 
 #[utoipa::path(
@@ -149,10 +163,12 @@ fn validate_listener_config_fields(config: &ListenerConfig) -> Result<(), Listen
 )]
 pub(super) async fn get_listener(
     State(state): State<TeamserverState>,
-    _identity: ReadApiAccess,
+    identity: ReadApiAccess,
     Path(name): Path<String>,
 ) -> Result<Json<ListenerSummary>, ListenerManagerError> {
-    Ok(Json(state.listeners.summary(&name).await?))
+    let summary = state.listeners.summary(&name).await?;
+    authorize_listener_access(&state.database, &identity.key_id, &summary.name).await?;
+    Ok(Json(summary))
 }
 
 #[utoipa::path(
@@ -177,6 +193,7 @@ pub(super) async fn update_listener(
     Path(name): Path<String>,
     Json(config): Json<ListenerConfig>,
 ) -> Result<Json<ListenerSummary>, ListenerManagerError> {
+    authorize_listener_access(&state.database, &identity.key_id, &name).await?;
     let parameters = serde_json::to_value(&config).ok();
     // Snapshot the current config so we can detect no-op updates later.
     let old_config = state.listeners.summary(&name).await.ok().map(|s| s.config);
@@ -295,6 +312,7 @@ pub(super) async fn delete_listener(
     identity: ListenerManagementApiAccess,
     Path(name): Path<String>,
 ) -> Result<StatusCode, ListenerManagerError> {
+    authorize_listener_access(&state.database, &identity.key_id, &name).await?;
     match state.listeners.delete(&name).await {
         Ok(()) => {
             record_audit_entry(
@@ -359,6 +377,7 @@ pub(super) async fn start_listener(
     identity: ListenerManagementApiAccess,
     Path(name): Path<String>,
 ) -> Result<Json<ListenerSummary>, ListenerManagerError> {
+    authorize_listener_access(&state.database, &identity.key_id, &name).await?;
     let summary = match state.listeners.start(&name).await {
         Ok(summary) => summary,
         Err(error) => {
@@ -421,6 +440,7 @@ pub(super) async fn stop_listener(
     identity: ListenerManagementApiAccess,
     Path(name): Path<String>,
 ) -> Result<Json<ListenerSummary>, ListenerManagerError> {
+    authorize_listener_access(&state.database, &identity.key_id, &name).await?;
     let summary = match state.listeners.stop(&name).await {
         Ok(summary) => summary,
         Err(error) => {
@@ -485,6 +505,7 @@ pub(super) async fn mark_listener(
     Path(name): Path<String>,
     Json(request): Json<ListenerMarkRequest>,
 ) -> Result<Json<ListenerSummary>, ListenerManagerError> {
+    authorize_listener_access(&state.database, &identity.key_id, &name).await?;
     let summary = match request.mark.as_str() {
         mark if mark.eq_ignore_ascii_case("start") || mark.eq_ignore_ascii_case("online") => {
             match state.listeners.start(&name).await {
@@ -590,6 +611,7 @@ pub(super) async fn reload_listener_tls_cert(
     Path(name): Path<String>,
     Json(body): Json<TlsCertReloadRequest>,
 ) -> Result<StatusCode, ListenerManagerError> {
+    authorize_listener_access(&state.database, &identity.key_id, &name).await?;
     match state
         .listeners
         .reload_tls_cert(&name, body.cert_pem.as_bytes(), body.key_pem.as_bytes())

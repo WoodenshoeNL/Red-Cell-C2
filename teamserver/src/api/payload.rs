@@ -13,7 +13,8 @@ use uuid::Uuid;
 use crate::app::TeamserverState;
 use crate::listeners::ListenerManagerError;
 use crate::{
-    AuditResultStatus, AuditWebhookNotifier, PayloadBuildRecord, audit_details, parameter_object,
+    AuditResultStatus, AuditWebhookNotifier, AuthorizationError, PayloadBuildRecord, audit_details,
+    authorize_listener_access, parameter_object,
 };
 
 use super::{
@@ -135,6 +136,13 @@ pub(super) struct FlushPayloadCacheResponse {
 
 // ── Private helpers ───────────────────────────────────────────────────────────
 
+/// Convert an [`AuthorizationError`] into a JSON [`Response`] so payload handlers
+/// that already return `Response` can surface ACL denials without rewriting
+/// their signatures.
+fn authorization_error_to_response(err: AuthorizationError) -> Response {
+    err.into_response()
+}
+
 /// Map CLI-style format names to Havoc builder format strings.
 pub(super) fn cli_format_to_havoc(format: &str) -> Result<&'static str, String> {
     match format {
@@ -203,22 +211,40 @@ pub(super) fn validate_agent_format_combination(
 )]
 pub(super) async fn list_payloads(
     State(state): State<TeamserverState>,
-    _identity: ReadApiAccess,
+    identity: ReadApiAccess,
 ) -> Response {
     match state.database.payload_builds().list_summaries().await {
         Ok(records) => {
-            let summaries: Vec<PayloadSummary> = records
-                .into_iter()
-                .filter(|r| r.status == "done")
-                .map(|r| PayloadSummary {
-                    id: r.id,
-                    name: r.name,
-                    arch: r.arch,
-                    format: r.format,
-                    built_at: r.created_at,
-                    size_bytes: r.size_bytes.map(|s| s as u64),
-                })
-                .collect();
+            let mut summaries = Vec::with_capacity(records.len());
+            for r in records {
+                if r.status != "done" {
+                    continue;
+                }
+                match state
+                    .database
+                    .listener_access()
+                    .operator_may_use_listener(&identity.key_id, &r.listener)
+                    .await
+                {
+                    Ok(true) => summaries.push(PayloadSummary {
+                        id: r.id,
+                        name: r.name,
+                        arch: r.arch,
+                        format: r.format,
+                        built_at: r.created_at,
+                        size_bytes: r.size_bytes.map(|s| s as u64),
+                    }),
+                    Ok(false) => {}
+                    Err(err) => {
+                        tracing::warn!(
+                            operator = %identity.key_id,
+                            listener = %r.listener,
+                            %err,
+                            "listener access check failed during list_payloads; hiding record"
+                        );
+                    }
+                }
+            }
             Json(summaries).into_response()
         }
         Err(err) => {
@@ -253,6 +279,14 @@ pub(super) async fn submit_payload_build(
     identity: TaskAgentApiAccess,
     Json(request): Json<PayloadBuildRequest>,
 ) -> Response {
+    // Enforce the per-listener operator allow-list before kicking off a build so
+    // an operator restricted to listener A cannot produce payloads for listener B.
+    if let Err(err) =
+        authorize_listener_access(&state.database, &identity.key_id, &request.listener).await
+    {
+        return authorization_error_to_response(err);
+    }
+
     // Validate format.
     let havoc_format = match cli_format_to_havoc(&request.format) {
         Ok(f) => f,
@@ -465,10 +499,15 @@ pub(super) async fn submit_payload_build(
 pub(super) async fn get_payload_job(
     State(state): State<TeamserverState>,
     Path(job_id): Path<String>,
-    _identity: ReadApiAccess,
+    identity: ReadApiAccess,
 ) -> Response {
     match state.database.payload_builds().get_summary(&job_id).await {
         Ok(Some(record)) => {
+            if let Err(err) =
+                authorize_listener_access(&state.database, &identity.key_id, &record.listener).await
+            {
+                return authorization_error_to_response(err);
+            }
             let payload_id = if record.status == "done" { Some(record.id.clone()) } else { None };
             Json(PayloadJobStatus {
                 job_id: record.id,
@@ -517,10 +556,15 @@ pub(super) async fn get_payload_job(
 pub(super) async fn download_payload(
     State(state): State<TeamserverState>,
     Path(id): Path<String>,
-    _identity: TaskAgentApiAccess,
+    identity: TaskAgentApiAccess,
 ) -> Response {
     match state.database.payload_builds().get(&id).await {
         Ok(Some(mut record)) if record.status == "done" && record.artifact.is_some() => {
+            if let Err(err) =
+                authorize_listener_access(&state.database, &identity.key_id, &record.listener).await
+            {
+                return authorization_error_to_response(err);
+            }
             // SAFETY: guard above checks is_some(); use take() to avoid expect()/unwrap()
             let Some(artifact) = record.artifact.take() else {
                 return json_error_response(

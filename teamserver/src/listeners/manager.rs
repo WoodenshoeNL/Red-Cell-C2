@@ -77,6 +77,10 @@ pub enum ListenerManagerError {
     /// TLS certificate validation or hot-reload failed.
     #[error("TLS certificate error: {message}")]
     TlsCertError { message: String },
+    /// The caller is not permitted to act on this listener (RBAC allow-list or
+    /// auth-layer failure).
+    #[error(transparent)]
+    Authorization(#[from] crate::AuthorizationError),
 }
 
 impl IntoResponse for ListenerManagerError {
@@ -95,6 +99,10 @@ impl IntoResponse for ListenerManagerError {
             Self::NotTlsListener { .. } => (StatusCode::UNPROCESSABLE_ENTITY, "listener_not_tls"),
             Self::TlsCertError { .. } => (StatusCode::BAD_REQUEST, "listener_tls_cert_error"),
             Self::Database(_) => (StatusCode::INTERNAL_SERVER_ERROR, "listener_error"),
+            // Defer to AuthorizationError's own status/code mapping so that
+            // ListenerAccessDenied returns 403 and DatabaseError returns 500,
+            // matching the other RBAC-protected endpoints.
+            Self::Authorization(err) => return err.clone().into_response(),
         };
 
         json_error_response(status, code, self.to_string())

@@ -1,5 +1,6 @@
 //! Teamserver-managed socket relay runtime for Demon `COMMAND_SOCKET` tasks.
 
+mod cleanup;
 mod relay;
 mod socks_proto;
 mod types;
@@ -10,16 +11,16 @@ use std::sync::atomic::AtomicU32;
 
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
-use tokio::runtime::Handle;
 use tokio::sync::{RwLock, oneshot};
 use tracing::warn;
 
 use crate::{AgentRegistry, EventBus};
 
+use cleanup::{close_agent_state, spawn_stale_agent_sweeper};
 pub use types::SocketRelayError;
 use types::{
     AgentSocketState, MAX_RELAY_LISTENERS, RelayStateSweeper, SOCKS_REPLY_GENERAL_FAILURE,
-    SOCKS_REPLY_SUCCEEDED, STALE_AGENT_SWEEP_INTERVAL, SocksServerHandle, parse_port,
+    SOCKS_REPLY_SUCCEEDED, SocksServerHandle, parse_port,
 };
 
 /// Teamserver-owned SOCKS5 listeners and pending reverse-proxy client sockets.
@@ -319,68 +320,6 @@ impl SocketRelayManager {
             warn!(agent_id = format_args!("{agent_id:08X}"), socket_id = format_args!("{socket_id:08X}"), %error, "SOCKS5 close_client: writer shutdown failed");
         }
         Ok(())
-    }
-}
-
-fn spawn_stale_agent_sweeper(
-    registry: AgentRegistry,
-    state: Arc<RwLock<HashMap<u32, AgentSocketState>>>,
-) -> Option<Arc<RelayStateSweeper>> {
-    let handle = Handle::try_current().ok()?;
-    let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
-    let task = handle.spawn(async move {
-        let mut ticker = tokio::time::interval(STALE_AGENT_SWEEP_INTERVAL);
-        loop {
-            tokio::select! {
-                _ = &mut shutdown_rx => break,
-                _ = ticker.tick() => {
-                    let _ = prune_stale_agent_state(&registry, &state).await;
-                }
-            }
-        }
-    });
-
-    Some(Arc::new(RelayStateSweeper { shutdown: Some(shutdown_tx), task }))
-}
-
-async fn prune_stale_agent_state(
-    registry: &AgentRegistry,
-    state: &Arc<RwLock<HashMap<u32, AgentSocketState>>>,
-) -> usize {
-    let active_agents = registry
-        .list_active()
-        .await
-        .into_iter()
-        .map(|agent| agent.agent_id)
-        .collect::<std::collections::HashSet<_>>();
-    let stale_states = {
-        let mut state = state.write().await;
-        let stale_agent_ids = state
-            .keys()
-            .copied()
-            .filter(|agent_id| !active_agents.contains(agent_id))
-            .collect::<Vec<_>>();
-        stale_agent_ids
-            .into_iter()
-            .filter_map(|agent_id| state.remove(&agent_id))
-            .collect::<Vec<_>>()
-    };
-
-    let removed = stale_states.len();
-    for agent_state in stale_states {
-        close_agent_state(agent_state).await;
-    }
-    removed
-}
-
-async fn close_agent_state(agent_state: AgentSocketState) {
-    for mut handle in agent_state.servers.into_values() {
-        handle.shutdown();
-    }
-
-    for client in agent_state.clients.into_values() {
-        let mut writer = client.writer.lock().await;
-        let _ = writer.shutdown().await;
     }
 }
 

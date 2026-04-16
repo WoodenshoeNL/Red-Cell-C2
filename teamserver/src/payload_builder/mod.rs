@@ -8,13 +8,13 @@ mod toolchain;
 
 pub use cache::PayloadCache;
 use cache::compute_cache_key;
+#[cfg(test)]
+use config_values::parse_hour_minute;
 use config_values::{
     add_bytes, add_u32, add_u64, add_wstring, amsi_patch_value, injection_mode, optional_bool,
     optional_string, parse_kill_date, parse_working_hours, proxy_loading_value, proxy_url,
     required_object, required_string, required_u32, sleep_jump_bypass, sleep_obfuscation_value,
 };
-#[cfg(test)]
-use config_values::parse_hour_minute;
 use formats::{Architecture, OutputFormat};
 pub use toolchain::ToolchainVersion;
 use toolchain::{

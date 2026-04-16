@@ -128,7 +128,7 @@ async fn allow_demon_init_for_smb_connection(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn spawn_smb_listener_runtime(
+pub(crate) async fn spawn_smb_listener_runtime(
     config: &SmbListenerConfig,
     registry: AgentRegistry,
     events: EventBus,

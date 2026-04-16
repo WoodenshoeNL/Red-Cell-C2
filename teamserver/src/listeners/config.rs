@@ -106,7 +106,7 @@ pub fn listener_config_from_operator(
     }
 }
 
-pub(super) fn profile_listener_configs(
+pub(crate) fn profile_listener_configs(
     profile: &Profile,
 ) -> Result<Vec<ListenerConfig>, ListenerManagerError> {
     let mut listeners = Vec::new();

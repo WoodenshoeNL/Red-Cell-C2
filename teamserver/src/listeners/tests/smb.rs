@@ -1,9 +1,10 @@
 use std::io;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use super::super::smb::smb_local_socket_name;
 use super::super::{
     MAX_DEMON_INIT_ATTEMPTS_PER_IP, MAX_SMB_FRAME_PAYLOAD_LEN, read_smb_frame,
-    smb_local_socket_name, spawn_smb_listener_runtime,
+    spawn_smb_listener_runtime,
 };
 use super::*;
 use crate::Job;

@@ -213,6 +213,50 @@ mod tests {
     }
 
     #[test]
+    fn session_expired_message_uses_init_connection_error_wire_shape() {
+        use crate::SessionExpiryReason;
+
+        let message = session_expired_message("operator", SessionExpiryReason::TtlExceeded);
+        let value = serde_json::to_value(&message).expect("message should serialize");
+
+        assert_eq!(value["Head"]["Event"], json!(EventCode::InitConnection.as_u32()));
+        assert_eq!(value["Body"]["SubEvent"], json!(InitConnectionCode::Error.as_u32()));
+        assert_eq!(value["Head"]["User"], json!("operator"));
+        assert_eq!(
+            value["Body"]["Info"]["Message"],
+            json!(SessionExpiryReason::TtlExceeded.client_message()),
+        );
+    }
+
+    #[test]
+    fn session_expired_message_covers_idle_timeout_variant() {
+        use crate::SessionExpiryReason;
+
+        let message = session_expired_message("analyst", SessionExpiryReason::IdleTimeout);
+        let value = serde_json::to_value(&message).expect("message should serialize");
+
+        assert_eq!(value["Body"]["SubEvent"], json!(InitConnectionCode::Error.as_u32()));
+        assert_eq!(
+            value["Body"]["Info"]["Message"],
+            json!(SessionExpiryReason::IdleTimeout.client_message()),
+        );
+    }
+
+    #[test]
+    fn session_expiry_reason_strings_are_distinct_and_non_empty() {
+        use crate::SessionExpiryReason;
+
+        for reason in [SessionExpiryReason::TtlExceeded, SessionExpiryReason::IdleTimeout] {
+            assert!(!reason.as_reason_str().is_empty());
+            assert!(!reason.client_message().is_empty());
+        }
+        assert_ne!(
+            SessionExpiryReason::TtlExceeded.as_reason_str(),
+            SessionExpiryReason::IdleTimeout.as_reason_str(),
+        );
+    }
+
+    #[test]
     fn all_authentication_failure_variants_have_non_empty_messages() {
         let variants =
             [AuthenticationFailure::InvalidCredentials, AuthenticationFailure::SessionCapExceeded];

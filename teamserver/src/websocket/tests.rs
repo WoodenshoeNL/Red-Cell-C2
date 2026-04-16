@@ -56,6 +56,13 @@ struct TestState {
 }
 
 impl TestState {
+    async fn new_with_session_policy(policy: crate::SessionPolicy) -> Self {
+        let mut state = Self::new().await;
+        let updated = state.auth.clone().with_session_policy(policy);
+        state.auth = updated;
+        state
+    }
+
     async fn new() -> Self {
         let profile = Profile::parse(
             r#"
@@ -2457,6 +2464,165 @@ async fn session_timeout_audit_recorded_for_idle_unauthenticated_connection() {
     // audit is expected.
     assert_eq!(page.total, 0, "early close should not produce a session_timeout record");
 
+    server.abort();
+}
+
+#[tokio::test]
+async fn authenticated_session_expires_after_idle_timeout_and_is_audited() {
+    use crate::SessionPolicy;
+
+    // Drive both TTL and idle timeout short enough that a single post-login
+    // frame sent after a small sleep crosses the threshold. 200 ms is large
+    // enough to absorb scheduler jitter while keeping the test quick.
+    let state = TestState::new_with_session_policy(SessionPolicy {
+        ttl: Some(Duration::from_secs(3600)),
+        idle_timeout: Some(Duration::from_millis(200)),
+    })
+    .await;
+    let database = state.database.clone();
+    let connections = state.connections.clone();
+    let (mut socket, server) = spawn_server(state).await;
+
+    login(&mut socket, "operator", "password1234").await;
+
+    // Wait past the idle window, then send any authenticated frame. The server
+    // must respond with an InitConnectionError carrying the expiry message and
+    // then close the socket.
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    socket.send_text(chat_message("operator", "hello after idle")).await;
+
+    let response = read_operator_message(&mut socket).await;
+    match response {
+        OperatorMessage::InitConnectionError(ref message) => {
+            assert!(
+                message.info.message.contains("inactivity")
+                    || message.info.message.contains("idle"),
+                "expected idle-timeout message, got {:?}",
+                message.info.message
+            );
+        }
+        other => panic!("expected InitConnectionError, got {other:?}"),
+    }
+
+    wait_for_connection_count(&connections, 0).await;
+
+    let page = query_audit_log(
+        &database,
+        &AuditQuery {
+            action: Some("operator.session_timeout".to_owned()),
+            actor: Some("operator".to_owned()),
+            ..AuditQuery::default()
+        },
+    )
+    .await
+    .expect("audit query should succeed");
+
+    assert_eq!(page.total, 1, "expected one session_timeout audit record");
+    let record = &page.items[0];
+    assert_eq!(record.action, "operator.session_timeout");
+    assert_eq!(record.actor, "operator");
+    assert_eq!(record.result_status, AuditResultStatus::Failure);
+    let reason = record.parameters.as_ref().and_then(|p| p.get("reason")).and_then(|v| v.as_str());
+    assert_eq!(
+        reason,
+        Some("idle_timeout"),
+        "session_timeout audit should record reason=idle_timeout, got {reason:?}"
+    );
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn authenticated_session_expires_after_absolute_ttl_and_is_audited() {
+    use crate::SessionPolicy;
+
+    // Short TTL; leave idle generous so the expiry is unambiguously from TTL.
+    let state = TestState::new_with_session_policy(SessionPolicy {
+        ttl: Some(Duration::from_millis(200)),
+        idle_timeout: Some(Duration::from_secs(600)),
+    })
+    .await;
+    let database = state.database.clone();
+    let connections = state.connections.clone();
+    let (mut socket, server) = spawn_server(state).await;
+
+    login(&mut socket, "operator", "password1234").await;
+
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    socket.send_text(chat_message("operator", "still here")).await;
+
+    let response = read_operator_message(&mut socket).await;
+    match response {
+        OperatorMessage::InitConnectionError(ref message) => {
+            assert!(
+                message.info.message.contains("lifetime"),
+                "expected TTL-expiry message, got {:?}",
+                message.info.message
+            );
+        }
+        other => panic!("expected InitConnectionError, got {other:?}"),
+    }
+
+    wait_for_connection_count(&connections, 0).await;
+
+    let page = query_audit_log(
+        &database,
+        &AuditQuery {
+            action: Some("operator.session_timeout".to_owned()),
+            actor: Some("operator".to_owned()),
+            ..AuditQuery::default()
+        },
+    )
+    .await
+    .expect("audit query should succeed");
+
+    assert_eq!(page.total, 1, "expected one session_timeout audit record");
+    let reason =
+        page.items[0].parameters.as_ref().and_then(|p| p.get("reason")).and_then(|v| v.as_str());
+    assert_eq!(reason, Some("ttl_exceeded"));
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn authenticated_session_within_idle_window_is_not_expired() {
+    use crate::SessionPolicy;
+
+    // Generous idle and TTL — no expiry should fire for a normal post-login
+    // frame. Guards against regressions where the expiry check mis-triggers on
+    // healthy sessions.
+    let state = TestState::new_with_session_policy(SessionPolicy {
+        ttl: Some(Duration::from_secs(3600)),
+        idle_timeout: Some(Duration::from_secs(3600)),
+    })
+    .await;
+    let database = state.database.clone();
+    let (mut socket, server) = spawn_server(state).await;
+
+    login(&mut socket, "operator", "password1234").await;
+
+    socket.send_text(chat_message("operator", "hi")).await;
+    // ChatMessage broadcasts to all operators (including the sender), so we
+    // expect to receive the broadcast rather than an error.
+    let response = read_operator_message(&mut socket).await;
+    assert!(
+        matches!(response, OperatorMessage::ChatMessage(_)),
+        "chat should echo for live session, got {response:?}"
+    );
+
+    let page = query_audit_log(
+        &database,
+        &AuditQuery {
+            action: Some("operator.session_timeout".to_owned()),
+            actor: Some("operator".to_owned()),
+            ..AuditQuery::default()
+        },
+    )
+    .await
+    .expect("audit query should succeed");
+    assert_eq!(page.total, 0, "live session must not trigger session_timeout audit");
+
+    socket.close().await;
     server.abort();
 }
 

@@ -729,3 +729,101 @@ async fn non_seq_protected_callback_not_checked_for_seq() {
         .await
         .expect("legacy callback without seq prefix must still be accepted");
 }
+
+/// Build a seq-protected callback whose seq prefix is valid but whose package
+/// stream is malformed (a payload length header that promises more bytes than
+/// are present).  Used to verify that a parse failure leaves both
+/// `last_seen_seq` and `ctr_block_offset` unchanged — the AES-CTR-has-no-AEAD
+/// desync bug fixed in red-cell-c2-4mygg.
+fn build_seq_protected_callback_with_malformed_packages(
+    agent_id: u32,
+    key: [u8; AGENT_KEY_LENGTH],
+    iv: [u8; AGENT_IV_LENGTH],
+    ctr_offset: u64,
+    seq: u64,
+) -> Vec<u8> {
+    let mut decrypted = Vec::new();
+    // Valid 8-byte LE seq prefix.
+    decrypted.extend_from_slice(&seq.to_le_bytes());
+    // First package claims a 0xFFFF_FFFF-byte payload but has zero bytes of
+    // body after the length header — `parse_callback_packages` must fail with
+    // BufferTooShort.
+    decrypted.extend_from_slice(&u32_be(0xFFFF_FFFF));
+    let encrypted = encrypt_agent_data_at_offset(&key, &iv, ctr_offset, &decrypted)
+        .expect("encrypt must succeed");
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&u32_be(u32::from(DemonCommand::CommandOutput)));
+    payload.extend_from_slice(&u32_be(1));
+    payload.extend_from_slice(&encrypted);
+    DemonEnvelope::new(agent_id, payload).expect("envelope must be valid").to_bytes()
+}
+
+#[tokio::test]
+async fn seq_protected_malformed_packages_does_not_consume_seq_or_ctr() {
+    // Regression for red-cell-c2-4mygg: when a seq-protected callback decrypts
+    // cleanly and carries a valid seq prefix but the package stream that
+    // follows is malformed, the parser must leave *both* `last_seen_seq` and
+    // `ctr_block_offset` untouched so the real agent's next legitimate
+    // callback at seq=N+1 still lines up with the stored keystream position.
+    let agent_id = 0xA000_0006;
+    let key = test_key(0xA6);
+    let iv = test_iv(0xB6);
+    let (registry, parser) = register_seq_protected_agent(agent_id, key, iv).await;
+
+    let ack = build_init_ack(&registry, agent_id).await.expect("build_init_ack must succeed");
+    let start_offset = ctr_blocks_for_len(ack.len()) as u64;
+
+    // Sanity: confirm starting state.
+    assert_eq!(
+        registry.ctr_offset(agent_id).await.expect("ctr_offset must succeed"),
+        start_offset,
+        "ctr offset must equal init-ack block count before any callback"
+    );
+    assert!(
+        registry.check_callback_seq(agent_id, 1).await.is_ok(),
+        "seq=1 must be acceptable before any callback"
+    );
+
+    // Malformed-by-packages callback at seq=1 must be rejected.
+    let bad =
+        build_seq_protected_callback_with_malformed_packages(agent_id, key, iv, start_offset, 1);
+    let err = parser
+        .parse_at(&bad, "10.0.0.1".to_owned(), datetime!(2026-03-20 12:01:00 UTC))
+        .await
+        .expect_err("malformed-packages callback must be rejected");
+    assert!(
+        matches!(err, DemonParserError::Protocol(_)),
+        "expected protocol parse error, got: {err:?}"
+    );
+
+    // (b) last_seen_seq must be unchanged — seq=1 must still be acceptable.
+    assert!(
+        registry.check_callback_seq(agent_id, 1).await.is_ok(),
+        "last_seen_seq must be unchanged: seq=1 must remain acceptable after parse failure"
+    );
+    // (c) ctr_block_offset must be unchanged.
+    assert_eq!(
+        registry.ctr_offset(agent_id).await.expect("ctr_offset must succeed"),
+        start_offset,
+        "ctr offset must be unchanged after malformed-packages parse failure"
+    );
+
+    // (d) A subsequent legitimate callback at seq=1 must still be accepted —
+    // which is only possible if the CTR keystream is still positioned at
+    // `start_offset`, i.e. the failed packet did not desync it.
+    let good = build_seq_protected_callback(agent_id, key, iv, start_offset, 1);
+    parser
+        .parse_at(&good, "10.0.0.1".to_owned(), datetime!(2026-03-20 12:02:00 UTC))
+        .await
+        .expect("subsequent legitimate callback at seq=1 must succeed");
+
+    // And now seq=1 is consumed, seq=2 remains acceptable.
+    assert!(
+        registry.check_callback_seq(agent_id, 1).await.is_err(),
+        "seq=1 must be rejected after legitimate callback commits it"
+    );
+    assert!(
+        registry.check_callback_seq(agent_id, 2).await.is_ok(),
+        "seq=2 must still be acceptable"
+    );
+}

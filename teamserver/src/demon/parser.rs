@@ -258,32 +258,48 @@ impl DemonPacketParser {
             .await
             .map_err(|e| lift_crypto_encoding_error(agent_id, e))?;
 
-        // For seq-protected agents (Specter/Archon with INIT_EXT_SEQ_PROTECTED), extract and
-        // validate the 8-byte little-endian sequence number that prefixes the decrypted body.
-        let callback_body: Cow<'_, [u8]> = if self.registry.is_seq_protected(agent_id).await {
-            use red_cell_common::callback_seq::SEQ_PREFIX_BYTES;
+        // For seq-protected agents (Specter/Archon with INIT_EXT_SEQ_PROTECTED), extract the
+        // 8-byte little-endian sequence number that prefixes the decrypted body.  Validation of
+        // the seq is deferred until after `parse_callback_packages` succeeds: because AES-CTR
+        // has no authentication tag, a successful seq-advance followed by a parse failure would
+        // consume the seq slot against an unauthenticated ciphertext, permanently desyncing the
+        // real agent's session (and giving an attacker with a known agent_id a cheap targeted
+        // DoS).  The parse step is our authenticator — only a genuine agent can produce a
+        // ciphertext that both decrypts to a valid seq and parses as a valid package stream.
+        let (seq_to_commit, callback_body): (Option<u64>, Cow<'_, [u8]>) =
+            if self.registry.is_seq_protected(agent_id).await {
+                use red_cell_common::callback_seq::SEQ_PREFIX_BYTES;
 
-            if decrypted.len() < SEQ_PREFIX_BYTES {
-                return Err(DemonParserError::Registry(TeamserverError::InvalidPersistedValue {
-                    field: "callback_seq_prefix",
-                    message: format!(
-                        "payload too short: {} bytes < {SEQ_PREFIX_BYTES} required",
-                        decrypted.len()
-                    ),
-                }));
-            }
+                if decrypted.len() < SEQ_PREFIX_BYTES {
+                    return Err(DemonParserError::Registry(
+                        TeamserverError::InvalidPersistedValue {
+                            field: "callback_seq_prefix",
+                            message: format!(
+                                "payload too short: {} bytes < {SEQ_PREFIX_BYTES} required",
+                                decrypted.len()
+                            ),
+                        },
+                    ));
+                }
 
-            let mut seq_bytes = [0u8; SEQ_PREFIX_BYTES];
-            seq_bytes.copy_from_slice(&decrypted[..SEQ_PREFIX_BYTES]);
-            let incoming_seq = u64::from_le_bytes(seq_bytes);
-            let body = decrypted[SEQ_PREFIX_BYTES..].to_vec();
+                let mut seq_bytes = [0u8; SEQ_PREFIX_BYTES];
+                seq_bytes.copy_from_slice(&decrypted[..SEQ_PREFIX_BYTES]);
+                let incoming_seq = u64::from_le_bytes(seq_bytes);
+                let body = decrypted[SEQ_PREFIX_BYTES..].to_vec();
+                (Some(incoming_seq), Cow::Owned(body))
+            } else {
+                (None, Cow::Borrowed(decrypted.as_slice()))
+            };
 
-            // Atomic check-and-advance: holding the per-agent last_seen_seq mutex
-            // across validation and persistence closes the TOCTOU window that would
-            // otherwise let two concurrent callbacks with the same seq both pass.
-            // Consuming the seq slot here (before parse) is safe because the payload
-            // is already AES-CTR-authenticated — a genuine agent will not resend a
-            // callback whose body we fail to parse.
+        let packages = parse_callback_packages(command_id, request_id, &callback_body)?;
+
+        // Parse succeeded — the payload is authenticated by having valid Demon structure.
+        // Commit the seq advance first (atomic check-and-advance under the per-agent
+        // last_seen_seq mutex, so concurrent callbacks with the same seq cannot both pass).
+        // If the seq advance fails (replay or out-of-order race with a higher seq that
+        // committed between decrypt and here) the CTR offset is *not* advanced and the
+        // real agent's keystream state stays intact.
+        if let Some(incoming_seq) = seq_to_commit {
             self.registry.check_and_advance_callback_seq(agent_id, incoming_seq).await.map_err(
                 |e| {
                     match &e {
@@ -299,15 +315,7 @@ impl DemonPacketParser {
                     DemonParserError::Registry(e)
                 },
             )?;
-
-            Cow::Owned(body)
-        } else {
-            Cow::Borrowed(decrypted.as_slice())
-        };
-
-        let packages = parse_callback_packages(command_id, request_id, &callback_body)?;
-
-        // Parse succeeded: advance the CTR offset now that we know the payload was genuine.
+        }
         self.registry.advance_ctr_for_agent(agent_id, remaining.len()).await?;
 
         Ok(ParsedDemonPacket::Callback { header: envelope.header, packages })

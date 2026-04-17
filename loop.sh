@@ -48,7 +48,7 @@ if systemctl --user is-active --quiet "${unit}.service"; then
     exit 1
 fi
 
-systemd-run --user \
+systemd-run --user --quiet \
     --unit="${unit}" \
     --description="Red-Cell-C2 ${unit}" \
     --working-directory="${SCRIPT_DIR}" \
@@ -56,6 +56,11 @@ systemd-run --user \
     --collect \
     -- "$PYTHON" "$SCRIPT_DIR/loop.py" "$@"
 
-echo "Started ${unit}.service (detached from this terminal)"
-echo "  logs:  journalctl --user -u ${unit} -f"
-echo "  stop:  systemctl --user stop ${unit}"
+cat <<EOF
+Started ${unit}.service — tailing its journal below.
+  Ctrl-C stops the tail only; the loop keeps running.
+  resume tail:  journalctl --user -u ${unit} -f
+  stop loop:    systemctl --user stop ${unit}
+----
+EOF
+exec journalctl --user -u "${unit}" -n 100 -f

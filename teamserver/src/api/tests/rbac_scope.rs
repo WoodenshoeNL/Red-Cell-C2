@@ -163,11 +163,7 @@ async fn list_listeners_filters_out_listeners_operator_cannot_use() {
         .expect("seed listener access");
 
     // bob sees only the unrestricted listener.
-    let response = app
-        .clone()
-        .oneshot(get(&app, "/listeners", "bob-key"))
-        .await
-        .expect("response");
+    let response = app.clone().oneshot(get(&app, "/listeners", "bob-key")).await.expect("response");
     assert_eq!(response.status(), StatusCode::OK);
     let body = read_json(response).await;
     let names: Vec<&str> =
@@ -176,11 +172,8 @@ async fn list_listeners_filters_out_listeners_operator_cannot_use() {
     assert!(!names.contains(&"alice-only"));
 
     // alice sees both.
-    let response = app
-        .clone()
-        .oneshot(get(&app, "/listeners", "alice-key"))
-        .await
-        .expect("response");
+    let response =
+        app.clone().oneshot(get(&app, "/listeners", "alice-key")).await.expect("response");
     let body = read_json(response).await;
     let names: Vec<&str> =
         body.as_array().expect("array").iter().map(|v| v["name"].as_str().unwrap_or("")).collect();
@@ -216,11 +209,8 @@ async fn listener_admin_endpoints_deny_operators_outside_allow_list() {
     // bob must be blocked on every listener management verb.
 
     // GET
-    let response = app
-        .clone()
-        .oneshot(get(&app, "/listeners/alice-only", "bob-key"))
-        .await
-        .expect("response");
+    let response =
+        app.clone().oneshot(get(&app, "/listeners/alice-only", "bob-key")).await.expect("response");
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
 
     // PUT (update)
@@ -357,11 +347,7 @@ async fn agent_read_endpoints_filter_by_operator_group_allow_list() {
         .expect("bob scope");
 
     // list_agents → alice sees only her agent.
-    let response = app
-        .clone()
-        .oneshot(get(&app, "/agents", "alice-key"))
-        .await
-        .expect("response");
+    let response = app.clone().oneshot(get(&app, "/agents", "alice-key")).await.expect("response");
     assert_eq!(response.status(), StatusCode::OK);
     let body = read_json(response).await;
     let ids: Vec<u64> = body
@@ -373,17 +359,11 @@ async fn agent_read_endpoints_filter_by_operator_group_allow_list() {
     assert_eq!(ids, vec![0x0AAA]);
 
     // get_agent on alice's agent works; on bob's agent it is denied.
-    let ok = app
-        .clone()
-        .oneshot(get(&app, "/agents/00000AAA", "alice-key"))
-        .await
-        .expect("response");
+    let ok =
+        app.clone().oneshot(get(&app, "/agents/00000AAA", "alice-key")).await.expect("response");
     assert_eq!(ok.status(), StatusCode::OK);
-    let denied = app
-        .clone()
-        .oneshot(get(&app, "/agents/00000BBB", "alice-key"))
-        .await
-        .expect("response");
+    let denied =
+        app.clone().oneshot(get(&app, "/agents/00000BBB", "alice-key")).await.expect("response");
     assert_eq!(denied.status(), StatusCode::FORBIDDEN);
 
     // get_agent_output is denied for agents outside the scope.
@@ -456,11 +436,7 @@ async fn payload_endpoints_enforce_listener_allow_list() {
     seed_payload_build(&database, "job-1", "alice-only", Some(vec![0xAA, 0xBB, 0xCC])).await;
 
     // list_payloads: bob must not see alice-only builds.
-    let response = app
-        .clone()
-        .oneshot(get(&app, "/payloads", "bob-key"))
-        .await
-        .expect("response");
+    let response = app.clone().oneshot(get(&app, "/payloads", "bob-key")).await.expect("response");
     assert_eq!(response.status(), StatusCode::OK);
     let body = read_json(response).await;
     let ids: Vec<&str> =
@@ -468,22 +444,16 @@ async fn payload_endpoints_enforce_listener_allow_list() {
     assert!(!ids.contains(&"job-1"), "bob saw restricted build: {ids:?}");
 
     // alice does see it.
-    let response = app
-        .clone()
-        .oneshot(get(&app, "/payloads", "alice-key"))
-        .await
-        .expect("response");
+    let response =
+        app.clone().oneshot(get(&app, "/payloads", "alice-key")).await.expect("response");
     let body = read_json(response).await;
     let ids: Vec<&str> =
         body.as_array().expect("array").iter().map(|v| v["id"].as_str().unwrap_or("")).collect();
     assert!(ids.contains(&"job-1"));
 
     // get_payload_job: bob is denied.
-    let response = app
-        .clone()
-        .oneshot(get(&app, "/payloads/jobs/job-1", "bob-key"))
-        .await
-        .expect("response");
+    let response =
+        app.clone().oneshot(get(&app, "/payloads/jobs/job-1", "bob-key")).await.expect("response");
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
 
     // download_payload: bob is denied.

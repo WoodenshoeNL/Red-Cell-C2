@@ -5,12 +5,13 @@ use red_cell_common::demon::{DemonCommand, DemonTransferCommand};
 
 use crate::EventBus;
 
-use super::{CallbackParser, CommandDispatchError, DownloadTracker, agent_response_event};
+use super::{CallbackParser, CommandDispatchError, DownloadTracker};
 
 mod beacon_output;
 mod control;
 mod helpers;
 mod list;
+mod mem_file;
 
 // Re-exported for sibling dispatch submodules (e.g. `filesystem`) that format
 // byte sizes in operator-facing output.
@@ -20,6 +21,11 @@ pub(super) use helpers::byte_count;
 // under the historical name so the outer dispatch module call site is
 // unaffected by the extraction.
 pub(super) use beacon_output::handle_beacon_output as handle_beacon_output_callback;
+
+// The `CommandMemFile` and `CommandPackageDropped` callback handlers live in
+// their own submodule; re-export them so the outer dispatch module call sites
+// are unaffected by the extraction.
+pub(super) use mem_file::{handle_mem_file_callback, handle_package_dropped_callback};
 
 #[cfg(test)]
 mod tests;
@@ -59,51 +65,5 @@ pub(super) async fn handle_transfer_callback(
         }
     }
 
-    Ok(None)
-}
-
-pub(super) async fn handle_mem_file_callback(
-    events: &EventBus,
-    agent_id: u32,
-    request_id: u32,
-    payload: &[u8],
-) -> Result<Option<Vec<u8>>, CommandDispatchError> {
-    let mut parser = CallbackParser::new(payload, u32::from(DemonCommand::CommandMemFile));
-    let mem_file_id = parser.read_u32("mem file id")?;
-    let success = parser.read_bool("mem file success")?;
-    events.broadcast(agent_response_event(
-        agent_id,
-        u32::from(DemonCommand::CommandMemFile),
-        request_id,
-        if success { "Good" } else { "Error" },
-        &format!(
-            "Memory file {:x} {}",
-            mem_file_id,
-            if success { "registered successfully" } else { "failed to register" }
-        ),
-        None,
-    )?);
-    Ok(None)
-}
-
-pub(super) async fn handle_package_dropped_callback(
-    events: &EventBus,
-    agent_id: u32,
-    request_id: u32,
-    payload: &[u8],
-) -> Result<Option<Vec<u8>>, CommandDispatchError> {
-    let mut parser = CallbackParser::new(payload, u32::from(DemonCommand::CommandPackageDropped));
-    let package_length = parser.read_u32("dropped package length")?;
-    let max_length = parser.read_u32("dropped package max length")?;
-    events.broadcast(agent_response_event(
-        agent_id,
-        u32::from(DemonCommand::CommandPackageDropped),
-        request_id,
-        "Error",
-        &format!(
-            "A package was discarded by demon for being larger than PIPE_BUFFER_MAX ({package_length} > {max_length})"
-        ),
-        None,
-    )?);
     Ok(None)
 }

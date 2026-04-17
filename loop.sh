@@ -1,28 +1,56 @@
 #!/bin/bash
-# Wrapper for loop.py that runs it as a transient systemd *user service*
-# (--unit, NOT --scope) so the loop survives the launching terminal being
-# closed or OOM-killed by systemd-oomd. Also marks the unit
-# ManagedOOMPreference=avoid so oomd itself won't pick it as a victim.
+# Wrapper for loop.py.
 #
-# Background: a --scope is parented under the calling terminal's
-# vte-spawn-<uuid>.scope cgroup. When oomd kills the terminal scope under
-# memory pressure, every --scope inside it dies too. A --unit is parented
-# directly under user@.service and is independent of any terminal.
+# Default (no --service):
+#   Runs loop.py in the foreground in the current terminal. Output is live.
+#   Closing the terminal or oomd killing the terminal scope kills the loop.
 #
-# Output:
-#   - file:    logs/<agent>_<loop>.log (loop.py writes this directly)
-#   - journal: journalctl --user -u <unit> -f
+# With --service:
+#   Runs loop.py as a transient systemd *user service* (--unit, NOT --scope)
+#   so it survives the launching terminal being closed or OOM-killed by
+#   systemd-oomd. Marks the unit ManagedOOMPreference=avoid. After starting,
+#   tails the unit's journal — Ctrl-C stops only the tail, not the loop.
 #
-# Manage:
-#   list:  systemctl --user list-units 'loop-*.service'
-#   stop:  systemctl --user stop <unit>
+#   Background: a --scope is parented under the calling terminal's
+#   vte-spawn-<uuid>.scope cgroup; when oomd kills that scope under memory
+#   pressure, every --scope inside it dies too. A --unit is parented directly
+#   under user@.service and is independent of any terminal.
 #
-# Falls back to running loop.py directly if systemd-run is unavailable.
+#   Service mode commands:
+#     list:  systemctl --user list-units 'loop-*.service'
+#     stop:  systemctl --user stop <unit>
+#     tail:  journalctl --user -u <unit> -f
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON="$(uv python find --managed-python 3.12 2>/dev/null || echo python3)"
+
+# Strip our own --service flag from args before passing them to loop.py.
+service_mode=0
+args=()
+for arg in "$@"; do
+    case "$arg" in
+        --service) service_mode=1 ;;
+        *) args+=("$arg") ;;
+    esac
+done
+if [[ "${#args[@]}" -gt 0 ]]; then
+    set -- "${args[@]}"
+else
+    set --
+fi
+
+if [[ "$service_mode" -eq 0 ]]; then
+    exec "$PYTHON" "$SCRIPT_DIR/loop.py" "$@"
+fi
+
+# --- service mode below ---
+
+if ! command -v systemd-run &>/dev/null; then
+    echo "ERROR: --service requires systemd-run, not found in PATH" >&2
+    exit 1
+fi
 
 # Derive a unit name from --agent / --loop / --zone so concurrent loops don't
 # collide. Example: --agent claude --loop dev --zone teamserver
@@ -36,10 +64,6 @@ for arg in "$@"; do
     prev="$arg"
 done
 unit="loop${suffix:--$(date +%H%M%S)}"
-
-if ! command -v systemd-run &>/dev/null; then
-    exec "$PYTHON" "$SCRIPT_DIR/loop.py" "$@"
-fi
 
 if systemctl --user is-active --quiet "${unit}.service"; then
     echo "ERROR: ${unit}.service is already running." >&2

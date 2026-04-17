@@ -575,6 +575,20 @@ def issue_status(task_id: str) -> str:
     return ""
 
 
+def issue_title(task_id: str) -> str:
+    """Query issue title via the br CLI. Returns empty string on failure."""
+    r = br(["show", task_id, "--json"])
+    if r.returncode != 0:
+        return ""
+    try:
+        issues = json.loads(r.stdout)
+        if issues:
+            return issues[0].get("title", "")
+    except Exception:
+        pass
+    return ""
+
+
 def repair_db_if_needed(log: Logger, rename_prefix: bool):
     """Rebuild the beads SQLite DB from JSONL if schema drift is detected."""
     r = br(["stats", "--json"])
@@ -1323,7 +1337,9 @@ def dev_loop(args, log: Logger):
             next_id = find_resumable_task(agent_id)
             if next_id:
                 is_resume = True
-                log.log(f"Resuming previously claimed task {next_id} (skipping re-claim)")
+                title = issue_title(next_id)
+                title_suffix = f" — {title}" if title else ""
+                log.log(f"Resuming previously claimed task {next_id}{title_suffix} (skipping re-claim)")
 
         if not next_id:
             r = br(["ready", "--json"])
@@ -1381,7 +1397,9 @@ def dev_loop(args, log: Logger):
             continue
 
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        log.log(f"Claimed {next_id}")
+        title = issue_title(next_id)
+        title_suffix = f" — {title}" if title else ""
+        log.log(f"Claimed {next_id}{title_suffix}")
 
         # Build runtime prompt (base template + injected task context)
         dev_prompt = prompt_file.read_text()

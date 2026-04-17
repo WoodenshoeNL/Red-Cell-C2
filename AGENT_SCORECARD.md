@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1267 | 255 | 96 |
-| Bugs filed against | 245 | 50 | 15 |
-| Bug rate (bugs/task) | 0.19 | 0.20 | 0.16 |
-| Quality score | 81% | 80% | 84% |
+| Tasks closed | 1321 | 255 | 97 |
+| Bugs filed against | 247 | 50 | 15 |
+| Bug rate (bugs/task) | 0.19 | 0.20 | 0.15 |
+| Quality score | 81% | 80% | 85% |
 
-*Bug rates: Claude 245/1267=0.1933→0.19, Codex 50/255=0.1961→0.20, Cursor 15/96=0.1563→0.16*
+*Bug rates: Claude 247/1321=0.1869→0.19, Codex 50/255=0.1961→0.20, Cursor 15/97=0.1546→0.15*
 
 ## Violation Breakdown
 
@@ -24,7 +24,7 @@ Each loop run updates the running totals and appends a review entry.
 | Missing tests / stale tests | 82 | 22 | 7 |
 | Clippy warnings | 15 | 0 | 2 |
 | Protocol errors | 30 | 32 | 4 |
-| Security issues | 62 | 40 | 0 |
+| Security issues | 64 | 40 | 0 |
 | Architecture drift | 42 | 25 | 4 |
 | Memory / resource leaks | 14 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 10 | 0 |
@@ -41,6 +41,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-17 12:00 — d5df20f2..b245b8d1
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 54 | 2 | Heavy refactor run: many `websocket/`, `listeners/`, `payload_builder/`, `sockets/`, `audit/`, `webhook/` module splits plus solid security fixes — atomic TOCTOU seq (red-cell-c2-6ae3y), operator session TTL + idle timeout (red-cell-c2-infja, red-cell-c2-gt56p), operator session-revocation endpoint (red-cell-c2-17viy), per-credential rate-limit bucketing (red-cell-c2-madkf), 50 MiB session WS body cap (red-cell-c2-d4eag), 4 KiB agent-note cap (red-cell-c2-xnzdv), DNS recon limiter check-then-increment (red-cell-c2-euhu2), session exec wait/poll (red-cell-c2-q9h4m). Two new bugs filed this run: WS session snapshot (red-cell-c2-rqpx7) and live EventBus broadcast (red-cell-c2-uhz3i) both bypass the per-operator ACL that was applied to REST/WS dispatch in commit 97ccb358 — partial wire-up of red-cell-c2-0mzt6. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 1 | 0 | Closed red-cell-c2-gt56p (operator session TTL/idle parsed from profile). |
+
+Build: **passed** — `cargo check --workspace` clean, `cargo clippy --workspace -- -D warnings` clean, `cargo nextest run --workspace` 5450/5450 passed in 16m52s.
 
 ### QA Review — 2026-04-15 03:00 — bbcbc00a..3dce5e7b
 

@@ -1363,7 +1363,9 @@ async fn repeated_wrong_passwords_trigger_rate_limiter_lockout()
     // lockout, then one more attempt to observe the rejection.
     const MAX_FAILURES: usize = 5;
 
-    let addr = common::spawn_test_server(multi_role_profile()).await?.addr;
+    let server = common::spawn_test_server(multi_role_profile()).await?;
+    let addr = server.addr;
+    let localhost = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
 
     let bad_login = serde_json::to_string(&OperatorMessage::Login(Message {
         head: MessageHead {
@@ -1379,24 +1381,33 @@ async fn repeated_wrong_passwords_trigger_rate_limiter_lockout()
     }))?;
 
     // --- Phase 1: exhaust the failure budget ---
-    for i in 0..MAX_FAILURES {
+    //
+    // Pre-populate 4 failures directly via the rate limiter to avoid the 30 s
+    // Argon2id + rejection-delay wall-clock cost per attempt.  Under parallel
+    // test load those 5×30 s waits can exceed the 60 s LOGIN_WINDOW_DURATION,
+    // causing the window to expire before Phase 2 runs.
+    for _ in 0..MAX_FAILURES - 1 {
+        server.rate_limiter.record_failure(localhost).await;
+    }
+
+    // Do exactly one real bad-password WS login to verify the per-attempt
+    // rejection path (server sends InitConnectionError before closing).
+    {
         let (raw_socket_, _) = connect_async(format!("ws://{addr}/havoc")).await?;
         let mut socket = common::WsSession::new(raw_socket_);
         socket.send_text(bad_login.clone()).await?;
 
-        // Each failed login incurs a 2 s server-side delay plus Argon2id hashing time.
         let response =
             timeout(Duration::from_secs(30), futures_util::StreamExt::next(&mut socket.socket))
                 .await?
-                .ok_or(format!("attempt {}: server closed without rejection", i + 1))??;
+                .ok_or("attempt 5: server closed without rejection")??;
         let rejection: OperatorMessage = match response {
             ClientMessage::Text(payload) => serde_json::from_str(payload.as_str())?,
-            other => return Err(format!("attempt {}: unexpected frame: {other:?}", i + 1).into()),
+            other => return Err(format!("attempt 5: unexpected frame: {other:?}").into()),
         };
         assert!(
             matches!(rejection, OperatorMessage::InitConnectionError(_)),
-            "attempt {}: expected InitConnectionError, got {rejection:?}",
-            i + 1
+            "attempt 5: expected InitConnectionError, got {rejection:?}"
         );
 
         // Wait for the close frame so the server records the failure before we

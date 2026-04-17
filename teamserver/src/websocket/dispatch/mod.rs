@@ -130,6 +130,8 @@ pub(crate) enum AgentCommandError {
     MissingAgentId,
     #[error("agent note is required")]
     MissingNote,
+    #[error("agent note is too long: {length} bytes (limit {limit})")]
+    NoteTooLong { length: usize, limit: usize },
     #[error("unsupported agent remove payload")]
     InvalidRemovePayload,
     #[error("invalid numeric command id `{command_id}`")]

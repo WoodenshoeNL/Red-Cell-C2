@@ -6,6 +6,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::ToSchema;
 
+/// Maximum byte length of an operator-authored agent note.
+///
+/// Enforced at every path that writes [`crate::AgentRecord::note`] so that a
+/// single misbehaving operator cannot inflate the `agents` table or audit
+/// parameters with a multi-megabyte note. The transport-frame caps
+/// (1 MiB over WS, 30 MiB over REST) are defensive for transport and are
+/// unrelated to what the data model should accept.
+pub const MAX_AGENT_NOTE_LEN: usize = 4 * 1024;
+
 /// Agent pivot metadata.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentPivotsInfo {

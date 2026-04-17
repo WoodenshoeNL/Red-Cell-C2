@@ -146,6 +146,13 @@ pub(super) fn note_from_task(
         .filter(|value| !value.is_empty())
         .ok_or(AgentCommandError::MissingNote)?;
 
+    if note.len() > red_cell_common::operator::MAX_AGENT_NOTE_LEN {
+        return Err(AgentCommandError::NoteTooLong {
+            length: note.len(),
+            limit: red_cell_common::operator::MAX_AGENT_NOTE_LEN,
+        });
+    }
+
     Ok(Some(note))
 }
 
@@ -863,4 +870,83 @@ pub(super) fn encode_utf16(value: &str) -> Vec<u8> {
     let mut encoded: Vec<u8> = value.encode_utf16().flat_map(u16::to_le_bytes).collect();
     encoded.extend_from_slice(&[0, 0]);
     encoded
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use red_cell_common::operator::{AgentTaskInfo, MAX_AGENT_NOTE_LEN};
+
+    fn note_task(note: String) -> AgentTaskInfo {
+        AgentTaskInfo {
+            command_id: "Teamserver".to_owned(),
+            command: Some("agent::note".to_owned()),
+            arguments: Some(note),
+            ..AgentTaskInfo::default()
+        }
+    }
+
+    #[test]
+    fn note_from_task_accepts_note_at_limit() {
+        let note = "x".repeat(MAX_AGENT_NOTE_LEN);
+        let info = note_task(note.clone());
+
+        let extracted = note_from_task(&info).expect("note at limit should be accepted");
+        assert_eq!(extracted, Some(note));
+    }
+
+    #[test]
+    fn note_from_task_rejects_oversized_note() {
+        let note = "x".repeat(MAX_AGENT_NOTE_LEN + 1);
+        let info = note_task(note);
+
+        let err = note_from_task(&info).expect_err("oversized note should be rejected");
+        match err {
+            AgentCommandError::NoteTooLong { length, limit } => {
+                assert_eq!(length, MAX_AGENT_NOTE_LEN + 1);
+                assert_eq!(limit, MAX_AGENT_NOTE_LEN);
+            }
+            other => panic!("expected NoteTooLong, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn note_from_task_rejects_oversized_note_from_task_message() {
+        let note = "y".repeat(MAX_AGENT_NOTE_LEN + 1024);
+        let info = AgentTaskInfo {
+            command_id: "Teamserver".to_owned(),
+            command: Some("agent::note".to_owned()),
+            task_message: Some(note),
+            ..AgentTaskInfo::default()
+        };
+
+        let err = note_from_task(&info).expect_err("oversized note_message should be rejected");
+        assert!(matches!(err, AgentCommandError::NoteTooLong { .. }));
+    }
+
+    #[test]
+    fn note_from_task_rejects_missing_note() {
+        let info = AgentTaskInfo {
+            command_id: "Teamserver".to_owned(),
+            command: Some("agent::note".to_owned()),
+            ..AgentTaskInfo::default()
+        };
+
+        let err = note_from_task(&info).expect_err("empty note should be rejected");
+        assert!(matches!(err, AgentCommandError::MissingNote));
+    }
+
+    #[test]
+    fn note_from_task_returns_none_for_non_note_commands() {
+        let info = AgentTaskInfo {
+            command_id: "42".to_owned(),
+            command: Some("ls".to_owned()),
+            arguments: Some("x".repeat(MAX_AGENT_NOTE_LEN + 1024)),
+            ..AgentTaskInfo::default()
+        };
+
+        let extracted =
+            note_from_task(&info).expect("non-note commands should not trigger validation");
+        assert_eq!(extracted, None);
+    }
 }

@@ -253,6 +253,7 @@ impl IntoResponse for AgentApiError {
                 AgentCommandError::InvalidAgentId { .. }
                 | AgentCommandError::MissingAgentId
                 | AgentCommandError::MissingNote
+                | AgentCommandError::NoteTooLong { .. }
                 | AgentCommandError::InvalidCommandId { .. }
                 | AgentCommandError::MissingField { .. }
                 | AgentCommandError::InvalidBooleanField { .. }

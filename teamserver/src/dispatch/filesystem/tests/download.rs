@@ -20,7 +20,7 @@ use super::super::download::{
 };
 use super::super::handle_filesystem_callback;
 
-use super::{add_u32_le, add_u64_le, add_utf16_le, dir_test_deps, stub_agent};
+use super::common::{add_u32_le, add_u64_le, add_utf16_le, dir_test_deps, stub_agent};
 
 const CMD_ID: u32 = 0x1234;
 

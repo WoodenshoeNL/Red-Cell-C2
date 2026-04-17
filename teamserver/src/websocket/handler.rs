@@ -197,6 +197,8 @@ where
         &event_bus,
         &ListenerManager::from_ref(&state),
         &AgentRegistry::from_ref(&state),
+        &database,
+        &session.username,
         &mut ws_session,
     )
     .await

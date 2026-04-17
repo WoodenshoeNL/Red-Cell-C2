@@ -789,6 +789,88 @@ async fn websocket_snapshot_includes_persisted_offline_listeners() {
 }
 
 #[tokio::test]
+async fn websocket_session_snapshot_filters_listeners_and_agents_by_operator_acl() {
+    let state = TestState::new().await;
+    let registry = state.registry.clone();
+    let listeners = state.listeners.clone();
+    let database = state.database.clone();
+
+    listeners
+        .create(sample_http_listener("alpha-public", 0))
+        .await
+        .expect("public listener should persist");
+    listeners
+        .create(sample_http_listener("beta-admin", 0))
+        .await
+        .expect("admin listener should persist");
+
+    // beta-admin has an allow-list scoped to `admin` only, so the `operator`
+    // account must not learn of it via the WebSocket snapshot.
+    database
+        .listener_access()
+        .set_allowed_operators("beta-admin", &["admin".to_owned()])
+        .await
+        .expect("seed listener access");
+
+    registry
+        .insert_with_listener(sample_agent(0xAAAA_1111), "alpha-public")
+        .await
+        .expect("public agent should insert");
+    registry
+        .insert_with_listener(sample_agent(0xBBBB_2222), "beta-admin")
+        .await
+        .expect("admin agent should insert");
+
+    database
+        .agent_groups()
+        .set_agent_groups(0xAAAA_1111, &["public-group".to_owned()])
+        .await
+        .expect("seed public agent group");
+    database
+        .agent_groups()
+        .set_agent_groups(0xBBBB_2222, &["admin-group".to_owned()])
+        .await
+        .expect("seed admin agent group");
+    database
+        .agent_groups()
+        .set_operator_allowed_groups("operator", &["public-group".to_owned()])
+        .await
+        .expect("seed operator agent-group scope");
+
+    let (mut socket, server) = spawn_server(state).await;
+    login(&mut socket, "operator", "password1234").await;
+
+    // Drain all snapshot frames with a short per-frame timeout; the filtered
+    // snapshot must contain only the listener/agent the operator is entitled
+    // to see.
+    let mut events = Vec::new();
+    while let Ok(msg) = timeout(Duration::from_millis(500), socket.recv_msg()).await {
+        events.push(msg);
+    }
+
+    let listener_names: Vec<String> = events
+        .iter()
+        .filter_map(|msg| match msg {
+            OperatorMessage::ListenerNew(m) => m.info.name.clone(),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(listener_names, vec!["alpha-public".to_owned()]);
+
+    let agent_ids: Vec<String> = events
+        .iter()
+        .filter_map(|msg| match msg {
+            OperatorMessage::AgentNew(m) => Some(m.info.name_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(agent_ids, vec!["AAAA1111".to_owned()]);
+
+    socket.close().await;
+    server.abort();
+}
+
+#[tokio::test]
 async fn websocket_closes_when_authenticated_operator_lacks_permission() {
     let state = TestState::new().await;
     let connection_registry = state.connections.clone();

@@ -42,6 +42,16 @@ Each loop run updates the running totals and appends a review entry.
 
 <!-- QA and arch loops append entries below this line -->
 
+### QA Review — 2026-04-17 14:30 — b245b8d1..5d723d48
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | One in-progress wip commit (5d723d48) on red-cell-c2-rqpx7 — adds `listener_visible_to`/`agent_visible_to` to `websocket/snapshot.rs` mirroring REST `authorize_agent_access`, plus `websocket_session_snapshot_filters_listeners_and_agents_by_operator_acl` regression test (passes). Diff is clean: no `unwrap`, proper `tracing::warn` on ACL errors, mirrors the listener+agent-group composite check from `api/agents.rs:303`. Issue still open since the commit is `wip:`. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **passed** — `cargo check --workspace` clean, `cargo clippy --workspace -- -D warnings` clean, `cargo nextest run -p red-cell websocket::` 96/96 passed.
+
 ### QA Review — 2026-04-17 12:00 — d5df20f2..b245b8d1
 
 | Agent | Tasks closed | Bugs filed | Notes |

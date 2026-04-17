@@ -211,6 +211,13 @@ async fn handle_agent_remove(
         return Err(AgentCommandError::InvalidRemovePayload);
     };
     let agent_id = parse_agent_id(&agent_id)?;
+
+    authorize_agent_group_access(database, &session.username, agent_id).await?;
+
+    if let Some(listener_name) = registry.listener_name(agent_id).await {
+        authorize_listener_access(database, &session.username, &listener_name).await?;
+    }
+
     match registry.remove(agent_id).await {
         Ok(_) => {
             log_operator_action(

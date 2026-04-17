@@ -2077,6 +2077,101 @@ async fn websocket_agent_remove_missing_agent_records_failure_audit() {
 }
 
 #[tokio::test]
+async fn websocket_agent_remove_enforces_operator_acl() {
+    // Two operators with disjoint scopes: `admin` is restricted to
+    // `admin-group` / `alpha-admin`, while a second agent owned by
+    // `beta-public` belongs to an operator on `public-group`. AgentRemove
+    // requires Admin role, so this test narrows `admin`'s agent-group and
+    // listener allow-lists to simulate "operator A" whose ACL does not cover
+    // the target agent, then asserts the sibling agent owned by "operator B"
+    // survives the denied remove.
+    let state = TestState::new().await;
+    let registry = state.registry.clone();
+    let listeners = state.listeners.clone();
+    let database = state.database.clone();
+
+    listeners
+        .create(sample_http_listener("alpha-admin", 0))
+        .await
+        .expect("admin listener should persist");
+    listeners
+        .create(sample_http_listener("beta-public", 0))
+        .await
+        .expect("public listener should persist");
+
+    // Restrict each listener to its owning operator so the remove command
+    // would still be blocked even if group ACLs were misconfigured.
+    database
+        .listener_access()
+        .set_allowed_operators("alpha-admin", &["admin".to_owned()])
+        .await
+        .expect("seed alpha listener access");
+    database
+        .listener_access()
+        .set_allowed_operators("beta-public", &["operator".to_owned()])
+        .await
+        .expect("seed beta listener access");
+
+    registry
+        .insert_with_listener(sample_agent(0xAAAA_1111), "alpha-admin")
+        .await
+        .expect("admin agent should insert");
+    registry
+        .insert_with_listener(sample_agent(0xBBBB_2222), "beta-public")
+        .await
+        .expect("public agent should insert");
+
+    database
+        .agent_groups()
+        .set_agent_groups(0xAAAA_1111, &["admin-group".to_owned()])
+        .await
+        .expect("seed admin agent group");
+    database
+        .agent_groups()
+        .set_agent_groups(0xBBBB_2222, &["public-group".to_owned()])
+        .await
+        .expect("seed public agent group");
+    database
+        .agent_groups()
+        .set_operator_allowed_groups("admin", &["admin-group".to_owned()])
+        .await
+        .expect("seed admin agent-group scope");
+
+    let (mut socket, server) = spawn_server(state).await;
+    login(&mut socket, "admin", "adminpass").await;
+
+    // Drain the snapshot so the only frame that arrives after sending the
+    // AgentRemove is the authorization-denied teamserver log.
+    while (timeout(Duration::from_millis(200), socket.recv_msg()).await).is_ok() {}
+
+    // `admin` dispatches an AgentRemove for the agent that belongs to
+    // operator B's listener — outside admin's agent-group and listener ACL.
+    socket.send_text(agent_remove_message("admin", "BBBB2222")).await;
+
+    let event = read_operator_message(&mut socket).await;
+    let OperatorMessage::TeamserverLog(message) = event else {
+        panic!("expected teamserver log for denied remove, got {event:?}");
+    };
+    assert!(
+        message.info.text.contains("not permitted"),
+        "expected authorization error, got: {}",
+        message.info.text
+    );
+
+    // The other operator's agent must still be registered — the denial must
+    // block the remove before it reaches the registry.
+    assert!(
+        registry.get(0xBBBB_2222).await.is_some(),
+        "public agent must survive a denied remove from a disjoint admin"
+    );
+    // The admin's own agent must be untouched.
+    assert!(registry.get(0xAAAA_1111).await.is_some(), "admin agent must remain untouched");
+
+    socket.close().await;
+    server.abort();
+}
+
+#[tokio::test]
 async fn websocket_reports_missing_agents_for_agent_commands() {
     let state = TestState::new().await;
     let (mut socket, server) = spawn_server(state).await;

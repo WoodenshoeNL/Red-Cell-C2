@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1321 | 255 | 97 |
-| Bugs filed against | 247 | 50 | 15 |
-| Bug rate (bugs/task) | 0.19 | 0.20 | 0.15 |
-| Quality score | 81% | 80% | 85% |
+| Tasks closed | 1341 | 255 | 97 |
+| Bugs filed against | 248 | 50 | 15 |
+| Bug rate (bugs/task) | 0.18 | 0.20 | 0.15 |
+| Quality score | 82% | 80% | 85% |
 
-*Bug rates: Claude 247/1321=0.1869→0.19, Codex 50/255=0.1961→0.20, Cursor 15/97=0.1546→0.15*
+*Bug rates: Claude 248/1341=0.1849→0.18, Codex 50/255=0.1961→0.20, Cursor 15/97=0.1546→0.15*
 
 ## Violation Breakdown
 
@@ -28,7 +28,7 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 43 | 25 | 4 |
 | Memory / resource leaks | 14 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 10 | 0 |
-| Test infrastructure / flakiness | 60 | 6 | 1 |
+| Test infrastructure / flakiness | 61 | 6 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 4 | 5 | 0 |
 | Correctness / pagination | 67 | 9 | 1 |
@@ -41,6 +41,18 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-18 00:15 — 5d723d48..a8a75ca0
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 20 | 1 | ~20 refactor+fix commits: full dispatch/transfer and dispatch/filesystem module splits, agents/mod.rs sub-extractions, websocket/tests.rs split. Fixes: EventBus ACL filter (red-cell-c2-uhz3i), snapshot ACL filter (red-cell-c2-rqpx7), AgentRemove ACL (red-cell-c2-qhdso), callback seq advance (red-cell-c2-4mygg). Bug filed: pre-existing flaky rate-limiter lockout test (red-cell-c2-x4vtd, P1). |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **cargo check** — passed. **cargo clippy -- -D warnings** — clean (0 warnings). **cargo nextest** — 1 failure: `repeated_wrong_passwords_trigger_rate_limiter_lockout` (pre-existing flaky test; LOGIN_WINDOW_DURATION=60s expires when Phase 1 takes >60s under CPU load; filed as red-cell-c2-x4vtd). All 5455 other tests pass.
+
+Highlights: The three open ACL issues from the arch review (red-cell-c2-uhz3i, red-cell-c2-rqpx7, red-cell-c2-qhdso) are now fully closed. Code quality is high — no `unwrap`/`expect` in production paths, no clippy violations, clean module structure. The pre-existing rate-limiter flakiness is now tracked.
 
 ### Arch Review — 2026-04-17 14:15
 

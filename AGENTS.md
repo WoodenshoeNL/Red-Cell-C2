@@ -22,7 +22,15 @@ compatibility is maintained.
    curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/beads_rust/main/install.sh" | bash
    ```
 2. **Clone the repo** (or `git pull` if already cloned) — `br` auto-imports issues from `.beads/issues.jsonl` on first use.
-3. **Verify**: `br ready` should show available work.
+3. **Tune systemd-oomd** so cargo builds don't trigger terminal/desktop OOM kills:
+   ```bash
+   ./oomd-setup.sh   # idempotent, prompts for sudo
+   ```
+4. **Install loop-log rotation** (otherwise `logs/claude_dev.log` grows to hundreds of MB):
+   ```bash
+   ./logrotate-setup.sh   # idempotent, prompts for sudo
+   ```
+5. **Verify**: `br ready` should show available work.
 
 ## CI Policy
 

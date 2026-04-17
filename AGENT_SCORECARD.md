@@ -24,8 +24,8 @@ Each loop run updates the running totals and appends a review entry.
 | Missing tests / stale tests | 82 | 22 | 7 |
 | Clippy warnings | 15 | 0 | 2 |
 | Protocol errors | 30 | 32 | 4 |
-| Security issues | 64 | 40 | 0 |
-| Architecture drift | 42 | 25 | 4 |
+| Security issues | 66 | 40 | 0 |
+| Architecture drift | 43 | 25 | 4 |
 | Memory / resource leaks | 14 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 10 | 0 |
 | Test infrastructure / flakiness | 60 | 6 | 1 |
@@ -41,6 +41,20 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-04-17 14:15
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 3 | security (2), architecture drift (1) | `handle_agent_remove` skips ACL (red-cell-c2-qhdso, P1); seq-protected CTR desync on parse fail (red-cell-c2-4mygg, P2); phantom systemd unit mis-indented (red-cell-c2-8wqbe, P2) |
+| Codex | 0 | — | No in-scope code written in recent range. |
+| Cursor | 0 | — | No in-scope code written in recent range. |
+
+Also filed 4 refactor tasks (no violation attribution): agents/mod.rs 4009 lines (red-cell-c2-eq086), dispatch/filesystem.rs 2813 lines (red-cell-c2-u5ees), dispatch/transfer.rs 2331 lines (red-cell-c2-95ta4), websocket/tests.rs 3023 lines (red-cell-c2-g21dl).
+
+Overall codebase health: **drifting** — cargo check / clippy / (pending) nextest clean and crypto/HKDF/protocol layers are solid, but two newly discovered authorization/ordering bugs mirror the pattern of the still-open red-cell-c2-uhz3i/rqpx7 set: per-operator ACL was wired into REST and snapshot paths but left out of adjacent WS handlers. The comment in commit 99b98ac7 claiming AES-CTR is "authenticated" indicates a conceptual gap worth flagging.
+
+Biggest blindspot: **WebSocket dispatch handlers that were skipped by the per-operator ACL pass** — `handle_agent_remove` and the live `event_receiver.recv()` loop both bypass the scope enforcement that REST endpoints honor. A sweep of every WS dispatch handler against `authorize_agent_group_access` / `authorize_listener_access` is overdue.
 
 ### QA Review — 2026-04-17 14:30 — b245b8d1..5d723d48
 

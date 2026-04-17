@@ -1,18 +1,20 @@
 //! Dispatch handlers for `CommandFs` callbacks.
 //!
-//! Routes the filesystem subcommand byte to per-operation handlers. Download
-//! lives in its own submodule (see `download.rs`); the directory operations
-//! (Dir, Mkdir, Cd, GetPwd, Remove, Copy, Move) live in `directory.rs`.
-//! Upload and Cat remain inline pending further sub-issues.
+//! Routes the filesystem subcommand byte to per-operation handlers. Each
+//! subcommand lives in its own submodule: Download in `download.rs`, the
+//! directory operations (Dir, Mkdir, Cd, GetPwd, Remove, Copy, Move) in
+//! `directory.rs`, Upload in `upload.rs`, and Cat in `cat.rs`.
 
 use red_cell_common::demon::{DemonCommand, DemonFilesystemCommand};
 
 use crate::{AgentRegistry, Database, EventBus, PluginRuntime};
 
-use super::{CallbackParser, CommandDispatchError, DownloadTracker, agent_response_event};
+use super::{CallbackParser, CommandDispatchError, DownloadTracker};
 
+mod cat;
 mod directory;
 mod download;
+mod upload;
 
 // Re-exports for sibling dispatch submodules (e.g. `transfer`) that already
 // reference these helpers as `super::filesystem::X`.
@@ -57,16 +59,7 @@ pub(super) async fn handle_filesystem_callback(
             .await?;
         }
         DemonFilesystemCommand::Upload => {
-            let size = parser.read_u32("filesystem upload size")?;
-            let path = parser.read_utf16("filesystem upload path")?;
-            events.broadcast(agent_response_event(
-                agent_id,
-                u32::from(DemonCommand::CommandFs),
-                request_id,
-                "Info",
-                &format!("Uploaded file: {path} ({size} bytes)"),
-                None,
-            )?);
+            upload::handle_upload(events, &mut parser, agent_id, request_id)?;
         }
         DemonFilesystemCommand::Cd => {
             directory::handle_cd(events, &mut parser, agent_id, request_id)?;
@@ -84,22 +77,7 @@ pub(super) async fn handle_filesystem_callback(
             directory::handle_getpwd(events, &mut parser, agent_id, request_id)?;
         }
         DemonFilesystemCommand::Cat => {
-            let path = parser.read_utf16("filesystem cat path")?;
-            let success = parser.read_bool("filesystem cat success")?;
-            let output = parser.read_string("filesystem cat output")?;
-            let (kind, message) = if success {
-                ("Info", format!("File content of {path} ({}):", output.len()))
-            } else {
-                ("Error", format!("Failed to read file: {path}"))
-            };
-            events.broadcast(agent_response_event(
-                agent_id,
-                u32::from(DemonCommand::CommandFs),
-                request_id,
-                kind,
-                &message,
-                if success { Some(output) } else { None },
-            )?);
+            cat::handle_cat(events, &mut parser, agent_id, request_id)?;
         }
     }
 
@@ -109,174 +87,16 @@ pub(super) async fn handle_filesystem_callback(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use red_cell_common::demon::DemonFilesystemCommand;
     use red_cell_common::operator::OperatorMessage;
 
+    mod cat;
     mod common;
     mod directory;
     mod download;
+    mod upload;
 
-    use common::{
-        add_bool_le, add_u32_le, add_utf16_le, call_and_expect_error, call_and_recv,
-    };
+    use common::{add_u32_le, call_and_expect_error};
     use download::{build_download_open_payload, build_download_write_payload};
-
-    // ---------------------------------------------------------------
-    // Payload builders for Upload and Cat (remain inline until the
-    // Upload/Cat handlers are extracted in a follow-up sub-issue).
-    // ---------------------------------------------------------------
-
-    fn build_upload_payload(size: u32, path: &str) -> Vec<u8> {
-        let mut buf = Vec::new();
-        add_u32_le(&mut buf, u32::from(DemonFilesystemCommand::Upload));
-        add_u32_le(&mut buf, size);
-        add_utf16_le(&mut buf, path);
-        buf
-    }
-
-    /// Build a Cat subcommand payload.  `output` is encoded via `read_string`
-    /// (u32-LE length prefix + raw UTF-8 bytes).
-    fn build_cat_payload(path: &str, success: bool, output: &str) -> Vec<u8> {
-        let mut buf = Vec::new();
-        add_u32_le(&mut buf, u32::from(DemonFilesystemCommand::Cat));
-        add_utf16_le(&mut buf, path);
-        add_bool_le(&mut buf, success);
-        // read_string = read_bytes (u32 LE len + raw bytes)
-        let raw = output.as_bytes();
-        add_u32_le(&mut buf, u32::try_from(raw.len()).expect("unwrap"));
-        buf.extend_from_slice(raw);
-        buf
-    }
-
-    // ---------------------------------------------------------------
-    // Upload callback
-    // ---------------------------------------------------------------
-
-    #[tokio::test]
-    async fn upload_callback_emits_info_with_size_and_path() {
-        let event =
-            call_and_recv(&build_upload_payload(4096, "C:\\Temp\\payload.bin"), 0xA1, 10).await;
-        let OperatorMessage::AgentResponse(msg) = &event else {
-            panic!("expected AgentResponse, got {event:?}");
-        };
-        let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
-        assert!(message.contains("Uploaded file"), "message: {message}");
-        assert!(message.contains("C:\\Temp\\payload.bin"), "message: {message}");
-        assert!(message.contains("4096 bytes"), "message: {message}");
-        assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Info"));
-    }
-
-    // ---------------------------------------------------------------
-    // Cat callback — success and failure
-    // ---------------------------------------------------------------
-
-    #[tokio::test]
-    async fn cat_success_callback_emits_file_content() {
-        let content = "Hello, World!\nLine 2\n";
-        let event =
-            call_and_recv(&build_cat_payload("C:\\readme.txt", true, content), 0xAB, 80).await;
-        let OperatorMessage::AgentResponse(msg) = &event else {
-            panic!("expected AgentResponse, got {event:?}");
-        };
-        let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
-        assert!(message.contains("File content of"), "message: {message}");
-        assert!(message.contains("C:\\readme.txt"), "message: {message}");
-        assert!(
-            message.contains(&format!("{})", content.len())),
-            "message should contain size: {message}"
-        );
-        assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Info"));
-        assert_eq!(msg.info.output, content, "output should contain file content");
-    }
-
-    #[tokio::test]
-    async fn cat_failure_callback_emits_error_with_no_content() {
-        let event = call_and_recv(
-            &build_cat_payload("C:\\secret.key", false, "ignored error data"),
-            0xAC,
-            81,
-        )
-        .await;
-        let OperatorMessage::AgentResponse(msg) = &event else {
-            panic!("expected AgentResponse, got {event:?}");
-        };
-        let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
-        assert!(message.contains("Failed to read file"), "message: {message}");
-        assert!(message.contains("C:\\secret.key"), "message: {message}");
-        assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Error"));
-        // On failure, output should be empty (no file contents attached)
-        assert!(msg.info.output.is_empty(), "failure should not attach file content");
-    }
-
-    // ---------------------------------------------------------------
-    // Upload/Cat truncated-payload tests
-    // ---------------------------------------------------------------
-
-    #[tokio::test]
-    async fn cat_truncated_payload_missing_output_returns_error() {
-        // Cat needs: subcommand + utf16(path) + bool(success) + string(output). Omit output.
-        let mut buf = Vec::new();
-        add_u32_le(&mut buf, u32::from(DemonFilesystemCommand::Cat));
-        add_utf16_le(&mut buf, "C:\\file.txt");
-        add_bool_le(&mut buf, true);
-        let err = call_and_expect_error(&buf, 0xE8, 9).await;
-        assert!(matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }), "got {err:?}");
-    }
-
-    #[tokio::test]
-    async fn cat_truncated_payload_missing_success_returns_error() {
-        // Only subcommand + path, no success bool or output.
-        let mut buf = Vec::new();
-        add_u32_le(&mut buf, u32::from(DemonFilesystemCommand::Cat));
-        add_utf16_le(&mut buf, "C:\\file.txt");
-        let err = call_and_expect_error(&buf, 0xE9, 10).await;
-        assert!(matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }), "got {err:?}");
-    }
-
-    #[tokio::test]
-    async fn upload_truncated_payload_missing_path_returns_error() {
-        // Upload needs: subcommand + u32(size) + utf16(path). Omit path.
-        let mut buf = Vec::new();
-        add_u32_le(&mut buf, u32::from(DemonFilesystemCommand::Upload));
-        add_u32_le(&mut buf, 100);
-        let err = call_and_expect_error(&buf, 0xEA, 11).await;
-        assert!(matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }), "got {err:?}");
-    }
-
-    #[tokio::test]
-    async fn upload_truncated_payload_empty_returns_error() {
-        let mut buf = Vec::new();
-        add_u32_le(&mut buf, u32::from(DemonFilesystemCommand::Upload));
-        let err = call_and_expect_error(&buf, 0xEB, 12).await;
-        assert!(matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }), "got {err:?}");
-    }
-
-    // ---------------------------------------------------------------
-    // Edge case tests — Upload/Cat zero-length payloads
-    // ---------------------------------------------------------------
-
-    #[tokio::test]
-    async fn upload_zero_size_broadcasts_event() {
-        let event = call_and_recv(&build_upload_payload(0, "C:\\empty.bin"), 0xF4, 104).await;
-        let OperatorMessage::AgentResponse(msg) = &event else {
-            panic!("expected AgentResponse, got {event:?}");
-        };
-        let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
-        assert!(message.contains("Uploaded file"), "message: {message}");
-        assert!(message.contains("0 bytes"), "message: {message}");
-    }
-
-    #[tokio::test]
-    async fn cat_success_empty_content_broadcasts_event() {
-        let event = call_and_recv(&build_cat_payload("C:\\empty.txt", true, ""), 0xF5, 105).await;
-        let OperatorMessage::AgentResponse(msg) = &event else {
-            panic!("expected AgentResponse, got {event:?}");
-        };
-        let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
-        assert!(message.contains("File content of"), "message: {message}");
-        assert!(message.contains("0)"), "message should show zero length: {message}");
-        assert_eq!(msg.info.output, "", "output should be empty");
-    }
 
     // ---------------------------------------------------------------
     // Dispatcher-level errors: invalid subcommand, empty payload.

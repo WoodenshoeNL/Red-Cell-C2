@@ -1,5 +1,6 @@
 //! Operator WebSocket endpoint and connection tracking.
 
+mod acl;
 mod auth;
 mod command_enc;
 mod connection;

@@ -871,6 +871,146 @@ async fn websocket_session_snapshot_filters_listeners_and_agents_by_operator_acl
 }
 
 #[tokio::test]
+async fn websocket_live_broadcast_filters_events_outside_operator_acl() {
+    use crate::PivotInfo;
+    use crate::agent_events::{agent_mark_event, agent_new_event};
+    use crate::{ListenerEventAction, listener_event_for_action};
+
+    let state = TestState::new().await;
+    let registry = state.registry.clone();
+    let listeners = state.listeners.clone();
+    let database = state.database.clone();
+    let events = state.events.clone();
+
+    listeners
+        .create(sample_http_listener("alpha-public", 0))
+        .await
+        .expect("public listener should persist");
+    listeners
+        .create(sample_http_listener("beta-admin", 0))
+        .await
+        .expect("admin listener should persist");
+
+    // beta-admin is scoped to `admin`; the `operator` account must not see
+    // live events carrying that listener's name or any agent attached to it.
+    database
+        .listener_access()
+        .set_allowed_operators("beta-admin", &["admin".to_owned()])
+        .await
+        .expect("seed listener access");
+
+    let admin_agent = sample_agent(0xBBBB_2222);
+    let public_agent = sample_agent(0xAAAA_1111);
+    registry
+        .insert_with_listener(admin_agent.clone(), "beta-admin")
+        .await
+        .expect("admin agent should insert");
+    registry
+        .insert_with_listener(public_agent.clone(), "alpha-public")
+        .await
+        .expect("public agent should insert");
+
+    database
+        .agent_groups()
+        .set_agent_groups(0xBBBB_2222, &["admin-group".to_owned()])
+        .await
+        .expect("seed admin agent group");
+    database
+        .agent_groups()
+        .set_agent_groups(0xAAAA_1111, &["public-group".to_owned()])
+        .await
+        .expect("seed public agent group");
+    database
+        .agent_groups()
+        .set_operator_allowed_groups("operator", &["public-group".to_owned()])
+        .await
+        .expect("seed operator agent-group scope");
+
+    let (mut operator_socket, server) = spawn_server(state.clone()).await;
+    login(&mut operator_socket, "operator", "password1234").await;
+
+    // Drain snapshot frames so the assertions below observe only live
+    // broadcasts that arrive after this point.
+    while (timeout(Duration::from_millis(200), operator_socket.recv_msg()).await).is_ok() {}
+
+    let beta_summary = listeners.summary("beta-admin").await.expect("beta listener");
+    let alpha_summary = listeners.summary("alpha-public").await.expect("alpha listener");
+    let pivots = PivotInfo::default();
+
+    // Broadcasts for the restricted listener / agent must be filtered out.
+    events.broadcast(listener_event_for_action(
+        "admin",
+        &beta_summary,
+        ListenerEventAction::Updated,
+    ));
+    events.broadcast(agent_new_event(
+        "beta-admin",
+        red_cell_common::demon::DEMON_MAGIC_VALUE,
+        &admin_agent,
+        &pivots,
+    ));
+    events.broadcast(agent_mark_event(&admin_agent));
+
+    // A visible broadcast for the public listener proves the filter lets
+    // authorized events through and serves as a synchronization barrier.
+    events.broadcast(listener_event_for_action(
+        "admin",
+        &alpha_summary,
+        ListenerEventAction::Updated,
+    ));
+    events.broadcast(agent_new_event(
+        "alpha-public",
+        red_cell_common::demon::DEMON_MAGIC_VALUE,
+        &public_agent,
+        &pivots,
+    ));
+
+    // Collect whatever arrives during a short window after the broadcasts.
+    let mut received = Vec::new();
+    while let Ok(msg) = timeout(Duration::from_millis(300), operator_socket.recv_msg()).await {
+        received.push(msg);
+    }
+
+    for msg in &received {
+        match msg {
+            OperatorMessage::ListenerEdit(m) => {
+                assert_ne!(
+                    m.info.name.as_deref(),
+                    Some("beta-admin"),
+                    "operator must not receive ListenerEdit for restricted listener"
+                );
+            }
+            OperatorMessage::AgentNew(m) => {
+                assert_ne!(
+                    m.info.name_id, "BBBB2222",
+                    "operator must not receive AgentNew for restricted agent"
+                );
+            }
+            OperatorMessage::AgentUpdate(m) => {
+                assert_ne!(
+                    m.info.agent_id, "BBBB2222",
+                    "operator must not receive AgentUpdate for restricted agent"
+                );
+            }
+            _ => {}
+        }
+    }
+
+    let saw_alpha_listener = received.iter().any(|msg| {
+        matches!(msg, OperatorMessage::ListenerEdit(m) if m.info.name.as_deref() == Some("alpha-public"))
+    });
+    assert!(saw_alpha_listener, "operator must receive ListenerEdit for the public listener");
+
+    let saw_alpha_agent = received
+        .iter()
+        .any(|msg| matches!(msg, OperatorMessage::AgentNew(m) if m.info.name_id == "AAAA1111"));
+    assert!(saw_alpha_agent, "operator must receive AgentNew for the public agent");
+
+    operator_socket.close().await;
+    server.abort();
+}
+
+#[tokio::test]
 async fn websocket_closes_when_authenticated_operator_lacks_permission() {
     let state = TestState::new().await;
     let connection_registry = state.connections.clone();

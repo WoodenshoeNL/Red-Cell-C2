@@ -21,6 +21,7 @@ use serde_json::Value;
 use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
+use super::acl::operator_may_see_event;
 use super::auth::handle_authentication;
 use super::connection::{
     DisconnectKind, OPERATOR_MAX_MESSAGE_SIZE, OperatorConnectionManager, SocketLoopControl,
@@ -191,12 +192,13 @@ where
     let mut ws_session = WsSession::new(&session.token);
 
     let mut event_receiver = event_bus.subscribe();
+    let registry = AgentRegistry::from_ref(&state);
     if let Err(error) = send_session_snapshot(
         &mut socket,
         &auth,
         &event_bus,
         &ListenerManager::from_ref(&state),
-        &AgentRegistry::from_ref(&state),
+        &registry,
         &database,
         &session.username,
         &mut ws_session,
@@ -248,7 +250,9 @@ where
                     break 'recv DisconnectKind::ServerShutdown;
                 };
 
-                if send_hmac_message(&mut socket, &event, &mut ws_session).await.is_err() {
+                if operator_may_see_event(&event, &database, &registry, &session.username).await
+                    && send_hmac_message(&mut socket, &event, &mut ws_session).await.is_err()
+                {
                     break 'recv DisconnectKind::Error;
                 }
             }

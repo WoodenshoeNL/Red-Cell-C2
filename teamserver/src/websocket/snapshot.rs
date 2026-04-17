@@ -1,12 +1,12 @@
 use axum::extract::ws::WebSocket;
 use thiserror::Error;
 
+use super::acl::{agent_visible_to, listener_visible_to};
 use super::connection::{SendMessageError, WsSession, send_hmac_message};
 use super::events::{agent_snapshot_event, operator_snapshot_event};
 use crate::{
-    AgentRegistry, AuthError, AuthService, AuthorizationError, Database, EventBus,
-    ListenerEventAction, ListenerManager, authorize_agent_group_access, authorize_listener_access,
-    listener_event_for_action,
+    AgentRegistry, AuthError, AuthService, Database, EventBus, ListenerEventAction,
+    ListenerManager, listener_event_for_action,
 };
 
 #[derive(Debug, Error)]
@@ -74,56 +74,4 @@ pub(super) async fn send_session_snapshot(
     }
 
     Ok(())
-}
-
-/// Apply the per-operator listener allow-list to the snapshot feed.
-///
-/// Mirrors the REST list-endpoint filter so a restricted operator does not
-/// learn of listeners outside their scope via the WebSocket snapshot.
-async fn listener_visible_to(database: &Database, username: &str, listener_name: &str) -> bool {
-    match authorize_listener_access(database, username, listener_name).await {
-        Ok(()) => true,
-        Err(AuthorizationError::ListenerAccessDenied { .. }) => false,
-        Err(err) => {
-            tracing::warn!(
-                %username,
-                %listener_name,
-                %err,
-                "listener ACL check failed; hiding listener from snapshot"
-            );
-            false
-        }
-    }
-}
-
-/// Apply the composite agent-group + listener allow-list to the snapshot feed.
-///
-/// Mirrors `api::agents::operator_may_access_agent` so a restricted operator
-/// does not learn of agents outside their scope via the WebSocket snapshot.
-async fn agent_visible_to(
-    database: &Database,
-    username: &str,
-    agent_id: u32,
-    listener_name: Option<&str>,
-) -> bool {
-    if let Err(err) = authorize_agent_group_access(database, username, agent_id).await {
-        return match err {
-            AuthorizationError::AgentGroupDenied { .. } => false,
-            other => {
-                tracing::warn!(
-                    %username,
-                    agent_id,
-                    err = %other,
-                    "agent-group ACL check failed; hiding agent from snapshot"
-                );
-                false
-            }
-        };
-    }
-
-    if let Some(listener_name) = listener_name {
-        return listener_visible_to(database, username, listener_name).await;
-    }
-
-    true
 }

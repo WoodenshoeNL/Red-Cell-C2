@@ -387,7 +387,7 @@ This project uses [beads_rust](https://github.com/Dicklesworthstone/beads_rust) 
 
 ```bash
 # View ready issues (unblocked, not deferred)
-br ready              # or: bd ready
+br ready
 
 # List and search
 br list --status=open # All open issues
@@ -454,7 +454,7 @@ git push                # Push to remote
 4. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash
    git pull --rebase
-   bd sync
+   br sync
    git push
    git status  # MUST show "up to date with origin"
    ```

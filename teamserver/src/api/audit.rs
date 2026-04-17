@@ -52,6 +52,12 @@ pub(super) async fn list_audit(
     _identity: ReadApiAccess,
     Query(query): Query<AuditQuery>,
 ) -> Result<Json<AuditPage>, AuditApiError> {
+    // Audit log is intentionally not filtered by per-operator agent-group or
+    // listener allow-lists: it is the canonical record of operator actions
+    // (login, listener changes, payload builds, agent kills, etc.) and
+    // restricting it would degrade incident response and cross-team review.
+    // Tightening to AdminApiAccess remains an option for deployments where
+    // operators must not see other operators' actions; revisit separately.
     Ok(Json(query_audit_log(&state.database, &query).await?))
 }
 

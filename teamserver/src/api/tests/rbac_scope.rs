@@ -12,9 +12,11 @@ use axum::http::{Request, StatusCode};
 use red_cell_common::config::{OperatorRole, Profile};
 use tower::ServiceExt;
 
+use crate::agents::Job;
 use crate::api::api_routes;
 use crate::api::auth::{API_KEY_HEADER, ApiRuntime};
 use crate::app::TeamserverState;
+use crate::database::LootRecord;
 use crate::{
     AgentRegistry, AuthService, Database, EventBus, ListenerManager, OperatorConnectionManager,
     PayloadBuildRecord, SocketRelayManager,
@@ -481,4 +483,196 @@ async fn payload_endpoints_enforce_listener_allow_list() {
         .await
         .expect("response");
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+// ── list_loot / get_loot / list_credentials / get_credential ─────────────────
+
+async fn seed_loot(database: &Database, agent_id: u32, kind: &str, name: &str) -> i64 {
+    let record = LootRecord {
+        id: None,
+        agent_id,
+        kind: kind.to_owned(),
+        name: name.to_owned(),
+        file_path: None,
+        size_bytes: Some(3),
+        captured_at: "2026-04-17T12:00:00Z".to_owned(),
+        data: Some(b"abc".to_vec()),
+        metadata: None,
+    };
+    database.loot().create(&record).await.expect("seed loot")
+}
+
+#[tokio::test]
+async fn loot_endpoints_filter_by_operator_agent_group_allow_list() {
+    let (app, database, registry) = two_operator_router().await;
+
+    registry.insert(sample_agent(0x0000_0AAA)).await.expect("insert aaa");
+    registry.insert(sample_agent(0x0000_0BBB)).await.expect("insert bbb");
+
+    database
+        .agent_groups()
+        .set_agent_groups(0x0000_0AAA, &["alice-group".to_owned()])
+        .await
+        .expect("group alice");
+    database
+        .agent_groups()
+        .set_agent_groups(0x0000_0BBB, &["bob-group".to_owned()])
+        .await
+        .expect("group bob");
+    database
+        .agent_groups()
+        .set_operator_allowed_groups("alice", &["alice-group".to_owned()])
+        .await
+        .expect("alice scope");
+    database
+        .agent_groups()
+        .set_operator_allowed_groups("bob", &["bob-group".to_owned()])
+        .await
+        .expect("bob scope");
+
+    let alice_loot_id = seed_loot(&database, 0x0000_0AAA, "screenshot", "alice.png").await;
+    let bob_loot_id = seed_loot(&database, 0x0000_0BBB, "screenshot", "bob.png").await;
+    let alice_cred_id = seed_loot(&database, 0x0000_0AAA, "credential", "alice-cred").await;
+    let bob_cred_id = seed_loot(&database, 0x0000_0BBB, "credential", "bob-cred").await;
+
+    // list_loot: alice sees only her agent's loot (both screenshot + credential
+    // kinds); bob sees neither alice item.
+    let response = app.clone().oneshot(get(&app, "/loot", "alice-key")).await.expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    let names: Vec<&str> = body["items"]
+        .as_array()
+        .expect("items array")
+        .iter()
+        .map(|v| v["name"].as_str().unwrap_or(""))
+        .collect();
+    assert_eq!(body["total"].as_u64(), Some(2));
+    assert!(names.contains(&"alice.png"));
+    assert!(names.contains(&"alice-cred"));
+    assert!(!names.contains(&"bob.png"));
+    assert!(!names.contains(&"bob-cred"));
+
+    // get_loot: bob is denied for alice's loot, allowed for his own.
+    let denied = app
+        .clone()
+        .oneshot(get(&app, &format!("/loot/{alice_loot_id}"), "bob-key"))
+        .await
+        .expect("response");
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    let ok = app
+        .clone()
+        .oneshot(get(&app, &format!("/loot/{bob_loot_id}"), "bob-key"))
+        .await
+        .expect("response");
+    assert_eq!(ok.status(), StatusCode::OK);
+
+    // list_credentials: same filtering applies.
+    let response =
+        app.clone().oneshot(get(&app, "/credentials", "alice-key")).await.expect("response");
+    let body = read_json(response).await;
+    assert_eq!(body["total"].as_u64(), Some(1));
+    let names: Vec<&str> = body["items"]
+        .as_array()
+        .expect("items array")
+        .iter()
+        .map(|v| v["name"].as_str().unwrap_or(""))
+        .collect();
+    assert_eq!(names, vec!["alice-cred"]);
+
+    // get_credential: bob is denied for alice's credential, allowed for his own.
+    let denied = app
+        .clone()
+        .oneshot(get(&app, &format!("/credentials/{alice_cred_id}"), "bob-key"))
+        .await
+        .expect("response");
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    let ok = app
+        .clone()
+        .oneshot(get(&app, &format!("/credentials/{bob_cred_id}"), "bob-key"))
+        .await
+        .expect("response");
+    assert_eq!(ok.status(), StatusCode::OK);
+}
+
+// ── list_jobs / get_job ───────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn job_endpoints_filter_by_operator_agent_group_allow_list() {
+    let (app, database, registry) = two_operator_router().await;
+
+    registry.insert(sample_agent(0x0000_0AAA)).await.expect("insert aaa");
+    registry.insert(sample_agent(0x0000_0BBB)).await.expect("insert bbb");
+
+    database
+        .agent_groups()
+        .set_agent_groups(0x0000_0AAA, &["alice-group".to_owned()])
+        .await
+        .expect("group alice");
+    database
+        .agent_groups()
+        .set_agent_groups(0x0000_0BBB, &["bob-group".to_owned()])
+        .await
+        .expect("group bob");
+    database
+        .agent_groups()
+        .set_operator_allowed_groups("alice", &["alice-group".to_owned()])
+        .await
+        .expect("alice scope");
+    database
+        .agent_groups()
+        .set_operator_allowed_groups("bob", &["bob-group".to_owned()])
+        .await
+        .expect("bob scope");
+
+    registry
+        .enqueue_job(
+            0x0000_0AAA,
+            Job {
+                command: 1,
+                request_id: 0x11,
+                payload: vec![0; 4],
+                command_line: "alice-job".to_owned(),
+                task_id: "task-alice".to_owned(),
+                created_at: "2026-04-17T12:00:00Z".to_owned(),
+                operator: "alice".to_owned(),
+            },
+        )
+        .await
+        .expect("enqueue alice");
+    registry
+        .enqueue_job(
+            0x0000_0BBB,
+            Job {
+                command: 1,
+                request_id: 0x22,
+                payload: vec![0; 4],
+                command_line: "bob-job".to_owned(),
+                task_id: "task-bob".to_owned(),
+                created_at: "2026-04-17T12:00:00Z".to_owned(),
+                operator: "bob".to_owned(),
+            },
+        )
+        .await
+        .expect("enqueue bob");
+
+    // list_jobs: alice sees only her agent's job; total reflects visible count.
+    let response = app.clone().oneshot(get(&app, "/jobs", "alice-key")).await.expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["total"].as_u64(), Some(1));
+    let agent_ids: Vec<&str> = body["items"]
+        .as_array()
+        .expect("items array")
+        .iter()
+        .map(|v| v["agent_id"].as_str().unwrap_or(""))
+        .collect();
+    assert_eq!(agent_ids, vec!["00000AAA"]);
+
+    // get_job: bob is denied for alice's job, allowed for his own.
+    let denied =
+        app.clone().oneshot(get(&app, "/jobs/00000AAA/11", "bob-key")).await.expect("response");
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    let ok =
+        app.clone().oneshot(get(&app, "/jobs/00000BBB/22", "bob-key")).await.expect("response");
+    assert_eq!(ok.status(), StatusCode::OK);
 }

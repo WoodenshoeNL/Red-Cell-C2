@@ -300,7 +300,7 @@ impl IntoResponse for AgentApiError {
 /// Authorize agent access for read/mutation handlers by composing both the
 /// agent-group and listener-access checks.  Returns the underlying
 /// [`AuthorizationError`] on denial so the handler maps to 403.
-async fn authorize_agent_access(
+pub(super) async fn authorize_agent_access(
     state: &TeamserverState,
     username: &str,
     agent_id: u32,
@@ -316,7 +316,11 @@ async fn authorize_agent_access(
 /// skip agents the caller cannot see.  Database errors are logged and treated
 /// as non-visible so a partial result is returned rather than leaking other
 /// operators' agents.
-async fn operator_may_access_agent(state: &TeamserverState, username: &str, agent_id: u32) -> bool {
+pub(super) async fn operator_may_access_agent(
+    state: &TeamserverState,
+    username: &str,
+    agent_id: u32,
+) -> bool {
     match authorize_agent_access(state, username, agent_id).await {
         Ok(()) => true,
         Err(AuthorizationError::AgentGroupDenied { .. })

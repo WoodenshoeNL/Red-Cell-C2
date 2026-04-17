@@ -15,9 +15,15 @@ use utoipa::{IntoParams, ToSchema};
 use crate::agents::QueuedJob;
 use crate::app::TeamserverState;
 use crate::database::LootFilter;
-use crate::{LootRecord, TeamserverError};
+use crate::{AuthorizationError, LootRecord, TeamserverError};
 
+use super::agents::{authorize_agent_access, operator_may_access_agent};
 use super::{ApiErrorBody, ReadApiAccess, json_error_response};
+
+/// Upper bound on rows fetched from the loot table when ACL filtering is
+/// applied in-memory.  Pagination happens after the ACL filter so callers see
+/// `total` for rows they may access, not the raw row count.
+const ACL_FILTER_ROW_CAP: i64 = 5_000;
 
 // ── Loot DTOs ─────────────────────────────────────────────────────────────────
 
@@ -175,6 +181,8 @@ impl JobQuery {
 pub(super) enum LootApiError {
     #[error("{0}")]
     Teamserver(#[from] TeamserverError),
+    #[error("{0}")]
+    Authorization(#[from] AuthorizationError),
     #[error("invalid loot id `{value}`")]
     InvalidLootId { value: String },
     #[error("invalid agent id `{value}`")]
@@ -187,15 +195,21 @@ pub(super) enum LootApiError {
 
 impl IntoResponse for LootApiError {
     fn into_response(self) -> Response {
-        let (status, code) = match &self {
-            Self::InvalidLootId { .. } => (StatusCode::BAD_REQUEST, "invalid_loot_id"),
-            Self::InvalidAgentId { .. } => (StatusCode::BAD_REQUEST, "invalid_agent_id"),
-            Self::NotFound { .. } => (StatusCode::NOT_FOUND, "loot_not_found"),
-            Self::MissingData { .. } => (StatusCode::CONFLICT, "loot_missing_data"),
-            Self::Teamserver(_) => (StatusCode::INTERNAL_SERVER_ERROR, "loot_api_error"),
-        };
-
-        json_error_response(status, code, self.to_string())
+        match self {
+            Self::Authorization(err) => err.into_response(),
+            other => {
+                let (status, code) = match &other {
+                    Self::InvalidLootId { .. } => (StatusCode::BAD_REQUEST, "invalid_loot_id"),
+                    Self::InvalidAgentId { .. } => (StatusCode::BAD_REQUEST, "invalid_agent_id"),
+                    Self::NotFound { .. } => (StatusCode::NOT_FOUND, "loot_not_found"),
+                    Self::MissingData { .. } => (StatusCode::CONFLICT, "loot_missing_data"),
+                    Self::Teamserver(_) | Self::Authorization(_) => {
+                        (StatusCode::INTERNAL_SERVER_ERROR, "loot_api_error")
+                    }
+                };
+                json_error_response(status, code, other.to_string())
+            }
+        }
     }
 }
 
@@ -203,6 +217,8 @@ impl IntoResponse for LootApiError {
 pub(super) enum CredentialApiError {
     #[error("{0}")]
     Teamserver(#[from] TeamserverError),
+    #[error("{0}")]
+    Authorization(#[from] AuthorizationError),
     #[error("invalid credential id `{value}`")]
     InvalidCredentialId { value: String },
     #[error("invalid agent id `{value}`")]
@@ -213,14 +229,22 @@ pub(super) enum CredentialApiError {
 
 impl IntoResponse for CredentialApiError {
     fn into_response(self) -> Response {
-        let (status, code) = match &self {
-            Self::InvalidCredentialId { .. } => (StatusCode::BAD_REQUEST, "invalid_credential_id"),
-            Self::InvalidAgentId { .. } => (StatusCode::BAD_REQUEST, "invalid_agent_id"),
-            Self::NotFound { .. } => (StatusCode::NOT_FOUND, "credential_not_found"),
-            Self::Teamserver(_) => (StatusCode::INTERNAL_SERVER_ERROR, "credential_api_error"),
-        };
-
-        json_error_response(status, code, self.to_string())
+        match self {
+            Self::Authorization(err) => err.into_response(),
+            other => {
+                let (status, code) = match &other {
+                    Self::InvalidCredentialId { .. } => {
+                        (StatusCode::BAD_REQUEST, "invalid_credential_id")
+                    }
+                    Self::InvalidAgentId { .. } => (StatusCode::BAD_REQUEST, "invalid_agent_id"),
+                    Self::NotFound { .. } => (StatusCode::NOT_FOUND, "credential_not_found"),
+                    Self::Teamserver(_) | Self::Authorization(_) => {
+                        (StatusCode::INTERNAL_SERVER_ERROR, "credential_api_error")
+                    }
+                };
+                json_error_response(status, code, other.to_string())
+            }
+        }
     }
 }
 
@@ -228,6 +252,8 @@ impl IntoResponse for CredentialApiError {
 pub(super) enum JobApiError {
     #[error("{0}")]
     Teamserver(#[from] TeamserverError),
+    #[error("{0}")]
+    Authorization(#[from] AuthorizationError),
     #[error("invalid agent id `{value}`")]
     InvalidAgentId { value: String },
     #[error("invalid request id `{value}`")]
@@ -238,14 +264,22 @@ pub(super) enum JobApiError {
 
 impl IntoResponse for JobApiError {
     fn into_response(self) -> Response {
-        let (status, code) = match &self {
-            Self::InvalidAgentId { .. } => (StatusCode::BAD_REQUEST, "invalid_agent_id"),
-            Self::InvalidRequestId { .. } => (StatusCode::BAD_REQUEST, "invalid_request_id"),
-            Self::NotFound { .. } => (StatusCode::NOT_FOUND, "job_not_found"),
-            Self::Teamserver(_) => (StatusCode::INTERNAL_SERVER_ERROR, "job_api_error"),
-        };
-
-        json_error_response(status, code, self.to_string())
+        match self {
+            Self::Authorization(err) => err.into_response(),
+            other => {
+                let (status, code) = match &other {
+                    Self::InvalidAgentId { .. } => (StatusCode::BAD_REQUEST, "invalid_agent_id"),
+                    Self::InvalidRequestId { .. } => {
+                        (StatusCode::BAD_REQUEST, "invalid_request_id")
+                    }
+                    Self::NotFound { .. } => (StatusCode::NOT_FOUND, "job_not_found"),
+                    Self::Teamserver(_) | Self::Authorization(_) => {
+                        (StatusCode::INTERNAL_SERVER_ERROR, "job_api_error")
+                    }
+                };
+                json_error_response(status, code, other.to_string())
+            }
+        }
     }
 }
 
@@ -268,7 +302,7 @@ impl IntoResponse for JobApiError {
 )]
 pub(super) async fn list_credentials(
     State(state): State<TeamserverState>,
-    _identity: ReadApiAccess,
+    identity: ReadApiAccess,
     Query(query): Query<CredentialQuery>,
 ) -> Result<Json<CredentialPage>, CredentialApiError> {
     let offset = query.offset();
@@ -287,13 +321,22 @@ pub(super) async fn list_credentials(
         ..LootFilter::default()
     };
     let repo = state.database.loot();
-    let items = repo
-        .query_filtered(&filter, usize_to_i64(limit, "limit")?, usize_to_i64(offset, "offset")?)
-        .await?
-        .into_iter()
-        .filter_map(credential_summary)
-        .collect::<Vec<_>>();
-    let total = i64_to_usize(repo.count_filtered(&filter).await?, "total")?;
+    // Hide credentials whose source agent is outside the operator's allow-list.
+    // Pagination is applied after filtering so `total` reflects what the caller
+    // can see, not what exists in the database; the row cap matches the
+    // largest practical credential corpus while bounding memory.
+    let unfiltered = repo.query_filtered(&filter, ACL_FILTER_ROW_CAP, 0).await?;
+    let mut visible: Vec<CredentialSummary> = Vec::with_capacity(unfiltered.len());
+    for record in unfiltered {
+        if !operator_may_access_agent(&state, &identity.key_id, record.agent_id).await {
+            continue;
+        }
+        if let Some(summary) = credential_summary(record) {
+            visible.push(summary);
+        }
+    }
+    let total = visible.len();
+    let items = visible.into_iter().skip(offset).take(limit).collect();
 
     Ok(Json(CredentialPage { total, limit, offset, items }))
 }
@@ -315,7 +358,7 @@ pub(super) async fn list_credentials(
 )]
 pub(super) async fn get_credential(
     State(state): State<TeamserverState>,
-    _identity: ReadApiAccess,
+    identity: ReadApiAccess,
     Path(id): Path<String>,
 ) -> Result<Json<CredentialSummary>, CredentialApiError> {
     let credential_id = id
@@ -329,6 +372,7 @@ pub(super) async fn get_credential(
         .await?
         .filter(|record| record.kind.eq_ignore_ascii_case("credential"))
         .ok_or(CredentialApiError::NotFound { id: credential_id })?;
+    authorize_agent_access(&state, &identity.key_id, record.agent_id).await?;
 
     credential_summary(record).map(Json).ok_or(CredentialApiError::NotFound { id: credential_id })
 }
@@ -352,7 +396,7 @@ pub(super) async fn get_credential(
 )]
 pub(super) async fn list_jobs(
     State(state): State<TeamserverState>,
-    _identity: ReadApiAccess,
+    identity: ReadApiAccess,
     Query(query): Query<JobQuery>,
 ) -> Result<Json<JobPage>, JobApiError> {
     let normalized_agent_id = normalize_agent_filter(query.agent_id.as_deref(), |value| {
@@ -362,7 +406,7 @@ pub(super) async fn list_jobs(
         JobApiError::InvalidRequestId { value }
     })?;
 
-    let mut items = state
+    let raw: Vec<QueuedJob> = state
         .agent_registry
         .queued_jobs_all()
         .await
@@ -375,8 +419,17 @@ pub(super) async fn list_jobs(
                 normalized_request_id.as_deref(),
             )
         })
-        .map(job_summary)
-        .collect::<Vec<_>>();
+        .collect();
+
+    // Skip jobs whose agent is outside the operator's allow-list before
+    // paginating so `total` reflects what the caller can see.
+    let mut items: Vec<JobSummary> = Vec::with_capacity(raw.len());
+    for queued_job in raw {
+        if !operator_may_access_agent(&state, &identity.key_id, queued_job.agent_id).await {
+            continue;
+        }
+        items.push(job_summary(queued_job));
+    }
 
     let total = items.len();
     let offset = query.offset();
@@ -406,7 +459,7 @@ pub(super) async fn list_jobs(
 )]
 pub(super) async fn get_job(
     State(state): State<TeamserverState>,
-    _identity: ReadApiAccess,
+    identity: ReadApiAccess,
     Path((agent_id, request_id)): Path<(String, String)>,
 ) -> Result<Json<JobSummary>, JobApiError> {
     let normalized_agent_id = normalize_agent_filter(Some(agent_id.as_str()), |value| {
@@ -418,7 +471,7 @@ pub(super) async fn get_job(
     })?
     .ok_or(JobApiError::InvalidRequestId { value: request_id.clone() })?;
 
-    state
+    let queued_job = state
         .agent_registry
         .queued_jobs_all()
         .await
@@ -427,12 +480,13 @@ pub(super) async fn get_job(
             format!("{:08X}", queued_job.agent_id) == normalized_agent_id
                 && format!("{:X}", queued_job.job.request_id) == normalized_request_id
         })
-        .map(job_summary)
-        .map(Json)
         .ok_or(JobApiError::NotFound {
-            agent_id: normalized_agent_id,
-            request_id: normalized_request_id,
-        })
+            agent_id: normalized_agent_id.clone(),
+            request_id: normalized_request_id.clone(),
+        })?;
+
+    authorize_agent_access(&state, &identity.key_id, queued_job.agent_id).await?;
+    Ok(Json(job_summary(queued_job)))
 }
 
 // ── Loot handlers ─────────────────────────────────────────────────────────────
@@ -453,7 +507,7 @@ pub(super) async fn get_job(
 )]
 pub(super) async fn list_loot(
     State(state): State<TeamserverState>,
-    _identity: ReadApiAccess,
+    identity: ReadApiAccess,
     Query(query): Query<LootQuery>,
 ) -> Result<Json<LootPage>, LootApiError> {
     let offset = query.offset();
@@ -472,13 +526,19 @@ pub(super) async fn list_loot(
         ..LootFilter::default()
     };
     let repo = state.database.loot();
-    let items = repo
-        .query_filtered(&filter, usize_to_i64(limit, "limit")?, usize_to_i64(offset, "offset")?)
-        .await?
-        .into_iter()
-        .map(loot_summary)
-        .collect::<Vec<_>>();
-    let total = i64_to_usize(repo.count_filtered(&filter).await?, "total")?;
+    // Hide loot whose source agent is outside the operator's allow-list.
+    // Pagination is applied after filtering so `total` reflects what the
+    // caller can see, not the raw row count.
+    let unfiltered = repo.query_filtered(&filter, ACL_FILTER_ROW_CAP, 0).await?;
+    let mut visible: Vec<LootSummary> = Vec::with_capacity(unfiltered.len());
+    for record in unfiltered {
+        if !operator_may_access_agent(&state, &identity.key_id, record.agent_id).await {
+            continue;
+        }
+        visible.push(loot_summary(record));
+    }
+    let total = visible.len();
+    let items = visible.into_iter().skip(offset).take(limit).collect();
 
     Ok(Json(LootPage { total, limit, offset, items }))
 }
@@ -501,13 +561,14 @@ pub(super) async fn list_loot(
 )]
 pub(super) async fn get_loot(
     State(state): State<TeamserverState>,
-    _identity: ReadApiAccess,
+    identity: ReadApiAccess,
     Path(id): Path<String>,
 ) -> Result<Response, LootApiError> {
     let loot_id =
         id.parse::<i64>().map_err(|_| LootApiError::InvalidLootId { value: id.clone() })?;
     let record =
         state.database.loot().get(loot_id).await?.ok_or(LootApiError::NotFound { id: loot_id })?;
+    authorize_agent_access(&state, &identity.key_id, record.agent_id).await?;
     let data = record.data.ok_or(LootApiError::MissingData { id: loot_id })?;
     let filename = sanitize_filename(record.name.as_str());
     let content_type = loot_content_type(record.kind.as_str(), filename.as_str());
@@ -678,20 +739,6 @@ fn parse_optional_agent_id<E>(
             parse_hex_u32(filter_value).ok_or_else(|| invalid(filter_value.to_owned()))
         })
         .transpose()
-}
-
-fn usize_to_i64(value: usize, field: &'static str) -> Result<i64, TeamserverError> {
-    i64::try_from(value).map_err(|_| TeamserverError::InvalidPersistedValue {
-        field,
-        message: format!("{field} exceeds i64 range"),
-    })
-}
-
-fn i64_to_usize(value: i64, field: &'static str) -> Result<usize, TeamserverError> {
-    usize::try_from(value).map_err(|_| TeamserverError::InvalidPersistedValue {
-        field,
-        message: format!("{field} exceeds usize range"),
-    })
 }
 
 fn parse_hex_u32(value: &str) -> Option<u32> {

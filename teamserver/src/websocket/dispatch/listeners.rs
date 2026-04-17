@@ -434,3 +434,241 @@ pub(super) async fn handle_listener_mark(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Verify that the WebSocket listener handlers refuse to act on listeners
+    //! outside the operator's per-listener allow-list.  These mirror the REST
+    //! `rbac_scope` tests but exercise the operator-WebSocket dispatch path.
+
+    use std::time::{Duration, Instant};
+
+    use red_cell_common::config::{OperatorRole, Profile};
+    use red_cell_common::operator::{
+        EventCode, ListenerInfo, ListenerMarkInfo, Message, MessageHead, NameInfo, OperatorMessage,
+    };
+    use red_cell_common::{HttpListenerConfig, ListenerConfig};
+    use tokio::time::timeout;
+    use uuid::Uuid;
+
+    use crate::auth::OperatorSession;
+    use crate::{
+        AgentRegistry, AuditWebhookNotifier, Database, EventBus, ListenerManager,
+        SocketRelayManager,
+    };
+
+    use super::{handle_listener_edit, handle_listener_mark, handle_listener_remove};
+
+    struct Harness {
+        listeners: ListenerManager,
+        events: EventBus,
+        database: Database,
+        webhooks: AuditWebhookNotifier,
+    }
+
+    async fn build_harness() -> Harness {
+        let database = Database::connect_in_memory().await.expect("database");
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let listeners =
+            ListenerManager::new(database.clone(), registry, events.clone(), sockets, None)
+                .with_demon_allow_legacy_ctr(true);
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40090
+            }
+            Operators {
+              user "Neo" {
+                Password = "password1234"
+              }
+            }
+            Demon {}
+            "#,
+        )
+        .expect("profile");
+        let webhooks = AuditWebhookNotifier::from_profile(&profile);
+        Harness { listeners, events, database, webhooks }
+    }
+
+    fn session(username: &str) -> OperatorSession {
+        let now = Instant::now();
+        OperatorSession {
+            token: format!("{username}-token"),
+            username: username.to_owned(),
+            role: OperatorRole::Admin,
+            connection_id: Uuid::new_v4(),
+            created_at: now,
+            last_activity_at: now,
+        }
+    }
+
+    fn http_listener(name: &str, port: u16) -> ListenerConfig {
+        ListenerConfig::from(HttpListenerConfig {
+            name: name.to_owned(),
+            kill_date: None,
+            working_hours: None,
+            hosts: vec!["127.0.0.1".to_owned()],
+            host_bind: "127.0.0.1".to_owned(),
+            host_rotation: "round-robin".to_owned(),
+            port_bind: port,
+            port_conn: None,
+            method: None,
+            behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
+            user_agent: None,
+            headers: Vec::new(),
+            uris: vec!["/".to_owned()],
+            host_header: None,
+            secure: false,
+            cert: None,
+            response: None,
+            proxy: None,
+            ja3_randomize: None,
+            doh_domain: None,
+            doh_provider: None,
+        })
+    }
+
+    fn edit_message(name: &str, port: u16) -> Message<ListenerInfo> {
+        Message {
+            head: MessageHead {
+                event: EventCode::Listener,
+                user: "test".to_owned(),
+                timestamp: String::new(),
+                one_time: String::new(),
+            },
+            info: ListenerInfo {
+                name: Some(name.to_owned()),
+                protocol: Some("http".to_owned()),
+                hosts: Some("127.0.0.1".to_owned()),
+                host_bind: Some("127.0.0.1".to_owned()),
+                host_rotation: Some("round-robin".to_owned()),
+                port_bind: Some(port.to_string()),
+                uris: Some("/".to_owned()),
+                secure: Some("false".to_owned()),
+                ..ListenerInfo::default()
+            },
+        }
+    }
+
+    async fn next_event(rx: &mut crate::events::EventReceiver) -> OperatorMessage {
+        timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("event arrived in time")
+            .expect("subscription open")
+    }
+
+    fn assert_log_event_for_user(message: &OperatorMessage, expected_user: &str) {
+        let body = serde_json::to_value(message).expect("message to json");
+        let head = body.get("Head").expect("Head field");
+        assert_eq!(head.get("User").and_then(|v| v.as_str()), Some(expected_user));
+    }
+
+    #[tokio::test]
+    async fn handle_listener_edit_denies_operator_outside_allow_list() {
+        let h = build_harness().await;
+        let summary = h.listeners.create(http_listener("alice-only", 40130)).await.expect("create");
+        h.database
+            .listener_access()
+            .set_allowed_operators(&summary.name, &["alice".to_owned()])
+            .await
+            .expect("seed");
+
+        let mut rx = h.events.subscribe();
+
+        handle_listener_edit(
+            &h.listeners,
+            &h.events,
+            &h.database,
+            &h.webhooks,
+            &session("bob"),
+            edit_message("alice-only", 40131),
+        )
+        .await;
+
+        let envelope = next_event(&mut rx).await;
+        assert_log_event_for_user(&envelope, "bob");
+
+        let after = h.listeners.summary("alice-only").await.expect("summary");
+        let ListenerConfig::Http(http) = &after.config else {
+            panic!("expected http listener");
+        };
+        assert_eq!(http.port_bind, 40130, "edit must not have applied");
+    }
+
+    #[tokio::test]
+    async fn handle_listener_remove_denies_operator_outside_allow_list() {
+        let h = build_harness().await;
+        let summary = h.listeners.create(http_listener("alice-only", 40132)).await.expect("create");
+        h.database
+            .listener_access()
+            .set_allowed_operators(&summary.name, &["alice".to_owned()])
+            .await
+            .expect("seed");
+
+        let mut rx = h.events.subscribe();
+
+        handle_listener_remove(
+            &h.listeners,
+            &h.events,
+            &h.database,
+            &h.webhooks,
+            &session("bob"),
+            Message {
+                head: MessageHead {
+                    event: EventCode::Listener,
+                    user: "test".to_owned(),
+                    timestamp: String::new(),
+                    one_time: String::new(),
+                },
+                info: NameInfo { name: "alice-only".to_owned() },
+            },
+        )
+        .await;
+
+        let envelope = next_event(&mut rx).await;
+        assert_log_event_for_user(&envelope, "bob");
+
+        h.listeners.summary("alice-only").await.expect("listener still exists");
+    }
+
+    #[tokio::test]
+    async fn handle_listener_mark_denies_operator_outside_allow_list() {
+        let h = build_harness().await;
+        let summary = h.listeners.create(http_listener("alice-only", 40133)).await.expect("create");
+        h.database
+            .listener_access()
+            .set_allowed_operators(&summary.name, &["alice".to_owned()])
+            .await
+            .expect("seed");
+
+        let mut rx = h.events.subscribe();
+
+        handle_listener_mark(
+            &h.listeners,
+            &h.events,
+            &h.database,
+            &h.webhooks,
+            &session("bob"),
+            Message {
+                head: MessageHead {
+                    event: EventCode::Listener,
+                    user: "test".to_owned(),
+                    timestamp: String::new(),
+                    one_time: String::new(),
+                },
+                info: ListenerMarkInfo { name: "alice-only".to_owned(), mark: "start".to_owned() },
+            },
+        )
+        .await;
+
+        let envelope = next_event(&mut rx).await;
+        assert_log_event_for_user(&envelope, "bob");
+
+        let after = h.listeners.summary("alice-only").await.expect("summary");
+        assert_ne!(after.state.status, crate::ListenerStatus::Running);
+    }
+}

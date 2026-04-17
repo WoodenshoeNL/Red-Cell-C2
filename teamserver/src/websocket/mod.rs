@@ -12,8 +12,6 @@ mod snapshot;
 mod upload;
 
 #[cfg(test)]
-use crate::MAX_AGENT_MESSAGE_LEN;
-#[cfg(test)]
 use command_enc::{build_job, build_jobs, encode_utf16, write_len_prefixed_bytes, write_u32};
 
 #[cfg(test)]

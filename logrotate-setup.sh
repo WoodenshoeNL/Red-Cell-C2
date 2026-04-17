@@ -33,8 +33,12 @@ fi
 DROPIN="/etc/logrotate.d/red-cell-c2-loops"
 # `su` directive is required because the repo dir is group-writable (typical
 # for a user clone); without it logrotate refuses to touch the logs.
+#
+# Glob `*[!0-9].log` matches the rolling per-loop logs (claude_dev.log,
+# codex_arch.log, maintenance.log, …) but skips the per-run timestamped logs
+# (codex_arch_20260414_210118.log, …) which already self-rotate by name.
 WANT=$(cat <<EOF
-${LOGS_DIR}/*.log {
+${LOGS_DIR}/*[!0-9].log {
     su ${REPO_USER} ${REPO_GROUP}
     daily
     size 50M

@@ -330,6 +330,22 @@ If the finding blocks existing work:
 br dep add <existing-issue-id> <new-issue-id>
 ```
 
+### After filing — verify each issue exists
+
+Every `br create` prints the assigned ID. Capture every ID you actually create in this
+run. **Before continuing to Step 8**, verify them all really exist:
+
+```bash
+for id in <id1> <id2> ...; do
+  br show "$id" >/dev/null 2>&1 && echo "$id ok" || echo "$id MISSING"
+done
+```
+
+If any ID is `MISSING`, you did **not** successfully create it — re-run the create command
+or drop the ID. **Never carry an unverified ID into Step 10.** If you wrote a `br create`
+command in your scratch but it never executed (no output captured), that issue does not
+exist and must not be reported.
+
 ---
 
 ## Step 8 — Update Agent Scorecard
@@ -388,7 +404,11 @@ Write a concise summary covering:
 1. **Codebase health**: overall impression (on track / drifting / concerning)
 2. **Security posture**: anything that could be exploited in a real engagement
 3. **Biggest blindspot**: the single most dangerous gap you found
-4. **Issues filed**: list each new beads ID with responsible agent and one-line description
+4. **Issues filed**: list each new beads ID with responsible agent and one-line description.
+   **Hard rule**: every ID listed here must have been returned by a real `br create`
+   invocation in this run AND verified by `br show <id>` in Step 7's verification block.
+   Do not invent, guess, or extrapolate IDs. If you filed nothing, write "No issues filed"
+   and explain why.
 5. **Agent quality**: based on findings this run, which agent is writing the best code?
 6. **Recommendation**: what the dev agents should prioritize next
 

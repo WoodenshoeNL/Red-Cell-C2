@@ -227,17 +227,35 @@ impl AuthService {
         connection_id: Uuid,
         login: &red_cell_common::operator::LoginInfo,
     ) -> AuthenticationResult {
-        let credentials = self.credentials.read().await;
-        let account = credentials.get(&login.user);
-        let expected_verifier = account
-            .map(|account| account.password_verifier.as_str())
-            .unwrap_or(self.dummy_password_verifier.as_str());
+        // Extract owned data under the read lock so we can drop it before the blocking await.
+        let (expected, account_role) = {
+            let credentials = self.credentials.read().await;
+            let account = credentials.get(&login.user);
+            let verifier = account
+                .map(|a| a.password_verifier.as_str())
+                .unwrap_or(self.dummy_password_verifier.as_str())
+                .to_owned();
+            let role = account.map(|a| a.role);
+            (verifier, role)
+        };
 
-        if !password_hashes_match(&login.password, expected_verifier) {
+        let submitted = login.password.clone();
+        let hashes_match =
+            tokio::task::spawn_blocking(move || password_hashes_match(&submitted, &expected))
+                .await
+                .map_err(|e| {
+                    tracing::error!("spawn_blocking for password_hashes_match panicked: {e}");
+                    AuthenticationResult::Failure(AuthenticationFailure::InvalidCredentials)
+                });
+        let hashes_match = match hashes_match {
+            Ok(v) => v,
+            Err(result) => return result,
+        };
+        if !hashes_match {
             return AuthenticationResult::Failure(AuthenticationFailure::InvalidCredentials);
         }
 
-        let Some(account) = account else {
+        let Some(role) = account_role else {
             return AuthenticationResult::Failure(AuthenticationFailure::InvalidCredentials);
         };
 
@@ -246,7 +264,7 @@ impl AuthService {
         let session = OperatorSession {
             token: token.clone(),
             username: login.user.clone(),
-            role: account.role,
+            role,
             connection_id,
             created_at: now,
             last_activity_at: now,

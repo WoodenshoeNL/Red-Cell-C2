@@ -5,6 +5,7 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
+use subtle::ConstantTimeEq;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -126,8 +127,8 @@ pub fn open_ws_frame(
     // Decode provided tag — returns BadHmac for wrong length or non-hex chars.
     let provided = decode_hex_tag(&envelope.hmac)?;
 
-    // Constant-time compare.
-    if !constant_time_eq(&expected, &provided) {
+    // Constant-time compare via `subtle` to prevent timing side-channels.
+    if !bool::from(expected.ct_eq(&provided[..])) {
         return Err(WsHmacError::BadHmac);
     }
 
@@ -164,17 +165,6 @@ fn hex_nibble(b: u8) -> Option<u8> {
         b'A'..=b'F' => Some(b - b'A' + 10),
         _ => None,
     }
-}
-
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff: u8 = 0;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
 }
 
 #[cfg(test)]

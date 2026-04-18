@@ -12,7 +12,8 @@ use interprocess::os::unix::local_socket::AbstractNsUdSocket;
 use red_cell_common::config::Profile;
 use red_cell_common::demon::DemonCommand;
 use red_cell_common::operator::{
-    AgentResponseInfo, AgentTaskInfo, EventCode, ListenerInfo, Message, MessageHead, OperatorMessage,
+    AgentResponseInfo, AgentTaskInfo, EventCode, ListenerInfo, Message, MessageHead,
+    OperatorMessage,
 };
 use red_cell_common::{DnsListenerConfig, HttpListenerConfig, ListenerConfig, SmbListenerConfig};
 use serde_json::Value;

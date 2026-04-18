@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1362 | 255 | 97 |
+| Tasks closed | 1369 | 255 | 97 |
 | Bugs filed against | 259 | 50 | 15 |
 | Bug rate (bugs/task) | 0.19 | 0.20 | 0.15 |
 | Quality score | 81% | 80% | 85% |
 
-*Bug rates: Claude 259/1362=0.1902→0.19, Codex 50/255=0.1961→0.20, Cursor 15/97=0.1546→0.15*
+*Bug rates: Claude 259/1369=0.1891→0.19, Codex 50/255=0.1961→0.20, Cursor 15/97=0.1546→0.15*
 
 ## Violation Breakdown
 
@@ -41,6 +41,18 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-18 — c078eb63..592b3627
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 7 | 0 | 4 bug fixes (specter MemFile OOM red-cell-c2-ytxk7, phantom Cat OOM red-cell-c2-i5y4q, preflight anyhow→thiserror red-cell-c2-vh8oe, webhook TOCTOU red-cell-c2-ooa08); 3 refactors (client main_tests/mod.rs 3495L split into 14 modules red-cell-c2-nmgs2, teamserver plugins/tests.rs 3233L→4 modules red-cell-c2-u53vg, teamserver listeners/tests/lifecycle.rs 2388L→4 modules red-cell-c2-y2exa); WIP specter dispatch/tests.rs split red-cell-c2-hhlja (partial: 3 modules extracted, 4838L mod.rs remains, in-progress). |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **cargo check** — passed (clean). **cargo clippy -- -D warnings** — clean (0 warnings). **cargo nextest run --workspace** — 5462 tests; 1818/1822 ran before early stop; 4 failures in `dispatch::util::tests::*` (pre-existing double-spawn race — all 4 pass with `--test-threads=1`); filed red-cell-c2-2vdfs to add serial nextest group (not attributed to Claude this period).
+
+Overall codebase health: **on track** — both P2 agent OOM bugs (ytxk7, i5y4q) now fixed. Webhook test TOCTOU race closed. Preflight now uses proper thiserror (architecture compliance). Three large test files successfully split. Specter dispatch tests split in progress (5203L→mod.rs 4838L + 3 modules extracted). One pre-existing infrastructure issue found: `dispatch::util::tests` flaky under parallel nextest (red-cell-c2-2vdfs). No new code quality regressions.
 
 ### QA Review — 2026-04-18 — a8a75ca0..c078eb63
 

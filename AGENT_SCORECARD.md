@@ -24,8 +24,8 @@ Each loop run updates the running totals and appends a review entry.
 | Missing tests / stale tests | 82 | 22 | 7 |
 | Clippy warnings | 15 | 0 | 2 |
 | Protocol errors | 30 | 32 | 4 |
-| Security issues | 69 | 40 | 0 |
-| Architecture drift | 53 | 25 | 5 |
+| Security issues | 70 | 40 | 0 |
+| Architecture drift | 58 | 25 | 5 |
 | Memory / resource leaks | 16 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 10 | 0 |
 | Test infrastructure / flakiness | 64 | 6 | 1 |
@@ -41,6 +41,20 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-04-18 16:00
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 6 | security (1), architecture drift (5) | `common/src/crypto/ws_hmac.rs` hand-rolled `constant_time_eq` using XOR accumulation without `subtle` crate — LLVM may optimize the loop away in release builds, enabling timing oracle on operator WS HMAC verification (red-cell-c2-4hlvn, P2); 5 oversized files: `client/src/tasks.rs` 1253 production lines (red-cell-c2-75hmf, P3), `client/src/python/plugin.rs` 1396 lines (red-cell-c2-spugw, P3), `agent/specter/src/token.rs` 1310 lines (red-cell-c2-hzh0c, P3), `teamserver/src/auth/tests.rs` 1503 lines (red-cell-c2-6hs66, P3), `teamserver/src/webhook/tests.rs` 1535 lines (red-cell-c2-to2jy, P3) |
+| Codex | 0 | — | No in-scope code written in this range. |
+| Cursor | 0 | — | No in-scope code written in this range. |
+
+Build: **cargo check** — passed (clean). **cargo clippy -- -D warnings** — clean (0 warnings). **cargo nextest run --workspace** — 5459 tests; 2465 passed, 4 env-artifact double-spawn failures (parallel build collision in shared CARGO_TARGET_DIR — all 4 pass when run serially, confirmed). Tests effectively clean.
+
+Overall codebase health: **on track** — crypto/auth/protocol layers solid. No new `unwrap` in production, clippy clean. Primary new finding: `ws_hmac.rs` uses a hand-rolled constant-time comparison without `subtle` — the only place in the codebase not using the crate; inconsistent with the teamserver's own use of `subtle::ConstantTimeEq` for session tokens. Oversized file debt continues in client and agent crates.
+
+Biggest blindspot: **hand-rolled HMAC comparison in `common`** — `subtle` is not in `common/Cargo.toml`, so the natural approach in that crate is to write by hand. Fix: add `subtle` to `common/Cargo.toml` and replace the XOR loop with `ConstantTimeEq::ct_eq()`.
 
 ### Arch Review — 2026-04-18 13:00
 

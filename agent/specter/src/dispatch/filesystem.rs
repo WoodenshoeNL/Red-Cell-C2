@@ -1,9 +1,13 @@
 //! Filesystem, in-memory file staging, transfer, and package-dropped handlers.
 
+use std::io::Read as _;
 use std::time::UNIX_EPOCH;
 
 /// Maximum allowed `total_size` for a `CommandMemFile` pre-allocation (100 MiB).
 const MAX_MEM_FILE_SIZE: u64 = 100 * 1024 * 1024;
+
+/// Maximum bytes read by `Cat` before truncating (32 MiB).
+const CAT_SIZE_LIMIT: u64 = 32 * 1024 * 1024;
 
 use red_cell_common::demon::{DemonCommand, DemonFilesystemCommand, DemonTransferCommand};
 use tracing::{info, warn};
@@ -14,7 +18,8 @@ use crate::download::{
 
 use super::{
     DispatchResult, MemFile, MemFileStore, Response, decode_utf16le_null, parse_bytes_le,
-    parse_u32_le, parse_u64_le, write_u32_be_always, write_u32_le, write_utf16le, write_wstring_be,
+    parse_u32_le, parse_u64_le, write_bytes_le, write_u32_be_always, write_u32_le, write_utf16le,
+    write_wstring_be,
 };
 
 // ─── COMMAND_FS (15) ─────────────────────────────────────────────────────────
@@ -57,10 +62,11 @@ pub(super) fn handle_fs(
         DemonFilesystemCommand::Upload => {
             handle_fs_upload(subcmd_raw, &payload[offset..], mem_files)
         }
-        _ => {
-            info!(subcommand = ?subcmd, "CommandFs: unhandled subcommand — ignoring");
-            DispatchResult::Ignore
-        }
+        DemonFilesystemCommand::Cat => handle_fs_cat(subcmd_raw, &payload[offset..]),
+        DemonFilesystemCommand::Remove => handle_fs_remove(subcmd_raw, &payload[offset..]),
+        DemonFilesystemCommand::Mkdir => handle_fs_mkdir(subcmd_raw, &payload[offset..]),
+        DemonFilesystemCommand::Copy => handle_fs_copy(subcmd_raw, &payload[offset..]),
+        DemonFilesystemCommand::Move => handle_fs_move(subcmd_raw, &payload[offset..]),
     }
 }
 
@@ -413,6 +419,209 @@ pub(super) fn handle_fs_upload(
     write_u32_be_always(&mut out, file_size);
     write_wstring_be(&mut out, &path_str);
 
+    DispatchResult::Respond(Response::new(DemonCommand::CommandFs, out))
+}
+
+// ─── COMMAND_FS / Cat (10) ──────────────────────────────────────────────────
+
+/// `COMMAND_FS / Cat (10)` — read a file and return its contents.
+///
+/// Incoming args (LE): `[file_path: bytes (UTF-16LE)]`
+///
+/// Outgoing payload (LE):
+/// `[10: u32][path: utf16le][success=1: u32][contents: length-prefixed bytes]`
+///
+/// Files larger than [`CAT_SIZE_LIMIT`] are truncated with a notice appended.
+fn handle_fs_cat(subcmd_raw: u32, rest: &[u8]) -> DispatchResult {
+    let mut offset = 0;
+    let path_bytes = match parse_bytes_le(rest, &mut offset) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("Cat: failed to parse path: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+    let path_str = decode_utf16le_null(&path_bytes);
+
+    let mut file = match std::fs::File::open(&path_str) {
+        Ok(f) => f,
+        Err(e) => {
+            warn!(path = %path_str, "Cat: open failed: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+
+    let file_len = file.metadata().map(|m| m.len()).unwrap_or(CAT_SIZE_LIMIT + 1);
+    let mut contents = Vec::new();
+    if let Err(e) = file.by_ref().take(CAT_SIZE_LIMIT).read_to_end(&mut contents) {
+        warn!(path = %path_str, "Cat: read failed: {e}");
+        return DispatchResult::Ignore;
+    }
+
+    if file_len > CAT_SIZE_LIMIT {
+        let note = format!(
+            "\n[truncated: file is {} bytes, only first {} bytes shown]",
+            file_len, CAT_SIZE_LIMIT
+        );
+        contents.extend_from_slice(note.as_bytes());
+    }
+
+    info!(path = %path_str, bytes = contents.len(), "Cat");
+
+    let mut out = Vec::new();
+    write_u32_le(&mut out, subcmd_raw);
+    write_utf16le(&mut out, &path_str);
+    write_u32_le(&mut out, 1); // success
+    write_bytes_le(&mut out, &contents);
+    DispatchResult::Respond(Response::new(DemonCommand::CommandFs, out))
+}
+
+// ─── COMMAND_FS / Remove (5) ────────────────────────────────────────────────
+
+/// `COMMAND_FS / Remove (5)` — delete a file or directory.
+///
+/// Incoming args (LE): `[path: bytes (UTF-16LE)]`
+///
+/// Outgoing payload (LE): `[5: u32][is_dir: u32][path: utf16le]`
+fn handle_fs_remove(subcmd_raw: u32, rest: &[u8]) -> DispatchResult {
+    let mut offset = 0;
+    let path_bytes = match parse_bytes_le(rest, &mut offset) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("Remove: failed to parse path: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+    let path_str = decode_utf16le_null(&path_bytes);
+    let path = std::path::Path::new(&path_str);
+    let is_dir = path.is_dir();
+
+    let result = if is_dir { std::fs::remove_dir(path) } else { std::fs::remove_file(path) };
+
+    if let Err(e) = result {
+        warn!(path = %path_str, "Remove: failed: {e}");
+        return DispatchResult::Ignore;
+    }
+
+    info!(path = %path_str, is_dir, "Remove");
+
+    let mut out = Vec::new();
+    write_u32_le(&mut out, subcmd_raw);
+    write_u32_le(&mut out, u32::from(is_dir));
+    write_utf16le(&mut out, &path_str);
+    DispatchResult::Respond(Response::new(DemonCommand::CommandFs, out))
+}
+
+// ─── COMMAND_FS / Mkdir (6) ─────────────────────────────────────────────────
+
+/// `COMMAND_FS / Mkdir (6)` — create a directory (and parents).
+///
+/// Incoming args (LE): `[path: bytes (UTF-16LE)]`
+///
+/// Outgoing payload (LE): `[6: u32][path: utf16le]`
+fn handle_fs_mkdir(subcmd_raw: u32, rest: &[u8]) -> DispatchResult {
+    let mut offset = 0;
+    let path_bytes = match parse_bytes_le(rest, &mut offset) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("Mkdir: failed to parse path: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+    let path_str = decode_utf16le_null(&path_bytes);
+
+    if let Err(e) = std::fs::create_dir_all(&path_str) {
+        warn!(path = %path_str, "Mkdir: create_dir_all failed: {e}");
+        return DispatchResult::Ignore;
+    }
+
+    info!(path = %path_str, "Mkdir");
+
+    let mut out = Vec::new();
+    write_u32_le(&mut out, subcmd_raw);
+    write_utf16le(&mut out, &path_str);
+    DispatchResult::Respond(Response::new(DemonCommand::CommandFs, out))
+}
+
+// ─── COMMAND_FS / Copy (7) ──────────────────────────────────────────────────
+
+/// `COMMAND_FS / Copy (7)` — copy a file.
+///
+/// Incoming args (LE): `[from: bytes (UTF-16LE)][to: bytes (UTF-16LE)]`
+///
+/// Outgoing payload (LE): `[7: u32][success=1: u32][from: utf16le][to: utf16le]`
+fn handle_fs_copy(subcmd_raw: u32, rest: &[u8]) -> DispatchResult {
+    let mut offset = 0;
+    let from_bytes = match parse_bytes_le(rest, &mut offset) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("Copy: failed to parse from-path: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+    let to_bytes = match parse_bytes_le(rest, &mut offset) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("Copy: failed to parse to-path: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+    let from_str = decode_utf16le_null(&from_bytes);
+    let to_str = decode_utf16le_null(&to_bytes);
+
+    if let Err(e) = std::fs::copy(&from_str, &to_str) {
+        warn!(from = %from_str, to = %to_str, "Copy: failed: {e}");
+        return DispatchResult::Ignore;
+    }
+
+    info!(from = %from_str, to = %to_str, "Copy");
+
+    let mut out = Vec::new();
+    write_u32_le(&mut out, subcmd_raw);
+    write_u32_le(&mut out, 1); // success
+    write_utf16le(&mut out, &from_str);
+    write_utf16le(&mut out, &to_str);
+    DispatchResult::Respond(Response::new(DemonCommand::CommandFs, out))
+}
+
+// ─── COMMAND_FS / Move (8) ──────────────────────────────────────────────────
+
+/// `COMMAND_FS / Move (8)` — move (rename) a file or directory.
+///
+/// Incoming args (LE): `[from: bytes (UTF-16LE)][to: bytes (UTF-16LE)]`
+///
+/// Outgoing payload (LE): `[8: u32][success=1: u32][from: utf16le][to: utf16le]`
+fn handle_fs_move(subcmd_raw: u32, rest: &[u8]) -> DispatchResult {
+    let mut offset = 0;
+    let from_bytes = match parse_bytes_le(rest, &mut offset) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("Move: failed to parse from-path: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+    let to_bytes = match parse_bytes_le(rest, &mut offset) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("Move: failed to parse to-path: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+    let from_str = decode_utf16le_null(&from_bytes);
+    let to_str = decode_utf16le_null(&to_bytes);
+
+    if let Err(e) = std::fs::rename(&from_str, &to_str) {
+        warn!(from = %from_str, to = %to_str, "Move: failed: {e}");
+        return DispatchResult::Ignore;
+    }
+
+    info!(from = %from_str, to = %to_str, "Move");
+
+    let mut out = Vec::new();
+    write_u32_le(&mut out, subcmd_raw);
+    write_u32_le(&mut out, 1); // success
+    write_utf16le(&mut out, &from_str);
+    write_utf16le(&mut out, &to_str);
     DispatchResult::Respond(Response::new(DemonCommand::CommandFs, out))
 }
 

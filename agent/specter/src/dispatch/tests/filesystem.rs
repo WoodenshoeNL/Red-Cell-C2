@@ -673,3 +673,200 @@ fn handle_fs_empty_payload_returns_ignore() {
     );
     assert!(matches!(result, DispatchResult::Ignore));
 }
+
+// ── handle_fs cat ─────────────────────────────────────────────────────────
+
+#[test]
+fn handle_fs_cat_reads_file_contents() {
+    let tmp = std::env::temp_dir();
+    let file = tmp.join(format!("specter_cat_{}.txt", rand::random::<u32>()));
+    std::fs::write(&file, b"hello specter").expect("write test file");
+
+    let mut config = SpecterConfig::default();
+    let mut payload = le_subcmd(u32::from(DemonFilesystemCommand::Cat));
+    payload.extend_from_slice(&le_utf16le_payload(&file.display().to_string()));
+    let package = DemonPackage::new(DemonCommand::CommandFs, 1, payload);
+    let result = dispatch(
+        &package,
+        &mut config,
+        &mut TokenVault::new(),
+        &mut DownloadTracker::new(),
+        &mut HashMap::new(),
+        &mut JobStore::new(),
+        &mut Vec::new(),
+        &crate::coffeeldr::new_bof_output_queue(),
+    );
+    let DispatchResult::Respond(resp) = result else {
+        panic!("expected Respond, got {result:?}");
+    };
+    assert_eq!(resp.command_id, u32::from(DemonCommand::CommandFs));
+    let subcmd = u32::from_le_bytes(resp.payload[0..4].try_into().expect("subcmd"));
+    assert_eq!(subcmd, u32::from(DemonFilesystemCommand::Cat));
+    // Verify "hello specter" appears in the payload.
+    assert!(
+        resp.payload.windows(b"hello specter".len()).any(|w| w == b"hello specter"),
+        "Cat response must contain file contents"
+    );
+    let _ = std::fs::remove_file(file);
+}
+
+#[test]
+fn handle_fs_cat_missing_file_returns_ignore() {
+    let mut config = SpecterConfig::default();
+    let mut payload = le_subcmd(u32::from(DemonFilesystemCommand::Cat));
+    payload.extend_from_slice(&le_utf16le_payload("/nonexistent_specter_cat_xyz.txt"));
+    let package = DemonPackage::new(DemonCommand::CommandFs, 1, payload);
+    let result = dispatch(
+        &package,
+        &mut config,
+        &mut TokenVault::new(),
+        &mut DownloadTracker::new(),
+        &mut HashMap::new(),
+        &mut JobStore::new(),
+        &mut Vec::new(),
+        &crate::coffeeldr::new_bof_output_queue(),
+    );
+    assert!(matches!(result, DispatchResult::Ignore), "Cat of nonexistent file must return Ignore");
+}
+
+// ── handle_fs remove ──────────────────────────────────────────────────────
+
+#[test]
+fn handle_fs_remove_deletes_file() {
+    let tmp = std::env::temp_dir();
+    let file = tmp.join(format!("specter_rm_{}.txt", rand::random::<u32>()));
+    std::fs::write(&file, b"delete me").expect("write file");
+    assert!(file.exists());
+
+    let mut config = SpecterConfig::default();
+    let mut payload = le_subcmd(u32::from(DemonFilesystemCommand::Remove));
+    payload.extend_from_slice(&le_utf16le_payload(&file.display().to_string()));
+    let package = DemonPackage::new(DemonCommand::CommandFs, 1, payload);
+    let result = dispatch(
+        &package,
+        &mut config,
+        &mut TokenVault::new(),
+        &mut DownloadTracker::new(),
+        &mut HashMap::new(),
+        &mut JobStore::new(),
+        &mut Vec::new(),
+        &crate::coffeeldr::new_bof_output_queue(),
+    );
+    assert!(matches!(result, DispatchResult::Respond(_)), "Remove must respond");
+    assert!(!file.exists(), "file must be deleted");
+}
+
+#[test]
+fn handle_fs_remove_deletes_empty_directory() {
+    let tmp = std::env::temp_dir();
+    let dir = tmp.join(format!("specter_rmdir_{}", rand::random::<u32>()));
+    std::fs::create_dir(&dir).expect("create dir");
+    assert!(dir.exists());
+
+    let mut config = SpecterConfig::default();
+    let mut payload = le_subcmd(u32::from(DemonFilesystemCommand::Remove));
+    payload.extend_from_slice(&le_utf16le_payload(&dir.display().to_string()));
+    let package = DemonPackage::new(DemonCommand::CommandFs, 1, payload);
+    let result = dispatch(
+        &package,
+        &mut config,
+        &mut TokenVault::new(),
+        &mut DownloadTracker::new(),
+        &mut HashMap::new(),
+        &mut JobStore::new(),
+        &mut Vec::new(),
+        &crate::coffeeldr::new_bof_output_queue(),
+    );
+    assert!(matches!(result, DispatchResult::Respond(_)), "Remove dir must respond");
+    assert!(!dir.exists(), "directory must be deleted");
+}
+
+// ── handle_fs mkdir ───────────────────────────────────────────────────────
+
+#[test]
+fn handle_fs_mkdir_creates_directory() {
+    let tmp = std::env::temp_dir();
+    let dir = tmp.join(format!("specter_mkdir_{}", rand::random::<u32>()));
+    assert!(!dir.exists());
+
+    let mut config = SpecterConfig::default();
+    let mut payload = le_subcmd(u32::from(DemonFilesystemCommand::Mkdir));
+    payload.extend_from_slice(&le_utf16le_payload(&dir.display().to_string()));
+    let package = DemonPackage::new(DemonCommand::CommandFs, 1, payload);
+    let result = dispatch(
+        &package,
+        &mut config,
+        &mut TokenVault::new(),
+        &mut DownloadTracker::new(),
+        &mut HashMap::new(),
+        &mut JobStore::new(),
+        &mut Vec::new(),
+        &crate::coffeeldr::new_bof_output_queue(),
+    );
+    assert!(matches!(result, DispatchResult::Respond(_)), "Mkdir must respond");
+    assert!(dir.exists() && dir.is_dir(), "directory must exist after Mkdir");
+    let _ = std::fs::remove_dir(dir);
+}
+
+// ── handle_fs copy ────────────────────────────────────────────────────────
+
+#[test]
+fn handle_fs_copy_copies_file() {
+    let tmp = std::env::temp_dir();
+    let from = tmp.join(format!("specter_cp_src_{}.txt", rand::random::<u32>()));
+    let to = tmp.join(format!("specter_cp_dst_{}.txt", rand::random::<u32>()));
+    std::fs::write(&from, b"copy content").expect("write src");
+
+    let mut config = SpecterConfig::default();
+    let mut payload = le_subcmd(u32::from(DemonFilesystemCommand::Copy));
+    payload.extend_from_slice(&le_utf16le_payload(&from.display().to_string()));
+    payload.extend_from_slice(&le_utf16le_payload(&to.display().to_string()));
+    let package = DemonPackage::new(DemonCommand::CommandFs, 1, payload);
+    let result = dispatch(
+        &package,
+        &mut config,
+        &mut TokenVault::new(),
+        &mut DownloadTracker::new(),
+        &mut HashMap::new(),
+        &mut JobStore::new(),
+        &mut Vec::new(),
+        &crate::coffeeldr::new_bof_output_queue(),
+    );
+    assert!(matches!(result, DispatchResult::Respond(_)), "Copy must respond");
+    assert!(from.exists(), "source must still exist after Copy");
+    assert!(to.exists(), "destination must exist after Copy");
+    assert_eq!(std::fs::read(&to).expect("read dst"), b"copy content");
+    let _ = std::fs::remove_file(from);
+    let _ = std::fs::remove_file(to);
+}
+
+// ── handle_fs move ────────────────────────────────────────────────────────
+
+#[test]
+fn handle_fs_move_renames_file() {
+    let tmp = std::env::temp_dir();
+    let from = tmp.join(format!("specter_mv_src_{}.txt", rand::random::<u32>()));
+    let to = tmp.join(format!("specter_mv_dst_{}.txt", rand::random::<u32>()));
+    std::fs::write(&from, b"move content").expect("write src");
+
+    let mut config = SpecterConfig::default();
+    let mut payload = le_subcmd(u32::from(DemonFilesystemCommand::Move));
+    payload.extend_from_slice(&le_utf16le_payload(&from.display().to_string()));
+    payload.extend_from_slice(&le_utf16le_payload(&to.display().to_string()));
+    let package = DemonPackage::new(DemonCommand::CommandFs, 1, payload);
+    let result = dispatch(
+        &package,
+        &mut config,
+        &mut TokenVault::new(),
+        &mut DownloadTracker::new(),
+        &mut HashMap::new(),
+        &mut JobStore::new(),
+        &mut Vec::new(),
+        &crate::coffeeldr::new_bof_output_queue(),
+    );
+    assert!(matches!(result, DispatchResult::Respond(_)), "Move must respond");
+    assert!(!from.exists(), "source must not exist after Move");
+    assert!(to.exists(), "destination must exist after Move");
+    assert_eq!(std::fs::read(&to).expect("read dst"), b"move content");
+    let _ = std::fs::remove_file(to);
+}

@@ -7162,3 +7162,30 @@ Biggest blindspot: **Specter silent filesystem gaps** — Phantom handles all 10
 | Cursor | 0 | 0 | No activity. |
 
 Build: **cargo check — passed**. clippy/nextest timed out (likely resource contention with concurrent dev agent); prior run was clean. All 13 refactored files compile correctly. No production code changed this period.
+
+### Architecture Review — 2026-04-18 (continuation) — 06494d91..cb4fcb3d
+
+| Agent | Issues filed | Category | Notes |
+|-------|-------------|----------|-------|
+| Arch review | 8 | correctness (1), architecture drift (7) | 7 oversized files without split issues found via deep file audit; 1 flaky e2e test from test run |
+
+**Build:** `cargo check --workspace` — passed. `cargo clippy -- -D warnings` — clean (0 warnings). `cargo nextest` — 2878/2879 passed; 1 failure: `wrong_password_receives_error_and_connection_closes` (Argon2 timing under load).
+
+**Issues filed this run:**
+
+| ID | Title | Priority | Kind |
+|----|-------|----------|------|
+| red-cell-c2-cujt1 | refactor(common): extract tests from 1284-line common/src/demon.rs | P3 | task |
+| red-cell-c2-9s24z | refactor(common): extract tests from 1264-line common/src/tls.rs | P3 | task |
+| red-cell-c2-x9ko2 | refactor(teamserver): extract tests from 1227-line teamserver/src/rbac.rs | P3 | task |
+| red-cell-c2-779gp | refactor(teamserver): extract tests from dispatch/socket.rs | P3 | task |
+| red-cell-c2-e3r1k | refactor(teamserver): split 2010-line dispatch/tests/token.rs | P3 | task |
+| red-cell-c2-t3xsd | refactor(teamserver): split 1795-line audit/tests/query.rs | P3 | task |
+| red-cell-c2-bisoy | refactor(teamserver): split 1601-line listeners/tests/dns.rs | P3 | task |
+| red-cell-c2-jlngz | fix(teamserver): e2e test wrong_password_receives_error_and_connection_closes fails under load | P2 | bug |
+
+**Pre-existing open issue confirmed still unresolved:** red-cell-c2-4hlvn — hand-rolled `constant_time_eq` in `common/src/crypto/ws_hmac.rs` may be optimized away by LLVM in release builds (no `subtle` crate usage).
+
+**Security posture:** Solid. No new critical vulnerabilities. CTR-offset deferred advance correct. All HMAC, Argon2, AES-GCM paths well-formed. Key material zeroized. Rate limiting on HTTP, DNS, SMB listeners all verified.
+
+**Biggest blindspot:** The hand-rolled `constant_time_eq` in ws_hmac.rs (red-cell-c2-4hlvn) remains unfixed since first filed. This is the only surviving security-relevant finding. All other previously identified security holes appear closed.

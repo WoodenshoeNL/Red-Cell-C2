@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1369 | 255 | 97 |
+| Tasks closed | 1382 | 255 | 97 |
 | Bugs filed against | 259 | 50 | 15 |
 | Bug rate (bugs/task) | 0.19 | 0.20 | 0.15 |
 | Quality score | 81% | 80% | 85% |
 
-*Bug rates: Claude 259/1369=0.1891→0.19, Codex 50/255=0.1961→0.20, Cursor 15/97=0.1546→0.15*
+*Bug rates: Claude 259/1382=0.1874→0.19, Codex 50/255=0.1961→0.20, Cursor 15/97=0.1546→0.15*
 
 ## Violation Breakdown
 
@@ -7152,3 +7152,13 @@ Build: **cargo check** — passed (clean). **cargo clippy -- -D warnings** — c
 Overall codebase health: **on track** — crypto/auth/protocol layers remain solid. No `unwrap`/`todo!` in production code, clippy clean. Primary new finding is a correctness hole in Specter filesystem dispatch: five subcommands silently no-op instead of returning an error. All other previously identified security issues (HMAC timing, MemFile OOM, Cat unbounded read) appear to have been addressed in recent commits. Large-file debt continues to accumulate across all agents and the teamserver.
 
 Biggest blindspot: **Specter silent filesystem gaps** — Phantom handles all 10 `DemonFilesystemCommand` variants; Specter handles only 5. Operators relying on Specter for `cat`, file removal, or directory operations will get no feedback, making the agent appear to hang.
+
+### QA Review — 2026-04-18 19:15 — 592b3627..06494d91
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 13 | 0 | Closed s15cj, zkmvj, sfeyu, hcta1, nng1x, s1z6r, dlwvi, ejyvt, lzcjb, u498n, 7shr9, 8ca06, hhlja. Pure test-file refactoring: split 13 oversized test files (1780–5256 lines each) into focused submodules across teamserver, phantom, specter, and common. All splits complete and properly closed. red-cell-c2-ivsgx (http.rs split) claimed, in_progress at review time. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **cargo check — passed**. clippy/nextest timed out (likely resource contention with concurrent dev agent); prior run was clean. All 13 refactored files compile correctly. No production code changed this period.

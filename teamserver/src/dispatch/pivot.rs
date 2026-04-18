@@ -4,7 +4,7 @@ use time::format_description::well_known::Rfc3339;
 use tracing::warn;
 
 use crate::agent_events::{agent_mark_event, agent_new_event};
-use crate::{AgentRegistry, DemonPacketParser, EventBus};
+use crate::{AgentRegistry, DemonInitSecretConfig, DemonPacketParser, EventBus};
 
 use super::process::win32_error_code_name;
 use super::{
@@ -30,6 +30,7 @@ pub(super) async fn handle_pivot_callback(
                 request_id,
                 &mut parser,
                 context.allow_legacy_ctr,
+                context.init_secret_config,
             )
             .await
         }
@@ -98,6 +99,7 @@ async fn handle_pivot_connect_callback(
     request_id: u32,
     parser: &mut CallbackParser<'_>,
     allow_legacy_ctr: bool,
+    init_secret_config: DemonInitSecretConfig,
 ) -> Result<Option<Vec<u8>>, CommandDispatchError> {
     let success = parser.read_u32("pivot connect success")?;
     if success == 0 {
@@ -161,10 +163,11 @@ async fn handle_pivot_connect_callback(
     } else {
         let external_ip =
             registry.get(parent_agent_id).await.map(|agent| agent.external_ip).unwrap_or_default();
-        let parsed = DemonPacketParser::new(registry.clone())
-            .with_allow_legacy_ctr(allow_legacy_ctr)
-            .parse_for_listener(&inner, external_ip, &listener_name)
-            .await;
+        let parsed =
+            DemonPacketParser::with_init_secret_config(registry.clone(), init_secret_config)
+                .with_allow_legacy_ctr(allow_legacy_ctr)
+                .parse_for_listener(&inner, external_ip, &listener_name)
+                .await;
         let agent = match parsed {
             Ok(crate::ParsedDemonPacket::Init(init)) => init.agent,
             Ok(_) => {
@@ -348,6 +351,7 @@ pub(super) async fn dispatch_builtin_packages(
             pivot_dispatch_depth: context.pivot_dispatch_depth + 1,
             max_pivot_chain_depth: context.max_pivot_chain_depth,
             allow_legacy_ctr: context.allow_legacy_ctr,
+            init_secret_config: context.init_secret_config.clone(),
         },
         false,
     );
@@ -791,6 +795,7 @@ mod tests {
             pivot_dispatch_depth: 0,
             max_pivot_chain_depth: crate::dispatch::DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
             allow_legacy_ctr: true,
+            init_secret_config: crate::DemonInitSecretConfig::None,
         };
 
         let result = handle_pivot_command_callback(context, AGENT_ID, &mut parser).await;
@@ -897,6 +902,7 @@ mod tests {
             pivot_dispatch_depth: 0,
             max_pivot_chain_depth: crate::dispatch::DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
             allow_legacy_ctr: true,
+            init_secret_config: crate::DemonInitSecretConfig::None,
         };
 
         let result = handle_pivot_command_callback(context, AGENT_ID, &mut parser).await;
@@ -936,6 +942,7 @@ mod tests {
             pivot_dispatch_depth: 0,
             max_pivot_chain_depth: crate::dispatch::DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
             allow_legacy_ctr: true,
+            init_secret_config: crate::DemonInitSecretConfig::None,
         };
 
         let result = handle_pivot_command_callback(context, AGENT_ID, &mut parser).await;
@@ -974,6 +981,7 @@ mod tests {
             pivot_dispatch_depth: 0,
             max_pivot_chain_depth: crate::dispatch::DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
             allow_legacy_ctr: true,
+            init_secret_config: crate::DemonInitSecretConfig::None,
         };
 
         let packages = vec![DemonCallbackPackage {
@@ -1035,6 +1043,7 @@ mod tests {
             pivot_dispatch_depth: DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
             max_pivot_chain_depth: DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
             allow_legacy_ctr: true,
+            init_secret_config: crate::DemonInitSecretConfig::None,
         };
 
         let packages = vec![DemonCallbackPackage {
@@ -1100,6 +1109,7 @@ mod tests {
             pivot_dispatch_depth: DEFAULT_MAX_PIVOT_CHAIN_DEPTH - 1,
             max_pivot_chain_depth: DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
             allow_legacy_ctr: true,
+            init_secret_config: crate::DemonInitSecretConfig::None,
         };
 
         let packages = vec![DemonCallbackPackage {
@@ -1137,6 +1147,7 @@ mod tests {
             pivot_dispatch_depth: 3,
             max_pivot_chain_depth: 3,
             allow_legacy_ctr: true,
+            init_secret_config: crate::DemonInitSecretConfig::None,
         };
 
         let packages = vec![DemonCallbackPackage {
@@ -1405,6 +1416,7 @@ mod tests {
             REQUEST_ID,
             &mut parser,
             true,
+            crate::DemonInitSecretConfig::None,
         )
         .await;
         assert!(result.is_ok(), "reconnect must succeed: {result:?}");
@@ -1465,6 +1477,7 @@ mod tests {
             REQUEST_ID,
             &mut parser,
             true,
+            crate::DemonInitSecretConfig::None,
         )
         .await;
         assert!(result.is_ok(), "reconnect of active agent must succeed: {result:?}");
@@ -1500,6 +1513,7 @@ mod tests {
             REQUEST_ID,
             &mut parser,
             true,
+            crate::DemonInitSecretConfig::None,
         )
         .await;
         assert!(result.is_ok(), "failure path must return Ok(None): {result:?}");
@@ -1617,6 +1631,7 @@ mod tests {
             REQUEST_ID,
             &mut parser,
             true,
+            crate::DemonInitSecretConfig::None,
         )
         .await;
         assert!(result.is_ok(), "new-agent pivot connect must succeed: {result:?}");
@@ -1678,6 +1693,7 @@ mod tests {
             REQUEST_ID,
             &mut parser,
             true,
+            crate::DemonInitSecretConfig::None,
         )
         .await;
         assert!(result.is_ok(), "new-agent connect must succeed: {result:?}");
@@ -1712,6 +1728,7 @@ mod tests {
             REQUEST_ID,
             &mut parser,
             true,
+            crate::DemonInitSecretConfig::None,
         )
         .await;
         assert!(result.is_err(), "invalid init metadata must return an error");
@@ -1726,6 +1743,76 @@ mod tests {
         assert!(
             registry.get(child_id).await.is_none(),
             "child must not be registered when init parsing fails"
+        );
+
+        Ok(())
+    }
+
+    /// Regression test for the security fix: when a listener is configured with
+    /// `InitSecret`, pivot-tunnelled DEMON_INIT packets must have their session
+    /// keys derived via HKDF, not stored as raw agent key material.
+    ///
+    /// Before the fix, `handle_pivot_connect_callback` used `DemonPacketParser::new`
+    /// (which ignores `init_secret_config`), storing raw keys.  After the fix it
+    /// uses `DemonPacketParser::with_init_secret_config`, so the HKDF derivation is
+    /// applied identically to direct HTTP/DNS/SMB connections.
+    #[tokio::test]
+    async fn pivot_connect_new_agent_applies_hkdf_when_init_secret_configured()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_database, registry, events, _sockets, _downloads) = setup_dispatch_context().await;
+        let _rx = events.subscribe();
+
+        let parent_id: u32 = 0xCC00_0001;
+        let child_id: u32 = 0xCC00_0002;
+        let child_key = test_key(0xC2);
+        let child_iv = test_iv(0xC3);
+
+        registry.insert(sample_agent_info(parent_id, test_key(0xC0), test_iv(0xC1))).await?;
+
+        let inner_envelope = build_full_init_packet(child_id, child_key, child_iv);
+        let payload = connect_payload(1, &inner_envelope);
+        let mut parser = CallbackParser::new(&payload, u32::from(DemonCommand::CommandPivot));
+
+        let server_secret = b"test-server-secret".to_vec();
+        let result = handle_pivot_connect_callback(
+            &registry,
+            &events,
+            parent_id,
+            REQUEST_ID,
+            &mut parser,
+            true,
+            crate::DemonInitSecretConfig::Unversioned(Zeroizing::new(server_secret.clone())),
+        )
+        .await;
+        assert!(result.is_ok(), "pivot connect with init_secret must succeed: {result:?}");
+
+        let child = registry
+            .get(child_id)
+            .await
+            .expect("child agent must be registered after pivot connect");
+
+        // The stored session key must be the HKDF-derived key, not the raw
+        // key/iv from the packet.  Verify by calling derive_session_keys ourselves.
+        let derived =
+            red_cell_common::crypto::derive_session_keys(&child_key, &child_iv, &server_secret)
+                .expect("derive_session_keys must succeed");
+
+        assert_eq!(
+            child.encryption.aes_key.as_slice(),
+            derived.key.as_ref(),
+            "stored AES key must be HKDF-derived, not the raw packet key"
+        );
+        assert_eq!(
+            child.encryption.aes_iv.as_slice(),
+            derived.iv.as_ref(),
+            "stored AES IV must be HKDF-derived, not the raw packet IV"
+        );
+
+        // Confirm raw key was NOT stored.
+        assert_ne!(
+            child.encryption.aes_key.as_slice(),
+            &child_key,
+            "raw packet key must not be stored when init_secret is configured"
         );
 
         Ok(())
@@ -1766,6 +1853,7 @@ mod tests {
             REQUEST_ID,
             &mut parser,
             true,
+            crate::DemonInitSecretConfig::None,
         )
         .await;
         assert!(result.is_err(), "non-DemonInit inner command must be rejected");
@@ -1810,6 +1898,7 @@ mod tests {
             pivot_dispatch_depth: 0,
             max_pivot_chain_depth: crate::dispatch::DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
             allow_legacy_ctr: true,
+            init_secret_config: crate::DemonInitSecretConfig::None,
         };
 
         let result = handle_pivot_callback(context, AGENT_ID, REQUEST_ID, &payload).await;
@@ -1833,6 +1922,7 @@ mod tests {
             pivot_dispatch_depth: 0,
             max_pivot_chain_depth: crate::dispatch::DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
             allow_legacy_ctr: true,
+            init_secret_config: crate::DemonInitSecretConfig::None,
         };
 
         let result = handle_pivot_callback(context, AGENT_ID, REQUEST_ID, &[]).await;
@@ -1859,6 +1949,7 @@ mod tests {
             pivot_dispatch_depth: 0,
             max_pivot_chain_depth: crate::dispatch::DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
             allow_legacy_ctr: true,
+            init_secret_config: crate::DemonInitSecretConfig::None,
         };
 
         let _result = handle_pivot_callback(context, AGENT_ID, REQUEST_ID, &payload).await;

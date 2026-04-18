@@ -6,7 +6,7 @@ use super::super::{
     CommandDispatchError, CommandDispatcher, DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
     DOWNLOAD_TRACKER_AGGREGATE_CAP_MULTIPLIER, DownloadState, DownloadTracker,
 };
-use crate::{AgentRegistry, Database, EventBus, SocketRelayManager};
+use crate::{AgentRegistry, Database, DemonInitSecretConfig, EventBus, SocketRelayManager};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use red_cell_common::demon::{DemonCallback, DemonCommand, DemonFilesystemCommand};
@@ -1556,6 +1556,7 @@ async fn builtin_filesystem_download_handler_surfaces_concurrent_limit_as_error_
         tracker,
         DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
         false,
+        DemonInitSecretConfig::None,
     );
 
     let file_id_1 = 0xB1_u32;
@@ -1633,6 +1634,7 @@ async fn builtin_beacon_file_callbacks_surface_concurrent_limit_as_error_event()
         tracker,
         DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
         false,
+        DemonInitSecretConfig::None,
     );
 
     let file_id_1 = 0xC1_u32;

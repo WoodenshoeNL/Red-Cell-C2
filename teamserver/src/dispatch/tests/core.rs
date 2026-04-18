@@ -2,7 +2,7 @@
 
 use super::common::*;
 use crate::dispatch::{CommandDispatchError, CommandDispatcher, DownloadTracker};
-use crate::{AgentRegistry, Database, EventBus, Job, SocketRelayManager};
+use crate::{AgentRegistry, Database, DemonInitSecretConfig, EventBus, Job, SocketRelayManager};
 use red_cell_common::crypto::decrypt_agent_data;
 use red_cell_common::demon::{DemonCommand, DemonMessage};
 
@@ -223,6 +223,7 @@ async fn with_builtin_handlers_and_downloads_registers_all_builtin_commands()
         tracker,
         crate::dispatch::DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
         true,
+        DemonInitSecretConfig::None,
     );
 
     let expected_commands = [
@@ -294,6 +295,7 @@ async fn with_builtin_handlers_and_downloads_dispatches_known_builtin_command()
         tracker,
         crate::dispatch::DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
         true,
+        DemonInitSecretConfig::None,
     );
 
     assert!(dispatcher.handles_command(u32::from(DemonCommand::CommandGetJob)));

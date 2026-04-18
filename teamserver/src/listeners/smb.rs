@@ -73,7 +73,7 @@ impl SmbListenerState {
             database: database.clone(),
             parser: DemonPacketParser::with_init_secret_config(
                 registry.clone(),
-                init_secret_config,
+                init_secret_config.clone(),
             )
             .with_allow_legacy_ctr(allow_legacy_ctr),
             events: events.clone(),
@@ -90,6 +90,7 @@ impl SmbListenerState {
                 downloads,
                 max_pivot_chain_depth,
                 allow_legacy_ctr,
+                init_secret_config,
             ),
         }
     }

@@ -10,8 +10,8 @@ use thiserror::Error;
 
 use crate::DEFAULT_MAX_DOWNLOAD_BYTES;
 use crate::{
-    AgentRegistry, Database, DemonCallbackPackage, EventBus, PluginRuntime, SocketRelayManager,
-    TeamserverError,
+    AgentRegistry, Database, DemonCallbackPackage, DemonInitSecretConfig, EventBus, PluginRuntime,
+    SocketRelayManager, TeamserverError,
 };
 
 mod assembly;
@@ -65,7 +65,7 @@ const DOTNET_INFO_FAILED: u32 = 0x5;
 /// Default maximum pivot-chain dispatch depth used when no profile override is present.
 pub(crate) const DEFAULT_MAX_PIVOT_CHAIN_DEPTH: usize = 10;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct BuiltinDispatchContext<'a> {
     registry: &'a AgentRegistry,
     events: &'a EventBus,
@@ -86,6 +86,10 @@ struct BuiltinDispatchContext<'a> {
     /// Whether to accept pivot-child DEMON_INIT packets that use legacy AES-CTR
     /// (no `INIT_EXT_MONOTONIC_CTR` flag).  Mirrors `DemonConfig::allow_legacy_ctr`.
     allow_legacy_ctr: bool,
+    /// HKDF init-secret configuration to enforce on pivot-child DEMON_INIT packets.
+    /// Mirrors the listener's `DemonInitSecretConfig` so SMB pivot registration is
+    /// subject to the same server-secret check as direct HTTP/DNS/SMB connections.
+    init_secret_config: DemonInitSecretConfig,
 }
 
 #[derive(Clone)]
@@ -103,6 +107,8 @@ struct BuiltinHandlerDependencies {
     /// Mirrors `DemonConfig::allow_legacy_ctr` — controls whether child-agent
     /// pivot registrations may use legacy (non-monotonic) AES-CTR.
     allow_legacy_ctr: bool,
+    /// HKDF init-secret configuration for pivot-child DEMON_INIT packets.
+    init_secret_config: DemonInitSecretConfig,
 }
 
 /// Error returned while routing or executing a Demon command handler.
@@ -239,6 +245,7 @@ impl CommandDispatcher {
             pivot_dispatch_depth,
             max_pivot_chain_depth,
             allow_legacy_ctr,
+            init_secret_config,
         } = dependencies;
 
         if include_get_job {
@@ -761,6 +768,7 @@ impl CommandDispatcher {
         let pivot_sockets = sockets.clone();
         let pivot_downloads = downloads.clone();
         let pivot_plugins = plugins.clone();
+        let pivot_init_secret_config = init_secret_config;
         self.register_handler(
             u32::from(DemonCommand::CommandPivot),
             move |agent_id, request_id, payload| {
@@ -770,6 +778,7 @@ impl CommandDispatcher {
                 let sockets = pivot_sockets.clone();
                 let downloads = pivot_downloads.clone();
                 let plugins = pivot_plugins.clone();
+                let init_secret_config = pivot_init_secret_config.clone();
                 Box::pin(async move {
                     let context = BuiltinDispatchContext {
                         registry: &registry,
@@ -781,6 +790,7 @@ impl CommandDispatcher {
                         pivot_dispatch_depth,
                         max_pivot_chain_depth,
                         allow_legacy_ctr,
+                        init_secret_config,
                     };
                     pivot::handle_pivot_callback(context, agent_id, request_id, &payload).await
                 })
@@ -826,9 +836,11 @@ impl CommandDispatcher {
             DownloadTracker::from_max_download_bytes(max_download_bytes),
             DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
             false,
+            DemonInitSecretConfig::None,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn with_builtin_handlers_and_downloads(
         registry: AgentRegistry,
         events: EventBus,
@@ -838,6 +850,7 @@ impl CommandDispatcher {
         downloads: DownloadTracker,
         max_pivot_chain_depth: usize,
         allow_legacy_ctr: bool,
+        init_secret_config: DemonInitSecretConfig,
     ) -> Self {
         let mut dispatcher = Self::with_downloads(downloads);
         dispatcher.register_builtin_handlers(
@@ -851,6 +864,7 @@ impl CommandDispatcher {
                 pivot_dispatch_depth: 0,
                 max_pivot_chain_depth,
                 allow_legacy_ctr,
+                init_secret_config,
             },
             true,
         );

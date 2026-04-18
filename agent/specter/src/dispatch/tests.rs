@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::download::{DOWNLOAD_MODE_OPEN, DOWNLOAD_REASON_REMOVED, DownloadState};
 use red_cell_common::demon::{

@@ -1293,7 +1293,7 @@ async fn operator_cannot_send_admin_message() -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wrong_password_receives_error_and_connection_closes()
 -> Result<(), Box<dyn std::error::Error>> {
     use red_cell_common::crypto::hash_password_sha3;

@@ -327,7 +327,7 @@ async fn websocket_login_succeeds_with_valid_credentials_via_build_router() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn websocket_login_rejected_with_wrong_password_via_build_router() {
     let addr = spawn_full_router_server(test_profile()).await;
     let (raw_socket_, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/havoc"))
@@ -361,7 +361,7 @@ async fn websocket_login_rejected_with_wrong_password_via_build_router() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn websocket_login_rejected_for_nonexistent_user_via_build_router() {
     let addr = spawn_full_router_server(test_profile()).await;
     let (raw_socket_, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/havoc"))

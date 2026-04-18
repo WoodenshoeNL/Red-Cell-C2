@@ -10,11 +10,11 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 1341 | 255 | 97 |
-| Bugs filed against | 248 | 50 | 15 |
-| Bug rate (bugs/task) | 0.18 | 0.20 | 0.15 |
+| Bugs filed against | 253 | 50 | 15 |
+| Bug rate (bugs/task) | 0.19 | 0.20 | 0.15 |
 | Quality score | 82% | 80% | 85% |
 
-*Bug rates: Claude 248/1341=0.1849→0.18, Codex 50/255=0.1961→0.20, Cursor 15/97=0.1546→0.15*
+*Bug rates: Claude 253/1341=0.1887→0.19, Codex 50/255=0.1961→0.20, Cursor 15/97=0.1546→0.15*
 
 ## Violation Breakdown
 
@@ -24,11 +24,11 @@ Each loop run updates the running totals and appends a review entry.
 | Missing tests / stale tests | 82 | 22 | 7 |
 | Clippy warnings | 15 | 0 | 2 |
 | Protocol errors | 30 | 32 | 4 |
-| Security issues | 67 | 40 | 0 |
-| Architecture drift | 51 | 25 | 5 |
-| Memory / resource leaks | 14 | 11 | 1 |
+| Security issues | 69 | 40 | 0 |
+| Architecture drift | 53 | 25 | 5 |
+| Memory / resource leaks | 16 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 10 | 0 |
-| Test infrastructure / flakiness | 62 | 6 | 1 |
+| Test infrastructure / flakiness | 64 | 6 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 5 | 5 | 0 |
 | Correctness / pagination | 67 | 9 | 1 |
@@ -41,6 +41,20 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-04-18 13:00
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 5 | security/resource (2), test flakiness (1), architecture drift (2) | Specter `CommandMemFile` `total_size` u64→usize cast with no bound check — `Vec::with_capacity(total_size)` OOMs agent (red-cell-c2-ytxk7, P2); Phantom `DemonFilesystemCommand::Cat` calls `fs::read` without size cap — unbounded allocation on operator `cat` of large file (red-cell-c2-i5y4q, P2); `websocket_login_rejected_for_nonexistent_user` and `websocket_login_rejected_with_wrong_password` flaky (same root as gx00f — filed red-cell-c2-ttmi8, P2); `plugins/tests.rs` 3233 lines (red-cell-c2-u53vg, P3); `client/src/main_tests/mod.rs` 3495 lines (red-cell-c2-nmgs2, P3) |
+| Codex | 0 | — | No in-scope code written in this range. |
+| Cursor | 0 | — | No in-scope code written in this range. |
+
+Build: **cargo check** — passed (clean). **cargo clippy -- -D warnings** — clean (0 warnings). **cargo nextest run --workspace** — 3090/5459 tests run; 2 failures: `websocket_login_rejected_for_nonexistent_user_via_build_router` and `websocket_login_rejected_with_wrong_password_via_build_router` — both timeout under parallel load (root cause: red-cell-c2-gx00f, Argon2 sync block); all other passing.
+
+Overall codebase health: **on track** — crypto/auth/protocol layers remain solid. No `unwrap` in production, no clippy violations. Two new agent-side resource safety issues found in specter (MemFile OOM) and phantom (Cat unbounded read) — both are P2 bugs that need size caps before the affected commands can be safely exposed. Flaky test roster now has 3 confirmed blockers all rooted in the gx00f Argon2 sync-block: fixing gx00f resolves all three (rdmn2, ttmi8, x4vtd). Inline test bloat continues: two new oversized standalone test files found (plugins/tests.rs, client/main_tests/mod.rs).
+
+Biggest blindspot: **agent-side resource exhaustion from server-controlled size fields** — both ytxk7 and i5y4q are server-driven: the teamserver sends a size/path and the agent allocates/reads blindly. A sweep of all agent command handlers for unbounded server-controlled allocations is warranted.
 
 ### Arch Review — 2026-04-18 11:30
 

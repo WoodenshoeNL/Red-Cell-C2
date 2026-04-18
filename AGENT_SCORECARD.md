@@ -10,11 +10,11 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 1341 | 255 | 97 |
-| Bugs filed against | 248 | 50 | 15 |
-| Bug rate (bugs/task) | 0.18 | 0.20 | 0.15 |
+| Bugs filed against | 253 | 50 | 15 |
+| Bug rate (bugs/task) | 0.19 | 0.20 | 0.15 |
 | Quality score | 82% | 80% | 85% |
 
-*Bug rates: Claude 248/1341=0.1849→0.18, Codex 50/255=0.1961→0.20, Cursor 15/97=0.1546→0.15*
+*Bug rates: Claude 253/1341=0.1887→0.19, Codex 50/255=0.1961→0.20, Cursor 15/97=0.1546→0.15*
 
 ## Violation Breakdown
 
@@ -24,13 +24,13 @@ Each loop run updates the running totals and appends a review entry.
 | Missing tests / stale tests | 82 | 22 | 7 |
 | Clippy warnings | 15 | 0 | 2 |
 | Protocol errors | 30 | 32 | 4 |
-| Security issues | 67 | 40 | 0 |
-| Architecture drift | 51 | 25 | 5 |
-| Memory / resource leaks | 14 | 11 | 1 |
+| Security issues | 69 | 40 | 0 |
+| Architecture drift | 63 | 25 | 5 |
+| Memory / resource leaks | 16 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 10 | 0 |
-| Test infrastructure / flakiness | 61 | 6 | 1 |
+| Test infrastructure / flakiness | 64 | 6 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
-| Availability / timeout regressions | 4 | 5 | 0 |
+| Availability / timeout regressions | 5 | 5 | 0 |
 | Correctness / pagination | 67 | 9 | 1 |
 | Workflow / close-hygiene | 39 | 1 | 2 |
 | Code reuse / duplication | 14 | 0 | 0 |
@@ -41,6 +41,48 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-04-18 15:00
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 10 | architecture drift (10) | 10 oversized test files (>1500 lines) lacking tracking issues — all created by prior inline-test-block extraction but themselves now over threshold: `agent/specter/src/dispatch/tests.rs` 5203 lines (red-cell-c2-e8sp4), `teamserver/src/dispatch/tests/process.rs` 2894 lines (red-cell-c2-7w1jx), `common/src/config/tests.rs` 2807 lines (red-cell-c2-jzbar), `agent/phantom/src/command/tests.rs` 2748 lines (red-cell-c2-npgym), `teamserver/tests/output_dispatch_basic.rs` 2146 lines (red-cell-c2-1k4b8), `teamserver/src/audit/tests.rs` 2068 lines (red-cell-c2-smnne), `teamserver/src/dispatch/tests/output.rs` 1989 lines (red-cell-c2-z7ib1), `teamserver/src/dispatch/tests/filesystem.rs` 1934 lines (red-cell-c2-r92ml), `teamserver/src/service/tests.rs` 1911 lines (red-cell-c2-jjc3y), `teamserver/src/webhook/tests.rs` 1535 lines (red-cell-c2-255v1). All P3, refactor tasks. |
+| Codex | 0 | — | No in-scope code written in this range. |
+| Cursor | 0 | — | No in-scope code written in this range. |
+
+Build: **cargo check** — passed (clean). **cargo clippy -- -D warnings** — clean (0 warnings). **cargo nextest run --workspace** — not re-run this session (prior session confirmed 3090/5459 passing with 2 known flaky failures rooted in red-cell-c2-gx00f; no production code changed).
+
+Overall codebase health: **on track** — crypto, auth, and protocol layers remain sound. No `unwrap`/`expect` in production, no clippy violations, no new security or correctness issues found. The inline test bloat problem has a second wave: the first wave of extractions (pivot.rs, service/mod.rs, sockets/mod.rs, etc.) succeeded, but the resulting standalone test files are themselves over threshold and need a second round of splitting.
+
+Biggest blindspot: **extracted test files are growing past threshold without new tracking issues** — the split workflow creates files, those files grow beyond 1500 lines, but no follow-up split issue is filed automatically. 10 such files found untracked in this review.
+
+### Arch Review — 2026-04-18 13:00
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 5 | security/resource (2), test flakiness (1), architecture drift (2) | Specter `CommandMemFile` `total_size` u64→usize cast with no bound check — `Vec::with_capacity(total_size)` OOMs agent (red-cell-c2-ytxk7, P2); Phantom `DemonFilesystemCommand::Cat` calls `fs::read` without size cap — unbounded allocation on operator `cat` of large file (red-cell-c2-i5y4q, P2); `websocket_login_rejected_for_nonexistent_user` and `websocket_login_rejected_with_wrong_password` flaky (same root as gx00f — filed red-cell-c2-ttmi8, P2); `plugins/tests.rs` 3233 lines (red-cell-c2-u53vg, P3); `client/src/main_tests/mod.rs` 3495 lines (red-cell-c2-nmgs2, P3) |
+| Codex | 0 | — | No in-scope code written in this range. |
+| Cursor | 0 | — | No in-scope code written in this range. |
+
+Build: **cargo check** — passed (clean). **cargo clippy -- -D warnings** — clean (0 warnings). **cargo nextest run --workspace** — 3090/5459 tests run; 2 failures: `websocket_login_rejected_for_nonexistent_user_via_build_router` and `websocket_login_rejected_with_wrong_password_via_build_router` — both timeout under parallel load (root cause: red-cell-c2-gx00f, Argon2 sync block); all other passing.
+
+Overall codebase health: **on track** — crypto/auth/protocol layers remain solid. No `unwrap` in production, no clippy violations. Two new agent-side resource safety issues found in specter (MemFile OOM) and phantom (Cat unbounded read) — both are P2 bugs that need size caps before the affected commands can be safely exposed. Flaky test roster now has 3 confirmed blockers all rooted in the gx00f Argon2 sync-block: fixing gx00f resolves all three (rdmn2, ttmi8, x4vtd). Inline test bloat continues: two new oversized standalone test files found (plugins/tests.rs, client/main_tests/mod.rs).
+
+Biggest blindspot: **agent-side resource exhaustion from server-controlled size fields** — both ytxk7 and i5y4q are server-driven: the teamserver sends a size/path and the agent allocates/reads blindly. A sweep of all agent command handlers for unbounded server-controlled allocations is warranted.
+
+### Arch Review — 2026-04-18 11:30
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 8 | availability (1), test flakiness (1), architecture drift (6) | `authenticate_login` calls Argon2 synchronously without `spawn_blocking` — blocks tokio thread 1-2s in production (red-cell-c2-gx00f, P2); `wrong_password_receives_error_and_connection_closes` flaky timeout 30s too tight under load (red-cell-c2-rdmn2, P2); 6 oversized files: auth/mod.rs 1587-line test inline (red-cell-c2-p2tej), main.rs 1427-line test inline (red-cell-c2-5nxp2), dispatch/kerberos.rs 1134-line test inline (red-cell-c2-su1wg), dispatch/token.rs 1051-line test inline (red-cell-c2-susdi), specter/socket.rs 400-line test inline (red-cell-c2-fdg8k), listeners/tests/lifecycle.rs 2388 lines (red-cell-c2-y2exa) |
+| Codex | 0 | — | No in-scope code written in this range. |
+| Cursor | 0 | — | No in-scope code written in this range. |
+
+Build: **cargo check** — passed (clean). **cargo clippy -- -D warnings** — clean (0 warnings). **cargo nextest run --workspace** — 2880/5459 tests run before cancellation; 1 failure: `wrong_password_receives_error_and_connection_closes` (timeout under load, filed as red-cell-c2-rdmn2); all others passing.
+
+Overall codebase health: **on track** — crypto layers (AES-CTR session design, HKDF key derivation, AES-GCM at-rest encryption, constant-time token comparison, zeroize for key material), auth (Argon2id, dummy verifier timing equalization, rate limiting, session TTL/idle expiry), and protocol layers are all solid. No `unwrap` in production, no clippy violations, workspace `unwrap_used = "deny"` enforced. Main new findings: Argon2 sync block (availability concern) and ongoing inline test bloat.
+
+Biggest blindspot: **`authenticate_login` blocks the tokio executor for 1-2s per production login attempt** (red-cell-c2-gx00f). A multi-connection login flood can exhaust the tokio thread pool and degrade agent check-in latency across all active listeners. The fix is a single `spawn_blocking` wrapper.
 
 ### Arch Review — 2026-04-18 02:30
 

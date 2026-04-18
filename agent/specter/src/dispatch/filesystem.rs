@@ -2,6 +2,9 @@
 
 use std::time::UNIX_EPOCH;
 
+/// Maximum allowed `total_size` for a `CommandMemFile` pre-allocation (100 MiB).
+const MAX_MEM_FILE_SIZE: u64 = 100 * 1024 * 1024;
+
 use red_cell_common::demon::{DemonCommand, DemonFilesystemCommand, DemonTransferCommand};
 use tracing::{info, warn};
 
@@ -442,13 +445,25 @@ pub(super) fn handle_memfile(
         }
     };
 
-    let total_size = match parse_u64_le(payload, &mut offset) {
-        Ok(v) => v as usize,
+    let total_size_raw = match parse_u64_le(payload, &mut offset) {
+        Ok(v) => v,
         Err(e) => {
             warn!(mem_file_id, "MemFile: failed to parse total_size: {e}");
             return memfile_ack(mem_file_id, request_id, false);
         }
     };
+
+    if total_size_raw > MAX_MEM_FILE_SIZE {
+        warn!(
+            mem_file_id,
+            total_size = total_size_raw,
+            max = MAX_MEM_FILE_SIZE,
+            "MemFile: total_size exceeds maximum — rejecting"
+        );
+        return memfile_ack(mem_file_id, request_id, false);
+    }
+
+    let total_size = total_size_raw as usize;
 
     let chunk = match parse_bytes_le(payload, &mut offset) {
         Ok(b) => b,

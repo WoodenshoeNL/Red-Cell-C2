@@ -4972,6 +4972,59 @@ fn memfile_zero_size_completes_immediately() {
     assert!(mem_files.contains_key(&1));
 }
 
+#[test]
+fn memfile_oversized_total_size_is_rejected() {
+    let mut config = SpecterConfig::default();
+    let mut mem_files: MemFileStore = HashMap::new();
+
+    // total_size just above the 100 MiB cap → must be rejected without allocation.
+    let oversized: u64 = 100 * 1024 * 1024 + 1;
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&42u32.to_le_bytes()); // file_id = 42
+    payload.extend_from_slice(&oversized.to_le_bytes()); // total_size > MAX
+    payload.extend_from_slice(&0u32.to_le_bytes()); // chunk_len = 0 (irrelevant)
+    let package = DemonPackage::new(DemonCommand::CommandMemFile, 1, payload);
+    let result = dispatch(
+        &package,
+        &mut config,
+        &mut TokenVault::new(),
+        &mut DownloadTracker::new(),
+        &mut mem_files,
+        &mut JobStore::new(),
+        &mut Vec::new(),
+        &crate::coffeeldr::new_bof_output_queue(),
+    );
+    // Oversized → failure ack, entry must NOT be inserted.
+    assert!(matches!(result, DispatchResult::Respond(_)));
+    assert!(!mem_files.contains_key(&42), "oversized memfile must not be stored");
+}
+
+#[test]
+fn memfile_at_exact_size_limit_is_accepted() {
+    let mut config = SpecterConfig::default();
+    let mut mem_files: MemFileStore = HashMap::new();
+
+    // total_size exactly at the 100 MiB cap → must be accepted.
+    let max: u64 = 100 * 1024 * 1024;
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&7u32.to_le_bytes()); // file_id = 7
+    payload.extend_from_slice(&max.to_le_bytes()); // total_size == MAX
+    payload.extend_from_slice(&0u32.to_le_bytes()); // chunk_len = 0
+    let package = DemonPackage::new(DemonCommand::CommandMemFile, 1, payload);
+    let result = dispatch(
+        &package,
+        &mut config,
+        &mut TokenVault::new(),
+        &mut DownloadTracker::new(),
+        &mut mem_files,
+        &mut JobStore::new(),
+        &mut Vec::new(),
+        &crate::coffeeldr::new_bof_output_queue(),
+    );
+    assert!(matches!(result, DispatchResult::Respond(_)));
+    assert!(mem_files.contains_key(&7), "memfile at exact limit must be accepted");
+}
+
 // ── handle_inline_execute edge cases ─────────────────────────────────────
 
 #[test]

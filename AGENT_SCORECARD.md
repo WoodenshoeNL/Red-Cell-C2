@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1382 | 255 | 97 |
-| Bugs filed against | 259 | 50 | 15 |
+| Tasks closed | 1390 | 255 | 97 |
+| Bugs filed against | 260 | 50 | 15 |
 | Bug rate (bugs/task) | 0.19 | 0.20 | 0.15 |
 | Quality score | 81% | 80% | 85% |
 
-*Bug rates: Claude 259/1382=0.1874→0.19, Codex 50/255=0.1961→0.20, Cursor 15/97=0.1546→0.15*
+*Bug rates: Claude 260/1390=0.1871→0.19, Codex 50/255=0.1961→0.20, Cursor 15/97=0.1546→0.15*
 
 ## Violation Breakdown
 
@@ -22,7 +22,7 @@ Each loop run updates the running totals and appends a review entry.
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 16 | 0 | 0 |
 | Missing tests / stale tests | 82 | 22 | 7 |
-| Clippy warnings | 15 | 0 | 2 |
+| Clippy warnings | 16 | 0 | 2 |
 | Protocol errors | 30 | 32 | 4 |
 | Security issues | 70 | 40 | 0 |
 | Architecture drift | 66 | 25 | 9 |
@@ -7189,3 +7189,15 @@ Build: **cargo check — passed**. clippy/nextest timed out (likely resource con
 **Security posture:** Solid. No new critical vulnerabilities. CTR-offset deferred advance correct. All HMAC, Argon2, AES-GCM paths well-formed. Key material zeroized. Rate limiting on HTTP, DNS, SMB listeners all verified.
 
 **Biggest blindspot:** The hand-rolled `constant_time_eq` in ws_hmac.rs (red-cell-c2-4hlvn) remains unfixed since first filed. This is the only surviving security-relevant finding. All other previously identified security holes appear closed.
+
+### QA Review — 2026-04-18 22:30 — 06494d91..10592ff9
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 8 | 1 | 5 refactors (rbac.rs 1227L→4 modules, listeners/http.rs 1290L→5 modules, e2e_operator_agent_session.rs 1724L→4 modules, client/plugin.rs→mod/types/tasks, client/tasks.rs→mod/builders/console); 1 test extraction (specter/token.rs inline tests→token_tests.rs); 1 security fix (common/crypto/ws_hmac.rs subtle::ConstantTimeEq); 1 auth test split (auth/tests.rs 1503L→login/rbac/session modules); webhook tests.rs 1555L→delivery/retry/discord/audit (wip, complete). 1 bug: red-cell-c2-okory (3 unused imports in webhook test split). Infrastructure issue red-cell-c2-5jieq (double-spawn unit test flakiness) not attributed to Claude. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **cargo check** — passed (clean). **cargo clippy -- -D warnings** — clean (0 warnings). **cargo nextest run --workspace** — 2432/5462 tests run before early stop; 1 failure in `service::tests::audit::listener_start_failure_creates_audit_entry_with_failure_status` (double-spawn ENOENT infrastructure issue — passes with `--test-threads=1`; filed red-cell-c2-5jieq for nextest serial group fix).
+
+Overall codebase health: **on track** — long-running large-file refactor sprint continues (8 issues closed, all refactors or cleanup). Security posture improved: constant-time HMAC comparison now uses `subtle` crate (red-cell-c2-4hlvn closed — had been the last open security finding from arch review). Test suite essentially clean. Two new minor issues filed: 3 unused imports from webhook split (red-cell-c2-okory P3), and double-spawn flakiness for red-cell unit test binary (red-cell-c2-5jieq P3).

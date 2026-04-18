@@ -5,8 +5,7 @@ use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 
-use super::super::{AuditWebhookNotifier, MAX_CONCURRENT_DELIVERIES, WebhookError};
-use crate::AuditRecord;
+use super::super::{AuditWebhookNotifier, WebhookError};
 
 use super::{
     discord_profile, flaky_webhook_server, notifier_with_timeout, sample_record, webhook_server,

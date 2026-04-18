@@ -7067,3 +7067,36 @@ Build: **passed** — `cargo check` + `cargo clippy -- -D warnings` both clean. 
 | Cursor | 1 | 0 | Closed red-cell-c2-mw1q7 (common config refactor). |
 
 Build: **passed** — `cargo check` + `cargo clippy -- -D warnings` both clean. 1 test failure: `job_suspend_success_broadcasts_good_response` times out with `Elapsed(())` (filed red-cell-c2-nj616). 63/64 tests passed. 1 task in_progress: red-cell-c2-3149a (extract external.rs — work appears complete but interrupted before close). 30+ ready issues in backlog.
+
+### Architecture Review — 2026-04-18 — d5df20f2..410d895e
+
+| Agent | Issues filed | Category | Notes |
+|-------|-------------|----------|-------|
+| Arch review | 18 | mixed | Full workspace arch review: 1 bug (P2), 1 arch-drift bug (P3), 16 oversized-file tasks (P3) |
+
+**Build:** passed — `cargo check --workspace` clean (12m 33s). `cargo nextest run --workspace` passed with 2 pre-existing test failures in `teamserver::webhook::tests` (filed as red-cell-c2-ooa08).
+
+**Security posture:** No new critical vulnerabilities found. CTR offset deferred advancement correct. Constant-time session-token lookup in place. Key material zeroized. Rate limiting on all listener types.
+
+**Issues filed this run:**
+
+| ID | Title | Priority | Kind |
+|----|-------|----------|------|
+| red-cell-c2-ooa08 | fix(teamserver): flaky webhook TOCTOU port-binding race | P2 | bug |
+| red-cell-c2-vh8oe | fix(teamserver): preflight.rs uses anyhow in library code | P3 | bug |
+| red-cell-c2-hhlja | refactor(specter): split 5203-line dispatch/tests.rs | P3 | task |
+| red-cell-c2-s15cj | refactor(teamserver): split 2894-line dispatch/tests/process.rs | P3 | task |
+| red-cell-c2-zkmvj | refactor(common): split 2807-line config/tests.rs | P3 | task |
+| red-cell-c2-sfeyu | refactor(phantom): split 2748-line command/tests.rs | P3 | task |
+| red-cell-c2-hcta1 | refactor(teamserver): split 2167-line dispatch/tests/pivot.rs | P3 | task |
+| red-cell-c2-nng1x | refactor(teamserver): split 2068-line audit/tests.rs | P3 | task |
+| red-cell-c2-s1z6r | refactor(teamserver): split 2146-line tests/output_dispatch_basic.rs | P3 | task |
+| red-cell-c2-dlwvi | refactor(teamserver): split 1989-line dispatch/tests/output.rs | P3 | task |
+| red-cell-c2-ejyvt | refactor(teamserver): split 1934-line dispatch/tests/filesystem.rs | P3 | task |
+| red-cell-c2-lzcjb | refactor(teamserver): split 1911-line service/tests.rs | P3 | task |
+| red-cell-c2-8ca06 | refactor(teamserver): split 1849-line tests/assembly_dispatch.rs | P3 | task |
+| red-cell-c2-7shr9 | refactor(teamserver): split 1847-line tests/mock_demon_agent_checkin.rs | P3 | task |
+| red-cell-c2-u498n | refactor(teamserver): split 1780-line tests/dns_listener_pipeline.rs | P3 | task |
+| red-cell-c2-061sp | refactor(teamserver): split 1724-line tests/e2e_operator_agent_session.rs | P3 | task |
+| red-cell-c2-ivsgx | refactor(teamserver): split 1290-line src/listeners/http.rs | P3 | task |
+| red-cell-c2-mq765 | refactor(teamserver): split 1227-line src/rbac.rs | P3 | task |

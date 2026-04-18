@@ -91,18 +91,18 @@ pub(super) fn read_exported_file(message: &str) -> String {
     contents
 }
 
-mod cli;
-mod app_state;
-mod agent_panel;
-mod session_graph;
-mod loot;
-mod file_browser;
-mod auth;
-mod process;
-mod filesystem_tasks;
 mod agent_metadata;
-mod ui_helpers;
-mod listener_dialog;
-mod payload_dialog;
+mod agent_panel;
+mod app_state;
+mod auth;
+mod cli;
 mod console;
+mod file_browser;
+mod filesystem_tasks;
+mod listener_dialog;
+mod loot;
 mod loot_panel;
+mod payload_dialog;
+mod process;
+mod session_graph;
+mod ui_helpers;

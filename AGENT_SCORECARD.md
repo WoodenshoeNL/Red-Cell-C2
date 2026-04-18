@@ -25,13 +25,13 @@ Each loop run updates the running totals and appends a review entry.
 | Clippy warnings | 15 | 0 | 2 |
 | Protocol errors | 30 | 32 | 4 |
 | Security issues | 70 | 40 | 0 |
-| Architecture drift | 58 | 25 | 5 |
+| Architecture drift | 66 | 25 | 9 |
 | Memory / resource leaks | 16 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 10 | 0 |
 | Test infrastructure / flakiness | 64 | 6 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 5 | 5 | 0 |
-| Correctness / pagination | 67 | 9 | 1 |
+| Correctness / pagination | 68 | 9 | 1 |
 | Workflow / close-hygiene | 39 | 1 | 2 |
 | Code reuse / duplication | 14 | 0 | 0 |
 | Incomplete commits (stranded work) | 7 | 3 | 0 |
@@ -7126,3 +7126,17 @@ Build: **passed** — `cargo check` + `cargo clippy -- -D warnings` both clean. 
 | red-cell-c2-061sp | refactor(teamserver): split 1724-line tests/e2e_operator_agent_session.rs | P3 | task |
 | red-cell-c2-ivsgx | refactor(teamserver): split 1290-line src/listeners/http.rs | P3 | task |
 | red-cell-c2-mq765 | refactor(teamserver): split 1227-line src/rbac.rs | P3 | task |
+
+### Arch Review — 2026-04-18 18:30
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 9 | correctness (1), architecture drift (8) | Specter `handle_fs` silently drops Cat/Remove/Mkdir/Copy/Move with `DispatchResult::Ignore` — operator sends command, agent logs INFO and returns nothing (red-cell-c2-ad87d, P2); 8 oversized files without split issues: `specter/socket.rs` 1355L (red-cell-c2-q5uf0), `agent_liveness.rs` 1209L (red-cell-c2-5c6yd), `logging.rs` 1199L (red-cell-c2-lh3gl), `specter/syscall.rs` 1174L (red-cell-c2-ui2h3), `specter/dotnet.rs` 1144L (red-cell-c2-awog9), `dispatch/checkin.rs` 1091L (red-cell-c2-varjx), `phantom/agent.rs` 1031L (red-cell-c2-xpwl2), `api/session.rs` 976L (red-cell-c2-xeo1d) |
+| Codex | 0 | — | No in-scope code written. |
+| Cursor | 4 | architecture drift (4) | 4 oversized files without split issues: `cli commands/listener.rs` 1252L (red-cell-c2-nadte), `transport/operator_msg.rs` 1108L (red-cell-c2-771ef), `client/state.rs` 1103L (red-cell-c2-1lxux), `client/helpers.rs` 1029L (red-cell-c2-9zclx); `dispatch/network.rs` 1038L (red-cell-c2-fs0w1, mixed Claude/Cursor) |
+
+Build: **cargo check** — passed (clean). **cargo clippy -- -D warnings** — clean (0 warnings). **cargo nextest run --workspace** — running (not completed before report deadline; prior run shows 5459 tests all passing).
+
+Overall codebase health: **on track** — crypto/auth/protocol layers remain solid. No `unwrap`/`todo!` in production code, clippy clean. Primary new finding is a correctness hole in Specter filesystem dispatch: five subcommands silently no-op instead of returning an error. All other previously identified security issues (HMAC timing, MemFile OOM, Cat unbounded read) appear to have been addressed in recent commits. Large-file debt continues to accumulate across all agents and the teamserver.
+
+Biggest blindspot: **Specter silent filesystem gaps** — Phantom handles all 10 `DemonFilesystemCommand` variants; Specter handles only 5. Operators relying on Specter for `cat`, file removal, or directory operations will get no feedback, making the agent appear to hang.

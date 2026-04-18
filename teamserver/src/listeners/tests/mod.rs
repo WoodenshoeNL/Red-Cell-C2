@@ -2,6 +2,10 @@ mod dns;
 mod external;
 mod http;
 mod lifecycle;
+mod lifecycle_dns;
+mod lifecycle_external;
+mod lifecycle_http;
+mod lifecycle_smb;
 mod smb;
 
 use std::net::TcpListener as StdTcpListener;

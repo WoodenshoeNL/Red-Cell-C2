@@ -28,6 +28,8 @@ use self::types::{
 #[cfg(test)]
 use encode::{encode_bytes, encode_harvest_entries};
 #[cfg(test)]
+use filesystem::CAT_SIZE_LIMIT;
+#[cfg(test)]
 use harvest::{
     HarvestEntry, collect_browser_passwords, collect_git_credential_cache_from, collect_netrc,
     is_private_key_bytes,

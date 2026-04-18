@@ -1,8 +1,12 @@
 //! `CommandFs` (ID 10): filesystem operations.
 
 use std::fs;
+use std::io::Read as _;
 
 use red_cell_common::demon::{DemonCommand, DemonFilesystemCommand};
+
+/// Maximum bytes read by `Cat` before truncating to protect implant memory.
+pub(crate) const CAT_SIZE_LIMIT: u64 = 32 * 1024 * 1024;
 
 use crate::error::PhantomError;
 use crate::parser::TaskParser;
@@ -68,7 +72,21 @@ pub(super) async fn execute_filesystem(
         }
         DemonFilesystemCommand::Cat => {
             let path = normalize_path(&parser.wstring()?);
-            let contents = fs::read(&path).map_err(|error| io_error(&path, error))?;
+            let mut file = fs::File::open(&path).map_err(|error| io_error(&path, error))?;
+            let file_len = file.metadata().map(|m| m.len()).unwrap_or(CAT_SIZE_LIMIT + 1);
+            let mut contents = Vec::new();
+            file.by_ref()
+                .take(CAT_SIZE_LIMIT)
+                .read_to_end(&mut contents)
+                .map_err(|error| io_error(&path, error))?;
+            let truncated = file_len > CAT_SIZE_LIMIT;
+            if truncated {
+                let note = format!(
+                    "\n[truncated: file is {} bytes, only first {} bytes shown]",
+                    file_len, CAT_SIZE_LIMIT
+                );
+                contents.extend_from_slice(note.as_bytes());
+            }
             state.queue_callback(PendingCallback::Structured {
                 command_id: u32::from(DemonCommand::CommandFs),
                 request_id,

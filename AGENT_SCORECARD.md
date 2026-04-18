@@ -24,8 +24,8 @@ Each loop run updates the running totals and appends a review entry.
 | Missing tests / stale tests | 82 | 22 | 7 |
 | Clippy warnings | 15 | 0 | 2 |
 | Protocol errors | 30 | 32 | 4 |
-| Security issues | 66 | 40 | 0 |
-| Architecture drift | 43 | 25 | 4 |
+| Security issues | 67 | 40 | 0 |
+| Architecture drift | 51 | 25 | 5 |
 | Memory / resource leaks | 14 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 10 | 0 |
 | Test infrastructure / flakiness | 61 | 6 | 1 |
@@ -33,7 +33,7 @@ Each loop run updates the running totals and appends a review entry.
 | Availability / timeout regressions | 4 | 5 | 0 |
 | Correctness / pagination | 67 | 9 | 1 |
 | Workflow / close-hygiene | 39 | 1 | 2 |
-| Code reuse / duplication | 11 | 0 | 0 |
+| Code reuse / duplication | 14 | 0 | 0 |
 | Incomplete commits (stranded work) | 7 | 3 | 0 |
 
 ---
@@ -41,6 +41,22 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-04-18 02:30
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 10 | security (1), architecture drift (7), code reuse (3) | Pivot init_secret bypass (red-cell-c2-85q33, P1); 7 oversized files with inline-test bloat not extracted to separate modules (audit/mod.rs, service/mod.rs, dispatch/output.rs, dispatch/process.rs, dispatch/pivot.rs, sockets/mod.rs, coffeeldr.rs); dispatch tests split across inline+external in output.rs, process.rs, pivot.rs (red-cell-c2-fsap6, red-cell-c2-xjqhr, red-cell-c2-is8jj) |
+| Codex | 0 | — | No in-scope code written in this range. |
+| Cursor | 1 | architecture drift (1) | specter dispatch/mod.rs — 5266-line inline test block not extracted (red-cell-c2-3rlli, P3) |
+
+Also filed no-attribution refactor tasks: phantom command/mod.rs 2620-line test bloat (red-cell-c2-9jb0j), dns.rs 1574 lines all production code (red-cell-c2-85p7b).
+
+Build: **cargo check** — passed. **cargo clippy -- -D warnings** — clean (0 warnings). **cargo nextest run --workspace** — 5458 tests, 0 failures (all passing at time of review; suite still completing long E2E tests).
+
+Overall codebase health: **on track** — crypto/auth/protocol layers are solid, no `unwrap` in production, no clippy violations, test suite clean. The main structural concern is inline test bloat: ~25,000 lines of tests are embedded directly in source files instead of being extracted to separate test modules. This slows every dev agent that must read a file to find a few hundred lines of production code.
+
+Biggest blindspot: **pivot-connected child agents bypass init_secret HKDF verification** (red-cell-c2-85q33). An operator configuring `InitSecret` to authenticate agents gets no such protection for SMB pivot channels. The fix requires threading `DemonInitSecretConfig` through `BuiltinDispatchContext`.
 
 ### QA Review — 2026-04-18 00:15 — 5d723d48..a8a75ca0
 

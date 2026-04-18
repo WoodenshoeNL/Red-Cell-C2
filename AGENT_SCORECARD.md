@@ -28,9 +28,9 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 51 | 25 | 5 |
 | Memory / resource leaks | 14 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 10 | 0 |
-| Test infrastructure / flakiness | 61 | 6 | 1 |
+| Test infrastructure / flakiness | 62 | 6 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
-| Availability / timeout regressions | 4 | 5 | 0 |
+| Availability / timeout regressions | 5 | 5 | 0 |
 | Correctness / pagination | 67 | 9 | 1 |
 | Workflow / close-hygiene | 39 | 1 | 2 |
 | Code reuse / duplication | 14 | 0 | 0 |
@@ -41,6 +41,20 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-04-18 11:30
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 8 | availability (1), test flakiness (1), architecture drift (6) | `authenticate_login` calls Argon2 synchronously without `spawn_blocking` — blocks tokio thread 1-2s in production (red-cell-c2-gx00f, P2); `wrong_password_receives_error_and_connection_closes` flaky timeout 30s too tight under load (red-cell-c2-rdmn2, P2); 6 oversized files: auth/mod.rs 1587-line test inline (red-cell-c2-p2tej), main.rs 1427-line test inline (red-cell-c2-5nxp2), dispatch/kerberos.rs 1134-line test inline (red-cell-c2-su1wg), dispatch/token.rs 1051-line test inline (red-cell-c2-susdi), specter/socket.rs 400-line test inline (red-cell-c2-fdg8k), listeners/tests/lifecycle.rs 2388 lines (red-cell-c2-y2exa) |
+| Codex | 0 | — | No in-scope code written in this range. |
+| Cursor | 0 | — | No in-scope code written in this range. |
+
+Build: **cargo check** — passed (clean). **cargo clippy -- -D warnings** — clean (0 warnings). **cargo nextest run --workspace** — 2880/5459 tests run before cancellation; 1 failure: `wrong_password_receives_error_and_connection_closes` (timeout under load, filed as red-cell-c2-rdmn2); all others passing.
+
+Overall codebase health: **on track** — crypto layers (AES-CTR session design, HKDF key derivation, AES-GCM at-rest encryption, constant-time token comparison, zeroize for key material), auth (Argon2id, dummy verifier timing equalization, rate limiting, session TTL/idle expiry), and protocol layers are all solid. No `unwrap` in production, no clippy violations, workspace `unwrap_used = "deny"` enforced. Main new findings: Argon2 sync block (availability concern) and ongoing inline test bloat.
+
+Biggest blindspot: **`authenticate_login` blocks the tokio executor for 1-2s per production login attempt** (red-cell-c2-gx00f). A multi-connection login flood can exhaust the tokio thread pool and degrade agent check-in latency across all active listeners. The fix is a single `spawn_blocking` wrapper.
 
 ### Arch Review — 2026-04-18 02:30
 

@@ -1,6 +1,8 @@
 //! Specter library surface for tests and alternate entrypoints.
 
 pub mod agent;
+pub mod beacon_api;
+pub mod bof_context;
 pub mod bypass;
 pub mod coffeeldr;
 pub mod config;

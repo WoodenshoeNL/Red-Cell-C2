@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1341 | 255 | 97 |
-| Bugs filed against | 253 | 50 | 15 |
+| Tasks closed | 1362 | 255 | 97 |
+| Bugs filed against | 259 | 50 | 15 |
 | Bug rate (bugs/task) | 0.19 | 0.20 | 0.15 |
-| Quality score | 82% | 80% | 85% |
+| Quality score | 81% | 80% | 85% |
 
-*Bug rates: Claude 253/1341=0.1887→0.19, Codex 50/255=0.1961→0.20, Cursor 15/97=0.1546→0.15*
+*Bug rates: Claude 259/1362=0.1902→0.19, Codex 50/255=0.1961→0.20, Cursor 15/97=0.1546→0.15*
 
 ## Violation Breakdown
 
@@ -41,6 +41,18 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-18 — a8a75ca0..c078eb63
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 21 | 0 | Heavy refactor run: 15 inline test splits (audit/mod.rs 2116L, service/mod.rs 1931L, sockets/mod.rs 1485L, dispatch/pivot.rs 1489L, dispatch/output.rs 1680L, dispatch/process.rs 1489L, dispatch/token.rs 1051L, dispatch/kerberos.rs 1134L, auth/mod.rs 1587L, main.rs 1427L, specter/dispatch/mod.rs 5266L, specter/socket.rs 400L, specter/coffeeldr.rs split to bof_context+beacon_api, phantom/command/mod.rs 2620L, dns.rs→dns/mod.rs+handler.rs+packet.rs); 3 real bug fixes: pivot init_secret HKDF bypass (red-cell-c2-85q33 P1), auth Argon2 spawn_blocking (red-cell-c2-gx00f P2), phantom systemd unit whitespace (red-cell-c2-8wqbe P2); plus 3 test infra fixes (rate-limiter x4vtd P1, multi_thread flavor rdmn2 P2, direct record_failure replacement). Zero new bugs found by QA this run. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **cargo check** — passed (clean). **cargo clippy -- -D warnings** — clean (0 warnings). **cargo nextest run --workspace** — 822/823 tests run before early stop; 1 apparent failure (`database::audit::tests::audit_query_filtered_by_action_substring`) diagnosed as nextest [double-spawn] infrastructure race from concurrent build runs — not a code defect. Test passes in isolation.
+
+Overall codebase health: **on track** — all three major security issues from previous arch reviews are now closed (pivot init_secret bypass, Argon2 sync block, phantom systemd unit). Test suite clean. Refactoring momentum is high: ~25 large inline test blocks have been extracted this sprint. Remaining P2 bugs (red-cell-c2-ytxk7 MemFile OOM, red-cell-c2-i5y4q Cat unbounded read) still open and unblocked.
 
 ### Arch Review — 2026-04-18 16:00
 

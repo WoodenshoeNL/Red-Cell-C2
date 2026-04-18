@@ -7200,4 +7200,26 @@ Build: **cargo check — passed**. clippy/nextest timed out (likely resource con
 
 Build: **cargo check** — passed (clean). **cargo clippy -- -D warnings** — clean (0 warnings). **cargo nextest run --workspace** — 2432/5462 tests run before early stop; 1 failure in `service::tests::audit::listener_start_failure_creates_audit_entry_with_failure_status` (double-spawn ENOENT infrastructure issue — passes with `--test-threads=1`; filed red-cell-c2-5jieq for nextest serial group fix).
 
+### Arch Review — 2026-04-19 — 4f32b45e..e4a2f302
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 0 | — | All code changes in review range are refactors (agent_liveness split, client-cli listener split, specter socket split) and WIP checkpoints. No new security, protocol, or correctness issues found. |
+| Codex | 0 | — | No activity. |
+| Cursor | 0 | — | No activity. |
+
+Build: **cargo check** — passed (clean). **cargo clippy -- -D warnings** — clean (0 warnings). **cargo nextest run --workspace** — 1 failure in `e2e_operator_agent_session` (double-spawn ENOENT — pre-existing, tracked by red-cell-c2-5jieq).
+
+**Security posture:** Strong. Zero `unwrap()`/`expect()` in production code across all crates. AES-256-CTR with monotonic offset advancement verified correct. HKDF-SHA256 key derivation with versioned secrets in place. Constant-time comparisons via `subtle::ConstantTimeEq` for session tokens. Key material zeroized via `Zeroize`/`ZeroizeOnDrop`. AES-256-GCM at-rest encryption for sensitive database columns. Rate limiting on init attempts and login. Camouflage 404 responses prevent fingerprinting. All SQL queries parameterized (no `format!()` SQL). Key-rotation hijack protection on agent re-registration. Deferred CTR offset and sequence number advancement (only after successful parse).
+
+**Architecture compliance:** All 8 architecture decisions from AGENTS.md verified met — edition 2024, Axum+Tokio, SQLite/sqlx with parameterized queries, HCL config, thiserror in library / anyhow in binary, egui client, no forbidden dependencies.
+
+**Issues filed this run:** 0 — no new findings.
+
+**Open issues (21):** Primarily oversized-file refactor tasks (P3) and test infrastructure (P2). No open security issues. The previously flagged `ws_hmac.rs` hand-rolled constant-time comparison (red-cell-c2-4hlvn) was fixed in a prior session (now uses `subtle::ConstantTimeEq`).
+
+Overall codebase health: **on track** — the codebase is in excellent shape. Zero production `unwrap`/`expect`, zero clippy warnings, zero `todo!`/`unimplemented!` in production code. Crypto, auth, and protocol layers are solid and well-tested with golden vector tests. The primary remaining debt is oversized test files (P3 refactors). No new security, correctness, or architecture drift issues found in this review.
+
+Biggest blindspot: **Test infrastructure flakiness** — the double-spawn ENOENT race (red-cell-c2-5jieq, red-cell-c2-2vdfs) causes intermittent test failures under parallel nextest execution. Not a code defect, but affects CI reliability.
+
 Overall codebase health: **on track** — long-running large-file refactor sprint continues (8 issues closed, all refactors or cleanup). Security posture improved: constant-time HMAC comparison now uses `subtle` crate (red-cell-c2-4hlvn closed — had been the last open security finding from arch review). Test suite essentially clean. Two new minor issues filed: 3 unused imports from webhook split (red-cell-c2-okory P3), and double-spawn flakiness for red-cell unit test binary (red-cell-c2-5jieq P3).

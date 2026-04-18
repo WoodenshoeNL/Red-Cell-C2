@@ -5,6 +5,7 @@ mod common;
 mod config;
 mod core;
 mod filesystem;
+mod kerberos;
 mod network_token_kerberos;
 mod output;
 mod pivot;

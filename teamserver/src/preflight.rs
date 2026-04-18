@@ -4,20 +4,47 @@
 /// starting in a broken state.
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use thiserror::Error;
 use tracing::info;
 
 use red_cell_common::config::Profile;
 
-use red_cell::DbMasterKey;
+use red_cell::{DbMasterKey, database::crypto::DbCryptoError};
+
+/// Errors that can occur during preflight checks.
+#[derive(Debug, Error)]
+pub enum PreflightError {
+    #[error("preflight: master key encrypt failed: {0}")]
+    MasterKeyEncrypt(#[source] DbCryptoError),
+
+    #[error("preflight: master key decrypt failed — key file may be corrupt: {0}")]
+    MasterKeyDecrypt(#[source] DbCryptoError),
+
+    #[error("preflight: master key roundtrip produced mismatched plaintext — key file is corrupt")]
+    MasterKeyMismatch,
+
+    #[error(
+        "preflight: no listeners defined — the teamserver needs at least one \
+         Http, Smb, External, or Dns listener to accept agent callbacks"
+    )]
+    NoListeners,
+
+    #[error("preflight: listener '{listener}': TLS certificate file not found: {path}")]
+    TlsCertNotFound { listener: String, path: String },
+
+    #[error("preflight: listener '{listener}': TLS private key file not found: {path}")]
+    TlsKeyNotFound { listener: String, path: String },
+}
 
 /// Run all preflight checks and log the startup banner on success.
-pub fn run(profile: &Profile, master_key: &DbMasterKey, database_path: &Path) -> Result<()> {
-    verify_master_key(master_key).context("preflight: master key verification failed")?;
-    let listener_count =
-        verify_listeners(profile).context("preflight: listener verification failed")?;
-    verify_listener_tls_certs(profile)
-        .context("preflight: listener TLS certificate verification failed")?;
+pub fn run(
+    profile: &Profile,
+    master_key: &DbMasterKey,
+    database_path: &Path,
+) -> Result<(), PreflightError> {
+    verify_master_key(master_key)?;
+    let listener_count = verify_listeners(profile)?;
+    verify_listener_tls_certs(profile)?;
 
     let operator_count = profile.operators.users.len();
 
@@ -26,37 +53,31 @@ pub fn run(profile: &Profile, master_key: &DbMasterKey, database_path: &Path) ->
 }
 
 /// Encrypt and decrypt a test value to verify the master key is usable.
-fn verify_master_key(master_key: &DbMasterKey) -> Result<()> {
+fn verify_master_key(master_key: &DbMasterKey) -> Result<(), PreflightError> {
     let test_value = b"preflight-roundtrip-check";
-    let encrypted =
-        master_key.encrypt(test_value).context("failed to encrypt test value with master key")?;
-    let decrypted = master_key
-        .decrypt(&encrypted)
-        .context("failed to decrypt test value with master key — key file may be corrupt")?;
+    let encrypted = master_key.encrypt(test_value).map_err(PreflightError::MasterKeyEncrypt)?;
+    let decrypted = master_key.decrypt(&encrypted).map_err(PreflightError::MasterKeyDecrypt)?;
     if decrypted.as_slice() != test_value {
-        bail!("master key roundtrip produced mismatched plaintext — key file is corrupt");
+        return Err(PreflightError::MasterKeyMismatch);
     }
     info!("master key encrypt/decrypt roundtrip verified");
     Ok(())
 }
 
 /// Verify at least one listener is defined in the profile.
-fn verify_listeners(profile: &Profile) -> Result<usize> {
+fn verify_listeners(profile: &Profile) -> Result<usize, PreflightError> {
     let listeners = &profile.listeners;
     let count =
         listeners.http.len() + listeners.smb.len() + listeners.external.len() + listeners.dns.len();
     if count == 0 {
-        bail!(
-            "no listeners defined in the profile — the teamserver needs at \
-             least one Http, Smb, External, or Dns listener to accept agent callbacks"
-        );
+        return Err(PreflightError::NoListeners);
     }
     info!(count, "listener profiles verified");
     Ok(count)
 }
 
 /// Verify that TLS certificate files exist and are readable for HTTPS listeners.
-fn verify_listener_tls_certs(profile: &Profile) -> Result<()> {
+fn verify_listener_tls_certs(profile: &Profile) -> Result<(), PreflightError> {
     for listener in &profile.listeners.http {
         if !listener.secure {
             continue;
@@ -68,18 +89,16 @@ fn verify_listener_tls_certs(profile: &Profile) -> Result<()> {
         let key_path = Path::new(&cert_config.key);
 
         if !cert_path.is_file() {
-            bail!(
-                "listener '{}': TLS certificate file not found: {}",
-                listener.name,
-                cert_config.cert
-            );
+            return Err(PreflightError::TlsCertNotFound {
+                listener: listener.name.clone(),
+                path: cert_config.cert.clone(),
+            });
         }
         if !key_path.is_file() {
-            bail!(
-                "listener '{}': TLS private key file not found: {}",
-                listener.name,
-                cert_config.key
-            );
+            return Err(PreflightError::TlsKeyNotFound {
+                listener: listener.name.clone(),
+                path: cert_config.key.clone(),
+            });
         }
         info!(listener = %listener.name, cert = %cert_config.cert, "listener TLS certificate verified");
     }
@@ -115,7 +134,8 @@ mod tests {
     fn verify_listeners_fails_when_none_defined() {
         let profile = minimal_profile_no_listeners();
         let err = verify_listeners(&profile).unwrap_err();
-        assert!(err.to_string().contains("no listeners defined"), "unexpected error: {err}");
+        assert!(matches!(err, PreflightError::NoListeners), "unexpected error: {err}");
+        assert!(err.to_string().contains("no listeners defined"), "unexpected message: {err}");
     }
 
     #[test]
@@ -145,9 +165,10 @@ mod tests {
         };
         let profile = minimal_profile_with_http_listener(true, Some(cert_config));
         let err = verify_listener_tls_certs(&profile).unwrap_err();
+        assert!(matches!(err, PreflightError::TlsCertNotFound { .. }), "unexpected error: {err}");
         assert!(
             err.to_string().contains("TLS certificate file not found"),
-            "unexpected error: {err}"
+            "unexpected message: {err}"
         );
     }
 
@@ -163,9 +184,10 @@ mod tests {
         };
         let profile = minimal_profile_with_http_listener(true, Some(cert_config));
         let err = verify_listener_tls_certs(&profile).unwrap_err();
+        assert!(matches!(err, PreflightError::TlsKeyNotFound { .. }), "unexpected error: {err}");
         assert!(
             err.to_string().contains("TLS private key file not found"),
-            "unexpected error: {err}"
+            "unexpected message: {err}"
         );
     }
 
@@ -199,7 +221,7 @@ mod tests {
         let profile = minimal_profile_no_listeners();
         let db_path = std::path::PathBuf::from("/tmp/test.sqlite");
         let err = run(&profile, &key, &db_path).unwrap_err();
-        assert!(format!("{err:?}").contains("listener"), "unexpected error: {err:?}");
+        assert!(matches!(err, PreflightError::NoListeners), "unexpected error: {err:?}");
     }
 
     // -- test helpers --

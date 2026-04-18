@@ -701,29 +701,41 @@ fn notifier_with_timeout(address: SocketAddr, timeout: Duration) -> AuditWebhook
     }
 }
 
-/// Synchronous delivery to a refused port must return `WebhookError::Request`.
+/// Synchronous delivery to a port that accepts but immediately closes must return
+/// `WebhookError::Request`. Using an accept-and-drop server avoids the TOCTOU race
+/// that occurs when relying on a dropped OS ephemeral port staying unbound.
 #[tokio::test]
 async fn notify_audit_record_returns_request_error_on_connection_refused() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("should bind");
     let address = listener.local_addr().expect("should resolve");
-    drop(listener);
+    // Keep the port bound; accept and immediately drop each connection so the HTTP
+    // request fails with a transport error rather than ECONNREFUSED.
+    let _accept_guard = tokio::spawn(async move {
+        loop {
+            let _ = listener.accept().await;
+        }
+    });
 
     let notifier = notifier_with_timeout(address, Duration::from_secs(1));
     let result = notifier.notify_audit_record(&sample_record(60)).await;
 
     assert!(
         matches!(result, Err(WebhookError::Request(_))),
-        "connection refusal should produce WebhookError::Request, got {result:?}"
+        "transport failure should produce WebhookError::Request, got {result:?}"
     );
 }
 
-/// Detached delivery to a refused port must drain on shutdown and increment
-/// the permanent failure counter.
+/// Detached delivery to a port that accepts but immediately closes must drain on
+/// shutdown and increment the permanent failure counter.
 #[tokio::test]
 async fn detached_delivery_increments_failure_count_on_connection_refused() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("should bind");
     let address = listener.local_addr().expect("should resolve");
-    drop(listener);
+    let _accept_guard = tokio::spawn(async move {
+        loop {
+            let _ = listener.accept().await;
+        }
+    });
 
     let notifier = notifier_with_timeout(address, Duration::from_secs(1));
     notifier.notify_audit_record_detached(sample_record(61));
@@ -789,12 +801,16 @@ async fn detached_delivery_increments_failure_count_on_client_timeout() {
 }
 
 /// Retries must all be attempted before the failure counter increments,
-/// even when the underlying error is a transport-level connection refusal.
+/// even when the underlying error is a transport-level failure.
 #[tokio::test]
 async fn detached_retries_exhaust_on_connection_refused_before_incrementing_failure() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("should bind");
     let address = listener.local_addr().expect("should resolve");
-    drop(listener);
+    let _accept_guard = tokio::spawn(async move {
+        loop {
+            let _ = listener.accept().await;
+        }
+    });
 
     let notifier = AuditWebhookNotifier {
         retry_delays: Arc::from([Duration::ZERO, Duration::ZERO, Duration::ZERO].as_slice()),
@@ -810,13 +826,17 @@ async fn detached_retries_exhaust_on_connection_refused_before_incrementing_fail
     );
 }
 
-/// Two detached deliveries both hitting connection refusal must each
+/// Two detached deliveries both hitting transport failure must each
 /// increment the failure counter independently.
 #[tokio::test]
 async fn failure_counter_accumulates_across_multiple_transport_failures() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("should bind");
     let address = listener.local_addr().expect("should resolve");
-    drop(listener);
+    let _accept_guard = tokio::spawn(async move {
+        loop {
+            let _ = listener.accept().await;
+        }
+    });
 
     let notifier = notifier_with_timeout(address, Duration::from_secs(1));
     notifier.notify_audit_record_detached(sample_record(65));

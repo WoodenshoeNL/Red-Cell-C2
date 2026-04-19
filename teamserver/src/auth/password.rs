@@ -17,14 +17,17 @@ use crate::{OperatorRepository, PersistedOperator, TeamserverError};
 /// resistance; the hashing/verification code paths exercised in tests are
 /// identical regardless of cost parameters.
 pub(super) fn argon2_hasher() -> Result<Argon2<'static>, AuthError> {
-    #[cfg(not(test))]
+    // fast_argon2 is emitted by build.rs for all non-release profiles (dev,
+    // test).  Integration test binaries in teamserver/tests/ compile the lib
+    // without cfg(test), so this cfg is the only way to give them fast params.
+    #[cfg(not(any(test, fast_argon2)))]
     let params = ParamsBuilder::new()
         .m_cost(65536)
         .t_cost(3)
         .p_cost(4)
         .build()
         .map_err(|e| AuthError::PasswordVerifier(format!("Argon2 parameter error: {e}")))?;
-    #[cfg(test)]
+    #[cfg(any(test, fast_argon2))]
     let params = ParamsBuilder::new()
         .m_cost(256)
         .t_cost(1)
@@ -35,9 +38,9 @@ pub(super) fn argon2_hasher() -> Result<Argon2<'static>, AuthError> {
 }
 
 pub(crate) fn password_hashes_match(submitted: &str, expected: &str) -> bool {
-    #[cfg(test)]
+    #[cfg(any(test, fast_argon2))]
     return password_hashes_match_cached(submitted, expected);
-    #[cfg(not(test))]
+    #[cfg(not(any(test, fast_argon2)))]
     return password_hashes_match_impl(submitted, expected);
 }
 
@@ -53,14 +56,14 @@ fn password_hashes_match_impl(submitted: &str, expected: &str) -> bool {
     hasher.verify_password(submitted.as_bytes(), &parsed_hash).is_ok()
 }
 
-/// Test-only cached wrapper around [`password_hashes_match_impl`].
+/// Cached wrapper around [`password_hashes_match_impl`] for non-release builds.
 ///
 /// Argon2 verification is intentionally slow (~1-2 s per call with production
 /// parameters). Tests that create many sessions (e.g. the global session cap
 /// test with 64+ verifications) become pathologically slow without caching.
 /// The cache key is `(submitted_lowercase, expected_verifier)` and values are
 /// append-only, so mutex poisoning is safe to recover from.
-#[cfg(test)]
+#[cfg(any(test, fast_argon2))]
 fn password_hashes_match_cached(submitted: &str, expected: &str) -> bool {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -82,9 +85,9 @@ fn password_hashes_match_cached(submitted: &str, expected: &str) -> bool {
 }
 
 pub(crate) fn password_verifier_for_sha3(password_hash: &str) -> Result<String, AuthError> {
-    #[cfg(test)]
+    #[cfg(any(test, fast_argon2))]
     return password_verifier_for_sha3_cached(password_hash);
-    #[cfg(not(test))]
+    #[cfg(not(any(test, fast_argon2)))]
     return password_verifier_for_sha3_impl(password_hash);
 }
 
@@ -95,7 +98,7 @@ fn password_verifier_for_sha3_impl(password_hash: &str) -> Result<String, AuthEr
         .map_err(|error| AuthError::PasswordVerifier(error.to_string()))
 }
 
-/// Test-only cached wrapper around `password_verifier_for_sha3_impl`.
+/// Cached wrapper around `password_verifier_for_sha3_impl` for non-release builds.
 ///
 /// Argon2 hashing is intentionally slow (memory-hard), which makes full test
 /// suite runs infeasible when every `AuthService::from_profile` call hashes
@@ -104,7 +107,7 @@ fn password_verifier_for_sha3_impl(password_hash: &str) -> Result<String, AuthEr
 /// keeping individual test setup instantaneous after the first warm-up.
 ///
 /// The production path via `password_verifier_for_sha3_impl` is unaffected.
-#[cfg(test)]
+#[cfg(any(test, fast_argon2))]
 fn password_verifier_for_sha3_cached(password_hash: &str) -> Result<String, AuthError> {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -173,9 +176,9 @@ pub(super) fn is_legacy_sha3_digest(value: &str) -> bool {
 /// The password material is 16 bytes from the OS CSPRNG (via [`Uuid::new_v4`]), so
 /// the resulting hash is unpredictable and cannot be precomputed by an attacker.
 pub(super) fn generate_dummy_verifier() -> Result<String, AuthError> {
-    #[cfg(test)]
+    #[cfg(any(test, fast_argon2))]
     return generate_dummy_verifier_cached();
-    #[cfg(not(test))]
+    #[cfg(not(any(test, fast_argon2)))]
     return generate_dummy_verifier_impl();
 }
 
@@ -187,12 +190,12 @@ fn generate_dummy_verifier_impl() -> Result<String, AuthError> {
         .map_err(|e| AuthError::PasswordVerifier(e.to_string()))
 }
 
-/// Test-only cached wrapper around [`generate_dummy_verifier_impl`].
+/// Cached wrapper around [`generate_dummy_verifier_impl`] for non-release builds.
 ///
 /// The dummy hash must be a valid Argon2 PHC string, but its exact value is
 /// irrelevant for correctness tests — reusing one across the test process avoids
 /// paying the Argon2 memory-hard cost on every [`AuthService`] construction.
-#[cfg(test)]
+#[cfg(any(test, fast_argon2))]
 fn generate_dummy_verifier_cached() -> Result<String, AuthError> {
     use std::sync::OnceLock;
     static DUMMY: OnceLock<Result<String, String>> = OnceLock::new();

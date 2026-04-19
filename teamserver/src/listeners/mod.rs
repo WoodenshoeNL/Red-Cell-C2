@@ -65,9 +65,8 @@ use crate::{ListenerStatus, dispatch::DownloadTracker};
 pub(crate) use events::operator_protocol_name;
 #[cfg(test)]
 pub(crate) use http::{
-    ProcessedDemonResponse, TrustedProxyPeer, build_response, cert_mtime, extract_external_ip,
-    http_listener_subject_alt_names, is_past_kill_date, map_command_dispatch_error,
-    parse_trusted_proxy_peer, reload_tls_from_files, set_default_header, spawn_cert_file_watcher,
+    TrustedProxyPeer, cert_mtime, extract_external_ip, is_past_kill_date,
+    parse_trusted_proxy_peer, reload_tls_from_files, spawn_cert_file_watcher,
 };
 #[cfg(test)]
 pub(crate) use rate_limiters::{

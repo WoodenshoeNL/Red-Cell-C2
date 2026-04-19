@@ -103,7 +103,7 @@ mod tests {
     use red_cell_common::demon::{DemonCommand, DemonFilesystemCommand};
     use red_cell_common::operator::AgentTaskInfo;
 
-    use super::super::command_enc::{build_jobs, encode_utf16};
+    use super::super::command_enc::build_jobs;
     use crate::MAX_AGENT_MESSAGE_LEN;
 
     #[test]

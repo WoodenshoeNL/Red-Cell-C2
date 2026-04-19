@@ -2,7 +2,7 @@ use super::super::super::{
     AuditQuery, AuditResultStatus, SessionActivityQuery, query_audit_log, query_session_activity,
 };
 use super::seed_diverse_audit_rows;
-use crate::{AuditLogEntry, Database, TeamserverError};
+use crate::{Database, TeamserverError};
 
 #[test]
 fn query_validates_limit_and_offset_defaults() {

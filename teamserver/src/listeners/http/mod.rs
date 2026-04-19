@@ -13,9 +13,7 @@ pub(crate) use dispatch::{DemonHttpDisposition, process_demon_transport};
 
 // Test-only re-exports consumed by listeners::tests
 #[cfg(test)]
-pub(crate) use dispatch::{ProcessedDemonResponse, map_command_dispatch_error};
-#[cfg(test)]
-pub(crate) use handler::{build_response, is_past_kill_date, set_default_header};
+pub(crate) use handler::is_past_kill_date;
 #[cfg(test)]
 pub(crate) use proxy::{TrustedProxyPeer, extract_external_ip, parse_trusted_proxy_peer};
 

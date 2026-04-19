@@ -5,10 +5,7 @@ use super::agent::{
 pub(super) use super::auth::SERVICE_AUTH_FRAME_TIMEOUT;
 use super::listeners::{handle_listener_add, handle_listener_start};
 use super::*;
-use red_cell_common::operator::{
-    AgentResponseInfo, EventCode, ListenerErrorInfo, ListenerMarkInfo, Message, MessageHead,
-    OperatorMessage, ServiceAgentRegistrationInfo, ServiceListenerRegistrationInfo,
-};
+use red_cell_common::operator::{EventCode, OperatorMessage};
 use std::time::Duration;
 
 mod agent_task;

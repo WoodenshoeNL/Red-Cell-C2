@@ -9,7 +9,7 @@
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use red_cell_common::config::{OperatorRole, Profile};
+use red_cell_common::config::Profile;
 use tower::ServiceExt;
 
 use crate::agents::Job;

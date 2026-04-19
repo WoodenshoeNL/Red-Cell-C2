@@ -8,7 +8,7 @@ use red_cell_common::{
     config::Profile,
     operator::{
         AgentTaskInfo, EventCode, FlatInfo, ListenerInfo, ListenerMarkInfo, LoginInfo, Message,
-        MessageHead, NameInfo, OperatorMessage, TeamserverLogInfo,
+        MessageHead, NameInfo, OperatorMessage,
     },
 };
 use serde_json::Value;
@@ -18,9 +18,8 @@ use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
 
 use super::{LoginRateLimiter, OperatorConnectionManager, routes, teamserver_log_event};
 use crate::{
-    AgentRegistry, AuditQuery, AuditResultStatus, AuditWebhookNotifier, AuthService, Database,
+    AgentRegistry, AuditWebhookNotifier, AuthService, Database,
     EventBus, ListenerManager, PayloadBuilderService, ShutdownController, SocketRelayManager,
-    query_audit_log,
 };
 use red_cell_common::crypto::{
     WsEnvelope, derive_ws_hmac_key, hash_password_sha3, open_ws_frame, seal_ws_frame,

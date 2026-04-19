@@ -1,8 +1,6 @@
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use red_cell_common::{AgentEncryptionInfo, HttpListenerConfig, ListenerConfig};
-use tempfile::TempDir;
 use zeroize::Zeroizing;
 
 use super::registry::{NamedCallback, RegisteredCommand};

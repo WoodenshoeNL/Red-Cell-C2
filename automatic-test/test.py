@@ -292,6 +292,49 @@ def run_scenario(scenario_id: str, path: Path, ctx: RunContext) -> tuple[str, Pa
         return "failed", report_path
 
 
+# ── Cert fingerprint auto-derive ─────────────────────────────────────────────
+
+def _auto_derive_cert_fingerprint(cli_cfg: CliConfig) -> CliConfig:
+    """Return a copy of *cli_cfg* with cert_fingerprint set from the server.
+
+    When cert_fingerprint is not in env.toml, derive it via openssl so
+    self-signed teamserver certs work without hardcoding machine-specific
+    values.  Silently returns the original config if derivation fails (e.g.
+    server not running yet, no openssl in PATH).
+    """
+    from dataclasses import replace
+    from urllib.parse import urlparse
+
+    server = cli_cfg.server
+    parsed = urlparse(server)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or (443 if parsed.scheme in ("https", "wss") else 80)
+
+    try:
+        result = subprocess.run(
+            ["openssl", "s_client", "-connect", f"{host}:{port}"],
+            input=b"",
+            capture_output=True,
+            timeout=5,
+        )
+        fp_result = subprocess.run(
+            ["openssl", "x509", "-noout", "-fingerprint", "-sha256"],
+            input=result.stdout,
+            capture_output=True,
+            timeout=5,
+        )
+        fp_line = fp_result.stdout.decode().strip()
+        # Expected: "SHA256 Fingerprint=XX:XX:..."
+        if "=" in fp_line:
+            fp = fp_line.split("=", 1)[1].replace(":", "").lower()
+            if len(fp) == 64:
+                return replace(cli_cfg, cert_fingerprint=fp)
+    except Exception:
+        pass
+
+    return cli_cfg
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -354,6 +397,12 @@ def main():
     env = {**env, "timeouts": {**base_timeouts, **timeouts_to_env_dict(tmo)}}
 
     cli_cfg = make_cli_config_from_parsed(env_cfg, env)
+
+    # When no cert_fingerprint is configured, auto-derive it from the server's
+    # TLS certificate so self-signed certs work without hardcoding machine-
+    # specific values in env.toml.
+    if cli_cfg.cert_fingerprint is None:
+        cli_cfg = _auto_derive_cert_fingerprint(cli_cfg)
 
     # Apply --target filter before constructing TargetConfig objects so that
     # an intentionally-incomplete stanza for the disabled target does not

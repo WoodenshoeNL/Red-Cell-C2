@@ -230,7 +230,7 @@ impl ListenerDialogState {
             ListenerProtocol::Dns => {
                 extra.insert(
                     "Domain".to_owned(),
-                    serde_json::Value::String(self.dns_domain.clone()),
+                    serde_json::Value::String(self.dns_domain.trim().to_owned()),
                 );
                 if !self.dns_record_types.is_empty() {
                     extra.insert(

@@ -264,8 +264,8 @@ fn listener_dialog_dns_non_empty_domain_passes_through() {
     dialog.dns_domain = "  c2.example.com  ".to_owned();
 
     let info = dialog.to_listener_info();
-    // to_listener_info does not trim; the raw value is forwarded unchanged.
-    assert_eq!(info.extra.get("Domain").and_then(|v| v.as_str()), Some("  c2.example.com  "));
+    // to_listener_info trims surrounding whitespace before forwarding.
+    assert_eq!(info.extra.get("Domain").and_then(|v| v.as_str()), Some("c2.example.com"));
 }
 
 #[test]

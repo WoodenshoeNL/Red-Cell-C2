@@ -25,7 +25,7 @@ Test steps:
        - Operator attribution: API-key actions match configured operator name;
          agent.checkin rows use actor ``teamserver``
        - Filter coverage: operator / action / agent CLI filters match substring
-         semantics against the baseline set; REST ``since`` + ``until`` matches
+         semantics against the baseline set; CLI ``since`` + ``until`` matches
          the same multiset as the baseline window
  10. Export loot to CSV using Python's csv module:
        - Write all loot entries returned by loot list to a temp file
@@ -98,7 +98,6 @@ def run(ctx):
         expected_subset_agent_id,
         expected_subset_operator_substring,
         expected_subset_until_window,
-        fetch_audit_items_rest,
     )
     from lib.cli import (
         CliError,
@@ -278,7 +277,7 @@ def run(ctx):
         )
         print("  [audit] operator attribution ✓")
 
-        # ── Filter coverage (CLI substring semantics + REST date range) ─────
+        # ── Filter coverage (CLI substring semantics + CLI date range) ──────
         exp_op = expected_subset_operator_substring(audit_entries, expected_operator)
         got_op = log_list(cli, since=test_start, operator=expected_operator, limit=200)
         assert_multiset_equal(got_op, exp_op, label="audit filter --operator")
@@ -295,15 +294,9 @@ def run(ctx):
         print("  [audit] filter --agent matches expected subset ✓")
 
         exp_until = expected_subset_until_window(audit_entries, until_ts=audit_window_end)
-        rest_until = fetch_audit_items_rest(
-            cli.server,
-            cli.token,
-            since=test_start,
-            until=audit_window_end,
-            limit=200,
-        )
-        assert_multiset_equal(rest_until, exp_until, label="REST /audit since+until")
-        print("  [audit] REST since+until window matches expected subset ✓")
+        cli_until = log_list(cli, since=test_start, until=audit_window_end, limit=200)
+        assert_multiset_equal(cli_until, exp_until, label="CLI log list since+until")
+        print("  [audit] CLI since+until window matches expected subset ✓")
 
         # ── Step 10: Export loot to CSV and validate ──────────────────────────
         print("  [csv] exporting loot list to CSV and validating")

@@ -383,6 +383,7 @@ def log_list(
     action: str | None = None,
     agent_id: str | None = None,
     since: str | None = None,
+    until: str | None = None,
     limit: int | None = None,
 ) -> list[dict]:
     """Return audit log entries (newest first), optionally filtered.
@@ -398,6 +399,8 @@ def log_list(
         args += ["--agent", agent_id]
     if since:
         args += ["--since", since]
+    if until:
+        args += ["--until", until]
     if limit is not None:
         args += ["--limit", str(limit)]
     return _run(cfg, *args)

@@ -695,6 +695,7 @@ pub enum AuditCommands {
     ///   red-cell-cli log list --operator alice --limit 50
     ///   red-cell-cli log list --action exec
     ///   red-cell-cli log list --since 2026-03-21T00:00:00Z --agent abc123
+    ///   red-cell-cli log list --since 2026-03-21T00:00:00Z --until 2026-03-22T00:00:00Z
     #[command(verbatim_doc_comment)]
     List {
         /// Filter by operator username
@@ -709,6 +710,9 @@ pub enum AuditCommands {
         /// Only return entries at or after this ISO 8601 UTC timestamp
         #[arg(long)]
         since: Option<String>,
+        /// Only return entries at or before this ISO 8601 UTC timestamp
+        #[arg(long)]
+        until: Option<String>,
         /// Maximum entries to return
         #[arg(long, default_value = "100")]
         limit: u32,

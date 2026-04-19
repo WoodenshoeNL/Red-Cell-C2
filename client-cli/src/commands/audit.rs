@@ -95,11 +95,12 @@ impl TextRow for AuditEntry {
 /// Dispatch an [`AuditCommands`] variant and return a process exit code.
 pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AuditCommands) -> i32 {
     match action {
-        AuditCommands::List { operator, action, agent, since, limit } => {
+        AuditCommands::List { operator, action, agent, since, until, limit } => {
             match list(
                 client,
                 limit,
                 since.as_deref(),
+                until.as_deref(),
                 operator.as_deref(),
                 agent,
                 action.as_deref(),
@@ -124,7 +125,7 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AuditCommands) 
             if follow {
                 tail_follow(client, fmt, max_failures).await
             } else {
-                match list(client, TAIL_LIMIT, None, None, None, None).await {
+                match list(client, TAIL_LIMIT, None, None, None, None, None).await {
                     Ok(data) => match print_success(fmt, &data) {
                         Ok(()) => EXIT_SUCCESS,
                         Err(e) => {
@@ -159,6 +160,7 @@ async fn list(
     client: &ApiClient,
     limit: u32,
     since: Option<&str>,
+    until: Option<&str>,
     operator: Option<&str>,
     agent_id: Option<AgentId>,
     action: Option<&str>,
@@ -167,6 +169,9 @@ async fn list(
 
     if let Some(s) = since {
         params.push(format!("since={}", percent_encode(s)));
+    }
+    if let Some(u) = until {
+        params.push(format!("until={}", percent_encode(u)));
     }
     if let Some(op) = operator {
         params.push(format!("operator={}", percent_encode(op)));
@@ -202,7 +207,7 @@ async fn tail_follow(client: &ApiClient, fmt: &OutputFormat, max_failures: u32) 
     // Fetch initial batch of 20 entries (same transient-timeout retry policy as the poll loop).
     let initial_entries = loop {
         let initial_result = tokio::select! {
-            result = list(client, TAIL_LIMIT, None, None, None, None) => result,
+            result = list(client, TAIL_LIMIT, None, None, None, None, None) => result,
             _ = tokio::signal::ctrl_c() => return EXIT_SUCCESS,
         };
 
@@ -248,7 +253,7 @@ async fn tail_follow(client: &ApiClient, fmt: &OutputFormat, max_failures: u32) 
     // Poll for new entries using the cursor timestamp.
     loop {
         let poll_result = tokio::select! {
-            result = list(client, 100, cursor.since(), None, None, None) => result,
+            result = list(client, 100, cursor.since(), None, None, None, None) => result,
             _ = tokio::signal::ctrl_c() => return EXIT_SUCCESS,
         };
 
@@ -865,6 +870,11 @@ mod tests {
     fn percent_encode_iso8601_timestamp_unchanged() {
         // Colons in ISO 8601 timestamps must not be encoded.
         assert_eq!(percent_encode("2026-03-21T12:00:00Z"), "2026-03-21T12:00:00Z");
+    }
+
+    #[test]
+    fn percent_encode_until_timestamp_unchanged() {
+        assert_eq!(percent_encode("2026-03-22T23:59:59Z"), "2026-03-22T23:59:59Z");
     }
 
     #[test]

@@ -250,6 +250,40 @@ mod tests {
     }
 
     #[test]
+    fn log_list_until_flag_parses() {
+        let cli = Cli::try_parse_from([
+            "red-cell-cli",
+            "log",
+            "list",
+            "--since",
+            "2026-03-21T00:00:00Z",
+            "--until",
+            "2026-03-22T00:00:00Z",
+        ])
+        .expect("log list --since --until must parse");
+        match cli.command {
+            Some(Commands::Audit { action: AuditCommands::List { since, until, .. } }) => {
+                assert_eq!(since.as_deref(), Some("2026-03-21T00:00:00Z"));
+                assert_eq!(until.as_deref(), Some("2026-03-22T00:00:00Z"));
+            }
+            _ => panic!("expected log list"),
+        }
+    }
+
+    #[test]
+    fn log_list_until_is_optional() {
+        let cli =
+            Cli::try_parse_from(["red-cell-cli", "log", "list", "--since", "2026-01-01T00:00:00Z"])
+                .expect("log list --since only must parse");
+        match cli.command {
+            Some(Commands::Audit { action: AuditCommands::List { until, .. } }) => {
+                assert!(until.is_none(), "--until should default to None");
+            }
+            _ => panic!("expected log list"),
+        }
+    }
+
+    #[test]
     fn log_tail_follow_default_max_failures_is_five() {
         let cli = Cli::try_parse_from(["red-cell-cli", "log", "tail", "--follow"]).expect("parse");
         match cli.command {

@@ -18,8 +18,8 @@ use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
 
 use super::{LoginRateLimiter, OperatorConnectionManager, routes, teamserver_log_event};
 use crate::{
-    AgentRegistry, AuditWebhookNotifier, AuthService, Database,
-    EventBus, ListenerManager, PayloadBuilderService, ShutdownController, SocketRelayManager,
+    AgentRegistry, AuditWebhookNotifier, AuthService, Database, EventBus, ListenerManager,
+    PayloadBuilderService, ShutdownController, SocketRelayManager,
 };
 use red_cell_common::crypto::{
     WsEnvelope, derive_ws_hmac_key, hash_password_sha3, open_ws_frame, seal_ws_frame,

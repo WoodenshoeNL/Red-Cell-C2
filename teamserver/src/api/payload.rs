@@ -10,11 +10,14 @@ use serde_json::Value;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use base64::Engine as _;
+use red_cell_common::ListenerConfig;
+
 use crate::app::TeamserverState;
 use crate::listeners::ListenerManagerError;
 use crate::{
-    AuditResultStatus, AuditWebhookNotifier, AuthorizationError, PayloadBuildRecord, audit_details,
-    authorize_listener_access, parameter_object,
+    AuditResultStatus, AuditWebhookNotifier, AuthorizationError, Database, PayloadBuildRecord,
+    audit_details, authorize_listener_access, parameter_object,
 };
 
 use super::{
@@ -365,6 +368,16 @@ pub(super) async fn submit_payload_build(
         );
     }
 
+    // For Archon builds on a non-legacy listener, load the ECDH public key so
+    // the compiler can embed it in the binary.
+    let ecdh_pub_key = load_archon_ecdh_pub_key(
+        agent_type,
+        &listener_summary.config,
+        &request.listener,
+        &state.database,
+    )
+    .await;
+
     // Spawn the background build task.
     let db = state.database.clone();
     let payload_builder = state.payload_builder.clone();
@@ -396,7 +409,9 @@ pub(super) async fn submit_payload_build(
             tracing::warn!(build_id = %build_job_id, error = %e, "failed to update payload build status to running");
         }
 
-        match payload_builder.build_payload(&listener_config, &build_request, |_progress| {}).await
+        match payload_builder
+            .build_payload(&listener_config, &build_request, ecdh_pub_key, |_progress| {})
+            .await
         {
             Ok(artifact) => {
                 let size = i64::try_from(artifact.bytes.len()).unwrap_or(i64::MAX);
@@ -644,6 +659,45 @@ pub(super) async fn flush_payload_cache(
                 "cache_flush_failed",
                 err.to_string(),
             )
+        }
+    }
+}
+
+/// Return the listener's X25519 public key when this is an Archon build for a
+/// non-legacy HTTP listener.  Returns `None` for all other combinations so the
+/// build falls back to the legacy AES-CTR key exchange.
+async fn load_archon_ecdh_pub_key(
+    agent_type: &str,
+    listener_config: &ListenerConfig,
+    listener_name: &str,
+    database: &Database,
+) -> Option<[u8; 32]> {
+    let is_archon = agent_type.eq_ignore_ascii_case("Archon");
+    let is_non_legacy_http = matches!(
+        listener_config,
+        ListenerConfig::Http(http) if !http.legacy_mode
+    );
+
+    if !is_archon || !is_non_legacy_http {
+        return None;
+    }
+
+    match database.ecdh().get_or_create_keypair(listener_name).await {
+        Ok(kp) => {
+            tracing::debug!(
+                listener = listener_name,
+                public_key = %base64::engine::general_purpose::STANDARD.encode(kp.public_bytes),
+                "injecting ECDH public key into Archon build"
+            );
+            Some(kp.public_bytes)
+        }
+        Err(err) => {
+            tracing::error!(
+                listener = listener_name,
+                error = %err,
+                "failed to load ECDH keypair for Archon build — building without ECDH"
+            );
+            None
         }
     }
 }

@@ -90,6 +90,21 @@ pub(super) fn format_config_bytes(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("0x{byte:02x}")).collect::<Vec<_>>().join(",")
 }
 
+/// Generate the compiler defines that enable ECDH session key exchange in Archon.
+///
+/// Produces two defines:
+/// - `ARCHON_ECDH_MODE` — activates the `#ifdef ARCHON_ECDH_MODE` code paths.
+/// - `ARCHON_LISTENER_PUBKEY={0x..,...}` — embeds the 32-byte X25519 public
+///   key so the agent can compute the ECDH shared secret without any plaintext
+///   key material in the init packet.
+pub(super) fn archon_ecdh_defines(pub_key: &[u8; 32]) -> Result<Vec<String>, PayloadBuildError> {
+    let mode_define = "ARCHON_ECDH_MODE".to_owned();
+    validate_define(&mode_define)?;
+    let key_define = format!("ARCHON_LISTENER_PUBKEY={{{}}}", format_config_bytes(pub_key));
+    validate_define(&key_define)?;
+    Ok(vec![mode_define, key_define])
+}
+
 /// Generate a random 4-byte Archon magic value and return the corresponding
 /// `-D` define string together with the raw `u32` value.
 ///

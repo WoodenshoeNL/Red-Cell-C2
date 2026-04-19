@@ -240,10 +240,18 @@ impl PayloadBuilderService {
     ///
     /// If a cached artifact exists for the same inputs, the compilation is
     /// skipped and the cached bytes are returned immediately.
+    /// Build a payload artifact for the given listener and request.
+    ///
+    /// `ecdh_pub_key` — X25519 public key to embed in Archon builds targeting
+    /// non-legacy listeners.  When `Some`, the compiler receives
+    /// `-DARCHON_ECDH_MODE` and `-DARCHON_LISTENER_PUBKEY={…}` so the agent
+    /// performs ECDH instead of sending the AES session key in plaintext.
+    /// Ignored for Demon, Phantom, and Specter builds.
     pub async fn build_payload<F>(
         &self,
         listener: &ListenerConfig,
         request: &BuildPayloadRequestInfo,
+        ecdh_pub_key: Option<[u8; 32]>,
         mut progress: F,
     ) -> Result<PayloadArtifact, PayloadBuildError>
     where
@@ -368,6 +376,7 @@ impl PayloadBuilderService {
                 &config,
                 &agent_ctx,
                 temp_dir.path(),
+                ecdh_pub_key,
                 &mut progress,
             )
             .await?;

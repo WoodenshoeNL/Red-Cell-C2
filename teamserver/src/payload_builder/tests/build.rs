@@ -151,7 +151,7 @@ async fn build_payload_rejects_unsupported_listener_protocol()
     });
 
     let error = service
-        .build_payload(&listener, &request, |_| {})
+        .build_payload(&listener, &request, None, |_| {})
         .await
         .expect_err("invalid request should be rejected");
     assert!(matches!(error, PayloadBuildError::InvalidRequest { .. }));
@@ -195,7 +195,7 @@ async fn build_payload_rejects_unsupported_agent_type() -> Result<(), Box<dyn st
     }));
 
     let error = service
-        .build_payload(&listener, &request, |_| {})
+        .build_payload(&listener, &request, None, |_| {})
         .await
         .expect_err("invalid request should be rejected");
     match error {
@@ -246,7 +246,7 @@ async fn build_payload_archon_rejects_missing_source_tree() -> Result<(), Box<dy
     }));
 
     let error = service
-        .build_payload(&listener, &request, |_| {})
+        .build_payload(&listener, &request, None, |_| {})
         .await
         .expect_err("missing archon source tree should be rejected");
     assert!(
@@ -294,7 +294,7 @@ async fn build_payload_rejects_unsupported_architecture() -> Result<(), Box<dyn 
     }));
 
     let error = service
-        .build_payload(&listener, &request, |_| {})
+        .build_payload(&listener, &request, None, |_| {})
         .await
         .expect_err("invalid request should be rejected");
     match error {
@@ -344,7 +344,7 @@ async fn build_payload_rejects_unsupported_output_format() -> Result<(), Box<dyn
     }));
 
     let error = service
-        .build_payload(&listener, &request, |_| {})
+        .build_payload(&listener, &request, None, |_| {})
         .await
         .expect_err("invalid request should be rejected");
     match error {
@@ -477,7 +477,7 @@ async fn build_payload_uses_toolchain_and_returns_compiled_bytes()
 
     let mut messages = Vec::new();
     let artifact = service
-        .build_payload(&listener, &request, |message| messages.push(message.message))
+        .build_payload(&listener, &request, None, |message| messages.push(message.message))
         .await?;
     assert_eq!(artifact.bytes, b"payload");
     assert_eq!(artifact.file_name, "demon.x64.exe");
@@ -623,7 +623,7 @@ async fn build_payload_x86_uses_x86_compiler_and_win32_nasm_format()
         legacy_mode: true,
     }));
 
-    let artifact = service.build_payload(&listener, &request, |_| {}).await?;
+    let artifact = service.build_payload(&listener, &request, None, |_| {}).await?;
 
     assert_eq!(artifact.bytes, b"payload-x86");
     assert_eq!(artifact.file_name, "demon.x86.exe");
@@ -647,7 +647,7 @@ async fn build_payload_compiler_exits_nonzero_returns_command_failed()
     let (service, listener, request) = setup_build_fixture(&temp, nasm_ok, gcc_fail)?;
 
     let error = service
-        .build_payload(&listener, &request, |_| {})
+        .build_payload(&listener, &request, None, |_| {})
         .await
         .expect_err("a compiler that exits non-zero must produce an error");
 
@@ -668,7 +668,7 @@ async fn build_payload_assembler_exits_nonzero_returns_command_failed()
     let (service, listener, request) = setup_build_fixture(&temp, nasm_fail, gcc_ok)?;
 
     let error = service
-        .build_payload(&listener, &request, |_| {})
+        .build_payload(&listener, &request, None, |_| {})
         .await
         .expect_err("an assembler that exits non-zero must produce an error");
 
@@ -689,7 +689,7 @@ async fn build_payload_compiler_failure_populates_diagnostics()
     let (service, listener, request) = setup_build_fixture(&temp, nasm_ok, gcc_fail)?;
 
     let error = service
-        .build_payload(&listener, &request, |_| {})
+        .build_payload(&listener, &request, None, |_| {})
         .await
         .expect_err("compiler failure must yield an error");
 
@@ -721,13 +721,13 @@ async fn build_payload_returns_cached_artifact_on_second_request()
     let (service, listener, request) = setup_build_fixture(&temp, nasm_ok, gcc_ok)?;
 
     // First build — cache miss, runs the compiler.
-    let first = service.build_payload(&listener, &request, |_| {}).await?;
+    let first = service.build_payload(&listener, &request, None, |_| {}).await?;
     assert_eq!(first.bytes, b"payload");
 
     // Second build with identical inputs — cache hit, no recompilation.
     let mut hit_messages = Vec::new();
     let second = service
-        .build_payload(&listener, &request, |m| hit_messages.push(m.message.clone()))
+        .build_payload(&listener, &request, None, |m| hit_messages.push(m.message.clone()))
         .await?;
     assert_eq!(second.bytes, b"payload");
     assert!(
@@ -748,13 +748,13 @@ async fn build_payload_cache_miss_on_different_architecture()
     let (service, listener, request_x64) = setup_build_fixture(&temp, nasm_ok, gcc_ok)?;
     let request_x86 = BuildPayloadRequestInfo { arch: "x86".to_owned(), ..request_x64.clone() };
 
-    let first = service.build_payload(&listener, &request_x64, |_| {}).await?;
+    let first = service.build_payload(&listener, &request_x64, None, |_| {}).await?;
     assert_eq!(first.bytes, b"payload");
 
     // x86 build should NOT return the x64 cached artifact.
     let mut hit_messages = Vec::new();
     service
-        .build_payload(&listener, &request_x86, |m| hit_messages.push(m.message.clone()))
+        .build_payload(&listener, &request_x86, None, |m| hit_messages.push(m.message.clone()))
         .await
         .ok(); // may fail due to stub compiler, but we just need to check messages
     assert!(
@@ -779,7 +779,7 @@ async fn build_payload_demon_and_archon_do_not_share_cache()
     let (service, listener, demon_request) = setup_build_fixture(&temp, nasm_ok, gcc_demon)?;
 
     // First build: Demon — cache miss, compiler writes "demon-bytes".
-    let demon_artifact = service.build_payload(&listener, &demon_request, |_| {}).await?;
+    let demon_artifact = service.build_payload(&listener, &demon_request, None, |_| {}).await?;
     assert_eq!(demon_artifact.bytes, b"demon-bytes");
 
     // Create a minimal Archon source tree so the existence check passes.
@@ -803,7 +803,7 @@ async fn build_payload_demon_and_archon_do_not_share_cache()
     // The build may succeed or fail depending on stub output — we only care about
     // whether a cache hit was reported.
     let _ = service
-        .build_payload(&listener, &archon_request, |m| hit_messages.push(m.message.clone()))
+        .build_payload(&listener, &archon_request, None, |m| hit_messages.push(m.message.clone()))
         .await;
 
     assert!(
@@ -891,7 +891,7 @@ async fn build_payload_raw_shellcode_rejects_x86() -> Result<(), Box<dyn std::er
     }));
 
     let err = service
-        .build_payload(&listener, &request, |_| {})
+        .build_payload(&listener, &request, None, |_| {})
         .await
         .expect_err("x86 raw shellcode must be rejected");
     assert!(
@@ -921,7 +921,7 @@ async fn build_payload_staged_shellcode_rejects_non_http() -> Result<(), Box<dyn
     });
 
     let err = service
-        .build_payload(&listener, &request, |_| {})
+        .build_payload(&listener, &request, None, |_| {})
         .await
         .expect_err("staged shellcode with SMB listener must be rejected");
     assert!(
@@ -949,8 +949,9 @@ async fn build_payload_staged_shellcode_uses_stager_template()
     };
 
     let mut messages = Vec::new();
-    let artifact =
-        service.build_payload(&listener, &request, |m| messages.push(m.message.clone())).await?;
+    let artifact = service
+        .build_payload(&listener, &request, None, |m| messages.push(m.message.clone()))
+        .await?;
 
     assert_eq!(artifact.bytes, b"stager");
     assert_eq!(artifact.file_name, "demon.x64.exe");
@@ -979,7 +980,7 @@ async fn build_payload_raw_shellcode_prepends_dllldr_template()
         config: r#"{"Sleep":"5","Jitter":"0","Sleep Technique":"WaitForSingleObjectEx","Injection":{"Alloc":"Win32","Execute":"Win32","Spawn64":"a","Spawn32":"b"}}"#.to_owned(),
     };
 
-    let artifact = service.build_payload(&listener, &request, |_| {}).await?;
+    let artifact = service.build_payload(&listener, &request, None, |_| {}).await?;
 
     // DllLdr.x64.bin stub is [0x55, 0x48]; the fake gcc writes "dll".
     assert_eq!(&artifact.bytes[..2], &[0x55, 0x48], "DllLdr header not prepended");
@@ -1006,12 +1007,13 @@ async fn build_payload_staged_shellcode_cache_hit_skips_compilation()
     };
 
     // First build — compiles and caches.
-    let first = service.build_payload(&listener, &request, |_| {}).await?;
+    let first = service.build_payload(&listener, &request, None, |_| {}).await?;
 
     // Second build — must return cache hit.
     let mut messages = Vec::new();
-    let second =
-        service.build_payload(&listener, &request, |m| messages.push(m.message.clone())).await?;
+    let second = service
+        .build_payload(&listener, &request, None, |m| messages.push(m.message.clone()))
+        .await?;
 
     assert_eq!(first.bytes, second.bytes, "cached bytes must match compiled bytes");
     assert!(
@@ -1072,8 +1074,9 @@ async fn build_stager_passes_correct_defines_to_compiler() -> Result<(), Box<dyn
     };
 
     let mut messages = Vec::new();
-    let artifact =
-        service.build_payload(&listener, &request, |m| messages.push(m.message.clone())).await?;
+    let artifact = service
+        .build_payload(&listener, &request, None, |m| messages.push(m.message.clone()))
+        .await?;
 
     // Validate artifact metadata.
     assert_eq!(artifact.file_name, "demon.x64.exe");
@@ -1243,7 +1246,7 @@ async fn build_stager_x86_uses_underscore_entry_point() -> Result<(), Box<dyn st
         config: "{}".to_owned(),
     };
 
-    let artifact = service.build_payload(&listener, &request, |_| {}).await?;
+    let artifact = service.build_payload(&listener, &request, None, |_| {}).await?;
 
     // Validate x86 stager output.
     assert_eq!(artifact.bytes, b"stager-x86");
@@ -1292,7 +1295,7 @@ async fn build_stager_copies_template_to_compile_dir() -> Result<(), Box<dyn std
         config: "{}".to_owned(),
     };
 
-    let artifact = service.build_payload(&listener, &request, |_| {}).await?;
+    let artifact = service.build_payload(&listener, &request, None, |_| {}).await?;
 
     assert_eq!(artifact.bytes, b"stager-bin");
     // The gcc stub copies MainStager.c from the compile dir if it exists.
@@ -1348,7 +1351,7 @@ async fn build_payload_phantom_rejects_missing_source_tree()
     }));
 
     let error = service
-        .build_payload(&listener, &request, |_| {})
+        .build_payload(&listener, &request, None, |_| {})
         .await
         .expect_err("missing phantom source tree should be rejected");
     assert!(
@@ -1396,7 +1399,7 @@ async fn build_payload_specter_rejects_missing_source_tree()
     }));
 
     let error = service
-        .build_payload(&listener, &request, |_| {})
+        .build_payload(&listener, &request, None, |_| {})
         .await
         .expect_err("missing specter source tree should be rejected");
     assert!(

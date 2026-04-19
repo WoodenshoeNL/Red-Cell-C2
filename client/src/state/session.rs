@@ -40,7 +40,7 @@ pub(crate) enum AuditFetchStatus {
 }
 
 /// Transient UI state for the audit log viewer panel.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct AuditLogPanelState {
     /// Rows returned from the last successful fetch, newest first.
     pub(crate) rows: Vec<AuditRow>,
@@ -64,6 +64,30 @@ pub(crate) struct AuditLogPanelState {
     pub(crate) show_api_key_input: bool,
     /// Result channel: the background fetch task writes here when done.
     pub(crate) result_rx: Option<tokio::sync::oneshot::Receiver<FetchResult>>,
+    /// Shared HTTP client — reused across page fetches to keep the connection pool alive.
+    pub(crate) http_client: reqwest::Client,
+}
+
+impl Default for AuditLogPanelState {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            total: 0,
+            offset: 0,
+            limit: 0,
+            fetch_status: AuditFetchStatus::default(),
+            filter_actor: String::new(),
+            filter_action: String::new(),
+            filter_agent_id: String::new(),
+            api_key_input: String::new(),
+            show_api_key_input: false,
+            result_rx: None,
+            http_client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build()
+                .unwrap_or_default(),
+        }
+    }
 }
 
 /// Result type for an audit log fetch task.

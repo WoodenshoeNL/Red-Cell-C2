@@ -83,7 +83,9 @@ fn ws_url_to_http_base(ws_url: &str) -> Option<String> {
 /// Fetch one page of audit log entries from the teamserver REST API.
 ///
 /// Runs in a Tokio background task; sends the result through `tx`.
+#[allow(clippy::too_many_arguments)]
 async fn fetch_audit_page(
+    client: reqwest::Client,
     http_base: String,
     api_key: String,
     actor: Option<String>,
@@ -93,15 +95,6 @@ async fn fetch_audit_page(
     limit: usize,
     tx: oneshot::Sender<Result<AuditFetchPayload, String>>,
 ) {
-    let client =
-        match reqwest::Client::builder().timeout(std::time::Duration::from_secs(15)).build() {
-            Ok(c) => c,
-            Err(e) => {
-                let _ = tx.send(Err(format!("failed to build HTTP client: {e}")));
-                return;
-            }
-        };
-
     let mut url = format!("{http_base}/api/v1/audit?limit={limit}&offset={offset}");
     if let Some(a) = actor.filter(|s| !s.trim().is_empty()) {
         url.push_str(&format!("&actor={}", urlencoding_encode(&a)));
@@ -508,9 +501,11 @@ fn trigger_fetch(
     let agent_id = panel.filter_agent_id.trim().to_owned();
     let offset = panel.offset;
     let limit = panel.limit;
+    let client = panel.http_client.clone();
 
     tokio::spawn(async move {
         fetch_audit_page(
+            client,
             http_base,
             api_key,
             if actor.is_empty() { None } else { Some(actor) },

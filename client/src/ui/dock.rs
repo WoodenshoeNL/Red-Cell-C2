@@ -94,6 +94,10 @@ impl ClientApp {
             Some(DockTab::Operators) => {
                 self.render_operators_panel(ui, state);
             }
+            Some(DockTab::AuditLog) => {
+                let local_config = self.local_config.clone();
+                self.render_audit_log_panel(ui, state, &local_config);
+            }
             Some(DockTab::AgentConsole(ref agent_id)) => {
                 let agent_id = agent_id.clone();
                 self.session_panel.selected_console = Some(agent_id.clone());

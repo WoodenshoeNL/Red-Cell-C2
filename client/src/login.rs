@@ -423,6 +423,7 @@ mod tests {
             python_script_timeout_secs: None,
             log_dir: None,
             log_level: None,
+            api_key: None,
         };
         let state = LoginState::new("wss://cli-default/havoc/", &config);
 

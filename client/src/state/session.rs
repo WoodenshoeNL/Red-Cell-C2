@@ -13,6 +13,75 @@ use super::agent::{
 };
 use super::listener::{ListenerDialogState, PayloadDialogState};
 
+// ── Audit log panel state ─────────────────────────────────────────────────────
+
+/// A single row fetched from `GET /api/v1/audit`.
+#[derive(Debug, Clone)]
+pub(crate) struct AuditRow {
+    /// Server-assigned primary key — used as a stable egui widget ID.
+    pub(crate) id: i64,
+    pub(crate) occurred_at: String,
+    pub(crate) actor: String,
+    pub(crate) action: String,
+    pub(crate) target_kind: String,
+    pub(crate) target_id: Option<String>,
+    pub(crate) agent_id: Option<String>,
+    pub(crate) command: Option<String>,
+    pub(crate) result_status: String,
+}
+
+/// Fetch status for the audit log panel.
+#[derive(Debug, Default)]
+pub(crate) enum AuditFetchStatus {
+    #[default]
+    Idle,
+    Fetching,
+    Error(String),
+}
+
+/// Transient UI state for the audit log viewer panel.
+#[derive(Debug, Default)]
+pub(crate) struct AuditLogPanelState {
+    /// Rows returned from the last successful fetch, newest first.
+    pub(crate) rows: Vec<AuditRow>,
+    /// Total matching rows reported by the server for the current filter.
+    pub(crate) total: usize,
+    /// Current page offset.
+    pub(crate) offset: usize,
+    /// Page size (rows per request).
+    pub(crate) limit: usize,
+    /// Whether a fetch is in progress.
+    pub(crate) fetch_status: AuditFetchStatus,
+    /// Filter: operator/actor name substring.
+    pub(crate) filter_actor: String,
+    /// Filter: action label substring.
+    pub(crate) filter_action: String,
+    /// Filter: agent ID hex substring.
+    pub(crate) filter_agent_id: String,
+    /// API key input field (editable in the panel when not in LocalConfig).
+    pub(crate) api_key_input: String,
+    /// Whether the API key input field should be shown.
+    pub(crate) show_api_key_input: bool,
+    /// Result channel: the background fetch task writes here when done.
+    pub(crate) result_rx: Option<tokio::sync::oneshot::Receiver<FetchResult>>,
+}
+
+/// Result type for an audit log fetch task.
+pub(crate) type FetchResult = Result<AuditFetchPayload, String>;
+
+/// Successful audit log fetch payload.
+#[derive(Debug)]
+pub(crate) struct AuditFetchPayload {
+    pub(crate) rows: Vec<AuditRow>,
+    pub(crate) total: usize,
+    pub(crate) offset: usize,
+    pub(crate) limit: usize,
+}
+
+impl AuditLogPanelState {
+    pub(crate) const DEFAULT_LIMIT: usize = 50;
+}
+
 // ── Operator management panel state ──────────────────────────────────────────
 
 /// Transient UI state for the operator management panel.
@@ -71,6 +140,8 @@ pub(crate) struct SessionPanelState {
     pub(crate) payload_dialog: Option<PayloadDialogState>,
     /// Operator management panel state.
     pub(crate) operators_panel: OperatorPanelState,
+    /// Audit log viewer panel state.
+    pub(crate) audit_log_panel: AuditLogPanelState,
     /// Set to true when the "Mark all read" button is pressed; consumed in `render_main_ui`.
     pub(crate) pending_mark_all_read: bool,
     /// Bottom dock panel state.

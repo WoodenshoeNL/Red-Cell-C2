@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod audit;
 pub mod chat;
 pub mod console;
 pub mod listeners;

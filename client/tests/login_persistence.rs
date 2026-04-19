@@ -31,6 +31,7 @@ fn persisted_config_populates_login_state_and_message() {
         python_script_timeout_secs: None,
         log_dir: None,
         log_level: None,
+        api_key: None,
     };
 
     persisted.save_to(&config_path).unwrap_or_else(|e| panic!("save_to should succeed: {e}"));
@@ -89,6 +90,7 @@ fn optional_tls_fields_remain_unset_in_persisted_flow() {
         python_script_timeout_secs: None,
         log_dir: None,
         log_level: None,
+        api_key: None,
     };
 
     persisted.save_to(&config_path).unwrap_or_else(|e| panic!("save_to should succeed: {e}"));

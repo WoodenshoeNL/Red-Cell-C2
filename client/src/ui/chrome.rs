@@ -91,6 +91,10 @@ impl ClientApp {
                     self.session_panel.dock.open_tab(DockTab::Operators);
                     ui.close();
                 }
+                if ui.button("Audit Log").clicked() {
+                    self.session_panel.dock.open_tab(DockTab::AuditLog);
+                    ui.close();
+                }
             });
 
             ui.menu_button("Attack", |ui| {

@@ -17,6 +17,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 futures-util = "0.3"
 pyo3 = { version = "0.23", features = ["abi3-py310"] }
 red-cell-common = { path = "../common" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rfd = "0.15"
 rustls-pemfile = "2.2"
 serde = { version = "1.0", features = ["derive"] }

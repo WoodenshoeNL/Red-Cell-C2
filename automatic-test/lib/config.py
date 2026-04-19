@@ -34,6 +34,7 @@ class ConfigError(Exception):
 class ServerConfig:
     url: str
     rest_url: str | None = None
+    cert_fingerprint: str | None = None
 
 
 @dataclass
@@ -209,7 +210,7 @@ _ALLOWED_ENV_ROOT = frozenset({
     "kerberos",
 })
 
-_ALLOWED_SERVER_KEYS = frozenset({"url", "rest_url"})
+_ALLOWED_SERVER_KEYS = frozenset({"url", "rest_url", "cert_fingerprint"})
 _ALLOWED_OPERATOR_KEYS = frozenset({"username", "password", "api_key"})
 _ALLOWED_TIMEOUTS_KEYS = frozenset({
     "agent_checkin",
@@ -386,9 +387,12 @@ def parse_env_config(raw: dict[str, Any]) -> EnvConfig:
         url = _non_empty_str(server_t.get("url"), "[server].url", errors)
         rest = server_t.get("rest_url")
         rest_url = _optional_str(rest, "[server].rest_url", errors) if rest is not None else None
+        fp = server_t.get("cert_fingerprint")
+        cert_fingerprint = _optional_str(fp, "[server].cert_fingerprint", errors) if fp is not None else None
     else:
         url = None
         rest_url = None
+        cert_fingerprint = None
 
     op_t = _require_table(raw, "operator", errors)
     if op_t is not None:

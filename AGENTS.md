@@ -222,7 +222,7 @@ Teamserver profiles live in `./profiles/` (`.yaotl` config files + TLS certs). T
 | Directory | Name | Language | Status | Policy |
 |-----------|------|----------|--------|--------|
 | `agent/demon/` | **Demon** | C/ASM | ✅ Production | **Frozen** — pristine Havoc Demon copy. Do not modify. Replace with upstream to update. |
-| `agent/archon/` | **Archon** | C/ASM | 🔨 Phase 2a | **Fork of Demon.** Initially identical to Demon — compile + test parity first. Enhancements in a later phase. Build: same toolchain as Demon (`mingw-w64` + `nasm`). |
+| `agent/archon/` | **Archon** | C/ASM | ✅ Production | **Fork of Demon with 9 enhancements (ARC-01 through ARC-09). Wire-compatible. Same toolchain (`mingw-w64` + `nasm`).** Parity milestone complete; all enhancements implemented and tested (191 tests pass). Teamserver integration complete. |
 | `agent/phantom/` | **Phantom** | Rust | 🔨 Phase 2b | **Linux Rust agent.** Demon-compatible transport. Linux-specific capabilities. Build: `cargo build --target x86_64-unknown-linux-musl`. |
 | `agent/specter/` | **Specter** | Rust | 🔨 Phase 2c | **Windows Rust agent.** Full Demon protocol/feature parity. Build: `cargo build --target x86_64-pc-windows-gnu`. |
 

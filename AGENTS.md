@@ -56,7 +56,7 @@ Do not use GitHub Actions for this repository.
 | **Client UI** | egui (pure Rust, immediate-mode) |
 | **Plugin system** | Python via PyO3 (client + teamserver) |
 | **New features** | RBAC, REST API, DNS listener, structured audit logging |
-| **Agent builds** | Demon and Archon: cross-compiled C/ASM via `mingw-w64` + `nasm` (same toolchain as Demon). Phantom and Specter: `cargo build --target x86_64-unknown-linux-gnu` / `x86_64-pc-windows-gnu`. |
+| **Agent builds** | Demon and Archon: cross-compiled C/ASM via `mingw-w64` + `nasm` (same toolchain as Demon). Phantom and Specter: `cargo build --target x86_64-unknown-linux-musl` / `x86_64-pc-windows-gnu`. |
 | **Testing** | Unit + integration (mock Demon agent) + E2E automated harness (`automatic-test/test.py`) + manual test plan (see `docs/test-plan.md`). |
 
 ## client-cli Design Spec (`red-cell-cli`)
@@ -223,7 +223,7 @@ Teamserver profiles live in `./profiles/` (`.yaotl` config files + TLS certs). T
 |-----------|------|----------|--------|--------|
 | `agent/demon/` | **Demon** | C/ASM | ✅ Production | **Frozen** — pristine Havoc Demon copy. Do not modify. Replace with upstream to update. |
 | `agent/archon/` | **Archon** | C/ASM | 🔨 Phase 2a | **Fork of Demon.** Initially identical to Demon — compile + test parity first. Enhancements in a later phase. Build: same toolchain as Demon (`mingw-w64` + `nasm`). |
-| `agent/phantom/` | **Phantom** | Rust | 🔨 Phase 2b | **Linux Rust agent.** Demon-compatible transport. Linux-specific capabilities. Build: `cargo build --target x86_64-unknown-linux-gnu`. |
+| `agent/phantom/` | **Phantom** | Rust | 🔨 Phase 2b | **Linux Rust agent.** Demon-compatible transport. Linux-specific capabilities. Build: `cargo build --target x86_64-unknown-linux-musl`. |
 | `agent/specter/` | **Specter** | Rust | 🔨 Phase 2c | **Windows Rust agent.** Full Demon protocol/feature parity. Build: `cargo build --target x86_64-pc-windows-gnu`. |
 
 ### Agent build commands
@@ -235,7 +235,7 @@ make          # uses the same Makefile structure as agent/demon
 
 # Phantom (Rust, Linux)
 cd agent/phantom
-cargo build --release --target x86_64-unknown-linux-gnu
+cargo build --release --target x86_64-unknown-linux-musl
 
 # Specter (Rust, Windows cross-compile from Linux)
 cd agent/specter

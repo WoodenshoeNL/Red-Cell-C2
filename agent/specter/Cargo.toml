@@ -22,6 +22,7 @@ todo = "deny"
 unwrap_used = "deny"
 
 [dependencies]
+base64 = "0.22"
 red-cell-common = { path = "../../common" }
 thiserror = "2.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net"] }

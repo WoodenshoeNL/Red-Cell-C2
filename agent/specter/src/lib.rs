@@ -10,6 +10,7 @@ pub mod dispatch;
 pub mod doh_transport;
 pub mod dotnet;
 pub mod download;
+pub mod ecdh;
 pub mod error;
 pub mod job;
 pub mod kerberos;

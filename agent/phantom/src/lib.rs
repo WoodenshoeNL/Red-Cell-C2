@@ -3,6 +3,7 @@
 pub mod agent;
 mod command;
 pub mod config;
+pub mod ecdh;
 pub mod error;
 pub(crate) mod kerberos;
 mod parser;

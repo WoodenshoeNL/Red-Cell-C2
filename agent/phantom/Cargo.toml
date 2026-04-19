@@ -22,6 +22,7 @@ unwrap_used = "deny"
 
 [dependencies]
 anyhow = "1"
+base64 = "0.22"
 libc = "0.2"
 png = "0.18"
 rand = "0.9"

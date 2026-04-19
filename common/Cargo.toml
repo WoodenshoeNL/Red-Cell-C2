@@ -11,11 +11,13 @@ workspace = true
 
 [dependencies]
 aes = "0.8"
+aes-gcm = "0.10"
 base64 = "0.22"
 cipher = "0.4"
 ctr = "0.9"
 getrandom = "0.3"
 subtle = "1"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
 zeroize = { version = "1", features = ["derive", "serde"] }
 hmac = "0.12"
 hkdf = "0.12"

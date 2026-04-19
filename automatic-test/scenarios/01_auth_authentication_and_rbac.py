@@ -43,7 +43,7 @@ def run(ctx):
     )
 
     # ── Test 2: Invalid credentials → exit code 3 ─────────────────────────────
-    bad_cfg = CliConfig(server=cli.server, token="invalid-bad-token-xyz123")
+    bad_cfg = cli.with_token("invalid-bad-token-xyz123")
     try:
         login(bad_cfg)
         raise AssertionError(
@@ -67,7 +67,7 @@ def run(ctx):
     analyst_key = env.get("analyst_operator", {}).get("api_key", "")
     if analyst_key:
         from lib.cli import operator_create
-        analyst_cfg = CliConfig(server=cli.server, token=analyst_key)
+        analyst_cfg = cli.with_token(analyst_key)
         try:
             operator_create(
                 analyst_cfg,
@@ -90,10 +90,7 @@ def run(ctx):
         )
 
     # ── Test 5: Expired / revoked token rejected ───────────────────────────────
-    expired_cfg = CliConfig(
-        server=cli.server,
-        token="expired-token-00000000-0000-0000-0000-000000000000",
-    )
+    expired_cfg = cli.with_token("expired-token-00000000-0000-0000-0000-000000000000")
     try:
         status(expired_cfg)
         raise AssertionError(

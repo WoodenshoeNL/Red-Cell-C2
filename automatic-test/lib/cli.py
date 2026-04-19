@@ -49,6 +49,12 @@ class CliConfig:
     #: timeout is ``min(timeout + 10, max_subprocess_secs)``.
     max_subprocess_secs: int = 120
     extra_env: dict[str, str] = field(default_factory=dict)
+    cert_fingerprint: str | None = None
+
+    def with_token(self, token: str) -> "CliConfig":
+        """Return a copy of this config with a different token, preserving all other fields."""
+        from dataclasses import replace
+        return replace(self, token=token)
 
 
 def _run(cfg: CliConfig, *args: str) -> dict[str, Any]:
@@ -65,8 +71,9 @@ def _run(cfg: CliConfig, *args: str) -> dict[str, Any]:
     subprocess_timeout = min(cfg.timeout + 10, cfg.max_subprocess_secs)
 
     try:
+        fp_args = ["--cert-fingerprint", cfg.cert_fingerprint] if cfg.cert_fingerprint else []
         result = subprocess.run(
-            [cfg.binary, "--output", "json", "--timeout", str(cfg.timeout), *args],
+            [cfg.binary, "--output", "json", "--timeout", str(cfg.timeout), *fp_args, *args],
             capture_output=True,
             text=True,
             env=env,

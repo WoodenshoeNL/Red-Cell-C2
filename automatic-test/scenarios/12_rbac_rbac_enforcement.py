@@ -95,7 +95,7 @@ def run(ctx):
             "set analyst_operator.api_key in config/env.toml to enable"
         )
 
-    viewer_cfg = CliConfig(server=cli.server, token=analyst_key)
+    viewer_cfg = cli.with_token(analyst_key)
     uid = _short_id()
     viewer_username = f"test-viewer-{uid}"
     admin_test_listener = f"test-rbac-listener-{uid}"

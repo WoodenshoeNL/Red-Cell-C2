@@ -641,7 +641,7 @@ def parse_env_config(raw: dict[str, Any]) -> EnvConfig:
     assert dns_port is not None and smb_pipe is not None
 
     return EnvConfig(
-        server=ServerConfig(url=url, rest_url=rest_url),
+        server=ServerConfig(url=url, rest_url=rest_url, cert_fingerprint=cert_fingerprint),
         operator=OperatorConfig(username=op_user, api_key=api_key, password=password),
         timeouts=TimeoutsConfig(
             agent_checkin=tr["agent_checkin"],  # type: ignore[arg-type]
@@ -854,6 +854,7 @@ def make_cli_config_from_parsed(cfg: EnvConfig, env: dict[str, Any]) -> CliConfi
         token=_resolve_api_key(env),
         timeout=int(t.command_output),
         max_subprocess_secs=int(t.max_cli_subprocess_secs),
+        cert_fingerprint=cfg.server.cert_fingerprint,
     )
 
 

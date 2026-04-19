@@ -84,51 +84,43 @@ void sha256_init(sha256_ctx *ctx) {
 }
 
 void sha256_update(sha256_ctx *ctx, const sha_u8 *data, sha_size_t len) {
-    sha_size_t buf_used = (sha_size_t)(ctx->count & 63);
-
-    ctx->count += (sha_u64)len;
-
-    if (buf_used) {
-        sha_size_t fill = SHA256_BLOCK_LEN - buf_used;
-        if (len < fill) {
-            /* Data fits in the partial block */
-            sha_size_t j;
-            for (j = 0; j < len; j++) ctx->buf[buf_used+j] = data[j];
-            return;
-        }
-        sha_size_t j;
-        for (j = 0; j < fill; j++) ctx->buf[buf_used+j] = data[j];
-        sha256_compress(ctx->state, ctx->buf);
-        data += fill; len -= fill;
+    sha_size_t i;
+    for (i = 0; i < len; ++i) {
+        ctx->buf[ctx->count & 63u] = data[i];
+        ctx->count++;
+        if ((ctx->count & 63u) == 0)
+            sha256_compress(ctx->state, ctx->buf);
     }
-
-    while (len >= SHA256_BLOCK_LEN) {
-        sha256_compress(ctx->state, data);
-        data += SHA256_BLOCK_LEN;
-        len  -= SHA256_BLOCK_LEN;
-    }
-
-    sha_size_t j;
-    for (j = 0; j < len; j++) ctx->buf[j] = data[j];
 }
 
 void sha256_final(sha256_ctx *ctx, sha_u8 digest[SHA256_DIGEST_LEN]) {
-    sha_u64 bit_count = ctx->count * 8;
-    sha_size_t buf_used = (sha_size_t)(ctx->count & 63);
-    sha_u8 pad[64] = {0};
-    sha_size_t pad_len, i;
+    sha_u64 bit_count = ctx->count * 8u;
+    sha_size_t buf_used = (sha_size_t)(ctx->count & 63u);
+    sha_size_t i;
 
-    pad[0] = 0x80;
-    pad_len = (buf_used < 56) ? (56 - buf_used) : (120 - buf_used);
-    sha256_update(ctx, pad, pad_len);
+    /* Append 0x80 padding byte */
+    ctx->buf[buf_used++] = 0x80;
 
-    /* Append 64-bit big-endian bit count */
-    sha_u8 bc[8];
-    bc[0]=(sha_u8)(bit_count>>56); bc[1]=(sha_u8)(bit_count>>48);
-    bc[2]=(sha_u8)(bit_count>>40); bc[3]=(sha_u8)(bit_count>>32);
-    bc[4]=(sha_u8)(bit_count>>24); bc[5]=(sha_u8)(bit_count>>16);
-    bc[6]=(sha_u8)(bit_count>> 8); bc[7]=(sha_u8)(bit_count    );
-    sha256_update(ctx, bc, 8);
+    /* If no room for the 8-byte length field, flush the partial block */
+    if (buf_used > 56) {
+        while (buf_used < 64) ctx->buf[buf_used++] = 0;
+        sha256_compress(ctx->state, ctx->buf);
+        buf_used = 0;
+    }
+
+    /* Zero-pad up to the length field position */
+    while (buf_used < 56) ctx->buf[buf_used++] = 0;
+
+    /* Append big-endian bit count */
+    ctx->buf[56] = (sha_u8)(bit_count >> 56);
+    ctx->buf[57] = (sha_u8)(bit_count >> 48);
+    ctx->buf[58] = (sha_u8)(bit_count >> 40);
+    ctx->buf[59] = (sha_u8)(bit_count >> 32);
+    ctx->buf[60] = (sha_u8)(bit_count >> 24);
+    ctx->buf[61] = (sha_u8)(bit_count >> 16);
+    ctx->buf[62] = (sha_u8)(bit_count >>  8);
+    ctx->buf[63] = (sha_u8)(bit_count      );
+    sha256_compress(ctx->state, ctx->buf);
 
     for (i = 0; i < 8; i++) { BE32(digest + 4*i, ctx->state[i]); }
 }
@@ -191,14 +183,14 @@ void hkdf_sha256_expand(
 ) {
     sha_u8  t[SHA256_DIGEST_LEN];
     sha_u8  prev[SHA256_DIGEST_LEN];
-    sha_size_t t_len = 0;   /* length of previous T block */
+    sha_size_t t_len = 0;
     sha_u8  counter = 1;
     sha_size_t out_pos = 0;
 
     while (out_pos < out_len) {
-        /* HMAC-SHA256(PRK, T(i-1) || info || i) */
-        sha_u8 tmp[SHA256_DIGEST_LEN + 256 + 1];  /* 256 bytes max info */
-        sha_size_t tmp_len = 0, i;
+        sha_u8 tmp[SHA256_DIGEST_LEN + 256 + 1];
+        sha_size_t tmp_len = 0;
+        sha_size_t i, copy;
 
         for (i = 0; i < t_len; i++) tmp[tmp_len++] = prev[i];
         for (i = 0; i < info_len && tmp_len < sizeof(tmp)-1; i++)
@@ -209,7 +201,7 @@ void hkdf_sha256_expand(
         for (i = 0; i < SHA256_DIGEST_LEN; i++) prev[i] = t[i];
         t_len = SHA256_DIGEST_LEN;
 
-        sha_size_t copy = out_len - out_pos;
+        copy = out_len - out_pos;
         if (copy > SHA256_DIGEST_LEN) copy = SHA256_DIGEST_LEN;
         for (i = 0; i < copy; i++) out[out_pos++] = t[i];
     }

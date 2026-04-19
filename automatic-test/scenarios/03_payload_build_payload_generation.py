@@ -43,7 +43,7 @@ def run(ctx):
 
     Raises AssertionError with a descriptive message on any failure.
     """
-    from lib.cli import CliError, listener_create, listener_delete, payload_build, payload_build_and_fetch
+    from lib.cli import CliError, listener_create, listener_delete, payload_build, payload_build_and_fetch, payload_cache_flush
 
     cli = ctx.cli
     uid = _short_id()
@@ -133,7 +133,9 @@ def run(ctx):
         #
         # Build the same config twice. The second build should use a cached
         # artifact and complete significantly faster than the first.
+        # Flush before measuring so the first build is always a real compile.
         print("  [cache-hit] testing build cache")
+        payload_cache_flush(cli)
 
         t0 = time.monotonic()
         payload_build_and_fetch(cli, listener=listener_name,

@@ -44,23 +44,6 @@ static void derive_session_key(
                        session_key, 32);
 }
 
-/* ── RNG bridge ──────────────────────────────────────────────────────────── */
-
-/*
- * Adapter: the RNG callback signature in EcdhInit uses (ei_u8*, ei_size_t),
- * while AesGcm uses (gcm_u8*, gcm_size_t).  They are the same types, so a
- * simple cast works.
- */
-typedef ei_bool (*ei_rng_fn)(ei_u8 *, ei_size_t);
-
-static gcm_bool gcm_rng_bridge(gcm_u8 *buf, gcm_size_t len) {
-    /* This is filled in per-call via a function pointer stored in a static;
-     * the seal helpers are called directly from the function bodies below,
-     * so we avoid needing a global. */
-    (void)buf; (void)len;
-    return GCM_FALSE;  /* unused; see local wrappers */
-}
-
 /* ── Public API ──────────────────────────────────────────────────────────── */
 
 ei_bool ecdh_build_registration_packet(

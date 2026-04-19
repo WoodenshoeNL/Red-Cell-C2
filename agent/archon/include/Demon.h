@@ -30,6 +30,10 @@
 
 #ifdef ARCHON_ECDH_MODE
 #include <crypt/EcdhInit.h>
+/* CSPRNG adapter for ECDH operations (defined in Demon.c, uses BCryptGenRandom). */
+ei_bool ArchonEcdhRng(ei_u8 *buf, ei_size_t len);
+/* 32-byte X25519 listener public key compiled into the binary. */
+extern const ei_u8 ArchonListenerKey[32];
 #endif
 
 #ifdef DEBUG

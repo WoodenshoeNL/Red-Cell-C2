@@ -206,6 +206,27 @@ def payload_build(cfg: CliConfig, listener: str,
     return _run(run_cfg, *args)
 
 
+def payload_cache_flush(cfg: CliConfig) -> dict:
+    """Flush all cached payload build artifacts.  Admin-only endpoint."""
+    import json
+    import ssl
+    import urllib.request
+
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+
+    req = urllib.request.Request(
+        f"{cfg.server}/api/v1/payload-cache",
+        method="POST",
+        headers={"Authorization": f"Bearer {cfg.token}"},
+        data=b"",
+    )
+    with urllib.request.urlopen(req, context=ctx, timeout=cfg.timeout) as resp:
+        body = resp.read().decode()
+    return json.loads(body) if body else {}
+
+
 def payload_download(cfg: CliConfig, payload_id: str | int, dst: str) -> dict:
     """Download a built payload to a local file."""
     return _run(cfg, "payload", "download", str(payload_id), "--dst", dst)

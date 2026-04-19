@@ -14,10 +14,6 @@ typedef x25519_i32 fe[10];
 
 /* ── Little-endian multi-byte loads ─────────────────────────────────────── */
 
-static x25519_u64 load3(const x25519_u8 *s) {
-    return (x25519_u64)s[0] | ((x25519_u64)s[1] << 8) | ((x25519_u64)s[2] << 16);
-}
-
 static x25519_u64 load4(const x25519_u8 *s) {
     return (x25519_u64)s[0] | ((x25519_u64)s[1] << 8)
          | ((x25519_u64)s[2] << 16) | ((x25519_u64)s[3] << 24);
@@ -260,7 +256,7 @@ static void fe_invert(fe h, const fe z) {
     int i;
 
     fe_sq(z2, z);
-    fe_sq(tmp, z2); fe_sq(tmp, tmp); fe_sq(tmp, tmp);
+    fe_sq(tmp, z2); fe_sq(tmp, tmp);
     fe_mul(z9, tmp, z);
     fe_mul(z11, z9, z2);
     fe_sq(tmp, z11); fe_mul(z2_5_0, tmp, z9);

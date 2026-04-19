@@ -100,6 +100,7 @@ mod tests {
                 payload_array: encoded_payload.clone(),
                 format: "Windows Exe".to_string(),
                 file_name: "demon.exe".to_string(),
+                export_name: None,
             },
         });
 

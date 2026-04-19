@@ -66,6 +66,7 @@ pub(super) fn build_payload_response_event(
     file_name: &str,
     format: &str,
     bytes: &[u8],
+    export_name: Option<String>,
 ) -> OperatorMessage {
     OperatorMessage::BuildPayloadResponse(Message {
         head: MessageHead {
@@ -78,6 +79,7 @@ pub(super) fn build_payload_response_event(
             payload_array: BASE64_STANDARD.encode(bytes),
             format: format.to_owned(),
             file_name: file_name.to_owned(),
+            export_name,
         },
     })
 }

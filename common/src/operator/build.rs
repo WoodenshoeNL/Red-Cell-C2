@@ -35,6 +35,12 @@ pub struct BuildPayloadResponseInfo {
     /// Suggested output filename.
     #[serde(rename = "FileName")]
     pub file_name: String,
+    /// For Archon DLL/ReflectiveDll payloads: the randomized export function
+    /// name injected at compile time (e.g. `Arc3f8b1a…`).  `null` / absent for
+    /// all other payload types.  Loaders that invoke the DLL by export name must
+    /// use this value instead of the hard-coded `Start` identifier.
+    #[serde(rename = "ExportName", default, skip_serializing_if = "Option::is_none")]
+    pub export_name: Option<String>,
 }
 
 /// Build payload console/log message payload.

@@ -209,6 +209,9 @@ pub struct PayloadBuildRecord {
     pub size_bytes: Option<i64>,
     /// Error message (populated when status is `"error"`).
     pub error: Option<String>,
+    /// For Archon DLL/ReflectiveDll builds: the randomized export function name
+    /// injected at compile time.  `None` for all other agent types and formats.
+    pub export_name: Option<String>,
     /// RFC 3339 creation timestamp.
     pub created_at: String,
     /// RFC 3339 last-update timestamp.
@@ -229,6 +232,7 @@ struct PayloadBuildRow {
     artifact: Option<Vec<u8>>,
     size_bytes: Option<i64>,
     error: Option<String>,
+    export_name: Option<String>,
     created_at: String,
     updated_at: String,
 }
@@ -247,6 +251,7 @@ impl From<PayloadBuildRow> for PayloadBuildRecord {
             artifact: row.artifact,
             size_bytes: row.size_bytes,
             error: row.error,
+            export_name: row.export_name,
             created_at: row.created_at,
             updated_at: row.updated_at,
         }
@@ -278,6 +283,8 @@ pub struct PayloadBuildSummary {
     pub size_bytes: Option<i64>,
     /// Error message (populated when status is `"error"`).
     pub error: Option<String>,
+    /// For Archon DLL/ReflectiveDll builds: the randomized export function name.
+    pub export_name: Option<String>,
     /// RFC 3339 creation timestamp.
     pub created_at: String,
     /// RFC 3339 last-update timestamp.
@@ -297,6 +304,7 @@ struct PayloadBuildSummaryRow {
     sleep_secs: Option<i64>,
     size_bytes: Option<i64>,
     error: Option<String>,
+    export_name: Option<String>,
     created_at: String,
     updated_at: String,
 }
@@ -314,6 +322,7 @@ impl From<PayloadBuildSummaryRow> for PayloadBuildSummary {
             sleep_secs: row.sleep_secs,
             size_bytes: row.size_bytes,
             error: row.error,
+            export_name: row.export_name,
             created_at: row.created_at,
             updated_at: row.updated_at,
         }
@@ -388,7 +397,7 @@ impl PayloadBuildRepository {
     ) -> Result<Option<PayloadBuildSummary>, TeamserverError> {
         const QUERY: &str = "\
             SELECT id, status, name, arch, format, listener, agent_type, sleep_secs, \
-                   size_bytes, error, created_at, updated_at \
+                   size_bytes, error, export_name, created_at, updated_at \
             FROM ts_payload_builds WHERE id = ?";
         let row = sqlx::query_as::<_, PayloadBuildSummaryRow>(QUERY)
             .bind(id)
@@ -401,7 +410,7 @@ impl PayloadBuildRepository {
     pub async fn list_summaries(&self) -> Result<Vec<PayloadBuildSummary>, TeamserverError> {
         const QUERY: &str = "\
             SELECT id, status, name, arch, format, listener, agent_type, sleep_secs, \
-                   size_bytes, error, created_at, updated_at \
+                   size_bytes, error, export_name, created_at, updated_at \
             FROM ts_payload_builds ORDER BY created_at DESC";
         let rows = sqlx::query_as::<_, PayloadBuildSummaryRow>(QUERY).fetch_all(&self.pool).await?;
         Ok(rows.into_iter().map(Into::into).collect())
@@ -437,6 +446,7 @@ impl PayloadBuildRepository {
         artifact: Option<&[u8]>,
         size_bytes: Option<i64>,
         error: Option<&str>,
+        export_name: Option<&str>,
         updated_at: &str,
     ) -> Result<bool, TeamserverError> {
         let result = sqlx::query(
@@ -447,6 +457,7 @@ impl PayloadBuildRepository {
                 artifact = COALESCE(?, artifact),
                 size_bytes = COALESCE(?, size_bytes),
                 error = COALESCE(?, error),
+                export_name = COALESCE(?, export_name),
                 updated_at = ?
             WHERE id = ?
             "#,
@@ -456,6 +467,7 @@ impl PayloadBuildRepository {
         .bind(artifact)
         .bind(size_bytes)
         .bind(error)
+        .bind(export_name)
         .bind(updated_at)
         .bind(id)
         .execute(&self.pool)
@@ -528,6 +540,7 @@ mod tests {
             artifact: None,
             size_bytes: None,
             error: None,
+            export_name: None,
             created_at: "2026-03-27T00:00:00Z".to_owned(),
             updated_at: "2026-03-27T00:00:00Z".to_owned(),
         }
@@ -631,6 +644,7 @@ mod tests {
             artifact: Some(vec![0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE]),
             size_bytes: Some(6),
             error: None,
+            export_name: None,
             created_at: "2026-03-27T10:00:00Z".to_owned(),
             updated_at: "2026-03-27T10:05:00Z".to_owned(),
         };
@@ -728,6 +742,7 @@ mod tests {
                 Some(artifact_bytes),
                 Some(4),
                 None,
+                None,
                 "2026-03-27T12:00:00Z",
             )
             .await
@@ -745,7 +760,16 @@ mod tests {
         let db = Database::connect_in_memory().await.expect("db");
         let updated = db
             .payload_builds()
-            .update_status("nonexistent-id", "done", None, None, None, None, "2026-03-27T12:00:00Z")
+            .update_status(
+                "nonexistent-id",
+                "done",
+                None,
+                None,
+                None,
+                None,
+                None,
+                "2026-03-27T12:00:00Z",
+            )
             .await
             .expect("update_status");
         assert!(!updated);
@@ -768,6 +792,7 @@ mod tests {
                 None,
                 None,
                 Some("build timed out"),
+                None,
                 "2026-03-27T13:00:00Z",
             )
             .await

@@ -49,6 +49,11 @@ pub struct PayloadArtifact {
     pub file_name: String,
     /// Echoed output format string.
     pub format: String,
+    /// For Archon DLL/ReflectiveDll builds: the randomized export function name
+    /// (e.g. `Arc3f8b1a…`).  `None` for all other formats and agent types.
+    /// Callers that invoke the DLL explicitly (rundll32, loaders) must use this
+    /// name rather than the well-known `Start` identifier.
+    pub export_name: Option<String>,
 }
 
 /// Errors returned by the Demon payload builder.
@@ -360,6 +365,9 @@ impl PayloadBuilderService {
                     bytes: cached,
                     file_name,
                     format: request.format.clone(),
+                    // Archon builds bypass the cache (is_archon guard above), so cached
+                    // artifacts are always non-Archon; export_name is never needed here.
+                    export_name: None,
                 });
             }
         }
@@ -368,7 +376,7 @@ impl PayloadBuilderService {
 
         let temp_dir = TempDir::new()?;
         let agent_ctx = AgentBuildContext { name: agent_name, source_root };
-        let compiled = self
+        let (compiled, export_name) = self
             .build_impl(
                 listener,
                 architecture,
@@ -386,7 +394,12 @@ impl PayloadBuilderService {
             self.inner.cache.put(key, &compiled).await;
         }
 
-        Ok(PayloadArtifact { bytes: compiled, file_name, format: request.format.clone() })
+        Ok(PayloadArtifact {
+            bytes: compiled,
+            file_name,
+            format: request.format.clone(),
+            export_name,
+        })
     }
 
     /// Return a reference to the payload artifact cache.

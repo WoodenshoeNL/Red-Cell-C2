@@ -101,6 +101,7 @@ pub(super) async fn handle_build_payload_request(
                     &artifact.file_name,
                     &artifact.format,
                     artifact.bytes.as_slice(),
+                    artifact.export_name.clone(),
                 ));
                 log_operator_action(
                     &database,

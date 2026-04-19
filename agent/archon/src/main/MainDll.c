@@ -2,10 +2,15 @@
 
 #include <common/Defines.h>
 
+/* Build-time configurable export name — injected as -DDEMON_EXPORT_NAME=<id> by the
+ * teamserver or CMakeLists.txt.  The fallback keeps manual cmake builds functional. */
+#ifndef DEMON_EXPORT_NAME
+#define DEMON_EXPORT_NAME Start
+#endif
+
 #ifndef SHELLCODE
-/* Export this for rundll32 or any other program that requires and exported functions...
- * TODO: make this function name optional/changeable in the payload generator.*/
-DLLEXPORT VOID Start(  )
+/* Export entry point for rundll32 or any loader that invokes an explicit DLL export. */
+DLLEXPORT VOID DEMON_EXPORT_NAME(  )
 {
     /* prevent exiting if started using rundll32 or something */
     PVOID Kernel32  = LdrModulePeb( H_MODULE_KERNEL32 );

@@ -280,8 +280,14 @@ fn parse_seq_num_prefix(decrypted: &[u8]) -> Result<(u64, &[u8]), &'static str> 
         return Err("payload too short for seq_num prefix (need ≥ 8 bytes)");
     }
     let seq_num = u64::from_le_bytes([
-        decrypted[0], decrypted[1], decrypted[2], decrypted[3],
-        decrypted[4], decrypted[5], decrypted[6], decrypted[7],
+        decrypted[0],
+        decrypted[1],
+        decrypted[2],
+        decrypted[3],
+        decrypted[4],
+        decrypted[5],
+        decrypted[6],
+        decrypted[7],
     ]);
     Ok((seq_num, &decrypted[8..]))
 }

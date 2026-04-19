@@ -90,6 +90,7 @@ fn payload_artifact_clone_and_eq() {
         bytes: vec![1, 2, 3],
         file_name: "test.exe".to_owned(),
         format: "Windows Exe".to_owned(),
+        export_name: None,
     };
     let b = a.clone();
     assert_eq!(a, b);

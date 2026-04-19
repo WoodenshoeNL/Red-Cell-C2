@@ -406,6 +406,7 @@ async fn seed_payload_build(
         size_bytes: artifact.as_ref().map(|b| b.len() as i64),
         artifact,
         error: None,
+        export_name: None,
         created_at: "2026-04-17T12:00:00Z".to_owned(),
         updated_at: "2026-04-17T12:00:00Z".to_owned(),
     };

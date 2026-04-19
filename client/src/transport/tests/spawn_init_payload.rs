@@ -552,6 +552,7 @@ fn build_payload_response_pushes_built_filename_event() {
             payload_array: String::new(),
             format: "exe".to_owned(),
             file_name: "demon.exe".to_owned(),
+            export_name: None,
         },
     }));
 
@@ -591,6 +592,7 @@ fn build_payload_response_stores_decoded_payload() {
             payload_array: encoded,
             format: "Windows Exe".to_owned(),
             file_name: "demon.exe".to_owned(),
+            export_name: None,
         },
     }));
 
@@ -610,6 +612,7 @@ fn build_payload_response_invalid_base64_does_not_store() {
             payload_array: "!!!not-valid-base64!!!".to_owned(),
             format: "exe".to_owned(),
             file_name: "demon.exe".to_owned(),
+            export_name: None,
         },
     }));
 

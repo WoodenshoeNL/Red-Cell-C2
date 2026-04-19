@@ -204,6 +204,7 @@ async fn list_payloads_returns_completed_builds() {
         artifact: Some(vec![0xDE, 0xAD]),
         size_bytes: Some(2),
         error: None,
+        export_name: None,
         created_at: "2026-03-23T10:00:00Z".to_owned(),
         updated_at: "2026-03-23T10:00:00Z".to_owned(),
     };
@@ -252,6 +253,7 @@ async fn list_payloads_excludes_pending_builds() {
         artifact: None,
         size_bytes: None,
         error: None,
+        export_name: None,
         created_at: "2026-03-23T10:00:00Z".to_owned(),
         updated_at: "2026-03-23T10:00:00Z".to_owned(),
     };
@@ -403,6 +405,7 @@ async fn get_payload_job_returns_status_for_pending_job() {
         artifact: None,
         size_bytes: None,
         error: None,
+        export_name: None,
         created_at: "2026-03-23T10:00:00Z".to_owned(),
         updated_at: "2026-03-23T10:00:00Z".to_owned(),
     };
@@ -447,6 +450,7 @@ async fn get_payload_job_returns_payload_id_for_done_job() {
         artifact: Some(vec![0xCA, 0xFE]),
         size_bytes: Some(2),
         error: None,
+        export_name: None,
         created_at: "2026-03-23T10:00:00Z".to_owned(),
         updated_at: "2026-03-23T10:01:00Z".to_owned(),
     };
@@ -492,6 +496,7 @@ async fn get_payload_job_returns_error_for_failed_job() {
         artifact: None,
         size_bytes: None,
         error: Some("compiler not found".to_owned()),
+        export_name: None,
         created_at: "2026-03-23T10:00:00Z".to_owned(),
         updated_at: "2026-03-23T10:01:00Z".to_owned(),
     };
@@ -538,6 +543,7 @@ async fn download_payload_returns_artifact_bytes() {
         artifact: Some(artifact.clone()),
         size_bytes: Some(i64::try_from(artifact.len()).unwrap_or(i64::MAX)),
         error: None,
+        export_name: None,
         created_at: "2026-03-23T10:00:00Z".to_owned(),
         updated_at: "2026-03-23T10:01:00Z".to_owned(),
     };
@@ -593,6 +599,7 @@ async fn download_payload_returns_not_found_for_pending_build() {
         artifact: None,
         size_bytes: None,
         error: None,
+        export_name: None,
         created_at: "2026-03-23T10:00:00Z".to_owned(),
         updated_at: "2026-03-23T10:00:00Z".to_owned(),
     };
@@ -655,6 +662,7 @@ async fn download_payload_returns_gone_for_stale_build() {
         artifact: Some(vec![0x4D, 0x5A]),
         size_bytes: Some(2),
         error: None,
+        export_name: None,
         created_at: "2026-03-31T10:00:00Z".to_owned(),
         updated_at: "2026-03-31T11:00:00Z".to_owned(),
     };
@@ -699,6 +707,7 @@ async fn update_listener_invalidates_done_payload_builds() {
         artifact: Some(vec![0xDE, 0xAD]),
         size_bytes: Some(2),
         error: None,
+        export_name: None,
         created_at: "2026-03-31T10:00:00Z".to_owned(),
         updated_at: "2026-03-31T10:00:00Z".to_owned(),
     };
@@ -759,6 +768,7 @@ async fn identical_listener_put_preserves_done_payload_builds() {
         artifact: Some(vec![0xDE, 0xAD]),
         size_bytes: Some(2),
         error: None,
+        export_name: None,
         created_at: "2026-03-31T10:00:00Z".to_owned(),
         updated_at: "2026-03-31T10:00:00Z".to_owned(),
     };
@@ -1157,6 +1167,7 @@ async fn payload_build_repository_create_and_get() {
         artifact: None,
         size_bytes: None,
         error: None,
+        export_name: None,
         created_at: "2026-03-23T10:00:00Z".to_owned(),
         updated_at: "2026-03-23T10:00:00Z".to_owned(),
     };
@@ -1194,6 +1205,7 @@ async fn payload_build_repository_list_returns_all() {
             artifact: Some(vec![0xDE, 0xAD]),
             size_bytes: Some(2),
             error: None,
+            export_name: None,
             created_at: format!("2026-03-23T10:0{i}:00Z"),
             updated_at: format!("2026-03-23T10:0{i}:00Z"),
         };
@@ -1221,6 +1233,7 @@ async fn payload_build_repository_update_status() {
         artifact: None,
         size_bytes: None,
         error: None,
+        export_name: None,
         created_at: "2026-03-23T10:00:00Z".to_owned(),
         updated_at: "2026-03-23T10:00:00Z".to_owned(),
     };
@@ -1233,6 +1246,7 @@ async fn payload_build_repository_update_status() {
             Some("demon.x64.exe"),
             Some(&[0xCA, 0xFE]),
             Some(2),
+            None,
             None,
             "2026-03-23T10:01:00Z",
         )
@@ -1253,7 +1267,7 @@ async fn payload_build_repository_update_missing_returns_false() {
     let db = Database::connect_in_memory().await.expect("db");
     let result = db
         .payload_builds()
-        .update_status("ghost", "done", None, None, None, None, "2026-03-23T10:00:00Z")
+        .update_status("ghost", "done", None, None, None, None, None, "2026-03-23T10:00:00Z")
         .await
         .expect("update");
     assert!(!result);
@@ -1276,6 +1290,7 @@ async fn payload_build_get_summary_excludes_artifact() {
         artifact: Some(vec![0xDE, 0xAD, 0xBE, 0xEF]),
         size_bytes: Some(4),
         error: None,
+        export_name: None,
         created_at: "2026-03-23T10:00:00Z".to_owned(),
         updated_at: "2026-03-23T10:00:00Z".to_owned(),
     };
@@ -1318,6 +1333,7 @@ async fn payload_build_list_summaries_excludes_artifact() {
             artifact: Some(vec![0xCA; 1024]),
             size_bytes: Some(1024),
             error: None,
+            export_name: None,
             created_at: format!("2026-03-23T10:0{i}:00Z"),
             updated_at: format!("2026-03-23T10:0{i}:00Z"),
         };

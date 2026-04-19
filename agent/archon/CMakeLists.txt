@@ -84,6 +84,18 @@ execute_process(
 string( PREPEND ARCHON_MAGIC_HEX "0x" )
 add_compile_definitions( ARCHON_MAGIC_VALUE=${ARCHON_MAGIC_HEX} )
 
+# ARC-12: randomize the DLL export name per build so no two Archon binaries
+# share the "Start" export fingerprint detected by AV/scanners.  The teamserver
+# independently supplies -DDEMON_EXPORT_NAME=<id> via the build API and records
+# the name for use by the payload generator.  The cmake-level random is only used
+# for manual (non-teamserver) builds.
+execute_process(
+    COMMAND sh -c "printf 'Arc'; openssl rand -hex 8"
+    OUTPUT_VARIABLE DEMON_EXPORT_NAME_VAL
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+add_compile_definitions( DEMON_EXPORT_NAME=${DEMON_EXPORT_NAME_VAL} )
+
 # preprocessor flags
 add_compile_definitions( DEBUG )
 

@@ -128,6 +128,10 @@ pub(super) struct PayloadJobStatus {
     size_bytes: Option<u64>,
     /// Error message (set when status is `"error"`).
     error: Option<String>,
+    /// For Archon DLL/ReflectiveDll builds: the randomized export function name.
+    /// `null` for all other payload types.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    export_name: Option<String>,
 }
 
 /// Response returned after flushing the payload build artifact cache.
@@ -355,6 +359,7 @@ pub(super) async fn submit_payload_build(
         artifact: None,
         size_bytes: None,
         error: None,
+        export_name: None,
         created_at: now.clone(),
         updated_at: now,
     };
@@ -414,7 +419,7 @@ pub(super) async fn submit_payload_build(
         // Mark running.
         if let Err(e) = db
             .payload_builds()
-            .update_status(&build_job_id, "running", None, None, None, None, &now_rfc3339())
+            .update_status(&build_job_id, "running", None, None, None, None, None, &now_rfc3339())
             .await
         {
             tracing::warn!(build_id = %build_job_id, error = %e, "failed to update payload build status to running");
@@ -435,6 +440,7 @@ pub(super) async fn submit_payload_build(
                         Some(&artifact.bytes),
                         Some(size),
                         None,
+                        artifact.export_name.as_deref(),
                         &now_rfc3339(),
                     )
                     .await
@@ -472,6 +478,7 @@ pub(super) async fn submit_payload_build(
                         None,
                         None,
                         Some(&err.to_string()),
+                        None,
                         &now_rfc3339(),
                     )
                     .await
@@ -542,6 +549,7 @@ pub(super) async fn get_payload_job(
                 payload_id,
                 size_bytes: record.size_bytes.map(|s| s as u64),
                 error: record.error,
+                export_name: record.export_name,
             })
             .into_response()
         }

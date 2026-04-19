@@ -94,6 +94,7 @@ impl PayloadBuilderService {
                 bytes: cached,
                 file_name: format!("{agent_name}{file_extension}"),
                 format: format!("{agent_name} release"),
+                export_name: None,
             });
         }
 
@@ -194,6 +195,7 @@ impl PayloadBuilderService {
             bytes,
             file_name: binary_name,
             format: format!("{agent_name} release"),
+            export_name: None,
         })
     }
 }

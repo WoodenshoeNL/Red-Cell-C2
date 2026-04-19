@@ -6,7 +6,7 @@ use base64::Engine as _;
 use sqlx::SqlitePool;
 use tracing::instrument;
 
-use red_cell_common::crypto::ecdh::{ConnectionId, ListenerKeypair, CONNECTION_ID_LEN};
+use red_cell_common::crypto::ecdh::{CONNECTION_ID_LEN, ConnectionId, ListenerKeypair};
 
 use super::crypto::DbMasterKey;
 use super::error::TeamserverError;
@@ -38,11 +38,11 @@ impl EcdhRepository {
         let kp = ListenerKeypair::generate()
             .map_err(|e| TeamserverError::Internal(format!("ECDH keypair generation: {e}")))?;
 
-        let secret_enc = self.master_key.encrypt(&kp.secret_bytes).map_err(|e| {
-            TeamserverError::Internal(format!("encrypt listener keypair: {e}"))
-        })?;
-        let public_b64 =
-            base64::engine::general_purpose::STANDARD.encode(kp.public_bytes);
+        let secret_enc = self
+            .master_key
+            .encrypt(&kp.secret_bytes)
+            .map_err(|e| TeamserverError::Internal(format!("encrypt listener keypair: {e}")))?;
+        let public_b64 = base64::engine::general_purpose::STANDARD.encode(kp.public_bytes);
 
         sqlx::query(
             "INSERT OR IGNORE INTO ts_listener_keypairs \
@@ -57,7 +57,9 @@ impl EcdhRepository {
 
         // Race: if INSERT OR IGNORE was a no-op, load the winner's row.
         self.get_keypair(listener_name).await?.ok_or_else(|| {
-            TeamserverError::Internal("ECDH keypair race: row missing after INSERT OR IGNORE".into())
+            TeamserverError::Internal(
+                "ECDH keypair race: row missing after INSERT OR IGNORE".into(),
+            )
         })
     }
 
@@ -99,9 +101,10 @@ impl EcdhRepository {
         agent_id: u32,
         session_key: &[u8; 32],
     ) -> Result<(), TeamserverError> {
-        let key_enc = self.master_key.encrypt(session_key).map_err(|e| {
-            TeamserverError::Internal(format!("encrypt ECDH session key: {e}"))
-        })?;
+        let key_enc = self
+            .master_key
+            .encrypt(session_key)
+            .map_err(|e| TeamserverError::Internal(format!("encrypt ECDH session key: {e}")))?;
 
         let now = now_secs();
         sqlx::query(
@@ -158,22 +161,17 @@ impl EcdhRepository {
         &self,
         connection_id_bytes: &[u8; CONNECTION_ID_LEN],
     ) -> Result<(), TeamserverError> {
-        sqlx::query(
-            "UPDATE ts_ecdh_sessions SET last_seen = ? WHERE connection_id = ?",
-        )
-        .bind(now_secs())
-        .bind(connection_id_bytes.as_slice())
-        .execute(&self.pool)
-        .await
-        .map_err(TeamserverError::Sqlx)?;
+        sqlx::query("UPDATE ts_ecdh_sessions SET last_seen = ? WHERE connection_id = ?")
+            .bind(now_secs())
+            .bind(connection_id_bytes.as_slice())
+            .execute(&self.pool)
+            .await
+            .map_err(TeamserverError::Sqlx)?;
         Ok(())
     }
 
     /// Delete all sessions for an agent (used when an agent is deregistered).
-    pub async fn delete_sessions_for_agent(
-        &self,
-        agent_id: u32,
-    ) -> Result<(), TeamserverError> {
+    pub async fn delete_sessions_for_agent(&self, agent_id: u32) -> Result<(), TeamserverError> {
         sqlx::query("DELETE FROM ts_ecdh_sessions WHERE agent_id = ?")
             .bind(i64::from(agent_id))
             .execute(&self.pool)
@@ -184,10 +182,8 @@ impl EcdhRepository {
 }
 
 fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()
+        as i64
 }
 
 #[cfg(test)]

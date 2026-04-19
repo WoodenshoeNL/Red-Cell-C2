@@ -24,12 +24,8 @@ use crate::demon::parse_ecdh_agent_metadata;
 use crate::listeners::ListenerManagerError;
 use crate::{
     AgentRegistry, AuditResultStatus, CommandDispatcher, Database, DemonCallbackPackage,
-    PluginRuntime,
-    agent_events::agent_new_event,
-    audit_details,
-    events::EventBus,
-    parameter_object, record_operator_action,
-    sockets::AgentSocketSnapshot,
+    PluginRuntime, agent_events::agent_new_event, audit_details, events::EventBus,
+    parameter_object, record_operator_action, sockets::AgentSocketSnapshot,
 };
 
 /// Replay-protection window: registration packets older or newer than this are rejected.
@@ -68,9 +64,7 @@ pub(crate) async fn process_ecdh_packet(
                 let _ = ecdh_db2.touch_session(&candidate_id).await;
             });
 
-            return Ok(Some(
-                process_ecdh_session(body, &session_key, agent_id, dispatcher).await?,
-            ));
+            return Ok(Some(process_ecdh_session(body, &session_key, agent_id, dispatcher).await?));
         }
     }
 
@@ -141,11 +135,9 @@ async fn process_ecdh_registration(
             message: format!("ECDH connection_id generation: {e}"),
         })?;
 
-    database.ecdh().store_session(&connection_id, agent_id, &session_key).await.map_err(
-        |e| ListenerManagerError::InvalidConfig {
-            message: format!("ECDH session store failed: {e}"),
-        },
-    )?;
+    database.ecdh().store_session(&connection_id, agent_id, &session_key).await.map_err(|e| {
+        ListenerManagerError::InvalidConfig { message: format!("ECDH session store failed: {e}") }
+    })?;
 
     // Build the registration response.
     let response =
@@ -214,12 +206,9 @@ async fn process_ecdh_session(
     dispatcher: &CommandDispatcher,
 ) -> Result<EcdhResponse, ListenerManagerError> {
     // body = [connection_id: 16] | [nonce: 12] | [ciphertext] | [tag: 16]
-    let decrypted =
-        open_session_packet(session_key, &body[16..]).map_err(|e| {
-            ListenerManagerError::InvalidConfig {
-                message: format!("ECDH session decrypt failed: {e}"),
-            }
-        })?;
+    let decrypted = open_session_packet(session_key, &body[16..]).map_err(|e| {
+        ListenerManagerError::InvalidConfig { message: format!("ECDH session decrypt failed: {e}") }
+    })?;
 
     let packages: Vec<DemonCallbackPackage> = if decrypted.is_empty() {
         Vec::new()
@@ -242,12 +231,11 @@ async fn process_ecdh_session(
         .await
         .map_err(|e| ListenerManagerError::InvalidConfig { message: e.to_string() })?;
 
-    let sealed =
-        seal_session_response(session_key, &response_bytes).map_err(|e| {
-            ListenerManagerError::InvalidConfig {
-                message: format!("ECDH seal_session_response failed: {e}"),
-            }
-        })?;
+    let sealed = seal_session_response(session_key, &response_bytes).map_err(|e| {
+        ListenerManagerError::InvalidConfig {
+            message: format!("ECDH seal_session_response failed: {e}"),
+        }
+    })?;
 
     Ok(EcdhResponse { payload: sealed })
 }

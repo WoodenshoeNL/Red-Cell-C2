@@ -263,16 +263,11 @@ pub(crate) fn parse_ecdh_agent_metadata(
     let mut offset = 0_usize;
 
     let agent_id = read_u32_be(metadata, &mut offset, "ecdh init agent_id")?;
-    let hostname =
-        read_length_prefixed_string_be(metadata, &mut offset, "hostname")?;
-    let username =
-        read_length_prefixed_string_be(metadata, &mut offset, "username")?;
-    let domain_name =
-        read_length_prefixed_string_be(metadata, &mut offset, "domain name")?;
-    let internal_ip =
-        read_length_prefixed_string_be(metadata, &mut offset, "internal ip")?;
-    let process_path =
-        read_length_prefixed_utf16_be(metadata, &mut offset, "process path")?;
+    let hostname = read_length_prefixed_string_be(metadata, &mut offset, "hostname")?;
+    let username = read_length_prefixed_string_be(metadata, &mut offset, "username")?;
+    let domain_name = read_length_prefixed_string_be(metadata, &mut offset, "domain name")?;
+    let internal_ip = read_length_prefixed_string_be(metadata, &mut offset, "internal ip")?;
+    let process_path = read_length_prefixed_utf16_be(metadata, &mut offset, "process path")?;
     let process_pid = read_u32_be(metadata, &mut offset, "process pid")?;
     let process_tid = read_u32_be(metadata, &mut offset, "process tid")?;
     let process_ppid = read_u32_be(metadata, &mut offset, "process ppid")?;
@@ -288,9 +283,8 @@ pub(crate) fn parse_ecdh_agent_metadata(
     let sleep_delay = read_u32_be(metadata, &mut offset, "sleep delay")?;
     let sleep_jitter = read_u32_be(metadata, &mut offset, "sleep jitter")?;
     let kill_date_raw = read_u64_be(metadata, &mut offset, "kill date")?;
-    let working_hours = i32::from_be_bytes(
-        read_fixed::<4>(metadata, &mut offset, "working hours")?
-    );
+    let working_hours =
+        i32::from_be_bytes(read_fixed::<4>(metadata, &mut offset, "working hours")?);
 
     let (legacy_ctr, seq_protected) = if metadata.len() - offset >= 4 {
         let ext_flags = read_u32_be(metadata, &mut offset, "init extension flags")?;
@@ -301,9 +295,8 @@ pub(crate) fn parse_ecdh_agent_metadata(
         (true, false)
     };
 
-    let timestamp = now
-        .format(&Rfc3339)
-        .map_err(|_| DemonParserError::InvalidInit("invalid timestamp"))?;
+    let timestamp =
+        now.format(&Rfc3339).map_err(|_| DemonParserError::InvalidInit("invalid timestamp"))?;
     let kill_date = parse_kill_date(kill_date_raw)?;
 
     Ok((

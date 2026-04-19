@@ -32,6 +32,7 @@ pub use audit_pruner::{
 };
 pub use backup::{DEFAULT_BACKUP_INTERVAL_SECS, DatabaseBackupScheduler};
 pub use crypto::DbMasterKey;
+pub use ecdh::EcdhRepository;
 pub use error::TeamserverError;
 pub use health::{
     DEFAULT_DEGRADED_THRESHOLD, DEFAULT_PROBE_SECS, DEFAULT_QUERY_TIMEOUT_SECS,
@@ -49,7 +50,6 @@ pub use listeners::{
 pub use loot::{LootFilter, LootRecord, LootRepository};
 pub use operators::{OperatorRepository, PersistedOperator};
 pub use write_queue::{DEFAULT_WRITE_QUEUE_CAPACITY, DeferredWrite, WriteQueue};
-pub use ecdh::EcdhRepository;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 

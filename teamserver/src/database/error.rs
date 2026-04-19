@@ -90,6 +90,12 @@ pub enum TeamserverError {
     /// Returned when the OS random-number generator is unavailable.
     #[error("OS RNG unavailable: {0}")]
     Rng(#[from] getrandom::Error),
+    /// General-purpose internal error with a human-readable message.
+    #[error("internal error: {0}")]
+    Internal(String),
+    /// SQLx database error (named alias; use for map_err(TeamserverError::Sqlx)).
+    #[error("database error: {0}")]
+    Sqlx(sqlx::Error),
     /// Returned when a per-agent job queue has reached its capacity limit.
     #[error(
         "job queue full for agent 0x{agent_id:08X}: {queued} jobs already queued (max {max_queue_depth})"

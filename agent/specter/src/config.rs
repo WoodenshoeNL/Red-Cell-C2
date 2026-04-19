@@ -270,10 +270,10 @@ impl Default for SpecterConfig {
             // Baked in at compile time — set SPECTER_PINNED_CERT_PEM when building the implant.
             pinned_cert_pem: option_env!("SPECTER_PINNED_CERT_PEM").map(str::to_string),
             user_agent: String::from(
-                "Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
             ),
             sleep_delay_ms: 5000,
-            sleep_jitter: 0,
+            sleep_jitter: 20,
             kill_date: None,
             working_hours: None,
             ppid_spoof: None,
@@ -512,5 +512,30 @@ mod tests {
             error,
             SpecterError::Argument(ref msg) if msg.contains("fakeprovider")
         ));
+    }
+
+    #[test]
+    fn default_sleep_jitter_is_20_percent() {
+        let config = SpecterConfig::default();
+        assert_eq!(config.sleep_jitter, 20);
+    }
+
+    #[test]
+    fn default_user_agent_is_current_chrome_on_windows_10() {
+        let config = SpecterConfig::default();
+        assert!(config.user_agent.contains("Windows NT 10.0"), "UA must be Windows 10");
+        assert!(config.user_agent.contains("Chrome/136"), "UA must reference Chrome 136");
+        assert!(!config.user_agent.contains("NT 6.1"), "UA must not reference Windows 7");
+    }
+
+    #[test]
+    fn config_override_takes_precedence_over_defaults() {
+        let config = SpecterConfig::from_sources(
+            ["specter", "--sleep-jitter", "5", "--user-agent", "custom-ua"],
+            std::iter::empty::<(&str, &str)>(),
+        )
+        .expect("config");
+        assert_eq!(config.sleep_jitter, 5);
+        assert_eq!(config.user_agent, "custom-ua");
     }
 }

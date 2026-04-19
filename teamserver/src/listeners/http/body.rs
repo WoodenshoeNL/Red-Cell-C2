@@ -76,6 +76,7 @@ pub(crate) async fn collect_body_with_magic_precheck(
     Some(Bytes::from(buf))
 }
 
+/// Validate a legacy Demon callback body (header layout: size | magic=0xDEADBEEF | agent_id).
 pub(crate) fn is_valid_demon_callback_request(body: &[u8]) -> bool {
     if body.len() < MINIMUM_DEMON_CALLBACK_BYTES {
         return false;
@@ -86,6 +87,29 @@ pub(crate) fn is_valid_demon_callback_request(body: &[u8]) -> bool {
     }
 
     DemonHeader::from_bytes(body).is_ok()
+}
+
+/// Validate an Archon callback body (header layout: size | agent_id | magic=random).
+///
+/// For Archon packets, bytes 4–7 are the agent_id (not magic), and bytes 8–11 are the
+/// per-build random magic.  We can only check minimum length and that the magic is not
+/// `0xDEADBEEF` (which would indicate a mis-routed Demon packet).  Per-agent magic
+/// validation happens later in [`DemonPacketParser`] before AES decryption.
+pub(crate) fn is_valid_archon_callback_request(body: &[u8]) -> bool {
+    if body.len() < MINIMUM_DEMON_CALLBACK_BYTES {
+        return false;
+    }
+    // Reject any packet with the Demon fingerprint at the magic position (bytes 8-11).
+    body[8..12] != DEMON_MAGIC_VALUE.to_be_bytes()
+}
+
+/// Validate a callback body using the appropriate check for the listener mode.
+pub(crate) fn is_valid_callback_request(body: &[u8], legacy_mode: bool) -> bool {
+    if legacy_mode {
+        is_valid_demon_callback_request(body)
+    } else {
+        is_valid_archon_callback_request(body)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

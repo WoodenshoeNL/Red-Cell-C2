@@ -14,7 +14,7 @@ use crate::listeners::ListenerManagerError;
 
 use super::HttpListenerState;
 use super::body::{
-    allow_demon_init_for_ip, collect_body_with_magic_precheck, is_valid_demon_callback_request,
+    allow_demon_init_for_ip, collect_body_with_magic_precheck, is_valid_callback_request,
 };
 use super::dispatch::{DemonHttpDisposition, process_demon_transport};
 use super::proxy::extract_external_ip;
@@ -54,7 +54,7 @@ pub(super) async fn http_listener_handler(
         return state.fake_404_response();
     };
 
-    if !is_valid_demon_callback_request(&body) {
+    if !is_valid_callback_request(&body, state.config.legacy_mode) {
         return state.fake_404_response();
     }
 

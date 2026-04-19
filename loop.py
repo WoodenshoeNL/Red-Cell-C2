@@ -2075,6 +2075,9 @@ def create_review_worktree(loop_type: str, log: Logger) -> Path | None:
     """
     Create a temporary git worktree at HEAD for a single review loop run.
     Returns the worktree path, or None if creation fails (caller falls back to SCRIPT_DIR).
+
+    A symlink worktree/.beads -> SCRIPT_DIR/.beads is created so that `br` commands
+    run inside the worktree resolve to the same database and JSONL as the main checkout.
     """
     import tempfile
     tmp = Path(tempfile.mkdtemp(prefix=f"red-cell-{loop_type}-", dir="/tmp"))
@@ -2087,113 +2090,61 @@ def create_review_worktree(loop_type: str, log: Logger) -> Path | None:
     if r.returncode != 0:
         log.log(f"WARNING: could not create review worktree: {r.stderr.strip()}")
         return None
+
+    # Symlink .beads into the worktree so `br` uses the main repo's database.
+    beads_link = tmp / ".beads"
+    beads_link.symlink_to(SCRIPT_DIR / ".beads")
+
     log.log(f"Review worktree: {tmp}")
     return tmp
 
 
 def harvest_worktree_beads(worktree_path: Path, log: Logger):
     """
-    Append any new issues created by a review agent in its worktree to the main
-    repo's .beads/issues.jsonl, then commit and push.
+    Safety-net: flush the main beads DB to JSONL and push if the review agent left
+    uncommitted changes (e.g. it filed issues but its own git push failed).
 
-    Safe under concurrent dev loops: we only append lines whose ID is not already
-    present in the main JSONL, so existing issue updates from other agents are
-    never overwritten.
+    The worktree has a .beads symlink pointing at SCRIPT_DIR/.beads, so all `br`
+    calls made inside the worktree already write to the main DB. We just need to
+    ensure the JSONL is flushed and any diff is committed and pushed.
     """
-    import json
+    # Flush the DB (which the agent wrote to via the symlink) to JSONL.
+    br(["sync", "--flush-only", "--quiet"])
 
-    worktree_jsonl = worktree_path / ".beads" / "issues.jsonl"
-    main_jsonl     = SCRIPT_DIR / ".beads" / "issues.jsonl"
-
-    # Flush the worktree DB → JSONL so the agent's br create calls are visible.
-    r = subprocess.run(
-        ["br", "sync", "--flush-only", "--quiet"],
-        capture_output=True, cwd=str(worktree_path),
-    )
-    if r.returncode != 0 or not worktree_jsonl.exists():
-        log.log("harvest: br sync in worktree failed or no JSONL — skipping")
+    # Nothing to do if JSONL is clean.
+    if git(["diff", "--quiet", "--", ".beads/issues.jsonl"]).returncode == 0:
+        log.log("harvest: no unflushed beads changes")
         return
-
-    # Collect IDs already known to the main repo.
-    main_ids: set[str] = set()
-    if main_jsonl.exists():
-        for line in main_jsonl.read_text().splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                main_ids.add(json.loads(line)["id"])
-            except (json.JSONDecodeError, KeyError):
-                pass
-
-    # Find lines in the worktree JSONL whose ID is new.
-    new_lines: list[str] = []
-    for line in worktree_jsonl.read_text().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            if json.loads(line)["id"] not in main_ids:
-                new_lines.append(line)
-        except (json.JSONDecodeError, KeyError):
-            pass
-
-    if not new_lines:
-        log.log("harvest: no new issues to harvest from worktree")
-        return
-
-    # All new issue IDs — used in commit messages and final log.
-    ids_str = ", ".join(json.loads(l)["id"] for l in new_lines)
 
     retries = 3
     for attempt in range(retries):
-        # Pull latest state so we commit on top of HEAD.
         pull_r = git(["pull", "--rebase", "--quiet"])
         if pull_r.returncode != 0:
-            # Abort a stuck rebase and try again next iteration.
             git(["rebase", "--abort"])
             log.log(f"harvest: pull --rebase failed on attempt {attempt + 1}/{retries}, retrying")
             continue
 
-        # Re-read main JSONL after the pull — another loop may have pushed some
-        # of these issues already.
-        present_ids: set[str] = set()
-        if main_jsonl.exists():
-            for line in main_jsonl.read_text().splitlines():
-                line = line.strip()
-                try:
-                    present_ids.add(json.loads(line)["id"])
-                except (json.JSONDecodeError, KeyError):
-                    pass
-
-        still_new = [l for l in new_lines if json.loads(l)["id"] not in present_ids]
-        if not still_new:
-            log.log("harvest: all issues already pushed by another loop — nothing to do")
+        # After the pull, check again — the rebase may have already incorporated
+        # the same changes from another agent's push.
+        if git(["diff", "--quiet", "--", ".beads/issues.jsonl"]).returncode == 0:
+            log.log("harvest: changes incorporated by rebase — nothing to commit")
             return
 
-        with main_jsonl.open("a") as fh:
-            for line in still_new:
-                fh.write(line + "\n")
-
-        subprocess.run(["br", "sync", "--import-only", "--quiet"], cwd=str(SCRIPT_DIR))
-
         git(["add", ".beads/issues.jsonl"])
-        still_ids = ", ".join(json.loads(l)["id"] for l in still_new)
-        msg = f"chore: harvest {len(still_new)} issue(s) from review worktree ({still_ids})"
+        msg = "chore: harvest unflushed beads issues from review worktree"
         if git(["commit", "-m", msg, "--quiet"]).returncode != 0:
             git(["restore", "--staged", ".beads/issues.jsonl"])
             log.log(f"harvest: commit failed on attempt {attempt + 1}/{retries}, retrying")
             continue
 
         if git(["push", "--quiet"]).returncode == 0:
-            log.log(f"harvest: pushed {len(still_new)} new issue(s): {still_ids}")
+            log.log("harvest: pushed unflushed beads issues")
             return
 
-        # Push failed — reset our commit and retry from the pull step.
         git(["reset", "HEAD~1", "--mixed", "--quiet"])
         log.log(f"harvest: push attempt {attempt + 1}/{retries} failed, retrying")
 
-    log.log(f"WARNING: harvest: could not push after {retries} attempts — issues saved locally: {ids_str}")
+    log.log("WARNING: harvest: could not push after {retries} attempts — issues saved locally")
 
 
 def remove_review_worktree(worktree_path: Path, log: Logger):

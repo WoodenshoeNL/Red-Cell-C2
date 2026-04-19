@@ -115,6 +115,9 @@ pub enum TlsError {
     /// The certificate DER could not be parsed for validity checking.
     #[error("failed to parse certificate for validity check: {0}")]
     CertificateParse(String),
+    /// OS entropy source failed while generating random TLS validity period.
+    #[error("failed to read random bytes from OS entropy source")]
+    CertGeneration,
 }
 
 /// Validate that the leaf certificate in `cert_pem` is currently within its validity window.
@@ -184,7 +187,14 @@ pub fn generate_self_signed_tls_identity(
     params.distinguished_name = rcgen::DistinguishedName::new();
     params.distinguished_name.push(rcgen::DnType::CommonName, common_name.as_str());
     params.not_before = OffsetDateTime::now_utc();
-    params.not_after = OffsetDateTime::now_utc() + time::Duration::days(365);
+    // Randomize validity between 60 and 120 days to avoid the static 365-day fingerprint
+    // that certificate scanners (Censys, Shodan) flag as a C2 indicator.
+    let validity_days = {
+        let mut buf = [0u8; 1];
+        getrandom::fill(&mut buf).map_err(|_| TlsError::CertGeneration)?;
+        i64::from(60 + (buf[0] % 61))
+    };
+    params.not_after = OffsetDateTime::now_utc() + time::Duration::days(validity_days);
 
     let signing_key = match algorithm {
         TlsKeyAlgorithm::EcdsaP256 => KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?,

@@ -325,21 +325,21 @@ fn generate_self_signed_tls_identity_has_reasonable_validity_period() {
         validity.not_after,
     );
 
-    // Validity span must be between 1 day and 10 years (reasonable for self-signed certs).
+    // Validity span must be between 60 and 120 days to avoid static-fingerprint detection.
     let not_before_secs = validity.not_before.timestamp();
     let not_after_secs = validity.not_after.timestamp();
     let span_secs = not_after_secs - not_before_secs;
 
-    let one_day_secs: i64 = 24 * 60 * 60;
-    let ten_years_secs: i64 = 10 * 365 * 24 * 60 * 60;
+    let sixty_days_secs: i64 = 60 * 24 * 60 * 60;
+    let one_twenty_days_secs: i64 = 120 * 24 * 60 * 60;
 
     assert!(
-        span_secs >= one_day_secs,
-        "certificate validity span ({span_secs}s) should be at least 1 day ({one_day_secs}s)",
+        span_secs >= sixty_days_secs,
+        "certificate validity span ({span_secs}s) should be at least 60 days ({sixty_days_secs}s)",
     );
     assert!(
-        span_secs <= ten_years_secs,
-        "certificate validity span ({span_secs}s) should be at most 10 years ({ten_years_secs}s)",
+        span_secs <= one_twenty_days_secs,
+        "certificate validity span ({span_secs}s) should be at most 120 days ({one_twenty_days_secs}s)",
     );
 }
 

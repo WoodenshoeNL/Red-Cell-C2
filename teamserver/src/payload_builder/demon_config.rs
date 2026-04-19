@@ -129,8 +129,8 @@ pub(crate) fn pack_config(
     add_wstring(&mut out, required_string(injection, "Spawn64")?)?;
     add_wstring(&mut out, required_string(injection, "Spawn32")?)?;
 
-    let sleep_technique = required_string(config, "Sleep Technique")?;
-    let obfuscation = sleep_obfuscation_value(sleep_technique);
+    let obfuscation =
+        sleep_obfuscation_value(optional_string(config, "Sleep Technique").unwrap_or_default());
     add_u32(&mut out, obfuscation);
     add_u32(&mut out, sleep_jump_bypass(obfuscation, optional_string(config, "Sleep Jmp Gadget"))?);
     add_u32(

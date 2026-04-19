@@ -383,7 +383,7 @@ pub(super) async fn submit_payload_build(
         format: havoc_format.to_owned(),
         config: request
             .sleep
-            .map_or_else(String::new, |s| serde_json::json!({"Sleep": s}).to_string()),
+            .map_or_else(|| "{}".to_owned(), |s| serde_json::json!({"Sleep": s}).to_string()),
     };
 
     tokio::spawn(async move {

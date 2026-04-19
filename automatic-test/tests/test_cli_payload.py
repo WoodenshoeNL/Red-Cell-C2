@@ -50,8 +50,9 @@ class TestPayloadBuild(unittest.TestCase):
             result = payload_build(_CFG, listener="listener-1", fmt="bin", agent="phantom", wait=True)
         self.assertEqual(result["id"], "payload-2")
         self.assertEqual(result["size_bytes"], 77)
+        # wait=True switches to a longer-timeout config to survive compilation.
         mock_run.assert_called_once_with(
-            _CFG,
+            _CFG.with_timeout(300),
             "payload",
             "build",
             "--listener",

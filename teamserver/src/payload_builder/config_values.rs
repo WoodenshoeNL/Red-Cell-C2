@@ -70,11 +70,11 @@ pub(super) fn injection_mode(
     config: &Map<String, Value>,
     key: &str,
 ) -> Result<u32, PayloadBuildError> {
-    match required_string(config, key)? {
-        "Win32" => Ok(1),
-        "Native/Syscall" => Ok(2),
-        _ => Ok(0),
-    }
+    Ok(match optional_string(config, key).unwrap_or_default() {
+        "Win32" => 1,
+        "Native/Syscall" => 2,
+        _ => 0,
+    })
 }
 
 pub(super) fn sleep_obfuscation_value(value: &str) -> u32 {

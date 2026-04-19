@@ -56,6 +56,12 @@ class CliConfig:
         from dataclasses import replace
         return replace(self, token=token)
 
+    def with_timeout(self, timeout: int) -> "CliConfig":
+        """Return a copy of this config with a longer timeout, also extending max_subprocess_secs
+        so the subprocess is not killed before the timeout expires."""
+        from dataclasses import replace
+        return replace(self, timeout=timeout, max_subprocess_secs=max(timeout + 10, self.max_subprocess_secs))
+
 
 def _run(cfg: CliConfig, *args: str) -> dict[str, Any]:
     env = os.environ.copy()
@@ -192,7 +198,12 @@ def payload_build(cfg: CliConfig, listener: str,
         args += ["--sleep", str(sleep_secs)]
     if wait:
         args.append("--wait")
-    return _run(cfg, *args)
+        # Payload compilation can take several minutes; extend the subprocess
+        # lifetime to match the CLI's built-in --wait-timeout default (300s).
+        run_cfg = cfg.with_timeout(300)
+    else:
+        run_cfg = cfg
+    return _run(run_cfg, *args)
 
 
 def payload_download(cfg: CliConfig, payload_id: str | int, dst: str) -> dict:

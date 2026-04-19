@@ -19,6 +19,7 @@ service-bridge-serial = { max-threads = 1 }
 client-cli-contract-serial = { max-threads = 1 }
 dispatch-util-serial = { max-threads = 1 }
 red-cell-lib-serial = { max-threads = 1 }
+database-audit-serial = { max-threads = 1 }
 
 [[profile.default.overrides]]
 filter = 'package(red-cell) & binary(assembly_dispatch)'
@@ -75,3 +76,7 @@ test-group = 'dispatch-util-serial'
 [[profile.default.overrides]]
 filter = 'binary_id(red-cell)'
 test-group = 'red-cell-lib-serial'
+
+[[profile.default.overrides]]
+filter = 'package(red-cell) & binary(database_audit)'
+test-group = 'database-audit-serial'

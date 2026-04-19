@@ -122,7 +122,7 @@ impl AgentRepository {
                 base_address = ?, process_pid = ?, process_tid = ?, process_ppid = ?,
                 process_arch = ?, elevated = ?, os_version = ?, os_build = ?, os_arch = ?, listener_name = ?, sleep_delay = ?,
                 sleep_jitter = ?, kill_date = ?, working_hours = ?, first_call_in = ?,
-                last_call_in = ?
+                last_call_in = ?, archon_magic = ?
             WHERE agent_id = ?
             "#,
         )
@@ -154,6 +154,7 @@ impl AgentRepository {
         .bind(agent.working_hours.map(i64::from))
         .bind(&agent.first_call_in)
         .bind(&agent.last_call_in)
+        .bind(agent.archon_magic.map(i64::from))
         .bind(i64::from(agent.agent_id))
         .execute(&self.pool)
         .await?;
@@ -186,7 +187,7 @@ impl AgentRepository {
                 base_address = ?, process_pid = ?, process_tid = ?, process_ppid = ?,
                 process_arch = ?, elevated = ?, os_version = ?, os_build = ?, os_arch = ?,
                 listener_name = ?, sleep_delay = ?, sleep_jitter = ?, kill_date = ?,
-                working_hours = ?, last_call_in = ?
+                working_hours = ?, last_call_in = ?, archon_magic = ?
             WHERE agent_id = ?
             "#,
         )
@@ -215,6 +216,7 @@ impl AgentRepository {
         .bind(agent.kill_date)
         .bind(agent.working_hours.map(i64::from))
         .bind(&agent.last_call_in)
+        .bind(agent.archon_magic.map(i64::from))
         .bind(i64::from(agent.agent_id))
         .execute(&self.pool)
         .await?;
@@ -412,8 +414,9 @@ pub(super) async fn insert_agent_row(
             hostname, username, domain_name,
             external_ip, internal_ip, process_name, process_path, base_address, process_pid, process_tid,
             process_ppid, process_arch, elevated, os_version, os_build, os_arch, listener_name, sleep_delay,
-            sleep_jitter, kill_date, working_hours, first_call_in, last_call_in, last_seen_seq, seq_protected
-        ) VALUES (?, ?, ?, ?, ?, ?, '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            sleep_jitter, kill_date, working_hours, first_call_in, last_call_in, last_seen_seq, seq_protected,
+            archon_magic
+        ) VALUES (?, ?, ?, ?, ?, ?, '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(i64::from(agent.agent_id))
@@ -449,6 +452,7 @@ pub(super) async fn insert_agent_row(
     .bind(&agent.last_call_in)
     .bind(0_i64) // last_seen_seq starts at 0
     .bind(0_i64) // seq_protected defaults to false
+    .bind(agent.archon_magic.map(i64::from))
     .execute(executor)
     .await?;
 
@@ -515,6 +519,7 @@ struct AgentRow {
     legacy_ctr: i64,
     last_seen_seq: i64,
     seq_protected: i64,
+    archon_magic: Option<i64>,
 }
 
 /// Decode an agent session key from a persisted row.
@@ -596,6 +601,11 @@ fn row_to_agent_record(
             .map_err(|_| super::invalid_value("working_hours", "value does not fit in i32"))?,
         first_call_in: row.first_call_in.clone(),
         last_call_in: row.last_call_in.clone(),
+        archon_magic: row
+            .archon_magic
+            .map(u32::try_from)
+            .transpose()
+            .map_err(|_| super::invalid_value("archon_magic", "value does not fit in u32"))?,
     })
 }
 
@@ -658,6 +668,7 @@ mod tests {
             working_hours: None,
             first_call_in: String::new(),
             last_call_in: String::new(),
+            archon_magic: None,
         }
     }
 

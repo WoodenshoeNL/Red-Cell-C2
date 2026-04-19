@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 
-use red_cell_common::demon::{DemonCommand, DemonEnvelope};
+use red_cell_common::demon::{ArchonEnvelope, DemonCommand, DemonEnvelope, DemonHeader};
 use subtle::ConstantTimeEq;
 use time::OffsetDateTime;
 use tracing::{info, warn};
@@ -30,6 +30,12 @@ pub struct DemonPacketParser {
     /// [`DemonParserError::LegacyCtrNotAllowed`].  Set to `true` only after the
     /// operator has explicitly opted in via `AllowLegacyCtr = true` in the profile.
     allow_legacy_ctr: bool,
+    /// Whether this parser handles legacy Demon (true) or Archon (false) agents.
+    ///
+    /// `true` — Demon header layout: `size(4) | magic=0xDEADBEEF(4) | agent_id(4)`.
+    /// `false` — Archon header layout: `size(4) | agent_id(4) | magic=random(4)`;
+    ///   per-agent magic is validated against the value stored at first check-in.
+    legacy_mode: bool,
 }
 
 impl DemonPacketParser {
@@ -39,7 +45,12 @@ impl DemonPacketParser {
     /// negotiate monotonic CTR are rejected.
     #[must_use]
     pub fn new(registry: AgentRegistry) -> Self {
-        Self { registry, init_secret_config: DemonInitSecretConfig::None, allow_legacy_ctr: false }
+        Self {
+            registry,
+            init_secret_config: DemonInitSecretConfig::None,
+            allow_legacy_ctr: false,
+            legacy_mode: true,
+        }
     }
 
     /// Create a packet parser with unversioned HKDF-based session key derivation.
@@ -59,7 +70,7 @@ impl DemonPacketParser {
             Some(s) => DemonInitSecretConfig::Unversioned(Zeroizing::new(s)),
             None => DemonInitSecretConfig::None,
         };
-        Self { registry, init_secret_config: config, allow_legacy_ctr: false }
+        Self { registry, init_secret_config: config, allow_legacy_ctr: false, legacy_mode: true }
     }
 
     /// Create a packet parser from an already-constructed [`DemonInitSecretConfig`].
@@ -69,7 +80,7 @@ impl DemonPacketParser {
     /// [`with_init_secrets`](Self::with_init_secrets) for explicit configuration.
     #[must_use]
     pub fn with_init_secret_config(registry: AgentRegistry, config: DemonInitSecretConfig) -> Self {
-        Self { registry, init_secret_config: config, allow_legacy_ctr: false }
+        Self { registry, init_secret_config: config, allow_legacy_ctr: false, legacy_mode: true }
     }
 
     /// Create a packet parser with versioned HKDF-based session key derivation.
@@ -92,7 +103,7 @@ impl DemonPacketParser {
                 secrets.into_iter().map(|(v, s)| (v, Zeroizing::new(s))).collect(),
             )
         };
-        Self { registry, init_secret_config: config, allow_legacy_ctr: false }
+        Self { registry, init_secret_config: config, allow_legacy_ctr: false, legacy_mode: true }
     }
 
     /// Enable or disable acceptance of legacy-CTR DEMON_INIT registrations.
@@ -104,6 +115,17 @@ impl DemonPacketParser {
     #[must_use]
     pub fn with_allow_legacy_ctr(mut self, allow: bool) -> Self {
         self.allow_legacy_ctr = allow;
+        self
+    }
+
+    /// Set the listener mode for this parser.
+    ///
+    /// `true` — legacy Demon mode: header layout `size|magic=0xDEADBEEF|agent_id`.
+    /// `false` — Archon mode: header layout `size|agent_id|magic=random`; per-agent
+    ///   magic is validated on every callback before AES decryption.
+    #[must_use]
+    pub fn with_legacy_mode(mut self, legacy: bool) -> Self {
+        self.legacy_mode = legacy;
         self
     }
 
@@ -144,7 +166,21 @@ impl DemonPacketParser {
         listener_name: &str,
         now: OffsetDateTime,
     ) -> Result<ParsedDemonPacket, DemonParserError> {
-        let envelope = DemonEnvelope::from_bytes(bytes)?;
+        // For non-legacy (Archon) listeners, the header field order differs from Demon.
+        // Parse using ArchonEnvelope and synthesise a DemonHeader so the rest of the
+        // pipeline can remain header-format agnostic.
+        let (envelope, archon_magic_from_packet) = if self.legacy_mode {
+            (DemonEnvelope::from_bytes(bytes)?, None)
+        } else {
+            let archon = ArchonEnvelope::from_bytes(bytes)?;
+            let header = DemonHeader::from_raw(
+                archon.header.size,
+                archon.header.magic,
+                archon.header.agent_id,
+            );
+            let env = DemonEnvelope { header, payload: archon.payload };
+            (env, Some(archon.header.magic))
+        };
         let mut offset = 0_usize;
         let command_id = read_u32_be(&envelope.payload, &mut offset, "top-level command id")?;
         let request_id = read_u32_be(&envelope.payload, &mut offset, "top-level request id")?;
@@ -163,13 +199,15 @@ impl DemonPacketParser {
             }
 
             if let Some(existing) = self.registry.get(envelope.header.agent_id).await {
-                let (agent, legacy_ctr, seq_protected) = parse_init_agent(
+                let (mut agent, legacy_ctr, seq_protected) = parse_init_agent(
                     envelope.header.agent_id,
                     remaining,
                     &external_ip,
                     now,
                     &self.init_secret_config,
                 )?;
+                // Stamp the per-build Archon magic into the agent record on re-init.
+                agent.archon_magic = archon_magic_from_packet;
 
                 // Guard against key-rotation hijack.
                 let keys_match = existing.encryption.aes_key.ct_eq(&agent.encryption.aes_key)
@@ -211,13 +249,15 @@ impl DemonPacketParser {
                 })));
             }
 
-            let (agent, legacy_ctr, seq_protected) = parse_init_agent(
+            let (mut agent, legacy_ctr, seq_protected) = parse_init_agent(
                 envelope.header.agent_id,
                 remaining,
                 &external_ip,
                 now,
                 &self.init_secret_config,
             )?;
+            // Stamp the per-build Archon magic into the agent record on first registration.
+            agent.archon_magic = archon_magic_from_packet;
 
             if legacy_ctr && !self.allow_legacy_ctr {
                 warn!(
@@ -240,6 +280,40 @@ impl DemonPacketParser {
                 request_id,
                 agent,
             })));
+        }
+
+        // Archon only: validate per-agent magic before AES decryption.
+        // This rejects packets whose magic doesn't match the value stored at first check-in,
+        // preventing an attacker from probing the CTR keystream with crafted ciphertext.
+        if let Some(packet_magic) = archon_magic_from_packet {
+            let agent_id = envelope.header.agent_id;
+            match self.registry.get(agent_id).await {
+                Some(record) => match record.archon_magic {
+                    Some(expected) if expected == packet_magic => {}
+                    Some(_) => {
+                        warn!(
+                            agent_id = format_args!("0x{agent_id:08X}"),
+                            listener_name,
+                            packet_magic = format_args!("0x{packet_magic:08X}"),
+                            "rejecting Archon callback: magic mismatch"
+                        );
+                        return Err(DemonParserError::ArchonMagicMismatch {
+                            agent_id,
+                            actual: packet_magic,
+                        });
+                    }
+                    None => {
+                        warn!(
+                            agent_id = format_args!("0x{agent_id:08X}"),
+                            listener_name, "rejecting Archon callback: no archon_magic on file"
+                        );
+                        return Err(DemonParserError::ArchonMagicNotOnFile { agent_id });
+                    }
+                },
+                None => {
+                    // Unknown agent — fall through; the registry lookup later will handle it.
+                }
+            }
         }
 
         // Decrypt without advancing the CTR offset first.  AES-CTR has no authentication tag, so

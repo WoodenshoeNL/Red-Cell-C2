@@ -65,6 +65,7 @@ pub(super) fn test_agent_record(agent_id: u32) -> red_cell_common::AgentRecord {
         working_hours: None,
         first_call_in: "0".to_owned(),
         last_call_in: "0".to_owned(),
+        archon_magic: None,
     }
 }
 

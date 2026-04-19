@@ -267,5 +267,6 @@ fn agent_with_raw_crypto(agent_id: u32, aes_key: Vec<u8>, aes_iv: Vec<u8>) -> Ag
         working_hours: None,
         first_call_in: "2026-03-10T12:00:00Z".to_owned(),
         last_call_in: "2026-03-10T12:00:00Z".to_owned(),
+        archon_magic: None,
     }
 }

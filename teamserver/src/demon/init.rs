@@ -241,6 +241,7 @@ pub(crate) fn parse_init_agent(
             working_hours: (working_hours != 0).then_some(working_hours),
             first_call_in: timestamp.clone(),
             last_call_in: timestamp,
+            archon_magic: None,
         },
         legacy_ctr,
         seq_protected,

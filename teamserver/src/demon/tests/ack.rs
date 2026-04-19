@@ -143,6 +143,7 @@ async fn build_init_ack_rejects_zero_key_agent() {
         working_hours: Some(0b101010),
         first_call_in: "2026-03-10T10:15:00Z".to_owned(),
         last_call_in: "2026-03-10T10:15:00Z".to_owned(),
+        archon_magic: None,
     };
     registry.insert(agent).await.expect("agent insert should succeed");
 

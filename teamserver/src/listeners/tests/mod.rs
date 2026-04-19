@@ -308,6 +308,7 @@ fn sample_agent_info(
         working_hours: Some(0b101010),
         first_call_in: "2026-03-09T19:00:00Z".to_owned(),
         last_call_in: "2026-03-09T19:01:00Z".to_owned(),
+        archon_magic: None,
     }
 }
 

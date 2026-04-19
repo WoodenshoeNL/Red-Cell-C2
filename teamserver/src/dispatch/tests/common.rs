@@ -106,6 +106,7 @@ pub(super) fn sample_agent_info(
         working_hours: None,
         first_call_in: "2026-03-09T20:00:00Z".to_owned(),
         last_call_in: "2026-03-09T20:00:00Z".to_owned(),
+        archon_magic: None,
     }
 }
 

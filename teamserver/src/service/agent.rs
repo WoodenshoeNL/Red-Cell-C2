@@ -366,6 +366,7 @@ pub(super) async fn handle_agent_instance_register(
         working_hours: None,
         first_call_in: now.clone(),
         last_call_in: now,
+        archon_magic: None,
     };
 
     let pivots = PivotInfo::default();

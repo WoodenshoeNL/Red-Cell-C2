@@ -88,6 +88,31 @@ pub(super) fn format_config_bytes(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("0x{byte:02x}")).collect::<Vec<_>>().join("\\,")
 }
 
+/// Generate a random 4-byte Archon magic value and return the corresponding
+/// `-D` define string together with the raw `u32` value.
+///
+/// The define is injected as `-DARCHON_MAGIC_VALUE=0x<hex>` so the C compiler
+/// overrides the fallback constant in `Defines.h`.  The returned `u32` is
+/// stored in the agent record on first check-in and used to validate every
+/// subsequent Archon packet before AES decryption.
+///
+/// The function guarantees that the generated value is never `0xDEADBEEF` so
+/// that Archon traffic cannot be confused with legacy Demon traffic.
+pub(super) fn generate_archon_magic() -> Result<(String, u32), PayloadBuildError> {
+    let mut bytes = [0u8; 4];
+    loop {
+        getrandom::fill(&mut bytes).map_err(|e| PayloadBuildError::ToolchainUnavailable {
+            message: format!("failed to generate random Archon magic: {e}"),
+        })?;
+        let magic = u32::from_be_bytes(bytes);
+        if magic != 0xDEAD_BEEF {
+            let define = format!("ARCHON_MAGIC_VALUE=0x{magic:08X}");
+            validate_define(&define)?;
+            return Ok((define, magic));
+        }
+    }
+}
+
 /// Build the `-D` defines injected into the staged shellcode stager template.
 ///
 /// Only HTTP listeners are supported: the stager makes an outbound HTTP(S) GET

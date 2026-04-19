@@ -54,6 +54,7 @@ async fn register_test_agent(
             working_hours: None,
             first_call_in: "2026-03-17T00:00:00Z".to_owned(),
             last_call_in: "2026-03-17T00:00:00Z".to_owned(),
+            archon_magic: None,
         })
         .await?;
     Ok(())
@@ -153,6 +154,7 @@ async fn beacon_output_callback_persists_credential_loot() -> Result<(), Box<dyn
             working_hours: None,
             first_call_in: "2026-03-17T00:00:00Z".to_owned(),
             last_call_in: "2026-03-17T00:00:00Z".to_owned(),
+            archon_magic: None,
         })
         .await?;
 

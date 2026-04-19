@@ -12,7 +12,12 @@
 #define PROCESS_AGENT_ARCH PROCESS_ARCH_X86
 #endif
 
-#define DEMON_MAGIC_VALUE 0xDEADBEEF
+/* ARC-10: per-build random magic — injected via -DARCHON_MAGIC_VALUE=0x... at compile time.
+ * Falls back to the Demon sentinel only for IDE/cmake builds; the teamserver always
+ * supplies a random value when producing a real payload. */
+#ifndef ARCHON_MAGIC_VALUE
+#define ARCHON_MAGIC_VALUE 0xDEADBEEF
+#endif
 
 #define WIN_VERSION_UNKNOWN 0
 #define WIN_VERSION_XP      1

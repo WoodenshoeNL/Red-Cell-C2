@@ -162,6 +162,7 @@ mod tests {
             working_hours: None,
             first_call_in: "2026-04-01T00:00:00Z".to_owned(),
             last_call_in: "2026-04-01T00:00:00Z".to_owned(),
+            archon_magic: None,
         }
     }
 

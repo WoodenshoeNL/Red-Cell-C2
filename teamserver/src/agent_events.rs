@@ -149,6 +149,7 @@ mod tests {
             working_hours: Some(0b101010),
             first_call_in: "2026-03-09T18:45:00Z".to_owned(),
             last_call_in: "2026-03-09T18:46:00Z".to_owned(),
+            archon_magic: None,
         }
     }
 

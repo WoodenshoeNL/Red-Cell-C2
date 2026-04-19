@@ -505,6 +505,7 @@ mod tests {
             working_hours: None,
             first_call_in: String::new(),
             last_call_in: String::new(),
+            archon_magic: None,
         }
     }
 

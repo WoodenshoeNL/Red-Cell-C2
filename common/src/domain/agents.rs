@@ -163,6 +163,13 @@ pub struct AgentRecord {
     /// Last callback timestamp.
     #[serde(rename = "LastCallIn")]
     pub last_call_in: String,
+    /// Per-build Archon magic value stored at first check-in.
+    ///
+    /// `None` for Demon agents (which always use the fixed `0xDEADBEEF` magic).
+    /// `Some(magic)` for Archon agents; every subsequent packet is validated
+    /// against this value before AES decryption.
+    #[serde(rename = "ArchonMagic", default, skip_serializing_if = "Option::is_none")]
+    pub archon_magic: Option<u32>,
 }
 
 impl AgentRecord {
@@ -260,6 +267,7 @@ mod tests {
             working_hours: None,
             first_call_in: "09/03/2026 19:04:00".to_string(),
             last_call_in: "09/03/2026 19:05:00".to_string(),
+            archon_magic: None,
         }
     }
 

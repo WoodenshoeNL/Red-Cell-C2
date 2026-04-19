@@ -13,7 +13,8 @@ use tempfile::TempDir;
 use red_cell_common::ListenerConfig;
 
 use super::build_defs::{
-    build_defines, build_stager_defines, default_compiler_flags, main_args, stager_cache_bytes,
+    build_defines, build_stager_defines, default_compiler_flags, generate_archon_magic, main_args,
+    stager_cache_bytes,
 };
 use super::cache::compute_cache_key;
 use super::compiler::{asm_sources, c_sources, run_command};
@@ -170,7 +171,11 @@ impl PayloadBuilderService {
             architecture.suffix(),
             format.file_extension()
         ));
-        let defines = build_defines(listener, config_bytes.as_slice(), shellcode_define)?;
+        let mut defines = build_defines(listener, config_bytes.as_slice(), shellcode_define)?;
+        if agent.name == "archon" {
+            let (magic_define, _magic_value) = generate_archon_magic()?;
+            defines.push(magic_define);
+        }
         let object_files = self
             .compile_asm_objects(architecture, agent.source_root, compile_dir, progress)
             .await?;

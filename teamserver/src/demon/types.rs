@@ -160,4 +160,30 @@ pub enum DemonParserError {
         /// The agent identifier that attempted the re-registration.
         agent_id: u32,
     },
+    /// An Archon packet's magic value did not match the per-agent expected value.
+    ///
+    /// Rejected before AES decryption is attempted to avoid keystream desyncs
+    /// caused by attacker-supplied ciphertext.
+    #[error(
+        "Archon packet rejected for agent 0x{agent_id:08X}: \
+         magic 0x{actual:08X} does not match expected per-agent value"
+    )]
+    ArchonMagicMismatch {
+        /// The agent identifier extracted from the packet header.
+        agent_id: u32,
+        /// The magic value supplied by the packet.
+        actual: u32,
+    },
+    /// An Archon packet arrived for an agent that has no stored magic value.
+    ///
+    /// This can happen when an Archon packet is sent to a listener that previously
+    /// accepted legacy Demon agents.  The packet is rejected to avoid key confusion.
+    #[error(
+        "Archon callback rejected for agent 0x{agent_id:08X}: \
+         no Archon magic on file (agent registered as Demon?)"
+    )]
+    ArchonMagicNotOnFile {
+        /// The agent identifier.
+        agent_id: u32,
+    },
 }

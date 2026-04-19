@@ -38,6 +38,8 @@ logs/
 
 # Runtime-generated TLS certificates and SQLite databases (teamserver creates these)
 profiles/*.sqlite
+profiles/*.sqlite-wal
+profiles/*.sqlite-shm
 profiles/*.sqlite.key
 profiles/*.tls.crt
 profiles/*.tls.key

@@ -58,6 +58,7 @@ fn sample_agent_with_crypto(
         working_hours: None,
         first_call_in: "2026-01-01T00:00:00Z".to_owned(),
         last_call_in: "2026-01-01T00:00:01Z".to_owned(),
+        archon_magic: None,
     }
 }
 

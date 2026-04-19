@@ -21,7 +21,7 @@ use red_cell_common::crypto::{
     encrypt_agent_data, encrypt_agent_data_at_offset, hash_password_sha3, open_ws_frame,
     seal_ws_frame,
 };
-use red_cell_common::demon::{DemonCommand, DemonEnvelope};
+use red_cell_common::demon::{ArchonEnvelope, DemonCommand, DemonEnvelope};
 use red_cell_common::operator::{EventCode, LoginInfo, Message, MessageHead, OperatorMessage};
 use tokio::net::TcpListener;
 use tokio::time::{sleep, timeout};
@@ -494,6 +494,90 @@ pub fn valid_demon_reconnect_body(agent_id: u32) -> Vec<u8> {
 
     DemonEnvelope::new(agent_id, payload)
         .unwrap_or_else(|error| panic!("failed to build demon reconnect request body: {error}"))
+        .to_bytes()
+}
+
+/// Build a valid Archon `DemonInit` envelope for the given `agent_id`, `key`, `iv`, and `magic`.
+///
+/// The Archon header layout is `size(4) | agent_id(4) | magic(4)` — unlike the legacy Demon
+/// header which places magic before agent_id.  The payload structure (command_id, key, iv,
+/// encrypted metadata) is identical to [`valid_demon_init_body`].
+pub fn valid_archon_init_body(
+    agent_id: u32,
+    key: [u8; AGENT_KEY_LENGTH],
+    iv: [u8; AGENT_IV_LENGTH],
+    magic: u32,
+) -> Vec<u8> {
+    let mut metadata = Vec::new();
+    metadata.extend_from_slice(&agent_id.to_be_bytes());
+    add_length_prefixed_bytes_be(&mut metadata, b"wkstn-01");
+    add_length_prefixed_bytes_be(&mut metadata, b"operator");
+    add_length_prefixed_bytes_be(&mut metadata, b"REDCELL");
+    add_length_prefixed_bytes_be(&mut metadata, b"10.0.0.25");
+    add_length_prefixed_utf16_le(&mut metadata, "C:\\Windows\\explorer.exe");
+    metadata.extend_from_slice(&1337_u32.to_be_bytes());
+    metadata.extend_from_slice(&1338_u32.to_be_bytes());
+    metadata.extend_from_slice(&512_u32.to_be_bytes());
+    metadata.extend_from_slice(&2_u32.to_be_bytes());
+    metadata.extend_from_slice(&1_u32.to_be_bytes());
+    metadata.extend_from_slice(&0x401000_u64.to_be_bytes());
+    metadata.extend_from_slice(&10_u32.to_be_bytes());
+    metadata.extend_from_slice(&0_u32.to_be_bytes());
+    metadata.extend_from_slice(&1_u32.to_be_bytes());
+    metadata.extend_from_slice(&0_u32.to_be_bytes());
+    metadata.extend_from_slice(&22000_u32.to_be_bytes());
+    metadata.extend_from_slice(&9_u32.to_be_bytes());
+    metadata.extend_from_slice(&15_u32.to_be_bytes());
+    metadata.extend_from_slice(&20_u32.to_be_bytes());
+    metadata.extend_from_slice(&1_893_456_000_u64.to_be_bytes());
+    metadata.extend_from_slice(&0b101010_u32.to_be_bytes());
+
+    let encrypted =
+        encrypt_agent_data(&key, &iv, &metadata).expect("metadata encryption should succeed");
+    let payload = [
+        u32::from(DemonCommand::DemonInit).to_be_bytes().as_slice(),
+        7_u32.to_be_bytes().as_slice(),
+        key.as_slice(),
+        iv.as_slice(),
+        encrypted.as_slice(),
+    ]
+    .concat();
+
+    ArchonEnvelope::new(agent_id, magic, payload)
+        .unwrap_or_else(|error| panic!("failed to build archon init request body: {error}"))
+        .to_bytes()
+}
+
+/// Build an Archon callback envelope using the Archon header layout `size | agent_id | magic`.
+///
+/// `ctr_offset` must be the cumulative AES-CTR block offset at the time of this call.
+pub fn valid_archon_callback_body(
+    agent_id: u32,
+    key: [u8; AGENT_KEY_LENGTH],
+    iv: [u8; AGENT_IV_LENGTH],
+    ctr_offset: u64,
+    command_id: u32,
+    request_id: u32,
+    payload: &[u8],
+    magic: u32,
+) -> Vec<u8> {
+    let mut decrypted = Vec::new();
+    decrypted.extend_from_slice(
+        &u32::try_from(payload.len()).expect("test data fits in u32").to_be_bytes(),
+    );
+    decrypted.extend_from_slice(payload);
+
+    let encrypted = encrypt_agent_data_at_offset(&key, &iv, ctr_offset, &decrypted)
+        .unwrap_or_else(|error| panic!("archon callback encrypt failed: {error}"));
+    let body = [
+        command_id.to_be_bytes().as_slice(),
+        request_id.to_be_bytes().as_slice(),
+        encrypted.as_slice(),
+    ]
+    .concat();
+
+    ArchonEnvelope::new(agent_id, magic, body)
+        .unwrap_or_else(|error| panic!("failed to build archon callback request body: {error}"))
         .to_bytes()
 }
 

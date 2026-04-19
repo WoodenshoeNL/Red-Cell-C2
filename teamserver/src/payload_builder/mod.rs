@@ -321,26 +321,39 @@ impl PayloadBuilderService {
         // binary. Using these as part of the cache key ensures that any change
         // to the listener or demon configuration produces a distinct cache entry.
         let config_bytes = pack_config(listener, &config)?;
-        let cache_key = compute_cache_key(
-            agent_name,
-            architecture,
-            format,
-            &config_bytes,
-            self.inner.binary_patch.as_ref(),
-        )?;
 
-        if let Some(cached) = self.inner.cache.get(&cache_key).await {
-            progress(BuildProgress {
-                level: "Info".to_owned(),
-                message: "cache hit — returning cached artifact".to_owned(),
-            });
-            let file_name =
-                format!("{agent_name}{}{}", architecture.suffix(), format.file_extension());
-            return Ok(PayloadArtifact {
-                bytes: cached,
-                file_name,
-                format: request.format.clone(),
-            });
+        // Archon builds must never be served from cache: each build embeds a unique
+        // per-build magic constant (-DARCHON_MAGIC_VALUE=0x…), so returning a cached
+        // binary would reuse an old magic and violate the "no two builds share the
+        // same magic" requirement.
+        let is_archon = agent_name == "archon";
+
+        let cache_key = if is_archon {
+            None
+        } else {
+            Some(compute_cache_key(
+                agent_name,
+                architecture,
+                format,
+                &config_bytes,
+                self.inner.binary_patch.as_ref(),
+            )?)
+        };
+
+        if let Some(ref key) = cache_key {
+            if let Some(cached) = self.inner.cache.get(key).await {
+                progress(BuildProgress {
+                    level: "Info".to_owned(),
+                    message: "cache hit — returning cached artifact".to_owned(),
+                });
+                let file_name =
+                    format!("{agent_name}{}{}", architecture.suffix(), format.file_extension());
+                return Ok(PayloadArtifact {
+                    bytes: cached,
+                    file_name,
+                    format: request.format.clone(),
+                });
+            }
         }
 
         progress(BuildProgress { level: "Info".to_owned(), message: "starting build".to_owned() });
@@ -360,7 +373,9 @@ impl PayloadBuilderService {
             .await?;
         let file_name = format!("{agent_name}{}{}", architecture.suffix(), format.file_extension());
 
-        self.inner.cache.put(&cache_key, &compiled).await;
+        if let Some(ref key) = cache_key {
+            self.inner.cache.put(key, &compiled).await;
+        }
 
         Ok(PayloadArtifact { bytes: compiled, file_name, format: request.format.clone() })
     }

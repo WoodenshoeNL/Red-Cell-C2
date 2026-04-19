@@ -264,6 +264,7 @@ async fn service_bridge_auth_then_agent_task_round_trip() {
         working_hours: None,
         first_call_in: "0".to_owned(),
         last_call_in: "0".to_owned(),
+        archon_magic: None,
     };
     registry.insert(agent).await.expect("insert agent");
 
@@ -382,6 +383,7 @@ async fn service_bridge_agent_task_add_nonexistent_agent_does_not_crash() {
         working_hours: None,
         first_call_in: "0".to_owned(),
         last_call_in: "0".to_owned(),
+        archon_magic: None,
     };
     registry.insert(real_agent).await.expect("insert real agent");
 

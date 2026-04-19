@@ -8,7 +8,7 @@ mod proxy;
 
 pub(crate) use body::{
     DemonTransportKind, allow_demon_init_for_ip, classify_demon_transport,
-    collect_body_with_magic_precheck, is_valid_callback_request, is_valid_demon_callback_request,
+    collect_body_with_magic_precheck, is_valid_demon_callback_request,
 };
 pub(crate) use dispatch::{DemonHttpDisposition, process_demon_transport};
 

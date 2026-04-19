@@ -107,9 +107,13 @@ fn insert_default_bool(config: &mut Map<String, Value>, key: &str, value: bool) 
 
 /// Pack the merged Demon config and listener settings into the binary layout
 /// expected by the Demon agent at runtime.
+///
+/// `agent_name` is used to gate Archon-only fields (JobExecution, StompDll)
+/// that must not be written into a standard Demon binary config blob.
 pub(crate) fn pack_config(
     listener: &ListenerConfig,
     config: &Map<String, Value>,
+    agent_name: &str,
 ) -> Result<Vec<u8>, PayloadBuildError> {
     let sleep = required_u32(config, "Sleep")?;
     let jitter = required_u32(config, "Jitter")?;
@@ -153,21 +157,23 @@ pub(crate) fn pack_config(
     // ARC-04: heap encryption during sleep — default ON.
     add_u32(&mut out, if optional_bool(config, "HeapEnc").unwrap_or(true) { 1 } else { 0 });
 
-    // ARC-09: job execution mode — 0 = dedicated thread (default), 1 = NT thread pool.
-    add_u32(
-        &mut out,
-        if optional_string(config, "JobExecution")
-            .unwrap_or("thread")
-            .eq_ignore_ascii_case("threadpool")
-        {
-            1
-        } else {
-            0
-        },
-    );
-
-    // ARC-05: StompDll — length-prefixed UTF-16LE wstring; empty = auto-select.
-    add_wstring(&mut out, optional_string(config, "StompDll").unwrap_or(""))?;
+    // ARC-09 / ARC-05: Archon-only fields — never written for standard Demon blobs.
+    if agent_name == "archon" {
+        // ARC-09: job execution mode — 0 = dedicated thread (default), 1 = NT thread pool.
+        add_u32(
+            &mut out,
+            if optional_string(config, "JobExecution")
+                .unwrap_or("thread")
+                .eq_ignore_ascii_case("threadpool")
+            {
+                1
+            } else {
+                0
+            },
+        );
+        // ARC-05: StompDll — length-prefixed UTF-16LE wstring; empty = auto-select.
+        add_wstring(&mut out, optional_string(config, "StompDll").unwrap_or(""))?;
+    }
 
     match listener {
         ListenerConfig::Http(http) => pack_http_listener(&mut out, http)?,

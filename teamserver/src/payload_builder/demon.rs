@@ -167,7 +167,7 @@ impl PayloadBuilderService {
     where
         F: FnMut(BuildProgress),
     {
-        let config_bytes = pack_config(listener, config)?;
+        let config_bytes = pack_config(listener, config, agent.name)?;
         progress(BuildProgress {
             level: "Info".to_owned(),
             message: format!("config size [{} bytes]", config_bytes.len()),

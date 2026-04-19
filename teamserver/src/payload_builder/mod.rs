@@ -333,7 +333,7 @@ impl PayloadBuilderService {
         // Compute the packed config bytes that will be embedded in the compiled
         // binary. Using these as part of the cache key ensures that any change
         // to the listener or demon configuration produces a distinct cache entry.
-        let config_bytes = pack_config(listener, &config)?;
+        let config_bytes = pack_config(listener, &config, agent_name)?;
 
         // Archon builds must never be served from cache: each build embeds a unique
         // per-build magic constant (-DARCHON_MAGIC_VALUE=0x…), so returning a cached

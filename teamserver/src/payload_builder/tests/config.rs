@@ -86,7 +86,6 @@ fn http_listener_with_method(method: Option<&str>) -> ListenerConfig {
         name: "http".to_owned(),
         kill_date: None,
         working_hours: None,
-        suppress_opsec_warnings: true,
         hosts: vec!["localhost:80".to_owned()],
         host_bind: "0.0.0.0".to_owned(),
         host_rotation: "round-robin".to_owned(),
@@ -108,7 +107,6 @@ fn http_listener_with_method(method: Option<&str>) -> ListenerConfig {
         doh_provider: None,
         legacy_mode: true,
         suppress_opsec_warnings: true,
-        suppress_opsec_warnings: true,
     }))
 }
 
@@ -118,7 +116,6 @@ fn https_listener_with_ja3(ja3_randomize: Option<bool>) -> ListenerConfig {
         name: "https".to_owned(),
         kill_date: None,
         working_hours: None,
-        suppress_opsec_warnings: true,
         hosts: vec!["localhost:443".to_owned()],
         host_bind: "0.0.0.0".to_owned(),
         host_rotation: "round-robin".to_owned(),
@@ -139,7 +136,6 @@ fn https_listener_with_ja3(ja3_randomize: Option<bool>) -> ListenerConfig {
         doh_domain: None,
         doh_provider: None,
         legacy_mode: true,
-        suppress_opsec_warnings: true,
         suppress_opsec_warnings: true,
     }))
 }
@@ -245,10 +241,9 @@ fn pack_config_matches_expected_http_layout() -> Result<(), Box<dyn std::error::
         doh_provider: None,
         legacy_mode: true,
         suppress_opsec_warnings: true,
-        suppress_opsec_warnings: true,
     }));
 
-    let bytes = pack_config(&listener, &config)?;
+    let bytes = pack_config(&listener, &config, "demon")?;
     let mut cursor = bytes.as_slice();
     assert_eq!(read_u32(&mut cursor)?, 5);
     assert_eq!(read_u32(&mut cursor)?, 15);
@@ -263,8 +258,7 @@ fn pack_config_matches_expected_http_layout() -> Result<(), Box<dyn std::error::
     assert_eq!(read_u32(&mut cursor)?, 1);
     assert_eq!(read_u32(&mut cursor)?, 1);
     assert_eq!(read_u32(&mut cursor)?, 1); // HeapEnc (default true)
-    assert_eq!(read_u32(&mut cursor)?, 0); // JobExecution: thread (default)
-    assert_eq!(read_wstring(&mut cursor)?, ""); // StompDll: auto-select (default)
+    // JobExecution and StompDll are Archon-only — absent for demon builds
     assert_eq!(read_u64(&mut cursor)?, 1234);
     assert_eq!(read_u32(&mut cursor)?, 5_243_968);
     assert_eq!(read_wstring(&mut cursor)?, "POST");
@@ -308,10 +302,9 @@ fn pack_config_ends_after_listener_specific_fields() -> Result<(), Box<dyn std::
         pipe_name: "pivot".to_owned(),
         kill_date: None,
         working_hours: None,
-        suppress_opsec_warnings: true,
     });
 
-    let bytes = pack_config(&listener, &config)?;
+    let bytes = pack_config(&listener, &config, "demon")?;
     let mut cursor = bytes.as_slice();
     assert_eq!(read_u32(&mut cursor)?, 5);
     assert_eq!(read_u32(&mut cursor)?, 0);
@@ -326,8 +319,7 @@ fn pack_config_ends_after_listener_specific_fields() -> Result<(), Box<dyn std::
     assert_eq!(read_u32(&mut cursor)?, 0);
     assert_eq!(read_u32(&mut cursor)?, 0);
     assert_eq!(read_u32(&mut cursor)?, 1); // HeapEnc (default true)
-    assert_eq!(read_u32(&mut cursor)?, 0); // JobExecution: thread (default)
-    assert_eq!(read_wstring(&mut cursor)?, ""); // StompDll: auto-select (default)
+    // JobExecution and StompDll are Archon-only — absent for demon builds
     assert_eq!(read_wstring(&mut cursor)?, r"\\.\pipe\pivot");
     assert_eq!(read_u64(&mut cursor)?, 0);
     assert_eq!(read_u32(&mut cursor)?, 0);
@@ -353,7 +345,6 @@ fn pack_config_http_without_proxy_ends_after_disabled_proxy_flag()
         name: "http".to_owned(),
         kill_date: None,
         working_hours: None,
-        suppress_opsec_warnings: true,
         hosts: vec!["listener.local".to_owned()],
         host_bind: "0.0.0.0".to_owned(),
         host_rotation: "round-robin".to_owned(),
@@ -375,10 +366,9 @@ fn pack_config_http_without_proxy_ends_after_disabled_proxy_flag()
         doh_provider: None,
         legacy_mode: true,
         suppress_opsec_warnings: true,
-        suppress_opsec_warnings: true,
     }));
 
-    let bytes = pack_config(&listener, &config)?;
+    let bytes = pack_config(&listener, &config, "demon")?;
     let mut cursor = bytes.as_slice();
     assert_eq!(read_u32(&mut cursor)?, 5);
     assert_eq!(read_u32(&mut cursor)?, 0);
@@ -393,8 +383,7 @@ fn pack_config_http_without_proxy_ends_after_disabled_proxy_flag()
     assert_eq!(read_u32(&mut cursor)?, 0);
     assert_eq!(read_u32(&mut cursor)?, 0);
     assert_eq!(read_u32(&mut cursor)?, 1); // HeapEnc (default true)
-    assert_eq!(read_u32(&mut cursor)?, 0); // JobExecution: thread (default)
-    assert_eq!(read_wstring(&mut cursor)?, ""); // StompDll: auto-select (default)
+    // JobExecution and StompDll are Archon-only — absent for demon builds
     assert_eq!(read_u64(&mut cursor)?, 0);
     assert_eq!(read_u32(&mut cursor)?, 0);
     assert_eq!(read_wstring(&mut cursor)?, "POST");
@@ -437,10 +426,10 @@ fn pack_config_rejects_dns_listener() -> Result<(), Box<dyn std::error::Error>> 
         record_types: vec!["TXT".to_owned()],
         kill_date: None,
         working_hours: None,
-        suppress_opsec_warnings: true,
     });
 
-    let error = pack_config(&listener, &config).expect_err("dns listener should be rejected");
+    let error =
+        pack_config(&listener, &config, "demon").expect_err("dns listener should be rejected");
     assert!(matches!(
         error,
         PayloadBuildError::InvalidRequest { message }
@@ -454,7 +443,7 @@ fn pack_config_rejects_dns_listener() -> Result<(), Box<dyn std::error::Error>> 
 #[test]
 fn pack_config_accepts_post_method() -> Result<(), Box<dyn std::error::Error>> {
     let listener = http_listener_with_method(Some("POST"));
-    pack_config(&listener, &minimal_config_json()).expect("POST should be accepted");
+    pack_config(&listener, &minimal_config_json(), "demon").expect("POST should be accepted");
     Ok(())
 }
 
@@ -462,11 +451,12 @@ fn pack_config_accepts_post_method() -> Result<(), Box<dyn std::error::Error>> {
 fn pack_config_accepts_post_method_case_insensitive() -> Result<(), Box<dyn std::error::Error>> {
     let canonical = {
         let listener = http_listener_with_method(Some("POST"));
-        pack_config(&listener, &minimal_config_json()).expect("POST should be accepted")
+        pack_config(&listener, &minimal_config_json(), "demon").expect("POST should be accepted")
     };
     let normalised = {
         let listener = http_listener_with_method(Some("post"));
-        pack_config(&listener, &minimal_config_json()).expect("lowercase post should be accepted")
+        pack_config(&listener, &minimal_config_json(), "demon")
+            .expect("lowercase post should be accepted")
     };
     assert_eq!(
         canonical, normalised,
@@ -478,8 +468,8 @@ fn pack_config_accepts_post_method_case_insensitive() -> Result<(), Box<dyn std:
 #[test]
 fn pack_config_rejects_head_method() {
     let listener = http_listener_with_method(Some("HEAD"));
-    let error =
-        pack_config(&listener, &minimal_config_json()).expect_err("HEAD should be rejected");
+    let error = pack_config(&listener, &minimal_config_json(), "demon")
+        .expect_err("HEAD should be rejected");
     assert!(
         matches!(&error, PayloadBuildError::InvalidRequest { message } if message.contains("HEAD")),
         "unexpected error: {error}"
@@ -489,7 +479,8 @@ fn pack_config_rejects_head_method() {
 #[test]
 fn pack_config_rejects_get_method() {
     let listener = http_listener_with_method(Some("GET"));
-    let error = pack_config(&listener, &minimal_config_json()).expect_err("GET should be rejected");
+    let error = pack_config(&listener, &minimal_config_json(), "demon")
+        .expect_err("GET should be rejected");
     assert!(
         matches!(&error, PayloadBuildError::InvalidRequest { message } if message.contains("GET")),
         "unexpected error: {error}"
@@ -499,8 +490,8 @@ fn pack_config_rejects_get_method() {
 #[test]
 fn pack_config_rejects_delete_method() {
     let listener = http_listener_with_method(Some("DELETE"));
-    let error =
-        pack_config(&listener, &minimal_config_json()).expect_err("DELETE should be rejected");
+    let error = pack_config(&listener, &minimal_config_json(), "demon")
+        .expect_err("DELETE should be rejected");
     assert!(
         matches!(&error, PayloadBuildError::InvalidRequest { message } if message.contains("DELETE")),
         "unexpected error: {error}"
@@ -510,9 +501,10 @@ fn pack_config_rejects_delete_method() {
 #[test]
 fn pack_config_method_none_defaults_to_post() -> Result<(), Box<dyn std::error::Error>> {
     // Producing a config with method=None should yield the same bytes as method=Some("POST").
-    let bytes_default = pack_config(&http_listener_with_method(None), &minimal_config_json())?;
+    let bytes_default =
+        pack_config(&http_listener_with_method(None), &minimal_config_json(), "demon")?;
     let bytes_explicit =
-        pack_config(&http_listener_with_method(Some("POST")), &minimal_config_json())?;
+        pack_config(&http_listener_with_method(Some("POST")), &minimal_config_json(), "demon")?;
     assert_eq!(bytes_default, bytes_explicit);
     Ok(())
 }
@@ -523,8 +515,9 @@ fn pack_config_method_none_defaults_to_post() -> Result<(), Box<dyn std::error::
 fn pack_config_ja3_randomize_defaults_to_true_for_https() -> Result<(), Box<dyn std::error::Error>>
 {
     // When ja3_randomize is None and the listener is HTTPS, the emitted flag must be 1.
-    let bytes_none = pack_config(&https_listener_with_ja3(None), &minimal_config_json())?;
-    let bytes_true = pack_config(&https_listener_with_ja3(Some(true)), &minimal_config_json())?;
+    let bytes_none = pack_config(&https_listener_with_ja3(None), &minimal_config_json(), "demon")?;
+    let bytes_true =
+        pack_config(&https_listener_with_ja3(Some(true)), &minimal_config_json(), "demon")?;
     assert_eq!(
         bytes_none, bytes_true,
         "None should produce the same bytes as Some(true) for HTTPS"
@@ -536,8 +529,10 @@ fn pack_config_ja3_randomize_defaults_to_true_for_https() -> Result<(), Box<dyn 
 fn pack_config_ja3_randomize_explicit_false_disables_for_https()
 -> Result<(), Box<dyn std::error::Error>> {
     // An explicit Some(false) must override the HTTPS default and emit 0.
-    let bytes_false = pack_config(&https_listener_with_ja3(Some(false)), &minimal_config_json())?;
-    let bytes_true = pack_config(&https_listener_with_ja3(Some(true)), &minimal_config_json())?;
+    let bytes_false =
+        pack_config(&https_listener_with_ja3(Some(false)), &minimal_config_json(), "demon")?;
+    let bytes_true =
+        pack_config(&https_listener_with_ja3(Some(true)), &minimal_config_json(), "demon")?;
     assert_ne!(
         bytes_false, bytes_true,
         "Some(false) and Some(true) should produce different bytes"
@@ -553,7 +548,6 @@ fn pack_config_ja3_randomize_defaults_to_false_for_plain_http()
         name: "http".to_owned(),
         kill_date: None,
         working_hours: None,
-        suppress_opsec_warnings: true,
         hosts: vec!["localhost:80".to_owned()],
         host_bind: "0.0.0.0".to_owned(),
         host_rotation: "round-robin".to_owned(),
@@ -575,13 +569,11 @@ fn pack_config_ja3_randomize_defaults_to_false_for_plain_http()
         doh_provider: None,
         legacy_mode: true,
         suppress_opsec_warnings: true,
-        suppress_opsec_warnings: true,
     }));
     let http_false = ListenerConfig::Http(Box::new(HttpListenerConfig {
         name: "http".to_owned(),
         kill_date: None,
         working_hours: None,
-        suppress_opsec_warnings: true,
         hosts: vec!["localhost:80".to_owned()],
         host_bind: "0.0.0.0".to_owned(),
         host_rotation: "round-robin".to_owned(),
@@ -603,10 +595,9 @@ fn pack_config_ja3_randomize_defaults_to_false_for_plain_http()
         doh_provider: None,
         legacy_mode: true,
         suppress_opsec_warnings: true,
-        suppress_opsec_warnings: true,
     }));
-    let bytes_none = pack_config(&http_none, &minimal_config_json())?;
-    let bytes_false = pack_config(&http_false, &minimal_config_json())?;
+    let bytes_none = pack_config(&http_none, &minimal_config_json(), "demon")?;
+    let bytes_false = pack_config(&http_false, &minimal_config_json(), "demon")?;
     assert_eq!(bytes_none, bytes_false, "None on plain HTTP should equal Some(false)");
     Ok(())
 }
@@ -950,7 +941,8 @@ fn pack_config_rejects_jitter_above_100() {
     }))
     .expect("unwrap");
     let listener = http_listener_with_method(None);
-    let err = pack_config(&listener, &config).expect_err("jitter > 100 should be rejected");
+    let err =
+        pack_config(&listener, &config, "demon").expect_err("jitter > 100 should be rejected");
     assert!(matches!(
         err,
         PayloadBuildError::InvalidRequest { message }
@@ -972,7 +964,7 @@ fn pack_config_accepts_jitter_at_boundary_100() -> Result<(), Box<dyn std::error
         }
     }))?;
     let listener = http_listener_with_method(None);
-    pack_config(&listener, &config)?;
+    pack_config(&listener, &config, "demon")?;
     Ok(())
 }
 
@@ -990,7 +982,7 @@ fn pack_config_accepts_jitter_at_boundary_0() -> Result<(), Box<dyn std::error::
         }
     }))?;
     let listener = http_listener_with_method(None);
-    pack_config(&listener, &config)?;
+    pack_config(&listener, &config, "demon")?;
     Ok(())
 }
 
@@ -1013,10 +1005,9 @@ fn pack_config_heap_enc_false_is_packed_as_zero() -> Result<(), Box<dyn std::err
         pipe_name: "pivot".to_owned(),
         kill_date: None,
         working_hours: None,
-        suppress_opsec_warnings: true,
     });
 
-    let bytes = pack_config(&listener, &config)?;
+    let bytes = pack_config(&listener, &config, "demon")?;
     let mut cursor = bytes.as_slice();
     assert_eq!(read_u32(&mut cursor)?, 5);
     assert_eq!(read_u32(&mut cursor)?, 0);
@@ -1031,8 +1022,7 @@ fn pack_config_heap_enc_false_is_packed_as_zero() -> Result<(), Box<dyn std::err
     assert_eq!(read_u32(&mut cursor)?, 0);
     assert_eq!(read_u32(&mut cursor)?, 0);
     assert_eq!(read_u32(&mut cursor)?, 0); // HeapEnc (explicit false)
-    assert_eq!(read_u32(&mut cursor)?, 0); // JobExecution: thread (default)
-    assert_eq!(read_wstring(&mut cursor)?, ""); // StompDll: auto-select (default)
+    // JobExecution and StompDll are Archon-only — absent for demon builds
     assert_eq!(read_wstring(&mut cursor)?, r"\\.\pipe\pivot");
     assert_eq!(read_u64(&mut cursor)?, 0);
     assert_eq!(read_u32(&mut cursor)?, 0);
@@ -1091,9 +1081,8 @@ fn pack_config_job_execution_threadpool_is_packed_as_one() -> Result<(), Box<dyn
         pipe_name: "pivot".to_owned(),
         kill_date: None,
         working_hours: None,
-        suppress_opsec_warnings: true,
     });
-    let bytes = pack_config(&listener, &config)?;
+    let bytes = pack_config(&listener, &config, "archon")?;
     let mut cursor = bytes.as_slice();
     // skip sleep, jitter, alloc, execute, spawn64, spawn32, technique, bypass, stackspoof,
     // proxyloading, syscall, amsi, heapenc
@@ -1110,8 +1099,8 @@ fn pack_config_job_execution_threadpool_is_packed_as_one() -> Result<(), Box<dyn
     read_u32(&mut cursor)?; // SysIndirect
     read_u32(&mut cursor)?; // AmsiEtwPatch
     read_u32(&mut cursor)?; // HeapEnc
-    assert_eq!(read_u32(&mut cursor)?, 1); // JobExecution: threadpool
-    assert_eq!(read_wstring(&mut cursor)?, ""); // StompDll: auto-select (default)
+    assert_eq!(read_u32(&mut cursor)?, 1); // JobExecution: threadpool (Archon-only)
+    assert_eq!(read_wstring(&mut cursor)?, ""); // StompDll: auto-select (Archon-only)
     Ok(())
 }
 
@@ -1134,9 +1123,8 @@ fn pack_config_stomp_dll_is_packed_as_wstring() -> Result<(), Box<dyn std::error
         pipe_name: "pivot".to_owned(),
         kill_date: None,
         working_hours: None,
-        suppress_opsec_warnings: true,
     });
-    let bytes = pack_config(&listener, &config)?;
+    let bytes = pack_config(&listener, &config, "archon")?;
     let mut cursor = bytes.as_slice();
     read_u32(&mut cursor)?; // sleep
     read_u32(&mut cursor)?; // jitter
@@ -1151,8 +1139,55 @@ fn pack_config_stomp_dll_is_packed_as_wstring() -> Result<(), Box<dyn std::error
     read_u32(&mut cursor)?; // SysIndirect
     read_u32(&mut cursor)?; // AmsiEtwPatch
     read_u32(&mut cursor)?; // HeapEnc
-    assert_eq!(read_u32(&mut cursor)?, 0); // JobExecution: thread (default)
-    assert_eq!(read_wstring(&mut cursor)?, "WINMM.DLL"); // StompDll
+    assert_eq!(read_u32(&mut cursor)?, 0); // JobExecution: thread (default, Archon-only)
+    assert_eq!(read_wstring(&mut cursor)?, "WINMM.DLL"); // StompDll (Archon-only)
+    Ok(())
+}
+
+#[test]
+fn pack_config_demon_excludes_archon_only_fields() -> Result<(), Box<dyn std::error::Error>> {
+    // Demon blobs must NOT include JobExecution or StompDll, even when those
+    // keys are present in the config map.  After HeapEnc, the next bytes must
+    // be the SMB pipe wstring, not a u32 JobExecution value.
+    let config = serde_json::from_value::<Map<String, Value>>(json!({
+        "Sleep": "5",
+        "Jitter": "0",
+        "Sleep Technique": "WaitForSingleObjectEx",
+        "JobExecution": "threadpool",
+        "StompDll": "WINMM.DLL",
+        "Injection": {
+            "Alloc": "Win32",
+            "Execute": "Win32",
+            "Spawn64": "a",
+            "Spawn32": "b"
+        }
+    }))?;
+    let listener = ListenerConfig::Smb(red_cell_common::SmbListenerConfig {
+        name: "smb".to_owned(),
+        pipe_name: "pivot".to_owned(),
+        kill_date: None,
+        working_hours: None,
+    });
+    let bytes = pack_config(&listener, &config, "demon")?;
+    let mut cursor = bytes.as_slice();
+    read_u32(&mut cursor)?; // sleep
+    read_u32(&mut cursor)?; // jitter
+    read_u32(&mut cursor)?; // alloc
+    read_u32(&mut cursor)?; // execute
+    read_wstring(&mut cursor)?; // spawn64
+    read_wstring(&mut cursor)?; // spawn32
+    read_u32(&mut cursor)?; // SleepTechnique
+    read_u32(&mut cursor)?; // SleepJmpBypass
+    read_u32(&mut cursor)?; // StackSpoof
+    read_u32(&mut cursor)?; // ProxyLoading
+    read_u32(&mut cursor)?; // SysIndirect
+    read_u32(&mut cursor)?; // AmsiEtwPatch
+    read_u32(&mut cursor)?; // HeapEnc
+    // Next field must be the pipe path — JobExecution/StompDll must not be present
+    assert_eq!(read_wstring(&mut cursor)?, r"\\.\pipe\pivot");
+    read_u64(&mut cursor)?; // KillDate
+    read_u32(&mut cursor)?; // WorkingHours
+    assert!(cursor.is_empty(), "demon blob has unexpected trailing bytes (Archon fields leaked)");
     Ok(())
 }
 
@@ -1454,7 +1489,6 @@ fn pack_http_listener_packs_doh_domain_and_provider_cloudflare()
         name: "http".to_owned(),
         kill_date: None,
         working_hours: None,
-        suppress_opsec_warnings: true,
         hosts: vec!["localhost:80".to_owned()],
         host_bind: "0.0.0.0".to_owned(),
         host_rotation: "round-robin".to_owned(),
@@ -1476,9 +1510,8 @@ fn pack_http_listener_packs_doh_domain_and_provider_cloudflare()
         doh_provider: Some("cloudflare".to_owned()),
         legacy_mode: true,
         suppress_opsec_warnings: true,
-        suppress_opsec_warnings: true,
     }));
-    let bytes = pack_config(&listener, &minimal_config_json())?;
+    let bytes = pack_config(&listener, &minimal_config_json(), "demon")?;
     let mut cursor = bytes.as_slice();
     // Skip to the DoH fields: consume all preceding fields.
     // Sleep, Jitter, Alloc, Execute, Spawn64, Spawn32, SleepTech, SleepJmp,
@@ -1496,8 +1529,7 @@ fn pack_http_listener_packs_doh_domain_and_provider_cloudflare()
     read_u32(&mut cursor)?; // SysIndirect
     read_u32(&mut cursor)?; // AmsiEtwPatch
     read_u32(&mut cursor)?; // HeapEnc
-    read_u32(&mut cursor)?; // JobExecution
-    read_wstring(&mut cursor)?; // StompDll
+    // JobExecution and StompDll are Archon-only — absent for demon builds
     // HTTP-transport fields
     read_u64(&mut cursor)?; // KillDate
     read_u32(&mut cursor)?; // WorkingHours
@@ -1527,7 +1559,6 @@ fn pack_http_listener_packs_doh_provider_google() -> Result<(), Box<dyn std::err
         name: "http".to_owned(),
         kill_date: None,
         working_hours: None,
-        suppress_opsec_warnings: true,
         hosts: vec!["localhost:80".to_owned()],
         host_bind: "0.0.0.0".to_owned(),
         host_rotation: "round-robin".to_owned(),
@@ -1549,9 +1580,8 @@ fn pack_http_listener_packs_doh_provider_google() -> Result<(), Box<dyn std::err
         doh_provider: Some("google".to_owned()),
         legacy_mode: true,
         suppress_opsec_warnings: true,
-        suppress_opsec_warnings: true,
     }));
-    let with_google = pack_config(&listener, &minimal_config_json())?;
+    let with_google = pack_config(&listener, &minimal_config_json(), "demon")?;
     // Verify the last 4 bytes (provider) are 1 = Google.
     let provider =
         u32::from_le_bytes(with_google[with_google.len() - 4..].try_into().expect("last 4 bytes"));

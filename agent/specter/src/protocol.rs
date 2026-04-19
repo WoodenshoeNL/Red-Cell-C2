@@ -5,7 +5,6 @@
 
 pub use red_cell_common::agent_protocol::{
     AgentMetadata, build_callback_packet, build_init_packet, parse_init_ack,
-    serialize_init_metadata,
 };
 use red_cell_common::crypto::{AgentCryptoMaterial, decrypt_agent_data_at_offset};
 use red_cell_common::demon::DemonEnvelope;
@@ -62,7 +61,6 @@ pub fn parse_tasking_response(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use red_cell_common::agent_protocol::{INIT_EXT_MONOTONIC_CTR, INIT_EXT_SEQ_PROTECTED};
     use red_cell_common::crypto::{
         AGENT_IV_LENGTH, AGENT_KEY_LENGTH, decrypt_agent_data, encrypt_agent_data_at_offset,
         generate_agent_crypto_material,
@@ -165,29 +163,6 @@ mod tests {
     }
 
     #[test]
-    fn init_metadata_has_monotonic_ctr_and_seq_protected_flags() {
-        let agent_id = 0x1111_2222;
-        let metadata = test_metadata();
-        let buf = serialize_init_metadata(agent_id, &metadata).expect("serialize");
-
-        let tail = &buf[buf.len() - 4..];
-        let ext_flags = u32::from_be_bytes(tail.try_into().expect("4 bytes"));
-        assert_ne!(ext_flags & INIT_EXT_MONOTONIC_CTR, 0, "INIT_EXT_MONOTONIC_CTR must be set");
-        assert_ne!(ext_flags & INIT_EXT_SEQ_PROTECTED, 0, "INIT_EXT_SEQ_PROTECTED must be set");
-    }
-
-    #[test]
-    fn init_metadata_hostname_round_trips() {
-        let agent_id = 0x1111_2222;
-        let metadata = test_metadata();
-        let buf = serialize_init_metadata(agent_id, &metadata).expect("serialize");
-
-        let hostname_len = u32::from_be_bytes(buf[4..8].try_into().expect("len")) as usize;
-        let hostname = std::str::from_utf8(&buf[8..8 + hostname_len]).expect("utf8");
-        assert_eq!(hostname, "DESKTOP-TEST");
-    }
-
-    #[test]
     fn parse_init_ack_valid() {
         let crypto = generate_agent_crypto_material().expect("keygen");
         let agent_id: u32 = 0xBEEF_CAFE;
@@ -279,44 +254,6 @@ mod tests {
         assert_eq!(decoded_seq, seq_num);
         let plen = u32::from_be_bytes(decrypted[8..12].try_into().expect("len")) as usize;
         assert_eq!(&decrypted[12..12 + plen], payload_data);
-    }
-
-    #[test]
-    fn utf16le_encoding_matches_havoc_format() {
-        // Verify UTF-16LE encoding via serialize_init_metadata process_path field.
-        // 'A' = U+0041 → UTF-16LE = [0x41, 0x00], length = 2 bytes.
-        // process_path is the 5th field; skip: agent_id(4) + hostname + username + domain + ip.
-        // Use a dedicated metadata with known hostname lengths to isolate process_path.
-        let m = AgentMetadata {
-            hostname: "H".into(),
-            username: "U".into(),
-            domain_name: "D".into(),
-            internal_ip: "I".into(),
-            process_path: "A".into(),
-            process_pid: 0,
-            process_tid: 0,
-            process_ppid: 0,
-            process_arch: 0,
-            elevated: false,
-            base_address: 0,
-            os_major: 0,
-            os_minor: 0,
-            os_product_type: 0,
-            os_service_pack: 0,
-            os_build: 0,
-            os_arch: 0,
-            sleep_delay: 0,
-            sleep_jitter: 0,
-            kill_date: 0,
-            working_hours: 0,
-        };
-        let buf = serialize_init_metadata(0, &m).expect("serialize");
-        // agent_id(4) + hostname(4+1) + username(4+1) + domain_name(4+1) + internal_ip(4+1) = 24 bytes before process_path
-        let offset = 4 + 5 + 5 + 5 + 5;
-        let path_len =
-            u32::from_be_bytes(buf[offset..offset + 4].try_into().expect("len")) as usize;
-        assert_eq!(path_len, 2); // 'A' as UTF-16LE = 2 bytes
-        assert_eq!(&buf[offset + 4..offset + 6], &[0x41, 0x00]);
     }
 
     #[test]

@@ -4,7 +4,6 @@ use std::path::Path;
 
 pub use red_cell_common::agent_protocol::{
     AgentMetadata, build_callback_packet, build_init_packet, parse_init_ack,
-    serialize_init_metadata,
 };
 use red_cell_common::crypto::{
     AgentCryptoMaterial, ctr_blocks_for_len, decrypt_agent_data_at_offset,

@@ -220,7 +220,7 @@ pub fn build_callback_packet(
 /// The buffer ends with a trailing `u32` extension-flags field that opts in to
 /// monotonic CTR mode and sequence-number replay protection.  Legacy Demon agents
 /// omit this field; the teamserver defaults to legacy mode when it is absent.
-pub fn serialize_init_metadata(
+pub(crate) fn serialize_init_metadata(
     agent_id: u32,
     m: &AgentMetadata,
 ) -> Result<Vec<u8>, AgentProtocolError> {

@@ -4,7 +4,6 @@ use red_cell_common::demon::{DemonCommand, DemonMessage, DemonPackage};
 
 use super::PhantomAgent;
 use crate::command::{PendingCallback, execute};
-use crate::ecdh::send_session_packet;
 use crate::error::PhantomError;
 use crate::protocol::{build_callback_packet, callback_ctr_blocks};
 

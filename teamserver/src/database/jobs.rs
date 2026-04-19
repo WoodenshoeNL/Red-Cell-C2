@@ -438,6 +438,7 @@ impl PayloadBuildRepository {
     }
 
     /// Update the status and optional artifact of a build record.
+    #[allow(clippy::too_many_arguments)]
     pub async fn update_status(
         &self,
         id: &str,

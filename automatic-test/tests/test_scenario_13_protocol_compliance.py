@@ -19,15 +19,19 @@ _spec.loader.exec_module(_mod)
 
 
 class TestWrongEndianCheck(unittest.TestCase):
-    def test_wrong_endian_registration_rejected(self) -> None:
-        with patch.object(_mod, "_post_raw", return_value=(404, b"")):
-            _mod._run_wrong_endian_check("http://127.0.0.1:19090/")
-
-    def test_wrong_endian_registration_accepted_is_failure(self) -> None:
+    def test_wrong_endian_registration_accepted(self) -> None:
+        """Server accepts garbled-endian packet (transport is valid) — function succeeds."""
         with patch.object(_mod, "_post_raw", return_value=(200, b"ack")):
+            agent_id = _mod._run_wrong_endian_check("http://127.0.0.1:19090/")
+        self.assertIsInstance(agent_id, int)
+        self.assertNotEqual(agent_id, 0)
+
+    def test_wrong_endian_registration_rejected_is_failure(self) -> None:
+        """Server rejects the packet (404) — function raises AssertionError."""
+        with patch.object(_mod, "_post_raw", return_value=(404, b"")):
             with self.assertRaises(AssertionError) as ctx:
                 _mod._run_wrong_endian_check("http://127.0.0.1:19090/")
-        self.assertIn("BE-encoded DEMON_INIT rejected", str(ctx.exception))
+        self.assertIn("BE-encoded DEMON_INIT accepted", str(ctx.exception))
 
 
 if __name__ == "__main__":

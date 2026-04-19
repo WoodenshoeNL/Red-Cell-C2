@@ -514,7 +514,7 @@ def run(ctx):
     base_url = f"http://{server_host}:{listener_port}/"
 
     print(f"  [listener] creating HTTP listener {listener_name!r} on {server_host}:{listener_port}")
-    listener_create(cli, listener_name, "http", port=listener_port)
+    listener_create(cli, listener_name, "http", port=listener_port, legacy_mode=True)
     listener_start(cli, listener_name)
     print("  [listener] started — waiting for port to open")
     _wait_for_tcp(server_host, listener_port, timeout=int(ctx.timeouts.listener_startup))

@@ -89,6 +89,13 @@ impl FallbackTransport {
         Ok(Self { http, doh })
     }
 
+    /// Return a reference to the primary HTTP transport.
+    ///
+    /// Used by the ECDH handshake which requires a typed `&HttpTransport`.
+    pub fn primary(&self) -> &HttpTransport {
+        &self.http
+    }
+
     /// Send `packet` to the teamserver.
     ///
     /// Tries HTTP first.  If HTTP fails **and** a DoH transport is configured,

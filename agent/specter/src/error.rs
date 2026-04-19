@@ -1,5 +1,6 @@
 //! Error types for the Specter agent.
 
+use red_cell_common::agent_protocol::AgentProtocolError;
 use red_cell_common::crypto::CryptoError;
 use red_cell_common::demon::DemonProtocolError;
 use thiserror::Error;
@@ -30,4 +31,14 @@ pub enum SpecterError {
     /// A command-line argument or environment variable was invalid.
     #[error("argument error: {0}")]
     Argument(String),
+}
+
+impl From<AgentProtocolError> for SpecterError {
+    fn from(e: AgentProtocolError) -> Self {
+        match e {
+            AgentProtocolError::Protocol(inner) => SpecterError::Protocol(inner),
+            AgentProtocolError::Crypto(inner) => SpecterError::Crypto(inner),
+            AgentProtocolError::InvalidResponse(msg) => SpecterError::InvalidResponse(msg),
+        }
+    }
 }

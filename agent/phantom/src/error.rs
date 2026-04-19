@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use red_cell_common::agent_protocol::AgentProtocolError;
 use red_cell_common::crypto::CryptoError;
 use red_cell_common::demon::DemonProtocolError;
 use thiserror::Error;
@@ -57,4 +58,14 @@ pub enum PhantomError {
     /// Screenshot capture failed.
     #[error("screenshot error: {0}")]
     Screenshot(String),
+}
+
+impl From<AgentProtocolError> for PhantomError {
+    fn from(e: AgentProtocolError) -> Self {
+        match e {
+            AgentProtocolError::Protocol(inner) => PhantomError::Protocol(inner),
+            AgentProtocolError::Crypto(inner) => PhantomError::Crypto(inner),
+            AgentProtocolError::InvalidResponse(msg) => PhantomError::InvalidResponse(msg),
+        }
+    }
 }

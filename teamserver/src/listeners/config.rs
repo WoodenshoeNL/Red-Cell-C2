@@ -208,16 +208,23 @@ pub(super) fn parse_extra_bool(
     info: &ListenerInfo,
     field: &'static str,
 ) -> Result<bool, ListenerManagerError> {
-    parse_bool(field, extra_value_as_str(info, field))
+    match info.extra.get(field) {
+        Some(serde_json::Value::Bool(b)) => Ok(*b),
+        _ => parse_bool(field, extra_value_as_str(info, field)),
+    }
 }
 
 pub(super) fn parse_optional_extra_bool(
     info: &ListenerInfo,
     field: &'static str,
 ) -> Result<Option<bool>, ListenerManagerError> {
-    match extra_value_as_str(info, field) {
+    match info.extra.get(field) {
         None => Ok(None),
-        Some(value) => parse_bool(field, Some(value)).map(Some),
+        Some(serde_json::Value::Bool(b)) => Ok(Some(*b)),
+        _ => match extra_value_as_str(info, field) {
+            None => Ok(None),
+            Some(value) => parse_bool(field, Some(value)).map(Some),
+        },
     }
 }
 
@@ -321,4 +328,67 @@ pub(super) fn http_response_from_operator(
     let headers = split_csv(info.response_headers.as_deref());
     let body = optional_extra_string(info, EXTRA_RESPONSE_BODY);
     (!headers.is_empty() || body.is_some()).then_some(HttpListenerResponseConfig { headers, body })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use red_cell_common::operator::ListenerInfo;
+
+    use super::{EXTRA_LEGACY_MODE, parse_extra_bool, parse_optional_extra_bool};
+
+    fn info_with_extra(key: &str, value: serde_json::Value) -> ListenerInfo {
+        let mut extra = BTreeMap::new();
+        extra.insert(key.to_owned(), value);
+        ListenerInfo { extra, ..Default::default() }
+    }
+
+    #[test]
+    fn parse_extra_bool_json_bool_true() {
+        let info = info_with_extra(EXTRA_LEGACY_MODE, serde_json::Value::Bool(true));
+        assert!(parse_extra_bool(&info, EXTRA_LEGACY_MODE).unwrap());
+    }
+
+    #[test]
+    fn parse_extra_bool_json_bool_false() {
+        let info = info_with_extra(EXTRA_LEGACY_MODE, serde_json::Value::Bool(false));
+        assert!(!parse_extra_bool(&info, EXTRA_LEGACY_MODE).unwrap());
+    }
+
+    #[test]
+    fn parse_extra_bool_json_string_true() {
+        let info = info_with_extra(EXTRA_LEGACY_MODE, serde_json::Value::String("true".into()));
+        assert!(parse_extra_bool(&info, EXTRA_LEGACY_MODE).unwrap());
+    }
+
+    #[test]
+    fn parse_extra_bool_json_string_false() {
+        let info = info_with_extra(EXTRA_LEGACY_MODE, serde_json::Value::String("false".into()));
+        assert!(!parse_extra_bool(&info, EXTRA_LEGACY_MODE).unwrap());
+    }
+
+    #[test]
+    fn parse_extra_bool_missing_defaults_false() {
+        let info = ListenerInfo { extra: BTreeMap::new(), ..Default::default() };
+        assert!(!parse_extra_bool(&info, EXTRA_LEGACY_MODE).unwrap());
+    }
+
+    #[test]
+    fn parse_optional_extra_bool_json_bool_true() {
+        let info = info_with_extra(EXTRA_LEGACY_MODE, serde_json::Value::Bool(true));
+        assert_eq!(parse_optional_extra_bool(&info, EXTRA_LEGACY_MODE).unwrap(), Some(true));
+    }
+
+    #[test]
+    fn parse_optional_extra_bool_json_bool_false() {
+        let info = info_with_extra(EXTRA_LEGACY_MODE, serde_json::Value::Bool(false));
+        assert_eq!(parse_optional_extra_bool(&info, EXTRA_LEGACY_MODE).unwrap(), Some(false));
+    }
+
+    #[test]
+    fn parse_optional_extra_bool_missing_is_none() {
+        let info = ListenerInfo { extra: BTreeMap::new(), ..Default::default() };
+        assert_eq!(parse_optional_extra_bool(&info, EXTRA_LEGACY_MODE).unwrap(), None);
+    }
 }

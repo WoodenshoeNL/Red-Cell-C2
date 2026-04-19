@@ -2092,7 +2092,14 @@ def create_review_worktree(loop_type: str, log: Logger) -> Path | None:
         return None
 
     # Symlink .beads into the worktree so `br` uses the main repo's database.
+    # git worktree add checks out .beads/issues.jsonl (tracked), so the directory
+    # already exists — remove it before creating the symlink.
+    import shutil
     beads_link = tmp / ".beads"
+    if beads_link.is_symlink() or beads_link.is_file():
+        beads_link.unlink()
+    elif beads_link.is_dir():
+        shutil.rmtree(beads_link)
     beads_link.symlink_to(SCRIPT_DIR / ".beads")
 
     log.log(f"Review worktree: {tmp}")

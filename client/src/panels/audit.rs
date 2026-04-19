@@ -221,6 +221,21 @@ impl ClientApp {
 
         let http_base = state.server_url.as_str().pipe(ws_url_to_http_base);
 
+        // Auto-fetch on first open when credentials are available.
+        if panel.rows.is_empty()
+            && panel.result_rx.is_none()
+            && resolved_api_key.is_some()
+            && http_base.is_some()
+            && matches!(panel.fetch_status, AuditFetchStatus::Idle)
+        {
+            trigger_fetch(
+                panel,
+                http_base.clone().unwrap_or_default(),
+                resolved_api_key.clone().unwrap_or_default(),
+                ui.ctx().clone(),
+            );
+        }
+
         // ── Toolbar ──────────────────────────────────────────────────────────
         ui.horizontal(|ui| {
             ui.heading(RichText::new("Audit Log").strong());

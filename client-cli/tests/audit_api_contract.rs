@@ -250,3 +250,59 @@ async fn old_audit_log_route_returns_404() {
         "the stale /audit/log route must not exist"
     );
 }
+
+async fn call_delete(state: TeamserverState, uri: &str, api_key: &str) -> axum::response::Response {
+    let router = build_router(state);
+    let req = Request::builder()
+        .method("DELETE")
+        .uri(uri)
+        .header("x-api-key", api_key)
+        .body(Body::empty())
+        .expect("request build");
+    router.oneshot(req).await.expect("router should respond")
+}
+
+/// `DELETE /api/v1/audit/purge` returns 200 with `{ deleted, cutoff }` —
+/// verifies the shape expected by `RawPurgeResponse`.
+#[tokio::test]
+async fn delete_audit_purge_returns_200_with_deleted_and_cutoff() {
+    let (state, _db) = build_test_state().await;
+    let response = call_delete(state, "/api/v1/audit/purge", API_KEY).await;
+
+    assert_eq!(response.status(), StatusCode::OK, "DELETE /audit/purge must return 200");
+
+    let json = read_json(response).await;
+    assert!(json["deleted"].is_number(), "response must have numeric `deleted` field");
+    assert!(json["cutoff"].is_string(), "response must have string `cutoff` field");
+}
+
+/// `DELETE /api/v1/audit/purge?older_than_days=1` accepts the optional
+/// `older_than_days` query parameter and still returns the same shape.
+#[tokio::test]
+async fn delete_audit_purge_accepts_older_than_days_param() {
+    let (state, _db) = build_test_state().await;
+    let response = call_delete(state, "/api/v1/audit/purge?older_than_days=1", API_KEY).await;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "DELETE /audit/purge?older_than_days=1 must return 200"
+    );
+
+    let json = read_json(response).await;
+    assert!(json["deleted"].is_number(), "response must have numeric `deleted` field");
+    assert!(json["cutoff"].is_string(), "response must have string `cutoff` field");
+}
+
+/// `DELETE /api/v1/audit/purge` without credentials returns 401.
+#[tokio::test]
+async fn delete_audit_purge_requires_authentication() {
+    let (state, _db) = build_test_state().await;
+    let response = call_delete(state, "/api/v1/audit/purge", "").await;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "unauthenticated DELETE /audit/purge must get 401"
+    );
+}

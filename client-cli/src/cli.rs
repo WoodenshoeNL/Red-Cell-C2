@@ -137,8 +137,10 @@ pub enum Commands {
     ///
     /// Examples:
     ///   red-cell-cli operator list
+    ///   red-cell-cli operator active
     ///   red-cell-cli operator create alice --role operator
     ///   red-cell-cli operator set-role alice admin
+    ///   red-cell-cli operator logout alice
     ///   red-cell-cli operator show-agent-groups alice
     ///   red-cell-cli operator set-agent-groups bob --group corp-dc
     #[command(verbatim_doc_comment)]
@@ -619,6 +621,23 @@ pub enum OperatorCommands {
         username: String,
     },
 
+    /// List operators with active WebSocket connections.
+    ///
+    /// Examples:
+    ///   red-cell-cli operator active
+    #[command(verbatim_doc_comment)]
+    Active,
+
+    /// Revoke all active sessions for an operator.
+    ///
+    /// Examples:
+    ///   red-cell-cli operator logout alice
+    #[command(verbatim_doc_comment)]
+    Logout {
+        /// Operator whose sessions should be revoked
+        username: String,
+    },
+
     /// Restrict an operator to tasking agents in specific groups
     /// (`PUT /operators/{username}/agent-groups`).
     ///
@@ -716,6 +735,24 @@ pub enum AuditCommands {
         /// Maximum entries to return
         #[arg(long, default_value = "100")]
         limit: u32,
+    },
+
+    /// Delete audit log entries older than the configured retention period.
+    ///
+    /// When `--older-than-days` is omitted, the teamserver uses the value
+    /// configured in its HCL profile (default: 90 days).
+    ///
+    /// Examples:
+    ///   red-cell-cli log purge --confirm
+    ///   red-cell-cli log purge --confirm --older-than-days 30
+    #[command(verbatim_doc_comment)]
+    Purge {
+        /// Required confirmation flag — prevents accidental data loss.
+        #[arg(long)]
+        confirm: bool,
+        /// Override the retention window for this purge (in days).
+        #[arg(long)]
+        older_than_days: Option<u32>,
     },
 
     /// Stream new audit log entries as they arrive.

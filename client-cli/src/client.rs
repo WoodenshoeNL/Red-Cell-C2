@@ -254,6 +254,30 @@ impl ApiClient {
         }
     }
 
+    /// Issue an authenticated `DELETE` request to `path` under `/api/v1` and
+    /// deserialise the JSON response body as `T`.
+    ///
+    /// Used for delete endpoints that return a JSON summary (e.g.
+    /// `DELETE /audit/purge` which returns `{ deleted, cutoff }`).
+    ///
+    /// # Errors
+    ///
+    /// Same mapping as [`ApiClient::get`].
+    #[instrument(skip(self), fields(path = %path))]
+    pub async fn delete_json<T: DeserializeOwned>(&self, path: &str) -> Result<T, CliError> {
+        let url = format!("{}/api/v1{path}", self.base_url);
+
+        let response = self
+            .inner
+            .delete(&url)
+            .header(API_KEY_HEADER, &self.token)
+            .send()
+            .await
+            .map_err(|e| map_reqwest_error(e, &url))?;
+
+        map_response(response, path).await
+    }
+
     /// Issue an unauthenticated `GET` to `path` under `/api/v1`.
     ///
     /// Used for endpoints that do not require authentication (e.g. the API

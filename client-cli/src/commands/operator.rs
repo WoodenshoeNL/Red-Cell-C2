@@ -10,6 +10,8 @@
 //! | `operator set-role <name> <role>` | `PUT /operators/{username}/role` | role update |
 //! | `operator show-agent-groups <name>` | `GET /operators/{username}/agent-groups` | allowed agent groups |
 //! | `operator set-agent-groups <name>` | `PUT /operators/{username}/agent-groups` | replace group restrictions |
+//! | `operator active` | `GET /operators/active` | currently connected operators |
+//! | `operator logout <name>` | `POST /operators/{username}/logout` | revoke active sessions |
 
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
@@ -54,6 +56,21 @@ struct RawCreateResponse {
 struct RawOperatorGroupAccessResponse {
     username: String,
     allowed_groups: Vec<String>,
+}
+
+/// Wire body for `GET /operators/active`.
+#[derive(Debug, Deserialize)]
+struct RawActiveOperatorEntry {
+    username: String,
+    connect_time: String,
+    remote_addr: String,
+}
+
+/// Wire body for `POST /operators/{username}/logout`.
+#[derive(Debug, Deserialize)]
+struct RawLogoutResponse {
+    username: String,
+    revoked_sessions: usize,
 }
 
 // ── public output types ───────────────────────────────────────────────────────
@@ -126,6 +143,45 @@ pub struct SetRoleResult {
 impl TextRender for SetRoleResult {
     fn render_text(&self) -> String {
         format!("Operator '{}' role set to '{}'.", self.username, self.role)
+    }
+}
+
+/// A currently connected operator returned by `operator active`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ActiveOperatorRow {
+    /// Operator username.
+    pub username: String,
+    /// ISO 8601 timestamp when the session was established.
+    pub connect_time: String,
+    /// Remote address of the connected client.
+    pub remote_addr: String,
+}
+
+impl TextRow for ActiveOperatorRow {
+    fn headers() -> Vec<&'static str> {
+        vec!["Username", "Connected At", "Remote Address"]
+    }
+
+    fn row(&self) -> Vec<String> {
+        vec![self.username.clone(), self.connect_time.clone(), self.remote_addr.clone()]
+    }
+}
+
+/// Result returned by `operator logout`.
+#[derive(Debug, Clone, Serialize)]
+pub struct LogoutResult {
+    /// Operator whose sessions were revoked.
+    pub username: String,
+    /// Number of sessions that were invalidated.
+    pub revoked_sessions: usize,
+}
+
+impl TextRender for LogoutResult {
+    fn render_text(&self) -> String {
+        format!(
+            "Revoked {} active session(s) for operator '{}'.",
+            self.revoked_sessions, self.username
+        )
     }
 }
 
@@ -248,6 +304,34 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: OperatorCommand
                 }
             }
         }
+
+        OperatorCommands::Active => match active(client).await {
+            Ok(data) => match print_success(fmt, &data) {
+                Ok(()) => EXIT_SUCCESS,
+                Err(e) => {
+                    print_error(&e).ok();
+                    e.exit_code()
+                }
+            },
+            Err(e) => {
+                print_error(&e).ok();
+                e.exit_code()
+            }
+        },
+
+        OperatorCommands::Logout { username } => match logout(client, &username).await {
+            Ok(result) => match print_success(fmt, &result) {
+                Ok(()) => EXIT_SUCCESS,
+                Err(e) => {
+                    print_error(&e).ok();
+                    e.exit_code()
+                }
+            },
+            Err(e) => {
+                print_error(&e).ok();
+                e.exit_code()
+            }
+        },
     }
 }
 
@@ -356,6 +440,38 @@ async fn set_operator_agent_groups(
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+/// `operator active` — list operators with live WebSocket connections.
+///
+/// # Examples
+/// ```text
+/// red-cell-cli operator active
+/// ```
+#[instrument(skip(client))]
+async fn active(client: &ApiClient) -> Result<Vec<ActiveOperatorRow>, CliError> {
+    let raw: Vec<RawActiveOperatorEntry> = client.get("/operators/active").await?;
+    Ok(raw
+        .into_iter()
+        .map(|r| ActiveOperatorRow {
+            username: r.username,
+            connect_time: r.connect_time,
+            remote_addr: r.remote_addr,
+        })
+        .collect())
+}
+
+/// `operator logout <username>` — revoke all active sessions for an operator.
+///
+/// # Examples
+/// ```text
+/// red-cell-cli operator logout alice
+/// ```
+#[instrument(skip(client))]
+async fn logout(client: &ApiClient, username: &str) -> Result<LogoutResult, CliError> {
+    let raw: RawLogoutResponse =
+        client.post_empty(&format!("/operators/{username}/logout")).await?;
+    Ok(LogoutResult { username: raw.username, revoked_sessions: raw.revoked_sessions })
+}
 
 fn operator_row_from_raw(raw: RawOperatorSummary) -> OperatorRow {
     OperatorRow {

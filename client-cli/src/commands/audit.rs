@@ -7,6 +7,7 @@
 //! | `log list [filters]` | `GET /api/v1/audit?...` | newest-first, filterable |
 //! | `log tail` | `GET /api/v1/audit?limit=20` | last 20 entries |
 //! | `log tail --follow` | poll `GET /api/v1/audit?since=<ts>` | stream JSON lines |
+//! | `log purge [--confirm]` | `DELETE /api/v1/audit/purge` | delete old entries |
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -20,8 +21,10 @@ use crate::AuditCommands;
 use crate::backoff::Backoff;
 use crate::client::ApiClient;
 use crate::defaults::AUDIT_TAIL_FOLLOW_POLL_INTERVAL_SECS;
-use crate::error::{CliError, EXIT_SUCCESS};
-use crate::output::{OutputFormat, TextRow, print_error, print_stream_entry, print_success};
+use crate::error::{CliError, EXIT_GENERAL, EXIT_SUCCESS};
+use crate::output::{
+    OutputFormat, TextRender, TextRow, print_error, print_stream_entry, print_success,
+};
 
 /// Number of entries fetched by `log tail` (without --follow).
 const TAIL_LIMIT: u32 = 20;
@@ -44,6 +47,13 @@ struct RawAuditRecord {
     command: Option<String>,
     result_status: String,
     occurred_at: String,
+}
+
+/// Mirrors `AuditPurgeResponse` from the teamserver.
+#[derive(Debug, Deserialize)]
+struct RawPurgeResponse {
+    deleted: u64,
+    cutoff: String,
 }
 
 /// Mirrors `teamserver::audit::AuditPage`.  Pagination metadata (`total`,
@@ -90,6 +100,21 @@ impl TextRow for AuditEntry {
     }
 }
 
+/// Result returned by `log purge`.
+#[derive(Debug, Clone, Serialize)]
+pub struct PurgeResult {
+    /// Number of audit log rows deleted.
+    pub deleted: u64,
+    /// RFC 3339 timestamp used as the deletion cutoff.
+    pub cutoff: String,
+}
+
+impl TextRender for PurgeResult {
+    fn render_text(&self) -> String {
+        format!("Purged {} audit log entries (cutoff: {}).", self.deleted, self.cutoff)
+    }
+}
+
 // ── top-level dispatcher ──────────────────────────────────────────────────────
 
 /// Dispatch an [`AuditCommands`] variant and return a process exit code.
@@ -108,6 +133,29 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AuditCommands) 
             .await
             {
                 Ok(data) => match print_success(fmt, &data) {
+                    Ok(()) => EXIT_SUCCESS,
+                    Err(e) => {
+                        print_error(&e).ok();
+                        e.exit_code()
+                    }
+                },
+                Err(e) => {
+                    print_error(&e).ok();
+                    e.exit_code()
+                }
+            }
+        }
+
+        AuditCommands::Purge { confirm, older_than_days } => {
+            if !confirm {
+                print_error(&CliError::InvalidArgs(
+                    "pass --confirm to acknowledge that this will permanently delete audit log entries".to_owned(),
+                ))
+                .ok();
+                return EXIT_GENERAL;
+            }
+            match purge(client, older_than_days).await {
+                Ok(result) => match print_success(fmt, &result) {
                     Ok(()) => EXIT_SUCCESS,
                     Err(e) => {
                         print_error(&e).ok();
@@ -144,6 +192,23 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AuditCommands) 
 }
 
 // ── command implementations ───────────────────────────────────────────────────
+
+/// `log purge` — delete audit log entries older than the retention window.
+///
+/// # Examples
+/// ```text
+/// red-cell-cli log purge --confirm
+/// red-cell-cli log purge --confirm --older-than-days 30
+/// ```
+#[instrument(skip(client))]
+async fn purge(client: &ApiClient, older_than_days: Option<u32>) -> Result<PurgeResult, CliError> {
+    let path = match older_than_days {
+        Some(days) => format!("/audit/purge?older_than_days={days}"),
+        None => "/audit/purge".to_owned(),
+    };
+    let raw: RawPurgeResponse = client.delete_json(&path).await?;
+    Ok(PurgeResult { deleted: raw.deleted, cutoff: raw.cutoff })
+}
 
 /// `log list` — fetch audit log entries with optional filters.
 ///

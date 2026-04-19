@@ -212,3 +212,87 @@ async fn put_operator_role_for_unknown_operator_returns_404() {
         "PUT /operators/{{username}}/role for unknown operator must return 404"
     );
 }
+
+/// `GET /api/v1/operators/active` returns 200 with a JSON array —
+/// verifies the shape expected by `RawActiveOperatorEntry`.
+///
+/// With no connected WebSocket clients the array will be empty, but the
+/// response structure must still be a JSON array so that the CLI can
+/// deserialize it without error.
+#[tokio::test]
+async fn get_operators_active_returns_200_with_array() {
+    let state = build_test_state().await;
+    let response = call(state, "GET", "/api/v1/operators/active", API_KEY, None).await;
+
+    assert_eq!(response.status(), StatusCode::OK, "GET /operators/active must return 200");
+
+    let json = read_json(response).await;
+    assert!(json.is_array(), "GET /operators/active must return a JSON array");
+}
+
+/// `GET /api/v1/operators/active` without credentials returns 401.
+#[tokio::test]
+async fn get_operators_active_requires_authentication() {
+    let state = build_test_state().await;
+    let response = call(state, "GET", "/api/v1/operators/active", "", None).await;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "unauthenticated GET /operators/active must get 401"
+    );
+}
+
+/// `POST /api/v1/operators/{username}/logout` returns 200 with
+/// `{ username, revoked_sessions }` — verifies the shape expected by
+/// `RawLogoutResponse`.
+///
+/// We first create the operator so the endpoint can find it (it returns 404
+/// for an unknown username).
+#[tokio::test]
+async fn post_operator_logout_returns_200_with_username_and_revoked_sessions() {
+    let state = build_test_state().await;
+
+    // Create the operator first.
+    let create_body = serde_json::json!({
+        "username": "logoutop",
+        "password": "P@ssword123!",
+        "role": "operator"
+    });
+    let create_resp =
+        call(state.clone(), "POST", "/api/v1/operators", API_KEY, Some(create_body)).await;
+    assert_eq!(
+        create_resp.status(),
+        StatusCode::CREATED,
+        "prerequisite operator create must succeed"
+    );
+
+    // Now revoke their sessions (none are active, but the endpoint must return the shape).
+    let response = call(state, "POST", "/api/v1/operators/logoutop/logout", API_KEY, None).await;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "POST /operators/{{username}}/logout must return 200"
+    );
+
+    let json = read_json(response).await;
+    assert_eq!(json["username"], "logoutop", "response must echo back the operator username");
+    assert!(
+        json["revoked_sessions"].is_number(),
+        "response must have a numeric `revoked_sessions` field"
+    );
+}
+
+/// `POST /api/v1/operators/{username}/logout` for an unknown operator returns 404.
+#[tokio::test]
+async fn post_operator_logout_for_unknown_operator_returns_404() {
+    let state = build_test_state().await;
+    let response = call(state, "POST", "/api/v1/operators/nobody/logout", API_KEY, None).await;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "POST /operators/{{username}}/logout for unknown operator must return 404"
+    );
+}

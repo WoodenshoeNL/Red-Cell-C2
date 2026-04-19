@@ -21,16 +21,34 @@ const COL_STATUS: f32 = 70.0;
 const COL_LAST_SEEN: f32 = 160.0;
 const COL_ACTIONS: f32 = 80.0;
 
+/// Returns `true` when the current operator has the Admin role.
+fn current_operator_is_admin(state: &AppState) -> bool {
+    state
+        .operator_info
+        .as_ref()
+        .and_then(|o| o.role.as_deref())
+        .map(|r| r.eq_ignore_ascii_case("admin"))
+        .unwrap_or(false)
+}
+
 impl ClientApp {
     /// Render the operator management dock tab.
     pub(crate) fn render_operators_panel(&mut self, ui: &mut egui::Ui, state: &AppState) {
         let panel = &mut self.session_panel.operators_panel;
+        let is_admin = current_operator_is_admin(state);
+        let self_username = state.operator_info.as_ref().map(|o| o.username.as_str()).unwrap_or("");
 
         // ── Toolbar ──────────────────────────────────────────────────
         ui.horizontal(|ui| {
             ui.heading(RichText::new("Operators").strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("+ Create").clicked() {
+                if !is_admin {
+                    ui.label(
+                        RichText::new("Read-only — Admin role required to manage operators.")
+                            .weak()
+                            .small(),
+                    );
+                } else if ui.button("+ Create").clicked() {
                     panel.create_dialog_open = true;
                     panel.create_username.clear();
                     panel.create_password.clear();
@@ -104,16 +122,23 @@ impl ClientApp {
                             [COL_LAST_SEEN, 16.0],
                             egui::Label::new(RichText::new(last_seen).small()),
                         );
-                        if ui
-                            .add_sized(
-                                [COL_ACTIONS, 16.0],
-                                egui::Button::new(
-                                    RichText::new("Delete").color(Color32::from_rgb(220, 80, 80)),
-                                ),
-                            )
-                            .clicked()
-                        {
-                            pending_delete = Some(username.clone());
+                        // Delete is only available to Admins; self-deletion is blocked.
+                        let can_delete = is_admin && username.as_str() != self_username;
+                        if can_delete {
+                            if ui
+                                .add_sized(
+                                    [COL_ACTIONS, 16.0],
+                                    egui::Button::new(
+                                        RichText::new("Delete")
+                                            .color(Color32::from_rgb(220, 80, 80)),
+                                    ),
+                                )
+                                .clicked()
+                            {
+                                pending_delete = Some(username.clone());
+                            }
+                        } else {
+                            ui.add_sized([COL_ACTIONS, 16.0], egui::Label::new(""));
                         }
                     });
                 }
@@ -280,6 +305,18 @@ mod tests {
         state
     }
 
+    fn state_with_operator_role(username: &str, role: &str) -> AppState {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+        state.operator_info = Some(OperatorInfo {
+            username: username.to_owned(),
+            password_hash: None,
+            role: Some(role.to_owned()),
+            online: true,
+            last_seen: None,
+        });
+        state
+    }
+
     #[test]
     fn build_operator_create_produces_correct_variant() {
         let state = state_with_operator("admin");
@@ -362,5 +399,41 @@ mod tests {
         assert_eq!(state.create_role_index, 0);
         assert!(state.delete_pending.is_none());
         assert!(state.status_message.is_none());
+    }
+
+    #[test]
+    fn current_operator_is_admin_true_for_admin_role() {
+        let state = state_with_operator_role("alice", "Admin");
+        assert!(current_operator_is_admin(&state));
+    }
+
+    #[test]
+    fn current_operator_is_admin_case_insensitive() {
+        let state = state_with_operator_role("alice", "admin");
+        assert!(current_operator_is_admin(&state));
+    }
+
+    #[test]
+    fn current_operator_is_admin_false_for_operator_role() {
+        let state = state_with_operator_role("alice", "Operator");
+        assert!(!current_operator_is_admin(&state));
+    }
+
+    #[test]
+    fn current_operator_is_admin_false_for_analyst_role() {
+        let state = state_with_operator_role("alice", "Analyst");
+        assert!(!current_operator_is_admin(&state));
+    }
+
+    #[test]
+    fn current_operator_is_admin_false_when_no_role() {
+        let state = state_with_operator("alice");
+        assert!(!current_operator_is_admin(&state));
+    }
+
+    #[test]
+    fn current_operator_is_admin_false_when_not_logged_in() {
+        let state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+        assert!(!current_operator_is_admin(&state));
     }
 }

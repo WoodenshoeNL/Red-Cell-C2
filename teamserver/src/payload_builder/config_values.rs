@@ -8,6 +8,7 @@
 
 use red_cell_common::HttpListenerProxyConfig;
 use serde_json::{Map, Value};
+use tracing::warn;
 
 use super::PayloadBuildError;
 
@@ -70,10 +71,20 @@ pub(super) fn injection_mode(
     config: &Map<String, Value>,
     key: &str,
 ) -> Result<u32, PayloadBuildError> {
-    Ok(match optional_string(config, key).unwrap_or_default() {
+    let value = optional_string(config, key).unwrap_or_default();
+    Ok(match value {
         "Win32" => 1,
         "Native/Syscall" => 2,
-        _ => 0,
+        "" => 0,
+        unknown => {
+            warn!(
+                config_key = key,
+                value = unknown,
+                "unrecognised injection mode — defaulting to 0 (Win32 via CreateThread). \
+                 Known values: \"Win32\", \"Native/Syscall\"."
+            );
+            0
+        }
     })
 }
 
@@ -82,7 +93,15 @@ pub(super) fn sleep_obfuscation_value(value: &str) -> u32 {
         "Foliage" => 3,
         "Ekko" => 1,
         "Zilean" => 2,
-        _ => 0,
+        "" => 0,
+        unknown => {
+            warn!(
+                value = unknown,
+                "unrecognised Sleep Technique — defaulting to 0 (no obfuscation). \
+                 Known values: \"Ekko\", \"Zilean\", \"Foliage\"."
+            );
+            0
+        }
     }
 }
 
@@ -215,4 +234,72 @@ pub(super) fn add_wstring(buffer: &mut Vec<u8>, value: &str) -> Result<(), Paylo
     let mut utf16: Vec<u8> = value.encode_utf16().flat_map(u16::to_le_bytes).collect();
     utf16.extend_from_slice(&[0, 0]);
     add_bytes(buffer, &utf16)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Map, Value};
+
+    use super::{injection_mode, sleep_obfuscation_value};
+
+    fn map_with(key: &str, value: &str) -> Map<String, Value> {
+        let mut m = Map::new();
+        m.insert(key.to_owned(), Value::String(value.to_owned()));
+        m
+    }
+
+    // --- injection_mode ---
+
+    #[test]
+    fn injection_mode_absent_returns_zero() {
+        let config = Map::new();
+        assert_eq!(injection_mode(&config, "Alloc").unwrap(), 0);
+    }
+
+    #[test]
+    fn injection_mode_win32() {
+        let config = map_with("Alloc", "Win32");
+        assert_eq!(injection_mode(&config, "Alloc").unwrap(), 1);
+    }
+
+    #[test]
+    fn injection_mode_native_syscall() {
+        let config = map_with("Execute", "Native/Syscall");
+        assert_eq!(injection_mode(&config, "Execute").unwrap(), 2);
+    }
+
+    #[test]
+    fn injection_mode_typo_returns_zero_with_warning() {
+        // "thread pool" is a likely operator typo for a future mode; must not error.
+        let config = map_with("Alloc", "thread pool");
+        assert_eq!(injection_mode(&config, "Alloc").unwrap(), 0);
+    }
+
+    // --- sleep_obfuscation_value ---
+
+    #[test]
+    fn sleep_obfuscation_absent_returns_zero() {
+        assert_eq!(sleep_obfuscation_value(""), 0);
+    }
+
+    #[test]
+    fn sleep_obfuscation_ekko() {
+        assert_eq!(sleep_obfuscation_value("Ekko"), 1);
+    }
+
+    #[test]
+    fn sleep_obfuscation_zilean() {
+        assert_eq!(sleep_obfuscation_value("Zilean"), 2);
+    }
+
+    #[test]
+    fn sleep_obfuscation_foliage() {
+        assert_eq!(sleep_obfuscation_value("Foliage"), 3);
+    }
+
+    #[test]
+    fn sleep_obfuscation_typo_returns_zero_with_warning() {
+        // "foliage" (lowercase) is a likely typo; must not error, must default to 0.
+        assert_eq!(sleep_obfuscation_value("foliage"), 0);
+    }
 }

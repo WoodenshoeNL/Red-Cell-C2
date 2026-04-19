@@ -28,6 +28,10 @@
 #include <core/CoffeeLdr.h>
 #include <core/Memory.h>
 
+#ifdef ARCHON_ECDH_MODE
+#include <crypt/EcdhInit.h>
+#endif
+
 #ifdef DEBUG
 #include <stdio.h>
 #endif
@@ -183,6 +187,19 @@ typedef struct
         } AES;
 
     } Config ;
+
+#ifdef ARCHON_ECDH_MODE
+    /* ECDH key-exchange session state (non-legacy listeners only).
+     * Active is set TRUE after the registration response is validated;
+     * until then the agent is in the unregistered state. */
+    struct {
+        BOOL   Active;
+        UINT8  SessionKey[32];    /* HKDF-SHA256 derived session key     */
+        UINT8  ConnectionId[16];  /* 16-byte routing token from teamserver */
+        PVOID  RegPacket;         /* raw ECDH registration packet buffer  */
+        SIZE_T RegPacketLen;      /* length of RegPacket in bytes         */
+    } ECDH;
+#endif
 
     // TODO: format everything by library. include syscalls too
     struct

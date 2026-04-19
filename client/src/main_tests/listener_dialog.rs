@@ -283,3 +283,40 @@ fn listener_dialog_http_empty_optional_fields_produce_none() {
     assert!(info.uris.is_none());
     assert!(!info.extra.contains_key("HostHeader"));
 }
+
+/// Mirrors the guard: `protocol == Dns && dns_domain.trim().is_empty()`
+fn dns_domain_empty_guard(dialog: &ListenerDialogState) -> bool {
+    dialog.protocol == ListenerProtocol::Dns && dialog.dns_domain.trim().is_empty()
+}
+
+#[test]
+fn dns_domain_guard_true_for_empty_dns_domain() {
+    let mut dialog = ListenerDialogState::new_create();
+    dialog.protocol = ListenerProtocol::Dns;
+    dialog.dns_domain = String::new();
+    assert!(dns_domain_empty_guard(&dialog));
+}
+
+#[test]
+fn dns_domain_guard_true_for_whitespace_only_dns_domain() {
+    let mut dialog = ListenerDialogState::new_create();
+    dialog.protocol = ListenerProtocol::Dns;
+    dialog.dns_domain = "   ".to_owned();
+    assert!(dns_domain_empty_guard(&dialog));
+}
+
+#[test]
+fn dns_domain_guard_false_for_non_dns_protocol() {
+    let mut dialog = ListenerDialogState::new_create();
+    dialog.protocol = ListenerProtocol::Http;
+    dialog.dns_domain = String::new();
+    assert!(!dns_domain_empty_guard(&dialog));
+}
+
+#[test]
+fn dns_domain_guard_false_when_domain_is_set() {
+    let mut dialog = ListenerDialogState::new_create();
+    dialog.protocol = ListenerProtocol::Dns;
+    dialog.dns_domain = "c2.example.com".to_owned();
+    assert!(!dns_domain_empty_guard(&dialog));
+}

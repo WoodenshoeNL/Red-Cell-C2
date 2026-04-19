@@ -59,11 +59,6 @@ pub fn parse_tasking_response(
     })
 }
 
-/// Calculate the number of CTR blocks consumed by `byte_len` bytes.
-pub fn ctr_blocks_for_len(byte_len: usize) -> u64 {
-    red_cell_common::crypto::ctr_blocks_for_len(byte_len)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,7 +346,7 @@ mod tests {
         assert_eq!(response.decrypted, plaintext);
         assert_eq!(
             response.next_recv_ctr_offset,
-            recv_ctr_offset + ctr_blocks_for_len(encrypted.len())
+            recv_ctr_offset + red_cell_common::crypto::ctr_blocks_for_len(encrypted.len())
         );
     }
 
@@ -373,7 +368,7 @@ mod tests {
         assert_eq!(response.decrypted, plaintext);
         assert_eq!(
             response.next_recv_ctr_offset,
-            recv_ctr_offset + ctr_blocks_for_len(encrypted.len())
+            recv_ctr_offset + red_cell_common::crypto::ctr_blocks_for_len(encrypted.len())
         );
     }
 }

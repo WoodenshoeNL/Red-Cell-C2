@@ -4652,6 +4652,7 @@ dependencies = [
  "image",
  "pyo3",
  "red-cell-common",
+ "reqwest",
  "rfd",
  "rustls-pemfile",
  "serde",

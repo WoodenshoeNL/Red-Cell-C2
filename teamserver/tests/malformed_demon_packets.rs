@@ -178,6 +178,7 @@ fn http_listener(name: &str, port: u16) -> ListenerConfig {
         doh_domain: None,
         doh_provider: None,
         legacy_mode: true,
+        suppress_opsec_warnings: true,
     })
 }
 
@@ -288,6 +289,7 @@ fn dns_listener(name: &str, port: u16, domain: &str) -> ListenerConfig {
         record_types: vec!["TXT".to_owned()],
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
     })
 }
 

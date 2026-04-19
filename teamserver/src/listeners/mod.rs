@@ -20,6 +20,7 @@ mod events;
 mod external;
 mod http;
 mod manager;
+mod opsec;
 mod rate_limiters;
 mod smb;
 mod summary;

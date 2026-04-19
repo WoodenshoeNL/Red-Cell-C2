@@ -21,6 +21,7 @@ async fn dns_listener_refuses_axfr_query() {
         record_types: vec!["TXT".to_owned()],
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
     };
     let (handle, _) = spawn_test_dns_listener(config).await;
     sleep(Duration::from_millis(50)).await;
@@ -49,6 +50,7 @@ async fn dns_listener_refuses_any_query() {
         record_types: vec!["TXT".to_owned()],
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
     };
     let (handle, _) = spawn_test_dns_listener(config).await;
     sleep(Duration::from_millis(50)).await;

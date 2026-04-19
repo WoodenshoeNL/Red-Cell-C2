@@ -106,6 +106,9 @@ pub struct ProfileHttpListenerConfig {
     /// Legacy mode — accept Demon `0xDEADBEEF` packets (default `false`).
     #[serde(rename = "LegacyMode", default)]
     pub legacy_mode: bool,
+    /// Suppress opsec-risk warnings at listener startup (default `false`).
+    #[serde(rename = "SuppressOpsecWarnings", default)]
+    pub suppress_opsec_warnings: bool,
 }
 
 /// SMB pivot listener configuration.
@@ -160,6 +163,9 @@ pub struct DnsListenerConfig {
     /// Optional working-hours restriction.
     #[serde(rename = "WorkingHours", default)]
     pub working_hours: Option<String>,
+    /// Suppress opsec-risk warnings at listener startup (default `false`).
+    #[serde(rename = "SuppressOpsecWarnings", default)]
+    pub suppress_opsec_warnings: bool,
 }
 
 fn default_all_interfaces() -> String {

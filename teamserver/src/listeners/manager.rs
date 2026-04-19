@@ -17,6 +17,9 @@ use axum::response::{IntoResponse, Response};
 use axum_server::tls_rustls::RustlsConfig;
 use red_cell_common::ListenerConfig;
 use red_cell_common::config::Profile;
+use red_cell_common::operator::{
+    EventCode, Message, MessageHead, OperatorMessage, TeamserverLogInfo,
+};
 use red_cell_common::tls::{load_tls_identity, validate_tls_not_expired};
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
@@ -624,6 +627,18 @@ impl ListenerManager {
                 self.active_handles.write().await.insert(name.to_owned(), handle);
                 repository.set_state(name, ListenerStatus::Running, None).await?;
                 info!(listener = name, protocol = %listener.protocol, "listener started");
+                for warning in super::opsec::opsec_warnings(&listener.config) {
+                    warn!(listener = name, "{warning}");
+                    self.events.broadcast(OperatorMessage::TeamserverLog(Message {
+                        head: MessageHead {
+                            event: EventCode::Teamserver,
+                            user: String::new(),
+                            timestamp: String::new(),
+                            one_time: String::new(),
+                        },
+                        info: TeamserverLogInfo { text: warning.to_owned() },
+                    }));
+                }
                 self.summary(name).await
             }
             Err(error) => {

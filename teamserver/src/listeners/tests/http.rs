@@ -133,6 +133,7 @@ async fn http_listener_returns_fake_404_for_non_matching_requests()
         doh_domain: None,
         doh_provider: None,
         legacy_mode: true,
+        suppress_opsec_warnings: true,
     });
 
     manager.create(config).await?;
@@ -207,6 +208,7 @@ async fn https_listener_generates_tls_and_accepts_requests()
         doh_domain: None,
         doh_provider: None,
         legacy_mode: true,
+        suppress_opsec_warnings: true,
     });
 
     manager.create(config).await?;
@@ -398,6 +400,7 @@ async fn non_legacy_http_listener_rejects_demon_packet_at_pre_filter()
         doh_domain: None,
         doh_provider: None,
         legacy_mode: false,
+        suppress_opsec_warnings: true,
     });
     manager.create(config).await?;
     manager.start("non-legacy-http").await?;
@@ -710,6 +713,7 @@ async fn http_listener_preserves_headers_but_not_decoy_body_for_empty_successful
         doh_domain: None,
         doh_provider: None,
         legacy_mode: true,
+        suppress_opsec_warnings: true,
     });
 
     registry.insert(sample_agent_info(agent_id, key, iv)).await?;
@@ -1364,6 +1368,7 @@ async fn reload_tls_cert_returns_tls_cert_error_for_invalid_pem() {
         doh_domain: None,
         doh_provider: None,
         legacy_mode: true,
+        suppress_opsec_warnings: true,
     });
 
     mgr.create(config).await.expect("create must succeed");

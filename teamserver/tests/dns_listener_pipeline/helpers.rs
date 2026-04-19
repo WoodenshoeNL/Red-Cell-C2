@@ -144,6 +144,7 @@ pub(super) fn dns_listener(name: &str, port: u16, domain: &str) -> ListenerConfi
         record_types: vec!["TXT".to_owned()],
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
     })
 }
 

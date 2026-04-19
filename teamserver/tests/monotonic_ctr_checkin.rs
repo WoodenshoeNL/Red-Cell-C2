@@ -113,6 +113,7 @@ async fn spawn_server_with_profile(
             doh_domain: None,
             doh_provider: None,
             legacy_mode: true,
+            suppress_opsec_warnings: true,
         }))
         .await?;
     drop(listener_guard);

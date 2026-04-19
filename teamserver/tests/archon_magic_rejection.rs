@@ -88,6 +88,7 @@ async fn spawn_non_legacy_listener(
             doh_domain: None,
             doh_provider: None,
             legacy_mode: false,
+            suppress_opsec_warnings: true,
         }))
         .await?;
     drop(listener_guard);

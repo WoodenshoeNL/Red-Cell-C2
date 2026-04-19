@@ -88,6 +88,7 @@ fn dns_to_operator_info_includes_domain_and_record_types() {
             record_types: vec!["A".to_owned(), "TXT".to_owned()],
             kill_date: None,
             working_hours: None,
+            suppress_opsec_warnings: true,
         }),
     };
 

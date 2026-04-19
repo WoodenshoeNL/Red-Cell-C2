@@ -144,6 +144,7 @@ pub(crate) fn http_listener_config(port: u16) -> ListenerConfig {
         doh_domain: None,
         doh_provider: None,
         legacy_mode: true,
+        suppress_opsec_warnings: true,
     })
 }
 
@@ -165,6 +166,7 @@ pub(crate) fn dns_listener_config(name: &str, port: u16, domain: &str) -> Listen
         record_types: vec!["TXT".to_owned()],
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
     })
 }
 

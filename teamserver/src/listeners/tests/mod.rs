@@ -45,6 +45,7 @@ fn http_listener(name: &str, port: u16) -> ListenerConfig {
         name: name.to_owned(),
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
         hosts: vec!["127.0.0.1".to_owned()],
         host_bind: "127.0.0.1".to_owned(),
         host_rotation: "round-robin".to_owned(),
@@ -65,6 +66,7 @@ fn http_listener(name: &str, port: u16) -> ListenerConfig {
         doh_domain: None,
         doh_provider: None,
         legacy_mode: true,
+        suppress_opsec_warnings: true,
     })
 }
 
@@ -73,6 +75,7 @@ fn https_listener(name: &str, port: u16) -> ListenerConfig {
         name: name.to_owned(),
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
         hosts: vec!["localhost".to_owned()],
         host_bind: "127.0.0.1".to_owned(),
         host_rotation: "round-robin".to_owned(),
@@ -93,6 +96,7 @@ fn https_listener(name: &str, port: u16) -> ListenerConfig {
         doh_domain: None,
         doh_provider: None,
         legacy_mode: true,
+        suppress_opsec_warnings: true,
     })
 }
 
@@ -105,6 +109,7 @@ fn http_listener_with_redirector(
         name: name.to_owned(),
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
         hosts: vec!["127.0.0.1".to_owned()],
         host_bind: "127.0.0.1".to_owned(),
         host_rotation: "round-robin".to_owned(),
@@ -125,6 +130,7 @@ fn http_listener_with_redirector(
         doh_domain: None,
         doh_provider: None,
         legacy_mode: true,
+        suppress_opsec_warnings: true,
     })
 }
 
@@ -134,6 +140,7 @@ fn smb_listener(name: &str, pipe_name: &str) -> ListenerConfig {
         pipe_name: pipe_name.to_owned(),
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
     })
 }
 
@@ -528,6 +535,7 @@ fn dns_listener_config(name: &str, port: u16, domain: &str) -> ListenerConfig {
         record_types: vec!["TXT".to_owned()],
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
     })
 }
 

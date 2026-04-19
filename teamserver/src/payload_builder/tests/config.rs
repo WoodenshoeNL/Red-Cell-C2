@@ -86,6 +86,7 @@ fn http_listener_with_method(method: Option<&str>) -> ListenerConfig {
         name: "http".to_owned(),
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
         hosts: vec!["localhost:80".to_owned()],
         host_bind: "0.0.0.0".to_owned(),
         host_rotation: "round-robin".to_owned(),
@@ -106,6 +107,8 @@ fn http_listener_with_method(method: Option<&str>) -> ListenerConfig {
         doh_domain: None,
         doh_provider: None,
         legacy_mode: true,
+        suppress_opsec_warnings: true,
+        suppress_opsec_warnings: true,
     }))
 }
 
@@ -115,6 +118,7 @@ fn https_listener_with_ja3(ja3_randomize: Option<bool>) -> ListenerConfig {
         name: "https".to_owned(),
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
         hosts: vec!["localhost:443".to_owned()],
         host_bind: "0.0.0.0".to_owned(),
         host_rotation: "round-robin".to_owned(),
@@ -135,6 +139,8 @@ fn https_listener_with_ja3(ja3_randomize: Option<bool>) -> ListenerConfig {
         doh_domain: None,
         doh_provider: None,
         legacy_mode: true,
+        suppress_opsec_warnings: true,
+        suppress_opsec_warnings: true,
     }))
 }
 
@@ -238,6 +244,8 @@ fn pack_config_matches_expected_http_layout() -> Result<(), Box<dyn std::error::
         doh_domain: None,
         doh_provider: None,
         legacy_mode: true,
+        suppress_opsec_warnings: true,
+        suppress_opsec_warnings: true,
     }));
 
     let bytes = pack_config(&listener, &config)?;
@@ -300,6 +308,7 @@ fn pack_config_ends_after_listener_specific_fields() -> Result<(), Box<dyn std::
         pipe_name: "pivot".to_owned(),
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
     });
 
     let bytes = pack_config(&listener, &config)?;
@@ -344,6 +353,7 @@ fn pack_config_http_without_proxy_ends_after_disabled_proxy_flag()
         name: "http".to_owned(),
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
         hosts: vec!["listener.local".to_owned()],
         host_bind: "0.0.0.0".to_owned(),
         host_rotation: "round-robin".to_owned(),
@@ -364,6 +374,8 @@ fn pack_config_http_without_proxy_ends_after_disabled_proxy_flag()
         doh_domain: None,
         doh_provider: None,
         legacy_mode: true,
+        suppress_opsec_warnings: true,
+        suppress_opsec_warnings: true,
     }));
 
     let bytes = pack_config(&listener, &config)?;
@@ -425,6 +437,7 @@ fn pack_config_rejects_dns_listener() -> Result<(), Box<dyn std::error::Error>> 
         record_types: vec!["TXT".to_owned()],
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
     });
 
     let error = pack_config(&listener, &config).expect_err("dns listener should be rejected");
@@ -540,6 +553,7 @@ fn pack_config_ja3_randomize_defaults_to_false_for_plain_http()
         name: "http".to_owned(),
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
         hosts: vec!["localhost:80".to_owned()],
         host_bind: "0.0.0.0".to_owned(),
         host_rotation: "round-robin".to_owned(),
@@ -560,11 +574,14 @@ fn pack_config_ja3_randomize_defaults_to_false_for_plain_http()
         doh_domain: None,
         doh_provider: None,
         legacy_mode: true,
+        suppress_opsec_warnings: true,
+        suppress_opsec_warnings: true,
     }));
     let http_false = ListenerConfig::Http(Box::new(HttpListenerConfig {
         name: "http".to_owned(),
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
         hosts: vec!["localhost:80".to_owned()],
         host_bind: "0.0.0.0".to_owned(),
         host_rotation: "round-robin".to_owned(),
@@ -585,6 +602,8 @@ fn pack_config_ja3_randomize_defaults_to_false_for_plain_http()
         doh_domain: None,
         doh_provider: None,
         legacy_mode: true,
+        suppress_opsec_warnings: true,
+        suppress_opsec_warnings: true,
     }));
     let bytes_none = pack_config(&http_none, &minimal_config_json())?;
     let bytes_false = pack_config(&http_false, &minimal_config_json())?;
@@ -994,6 +1013,7 @@ fn pack_config_heap_enc_false_is_packed_as_zero() -> Result<(), Box<dyn std::err
         pipe_name: "pivot".to_owned(),
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
     });
 
     let bytes = pack_config(&listener, &config)?;
@@ -1071,6 +1091,7 @@ fn pack_config_job_execution_threadpool_is_packed_as_one() -> Result<(), Box<dyn
         pipe_name: "pivot".to_owned(),
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
     });
     let bytes = pack_config(&listener, &config)?;
     let mut cursor = bytes.as_slice();
@@ -1113,6 +1134,7 @@ fn pack_config_stomp_dll_is_packed_as_wstring() -> Result<(), Box<dyn std::error
         pipe_name: "pivot".to_owned(),
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
     });
     let bytes = pack_config(&listener, &config)?;
     let mut cursor = bytes.as_slice();
@@ -1432,6 +1454,7 @@ fn pack_http_listener_packs_doh_domain_and_provider_cloudflare()
         name: "http".to_owned(),
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
         hosts: vec!["localhost:80".to_owned()],
         host_bind: "0.0.0.0".to_owned(),
         host_rotation: "round-robin".to_owned(),
@@ -1452,6 +1475,8 @@ fn pack_http_listener_packs_doh_domain_and_provider_cloudflare()
         doh_domain: Some("c2.example.com".to_owned()),
         doh_provider: Some("cloudflare".to_owned()),
         legacy_mode: true,
+        suppress_opsec_warnings: true,
+        suppress_opsec_warnings: true,
     }));
     let bytes = pack_config(&listener, &minimal_config_json())?;
     let mut cursor = bytes.as_slice();
@@ -1502,6 +1527,7 @@ fn pack_http_listener_packs_doh_provider_google() -> Result<(), Box<dyn std::err
         name: "http".to_owned(),
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
         hosts: vec!["localhost:80".to_owned()],
         host_bind: "0.0.0.0".to_owned(),
         host_rotation: "round-robin".to_owned(),
@@ -1522,6 +1548,8 @@ fn pack_http_listener_packs_doh_provider_google() -> Result<(), Box<dyn std::err
         doh_domain: Some("c2.example.com".to_owned()),
         doh_provider: Some("google".to_owned()),
         legacy_mode: true,
+        suppress_opsec_warnings: true,
+        suppress_opsec_warnings: true,
     }));
     let with_google = pack_config(&listener, &minimal_config_json())?;
     // Verify the last 4 bytes (provider) are 1 = Google.

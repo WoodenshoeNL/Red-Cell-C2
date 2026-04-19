@@ -31,6 +31,7 @@ pub(super) const EXTRA_KILL_DATE: &str = "KillDate";
 pub(super) const EXTRA_WORKING_HOURS: &str = "WorkingHours";
 pub(super) const EXTRA_JA3_RANDOMIZE: &str = "Ja3Randomize";
 pub(super) const EXTRA_LEGACY_MODE: &str = "LegacyMode";
+pub(super) const EXTRA_SUPPRESS_OPSEC_WARNINGS: &str = "SuppressOpsecWarnings";
 
 /// Validate and normalise an optional KillDate string from operator input,
 /// converting it from the raw extra-field value into a unix-timestamp string.
@@ -78,6 +79,7 @@ pub fn listener_config_from_operator(
             doh_domain: None,
             doh_provider: None,
             legacy_mode: parse_extra_bool(info, EXTRA_LEGACY_MODE)?,
+            suppress_opsec_warnings: parse_extra_bool(info, EXTRA_SUPPRESS_OPSEC_WARNINGS)?,
         })),
         Ok(ListenerProtocol::Smb) => Ok(ListenerConfig::from(SmbListenerConfig {
             name: name.to_owned(),
@@ -99,6 +101,7 @@ pub fn listener_config_from_operator(
             ),
             kill_date: validated_kill_date(optional_extra_string(info, EXTRA_KILL_DATE))?,
             working_hours: optional_extra_string(info, EXTRA_WORKING_HOURS),
+            suppress_opsec_warnings: parse_extra_bool(info, EXTRA_SUPPRESS_OPSEC_WARNINGS)?,
         })),
         Ok(ListenerProtocol::External) => Ok(ListenerConfig::from(ExternalListenerConfig {
             name: name.to_owned(),
@@ -139,6 +142,7 @@ pub(crate) fn profile_listener_configs(
             doh_domain: config.doh_domain,
             doh_provider: config.doh_provider,
             legacy_mode: config.legacy_mode,
+            suppress_opsec_warnings: config.suppress_opsec_warnings,
         }));
     }
     for config in profile.listeners.smb.iter().cloned() {
@@ -158,6 +162,7 @@ pub(crate) fn profile_listener_configs(
             record_types: config.record_types,
             kill_date: validated_kill_date(config.kill_date)?,
             working_hours: config.working_hours,
+            suppress_opsec_warnings: config.suppress_opsec_warnings,
         }));
     }
     listeners.extend(profile.listeners.external.iter().cloned().map(|config| {

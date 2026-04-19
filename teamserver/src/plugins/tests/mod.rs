@@ -87,6 +87,7 @@ pub(super) fn sample_listener() -> ListenerConfig {
         doh_domain: None,
         doh_provider: None,
         legacy_mode: true,
+        suppress_opsec_warnings: true,
     })
 }
 

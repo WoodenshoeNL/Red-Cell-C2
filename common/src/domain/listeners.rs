@@ -238,6 +238,12 @@ pub struct HttpListenerConfig {
     /// that new-protocol listeners carry no plaintext fingerprint.
     #[serde(default)]
     pub legacy_mode: bool,
+    /// Suppress opsec-risk warnings at listener startup.
+    ///
+    /// Set to `true` only for intentional test deployments where the default
+    /// port, User-Agent, or self-signed certificate are known and acceptable.
+    #[serde(default)]
+    pub suppress_opsec_warnings: bool,
 }
 
 /// Shared SMB listener configuration.
@@ -276,6 +282,12 @@ pub struct DnsListenerConfig {
     /// Optional working-hours restriction from the profile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_hours: Option<String>,
+    /// Suppress opsec-risk warnings at listener startup.
+    ///
+    /// Set to `true` only for intentional test deployments where the default
+    /// port is known and acceptable.
+    #[serde(default)]
+    pub suppress_opsec_warnings: bool,
 }
 
 fn default_dns_record_types() -> Vec<String> {
@@ -450,6 +462,7 @@ mod tests {
             doh_domain: None,
             doh_provider: None,
             legacy_mode: false,
+            suppress_opsec_warnings: false,
         });
 
         assert_eq!(config.name(), "edge");
@@ -537,6 +550,7 @@ mod tests {
             record_types: vec!["TXT".to_string(), "A".to_string()],
             kill_date: Some("1798761599".to_string()),
             working_hours: Some("08:00-18:00".to_string()),
+            suppress_opsec_warnings: false,
         });
 
         let encoded = serde_json::to_value(&original)?;

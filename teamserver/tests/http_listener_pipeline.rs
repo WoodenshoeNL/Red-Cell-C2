@@ -852,6 +852,7 @@ fn http_listener(name: &str, port: u16) -> ListenerConfig {
         doh_domain: None,
         doh_provider: None,
         legacy_mode: true,
+        suppress_opsec_warnings: true,
     })
 }
 
@@ -884,6 +885,7 @@ fn http_listener_with_redirector(
         doh_domain: None,
         doh_provider: None,
         legacy_mode: true,
+        suppress_opsec_warnings: true,
     })
 }
 

@@ -299,6 +299,7 @@ mod tests {
             name: "http".to_owned(),
             kill_date: None,
             working_hours: None,
+            suppress_opsec_warnings: true,
             hosts: vec!["localhost:80".to_owned()],
             host_bind: "0.0.0.0".to_owned(),
             host_rotation: "round-robin".to_owned(),
@@ -319,6 +320,7 @@ mod tests {
             doh_domain: None,
             doh_provider: None,
             legacy_mode: false,
+            suppress_opsec_warnings: true,
         }))
     }
 
@@ -458,6 +460,7 @@ mod tests {
             pipe_name: "pivot".to_owned(),
             kill_date: None,
             working_hours: None,
+            suppress_opsec_warnings: true,
         });
         let defines = build_defines(&listener, &[0x01], false)?;
         assert!(defines.iter().any(|d| d == "TRANSPORT_SMB"), "TRANSPORT_SMB missing");
@@ -474,6 +477,7 @@ mod tests {
             record_types: vec!["TXT".to_owned()],
             kill_date: None,
             working_hours: None,
+            suppress_opsec_warnings: true,
         });
         let err =
             build_defines(&listener, &[0x01], false).expect_err("DNS listener should be rejected");
@@ -487,6 +491,7 @@ mod tests {
             name: "http".to_owned(),
             kill_date: None,
             working_hours: None,
+            suppress_opsec_warnings: true,
             hosts: vec!["localhost:80".to_owned()],
             host_bind: "0.0.0.0".to_owned(),
             host_rotation: "round-robin".to_owned(),
@@ -507,6 +512,7 @@ mod tests {
             doh_domain: Some("c2.example.com".to_owned()),
             doh_provider: Some("cloudflare".to_owned()),
             legacy_mode: false,
+            suppress_opsec_warnings: true,
         }));
         let defines = build_defines(&listener, &[0x01], false)?;
         assert!(defines.iter().any(|d| d == "TRANSPORT_HTTP"), "TRANSPORT_HTTP missing");
@@ -533,6 +539,7 @@ mod tests {
             name: "http".to_owned(),
             kill_date: None,
             working_hours: None,
+            suppress_opsec_warnings: true,
             hosts: vec!["c2.example.com".to_owned()],
             host_bind: "0.0.0.0".to_owned(),
             host_rotation: "round-robin".to_owned(),
@@ -553,6 +560,7 @@ mod tests {
             doh_domain: None,
             doh_provider: None,
             legacy_mode: false,
+            suppress_opsec_warnings: true,
         }));
 
         let defines = build_stager_defines(&listener)?;
@@ -583,6 +591,7 @@ mod tests {
             name: "http".to_owned(),
             kill_date: None,
             working_hours: None,
+            suppress_opsec_warnings: true,
             hosts: vec!["host.local".to_owned()],
             host_bind: "0.0.0.0".to_owned(),
             host_rotation: "round-robin".to_owned(),
@@ -603,6 +612,7 @@ mod tests {
             doh_domain: None,
             doh_provider: None,
             legacy_mode: false,
+            suppress_opsec_warnings: true,
         }));
 
         let defines = build_stager_defines(&listener)?;
@@ -617,6 +627,7 @@ mod tests {
             name: "http".to_owned(),
             kill_date: None,
             working_hours: None,
+            suppress_opsec_warnings: true,
             hosts: vec!["host.local".to_owned()],
             host_bind: "0.0.0.0".to_owned(),
             host_rotation: "round-robin".to_owned(),
@@ -637,6 +648,7 @@ mod tests {
             doh_domain: None,
             doh_provider: None,
             legacy_mode: false,
+            suppress_opsec_warnings: true,
         }));
 
         let defines = build_stager_defines(&listener)?;
@@ -656,6 +668,7 @@ mod tests {
             pipe_name: "pivot".to_owned(),
             kill_date: None,
             working_hours: None,
+            suppress_opsec_warnings: true,
         });
         let err = build_stager_defines(&listener)
             .expect_err("non-HTTP listener should be rejected for stager");
@@ -675,6 +688,7 @@ mod tests {
             name: "http".to_owned(),
             kill_date: None,
             working_hours: None,
+            suppress_opsec_warnings: true,
             hosts: vec!["c2.local".to_owned()],
             host_bind: "0.0.0.0".to_owned(),
             host_rotation: "round-robin".to_owned(),
@@ -695,6 +709,7 @@ mod tests {
             doh_domain: None,
             doh_provider: None,
             legacy_mode: false,
+            suppress_opsec_warnings: true,
         }));
 
         let bytes = stager_cache_bytes(&listener)?;
@@ -714,6 +729,7 @@ mod tests {
             pipe_name: "pivot".to_owned(),
             kill_date: None,
             working_hours: None,
+            suppress_opsec_warnings: true,
         });
         let err = stager_cache_bytes(&listener).expect_err("non-HTTP listener should be rejected");
         assert!(matches!(
@@ -730,6 +746,7 @@ mod tests {
                 name: "http".to_owned(),
                 kill_date: None,
                 working_hours: None,
+                suppress_opsec_warnings: true,
                 hosts: vec![host.to_owned()],
                 host_bind: "0.0.0.0".to_owned(),
                 host_rotation: "round-robin".to_owned(),
@@ -750,6 +767,7 @@ mod tests {
                 doh_domain: None,
                 doh_provider: None,
                 legacy_mode: false,
+                suppress_opsec_warnings: true,
             }))
         };
 

@@ -78,6 +78,7 @@ pub(super) async fn dns_state(name: &str) -> DnsListenerState {
         record_types: vec!["TXT".to_owned()],
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
     };
 
     DnsListenerState::new(

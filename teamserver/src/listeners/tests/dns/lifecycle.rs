@@ -25,6 +25,7 @@ async fn dns_listener_starts_and_responds_to_unknown_queries_with_refused() {
         record_types: vec!["TXT".to_owned()],
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
     };
     let (handle, _) = spawn_test_dns_listener(config).await;
 
@@ -62,6 +63,7 @@ async fn dns_listener_runtime_exits_when_shutdown_started_before_first_poll() {
         record_types: vec!["TXT".to_owned()],
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
     };
     let database = Database::connect_in_memory().await.expect("database creation failed");
     let registry = AgentRegistry::new(database.clone());
@@ -105,6 +107,7 @@ async fn dns_listener_a_query_returns_ipv4_rdata_when_payload_fits() {
         record_types: vec!["A".to_owned()],
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
     };
     let (handle, _) = spawn_test_dns_listener(config).await;
 
@@ -153,6 +156,7 @@ async fn dns_listener_rate_limits_demon_init_per_source_ip() {
         record_types: vec!["TXT".to_owned()],
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
     };
     let (handle, registry) = spawn_test_dns_listener(config).await;
 
@@ -214,6 +218,7 @@ async fn dns_listener_refuses_query_types_not_enabled_by_config() {
         record_types: vec!["TXT".to_owned()],
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
     };
     let (handle, _) = spawn_test_dns_listener(config).await;
 
@@ -246,6 +251,7 @@ async fn dns_listener_responds_to_a_burst_of_udp_queries() {
         record_types: vec!["TXT".to_owned()],
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
     };
     let (handle, _) = spawn_test_dns_listener(config).await;
 
@@ -286,6 +292,7 @@ async fn dns_listener_accepts_cname_queries_when_enabled() {
         record_types: vec!["CNAME".to_owned()],
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
     };
     let (handle, _) = spawn_test_dns_listener(config).await;
 
@@ -335,6 +342,7 @@ async fn dns_listener_multi_record_types_each_answer_rr_matches_query_qtype() {
         record_types: vec!["TXT".to_owned(), "A".to_owned(), "CNAME".to_owned()],
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
     };
     let (handle, _) = spawn_test_dns_listener(config).await;
 
@@ -377,6 +385,7 @@ async fn dns_listener_start_rejects_unsupported_record_types() {
         record_types: vec!["MX".to_owned()],
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
     };
 
     let database = Database::connect_in_memory().await.expect("database creation failed");

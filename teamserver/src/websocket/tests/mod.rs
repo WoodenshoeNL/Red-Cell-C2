@@ -523,6 +523,7 @@ fn sample_http_listener(name: &str, port: u16) -> red_cell_common::ListenerConfi
         doh_domain: None,
         doh_provider: None,
         legacy_mode: true,
+        suppress_opsec_warnings: true,
     })
 }
 

@@ -102,6 +102,7 @@ fn setup_build_fixture(
         name: "http".to_owned(),
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
         hosts: vec!["listener.local".to_owned()],
         host_bind: "0.0.0.0".to_owned(),
         host_rotation: "round-robin".to_owned(),
@@ -122,6 +123,8 @@ fn setup_build_fixture(
         doh_domain: None,
         doh_provider: None,
         legacy_mode: true,
+        suppress_opsec_warnings: true,
+        suppress_opsec_warnings: true,
     }));
 
     Ok((service, listener, request))
@@ -148,6 +151,7 @@ async fn build_payload_rejects_unsupported_listener_protocol()
         record_types: vec!["TXT".to_owned()],
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
     });
 
     let error = service
@@ -172,6 +176,7 @@ async fn build_payload_rejects_unsupported_agent_type() -> Result<(), Box<dyn st
         name: "http".to_owned(),
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
         hosts: vec!["listener.local".to_owned()],
         host_bind: "0.0.0.0".to_owned(),
         host_rotation: "round-robin".to_owned(),
@@ -192,6 +197,8 @@ async fn build_payload_rejects_unsupported_agent_type() -> Result<(), Box<dyn st
         doh_domain: None,
         doh_provider: None,
         legacy_mode: true,
+        suppress_opsec_warnings: true,
+        suppress_opsec_warnings: true,
     }));
 
     let error = service
@@ -223,6 +230,7 @@ async fn build_payload_archon_rejects_missing_source_tree() -> Result<(), Box<dy
         name: "http".to_owned(),
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
         hosts: vec!["listener.local".to_owned()],
         host_bind: "0.0.0.0".to_owned(),
         host_rotation: "round-robin".to_owned(),
@@ -243,6 +251,8 @@ async fn build_payload_archon_rejects_missing_source_tree() -> Result<(), Box<dy
         doh_domain: None,
         doh_provider: None,
         legacy_mode: true,
+        suppress_opsec_warnings: true,
+        suppress_opsec_warnings: true,
     }));
 
     let error = service
@@ -271,6 +281,7 @@ async fn build_payload_rejects_unsupported_architecture() -> Result<(), Box<dyn 
         name: "http".to_owned(),
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
         hosts: vec!["listener.local".to_owned()],
         host_bind: "0.0.0.0".to_owned(),
         host_rotation: "round-robin".to_owned(),
@@ -291,6 +302,8 @@ async fn build_payload_rejects_unsupported_architecture() -> Result<(), Box<dyn 
         doh_domain: None,
         doh_provider: None,
         legacy_mode: true,
+        suppress_opsec_warnings: true,
+        suppress_opsec_warnings: true,
     }));
 
     let error = service
@@ -321,6 +334,7 @@ async fn build_payload_rejects_unsupported_output_format() -> Result<(), Box<dyn
         name: "http".to_owned(),
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
         hosts: vec!["listener.local".to_owned()],
         host_bind: "0.0.0.0".to_owned(),
         host_rotation: "round-robin".to_owned(),
@@ -341,6 +355,8 @@ async fn build_payload_rejects_unsupported_output_format() -> Result<(), Box<dyn
         doh_domain: None,
         doh_provider: None,
         legacy_mode: true,
+        suppress_opsec_warnings: true,
+        suppress_opsec_warnings: true,
     }));
 
     let error = service
@@ -453,6 +469,7 @@ async fn build_payload_uses_toolchain_and_returns_compiled_bytes()
         name: "http".to_owned(),
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
         hosts: vec!["listener.local".to_owned()],
         host_bind: "0.0.0.0".to_owned(),
         host_rotation: "round-robin".to_owned(),
@@ -473,6 +490,8 @@ async fn build_payload_uses_toolchain_and_returns_compiled_bytes()
         doh_domain: None,
         doh_provider: None,
         legacy_mode: true,
+        suppress_opsec_warnings: true,
+        suppress_opsec_warnings: true,
     }));
 
     let mut messages = Vec::new();
@@ -601,6 +620,7 @@ async fn build_payload_x86_uses_x86_compiler_and_win32_nasm_format()
         name: "http".to_owned(),
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
         hosts: vec!["listener.local".to_owned()],
         host_bind: "0.0.0.0".to_owned(),
         host_rotation: "round-robin".to_owned(),
@@ -621,6 +641,8 @@ async fn build_payload_x86_uses_x86_compiler_and_win32_nasm_format()
         doh_domain: None,
         doh_provider: None,
         legacy_mode: true,
+        suppress_opsec_warnings: true,
+        suppress_opsec_warnings: true,
     }));
 
     let artifact = service.build_payload(&listener, &request, None, |_| {}).await?;
@@ -868,6 +890,7 @@ async fn build_payload_raw_shellcode_rejects_x86() -> Result<(), Box<dyn std::er
         name: "http".to_owned(),
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
         hosts: vec!["listener.local".to_owned()],
         host_bind: "0.0.0.0".to_owned(),
         host_rotation: "round-robin".to_owned(),
@@ -888,6 +911,8 @@ async fn build_payload_raw_shellcode_rejects_x86() -> Result<(), Box<dyn std::er
         doh_domain: None,
         doh_provider: None,
         legacy_mode: true,
+        suppress_opsec_warnings: true,
+        suppress_opsec_warnings: true,
     }));
 
     let err = service
@@ -918,6 +943,7 @@ async fn build_payload_staged_shellcode_rejects_non_http() -> Result<(), Box<dyn
         pipe_name: "pivot".to_owned(),
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
     });
 
     let err = service
@@ -1043,6 +1069,7 @@ async fn build_stager_passes_correct_defines_to_compiler() -> Result<(), Box<dyn
         name: "http-staging".to_owned(),
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
         hosts: vec!["c2.example.com".to_owned()],
         host_bind: "0.0.0.0".to_owned(),
         host_rotation: "round-robin".to_owned(),
@@ -1063,6 +1090,8 @@ async fn build_stager_passes_correct_defines_to_compiler() -> Result<(), Box<dyn
         doh_domain: None,
         doh_provider: None,
         legacy_mode: true,
+        suppress_opsec_warnings: true,
+        suppress_opsec_warnings: true,
     }));
 
     let request = BuildPayloadRequestInfo {
@@ -1216,6 +1245,7 @@ async fn build_stager_x86_uses_underscore_entry_point() -> Result<(), Box<dyn st
         name: "http".to_owned(),
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
         hosts: vec!["stager.local".to_owned()],
         host_bind: "0.0.0.0".to_owned(),
         host_rotation: "round-robin".to_owned(),
@@ -1236,6 +1266,8 @@ async fn build_stager_x86_uses_underscore_entry_point() -> Result<(), Box<dyn st
         doh_domain: None,
         doh_provider: None,
         legacy_mode: true,
+        suppress_opsec_warnings: true,
+        suppress_opsec_warnings: true,
     }));
 
     let request = BuildPayloadRequestInfo {
@@ -1328,6 +1360,7 @@ async fn build_payload_phantom_rejects_missing_source_tree()
         name: "http".to_owned(),
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
         hosts: vec!["listener.local".to_owned()],
         host_bind: "0.0.0.0".to_owned(),
         host_rotation: "round-robin".to_owned(),
@@ -1348,6 +1381,8 @@ async fn build_payload_phantom_rejects_missing_source_tree()
         doh_domain: None,
         doh_provider: None,
         legacy_mode: true,
+        suppress_opsec_warnings: true,
+        suppress_opsec_warnings: true,
     }));
 
     let error = service
@@ -1376,6 +1411,7 @@ async fn build_payload_specter_rejects_missing_source_tree()
         name: "http".to_owned(),
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
         hosts: vec!["listener.local".to_owned()],
         host_bind: "0.0.0.0".to_owned(),
         host_rotation: "round-robin".to_owned(),
@@ -1396,6 +1432,8 @@ async fn build_payload_specter_rejects_missing_source_tree()
         doh_domain: None,
         doh_provider: None,
         legacy_mode: true,
+        suppress_opsec_warnings: true,
+        suppress_opsec_warnings: true,
     }));
 
     let error = service

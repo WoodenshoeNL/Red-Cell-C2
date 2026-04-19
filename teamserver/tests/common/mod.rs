@@ -618,6 +618,7 @@ pub fn http_listener_config(name: &str, port: u16) -> red_cell_common::ListenerC
         doh_domain: None,
         doh_provider: None,
         legacy_mode: true,
+        suppress_opsec_warnings: true,
     })
 }
 

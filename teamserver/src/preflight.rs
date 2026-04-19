@@ -305,6 +305,7 @@ mod tests {
             doh_domain: None,
             doh_provider: None,
             legacy_mode: false,
+            suppress_opsec_warnings: false,
         });
         profile
     }

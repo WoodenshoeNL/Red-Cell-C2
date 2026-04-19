@@ -88,6 +88,7 @@ pub(super) async fn spawn_server_with_http_listener(
             doh_domain: None,
             doh_provider: None,
             legacy_mode: true,
+            suppress_opsec_warnings: true,
         }))
         .await?;
     drop(listener_guard);
@@ -142,6 +143,7 @@ pub(super) async fn spawn_server_with_http_listener_custom(
             doh_domain: None,
             doh_provider: None,
             legacy_mode: true,
+            suppress_opsec_warnings: true,
         }))
         .await?;
     drop(listener_guard);

@@ -750,8 +750,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/api/v1/payload-cache"))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({ "flushed": 3 })),
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "flushed": 3 })),
             )
             .expect(1)
             .mount(&server)
@@ -791,9 +790,6 @@ mod tests {
         let client = crate::client::ApiClient::new(&cfg).expect("client");
 
         let err = cache_flush(&client).await.expect_err("must fail with 403");
-        assert!(
-            matches!(err, CliError::AuthFailure(_)),
-            "expected AuthFailure, got {err:?}"
-        );
+        assert!(matches!(err, CliError::AuthFailure(_)), "expected AuthFailure, got {err:?}");
     }
 }

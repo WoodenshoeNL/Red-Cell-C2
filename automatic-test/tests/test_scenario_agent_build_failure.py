@@ -66,6 +66,9 @@ _BUILD_FAIL = CliError("BUILD_FAILED", "toolchain error", 1)
 _LISTENER_PATCHES = [
     patch("lib.cli.listener_create", return_value={}),
     patch("lib.cli.listener_start", return_value={}),
+    # patch both the module-level binding (used by lib.deploy_agent) and the
+    # source symbol (used by scenarios that import lazily from lib.cli directly)
+    patch("lib.deploy_agent.payload_build_and_fetch", side_effect=_BUILD_FAIL),
     patch("lib.cli.payload_build_and_fetch", side_effect=_BUILD_FAIL),
 ]
 

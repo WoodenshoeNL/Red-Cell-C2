@@ -71,7 +71,7 @@ class TestRunArchonAvailabilityGate(unittest.TestCase):
              patch("lib.cli.listener_start"), \
              patch("lib.cli.listener_stop"), \
              patch("lib.cli.listener_delete"), \
-             patch("lib.cli.payload_build_and_fetch", side_effect=CliError("UNKNOWN_AGENT", "unknown agent type: archon", 1)):
+             patch("lib.deploy_agent.payload_build_and_fetch", side_effect=CliError("UNKNOWN_AGENT", "unknown agent type: archon", 1)):
             with self.assertRaises(CliError) as cm:
                 _mod.run(ctx)
         self.assertEqual(cm.exception.code, "UNKNOWN_AGENT")

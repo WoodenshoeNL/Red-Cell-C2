@@ -19,8 +19,11 @@ Status legend: ✅ implemented · 🔨 in progress · ☐ planned · — not app
 | **Process list**           | ✅            | ☐              | ✅                   | ✅                 |
 | **Process kill**           | ✅            | ☐              | ✅                   | ✅                 |
 | **Screenshot**             | ✅            | ☐              | ✅                   | ✅                 |
-| **Kerberos (ask TGT)**     | ✅            | ☐              | —                    | ✅                 |
-| **Kerberos (ask ST)**      | ✅            | ☐              | —                    | ✅                 |
+| **Kerberos (ask TGT)**     | ✅            | ☐              | — ¹                  | ✅                 |
+| **Kerberos (ask ST)**      | ✅            | ☐              | — ¹                  | ✅                 |
+| **Kerberos klist**         | —             | —              | ✅                   | —                  |
+| **Kerberos purge**         | —             | —              | ✅                   | —                  |
+| **Kerberos PTT**           | —             | —              | ✅                   | —                  |
 | **Pivot dispatch**         | ✅            | ☐              | ✅                   | ✅                 |
 | **Token impersonation**    | ✅            | ☐              | —                    | ✅                 |
 | **Memory injection**       | ✅            | ☐              | ✅                   | ✅                 |
@@ -29,9 +32,18 @@ Status legend: ✅ implemented · 🔨 in progress · ☐ planned · — not app
 | **Net enumeration**        | ✅            | ☐              | ✅                   | ✅                 |
 | **SOCKS / socket relay**   | ✅            | ☐              | ✅                   | ✅                 |
 | **In-memory file staging** | ✅            | ☐              | ✅                   | ✅                 |
+| **Persist** ²              | —             | —              | ✅                   | —                  |
+| **Harvest** ³              | —             | —              | ✅                   | —                  |
 
 Notes:
 - Phantom **Screenshot** uses best-effort Linux tooling (`import`, `scrot`, `gnome-screenshot`).
+- ¹ Linux has no LSA/TGT-request API. Phantom implements Linux Kerberos via ccache/keytab
+  (`klist`, `purge`, `PTT`) rather than Windows-style TGT/ST requests.
+- ² Phantom **Persist** supports install/remove via cron, systemd user units, and shell RC files
+  (`~/.bashrc`, `~/.zshrc`, etc.).
+- ³ Phantom **Harvest** collects SSH private keys, browser cookies/passwords (Chrome, Firefox),
+  `/etc/shadow` (when readable), `.netrc`, and git credential cache — without spawning
+  subprocesses.
 
 ---
 

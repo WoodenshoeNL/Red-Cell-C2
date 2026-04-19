@@ -9,6 +9,7 @@ fn listener_protocol_label_round_trips() {
     assert_eq!(ListenerProtocol::Http.label(), "Http");
     assert_eq!(ListenerProtocol::Https.label(), "Https");
     assert_eq!(ListenerProtocol::Smb.label(), "Smb");
+    assert_eq!(ListenerProtocol::Dns.label(), "Dns");
     assert_eq!(ListenerProtocol::External.label(), "External");
 }
 
@@ -184,6 +185,59 @@ fn build_listener_remove_creates_correct_message() {
         }
         _ => panic!("expected ListenerRemove"),
     }
+}
+
+#[test]
+fn listener_dialog_to_info_dns() {
+    let mut dialog = ListenerDialogState::new_create();
+    dialog.name = "dns-c2".to_owned();
+    dialog.protocol = ListenerProtocol::Dns;
+    dialog.host = "0.0.0.0".to_owned();
+    dialog.port = "53".to_owned();
+    dialog.dns_domain = "c2.example.com".to_owned();
+    dialog.dns_record_types = "TXT,A".to_owned();
+
+    let info = dialog.to_listener_info();
+    assert_eq!(info.name.as_deref(), Some("dns-c2"));
+    assert_eq!(info.protocol.as_deref(), Some("Dns"));
+    assert_eq!(info.host_bind.as_deref(), Some("0.0.0.0"));
+    assert_eq!(info.port_bind.as_deref(), Some("53"));
+    assert_eq!(info.extra.get("Domain").and_then(|v| v.as_str()), Some("c2.example.com"));
+    assert_eq!(info.extra.get("RecordTypes").and_then(|v| v.as_str()), Some("TXT,A"));
+    // HTTP-specific fields should be absent
+    assert!(info.user_agent.is_none());
+    assert!(info.proxy_enabled.is_none());
+}
+
+#[test]
+fn listener_dialog_dns_empty_record_types_omits_extra_key() {
+    let mut dialog = ListenerDialogState::new_create();
+    dialog.name = "dns-minimal".to_owned();
+    dialog.protocol = ListenerProtocol::Dns;
+    dialog.dns_domain = "c2.example.com".to_owned();
+    dialog.dns_record_types = String::new();
+
+    let info = dialog.to_listener_info();
+    assert_eq!(info.extra.get("Domain").and_then(|v| v.as_str()), Some("c2.example.com"));
+    assert!(!info.extra.contains_key("RecordTypes"));
+}
+
+#[test]
+fn listener_dialog_new_edit_dns_preserves_fields() {
+    let mut source = ListenerInfo::default();
+    source.host_bind = Some("0.0.0.0".to_owned());
+    source.port_bind = Some("53".to_owned());
+    source
+        .extra
+        .insert("Domain".to_owned(), serde_json::Value::String("c2.example.com".to_owned()));
+    source.extra.insert("RecordTypes".to_owned(), serde_json::Value::String("TXT".to_owned()));
+
+    let dialog = ListenerDialogState::new_edit("dns-listener", "Dns", &source);
+    assert_eq!(dialog.protocol, ListenerProtocol::Dns);
+    assert_eq!(dialog.host, "0.0.0.0");
+    assert_eq!(dialog.port, "53");
+    assert_eq!(dialog.dns_domain, "c2.example.com");
+    assert_eq!(dialog.dns_record_types, "TXT");
 }
 
 #[test]

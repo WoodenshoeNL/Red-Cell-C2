@@ -13,17 +13,20 @@ pub(crate) enum ListenerProtocol {
     Http,
     Https,
     Smb,
+    Dns,
     External,
 }
 
 impl ListenerProtocol {
-    pub(crate) const ALL: [Self; 4] = [Self::Http, Self::Https, Self::Smb, Self::External];
+    pub(crate) const ALL: [Self; 5] =
+        [Self::Http, Self::Https, Self::Smb, Self::Dns, Self::External];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Http => "Http",
             Self::Https => "Https",
             Self::Smb => "Smb",
+            Self::Dns => "Dns",
             Self::External => "External",
         }
     }
@@ -57,6 +60,9 @@ pub(crate) struct ListenerDialogState {
     pub(crate) proxy_password: Zeroizing<String>,
     // SMB fields
     pub(crate) pipe_name: String,
+    // DNS fields
+    pub(crate) dns_domain: String,
+    pub(crate) dns_record_types: String,
     // External fields
     pub(crate) endpoint: String,
 }
@@ -80,6 +86,8 @@ impl ListenerDialogState {
             proxy_username: String::new(),
             proxy_password: Zeroizing::new(String::new()),
             pipe_name: String::new(),
+            dns_domain: String::new(),
+            dns_record_types: "TXT,A".to_owned(),
             endpoint: String::new(),
         }
     }
@@ -88,6 +96,7 @@ impl ListenerDialogState {
         let protocol_enum = match protocol {
             "Https" => ListenerProtocol::Https,
             "Smb" => ListenerProtocol::Smb,
+            "Dns" => ListenerProtocol::Dns,
             "External" => ListenerProtocol::External,
             _ => ListenerProtocol::Http,
         };
@@ -117,6 +126,18 @@ impl ListenerDialogState {
                 .get("PipeName")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
+                .to_owned(),
+            dns_domain: info
+                .extra
+                .get("Domain")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_owned(),
+            dns_record_types: info
+                .extra
+                .get("RecordTypes")
+                .and_then(|v| v.as_str())
+                .unwrap_or("TXT,A")
                 .to_owned(),
             endpoint: info
                 .extra
@@ -198,6 +219,27 @@ impl ListenerDialogState {
                     name: Some(self.name.clone()),
                     protocol: Some(protocol_str),
                     status: Some("Online".to_owned()),
+                    extra,
+                    ..ListenerInfo::default()
+                }
+            }
+            ListenerProtocol::Dns => {
+                extra.insert(
+                    "Domain".to_owned(),
+                    serde_json::Value::String(self.dns_domain.clone()),
+                );
+                if !self.dns_record_types.is_empty() {
+                    extra.insert(
+                        "RecordTypes".to_owned(),
+                        serde_json::Value::String(self.dns_record_types.clone()),
+                    );
+                }
+                ListenerInfo {
+                    name: Some(self.name.clone()),
+                    protocol: Some(protocol_str),
+                    status: Some("Online".to_owned()),
+                    host_bind: if self.host.is_empty() { None } else { Some(self.host.clone()) },
+                    port_bind: if self.port.is_empty() { None } else { Some(self.port.clone()) },
                     extra,
                     ..ListenerInfo::default()
                 }

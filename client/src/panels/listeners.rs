@@ -201,6 +201,40 @@ impl ClientApp {
                             },
                         );
                     }
+                    ListenerProtocol::Dns => {
+                        egui::Grid::new("dns_fields").num_columns(2).spacing([8.0, 6.0]).show(
+                            ui,
+                            |ui| {
+                                ui.label("Bind Address:");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut dialog.host)
+                                        .desired_width(300.0),
+                                );
+                                ui.end_row();
+
+                                ui.label("Port:");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut dialog.port)
+                                        .desired_width(300.0),
+                                );
+                                ui.end_row();
+
+                                ui.label("Domain:");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut dialog.dns_domain)
+                                        .desired_width(300.0),
+                                );
+                                ui.end_row();
+
+                                ui.label("Record Types:");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut dialog.dns_record_types)
+                                        .desired_width(300.0),
+                                );
+                                ui.end_row();
+                            },
+                        );
+                    }
                     ListenerProtocol::External => {
                         egui::Grid::new("external_fields").num_columns(2).spacing([8.0, 6.0]).show(
                             ui,

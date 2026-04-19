@@ -37,7 +37,7 @@ DEFAULT_SLEEP = {
 }
 
 # Dev loop timing constants (seconds)
-DEV_SLEEP_NO_WORK     = 60     # wait when no tasks are ready
+DEV_SLEEP_NO_WORK     = 600    # wait when no tasks are ready
 DEV_SLEEP_BETWEEN     = 15     # wait between tasks when --sleep not set
 DEV_SLEEP_TOKEN_LIMIT = 1200   # wait after Claude context limit hit
 DEV_CLEAN_EVERY       = 1      # run build-artifact cleanup every N dev iterations

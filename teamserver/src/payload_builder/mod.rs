@@ -410,6 +410,8 @@ impl PayloadBuilderService {
                     trusted_proxy_peers: Vec::new(),
                     heap_enc: true,
                     allow_legacy_ctr: false,
+                    job_execution: "thread".to_owned(),
+                    stomp_dll: None,
                 },
                 binary_patch: None,
                 cache: PayloadCache::new(PathBuf::from("/nonexistent/payload-cache")),

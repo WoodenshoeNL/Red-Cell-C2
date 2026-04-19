@@ -23,6 +23,10 @@ pub(crate) fn default_true() -> bool {
     true
 }
 
+pub(crate) fn default_job_execution() -> String {
+    "thread".to_owned()
+}
+
 pub(crate) const fn default_api_rate_limit_per_minute() -> u32 {
     60
 }

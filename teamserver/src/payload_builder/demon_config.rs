@@ -61,6 +61,16 @@ pub(crate) fn merged_request_config(
     if !config.contains_key("HeapEnc") {
         config.insert("HeapEnc".to_owned(), Value::Bool(defaults.heap_enc));
     }
+    // ARC-09: JobExecution — Archon-only, propagate profile default.
+    if agent_name == "archon" && !config.contains_key("JobExecution") {
+        config.insert("JobExecution".to_owned(), Value::String(defaults.job_execution.clone()));
+    }
+    // ARC-05: StompDll — Archon-only optional victim DLL name.
+    if agent_name == "archon" && !config.contains_key("StompDll") {
+        if let Some(stomp_dll) = &defaults.stomp_dll {
+            config.insert("StompDll".to_owned(), Value::String(stomp_dll.clone()));
+        }
+    }
     if let Some(injection) = &defaults.injection {
         let entry =
             config.entry("Injection".to_owned()).or_insert_with(|| Value::Object(Map::new()));
@@ -142,6 +152,22 @@ pub(crate) fn pack_config(
 
     // ARC-04: heap encryption during sleep — default ON.
     add_u32(&mut out, if optional_bool(config, "HeapEnc").unwrap_or(true) { 1 } else { 0 });
+
+    // ARC-09: job execution mode — 0 = dedicated thread (default), 1 = NT thread pool.
+    add_u32(
+        &mut out,
+        if optional_string(config, "JobExecution")
+            .unwrap_or("thread")
+            .eq_ignore_ascii_case("threadpool")
+        {
+            1
+        } else {
+            0
+        },
+    );
+
+    // ARC-05: StompDll — length-prefixed UTF-16LE wstring; empty = auto-select.
+    add_wstring(&mut out, optional_string(config, "StompDll").unwrap_or(""))?;
 
     match listener {
         ListenerConfig::Http(http) => pack_http_listener(&mut out, http)?,

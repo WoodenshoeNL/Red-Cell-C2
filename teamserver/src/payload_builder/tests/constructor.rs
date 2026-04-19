@@ -55,6 +55,8 @@ fn constructor_test_profile(compiler_x64: &Path, compiler_x86: &Path, nasm: &Pat
             trusted_proxy_peers: Vec::new(),
             heap_enc: true,
             allow_legacy_ctr: false,
+            job_execution: "thread".to_owned(),
+            stomp_dll: None,
         },
         service: None,
         api: None,

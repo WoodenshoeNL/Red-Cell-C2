@@ -163,6 +163,8 @@ fn merged_request_config_applies_profile_defaults() -> Result<(), Box<dyn std::e
             trusted_proxy_peers: Vec::new(),
             heap_enc: true,
             allow_legacy_ctr: false,
+            job_execution: "thread".to_owned(),
+            stomp_dll: None,
         },
     )?;
 
@@ -250,6 +252,8 @@ fn pack_config_matches_expected_http_layout() -> Result<(), Box<dyn std::error::
     assert_eq!(read_u32(&mut cursor)?, 1);
     assert_eq!(read_u32(&mut cursor)?, 1);
     assert_eq!(read_u32(&mut cursor)?, 1); // HeapEnc (default true)
+    assert_eq!(read_u32(&mut cursor)?, 0); // JobExecution: thread (default)
+    assert_eq!(read_wstring(&mut cursor)?, ""); // StompDll: auto-select (default)
     assert_eq!(read_u64(&mut cursor)?, 1234);
     assert_eq!(read_u32(&mut cursor)?, 5_243_968);
     assert_eq!(read_wstring(&mut cursor)?, "POST");
@@ -310,6 +314,8 @@ fn pack_config_ends_after_listener_specific_fields() -> Result<(), Box<dyn std::
     assert_eq!(read_u32(&mut cursor)?, 0);
     assert_eq!(read_u32(&mut cursor)?, 0);
     assert_eq!(read_u32(&mut cursor)?, 1); // HeapEnc (default true)
+    assert_eq!(read_u32(&mut cursor)?, 0); // JobExecution: thread (default)
+    assert_eq!(read_wstring(&mut cursor)?, ""); // StompDll: auto-select (default)
     assert_eq!(read_wstring(&mut cursor)?, r"\\.\pipe\pivot");
     assert_eq!(read_u64(&mut cursor)?, 0);
     assert_eq!(read_u32(&mut cursor)?, 0);
@@ -371,6 +377,8 @@ fn pack_config_http_without_proxy_ends_after_disabled_proxy_flag()
     assert_eq!(read_u32(&mut cursor)?, 0);
     assert_eq!(read_u32(&mut cursor)?, 0);
     assert_eq!(read_u32(&mut cursor)?, 1); // HeapEnc (default true)
+    assert_eq!(read_u32(&mut cursor)?, 0); // JobExecution: thread (default)
+    assert_eq!(read_wstring(&mut cursor)?, ""); // StompDll: auto-select (default)
     assert_eq!(read_u64(&mut cursor)?, 0);
     assert_eq!(read_u32(&mut cursor)?, 0);
     assert_eq!(read_wstring(&mut cursor)?, "POST");
@@ -791,6 +799,8 @@ fn merged_request_config_archon_defaults_amsi_to_patch() -> Result<(), Box<dyn s
             trusted_proxy_peers: Vec::new(),
             heap_enc: true,
             allow_legacy_ctr: false,
+            job_execution: "thread".to_owned(),
+            stomp_dll: None,
         },
     )?;
     assert_eq!(
@@ -825,6 +835,8 @@ fn merged_request_config_archon_profile_amsi_overrides_default()
             trusted_proxy_peers: Vec::new(),
             heap_enc: true,
             allow_legacy_ctr: false,
+            job_execution: "thread".to_owned(),
+            stomp_dll: None,
         },
     )?;
     assert_eq!(
@@ -860,6 +872,8 @@ fn merged_request_config_demon_amsi_stays_none_by_default() -> Result<(), Box<dy
             trusted_proxy_peers: Vec::new(),
             heap_enc: true,
             allow_legacy_ctr: false,
+            job_execution: "thread".to_owned(),
+            stomp_dll: None,
         },
     )?;
     assert_eq!(
@@ -991,6 +1005,8 @@ fn pack_config_heap_enc_false_is_packed_as_zero() -> Result<(), Box<dyn std::err
     assert_eq!(read_u32(&mut cursor)?, 0);
     assert_eq!(read_u32(&mut cursor)?, 0);
     assert_eq!(read_u32(&mut cursor)?, 0); // HeapEnc (explicit false)
+    assert_eq!(read_u32(&mut cursor)?, 0); // JobExecution: thread (default)
+    assert_eq!(read_wstring(&mut cursor)?, ""); // StompDll: auto-select (default)
     assert_eq!(read_wstring(&mut cursor)?, r"\\.\pipe\pivot");
     assert_eq!(read_u64(&mut cursor)?, 0);
     assert_eq!(read_u32(&mut cursor)?, 0);
@@ -1021,9 +1037,188 @@ fn merged_request_config_propagates_heap_enc_false_from_profile_defaults()
             trusted_proxy_peers: Vec::new(),
             heap_enc: false,
             allow_legacy_ctr: false,
+            job_execution: "thread".to_owned(),
+            stomp_dll: None,
         },
     )?;
     assert_eq!(config.get("HeapEnc"), Some(&Value::Bool(false)));
+    Ok(())
+}
+
+#[test]
+fn pack_config_job_execution_threadpool_is_packed_as_one()
+-> Result<(), Box<dyn std::error::Error>> {
+    let config = serde_json::from_value::<Map<String, Value>>(json!({
+        "Sleep": "5",
+        "Jitter": "0",
+        "Sleep Technique": "WaitForSingleObjectEx",
+        "JobExecution": "threadpool",
+        "Injection": {
+            "Alloc": "Win32",
+            "Execute": "Win32",
+            "Spawn64": "a",
+            "Spawn32": "b"
+        }
+    }))?;
+    let listener = ListenerConfig::Smb(red_cell_common::SmbListenerConfig {
+        name: "smb".to_owned(),
+        pipe_name: "pivot".to_owned(),
+        kill_date: None,
+        working_hours: None,
+    });
+    let bytes = pack_config(&listener, &config)?;
+    let mut cursor = bytes.as_slice();
+    // skip sleep, jitter, alloc, execute, spawn64, spawn32, technique, bypass, stackspoof,
+    // proxyloading, syscall, amsi, heapenc
+    read_u32(&mut cursor)?; // sleep
+    read_u32(&mut cursor)?; // jitter
+    read_u32(&mut cursor)?; // alloc
+    read_u32(&mut cursor)?; // execute
+    read_wstring(&mut cursor)?; // spawn64
+    read_wstring(&mut cursor)?; // spawn32
+    read_u32(&mut cursor)?; // SleepTechnique
+    read_u32(&mut cursor)?; // SleepJmpBypass
+    read_u32(&mut cursor)?; // StackSpoof
+    read_u32(&mut cursor)?; // ProxyLoading
+    read_u32(&mut cursor)?; // SysIndirect
+    read_u32(&mut cursor)?; // AmsiEtwPatch
+    read_u32(&mut cursor)?; // HeapEnc
+    assert_eq!(read_u32(&mut cursor)?, 1); // JobExecution: threadpool
+    assert_eq!(read_wstring(&mut cursor)?, ""); // StompDll: auto-select (default)
+    Ok(())
+}
+
+#[test]
+fn pack_config_stomp_dll_is_packed_as_wstring() -> Result<(), Box<dyn std::error::Error>> {
+    let config = serde_json::from_value::<Map<String, Value>>(json!({
+        "Sleep": "5",
+        "Jitter": "0",
+        "Sleep Technique": "WaitForSingleObjectEx",
+        "StompDll": "WINMM.DLL",
+        "Injection": {
+            "Alloc": "Win32",
+            "Execute": "Win32",
+            "Spawn64": "a",
+            "Spawn32": "b"
+        }
+    }))?;
+    let listener = ListenerConfig::Smb(red_cell_common::SmbListenerConfig {
+        name: "smb".to_owned(),
+        pipe_name: "pivot".to_owned(),
+        kill_date: None,
+        working_hours: None,
+    });
+    let bytes = pack_config(&listener, &config)?;
+    let mut cursor = bytes.as_slice();
+    read_u32(&mut cursor)?; // sleep
+    read_u32(&mut cursor)?; // jitter
+    read_u32(&mut cursor)?; // alloc
+    read_u32(&mut cursor)?; // execute
+    read_wstring(&mut cursor)?; // spawn64
+    read_wstring(&mut cursor)?; // spawn32
+    read_u32(&mut cursor)?; // SleepTechnique
+    read_u32(&mut cursor)?; // SleepJmpBypass
+    read_u32(&mut cursor)?; // StackSpoof
+    read_u32(&mut cursor)?; // ProxyLoading
+    read_u32(&mut cursor)?; // SysIndirect
+    read_u32(&mut cursor)?; // AmsiEtwPatch
+    read_u32(&mut cursor)?; // HeapEnc
+    assert_eq!(read_u32(&mut cursor)?, 0); // JobExecution: thread (default)
+    assert_eq!(read_wstring(&mut cursor)?, "WINMM.DLL"); // StompDll
+    Ok(())
+}
+
+#[test]
+fn merged_request_config_propagates_job_execution_from_archon_profile()
+-> Result<(), Box<dyn std::error::Error>> {
+    let config = merged_request_config(
+        r#"{"Sleep":"5","Jitter":"0","Sleep Technique":"WaitForSingleObjectEx","Injection":{"Alloc":"Win32","Execute":"Win32","Spawn64":"a","Spawn32":"b"}}"#,
+        "archon",
+        &DemonConfig {
+            sleep: None,
+            jitter: None,
+            indirect_syscall: false,
+            stack_duplication: false,
+            sleep_technique: None,
+            proxy_loading: None,
+            amsi_etw_patching: None,
+            injection: None,
+            dotnet_name_pipe: None,
+            binary: None,
+            init_secret: None,
+            init_secrets: Vec::new(),
+            trust_x_forwarded_for: false,
+            trusted_proxy_peers: Vec::new(),
+            heap_enc: true,
+            allow_legacy_ctr: false,
+            job_execution: "threadpool".to_owned(),
+            stomp_dll: None,
+        },
+    )?;
+    assert_eq!(config.get("JobExecution"), Some(&Value::String("threadpool".to_owned())));
+    Ok(())
+}
+
+#[test]
+fn merged_request_config_propagates_stomp_dll_from_archon_profile()
+-> Result<(), Box<dyn std::error::Error>> {
+    let config = merged_request_config(
+        r#"{"Sleep":"5","Jitter":"0","Sleep Technique":"WaitForSingleObjectEx","Injection":{"Alloc":"Win32","Execute":"Win32","Spawn64":"a","Spawn32":"b"}}"#,
+        "archon",
+        &DemonConfig {
+            sleep: None,
+            jitter: None,
+            indirect_syscall: false,
+            stack_duplication: false,
+            sleep_technique: None,
+            proxy_loading: None,
+            amsi_etw_patching: None,
+            injection: None,
+            dotnet_name_pipe: None,
+            binary: None,
+            init_secret: None,
+            init_secrets: Vec::new(),
+            trust_x_forwarded_for: false,
+            trusted_proxy_peers: Vec::new(),
+            heap_enc: true,
+            allow_legacy_ctr: false,
+            job_execution: "thread".to_owned(),
+            stomp_dll: Some("WINMM.DLL".to_owned()),
+        },
+    )?;
+    assert_eq!(config.get("StompDll"), Some(&Value::String("WINMM.DLL".to_owned())));
+    Ok(())
+}
+
+#[test]
+fn merged_request_config_does_not_propagate_archon_keys_for_demon()
+-> Result<(), Box<dyn std::error::Error>> {
+    let config = merged_request_config(
+        r#"{"Sleep":"5","Jitter":"0","Sleep Technique":"WaitForSingleObjectEx","Injection":{"Alloc":"Win32","Execute":"Win32","Spawn64":"a","Spawn32":"b"}}"#,
+        "demon",
+        &DemonConfig {
+            sleep: None,
+            jitter: None,
+            indirect_syscall: false,
+            stack_duplication: false,
+            sleep_technique: None,
+            proxy_loading: None,
+            amsi_etw_patching: None,
+            injection: None,
+            dotnet_name_pipe: None,
+            binary: None,
+            init_secret: None,
+            init_secrets: Vec::new(),
+            trust_x_forwarded_for: false,
+            trusted_proxy_peers: Vec::new(),
+            heap_enc: true,
+            allow_legacy_ctr: false,
+            job_execution: "threadpool".to_owned(),
+            stomp_dll: Some("WINMM.DLL".to_owned()),
+        },
+    )?;
+    assert_eq!(config.get("JobExecution"), None);
+    assert_eq!(config.get("StompDll"), None);
     Ok(())
 }
 
@@ -1052,6 +1247,8 @@ fn merged_request_config_request_overrides_profile_defaults()
             trusted_proxy_peers: Vec::new(),
             heap_enc: true,
             allow_legacy_ctr: false,
+            job_execution: "thread".to_owned(),
+            stomp_dll: None,
         },
     )?;
     // Request values should override profile defaults.
@@ -1086,6 +1283,8 @@ fn merged_request_config_injection_spawn_overrides_profile()
             trusted_proxy_peers: Vec::new(),
             heap_enc: true,
             allow_legacy_ctr: false,
+            job_execution: "thread".to_owned(),
+            stomp_dll: None,
         },
     )?;
     assert_eq!(config["Injection"]["Spawn64"], Value::String("custom64.exe".to_owned()));
@@ -1115,6 +1314,8 @@ fn merged_request_config_rejects_non_object_input() {
             trusted_proxy_peers: Vec::new(),
             heap_enc: true,
             allow_legacy_ctr: false,
+            job_execution: "thread".to_owned(),
+            stomp_dll: None,
         },
     )
     .expect_err("non-object JSON should be rejected");
@@ -1263,6 +1464,8 @@ fn pack_http_listener_packs_doh_domain_and_provider_cloudflare()
     read_u32(&mut cursor)?; // SysIndirect
     read_u32(&mut cursor)?; // AmsiEtwPatch
     read_u32(&mut cursor)?; // HeapEnc
+    read_u32(&mut cursor)?; // JobExecution
+    read_wstring(&mut cursor)?; // StompDll
     // HTTP-transport fields
     read_u64(&mut cursor)?; // KillDate
     read_u32(&mut cursor)?; // WorkingHours

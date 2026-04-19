@@ -269,6 +269,8 @@ mod tests {
                 trusted_proxy_peers: vec![],
                 heap_enc: true,
                 allow_legacy_ctr: false,
+                job_execution: "thread".to_owned(),
+                stomp_dll: None,
             },
             service: None,
             api: None,

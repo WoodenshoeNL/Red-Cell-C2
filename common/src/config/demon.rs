@@ -167,6 +167,28 @@ pub struct DemonConfig {
     /// HCL profile key: `AllowLegacyCtr` (boolean, default `false`).
     #[serde(rename = "AllowLegacyCtr", default)]
     pub allow_legacy_ctr: bool,
+    /// Job execution mode for post-exploitation commands (ARC-09).
+    ///
+    /// - `"thread"` (default): spawns a new OS thread per job (Demon-compatible).
+    /// - `"threadpool"`: queues each job onto the NT thread pool, suppressing new
+    ///   thread creation to defeat thread-count anomaly detectors.
+    ///
+    /// HCL profile key: `JobExecution` (string, default `"thread"`).
+    #[serde(
+        rename = "JobExecution",
+        default = "crate::config::serde_helpers::default_job_execution"
+    )]
+    pub job_execution: String,
+    /// Optional victim DLL name for module-stomping injection (ARC-05).
+    ///
+    /// When set (e.g. `"WINMM.DLL"`), Archon searches the PEB
+    /// `InLoadOrderModuleList` for this module (case-insensitive) and stomps it
+    /// instead of auto-selecting.  When absent, Archon picks the first suitable
+    /// already-mapped module automatically.
+    ///
+    /// HCL profile key: `StompDll` (string, default: auto-select).
+    #[serde(rename = "StompDll", default)]
+    pub stomp_dll: Option<String>,
 }
 
 impl fmt::Debug for DemonConfig {
@@ -191,6 +213,8 @@ impl fmt::Debug for DemonConfig {
             .field("trusted_proxy_peers", &self.trusted_proxy_peers)
             .field("heap_enc", &self.heap_enc)
             .field("allow_legacy_ctr", &self.allow_legacy_ctr)
+            .field("job_execution", &self.job_execution)
+            .field("stomp_dll", &self.stomp_dll)
             .finish()
     }
 }

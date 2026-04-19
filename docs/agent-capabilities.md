@@ -11,29 +11,43 @@ Status legend: ✅ implemented · 🔨 in progress · ☐ planned · — not app
 
 | Command / Feature          | Demon (C/ASM) | Archon (C/ASM) | Phantom (Rust/Linux) | Specter (Rust/Win) |
 |----------------------------|:-------------:|:--------------:|:--------------------:|:------------------:|
-| **Checkin / beacon**       | ✅            | ☐              | ✅                   | ✅                 |
-| **Shell exec**             | ✅            | ☐              | ✅                   | ✅                 |
-| **File upload**            | ✅            | ☐              | ✅                   | ✅                 |
-| **File download**          | ✅            | ☐              | ✅                   | ✅                 |
-| **Directory listing**      | ✅            | ☐              | ✅                   | ✅                 |
-| **Process list**           | ✅            | ☐              | ✅                   | ✅                 |
-| **Process kill**           | ✅            | ☐              | ✅                   | ✅                 |
-| **Screenshot**             | ✅            | ☐              | ✅                   | ✅                 |
-| **Kerberos (ask TGT)**     | ✅            | ☐              | — ¹                  | ✅                 |
-| **Kerberos (ask ST)**      | ✅            | ☐              | — ¹                  | ✅                 |
+| **Checkin / beacon**       | ✅            | ✅             | ✅                   | ✅                 |
+| **Shell exec**             | ✅            | ✅             | ✅                   | ✅                 |
+| **File upload**            | ✅            | ✅             | ✅                   | ✅                 |
+| **File download**          | ✅            | ✅             | ✅                   | ✅                 |
+| **Directory listing**      | ✅            | ✅             | ✅                   | ✅                 |
+| **Process list**           | ✅            | ✅             | ✅                   | ✅                 |
+| **Process kill**           | ✅            | ✅             | ✅                   | ✅                 |
+| **Screenshot**             | ✅            | ✅             | ✅                   | ✅                 |
+| **Kerberos (ask TGT)**     | ✅            | ✅             | — ¹                  | ✅                 |
+| **Kerberos (ask ST)**      | ✅            | ✅             | — ¹                  | ✅                 |
 | **Kerberos klist**         | —             | —              | ✅                   | —                  |
 | **Kerberos purge**         | —             | —              | ✅                   | —                  |
 | **Kerberos PTT**           | —             | —              | ✅                   | —                  |
-| **Pivot dispatch**         | ✅            | ☐              | ✅                   | ✅                 |
-| **Token impersonation**    | ✅            | ☐              | —                    | ✅                 |
-| **Memory injection**       | ✅            | ☐              | ✅                   | ✅                 |
-| **Sleep / jitter control** | ✅            | ☐              | ✅                   | ✅                 |
-| **Self-destruct / exit**   | ✅            | ☐              | ✅                   | ✅                 |
-| **Net enumeration**        | ✅            | ☐              | ✅                   | ✅                 |
-| **SOCKS / socket relay**   | ✅            | ☐              | ✅                   | ✅                 |
-| **In-memory file staging** | ✅            | ☐              | ✅                   | ✅                 |
+| **Pivot dispatch**         | ✅            | ✅             | ✅                   | ✅                 |
+| **Token impersonation**    | ✅            | ✅             | —                    | ✅                 |
+| **Memory injection**       | ✅            | ✅             | ✅                   | ✅                 |
+| **Sleep / jitter control** | ✅            | ✅             | ✅                   | ✅                 |
+| **Self-destruct / exit**   | ✅            | ✅             | ✅                   | ✅                 |
+| **Net enumeration**        | ✅            | ✅             | ✅                   | ✅                 |
+| **SOCKS / socket relay**   | ✅            | ✅             | ✅                   | ✅                 |
+| **In-memory file staging** | ✅            | ✅             | ✅                   | ✅                 |
 | **Persist** ²              | —             | —              | ✅                   | —                  |
 | **Harvest** ³              | —             | —              | ✅                   | —                  |
+
+### Archon-specific enhancements
+
+| Enhancement                              | Archon | Notes                                          |
+|------------------------------------------|:------:|------------------------------------------------|
+| **ARC-01: Persistent AMSI/ETW bypass**   | ✅     | Patches AMSI/ETW in-process at init and re-applies after each job |
+| **ARC-02: Synthetic call-stack frames**  | ✅     | Spoofs return addresses to look like legitimate call chains |
+| **ARC-03: Cronos timer-callback sleep**  | ✅     | Sleep via NtSetTimer2/timer callbacks instead of NtDelayExecution |
+| **ARC-04: Heap encryption during sleep** | ✅     | Encrypts heap segments while sleeping to foil memory scanners |
+| **ARC-05: Module-stomping loader**       | ✅     | Loads reflective DLL into a legitimate module's memory region |
+| **ARC-06: JA3 fingerprint randomization**| ✅     | Randomizes TLS cipher-suite order per connection |
+| **ARC-07: PE header erasure**            | ✅     | Zeroes DOS/PE headers in-memory after load |
+| **ARC-08: DNS-over-HTTPS fallback**      | ✅     | Falls back to DoH (Cloudflare/Google) when direct DNS is blocked |
+| **ARC-09: Thread-pool post-ex execution**| ✅     | Dispatches post-ex jobs via the system thread pool to avoid suspicious thread creation |
 
 Notes:
 - Phantom **Screenshot** uses best-effort Linux tooling (`import`, `scrot`, `gnome-screenshot`).
@@ -54,12 +68,12 @@ teamserver:
 
 | Protocol requirement              | Demon | Archon | Phantom | Specter |
 |-----------------------------------|:-----:|:------:|:-------:|:-------:|
-| Magic bytes (`0xDEADBEEF`)        | ✅    | ☐      | ✅      | ✅      |
-| AES-256-CTR encryption            | ✅    | ☐      | ✅      | ✅      |
-| Per-agent key derivation          | ✅    | ☐      | ✅      | ✅      |
-| DEMON_INIT (cmd 99) handshake     | ✅    | ☐      | ✅      | ✅      |
-| CHECKIN (cmd 100) registration    | ✅    | ☐      | ✅      | ✅      |
-| GET_JOB (cmd 1) poll loop         | ✅    | ☐      | ✅      | ✅      |
+| Magic bytes (`0xDEADBEEF`)        | ✅    | ✅     | ✅      | ✅      |
+| AES-256-CTR encryption            | ✅    | ✅     | ✅      | ✅      |
+| Per-agent key derivation          | ✅    | ✅     | ✅      | ✅      |
+| DEMON_INIT (cmd 99) handshake     | ✅    | ✅     | ✅      | ✅      |
+| CHECKIN (cmd 100) registration    | ✅    | ✅     | ✅      | ✅      |
+| GET_JOB (cmd 1) poll loop         | ✅    | ✅     | ✅      | ✅      |
 
 See `teamserver/src/protocol/` for the full specification and
 `teamserver/tests/` for integration tests that agents must pass.
@@ -71,7 +85,7 @@ See `teamserver/src/protocol/` for the full specification and
 | Agent   | Windows x64 | Windows x86 | Linux x64 | Linux aarch64 |
 |---------|:-----------:|:-----------:|:---------:|:-------------:|
 | Demon   | ✅          | ✅          | —         | —             |
-| Archon  | ☐           | ☐           | —         | —             |
+| Archon  | ✅          | ✅          | —         | —             |
 | Phantom | —           | —           | ✅        | ☐             |
 | Specter | ✅          | ☐           | —         | —             |
 

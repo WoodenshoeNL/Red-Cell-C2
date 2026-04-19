@@ -1,0 +1,637 @@
+//! String formatting, byte-count display, timestamp, and data-filter helpers.
+//!
+//! Pure functions — no egui, no file I/O.
+
+use std::path::Path;
+
+use crate::python::{ScriptLoadStatus, ScriptOutputStream};
+use crate::transport::{
+    AgentFileBrowserState, AgentSummary, FileBrowserEntry, LootItem, LootKind, ProcessEntry,
+};
+use crate::{CredentialSubFilter, FileSubFilter, LootTypeFilter};
+
+// ── Script helpers ───────────────────────────────────────────────────────────
+
+pub(crate) fn script_status_label(status: ScriptLoadStatus) -> &'static str {
+    match status {
+        ScriptLoadStatus::Loaded => "loaded",
+        ScriptLoadStatus::Error => "error",
+        ScriptLoadStatus::Unloaded => "unloaded",
+    }
+}
+
+pub(crate) fn script_output_label(stream: ScriptOutputStream) -> &'static str {
+    match stream {
+        ScriptOutputStream::Stdout => "stdout",
+        ScriptOutputStream::Stderr => "stderr",
+    }
+}
+
+pub(crate) fn script_name_for_display(path: &Path) -> Option<String> {
+    path.file_stem().and_then(|stem| stem.to_str()).map(str::to_owned)
+}
+
+// ── Agent helpers ─────────────────────────────────────────────────────────────
+
+pub(crate) fn agent_arch(agent: &AgentSummary) -> String {
+    if agent.process_arch.trim().is_empty() {
+        agent.os_arch.clone()
+    } else {
+        agent.process_arch.clone()
+    }
+}
+
+pub(crate) fn agent_os(agent: &AgentSummary) -> String {
+    if agent.os_build.trim().is_empty() {
+        agent.os_version.clone()
+    } else {
+        format!("{} ({})", agent.os_version, agent.os_build)
+    }
+}
+
+pub(crate) fn ellipsize(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_owned();
+    }
+
+    let mut output = String::new();
+    for (index, ch) in value.chars().enumerate() {
+        if index + 1 >= max_chars {
+            break;
+        }
+        output.push(ch);
+    }
+    output.push_str("...");
+    output
+}
+
+// ── Process helpers ───────────────────────────────────────────────────────────
+
+pub(crate) fn filtered_process_rows<'a>(
+    rows: &'a [ProcessEntry],
+    filter: &str,
+) -> Vec<&'a ProcessEntry> {
+    let trimmed = filter.trim();
+    if trimmed.is_empty() {
+        return rows.iter().collect();
+    }
+
+    let needle = trimmed.to_ascii_lowercase();
+    rows.iter()
+        .filter(|row| {
+            row.name.to_ascii_lowercase().contains(&needle) || row.pid.to_string().contains(&needle)
+        })
+        .collect()
+}
+
+pub(crate) fn normalized_process_arch(arch: &str) -> String {
+    match arch.trim().to_ascii_lowercase().as_str() {
+        "x86" | "386" | "i386" => "x86".to_owned(),
+        _ => "x64".to_owned(),
+    }
+}
+
+// ── Loot filter helpers ───────────────────────────────────────────────────────
+
+pub(crate) fn build_filtered_loot_indices(
+    loot: &[LootItem],
+    type_filter: LootTypeFilter,
+    cred_filter: CredentialSubFilter,
+    file_filter: FileSubFilter,
+    agent_filter: &str,
+    since_filter: &str,
+    until_filter: &str,
+    text_filter: &str,
+) -> Vec<usize> {
+    loot.iter()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            loot_matches_filters(
+                item,
+                type_filter,
+                cred_filter,
+                file_filter,
+                agent_filter,
+                since_filter,
+                until_filter,
+                text_filter,
+            )
+            .then_some(index)
+        })
+        .collect()
+}
+
+pub(crate) fn loot_matches_filters(
+    item: &LootItem,
+    type_filter: LootTypeFilter,
+    cred_filter: CredentialSubFilter,
+    file_filter: FileSubFilter,
+    agent_filter: &str,
+    since_filter: &str,
+    until_filter: &str,
+    text_filter: &str,
+) -> bool {
+    if !matches_loot_type_filter(item, type_filter, cred_filter, file_filter) {
+        return false;
+    }
+
+    if !contains_ascii_case_insensitive(&item.agent_id, agent_filter) {
+        return false;
+    }
+
+    // Time range filtering: `since_filter` is an inclusive lower bound, `until_filter` is an
+    // inclusive upper bound.  Both are matched as string prefixes against `collected_at` so that
+    // partial date strings like "2026-03" work as expected.
+    let since = since_filter.trim();
+    if !since.is_empty() && item.collected_at.as_str() < since {
+        return false;
+    }
+    let until = until_filter.trim();
+    if !until.is_empty() && item.collected_at.as_str() > until {
+        return false;
+    }
+
+    [
+        item.name.as_str(),
+        item.source.as_str(),
+        item.agent_id.as_str(),
+        item.file_path.as_deref().unwrap_or_default(),
+        item.preview.as_deref().unwrap_or_default(),
+    ]
+    .into_iter()
+    .any(|field| contains_ascii_case_insensitive(field, text_filter))
+}
+
+pub(crate) fn matches_loot_type_filter(
+    item: &LootItem,
+    type_filter: LootTypeFilter,
+    cred_filter: CredentialSubFilter,
+    file_filter: FileSubFilter,
+) -> bool {
+    match type_filter {
+        LootTypeFilter::All => true,
+        LootTypeFilter::Credentials => {
+            if !matches!(item.kind, LootKind::Credential) {
+                return false;
+            }
+            matches_credential_sub_filter(item, cred_filter)
+        }
+        LootTypeFilter::Files => {
+            if !matches!(item.kind, LootKind::File) {
+                return false;
+            }
+            matches_file_sub_filter(item, file_filter)
+        }
+        LootTypeFilter::Screenshots => matches!(item.kind, LootKind::Screenshot),
+    }
+}
+
+/// Detect a credential sub-category from name/preview/source heuristics.
+pub(crate) fn detect_credential_category(item: &LootItem) -> CredentialSubFilter {
+    let haystack =
+        [item.name.as_str(), item.source.as_str(), item.preview.as_deref().unwrap_or_default()]
+            .join(" ")
+            .to_ascii_lowercase();
+
+    if haystack.contains("ntlm") || haystack.contains("lm hash") || haystack.contains("nthash") {
+        CredentialSubFilter::NtlmHash
+    } else if haystack.contains("kerberos")
+        || haystack.contains("kirbi")
+        || haystack.contains(".ccache")
+        || haystack.contains("tgt")
+        || haystack.contains("tgs")
+    {
+        CredentialSubFilter::KerberosTicket
+    } else if haystack.contains("certificate")
+        || haystack.contains(".pfx")
+        || haystack.contains(".pem")
+        || haystack.contains(".crt")
+        || haystack.contains(".cer")
+    {
+        CredentialSubFilter::Certificate
+    } else if haystack.contains("plaintext")
+        || haystack.contains("password")
+        || haystack.contains("passwd")
+        || haystack.contains("cleartext")
+    {
+        CredentialSubFilter::Plaintext
+    } else {
+        CredentialSubFilter::All
+    }
+}
+
+/// Detect a file sub-category from the file extension or name.
+pub(crate) fn detect_file_category(item: &LootItem) -> FileSubFilter {
+    let path_str = item.file_path.as_deref().unwrap_or(item.name.as_str()).to_ascii_lowercase();
+    let ext =
+        std::path::Path::new(&path_str).extension().and_then(|e| e.to_str()).unwrap_or_default();
+
+    const DOCUMENT_EXTS: &[&str] = &[
+        "doc", "docx", "xls", "xlsx", "ppt", "pptx", "pdf", "txt", "rtf", "odt", "ods", "csv",
+        "md", "html", "htm", "xml", "json", "yaml", "yml",
+    ];
+    const ARCHIVE_EXTS: &[&str] =
+        &["zip", "rar", "7z", "tar", "gz", "bz2", "xz", "cab", "iso", "tgz"];
+
+    if DOCUMENT_EXTS.contains(&ext) {
+        FileSubFilter::Document
+    } else if ARCHIVE_EXTS.contains(&ext) {
+        FileSubFilter::Archive
+    } else if !ext.is_empty() {
+        // Anything with an extension that is not a known document/archive is treated as binary.
+        FileSubFilter::Binary
+    } else {
+        // No extension — heuristic: if the name contains "bin" or the path is a known binary
+        // location, call it binary; otherwise treat as unknown (pass through).
+        if path_str.contains("/bin/")
+            || path_str.contains("\\bin\\")
+            || ext == "exe"
+            || ext == "dll"
+        {
+            FileSubFilter::Binary
+        } else {
+            FileSubFilter::All
+        }
+    }
+}
+
+pub(crate) fn matches_credential_sub_filter(item: &LootItem, filter: CredentialSubFilter) -> bool {
+    if filter == CredentialSubFilter::All {
+        return true;
+    }
+    detect_credential_category(item) == filter
+}
+
+pub(crate) fn matches_file_sub_filter(item: &LootItem, filter: FileSubFilter) -> bool {
+    if filter == FileSubFilter::All {
+        return true;
+    }
+    detect_file_category(item) == filter
+}
+
+/// Returns a short human-readable sub-category label for display in the loot list.
+pub(crate) fn loot_sub_category_label(item: &LootItem) -> &'static str {
+    match item.kind {
+        LootKind::Credential => match detect_credential_category(item) {
+            CredentialSubFilter::NtlmHash => "NTLM Hash",
+            CredentialSubFilter::Plaintext => "Plaintext",
+            CredentialSubFilter::KerberosTicket => "Kerberos",
+            CredentialSubFilter::Certificate => "Certificate",
+            CredentialSubFilter::All => "",
+        },
+        LootKind::File => match detect_file_category(item) {
+            FileSubFilter::Document => "Document",
+            FileSubFilter::Archive => "Archive",
+            FileSubFilter::Binary => "Binary",
+            FileSubFilter::All => "",
+        },
+        _ => "",
+    }
+}
+
+pub(crate) fn loot_is_downloadable(item: &LootItem) -> bool {
+    matches!(item.kind, LootKind::File | LootKind::Screenshot) && item.content_base64.is_some()
+}
+
+pub(crate) fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
+    let trimmed = needle.trim();
+    trimmed.is_empty() || haystack.to_ascii_lowercase().contains(&trimmed.to_ascii_lowercase())
+}
+
+pub(crate) fn csv_field(value: &str) -> String {
+    // Neutralize spreadsheet formula injection: prepend a single-quote to any value whose
+    // first non-whitespace character is a formula trigger (`=`, `+`, `-`, `@`).  Loot data
+    // is adversary-controlled, so an attacker on the target host could craft a credential
+    // name or file path like `=EXEC("malware.exe")` that executes when an operator opens the
+    // exported CSV in Excel or LibreOffice Calc.
+    let effective: String = if value.trim_start().starts_with(['=', '+', '-', '@']) {
+        format!("'{value}")
+    } else {
+        value.to_owned()
+    };
+    if effective.contains(',')
+        || effective.contains('"')
+        || effective.contains('\n')
+        || effective.contains('\r')
+    {
+        format!("\"{}\"", effective.replace('"', "\"\""))
+    } else {
+        effective
+    }
+}
+
+pub(crate) fn json_str(value: &str) -> String {
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t");
+    format!("\"{escaped}\"")
+}
+
+// ── File-browser helpers ──────────────────────────────────────────────────────
+
+pub(crate) fn blank_if_empty<'a>(value: &'a str, fallback: &'a str) -> &'a str {
+    if value.trim().is_empty() { fallback } else { value }
+}
+
+pub(crate) fn upload_destination(
+    browser: Option<&AgentFileBrowserState>,
+    selected_path: Option<&str>,
+) -> Option<String> {
+    selected_remote_directory(browser, selected_path)
+        .or_else(|| browser.and_then(|state| state.current_dir.clone()))
+}
+
+pub(crate) fn selected_remote_directory(
+    browser: Option<&AgentFileBrowserState>,
+    selected_path: Option<&str>,
+) -> Option<String> {
+    selected_path.and_then(|path| {
+        browser.and_then(|state| {
+            find_file_entry(state, path).map(|entry| {
+                if entry.is_dir {
+                    entry.path.clone()
+                } else {
+                    parent_remote_path(&entry.path).unwrap_or_else(|| entry.path.clone())
+                }
+            })
+        })
+    })
+}
+
+pub(crate) fn find_file_entry<'a>(
+    browser: &'a AgentFileBrowserState,
+    path: &str,
+) -> Option<&'a FileBrowserEntry> {
+    browser.directories.values().flat_map(|entries| entries.iter()).find(|entry| entry.path == path)
+}
+
+pub(crate) fn parent_remote_path(path: &str) -> Option<String> {
+    let trimmed = path.trim_end_matches(['\\', '/']);
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some(index) = trimmed.rfind(['\\', '/']) {
+        let parent = &trimmed[..=index];
+        if parent.is_empty() { None } else { Some(parent.to_owned()) }
+    } else {
+        None
+    }
+}
+
+pub(crate) fn join_remote_path(base: &str, name: &str) -> String {
+    if base.is_empty() {
+        return name.to_owned();
+    }
+
+    let separator = if base.contains('\\') { '\\' } else { '/' };
+    if base.ends_with('\\') || base.ends_with('/') {
+        format!("{base}{name}")
+    } else {
+        format!("{base}{separator}{name}")
+    }
+}
+
+/// Split a remote path into `(label, cumulative_path)` pairs for breadcrumb rendering.
+pub(crate) fn breadcrumb_segments(path: &str) -> Vec<(String, String)> {
+    let sep = if path.contains('\\') { '\\' } else { '/' };
+    let mut segments = Vec::new();
+
+    // Handle Windows drive root: "C:\\" → segment ("C:\\", "C:\\")
+    let trimmed_for_check = path.trim_end_matches(sep);
+    if trimmed_for_check.len() >= 2 && trimmed_for_check.as_bytes()[1] == b':' {
+        let drive_root = format!("{}:{sep}", &trimmed_for_check[..1]);
+        segments.push((drive_root.clone(), drive_root.clone()));
+
+        let rest_start = drive_root.len().min(path.len());
+        let rest = path[rest_start..].trim_matches(sep);
+        if !rest.is_empty() {
+            let mut cumulative = drive_root;
+            for part in rest.split(sep) {
+                if part.is_empty() {
+                    continue;
+                }
+                cumulative = format!("{cumulative}{part}{sep}");
+                segments.push((part.to_owned(), cumulative.clone()));
+            }
+        }
+        return segments;
+    }
+
+    // Unix-style: starts with "/"
+    if path.starts_with(sep) {
+        let root = sep.to_string();
+        segments.push((root.clone(), root.clone()));
+
+        let rest = path[1..].trim_end_matches(sep);
+        if !rest.is_empty() {
+            let mut cumulative = String::from(sep);
+            for part in rest.split(sep) {
+                if part.is_empty() {
+                    continue;
+                }
+                cumulative = format!("{cumulative}{part}{sep}");
+                segments.push((part.to_owned(), cumulative.clone()));
+            }
+        }
+        return segments;
+    }
+
+    // Relative path — just split on separator
+    let mut cumulative = String::new();
+    for part in path.trim_end_matches(sep).split(sep) {
+        if part.is_empty() {
+            continue;
+        }
+        if cumulative.is_empty() {
+            cumulative = format!("{part}{sep}");
+        } else {
+            cumulative = format!("{cumulative}{part}{sep}");
+        }
+        segments.push((part.to_owned(), cumulative.clone()));
+    }
+    segments
+}
+
+pub(crate) fn directory_label(path: &str) -> String {
+    if path.ends_with(':') || path.ends_with(":\\") || path.ends_with(":/") {
+        return path.to_owned();
+    }
+
+    let trimmed = path.trim_end_matches(['\\', '/']);
+    Path::new(trimmed)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(trimmed)
+        .to_owned()
+}
+
+pub(crate) fn file_entry_label(entry: &FileBrowserEntry) -> String {
+    let size = if entry.size_label.trim().is_empty() { "-" } else { entry.size_label.as_str() };
+    let modified = blank_if_empty(&entry.modified_at, "-");
+    let permissions = blank_if_empty(&entry.permissions, "-");
+    format!("{}  [{size} | {modified} | {permissions}]", entry.name)
+}
+
+pub(crate) fn human_size(size_bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+
+    let mut size = size_bytes as f64;
+    let mut unit = 0_usize;
+    while size >= 1024.0 && unit + 1 < UNITS.len() {
+        size /= 1024.0;
+        unit += 1;
+    }
+
+    if unit == 0 {
+        format!("{size_bytes} {}", UNITS[unit])
+    } else {
+        format!("{size:.1} {}", UNITS[unit])
+    }
+}
+
+#[cfg(test)]
+mod loot_filter_tests {
+    use super::*;
+    use crate::transport::{LootItem, LootKind};
+
+    fn credential_named(name: &str, preview: &str) -> LootItem {
+        LootItem {
+            id: Some(1),
+            kind: LootKind::Credential,
+            name: name.to_owned(),
+            agent_id: "agent-1".to_owned(),
+            source: "proc".to_owned(),
+            collected_at: "2026-04-05T10:00:00Z".to_owned(),
+            file_path: None,
+            size_bytes: None,
+            content_base64: None,
+            preview: Some(preview.to_owned()),
+        }
+    }
+
+    fn file_named(name: &str, path: &str) -> LootItem {
+        LootItem {
+            id: Some(2),
+            kind: LootKind::File,
+            name: name.to_owned(),
+            agent_id: "agent-2".to_owned(),
+            source: "fb".to_owned(),
+            collected_at: "2026-04-06T12:00:00Z".to_owned(),
+            file_path: Some(path.to_owned()),
+            size_bytes: Some(100),
+            content_base64: None,
+            preview: None,
+        }
+    }
+
+    #[test]
+    fn loot_matches_filters_respects_type_agent_date_and_text_together() {
+        let item = credential_named("secret.txt", "NTLM hash abc");
+        assert!(loot_matches_filters(
+            &item,
+            LootTypeFilter::Credentials,
+            CredentialSubFilter::NtlmHash,
+            FileSubFilter::All,
+            "agent-1",
+            "2026-04-01",
+            "2026-04-10",
+            "ntlm",
+        ));
+        assert!(!loot_matches_filters(
+            &item,
+            LootTypeFilter::Credentials,
+            CredentialSubFilter::Plaintext,
+            FileSubFilter::All,
+            "agent-1",
+            "",
+            "",
+            "",
+        ));
+        assert!(!loot_matches_filters(
+            &item,
+            LootTypeFilter::Credentials,
+            CredentialSubFilter::NtlmHash,
+            FileSubFilter::All,
+            "other-agent",
+            "",
+            "",
+            "",
+        ));
+        assert!(!loot_matches_filters(
+            &item,
+            LootTypeFilter::Credentials,
+            CredentialSubFilter::NtlmHash,
+            FileSubFilter::All,
+            "agent-1",
+            "2026-04-06",
+            "",
+            "",
+        ));
+    }
+
+    #[test]
+    fn loot_matches_filters_screenshots_only_kind() {
+        let shot = LootItem {
+            id: Some(3),
+            kind: LootKind::Screenshot,
+            name: "cap.png".to_owned(),
+            agent_id: "a".to_owned(),
+            source: "s".to_owned(),
+            collected_at: "2026-01-01".to_owned(),
+            file_path: None,
+            size_bytes: None,
+            content_base64: Some("AA==".to_owned()),
+            preview: None,
+        };
+        assert!(loot_matches_filters(
+            &shot,
+            LootTypeFilter::Screenshots,
+            CredentialSubFilter::All,
+            FileSubFilter::All,
+            "",
+            "",
+            "",
+            "cap",
+        ));
+        assert!(!loot_matches_filters(
+            &shot,
+            LootTypeFilter::Files,
+            CredentialSubFilter::All,
+            FileSubFilter::Document,
+            "",
+            "",
+            "",
+            "",
+        ));
+    }
+
+    #[test]
+    fn loot_matches_filters_file_subcategory_with_type_files() {
+        let doc = file_named("readme.txt", "/tmp/readme.txt");
+        assert!(loot_matches_filters(
+            &doc,
+            LootTypeFilter::Files,
+            CredentialSubFilter::All,
+            FileSubFilter::Document,
+            "agent-2",
+            "",
+            "",
+            "",
+        ));
+        assert!(!loot_matches_filters(
+            &doc,
+            LootTypeFilter::Files,
+            CredentialSubFilter::All,
+            FileSubFilter::Archive,
+            "",
+            "",
+            "",
+            "",
+        ));
+    }
+}

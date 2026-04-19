@@ -137,6 +137,30 @@ impl ApiClient {
         }
     }
 
+    /// Issue an authenticated `POST` request to `path` under `/api/v1` with
+    /// no body and deserialise the response body as `T`.
+    ///
+    /// Used for action endpoints that carry no request payload (e.g.
+    /// `POST /payload-cache` to flush cached build artifacts).
+    ///
+    /// # Errors
+    ///
+    /// Same mapping as [`ApiClient::get`].
+    #[instrument(skip(self), fields(path = %path))]
+    pub async fn post_empty<T: DeserializeOwned>(&self, path: &str) -> Result<T, CliError> {
+        let url = format!("{}/api/v1{path}", self.base_url);
+
+        let response = self
+            .inner
+            .post(&url)
+            .header(API_KEY_HEADER, &self.token)
+            .send()
+            .await
+            .map_err(|e| map_reqwest_error(e, &url))?;
+
+        map_response(response, path).await
+    }
+
     /// Issue an authenticated `PUT` request to `path` under `/api/v1` with a
     /// JSON body and deserialise the response body as `T`.
     ///

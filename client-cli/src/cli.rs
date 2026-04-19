@@ -548,6 +548,13 @@ pub enum PayloadCommands {
         #[arg(long)]
         dst: String,
     },
+
+    /// Flush all cached payload build artifacts (admin only).
+    ///
+    /// Examples:
+    ///   red-cell-cli payload cache-flush
+    #[command(verbatim_doc_comment)]
+    CacheFlush,
 }
 
 // ── operator subcommands ──────────────────────────────────────────────────────

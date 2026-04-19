@@ -7,6 +7,7 @@
 //! | `payload list` | `GET /payloads` | table of all built payloads |
 //! | `payload build` | `POST /payloads/build` | submit build job; `--wait` polls until done |
 //! | `payload download <id>` | `GET /payloads/{id}/download` | saves raw bytes to disk |
+//! | `payload cache-flush` | `POST /payload-cache` | flush all cached build artifacts (admin) |
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -130,6 +131,19 @@ impl TextRender for DownloadResult {
     }
 }
 
+/// Result returned by `payload cache-flush`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheFlushResult {
+    /// Number of cached payload entries that were removed.
+    pub flushed: u64,
+}
+
+impl TextRender for CacheFlushResult {
+    fn render_text(&self) -> String {
+        format!("Flushed {} cached payload(s).", self.flushed)
+    }
+}
+
 // ── top-level dispatcher ──────────────────────────────────────────────────────
 
 /// Dispatch a [`PayloadCommands`] variant and return a process exit code.
@@ -195,6 +209,20 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: PayloadCommands
         }
 
         PayloadCommands::Download { id, dst } => match download(client, &id, &dst).await {
+            Ok(result) => match print_success(fmt, &result) {
+                Ok(()) => EXIT_SUCCESS,
+                Err(e) => {
+                    print_error(&e).ok();
+                    e.exit_code()
+                }
+            },
+            Err(e) => {
+                print_error(&e).ok();
+                e.exit_code()
+            }
+        },
+
+        PayloadCommands::CacheFlush => match cache_flush(client).await {
             Ok(result) => match print_success(fmt, &result) {
                 Ok(()) => EXIT_SUCCESS,
                 Err(e) => {
@@ -364,6 +392,17 @@ async fn download(client: &ApiClient, id: &str, dst: &str) -> Result<DownloadRes
         .map_err(|e| CliError::General(format!("failed to write payload to {dst}: {e}")))?;
 
     Ok(DownloadResult { id: id.to_owned(), dst: dst.to_owned(), size_bytes })
+}
+
+/// `payload cache-flush` — flush all cached build artifacts (admin only).
+///
+/// # Examples
+/// ```text
+/// red-cell-cli payload cache-flush
+/// ```
+#[instrument(skip(client))]
+async fn cache_flush(client: &ApiClient) -> Result<CacheFlushResult, CliError> {
+    client.post_empty("/payload-cache").await
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -674,5 +713,87 @@ mod tests {
 
         assert!(nested.exists(), "download must create parent directories");
         assert_eq!(result.size_bytes, 4);
+    }
+
+    // ── CacheFlushResult ──────────────────────────────────────────────────────
+
+    #[test]
+    fn cache_flush_result_render_contains_count() {
+        let r = CacheFlushResult { flushed: 7 };
+        let text = r.render_text();
+        assert!(text.contains("7"), "render must include flushed count");
+        assert!(text.to_lowercase().contains("flush"), "render must mention flush");
+    }
+
+    #[test]
+    fn cache_flush_result_render_zero() {
+        let r = CacheFlushResult { flushed: 0 };
+        let text = r.render_text();
+        assert!(text.contains("0"));
+    }
+
+    #[test]
+    fn cache_flush_result_serialises_flushed_field() {
+        let r = CacheFlushResult { flushed: 42 };
+        let v = serde_json::to_value(&r).expect("serialise");
+        assert_eq!(v["flushed"], 42);
+    }
+
+    // ── cache_flush HTTP call ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn cache_flush_calls_post_payload_cache_and_returns_count() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/payload-cache"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "flushed": 3 })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let cfg = crate::config::ResolvedConfig {
+            server: server.uri(),
+            token: "tok".to_owned(),
+            timeout: 5,
+            tls_mode: crate::config::TlsMode::SystemRoots,
+        };
+        let client = crate::client::ApiClient::new(&cfg).expect("client");
+
+        let result = cache_flush(&client).await.expect("cache_flush must succeed");
+        assert_eq!(result.flushed, 3);
+    }
+
+    #[tokio::test]
+    async fn cache_flush_returns_auth_failure_on_403() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/payload-cache"))
+            .respond_with(ResponseTemplate::new(403))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let cfg = crate::config::ResolvedConfig {
+            server: server.uri(),
+            token: "non-admin-token".to_owned(),
+            timeout: 5,
+            tls_mode: crate::config::TlsMode::SystemRoots,
+        };
+        let client = crate::client::ApiClient::new(&cfg).expect("client");
+
+        let err = cache_flush(&client).await.expect_err("must fail with 403");
+        assert!(
+            matches!(err, CliError::AuthFailure(_)),
+            "expected AuthFailure, got {err:?}"
+        );
     }
 }

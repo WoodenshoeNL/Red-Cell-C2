@@ -156,6 +156,32 @@ impl EcdhRepository {
         Ok(Some((agent_id, session_key)))
     }
 
+    /// Validate and advance the sequence number for a session.
+    ///
+    /// Returns `Ok(true)` if `candidate_seq` > `last_seq_num` and the DB was
+    /// updated atomically.  Returns `Ok(false)` if the packet is a replay
+    /// (candidate_seq ≤ last_seq_num).  Returns `Err` on DB failure.
+    pub async fn advance_seq_num(
+        &self,
+        connection_id_bytes: &[u8; CONNECTION_ID_LEN],
+        candidate_seq: u64,
+    ) -> Result<bool, TeamserverError> {
+        let rows_affected = sqlx::query(
+            "UPDATE ts_ecdh_sessions \
+             SET last_seq_num = ? \
+             WHERE connection_id = ? AND last_seq_num < ?",
+        )
+        .bind(i64::try_from(candidate_seq).unwrap_or(i64::MAX))
+        .bind(connection_id_bytes.as_slice())
+        .bind(i64::try_from(candidate_seq).unwrap_or(i64::MAX))
+        .execute(&self.pool)
+        .await
+        .map_err(TeamserverError::Sqlx)?
+        .rows_affected();
+
+        Ok(rows_affected > 0)
+    }
+
     /// Update the `last_seen` timestamp for a session.
     pub async fn touch_session(
         &self,
@@ -268,5 +294,82 @@ mod tests {
         repo.delete_sessions_for_agent(42).await.expect("delete");
 
         assert!(repo.lookup_session(&conn_id.0).await.expect("lookup").is_none());
+    }
+
+    #[tokio::test]
+    async fn advance_seq_num_accepts_first_packet() {
+        let (db, master_key) = test_db().await;
+        let repo = EcdhRepository::new(db.pool().clone(), master_key);
+
+        let conn_id = ConnectionId::generate().expect("conn_id");
+        repo.store_session(&conn_id, 1, &[0u8; 32]).await.expect("store");
+
+        // First packet with seq_num = 1 must be accepted (last_seq_num starts at 0).
+        assert!(repo.advance_seq_num(&conn_id.0, 1).await.expect("advance"), "seq 1 accepted");
+    }
+
+    #[tokio::test]
+    async fn advance_seq_num_accepts_monotone_sequence() {
+        let (db, master_key) = test_db().await;
+        let repo = EcdhRepository::new(db.pool().clone(), master_key);
+
+        let conn_id = ConnectionId::generate().expect("conn_id");
+        repo.store_session(&conn_id, 2, &[0u8; 32]).await.expect("store");
+
+        for seq in [1u64, 2, 5, 100] {
+            assert!(
+                repo.advance_seq_num(&conn_id.0, seq).await.expect("advance"),
+                "seq {seq} must be accepted"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn advance_seq_num_rejects_replay() {
+        let (db, master_key) = test_db().await;
+        let repo = EcdhRepository::new(db.pool().clone(), master_key);
+
+        let conn_id = ConnectionId::generate().expect("conn_id");
+        repo.store_session(&conn_id, 3, &[0u8; 32]).await.expect("store");
+
+        assert!(repo.advance_seq_num(&conn_id.0, 10).await.expect("advance"), "seq 10 accepted");
+
+        // Replaying the same packet must be rejected.
+        assert!(
+            !repo.advance_seq_num(&conn_id.0, 10).await.expect("advance"),
+            "seq 10 replay rejected"
+        );
+
+        // Older packet must be rejected.
+        assert!(
+            !repo.advance_seq_num(&conn_id.0, 5).await.expect("advance"),
+            "seq 5 (old) rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn advance_seq_num_independent_per_connection() {
+        let (db, master_key) = test_db().await;
+        let repo = EcdhRepository::new(db.pool().clone(), master_key);
+
+        let conn_a = ConnectionId::generate().expect("conn_a");
+        let conn_b = ConnectionId::generate().expect("conn_b");
+        repo.store_session(&conn_a, 4, &[0u8; 32]).await.expect("store a");
+        repo.store_session(&conn_b, 5, &[0u8; 32]).await.expect("store b");
+
+        // Advance A to seq 50.
+        assert!(repo.advance_seq_num(&conn_a.0, 50).await.expect("advance a"));
+
+        // B starts at 0; seq 1 must still be accepted independently.
+        assert!(repo.advance_seq_num(&conn_b.0, 1).await.expect("advance b"));
+    }
+
+    #[tokio::test]
+    async fn advance_seq_num_missing_session_returns_false() {
+        let (db, master_key) = test_db().await;
+        let repo = EcdhRepository::new(db.pool().clone(), master_key);
+
+        // No session stored — advance_seq_num must return false (not an error).
+        assert!(!repo.advance_seq_num(&[0u8; 16], 1).await.expect("advance"), "no session → false");
     }
 }

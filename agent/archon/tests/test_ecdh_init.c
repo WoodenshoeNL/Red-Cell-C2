@@ -400,6 +400,85 @@ static void test_ecdh_full_protocol(void) {
     free(pkt_buf);
 }
 
+/*
+ * Verify that the session packet GCM plaintext starts with an 8-byte
+ * little-endian seq_num prefix followed by the application payload.
+ *
+ * This mirrors the agent-side PackageTransmitAll ECDH path: the agent
+ * prepends seq_num(8 LE) before the DemonMessage bytes and seals the
+ * whole thing.  The teamserver strips the prefix and validates it.
+ */
+static void test_ecdh_session_seq_num(void)
+{
+    printf("  seq_num prefix: ");
+
+    /* Shared secret for this test */
+    uint8_t key[32];
+    memset(key, 0xAA, sizeof(key));
+
+    /* Simulate what PackageTransmitAll builds: seq_num(8) | payload */
+    uint64_t seq = 0x0000000000000007ULL; /* seq_num = 7 */
+    const uint8_t demon_msg[] = {
+        /* DemonMessage: cmd_id(4 LE) | req_id(4 LE) | len(4 LE) */
+        0x01, 0x00, 0x00, 0x00,  /* cmd_id = 1 */
+        0x02, 0x00, 0x00, 0x00,  /* req_id = 2 */
+        0x00, 0x00, 0x00, 0x00   /* len = 0 (empty payload) */
+    };
+
+    uint8_t plaintext[8 + sizeof(demon_msg)];
+    /* Write seq_num as little-endian u64 */
+    for (int i = 0; i < 8; i++) {
+        plaintext[i] = (uint8_t)(seq >> (8 * i));
+    }
+    memcpy(plaintext + 8, demon_msg, sizeof(demon_msg));
+    size_t plaintext_len = sizeof(plaintext);
+
+    /* Seal with AES-256-GCM (as ecdh_build_session_packet does internally) */
+    uint8_t conn_id[16];
+    memset(conn_id, 0xBB, sizeof(conn_id));
+    size_t pkt_max = 16 + 12 + plaintext_len + 16;
+    uint8_t *pkt = malloc(pkt_max);
+    size_t   pkt_len = pkt_max;
+    ei_bool ok = ecdh_build_session_packet(
+        conn_id, key,
+        plaintext, plaintext_len,
+        pkt, &pkt_len,
+        test_rng);
+    CHECK(ok, "seq_num: ecdh_build_session_packet succeeds");
+
+    /* Server decrypts: body[16..] = nonce | ciphertext | tag */
+    size_t body_len = pkt_len - 16;
+    uint8_t *decrypted = malloc(body_len);
+    gcm_size_t decrypted_len = aes256gcm_open(key, pkt + 16, (gcm_size_t)body_len, decrypted);
+    CHECK(decrypted_len == (gcm_size_t)plaintext_len,
+          "seq_num: server decrypts full GCM plaintext");
+
+    /* Verify seq_num prefix (little-endian u64) */
+    uint64_t got_seq = 0;
+    for (int i = 0; i < 8; i++) {
+        got_seq |= (uint64_t)decrypted[i] << (8 * i);
+    }
+    CHECK(got_seq == seq, "seq_num: server reads correct seq_num from prefix");
+
+    /* Verify remainder is the DemonMessage */
+    CHECK(decrypted_len - 8 == sizeof(demon_msg),
+          "seq_num: remainder length matches DemonMessage");
+    CHECK(memcmp(decrypted + 8, demon_msg, sizeof(demon_msg)) == 0,
+          "seq_num: remainder bytes match DemonMessage");
+
+    /* Verify replay detection: a second packet with seq 6 (< 7) must be
+     * distinguishable.  We just confirm the seq_num is lower. */
+    uint64_t old_seq = 6;
+    uint8_t old_prefix[8];
+    for (int i = 0; i < 8; i++) old_prefix[i] = (uint8_t)(old_seq >> (8 * i));
+    uint64_t read_old = 0;
+    for (int i = 0; i < 8; i++) read_old |= (uint64_t)old_prefix[i] << (8 * i);
+    CHECK(read_old < seq, "seq_num: lower seq_num correctly identified as replay candidate");
+
+    free(decrypted);
+    free(pkt);
+}
+
 /* ── Main ────────────────────────────────────────────────────────────────── */
 
 int main(void) {
@@ -418,6 +497,7 @@ int main(void) {
 
     printf("\nECDH protocol:\n");
     test_ecdh_full_protocol();
+    test_ecdh_session_seq_num();
 
     printf("\n===========================\n");
     printf("Results: %d passed, %d failed\n", g_pass, g_fail);

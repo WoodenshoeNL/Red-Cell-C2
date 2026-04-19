@@ -253,6 +253,7 @@ mod tests {
             ja3_randomize: None,
             doh_domain: None,
             doh_provider: None,
+            legacy_mode: false,
         }))
     }
 
@@ -440,6 +441,7 @@ mod tests {
             ja3_randomize: None,
             doh_domain: Some("c2.example.com".to_owned()),
             doh_provider: Some("cloudflare".to_owned()),
+            legacy_mode: false,
         }));
         let defines = build_defines(&listener, &[0x01], false)?;
         assert!(defines.iter().any(|d| d == "TRANSPORT_HTTP"), "TRANSPORT_HTTP missing");
@@ -485,6 +487,7 @@ mod tests {
             ja3_randomize: None,
             doh_domain: None,
             doh_provider: None,
+            legacy_mode: false,
         }));
 
         let defines = build_stager_defines(&listener)?;
@@ -534,6 +537,7 @@ mod tests {
             ja3_randomize: None,
             doh_domain: None,
             doh_provider: None,
+            legacy_mode: false,
         }));
 
         let defines = build_stager_defines(&listener)?;
@@ -567,6 +571,7 @@ mod tests {
             ja3_randomize: None,
             doh_domain: None,
             doh_provider: None,
+            legacy_mode: false,
         }));
 
         let defines = build_stager_defines(&listener)?;
@@ -624,6 +629,7 @@ mod tests {
             ja3_randomize: None,
             doh_domain: None,
             doh_provider: None,
+            legacy_mode: false,
         }));
 
         let bytes = stager_cache_bytes(&listener)?;
@@ -678,6 +684,7 @@ mod tests {
                 ja3_randomize: None,
                 doh_domain: None,
                 doh_provider: None,
+                legacy_mode: false,
             }))
         };
 

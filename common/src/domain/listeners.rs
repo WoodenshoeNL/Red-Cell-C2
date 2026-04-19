@@ -229,6 +229,15 @@ pub struct HttpListenerConfig {
     /// `"google"`.  Ignored when `doh_domain` is `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doh_provider: Option<String>,
+    /// Whether this listener runs in legacy (Demon-compatible) mode.
+    ///
+    /// When `true` the listener accepts packets bearing the `0xDEADBEEF` Havoc
+    /// magic value and routes them through the Demon protocol path.  When
+    /// `false` (the default) any packet whose bytes 4–7 equal `0xDEADBEEF` is
+    /// silently rejected at the pre-filter stage, before any DB look-up, so
+    /// that new-protocol listeners carry no plaintext fingerprint.
+    #[serde(default)]
+    pub legacy_mode: bool,
 }
 
 /// Shared SMB listener configuration.
@@ -440,6 +449,7 @@ mod tests {
             ja3_randomize: None,
             doh_domain: None,
             doh_provider: None,
+            legacy_mode: false,
         });
 
         assert_eq!(config.name(), "edge");

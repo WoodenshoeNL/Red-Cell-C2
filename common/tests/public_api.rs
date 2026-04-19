@@ -44,6 +44,7 @@ fn crate_root_exports_round_trip_listener_config() -> Result<(), Box<dyn std::er
         ja3_randomize: None,
         doh_domain: None,
         doh_provider: None,
+        legacy_mode: false,
     });
 
     let encoded = serde_json::to_value(&original)?;
@@ -97,6 +98,7 @@ fn crate_root_exports_compile_without_private_module_paths() {
         ja3_randomize: None,
         doh_domain: None,
         doh_provider: None,
+        legacy_mode: false,
     };
 
     let listener = uses_public_api(config);

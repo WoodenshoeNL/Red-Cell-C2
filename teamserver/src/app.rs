@@ -180,6 +180,7 @@ async fn teamserver_fallback(
         let body = match collect_body_with_magic_precheck(
             request.into_body(),
             MAX_AGENT_MESSAGE_LEN,
+            true, // external listeners always relay Demon (legacy) traffic
         )
         .await
         {

@@ -112,6 +112,7 @@ async fn spawn_server_with_profile(
             ja3_randomize: None,
             doh_domain: None,
             doh_provider: None,
+            legacy_mode: true,
         }))
         .await?;
     drop(listener_guard);

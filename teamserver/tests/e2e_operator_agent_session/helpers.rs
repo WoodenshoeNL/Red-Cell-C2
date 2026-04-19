@@ -143,6 +143,7 @@ pub(crate) fn http_listener_config(port: u16) -> ListenerConfig {
         ja3_randomize: None,
         doh_domain: None,
         doh_provider: None,
+        legacy_mode: true,
     })
 }
 

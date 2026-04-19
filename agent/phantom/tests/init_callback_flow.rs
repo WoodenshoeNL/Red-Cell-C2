@@ -89,6 +89,7 @@ async fn spawn_server_with_http_listener(
             ja3_randomize: None,
             doh_domain: None,
             doh_provider: None,
+            legacy_mode: true,
         }))
         .await?;
     drop(listener_guard);

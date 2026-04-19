@@ -47,7 +47,10 @@ pub(super) async fn http_listener_handler(
         &request,
     );
     let (_, body) = request.into_parts();
-    let Some(body) = collect_body_with_magic_precheck(body, MAX_AGENT_MESSAGE_LEN).await else {
+    let Some(body) =
+        collect_body_with_magic_precheck(body, MAX_AGENT_MESSAGE_LEN, state.config.legacy_mode)
+            .await
+    else {
         return state.fake_404_response();
     };
 

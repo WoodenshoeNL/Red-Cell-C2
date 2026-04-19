@@ -30,6 +30,7 @@ pub(super) const EXTRA_RESPONSE_BODY: &str = "ResponseBody";
 pub(super) const EXTRA_KILL_DATE: &str = "KillDate";
 pub(super) const EXTRA_WORKING_HOURS: &str = "WorkingHours";
 pub(super) const EXTRA_JA3_RANDOMIZE: &str = "Ja3Randomize";
+pub(super) const EXTRA_LEGACY_MODE: &str = "LegacyMode";
 
 /// Validate and normalise an optional KillDate string from operator input,
 /// converting it from the raw extra-field value into a unix-timestamp string.
@@ -76,6 +77,7 @@ pub fn listener_config_from_operator(
             ja3_randomize: parse_optional_extra_bool(info, EXTRA_JA3_RANDOMIZE)?,
             doh_domain: None,
             doh_provider: None,
+            legacy_mode: parse_extra_bool(info, EXTRA_LEGACY_MODE)?,
         })),
         Ok(ListenerProtocol::Smb) => Ok(ListenerConfig::from(SmbListenerConfig {
             name: name.to_owned(),
@@ -136,6 +138,7 @@ pub(crate) fn profile_listener_configs(
             ja3_randomize: config.ja3_randomize,
             doh_domain: config.doh_domain,
             doh_provider: config.doh_provider,
+            legacy_mode: config.legacy_mode,
         }));
     }
     for config in profile.listeners.smb.iter().cloned() {

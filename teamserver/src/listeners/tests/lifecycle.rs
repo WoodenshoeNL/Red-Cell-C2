@@ -780,6 +780,7 @@ fn operator_protocol_name_emits_havoc_compatible_title_case_labels() {
         ja3_randomize: None,
         doh_domain: None,
         doh_provider: None,
+        legacy_mode: true,
     });
     assert_eq!(operator_protocol_name(&https), "Https");
 

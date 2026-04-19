@@ -85,6 +85,7 @@ pub(super) fn sample_listener() -> ListenerConfig {
         ja3_randomize: None,
         doh_domain: None,
         doh_provider: None,
+        legacy_mode: true,
     })
 }
 

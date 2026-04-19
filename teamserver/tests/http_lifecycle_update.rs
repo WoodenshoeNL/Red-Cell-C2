@@ -123,6 +123,7 @@ async fn update_running_listener_persists_non_port_config_changes()
         ja3_randomize: None,
         doh_domain: None,
         doh_provider: None,
+        legacy_mode: true,
     };
 
     let updated = manager.update(ListenerConfig::from(updated_cfg.clone())).await?;

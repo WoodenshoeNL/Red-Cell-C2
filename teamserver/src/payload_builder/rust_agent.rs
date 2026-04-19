@@ -251,6 +251,7 @@ mod tests {
             ja3_randomize: None,
             doh_domain: None,
             doh_provider: None,
+            legacy_mode: false,
         }));
         let url = rust_agent_callback_url(&listener)?;
         assert_eq!(url, "https://c2.example.com:8443/");
@@ -283,6 +284,7 @@ mod tests {
             ja3_randomize: None,
             doh_domain: None,
             doh_provider: None,
+            legacy_mode: false,
         }));
         let url = rust_agent_callback_url(&listener)?;
         assert_eq!(url, "http://10.0.0.1:80/");
@@ -315,6 +317,7 @@ mod tests {
             ja3_randomize: None,
             doh_domain: None,
             doh_provider: None,
+            legacy_mode: false,
         }));
         let url = rust_agent_callback_url(&listener)?;
         assert_eq!(url, "https://127.0.0.1:443/");

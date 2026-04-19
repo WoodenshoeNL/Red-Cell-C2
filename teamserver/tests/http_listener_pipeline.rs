@@ -851,6 +851,7 @@ fn http_listener(name: &str, port: u16) -> ListenerConfig {
         ja3_randomize: None,
         doh_domain: None,
         doh_provider: None,
+        legacy_mode: true,
     })
 }
 
@@ -882,6 +883,7 @@ fn http_listener_with_redirector(
         ja3_randomize: None,
         doh_domain: None,
         doh_provider: None,
+        legacy_mode: true,
     })
 }
 

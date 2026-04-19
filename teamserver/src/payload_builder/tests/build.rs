@@ -121,6 +121,7 @@ fn setup_build_fixture(
         ja3_randomize: None,
         doh_domain: None,
         doh_provider: None,
+        legacy_mode: true,
     }));
 
     Ok((service, listener, request))
@@ -190,6 +191,7 @@ async fn build_payload_rejects_unsupported_agent_type() -> Result<(), Box<dyn st
         ja3_randomize: None,
         doh_domain: None,
         doh_provider: None,
+        legacy_mode: true,
     }));
 
     let error = service
@@ -240,6 +242,7 @@ async fn build_payload_archon_rejects_missing_source_tree() -> Result<(), Box<dy
         ja3_randomize: None,
         doh_domain: None,
         doh_provider: None,
+        legacy_mode: true,
     }));
 
     let error = service
@@ -287,6 +290,7 @@ async fn build_payload_rejects_unsupported_architecture() -> Result<(), Box<dyn 
         ja3_randomize: None,
         doh_domain: None,
         doh_provider: None,
+        legacy_mode: true,
     }));
 
     let error = service
@@ -336,6 +340,7 @@ async fn build_payload_rejects_unsupported_output_format() -> Result<(), Box<dyn
         ja3_randomize: None,
         doh_domain: None,
         doh_provider: None,
+        legacy_mode: true,
     }));
 
     let error = service
@@ -467,6 +472,7 @@ async fn build_payload_uses_toolchain_and_returns_compiled_bytes()
         ja3_randomize: None,
         doh_domain: None,
         doh_provider: None,
+        legacy_mode: true,
     }));
 
     let mut messages = Vec::new();
@@ -614,6 +620,7 @@ async fn build_payload_x86_uses_x86_compiler_and_win32_nasm_format()
         ja3_randomize: None,
         doh_domain: None,
         doh_provider: None,
+        legacy_mode: true,
     }));
 
     let artifact = service.build_payload(&listener, &request, |_| {}).await?;
@@ -880,6 +887,7 @@ async fn build_payload_raw_shellcode_rejects_x86() -> Result<(), Box<dyn std::er
         ja3_randomize: None,
         doh_domain: None,
         doh_provider: None,
+        legacy_mode: true,
     }));
 
     let err = service
@@ -1052,6 +1060,7 @@ async fn build_stager_passes_correct_defines_to_compiler() -> Result<(), Box<dyn
         ja3_randomize: None,
         doh_domain: None,
         doh_provider: None,
+        legacy_mode: true,
     }));
 
     let request = BuildPayloadRequestInfo {
@@ -1223,6 +1232,7 @@ async fn build_stager_x86_uses_underscore_entry_point() -> Result<(), Box<dyn st
         ja3_randomize: None,
         doh_domain: None,
         doh_provider: None,
+        legacy_mode: true,
     }));
 
     let request = BuildPayloadRequestInfo {
@@ -1334,6 +1344,7 @@ async fn build_payload_phantom_rejects_missing_source_tree()
         ja3_randomize: None,
         doh_domain: None,
         doh_provider: None,
+        legacy_mode: true,
     }));
 
     let error = service
@@ -1381,6 +1392,7 @@ async fn build_payload_specter_rejects_missing_source_tree()
         ja3_randomize: None,
         doh_domain: None,
         doh_provider: None,
+        legacy_mode: true,
     }));
 
     let error = service

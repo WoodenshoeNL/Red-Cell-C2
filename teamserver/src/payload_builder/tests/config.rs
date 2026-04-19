@@ -105,6 +105,7 @@ fn http_listener_with_method(method: Option<&str>) -> ListenerConfig {
         ja3_randomize: None,
         doh_domain: None,
         doh_provider: None,
+        legacy_mode: true,
     }))
 }
 
@@ -133,6 +134,7 @@ fn https_listener_with_ja3(ja3_randomize: Option<bool>) -> ListenerConfig {
         ja3_randomize,
         doh_domain: None,
         doh_provider: None,
+        legacy_mode: true,
     }))
 }
 
@@ -235,6 +237,7 @@ fn pack_config_matches_expected_http_layout() -> Result<(), Box<dyn std::error::
         ja3_randomize: None,
         doh_domain: None,
         doh_provider: None,
+        legacy_mode: true,
     }));
 
     let bytes = pack_config(&listener, &config)?;
@@ -360,6 +363,7 @@ fn pack_config_http_without_proxy_ends_after_disabled_proxy_flag()
         ja3_randomize: None,
         doh_domain: None,
         doh_provider: None,
+        legacy_mode: true,
     }));
 
     let bytes = pack_config(&listener, &config)?;
@@ -555,6 +559,7 @@ fn pack_config_ja3_randomize_defaults_to_false_for_plain_http()
         ja3_randomize: None,
         doh_domain: None,
         doh_provider: None,
+        legacy_mode: true,
     }));
     let http_false = ListenerConfig::Http(Box::new(HttpListenerConfig {
         name: "http".to_owned(),
@@ -579,6 +584,7 @@ fn pack_config_ja3_randomize_defaults_to_false_for_plain_http()
         ja3_randomize: Some(false),
         doh_domain: None,
         doh_provider: None,
+        legacy_mode: true,
     }));
     let bytes_none = pack_config(&http_none, &minimal_config_json())?;
     let bytes_false = pack_config(&http_false, &minimal_config_json())?;
@@ -1046,8 +1052,8 @@ fn merged_request_config_propagates_heap_enc_false_from_profile_defaults()
 }
 
 #[test]
-fn pack_config_job_execution_threadpool_is_packed_as_one()
--> Result<(), Box<dyn std::error::Error>> {
+fn pack_config_job_execution_threadpool_is_packed_as_one() -> Result<(), Box<dyn std::error::Error>>
+{
     let config = serde_json::from_value::<Map<String, Value>>(json!({
         "Sleep": "5",
         "Jitter": "0",
@@ -1445,6 +1451,7 @@ fn pack_http_listener_packs_doh_domain_and_provider_cloudflare()
         ja3_randomize: Some(false),
         doh_domain: Some("c2.example.com".to_owned()),
         doh_provider: Some("cloudflare".to_owned()),
+        legacy_mode: true,
     }));
     let bytes = pack_config(&listener, &minimal_config_json())?;
     let mut cursor = bytes.as_slice();
@@ -1514,6 +1521,7 @@ fn pack_http_listener_packs_doh_provider_google() -> Result<(), Box<dyn std::err
         ja3_randomize: Some(false),
         doh_domain: Some("c2.example.com".to_owned()),
         doh_provider: Some("google".to_owned()),
+        legacy_mode: true,
     }));
     let with_google = pack_config(&listener, &minimal_config_json())?;
     // Verify the last 4 bytes (provider) are 1 = Google.

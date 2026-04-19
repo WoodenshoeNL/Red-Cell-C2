@@ -16,16 +16,26 @@ pub(crate) const MINIMUM_DEMON_CALLBACK_BYTES: usize = DemonHeader::SERIALIZED_L
 /// Demon transport magic value.
 ///
 /// The Demon magic value (`0xDEADBEEF`) occupies bytes 4–7 of every valid
-/// Demon packet. Buffering the full body before checking the magic allows
-/// an adversary to force the server to allocate up to `MAX_AGENT_MESSAGE_LEN`
-/// (30 MiB) per connection before rejection. This function rejects bodies
-/// that fail the magic check as soon as 8 bytes have been accumulated, which
-/// limits per-connection allocation to a single network chunk (~16 KiB in
-/// practice) for obviously non-Demon traffic.
+/// Demon packet.  The `legacy_mode` flag controls how the magic is treated:
+///
+/// - **`legacy_mode = true`** (Demon listeners): the body is accepted only if
+///   bytes 4–7 equal `0xDEADBEEF`.  Any other value causes immediate rejection
+///   after the first 8 bytes have been buffered, limiting per-connection
+///   allocation to a single network chunk (~16 KiB).
+///
+/// - **`legacy_mode = false`** (new-protocol listeners): the body is accepted
+///   only if bytes 4–7 do **not** equal `0xDEADBEEF`.  Packets that carry the
+///   plaintext Havoc fingerprint are rejected at this pre-filter stage, before
+///   any DB look-up, so that non-legacy listeners carry no detectable Demon
+///   fingerprint.
 ///
 /// Returns `None` if the body exceeds `max_len`, contains a read error, or
-/// does not carry the correct Demon magic value.
-pub(crate) async fn collect_body_with_magic_precheck(body: Body, max_len: usize) -> Option<Bytes> {
+/// fails the mode-appropriate magic check.
+pub(crate) async fn collect_body_with_magic_precheck(
+    body: Body,
+    max_len: usize,
+    legacy_mode: bool,
+) -> Option<Bytes> {
     use http_body_util::BodyExt as _;
 
     let mut body = body;
@@ -43,9 +53,15 @@ pub(crate) async fn collect_body_with_magic_precheck(body: Body, max_len: usize)
         }
         buf.extend_from_slice(&data);
         // As soon as we have the 8 bytes that cover the magic field (bytes 4–7),
-        // validate the magic and drop the connection immediately on mismatch.
+        // apply the mode-appropriate check.
         if !magic_checked && buf.len() >= 8 {
-            if buf[4..8] != DEMON_MAGIC_VALUE.to_be_bytes() {
+            let has_demon_magic = buf[4..8] == DEMON_MAGIC_VALUE.to_be_bytes();
+            if legacy_mode && !has_demon_magic {
+                // Legacy listener: require 0xDEADBEEF — reject anything else.
+                return None;
+            }
+            if !legacy_mode && has_demon_magic {
+                // Non-legacy listener: reject 0xDEADBEEF before DB look-up.
                 return None;
             }
             magic_checked = true;

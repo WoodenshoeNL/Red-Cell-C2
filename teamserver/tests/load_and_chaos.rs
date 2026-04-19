@@ -81,6 +81,7 @@ async fn spawn_http_listener_with_manager(
             ja3_randomize: None,
             doh_domain: None,
             doh_provider: None,
+            legacy_mode: true,
         }))
         .await?;
     drop(guard);

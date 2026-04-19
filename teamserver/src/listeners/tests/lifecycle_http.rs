@@ -77,6 +77,7 @@ fn http_listener_operator_round_trip_preserves_advanced_settings()
         ja3_randomize: None,
         doh_domain: None,
         doh_provider: None,
+        legacy_mode: true,
     });
     let summary = ListenerSummary {
         name: "edge".to_owned(),
@@ -128,6 +129,7 @@ fn operator_payload_redacts_http_proxy_password() {
             ja3_randomize: None,
             doh_domain: None,
             doh_provider: None,
+            legacy_mode: true,
         }),
     };
 

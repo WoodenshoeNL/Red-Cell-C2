@@ -533,6 +533,7 @@ pub fn http_listener_config(name: &str, port: u16) -> red_cell_common::ListenerC
         ja3_randomize: None,
         doh_domain: None,
         doh_provider: None,
+        legacy_mode: true,
     })
 }
 

@@ -103,6 +103,9 @@ pub struct ProfileHttpListenerConfig {
     /// ARC-08: DoH provider — `"cloudflare"` (default) or `"google"`.
     #[serde(rename = "DoHProvider", default)]
     pub doh_provider: Option<String>,
+    /// Legacy mode — accept Demon `0xDEADBEEF` packets (default `false`).
+    #[serde(rename = "LegacyMode", default)]
+    pub legacy_mode: bool,
 }
 
 /// SMB pivot listener configuration.

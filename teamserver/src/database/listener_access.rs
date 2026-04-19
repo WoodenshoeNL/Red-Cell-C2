@@ -89,7 +89,6 @@ mod tests {
             name: name.to_owned(),
             kill_date: None,
             working_hours: None,
-            suppress_opsec_warnings: true,
             hosts: vec!["127.0.0.1".to_owned()],
             host_bind: "0.0.0.0".to_owned(),
             host_rotation: "round-robin".to_owned(),

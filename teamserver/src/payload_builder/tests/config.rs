@@ -426,6 +426,7 @@ fn pack_config_rejects_dns_listener() -> Result<(), Box<dyn std::error::Error>> 
         record_types: vec!["TXT".to_owned()],
         kill_date: None,
         working_hours: None,
+        suppress_opsec_warnings: true,
     });
 
     let error =

@@ -12,8 +12,8 @@ use utoipa::ToSchema;
 
 use super::config::{
     EXTRA_BEHIND_REDIRECTOR, EXTRA_CERT_PATH, EXTRA_JA3_RANDOMIZE, EXTRA_KEY_PATH, EXTRA_KILL_DATE,
-    EXTRA_LEGACY_MODE, EXTRA_METHOD, EXTRA_RESPONSE_BODY, EXTRA_TRUSTED_PROXY_PEERS,
-    EXTRA_WORKING_HOURS, insert_optional_extra_string,
+    EXTRA_LEGACY_MODE, EXTRA_METHOD, EXTRA_RESPONSE_BODY, EXTRA_SUPPRESS_OPSEC_WARNINGS,
+    EXTRA_TRUSTED_PROXY_PEERS, EXTRA_WORKING_HOURS, insert_optional_extra_string,
 };
 use super::events::{operator_protocol_name, operator_status};
 use crate::{PersistedListener, PersistedListenerState};
@@ -156,6 +156,10 @@ impl ListenerSummary {
                     EXTRA_LEGACY_MODE.to_owned(),
                     serde_json::Value::String(config.legacy_mode.to_string()),
                 );
+                info.extra.insert(
+                    EXTRA_SUPPRESS_OPSEC_WARNINGS.to_owned(),
+                    serde_json::Value::String(config.suppress_opsec_warnings.to_string()),
+                );
             }
             ListenerConfig::Smb(config) => {
                 info.extra.insert("Host".to_owned(), serde_json::Value::String(String::new()));
@@ -215,6 +219,10 @@ impl ListenerSummary {
                     &mut info.extra,
                     EXTRA_WORKING_HOURS,
                     config.working_hours.as_deref(),
+                );
+                info.extra.insert(
+                    EXTRA_SUPPRESS_OPSEC_WARNINGS.to_owned(),
+                    serde_json::Value::String(config.suppress_opsec_warnings.to_string()),
                 );
                 info.host_bind = Some(config.host_bind.clone());
                 info.port_bind = Some(config.port_bind.to_string());

@@ -299,7 +299,6 @@ mod tests {
             name: "http".to_owned(),
             kill_date: None,
             working_hours: None,
-            suppress_opsec_warnings: true,
             hosts: vec!["localhost:80".to_owned()],
             host_bind: "0.0.0.0".to_owned(),
             host_rotation: "round-robin".to_owned(),
@@ -460,7 +459,6 @@ mod tests {
             pipe_name: "pivot".to_owned(),
             kill_date: None,
             working_hours: None,
-            suppress_opsec_warnings: true,
         });
         let defines = build_defines(&listener, &[0x01], false)?;
         assert!(defines.iter().any(|d| d == "TRANSPORT_SMB"), "TRANSPORT_SMB missing");
@@ -491,7 +489,6 @@ mod tests {
             name: "http".to_owned(),
             kill_date: None,
             working_hours: None,
-            suppress_opsec_warnings: true,
             hosts: vec!["localhost:80".to_owned()],
             host_bind: "0.0.0.0".to_owned(),
             host_rotation: "round-robin".to_owned(),
@@ -539,7 +536,6 @@ mod tests {
             name: "http".to_owned(),
             kill_date: None,
             working_hours: None,
-            suppress_opsec_warnings: true,
             hosts: vec!["c2.example.com".to_owned()],
             host_bind: "0.0.0.0".to_owned(),
             host_rotation: "round-robin".to_owned(),
@@ -591,7 +587,6 @@ mod tests {
             name: "http".to_owned(),
             kill_date: None,
             working_hours: None,
-            suppress_opsec_warnings: true,
             hosts: vec!["host.local".to_owned()],
             host_bind: "0.0.0.0".to_owned(),
             host_rotation: "round-robin".to_owned(),
@@ -627,7 +622,6 @@ mod tests {
             name: "http".to_owned(),
             kill_date: None,
             working_hours: None,
-            suppress_opsec_warnings: true,
             hosts: vec!["host.local".to_owned()],
             host_bind: "0.0.0.0".to_owned(),
             host_rotation: "round-robin".to_owned(),
@@ -668,7 +662,6 @@ mod tests {
             pipe_name: "pivot".to_owned(),
             kill_date: None,
             working_hours: None,
-            suppress_opsec_warnings: true,
         });
         let err = build_stager_defines(&listener)
             .expect_err("non-HTTP listener should be rejected for stager");
@@ -688,7 +681,6 @@ mod tests {
             name: "http".to_owned(),
             kill_date: None,
             working_hours: None,
-            suppress_opsec_warnings: true,
             hosts: vec!["c2.local".to_owned()],
             host_bind: "0.0.0.0".to_owned(),
             host_rotation: "round-robin".to_owned(),
@@ -729,7 +721,6 @@ mod tests {
             pipe_name: "pivot".to_owned(),
             kill_date: None,
             working_hours: None,
-            suppress_opsec_warnings: true,
         });
         let err = stager_cache_bytes(&listener).expect_err("non-HTTP listener should be rejected");
         assert!(matches!(
@@ -746,7 +737,6 @@ mod tests {
                 name: "http".to_owned(),
                 kill_date: None,
                 working_hours: None,
-                suppress_opsec_warnings: true,
                 hosts: vec![host.to_owned()],
                 host_bind: "0.0.0.0".to_owned(),
                 host_rotation: "round-robin".to_owned(),

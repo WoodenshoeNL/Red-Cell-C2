@@ -19,6 +19,7 @@ fn smb_and_dns_listener_operator_round_trip_preserves_profile_timing()
         record_types: vec!["A".to_owned(), "TXT".to_owned()],
         kill_date: Some("1773086400".to_owned()),
         working_hours: Some("08:00-17:00".to_owned()),
+        suppress_opsec_warnings: true,
     });
 
     for config in [smb, dns] {

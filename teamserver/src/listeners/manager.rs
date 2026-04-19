@@ -21,6 +21,8 @@ use red_cell_common::operator::{
     EventCode, Message, MessageHead, OperatorMessage, TeamserverLogInfo,
 };
 use red_cell_common::tls::{load_tls_identity, validate_tls_not_expired};
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{info, instrument, warn};
@@ -36,9 +38,9 @@ use super::rate_limiters::{
 use super::smb::spawn_smb_listener_runtime;
 use super::summary::ListenerSummary;
 use crate::{
-    AgentRegistry, DEFAULT_MAX_DOWNLOAD_BYTES, Database, DemonInitSecretConfig, ListenerRepository,
-    ListenerStatus, PluginRuntime, ShutdownController, SocketRelayManager, TeamserverError,
-    dispatch::DownloadTracker, events::EventBus, json_error_response,
+    AgentRegistry, AuditLogEntry, DEFAULT_MAX_DOWNLOAD_BYTES, Database, DemonInitSecretConfig,
+    ListenerRepository, ListenerStatus, PluginRuntime, ShutdownController, SocketRelayManager,
+    TeamserverError, dispatch::DownloadTracker, events::EventBus, json_error_response,
 };
 
 pub(crate) type ListenerRuntimeFuture = Pin<Box<dyn Future<Output = ListenerRuntimeResult> + Send>>;
@@ -638,6 +640,29 @@ impl ListenerManager {
                         },
                         info: TeamserverLogInfo { text: warning.to_owned() },
                     }));
+                    let occurred_at = OffsetDateTime::now_utc()
+                        .format(&Rfc3339)
+                        .unwrap_or_else(|_| String::from("unknown"));
+                    if let Err(err) = self
+                        .database
+                        .audit_log()
+                        .create(&AuditLogEntry {
+                            id: None,
+                            actor: "teamserver".to_owned(),
+                            action: "opsec_warning".to_owned(),
+                            target_kind: "listener".to_owned(),
+                            target_id: Some(name.to_owned()),
+                            details: Some(serde_json::json!({ "warning": warning })),
+                            occurred_at,
+                        })
+                        .await
+                    {
+                        warn!(
+                            listener = name,
+                            error = %err,
+                            "failed to write opsec warning audit log entry"
+                        );
+                    }
                 }
                 self.summary(name).await
             }

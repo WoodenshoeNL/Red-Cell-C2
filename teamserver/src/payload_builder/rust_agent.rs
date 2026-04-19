@@ -234,7 +234,6 @@ mod tests {
             name: "https-listener".to_owned(),
             kill_date: None,
             working_hours: None,
-            suppress_opsec_warnings: true,
             hosts: vec!["c2.example.com:8443".to_owned()],
             host_bind: "0.0.0.0".to_owned(),
             host_rotation: "round-robin".to_owned(),
@@ -269,7 +268,6 @@ mod tests {
             name: "http-listener".to_owned(),
             kill_date: None,
             working_hours: None,
-            suppress_opsec_warnings: true,
             hosts: vec!["10.0.0.1".to_owned()],
             host_bind: "0.0.0.0".to_owned(),
             host_rotation: "round-robin".to_owned(),
@@ -304,7 +302,6 @@ mod tests {
             name: "empty-hosts".to_owned(),
             kill_date: None,
             working_hours: None,
-            suppress_opsec_warnings: true,
             hosts: Vec::new(),
             host_bind: "0.0.0.0".to_owned(),
             host_rotation: "round-robin".to_owned(),
@@ -339,7 +336,6 @@ mod tests {
             pipe_name: "pipe".to_owned(),
             kill_date: None,
             working_hours: None,
-            suppress_opsec_warnings: true,
         });
         let err = rust_agent_callback_url(&listener).expect_err("SMB listener should be rejected");
         assert!(matches!(err, PayloadBuildError::InvalidRequest { .. }));

@@ -129,7 +129,7 @@ mod tests {
 
     #[test]
     fn no_warnings_for_safe_http_config() {
-        let config = ListenerConfig::Http(base_http());
+        let config = ListenerConfig::from(base_http());
         assert!(opsec_warnings(&config).is_empty());
     }
 

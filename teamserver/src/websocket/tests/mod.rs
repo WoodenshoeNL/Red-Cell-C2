@@ -541,6 +541,10 @@ fn sample_listener_info(name: &str, status: &str, port: u16) -> ListenerInfo {
         uris: Some("/".to_owned()),
         user_agent: Some("Mozilla/5.0".to_owned()),
         secure: Some("false".to_owned()),
+        extra: BTreeMap::from([(
+            "SuppressOpsecWarnings".to_owned(),
+            serde_json::Value::String("true".to_owned()),
+        )]),
         ..ListenerInfo::default()
     }
 }

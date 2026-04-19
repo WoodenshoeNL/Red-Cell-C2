@@ -234,6 +234,18 @@ impl Serialize for OperatorMessage {
                 TeamserverCode::DatabaseRecovered.as_u32(),
                 &message.info,
             ),
+            Self::OperatorCreate(message) => serialize_message(
+                serializer,
+                &message.head,
+                OperatorManagementCode::Create.as_u32(),
+                &message.info,
+            ),
+            Self::OperatorRemove(message) => serialize_message(
+                serializer,
+                &message.head,
+                OperatorManagementCode::Remove.as_u32(),
+                &message.info,
+            ),
         }
     }
 }

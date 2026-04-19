@@ -416,6 +416,8 @@ pub(crate) enum DockTab {
     FileBrowser(String),
     /// Per-agent process list viewer (standalone tab).
     ProcessList(String),
+    /// Operator management / RBAC panel.
+    Operators,
     /// Python-script-registered custom tab (title is the normalized tab name).
     CustomTab(String),
 }
@@ -429,6 +431,7 @@ impl DockTab {
             Self::SessionGraph => "Session Graph".to_owned(),
             Self::Scripts => "Scripts".to_owned(),
             Self::Loot => "Loot".to_owned(),
+            Self::Operators => "Operators".to_owned(),
             Self::AgentConsole(id) => format!("[{id}]"),
             Self::FileBrowser(id) => format!("[{id}] File Explorer"),
             Self::ProcessList(id) => format!("Process: [{id}]"),
@@ -444,6 +447,7 @@ impl DockTab {
             Self::SessionGraph => Color32::from_rgb(110, 199, 141),  // green
             Self::Scripts => Color32::from_rgb(232, 182, 83),        // yellow
             Self::Loot => Color32::from_rgb(220, 130, 60),           // orange
+            Self::Operators => Color32::from_rgb(180, 120, 255),     // violet
             Self::AgentConsole(_) => Color32::from_rgb(140, 120, 220), // purple
             Self::FileBrowser(_) => Color32::from_rgb(80, 180, 140), // teal
             Self::ProcessList(_) => Color32::from_rgb(255, 85, 85),  // red/salmon

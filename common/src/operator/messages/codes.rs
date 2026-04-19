@@ -72,6 +72,7 @@ numeric_code! {
         Session = 0x7,
         Service = 0x9,
         Teamserver = 0x10,
+        OperatorManagement = 0x11,
     }
 }
 
@@ -171,6 +172,14 @@ numeric_code! {
     }
 }
 
+numeric_code! {
+    /// `OperatorManagement` subevents (Red Cell extension).
+    pub enum OperatorManagementCode {
+        Create = 0x1,
+        Remove = 0x2,
+    }
+}
+
 impl fmt::Display for EventCode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{self:?}")
@@ -197,6 +206,7 @@ mod tests {
             (EventCode::Session, 0x7),
             (EventCode::Service, 0x9),
             (EventCode::Teamserver, 0x10),
+            (EventCode::OperatorManagement, 0x11),
         ];
         for (variant, expected) in cases {
             assert_eq!(variant.as_u32(), expected, "EventCode::{variant:?} wire value");

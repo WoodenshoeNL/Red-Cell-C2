@@ -25,6 +25,7 @@ use crate::operator::misc::{
     ChatUserInfo, DatabaseStatusInfo, InitProfileInfo, LoginInfo, ServiceAgentRegistrationInfo,
     ServiceListenerRegistrationInfo, TeamserverLogInfo, TeamserverProfileInfo,
 };
+use crate::operator::operators::{CreateOperatorInfo, RemoveOperatorInfo};
 
 /// Semantic operator protocol messages mapped onto Havoc wire event/subevent codes.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -66,6 +67,10 @@ pub enum OperatorMessage {
     TeamserverProfile(Message<TeamserverProfileInfo>),
     DatabaseDegraded(Message<DatabaseStatusInfo>),
     DatabaseRecovered(Message<DatabaseStatusInfo>),
+    /// Red Cell extension: create a new operator account.
+    OperatorCreate(Message<CreateOperatorInfo>),
+    /// Red Cell extension: remove an operator account.
+    OperatorRemove(Message<RemoveOperatorInfo>),
 }
 
 impl OperatorMessage {
@@ -108,6 +113,7 @@ impl OperatorMessage {
             | Self::TeamserverProfile(_)
             | Self::DatabaseDegraded(_)
             | Self::DatabaseRecovered(_) => EventCode::Teamserver,
+            Self::OperatorCreate(_) | Self::OperatorRemove(_) => EventCode::OperatorManagement,
         }
     }
 }

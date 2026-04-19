@@ -134,6 +134,12 @@ impl<'de> Deserialize<'de> for OperatorMessage {
             (EventCode::Teamserver, x) if x == TeamserverCode::DatabaseRecovered.as_u32() => {
                 Ok(Self::DatabaseRecovered(Message { head, info: parse_info(info)? }))
             }
+            (EventCode::OperatorManagement, x) if x == OperatorManagementCode::Create.as_u32() => {
+                Ok(Self::OperatorCreate(Message { head, info: parse_info(info)? }))
+            }
+            (EventCode::OperatorManagement, x) if x == OperatorManagementCode::Remove.as_u32() => {
+                Ok(Self::OperatorRemove(Message { head, info: parse_info(info)? }))
+            }
             (event, sub_event) => Err(serde::de::Error::custom(format!(
                 "unsupported operator message event={event:?} sub_event={sub_event:#x}"
             ))),

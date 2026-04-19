@@ -13,6 +13,25 @@ use super::agent::{
 };
 use super::listener::{ListenerDialogState, PayloadDialogState};
 
+// ── Operator management panel state ──────────────────────────────────────────
+
+/// Transient UI state for the operator management panel.
+#[derive(Debug, Default)]
+pub(crate) struct OperatorPanelState {
+    /// Whether the "Create Operator" dialog is open.
+    pub(crate) create_dialog_open: bool,
+    /// Username field in the Create Operator dialog.
+    pub(crate) create_username: String,
+    /// Password field in the Create Operator dialog.
+    pub(crate) create_password: String,
+    /// Role selection index in the Create Operator dialog (0=Admin, 1=Operator, 2=Analyst).
+    pub(crate) create_role_index: usize,
+    /// Username pending deletion confirmation (Some = confirmation modal open).
+    pub(crate) delete_pending: Option<String>,
+    /// Last status message (success or error feedback to the operator).
+    pub(crate) status_message: Option<String>,
+}
+
 // ── Top-level session panel state ────────────────────────────────────────────
 
 #[derive(Debug, Default)]
@@ -50,6 +69,8 @@ pub(crate) struct SessionPanelState {
     pub(crate) listener_dialog: Option<ListenerDialogState>,
     /// Open Payload generation dialog state (None = dialog closed).
     pub(crate) payload_dialog: Option<PayloadDialogState>,
+    /// Operator management panel state.
+    pub(crate) operators_panel: OperatorPanelState,
     /// Set to true when the "Mark all read" button is pressed; consumed in `render_main_ui`.
     pub(crate) pending_mark_all_read: bool,
     /// Bottom dock panel state.

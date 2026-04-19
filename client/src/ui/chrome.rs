@@ -87,6 +87,10 @@ impl ClientApp {
                     self.session_panel.dock.open_tab(DockTab::Loot);
                     ui.close();
                 }
+                if ui.button("Operators").clicked() {
+                    self.session_panel.dock.open_tab(DockTab::Operators);
+                    ui.close();
+                }
             });
 
             ui.menu_button("Attack", |ui| {

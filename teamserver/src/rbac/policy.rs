@@ -166,7 +166,9 @@ fn required_permission(message: &OperatorMessage) -> Result<Permission, Authoriz
         | OperatorMessage::HostFileAdd(_)
         | OperatorMessage::HostFileRemove(_)
         | OperatorMessage::AgentRemove(_)
-        | OperatorMessage::TeamserverProfile(_) => Ok(Permission::Admin),
+        | OperatorMessage::TeamserverProfile(_)
+        | OperatorMessage::OperatorCreate(_)
+        | OperatorMessage::OperatorRemove(_) => Ok(Permission::Admin),
     }
 }
 

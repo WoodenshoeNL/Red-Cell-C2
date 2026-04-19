@@ -91,6 +91,9 @@ impl ClientApp {
             Some(DockTab::Loot) => {
                 self.render_loot_panel(ui, state);
             }
+            Some(DockTab::Operators) => {
+                self.render_operators_panel(ui, state);
+            }
             Some(DockTab::AgentConsole(ref agent_id)) => {
                 let agent_id = agent_id.clone();
                 self.session_panel.selected_console = Some(agent_id.clone());

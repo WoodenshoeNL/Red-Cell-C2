@@ -255,7 +255,9 @@ impl AppState {
             | OperatorMessage::ServiceListenerRegister(_)
             | OperatorMessage::TeamserverProfile(_)
             | OperatorMessage::DatabaseDegraded(_)
-            | OperatorMessage::DatabaseRecovered(_) => {}
+            | OperatorMessage::DatabaseRecovered(_)
+            | OperatorMessage::OperatorCreate(_)
+            | OperatorMessage::OperatorRemove(_) => {}
         }
         events
     }

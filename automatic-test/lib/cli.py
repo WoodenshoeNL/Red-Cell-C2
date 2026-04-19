@@ -159,7 +159,12 @@ def listener_list(cfg: CliConfig) -> list[dict]:
 def listener_create(cfg: CliConfig, name: str, type_: str, **kwargs) -> dict:
     extra = []
     for k, v in kwargs.items():
-        extra += [f"--{k.replace('_', '-')}", str(v)]
+        flag = f"--{k.replace('_', '-')}"
+        if isinstance(v, bool):
+            if v:
+                extra.append(flag)
+        else:
+            extra += [flag, str(v)]
     return _run(cfg, "listener", "create", "--name", name, "--type", type_, *extra)
 
 

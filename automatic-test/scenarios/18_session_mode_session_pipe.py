@@ -59,7 +59,7 @@ def run(ctx):
 
     # ── 3. agent.exec ─────────────────────────────────────────────────────────
     if agents:
-        agent_id = agents[0]["id"]
+        agent_id = f"{agents[0]['AgentID']:08X}"
         print(f"  [session][agent.exec] running 'echo hello' on agent {agent_id!r}")
         with Session(cli) as sess:
             result = sess.send({

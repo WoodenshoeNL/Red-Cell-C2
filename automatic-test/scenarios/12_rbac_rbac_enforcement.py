@@ -163,7 +163,7 @@ def run(ctx):
                 print("  [analyst] agent list entry missing id — skipping agent output probe")
         else:
             try:
-                agent_output(viewer_cfg, "00000000-0000-0000-0000-000000000001")
+                agent_output(viewer_cfg, "00000001")
             except CliError as exc:
                 assert exc.exit_code != 3, (
                     f"analyst was RBAC-blocked for agent output (exit 3): {exc}"
@@ -247,7 +247,7 @@ def run(ctx):
             "agent kill",
             lambda: agent_kill(
                 viewer_cfg,
-                "00000000-0000-0000-0000-000000000000",
+                "00000000",
             ),
         )
         print("  [analyst] agent kill denied (exit 3) ✓")
@@ -284,7 +284,7 @@ def run(ctx):
 
         print("  [analyst] agent exec → should be denied (exit code 3)")
         try:
-            agent_exec(viewer_cfg, "00000000-0000-0000-0000-000000000000", "whoami")
+            agent_exec(viewer_cfg, "00000000", "whoami")
             raise AssertionError(
                 "analyst-role token was NOT rejected for 'agent exec' — RBAC broken"
             )
@@ -321,7 +321,7 @@ def run(ctx):
 
         print("  [admin] agent exec on dummy id → should not be RBAC-rejected")
         try:
-            agent_exec(cli, "00000000-0000-0000-0000-000000000000", "whoami")
+            agent_exec(cli, "00000000", "whoami")
         except CliError as exc:
             assert exc.exit_code != 3, (
                 f"admin was RBAC-rejected for 'agent exec' (exit 3) — RBAC broken: {exc}"

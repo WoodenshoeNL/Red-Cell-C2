@@ -85,7 +85,9 @@ pub(super) fn validate_define(define: &str) -> Result<(), PayloadBuildError> {
 /// Format a byte slice as a comma-separated list of hex literals suitable for
 /// embedding in a C array initialiser via a `-D` define.
 pub(super) fn format_config_bytes(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("0x{byte:02x}")).collect::<Vec<_>>().join("\\,")
+    // No shell escaping needed: the compiler is invoked via Command::args() which
+    // passes arguments directly to execvp, so commas do not need backslash-escaping.
+    bytes.iter().map(|byte| format!("0x{byte:02x}")).collect::<Vec<_>>().join(",")
 }
 
 /// Generate a random 4-byte Archon magic value and return the corresponding
@@ -294,7 +296,7 @@ mod tests {
     #[test]
     fn validate_define_accepts_name_equals_value() {
         assert!(validate_define("FOO=bar").is_ok());
-        assert!(validate_define("CONFIG_BYTES={0x00\\,0x01}").is_ok());
+        assert!(validate_define("CONFIG_BYTES={0x00,0x01}").is_ok());
         assert!(validate_define("LEVEL=1").is_ok());
     }
 
@@ -373,7 +375,7 @@ mod tests {
 
     #[test]
     fn format_config_bytes_formats_correctly() {
-        assert_eq!(format_config_bytes(&[0x00, 0xFF, 0x42]), r"0x00\,0xff\,0x42");
+        assert_eq!(format_config_bytes(&[0x00, 0xFF, 0x42]), "0x00,0xff,0x42");
     }
 
     #[test]

@@ -248,6 +248,106 @@ pub(crate) fn parse_init_agent(
     ))
 }
 
+/// Parse ECDH registration metadata (agent → teamserver).
+///
+/// The metadata bytes are produced by `serialize_init_metadata` and are already
+/// decrypted by the ECDH AEAD layer.  No AES key/IV prefix is present — this
+/// differs from [`parse_init_agent`] which reads key/IV first then decrypts.
+///
+/// Returns `(agent_record, legacy_ctr, seq_protected)`.
+pub(crate) fn parse_ecdh_agent_metadata(
+    metadata: &[u8],
+    external_ip: &str,
+    now: OffsetDateTime,
+) -> Result<(AgentRecord, bool, bool), DemonParserError> {
+    let mut offset = 0_usize;
+
+    let agent_id = read_u32_be(metadata, &mut offset, "ecdh init agent_id")?;
+    let hostname =
+        read_length_prefixed_string_be(metadata, &mut offset, "hostname")?;
+    let username =
+        read_length_prefixed_string_be(metadata, &mut offset, "username")?;
+    let domain_name =
+        read_length_prefixed_string_be(metadata, &mut offset, "domain name")?;
+    let internal_ip =
+        read_length_prefixed_string_be(metadata, &mut offset, "internal ip")?;
+    let process_path =
+        read_length_prefixed_utf16_be(metadata, &mut offset, "process path")?;
+    let process_pid = read_u32_be(metadata, &mut offset, "process pid")?;
+    let process_tid = read_u32_be(metadata, &mut offset, "process tid")?;
+    let process_ppid = read_u32_be(metadata, &mut offset, "process ppid")?;
+    let process_arch = read_u32_be(metadata, &mut offset, "process arch")?;
+    let elevated = read_u32_be(metadata, &mut offset, "elevated")? != 0;
+    let base_address = read_u64_be(metadata, &mut offset, "base address")?;
+    let os_major = read_u32_be(metadata, &mut offset, "os major")?;
+    let os_minor = read_u32_be(metadata, &mut offset, "os minor")?;
+    let os_product_type = read_u32_be(metadata, &mut offset, "os product type")?;
+    let os_service_pack = read_u32_be(metadata, &mut offset, "os service pack")?;
+    let os_build = read_u32_be(metadata, &mut offset, "os build")?;
+    let os_arch = read_u32_be(metadata, &mut offset, "os arch")?;
+    let sleep_delay = read_u32_be(metadata, &mut offset, "sleep delay")?;
+    let sleep_jitter = read_u32_be(metadata, &mut offset, "sleep jitter")?;
+    let kill_date_raw = read_u64_be(metadata, &mut offset, "kill date")?;
+    let working_hours = i32::from_be_bytes(
+        read_fixed::<4>(metadata, &mut offset, "working hours")?
+    );
+
+    let (legacy_ctr, seq_protected) = if metadata.len() - offset >= 4 {
+        let ext_flags = read_u32_be(metadata, &mut offset, "init extension flags")?;
+        let monotonic = ext_flags & INIT_EXT_MONOTONIC_CTR != 0;
+        let seq_prot = ext_flags & INIT_EXT_SEQ_PROTECTED != 0;
+        (!monotonic, seq_prot)
+    } else {
+        (true, false)
+    };
+
+    let timestamp = now
+        .format(&Rfc3339)
+        .map_err(|_| DemonParserError::InvalidInit("invalid timestamp"))?;
+    let kill_date = parse_kill_date(kill_date_raw)?;
+
+    Ok((
+        AgentRecord {
+            agent_id,
+            active: true,
+            reason: String::new(),
+            note: String::new(),
+            encryption: AgentEncryptionInfo::default(),
+            hostname,
+            username,
+            domain_name,
+            external_ip: external_ip.to_owned(),
+            internal_ip,
+            process_name: basename(&process_path),
+            process_path,
+            base_address,
+            process_pid,
+            process_tid,
+            process_ppid,
+            process_arch: process_arch_label(process_arch).to_owned(),
+            elevated,
+            os_version: windows_version_label(
+                os_major,
+                os_minor,
+                os_product_type,
+                os_service_pack,
+                os_build,
+            ),
+            os_build,
+            os_arch: windows_arch_label(os_arch).to_owned(),
+            sleep_delay,
+            sleep_jitter,
+            kill_date,
+            working_hours: (working_hours != 0).then_some(working_hours),
+            first_call_in: timestamp.clone(),
+            last_call_in: timestamp,
+            archon_magic: None,
+        },
+        legacy_ctr,
+        seq_protected,
+    ))
+}
+
 fn parse_kill_date(kill_date: u64) -> Result<Option<i64>, DemonParserError> {
     if kill_date == 0 {
         return Ok(None);

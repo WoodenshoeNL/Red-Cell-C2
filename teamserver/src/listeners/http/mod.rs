@@ -2,6 +2,7 @@
 
 mod body;
 mod dispatch;
+mod ecdh_dispatch;
 mod handler;
 mod proxy;
 
@@ -42,6 +43,9 @@ use crate::listeners::{
     DemonInitRateLimiter, ListenerManagerError, ListenerRuntimeFuture, ReconnectProbeRateLimiter,
     UnknownCallbackProbeAuditLimiter,
 };
+use base64::Engine as _;
+use red_cell_common::crypto::ecdh::ListenerKeypair;
+
 use crate::{
     AgentRegistry, CommandDispatcher, Database, DemonInitSecretConfig, DemonPacketParser,
     PluginRuntime, ShutdownController, SocketRelayManager, dispatch::DownloadTracker,
@@ -73,6 +77,8 @@ pub(super) struct HttpListenerState {
     pub(super) response_body: Arc<[u8]>,
     pub(super) default_fake_404_body: Arc<[u8]>,
     pub(super) shutdown: ShutdownController,
+    /// X25519 keypair for ECDH new-protocol listeners. `None` for legacy listeners.
+    pub(super) listener_keypair: Option<ListenerKeypair>,
 }
 
 pub(super) struct ExpectedHeader {
@@ -99,6 +105,7 @@ impl HttpListenerState {
         init_secret_config: DemonInitSecretConfig,
         max_pivot_chain_depth: usize,
         allow_legacy_ctr: bool,
+        listener_keypair: Option<ListenerKeypair>,
     ) -> Result<Self, ListenerManagerError> {
         let method = parse_method(config)?;
         let trusted_proxy_peers = parse_trusted_proxy_peers(config)?;
@@ -152,6 +159,7 @@ impl HttpListenerState {
             response_body,
             default_fake_404_body: DEFAULT_FAKE_404_BODY.as_bytes().to_vec().into(),
             shutdown,
+            listener_keypair,
         })
     }
 
@@ -200,6 +208,27 @@ pub(super) async fn spawn_http_listener_runtime(
     tls_configs: Arc<RwLock<HashMap<String, RustlsConfig>>>,
     watcher_handles: Arc<RwLock<HashMap<String, JoinHandle<()>>>>,
 ) -> Result<ListenerRuntimeFuture, ListenerManagerError> {
+    // For non-legacy listeners, load (or generate) the ECDH keypair so Phantom/Specter
+    // agents can use the new-protocol encrypted transport.
+    let listener_keypair = if !config.legacy_mode {
+        match database.ecdh().get_or_create_keypair(&config.name).await {
+            Ok(kp) => {
+                tracing::info!(
+                    listener = %config.name,
+                    public_key = %base64::engine::general_purpose::STANDARD.encode(kp.public_bytes),
+                    "ECDH listener keypair ready"
+                );
+                Some(kp)
+            }
+            Err(e) => {
+                tracing::warn!(listener = %config.name, error = %e, "failed to load ECDH keypair — new-protocol agents will be rejected");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let state = Arc::new(HttpListenerState::build(
         config,
         registry,
@@ -215,6 +244,7 @@ pub(super) async fn spawn_http_listener_runtime(
         init_secret_config,
         max_pivot_chain_depth,
         allow_legacy_ctr,
+        listener_keypair,
     )?);
     let address = format!("{}:{}", config.host_bind, config.port_bind);
     let listener = TcpListener::bind(address.as_str()).await.map_err(|error| {

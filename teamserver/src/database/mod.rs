@@ -13,6 +13,7 @@ pub mod audit;
 pub mod audit_pruner;
 pub mod backup;
 pub mod crypto;
+pub mod ecdh;
 pub mod error;
 pub mod health;
 pub mod jobs;
@@ -48,6 +49,7 @@ pub use listeners::{
 pub use loot::{LootFilter, LootRecord, LootRepository};
 pub use operators::{OperatorRepository, PersistedOperator};
 pub use write_queue::{DEFAULT_WRITE_QUEUE_CAPACITY, DeferredWrite, WriteQueue};
+pub use ecdh::EcdhRepository;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
@@ -187,6 +189,12 @@ impl Database {
     #[must_use]
     pub fn listener_access(&self) -> ListenerAccessRepository {
         ListenerAccessRepository::new(self.pool.clone())
+    }
+
+    /// Access ECDH listener keypair and session persistence methods.
+    #[must_use]
+    pub fn ecdh(&self) -> EcdhRepository {
+        EcdhRepository::new(self.pool.clone(), Arc::clone(&self.master_key))
     }
 
     /// Close the SQLite pool and wait for all checked-out connections to return.

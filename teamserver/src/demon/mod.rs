@@ -7,6 +7,7 @@ mod parser;
 mod types;
 
 pub use ack::{build_init_ack, build_reconnect_ack};
+pub(crate) use init::parse_ecdh_agent_metadata;
 pub use parser::DemonPacketParser;
 pub use types::{
     DemonCallbackPackage, DemonInitSecretConfig, DemonParserError, INIT_EXT_MONOTONIC_CTR,

@@ -17,6 +17,7 @@ use super::body::{
     allow_demon_init_for_ip, collect_body_with_magic_precheck, is_valid_callback_request,
 };
 use super::dispatch::{DemonHttpDisposition, process_demon_transport};
+use super::ecdh_dispatch::process_ecdh_packet;
 use super::proxy::extract_external_ip;
 
 pub(super) async fn http_listener_handler(
@@ -61,6 +62,37 @@ pub(super) async fn http_listener_handler(
     let Some(_callback_guard) = state.shutdown.try_track_callback() else {
         return state.fake_404_response();
     };
+
+    // For non-legacy listeners, try ECDH (Phantom/Specter new-protocol) first.
+    if !state.config.legacy_mode {
+        match process_ecdh_packet(
+            &state.config.name,
+            state.listener_keypair.as_ref(),
+            &state.registry,
+            &state.database,
+            &state.events,
+            &state.dispatcher,
+            body.as_ref(),
+            external_ip,
+        )
+        .await
+        {
+            Ok(Some(ecdh_resp)) => {
+                return if ecdh_resp.payload.is_empty() {
+                    state.callback_empty_response()
+                } else {
+                    state.callback_bytes_response(&ecdh_resp.payload)
+                };
+            }
+            Ok(None) => {
+                // Not an ECDH packet — fall through to Archon handler below.
+            }
+            Err(error) => {
+                warn!(listener = %state.config.name, %error, "ECDH packet processing failed");
+                return state.fake_404_response();
+            }
+        }
+    }
 
     if !allow_demon_init_for_ip(
         &state.config.name,

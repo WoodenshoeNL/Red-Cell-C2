@@ -1,0 +1,276 @@
+//! Database persistence for ECDH listener keypairs and agent session tokens.
+
+use std::sync::Arc;
+
+use base64::Engine as _;
+use sqlx::SqlitePool;
+use tracing::instrument;
+
+use red_cell_common::crypto::ecdh::{ConnectionId, ListenerKeypair, CONNECTION_ID_LEN};
+
+use super::crypto::DbMasterKey;
+use super::error::TeamserverError;
+
+/// Repository for ECDH listener keypairs and session tokens.
+#[derive(Clone, Debug)]
+pub struct EcdhRepository {
+    pool: SqlitePool,
+    master_key: Arc<DbMasterKey>,
+}
+
+impl EcdhRepository {
+    pub fn new(pool: SqlitePool, master_key: Arc<DbMasterKey>) -> Self {
+        Self { pool, master_key }
+    }
+
+    // ─── Listener keypairs ─────────────────────────────────────────────────────
+
+    /// Return the existing X25519 keypair for a listener, or generate and persist a new one.
+    #[instrument(skip(self), fields(listener = listener_name))]
+    pub async fn get_or_create_keypair(
+        &self,
+        listener_name: &str,
+    ) -> Result<ListenerKeypair, TeamserverError> {
+        if let Some(kp) = self.get_keypair(listener_name).await? {
+            return Ok(kp);
+        }
+
+        let kp = ListenerKeypair::generate()
+            .map_err(|e| TeamserverError::Internal(format!("ECDH keypair generation: {e}")))?;
+
+        let secret_enc = self.master_key.encrypt(&kp.secret_bytes).map_err(|e| {
+            TeamserverError::Internal(format!("encrypt listener keypair: {e}"))
+        })?;
+        let public_b64 =
+            base64::engine::general_purpose::STANDARD.encode(kp.public_bytes);
+
+        sqlx::query(
+            "INSERT OR IGNORE INTO ts_listener_keypairs \
+             (listener_name, secret_key_enc, public_key) VALUES (?, ?, ?)",
+        )
+        .bind(listener_name)
+        .bind(&secret_enc)
+        .bind(&public_b64)
+        .execute(&self.pool)
+        .await
+        .map_err(TeamserverError::Sqlx)?;
+
+        // Race: if INSERT OR IGNORE was a no-op, load the winner's row.
+        self.get_keypair(listener_name).await?.ok_or_else(|| {
+            TeamserverError::Internal("ECDH keypair race: row missing after INSERT OR IGNORE".into())
+        })
+    }
+
+    /// Load the persisted X25519 keypair for a listener, if one exists.
+    pub async fn get_keypair(
+        &self,
+        listener_name: &str,
+    ) -> Result<Option<ListenerKeypair>, TeamserverError> {
+        let row: Option<(String, String)> = sqlx::query_as(
+            "SELECT secret_key_enc, public_key FROM ts_listener_keypairs WHERE listener_name = ?",
+        )
+        .bind(listener_name)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(TeamserverError::Sqlx)?;
+
+        let Some((secret_enc, _public_b64)) = row else {
+            return Ok(None);
+        };
+
+        let secret_bytes = self
+            .master_key
+            .decrypt(&secret_enc)
+            .map_err(|e| TeamserverError::Internal(format!("decrypt listener keypair: {e}")))?;
+
+        let secret_arr: [u8; 32] = secret_bytes.as_slice().try_into().map_err(|_| {
+            TeamserverError::Internal("persisted listener secret key has wrong length".into())
+        })?;
+
+        Ok(Some(ListenerKeypair::from_bytes(secret_arr)))
+    }
+
+    // ─── ECDH sessions ─────────────────────────────────────────────────────────
+
+    /// Persist a new ECDH session (connection_id → agent_id + session_key).
+    pub async fn store_session(
+        &self,
+        connection_id: &ConnectionId,
+        agent_id: u32,
+        session_key: &[u8; 32],
+    ) -> Result<(), TeamserverError> {
+        let key_enc = self.master_key.encrypt(session_key).map_err(|e| {
+            TeamserverError::Internal(format!("encrypt ECDH session key: {e}"))
+        })?;
+
+        let now = now_secs();
+        sqlx::query(
+            "INSERT INTO ts_ecdh_sessions \
+             (connection_id, agent_id, session_key_enc, created_at, last_seen) \
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(connection_id.0.as_slice())
+        .bind(i64::from(agent_id))
+        .bind(&key_enc)
+        .bind(now)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .map_err(TeamserverError::Sqlx)?;
+
+        Ok(())
+    }
+
+    /// Look up a session by its `connection_id`.  Returns `(agent_id, session_key)`.
+    pub async fn lookup_session(
+        &self,
+        connection_id_bytes: &[u8; CONNECTION_ID_LEN],
+    ) -> Result<Option<(u32, [u8; 32])>, TeamserverError> {
+        let row: Option<(i64, String)> = sqlx::query_as(
+            "SELECT agent_id, session_key_enc FROM ts_ecdh_sessions WHERE connection_id = ?",
+        )
+        .bind(connection_id_bytes.as_slice())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(TeamserverError::Sqlx)?;
+
+        let Some((agent_id_i64, key_enc)) = row else {
+            return Ok(None);
+        };
+
+        let agent_id = u32::try_from(agent_id_i64)
+            .map_err(|_| TeamserverError::Internal("ECDH session agent_id overflow".into()))?;
+
+        let key_bytes = self
+            .master_key
+            .decrypt(&key_enc)
+            .map_err(|e| TeamserverError::Internal(format!("decrypt ECDH session key: {e}")))?;
+
+        let session_key: [u8; 32] = key_bytes.as_slice().try_into().map_err(|_| {
+            TeamserverError::Internal("persisted ECDH session key has wrong length".into())
+        })?;
+
+        Ok(Some((agent_id, session_key)))
+    }
+
+    /// Update the `last_seen` timestamp for a session.
+    pub async fn touch_session(
+        &self,
+        connection_id_bytes: &[u8; CONNECTION_ID_LEN],
+    ) -> Result<(), TeamserverError> {
+        sqlx::query(
+            "UPDATE ts_ecdh_sessions SET last_seen = ? WHERE connection_id = ?",
+        )
+        .bind(now_secs())
+        .bind(connection_id_bytes.as_slice())
+        .execute(&self.pool)
+        .await
+        .map_err(TeamserverError::Sqlx)?;
+        Ok(())
+    }
+
+    /// Delete all sessions for an agent (used when an agent is deregistered).
+    pub async fn delete_sessions_for_agent(
+        &self,
+        agent_id: u32,
+    ) -> Result<(), TeamserverError> {
+        sqlx::query("DELETE FROM ts_ecdh_sessions WHERE agent_id = ?")
+            .bind(i64::from(agent_id))
+            .execute(&self.pool)
+            .await
+            .map_err(TeamserverError::Sqlx)?;
+        Ok(())
+    }
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::database::{Database, DbMasterKey};
+
+    async fn test_db() -> (Database, Arc<DbMasterKey>) {
+        let db = Database::connect_in_memory().await.expect("db");
+        let master_key = Arc::new(DbMasterKey::random().expect("master key"));
+        (db, master_key)
+    }
+
+    #[tokio::test]
+    async fn get_or_create_keypair_is_idempotent() {
+        let (db, master_key) = test_db().await;
+        let repo = EcdhRepository::new(db.pool().clone(), master_key);
+
+        let kp1 = repo.get_or_create_keypair("test-listener").await.expect("kp1");
+        let kp2 = repo.get_or_create_keypair("test-listener").await.expect("kp2");
+        assert_eq!(kp1.public_bytes, kp2.public_bytes);
+    }
+
+    #[tokio::test]
+    async fn different_listeners_get_different_keypairs() {
+        let (db, master_key) = test_db().await;
+        let repo = EcdhRepository::new(db.pool().clone(), master_key);
+
+        let kp1 = repo.get_or_create_keypair("listener-a").await.expect("kp1");
+        let kp2 = repo.get_or_create_keypair("listener-b").await.expect("kp2");
+        assert_ne!(kp1.public_bytes, kp2.public_bytes);
+    }
+
+    #[tokio::test]
+    async fn store_and_lookup_session() {
+        let (db, master_key) = test_db().await;
+        let repo = EcdhRepository::new(db.pool().clone(), master_key);
+
+        let conn_id = ConnectionId::generate().expect("conn_id");
+        let agent_id = 0x1234_5678_u32;
+        let session_key = [0xAB_u8; 32];
+
+        repo.store_session(&conn_id, agent_id, &session_key).await.expect("store");
+
+        let result = repo.lookup_session(&conn_id.0).await.expect("lookup");
+        let (found_agent_id, found_key) = result.expect("Some");
+        assert_eq!(found_agent_id, agent_id);
+        assert_eq!(found_key, session_key);
+    }
+
+    #[tokio::test]
+    async fn lookup_missing_session_returns_none() {
+        let (db, master_key) = test_db().await;
+        let repo = EcdhRepository::new(db.pool().clone(), master_key);
+
+        let result = repo.lookup_session(&[0u8; 16]).await.expect("lookup");
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn touch_session_updates_last_seen() {
+        let (db, master_key) = test_db().await;
+        let repo = EcdhRepository::new(db.pool().clone(), master_key);
+
+        let conn_id = ConnectionId::generate().expect("conn_id");
+        repo.store_session(&conn_id, 1, &[0u8; 32]).await.expect("store");
+        repo.touch_session(&conn_id.0).await.expect("touch");
+        // Just verify it doesn't error; timing is non-deterministic in tests.
+    }
+
+    #[tokio::test]
+    async fn delete_sessions_for_agent() {
+        let (db, master_key) = test_db().await;
+        let repo = EcdhRepository::new(db.pool().clone(), master_key);
+
+        let conn_id = ConnectionId::generate().expect("conn_id");
+        repo.store_session(&conn_id, 42, &[0u8; 32]).await.expect("store");
+
+        // Verify it's there before deletion.
+        assert!(repo.lookup_session(&conn_id.0).await.expect("lookup").is_some());
+
+        repo.delete_sessions_for_agent(42).await.expect("delete");
+
+        assert!(repo.lookup_session(&conn_id.0).await.expect("lookup").is_none());
+    }
+}

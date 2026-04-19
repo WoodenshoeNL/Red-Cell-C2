@@ -206,12 +206,11 @@ impl PluginRuntime {
         Ok(runtime)
     }
 
-    /// Load all `.py` modules from the configured plugins directory.
-    #[instrument(skip(self))]
     /// Load all Python plugins from the configured plugin directory.
     ///
     /// Returns `(loaded_names, failed_count)` where `failed_count` is the number
     /// of `.py` files that were found but could not be loaded successfully.
+    #[instrument(skip(self))]
     pub async fn load_plugins(&self) -> Result<(Vec<String>, u32), PluginError> {
         let Some(directory) = self.inner.plugins_dir.clone() else {
             return Ok((Vec::new(), 0));

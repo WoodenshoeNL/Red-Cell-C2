@@ -34,6 +34,13 @@ DEFAULT_SLEEP = {
     "quality":     30 * 60,    # 30 minutes
     "coverage":    30 * 60,    # 30 minutes
     "maintenance": 60 * 60,    # 60 minutes
+    "feature":     0,          # default iterations=1, so sleep is irrelevant
+}
+
+# Loop types that default to 1 iteration instead of running forever.
+# User can override with --iterations N; --iterations 0 means unlimited.
+DEFAULT_ITERATIONS = {
+    "feature": 1,
 }
 
 # Dev loop timing constants (seconds)
@@ -62,16 +69,21 @@ DEV_PROMPTS = {
     "cursor": "prompts/CURSOR_PROMPT.md",
 }
 
+# Lite QA prompt run after each dev task (agent-independent)
+DEV_LITEQA_PROMPT = "prompts/DEV_LITEQA_PROMPT.md"
+DEV_LITEQA_MAX_TURNS = 50
+
 # Review loops use a single best-of prompt per loop type (agent-independent)
 REVIEW_PROMPTS = {
     "qa":       "prompts/CLAUDE_PROMPT.md",        # identical across agents
     "arch":     "prompts/CLAUDE_ARCH_PROMPT.md",   # Claude version is more thorough
     "quality":  "prompts/CLAUDE_TEST_PROMPT.md",   # quality-focused test review
     "coverage": "prompts/CODEX_TEST_PROMPT.md",    # breadth-focused coverage scan
+    "feature":  "prompts/CLAUDE_FEATURE_PROMPT.md", # feature completeness + integration gaps
 }
 
 # Review loop types that write a per-run timestamped log in addition to the rolling log
-PER_RUN_LOG_LOOPS = {"arch", "quality", "coverage"}
+PER_RUN_LOG_LOOPS = {"arch", "quality", "coverage", "feature"}
 
 
 # ── Logging ────────────────────────────────────────────────────────────────────
@@ -1266,6 +1278,7 @@ def dev_loop(args, log: Logger):
     iteration = 0
 
     zone_desc = ", ".join(zones) if zones else "all zones"
+    lite_qa_mode = "off (--dev-light)" if getattr(args, "dev_light", False) else "on"
     log.banner([
         f"{agent.title()} development loop starting",
         f"Agent ID:  {agent_id}",
@@ -1274,6 +1287,7 @@ def dev_loop(args, log: Logger):
         f"Max runs:  {'unlimited' if max_iters == 0 else max_iters}",
         f"Stale thr: {args.stale_threshold}m",
         f"Zones:     {zone_desc}",
+        f"Lite QA:   {lite_qa_mode}",
     ])
 
     lock_path = SCRIPT_DIR / ".agent-claim.lock"
@@ -1487,6 +1501,8 @@ Start directly with understanding the task and implementing it.
                 dev_extra_env["CARGO_TARGET_DIR"] = str(zone_target)
                 log.log(f"CARGO_TARGET_DIR: {zone_target}")
 
+        before_sha = git(["rev-parse", "HEAD"]).stdout.strip()
+
         log.log(f"Running {agent.title()} on task {next_id}...")
         exit_code, output, result_subtype = run_agent(
             agent, args.model, runtime_prompt, log,
@@ -1559,6 +1575,35 @@ Start directly with understanding the task and implementing it.
                 else:
                     log.log("WARNING: WIP commit failed — unstaging")
                     git(["restore", "--staged", "."])
+
+        # Lite QA: second agent pass reviewing code quality of this task's changes.
+        # Skipped when --dev-light is set, or when the dev run was incomplete
+        # (max turns hit, token limit, or rate limited).
+        if (
+            not getattr(args, "dev_light", False)
+            and not max_turns_hit
+            and not token_limit_hit
+        ):
+            liteqa_prompt_file = SCRIPT_DIR / DEV_LITEQA_PROMPT
+            if liteqa_prompt_file.exists():
+                liteqa_template = liteqa_prompt_file.read_text()
+                issue_details = br(["show", next_id]).stdout.strip() or f"Issue ID: {next_id}"
+                liteqa_prompt = liteqa_template.replace("{ISSUE_ID}", next_id) \
+                                               .replace("{BEFORE_SHA}", before_sha or "HEAD~1") \
+                                               .replace("{AGENT_ID}", agent_id)
+                liteqa_prompt += f"\n\n---\n\n## Issue Details\n\n{issue_details}\n"
+                log.log(f"Running lite QA on task {next_id} (range: {(before_sha or 'HEAD~1')[:8]}..HEAD)...")
+                lq_exit, lq_output, _ = run_agent(
+                    agent, args.model, liteqa_prompt, log,
+                    max_turns=DEV_LITEQA_MAX_TURNS if agent == "claude" else 0,
+                    extra_env=dev_extra_env or None,
+                )
+                if lq_exit != 0:
+                    log.log(f"WARNING: lite QA exited with code {lq_exit}")
+                else:
+                    log.log(f"Lite QA completed for task {next_id}")
+            else:
+                log.log(f"WARNING: lite QA prompt not found at {liteqa_prompt_file} — skipping")
 
         final_status = issue_status_from_jsonl(next_id)
         if final_status == "in_progress":
@@ -2046,6 +2091,85 @@ def create_review_worktree(loop_type: str, log: Logger) -> Path | None:
     return tmp
 
 
+def harvest_worktree_beads(worktree_path: Path, log: Logger):
+    """
+    Append any new issues created by a review agent in its worktree to the main
+    repo's .beads/issues.jsonl, then commit and push.
+
+    Safe under concurrent dev loops: we only append lines whose ID is not already
+    present in the main JSONL, so existing issue updates from other agents are
+    never overwritten.
+    """
+    import json
+
+    worktree_jsonl = worktree_path / ".beads" / "issues.jsonl"
+    main_jsonl     = SCRIPT_DIR / ".beads" / "issues.jsonl"
+
+    # Flush the worktree DB → JSONL so the agent's br create calls are visible.
+    r = subprocess.run(
+        ["br", "sync", "--flush-only", "--quiet"],
+        capture_output=True, cwd=str(worktree_path),
+    )
+    if r.returncode != 0 or not worktree_jsonl.exists():
+        log.log("harvest: br sync in worktree failed or no JSONL — skipping")
+        return
+
+    # Collect IDs already known to the main repo.
+    main_ids: set[str] = set()
+    if main_jsonl.exists():
+        for line in main_jsonl.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                main_ids.add(json.loads(line)["id"])
+            except (json.JSONDecodeError, KeyError):
+                pass
+
+    # Find lines in the worktree JSONL whose ID is new.
+    new_lines: list[str] = []
+    for line in worktree_jsonl.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            if json.loads(line)["id"] not in main_ids:
+                new_lines.append(line)
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    if not new_lines:
+        log.log("harvest: no new issues to harvest from worktree")
+        return
+
+    # Append new lines to main JSONL, import into main DB, commit, push.
+    with main_jsonl.open("a") as fh:
+        for line in new_lines:
+            fh.write(line + "\n")
+
+    subprocess.run(["br", "sync", "--import-only", "--quiet"], cwd=str(SCRIPT_DIR))
+
+    git(["add", ".beads/issues.jsonl"])
+    ids_str = ", ".join(
+        json.loads(l)["id"] for l in new_lines
+    )
+    msg = f"chore: harvest {len(new_lines)} issue(s) from review worktree ({ids_str})"
+    if git(["commit", "-m", msg, "--quiet"]).returncode != 0:
+        git(["restore", "--staged", ".beads/issues.jsonl"])
+        log.log("harvest: commit failed — changes unstaged")
+        return
+
+    retries = 3
+    for attempt in range(retries):
+        git(["pull", "--rebase", "--quiet"])
+        if git(["push", "--quiet"]).returncode == 0:
+            log.log(f"harvest: pushed {len(new_lines)} new issue(s): {ids_str}")
+            return
+        log.log(f"harvest: push attempt {attempt + 1}/{retries} failed, retrying")
+
+    log.log(f"WARNING: harvest: could not push after {retries} attempts — issues saved locally")
+
+
 def remove_review_worktree(worktree_path: Path, log: Logger):
     """Remove a review worktree (but leave the shared cargo target dir intact)."""
     import shutil
@@ -2140,6 +2264,7 @@ def review_loop(args, log: Logger):
         )
 
         if worktree_path:
+            harvest_worktree_beads(worktree_path, log)
             remove_review_worktree(worktree_path, log)
 
         if exit_code != 0:
@@ -2175,12 +2300,13 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 loop types:
-  dev          Development — claims beads tasks and implements them
+  dev          Development — claims beads tasks, implements them, then runs a lite QA pass
   qa           QA review   — reviews recent commits, files issues (default sleep: 20m)
   arch         Architecture review — deep full-codebase analysis  (default sleep: 120m)
   quality      Test quality review — evaluates quality of existing tests (default sleep: 30m)
   coverage     Test coverage scan  — finds untested public functions    (default sleep: 30m)
   maintenance  Infrastructure health — disk, git, process checks       (default sleep: 60m)
+  feature      Feature completeness — what's planned vs built, integration gaps (default: 1 run)
 
 examples:
   ./loop.py --agent claude --loop dev
@@ -2188,6 +2314,7 @@ examples:
   ./loop.py --agent codex  --loop dev  --zone teamserver
   ./loop.py --agent cursor --loop dev  --zone client-cli client
   ./loop.py --agent claude --loop dev  --sleep 0 --iterations 1
+  ./loop.py --agent claude --loop dev  --dev-light          # skip lite QA (original behaviour)
   ./loop.py --agent codex  --loop qa   --sleep 20
   ./loop.py --agent claude --loop arch --zone teamserver
   ./loop.py --agent claude --loop arch --sleep 120 --jitter 15
@@ -2195,6 +2322,9 @@ examples:
   ./loop.py --agent claude --loop dev  --pre-sleep 5 --model claude-opus-4-6
   ./loop.py --loop maintenance                        # hourly health checks
   ./loop.py --loop maintenance --sleep 30             # every 30 minutes
+  ./loop.py --agent claude --loop feature --zone teamserver client-cli
+  ./loop.py --agent claude --loop feature --zone teamserver phantom
+  ./loop.py --agent claude --loop feature --zone teamserver  # single zone
 """,
     )
     parser.add_argument(
@@ -2205,7 +2335,7 @@ examples:
     )
     parser.add_argument(
         "--loop",
-        choices=["dev", "qa", "arch", "quality", "coverage", "maintenance"],
+        choices=["dev", "qa", "arch", "quality", "coverage", "maintenance", "feature"],
         default="dev",
         help="Loop type to run (default: dev)",
     )
@@ -2229,8 +2359,11 @@ examples:
     )
     parser.add_argument(
         "--iterations",
-        type=int, default=0, metavar="N",
-        help="Max iterations before exit; 0 = run forever (default: 0)",
+        type=int, default=None, metavar="N",
+        help=(
+            "Max iterations before exit; 0 = run forever. "
+            "Default varies by loop type: feature=1, all others=0 (unlimited)."
+        ),
     )
     parser.add_argument(
         "--model",
@@ -2270,6 +2403,15 @@ examples:
             "Can also be set via the RC_NODE_ID environment variable. "
             "Default: socket.gethostname(). "
             "Example: --node-id desktop-dev01  →  tags become [desktop-dev01-claude]"
+        ),
+    )
+    parser.add_argument(
+        "--dev-light",
+        action="store_true",
+        default=False,
+        help=(
+            "Dev loop only: skip the lite QA pass after each task. "
+            "Use this to get the original single-agent-call behaviour."
         ),
     )
     return parser.parse_args()
@@ -2317,6 +2459,10 @@ def main():
     if args.model and args.agent != "claude":
         print("ERROR: --model is only applicable with --agent claude", file=sys.stderr)
         sys.exit(1)
+
+    # Resolve --iterations default (None means "use loop-type default")
+    if args.iterations is None:
+        args.iterations = DEFAULT_ITERATIONS.get(args.loop, 0)
 
     node_id = resolve_node_id(args)
     args._node_id_resolved = node_id   # stash for dev_loop / review_loop

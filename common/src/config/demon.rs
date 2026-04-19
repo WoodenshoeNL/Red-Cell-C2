@@ -43,6 +43,19 @@ impl fmt::Debug for VersionedInitSecret {
     }
 }
 
+/// Job execution mode for Archon post-exploitation commands (ARC-09).
+///
+/// - `Thread` (default): spawns a new OS thread per job (Demon-compatible).
+/// - `Threadpool`: queues each job onto the NT thread pool, suppressing new
+///   thread creation to defeat thread-count anomaly detectors.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum JobExecutionMode {
+    #[default]
+    Thread,
+    Threadpool,
+}
+
 /// Demon build-time defaults and injection settings.
 #[derive(Clone, PartialEq, Eq, Deserialize)]
 pub struct DemonConfig {
@@ -169,16 +182,9 @@ pub struct DemonConfig {
     pub allow_legacy_ctr: bool,
     /// Job execution mode for post-exploitation commands (ARC-09).
     ///
-    /// - `"thread"` (default): spawns a new OS thread per job (Demon-compatible).
-    /// - `"threadpool"`: queues each job onto the NT thread pool, suppressing new
-    ///   thread creation to defeat thread-count anomaly detectors.
-    ///
-    /// HCL profile key: `JobExecution` (string, default `"thread"`).
-    #[serde(
-        rename = "JobExecution",
-        default = "crate::config::serde_helpers::default_job_execution"
-    )]
-    pub job_execution: String,
+    /// HCL profile key: `JobExecution` (accepted values: `"thread"`, `"threadpool"`).
+    #[serde(rename = "JobExecution", default)]
+    pub job_execution: JobExecutionMode,
     /// Optional victim DLL name for module-stomping injection (ARC-05).
     ///
     /// When set (e.g. `"WINMM.DLL"`), Archon searches the PEB

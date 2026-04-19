@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use red_cell_common::ListenerConfig;
-use red_cell_common::config::{BinaryConfig, DemonConfig, Profile};
+use red_cell_common::config::{BinaryConfig, DemonConfig, JobExecutionMode, Profile};
 use red_cell_common::operator::{BuildPayloadRequestInfo, CompilerDiagnostic};
 use tempfile::TempDir;
 use thiserror::Error;
@@ -447,7 +447,7 @@ impl PayloadBuilderService {
                     trusted_proxy_peers: Vec::new(),
                     heap_enc: true,
                     allow_legacy_ctr: false,
-                    job_execution: "thread".to_owned(),
+                    job_execution: JobExecutionMode::Thread,
                     stomp_dll: None,
                 },
                 binary_patch: None,

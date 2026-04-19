@@ -1,5 +1,5 @@
 use super::*;
-use red_cell_common::config::DemonConfig;
+use red_cell_common::config::{DemonConfig, JobExecutionMode};
 
 /// Build a minimal source tree and return (service, listener, request).
 ///
@@ -83,7 +83,7 @@ fn setup_build_fixture(
             trusted_proxy_peers: Vec::new(),
             heap_enc: true,
             allow_legacy_ctr: false,
-            job_execution: "thread".to_owned(),
+            job_execution: JobExecutionMode::Thread,
             stomp_dll: None,
         },
         None,
@@ -452,7 +452,7 @@ async fn build_payload_uses_toolchain_and_returns_compiled_bytes()
             trusted_proxy_peers: Vec::new(),
             heap_enc: true,
             allow_legacy_ctr: false,
-            job_execution: "thread".to_owned(),
+            job_execution: JobExecutionMode::Thread,
             stomp_dll: None,
         },
         None,
@@ -603,7 +603,7 @@ async fn build_payload_x86_uses_x86_compiler_and_win32_nasm_format()
             trusted_proxy_peers: Vec::new(),
             heap_enc: true,
             allow_legacy_ctr: false,
-            job_execution: "thread".to_owned(),
+            job_execution: JobExecutionMode::Thread,
             stomp_dll: None,
         },
         None,
@@ -1234,7 +1234,7 @@ async fn build_stager_x86_uses_underscore_entry_point() -> Result<(), Box<dyn st
             trusted_proxy_peers: Vec::new(),
             heap_enc: true,
             allow_legacy_ctr: false,
-            job_execution: "thread".to_owned(),
+            job_execution: JobExecutionMode::Thread,
             stomp_dll: None,
         },
         None,

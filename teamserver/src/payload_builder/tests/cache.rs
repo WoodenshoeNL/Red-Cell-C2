@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use super::*;
+use red_cell_common::config::JobExecutionMode;
 
 fn test_cache_key(hex: &str, ext: &'static str) -> CacheKey {
     CacheKey { hex: hex.to_owned(), ext }
@@ -78,7 +79,7 @@ async fn cache_accessor_observes_external_mutations() {
             trusted_proxy_peers: Vec::new(),
             heap_enc: true,
             allow_legacy_ctr: false,
-            job_execution: "thread".to_owned(),
+            job_execution: JobExecutionMode::Thread,
             stomp_dll: None,
         },
         None,

@@ -611,7 +611,7 @@ fn demon_config_with_secret(secret: Option<&str>) -> DemonConfig {
         trusted_proxy_peers: vec![],
         heap_enc: true,
         allow_legacy_ctr: false,
-        job_execution: "thread".to_owned(),
+        job_execution: JobExecutionMode::Thread,
         stomp_dll: None,
     }
 }
@@ -891,5 +891,77 @@ fn rejects_teamserver_with_both_blank_certificate_paths() {
     assert!(
         error.errors.iter().any(|message| message.contains("Teamserver.Cert.Key")),
         "expected Key path error, got: {error:?}"
+    );
+}
+
+#[test]
+fn job_execution_mode_thread_deserialises() {
+    const PROFILE: &str = r#"
+        Teamserver {
+          Host = "0.0.0.0"
+          Port = 40056
+        }
+        Operators {
+          user "test" { Password = "test" }
+        }
+        Demon {
+          JobExecution = "thread"
+        }
+    "#;
+    let profile = Profile::parse(PROFILE).expect("profile should parse");
+    assert_eq!(profile.demon.job_execution, JobExecutionMode::Thread);
+}
+
+#[test]
+fn job_execution_mode_threadpool_deserialises() {
+    const PROFILE: &str = r#"
+        Teamserver {
+          Host = "0.0.0.0"
+          Port = 40056
+        }
+        Operators {
+          user "test" { Password = "test" }
+        }
+        Demon {
+          JobExecution = "threadpool"
+        }
+    "#;
+    let profile = Profile::parse(PROFILE).expect("profile should parse");
+    assert_eq!(profile.demon.job_execution, JobExecutionMode::Threadpool);
+}
+
+#[test]
+fn job_execution_mode_defaults_to_thread() {
+    const PROFILE: &str = r#"
+        Teamserver {
+          Host = "0.0.0.0"
+          Port = 40056
+        }
+        Operators {
+          user "test" { Password = "test" }
+        }
+        Demon {}
+    "#;
+    let profile = Profile::parse(PROFILE).expect("profile should parse");
+    assert_eq!(profile.demon.job_execution, JobExecutionMode::Thread);
+}
+
+#[test]
+fn job_execution_mode_unknown_value_is_rejected() {
+    const PROFILE: &str = r#"
+        Teamserver {
+          Host = "0.0.0.0"
+          Port = 40056
+        }
+        Operators {
+          user "test" { Password = "test" }
+        }
+        Demon {
+          JobExecution = "threedpool"
+        }
+    "#;
+    assert!(
+        Profile::parse(PROFILE).is_err(),
+        "profile with invalid JobExecution value should fail to parse"
     );
 }

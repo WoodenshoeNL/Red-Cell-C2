@@ -1,7 +1,7 @@
 use super::super::pe_patch::parse_header_u32_field;
 use super::*;
 use red_cell_common::HttpListenerProxyConfig as DomainHttpListenerProxyConfig;
-use red_cell_common::config::DemonConfig;
+use red_cell_common::config::{DemonConfig, JobExecutionMode};
 use serde_json::{Map, Value, json};
 use zeroize::Zeroizing;
 
@@ -167,7 +167,7 @@ fn merged_request_config_applies_profile_defaults() -> Result<(), Box<dyn std::e
             trusted_proxy_peers: Vec::new(),
             heap_enc: true,
             allow_legacy_ctr: false,
-            job_execution: "thread".to_owned(),
+            job_execution: JobExecutionMode::Thread,
             stomp_dll: None,
         },
     )?;
@@ -815,7 +815,7 @@ fn merged_request_config_archon_defaults_amsi_to_patch() -> Result<(), Box<dyn s
             trusted_proxy_peers: Vec::new(),
             heap_enc: true,
             allow_legacy_ctr: false,
-            job_execution: "thread".to_owned(),
+            job_execution: JobExecutionMode::Thread,
             stomp_dll: None,
         },
     )?;
@@ -851,7 +851,7 @@ fn merged_request_config_archon_profile_amsi_overrides_default()
             trusted_proxy_peers: Vec::new(),
             heap_enc: true,
             allow_legacy_ctr: false,
-            job_execution: "thread".to_owned(),
+            job_execution: JobExecutionMode::Thread,
             stomp_dll: None,
         },
     )?;
@@ -888,7 +888,7 @@ fn merged_request_config_demon_amsi_stays_none_by_default() -> Result<(), Box<dy
             trusted_proxy_peers: Vec::new(),
             heap_enc: true,
             allow_legacy_ctr: false,
-            job_execution: "thread".to_owned(),
+            job_execution: JobExecutionMode::Thread,
             stomp_dll: None,
         },
     )?;
@@ -1053,7 +1053,7 @@ fn merged_request_config_propagates_heap_enc_false_from_profile_defaults()
             trusted_proxy_peers: Vec::new(),
             heap_enc: false,
             allow_legacy_ctr: false,
-            job_execution: "thread".to_owned(),
+            job_execution: JobExecutionMode::Thread,
             stomp_dll: None,
         },
     )?;
@@ -1214,7 +1214,7 @@ fn merged_request_config_propagates_job_execution_from_archon_profile()
             trusted_proxy_peers: Vec::new(),
             heap_enc: true,
             allow_legacy_ctr: false,
-            job_execution: "threadpool".to_owned(),
+            job_execution: JobExecutionMode::Threadpool,
             stomp_dll: None,
         },
     )?;
@@ -1245,7 +1245,7 @@ fn merged_request_config_propagates_stomp_dll_from_archon_profile()
             trusted_proxy_peers: Vec::new(),
             heap_enc: true,
             allow_legacy_ctr: false,
-            job_execution: "thread".to_owned(),
+            job_execution: JobExecutionMode::Thread,
             stomp_dll: Some("WINMM.DLL".to_owned()),
         },
     )?;
@@ -1276,7 +1276,7 @@ fn merged_request_config_does_not_propagate_archon_keys_for_demon()
             trusted_proxy_peers: Vec::new(),
             heap_enc: true,
             allow_legacy_ctr: false,
-            job_execution: "threadpool".to_owned(),
+            job_execution: JobExecutionMode::Threadpool,
             stomp_dll: Some("WINMM.DLL".to_owned()),
         },
     )?;
@@ -1310,7 +1310,7 @@ fn merged_request_config_request_overrides_profile_defaults()
             trusted_proxy_peers: Vec::new(),
             heap_enc: true,
             allow_legacy_ctr: false,
-            job_execution: "thread".to_owned(),
+            job_execution: JobExecutionMode::Thread,
             stomp_dll: None,
         },
     )?;
@@ -1346,7 +1346,7 @@ fn merged_request_config_injection_spawn_overrides_profile()
             trusted_proxy_peers: Vec::new(),
             heap_enc: true,
             allow_legacy_ctr: false,
-            job_execution: "thread".to_owned(),
+            job_execution: JobExecutionMode::Thread,
             stomp_dll: None,
         },
     )?;
@@ -1377,7 +1377,7 @@ fn merged_request_config_rejects_non_object_input() {
             trusted_proxy_peers: Vec::new(),
             heap_enc: true,
             allow_legacy_ctr: false,
-            job_execution: "thread".to_owned(),
+            job_execution: JobExecutionMode::Thread,
             stomp_dll: None,
         },
     )

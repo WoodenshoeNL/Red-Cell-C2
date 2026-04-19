@@ -13,7 +13,8 @@ mod tests;
 
 pub use api::{ApiConfig, ApiKeyConfig, DiscordWebHookConfig, ServiceConfig, WebHookConfig};
 pub use demon::{
-    BinaryConfig, DemonConfig, HeaderConfig, ProcessInjectionConfig, VersionedInitSecret,
+    BinaryConfig, DemonConfig, HeaderConfig, JobExecutionMode, ProcessInjectionConfig,
+    VersionedInitSecret,
 };
 pub use listeners::{
     DnsListenerConfig, ExternalListenerConfig, HclHttpListenerProxyConfig,

@@ -227,7 +227,9 @@ mod tests {
     // -- test helpers --
 
     fn minimal_profile_no_listeners() -> Profile {
-        use red_cell_common::config::{DemonConfig, OperatorsConfig, TeamserverConfig};
+        use red_cell_common::config::{
+            DemonConfig, JobExecutionMode, OperatorsConfig, TeamserverConfig,
+        };
 
         Profile {
             teamserver: TeamserverConfig {
@@ -269,7 +271,7 @@ mod tests {
                 trusted_proxy_peers: vec![],
                 heap_enc: true,
                 allow_legacy_ctr: false,
-                job_execution: "thread".to_owned(),
+                job_execution: JobExecutionMode::Thread,
                 stomp_dll: None,
             },
             service: None,

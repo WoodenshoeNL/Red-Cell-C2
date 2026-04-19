@@ -4,7 +4,7 @@
 //! defaults and serialises the resulting config into the compact binary layout
 //! the Demon (and Archon) implant expects at runtime.
 
-use red_cell_common::config::DemonConfig;
+use red_cell_common::config::{DemonConfig, JobExecutionMode};
 use red_cell_common::{HttpListenerConfig, ListenerConfig};
 use serde_json::{Map, Value};
 
@@ -63,7 +63,11 @@ pub(crate) fn merged_request_config(
     }
     // ARC-09: JobExecution — Archon-only, propagate profile default.
     if agent_name == "archon" && !config.contains_key("JobExecution") {
-        config.insert("JobExecution".to_owned(), Value::String(defaults.job_execution.clone()));
+        let mode_str = match defaults.job_execution {
+            JobExecutionMode::Thread => "thread",
+            JobExecutionMode::Threadpool => "threadpool",
+        };
+        config.insert("JobExecution".to_owned(), Value::String(mode_str.to_owned()));
     }
     // ARC-05: StompDll — Archon-only optional victim DLL name.
     if agent_name == "archon" && !config.contains_key("StompDll") {

@@ -16,6 +16,7 @@ use crate::{
     audit_details, build_init_ack, build_reconnect_ack,
     events::EventBus,
     parameter_object, record_operator_action,
+    sockets::AgentSocketSnapshot,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,6 +74,7 @@ pub(crate) async fn process_demon_transport(
                 init.header.magic,
                 &init.agent,
                 &pivots,
+                AgentSocketSnapshot::default(),
             ));
             let agent_id = init.agent.agent_id;
             let external_ip_for_audit = external_ip.clone();
@@ -133,6 +135,7 @@ pub(crate) async fn process_demon_transport(
                 init.header.magic,
                 &init.agent,
                 &pivots,
+                AgentSocketSnapshot::default(),
             ));
             let agent_id = init.agent.agent_id;
             let external_ip_for_audit = external_ip.clone();

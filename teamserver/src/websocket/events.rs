@@ -17,6 +17,7 @@ use red_cell_common::{AgentRecord, OperatorInfo};
 use serde_json::Value;
 use time::OffsetDateTime;
 
+use crate::sockets::AgentSocketSnapshot;
 use crate::{PivotInfo, agent_events::agent_new_event};
 
 /// Build a `TeamserverLog` event from free-form text.
@@ -86,8 +87,15 @@ pub(super) fn agent_snapshot_event(
     listener_name: &str,
     agent: &AgentRecord,
     pivots: &PivotInfo,
+    sockets: AgentSocketSnapshot,
 ) -> OperatorMessage {
-    agent_new_event(listener_name, red_cell_common::demon::DEMON_MAGIC_VALUE, agent, pivots)
+    agent_new_event(
+        listener_name,
+        red_cell_common::demon::DEMON_MAGIC_VALUE,
+        agent,
+        pivots,
+        sockets,
+    )
 }
 
 /// Build an `InitConnection` event containing the operator roster.

@@ -247,6 +247,7 @@ async fn websocket_session_snapshot_filters_listeners_and_agents_by_operator_acl
 async fn websocket_live_broadcast_filters_events_outside_operator_acl() {
     use crate::PivotInfo;
     use crate::agent_events::{agent_mark_event, agent_new_event};
+    use crate::sockets::AgentSocketSnapshot;
     use crate::{ListenerEventAction, listener_event_for_action};
 
     let state = TestState::new().await;
@@ -321,6 +322,7 @@ async fn websocket_live_broadcast_filters_events_outside_operator_acl() {
         red_cell_common::demon::DEMON_MAGIC_VALUE,
         &admin_agent,
         &pivots,
+        AgentSocketSnapshot::default(),
     ));
     events.broadcast(agent_mark_event(&admin_agent));
 
@@ -336,6 +338,7 @@ async fn websocket_live_broadcast_filters_events_outside_operator_acl() {
         red_cell_common::demon::DEMON_MAGIC_VALUE,
         &public_agent,
         &pivots,
+        AgentSocketSnapshot::default(),
     ));
 
     // Collect whatever arrives during a short window after the broadcasts.

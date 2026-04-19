@@ -6,7 +6,7 @@ use super::connection::{SendMessageError, WsSession, send_hmac_message};
 use super::events::{agent_snapshot_event, operator_snapshot_event};
 use crate::{
     AgentRegistry, AuthError, AuthService, Database, EventBus, ListenerEventAction,
-    ListenerManager, listener_event_for_action,
+    ListenerManager, SocketRelayManager, listener_event_for_action,
 };
 
 #[derive(Debug, Error)]
@@ -30,6 +30,7 @@ pub(super) async fn send_session_snapshot(
     events: &EventBus,
     listeners: &ListenerManager,
     registry: &AgentRegistry,
+    relay: &SocketRelayManager,
     database: &Database,
     username: &str,
     ws_session: &mut WsSession,
@@ -64,10 +65,11 @@ pub(super) async fn send_session_snapshot(
             continue;
         }
         let pivots = registry.pivots(agent.agent_id).await;
+        let socket_snapshot = relay.agent_socket_snapshot(agent.agent_id).await;
         let display_listener = listener_name.unwrap_or_else(|| "null".to_owned());
         send_hmac_message(
             socket,
-            &agent_snapshot_event(&display_listener, &agent, &pivots),
+            &agent_snapshot_event(&display_listener, &agent, &pivots, socket_snapshot),
             ws_session,
         )
         .await?;

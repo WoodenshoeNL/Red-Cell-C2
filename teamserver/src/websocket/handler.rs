@@ -199,6 +199,7 @@ where
         &event_bus,
         &ListenerManager::from_ref(&state),
         &registry,
+        &SocketRelayManager::from_ref(&state),
         &database,
         &session.username,
         &mut ws_session,

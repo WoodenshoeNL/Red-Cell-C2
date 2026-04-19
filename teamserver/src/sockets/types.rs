@@ -113,10 +113,31 @@ pub enum SocketRelayError {
 
 // ── Internal types ──────────────────────────────────────────────────────────
 
+/// A point-in-time snapshot of an agent's active socket relay state.
+///
+/// Populated by [`super::SocketRelayManager::agent_socket_snapshot`] and used to fill
+/// the `PortFwds`, `SocksCli`, and `SocksSvr` fields in the operator agent info.
+#[derive(Clone, Debug, Default)]
+pub struct AgentSocketSnapshot {
+    /// Formatted strings for each active reverse port forward, e.g. `"127.0.0.1:8080 -> 10.0.0.1:80"`.
+    pub port_fwds: Vec<String>,
+    /// Formatted strings for each active SOCKS5 relay server listener, e.g. `"127.0.0.1:1080"`.
+    pub socks_svr: Vec<String>,
+    /// Formatted strings for each pending/connected SOCKS5 client session.
+    pub socks_cli: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct PortFwdEntry {
+    pub(super) display: String,
+}
+
 #[derive(Debug, Default)]
 pub(super) struct AgentSocketState {
     pub(super) servers: BTreeMap<u16, SocksServerHandle>,
     pub(super) clients: HashMap<u32, PendingClient>,
+    /// Active reverse port forwards, keyed by socket ID.
+    pub(super) port_fwds: BTreeMap<u32, PortFwdEntry>,
 }
 
 #[derive(Debug)]

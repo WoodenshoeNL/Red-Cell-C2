@@ -17,10 +17,10 @@ use tracing::warn;
 use crate::{AgentRegistry, EventBus};
 
 use cleanup::{close_agent_state, spawn_stale_agent_sweeper};
-pub use types::SocketRelayError;
+pub use types::{AgentSocketSnapshot, SocketRelayError};
 use types::{
-    AgentSocketState, MAX_RELAY_LISTENERS, RelayStateSweeper, SOCKS_REPLY_GENERAL_FAILURE,
-    SOCKS_REPLY_SUCCEEDED, SocksServerHandle, parse_port,
+    AgentSocketState, MAX_RELAY_LISTENERS, PortFwdEntry, RelayStateSweeper,
+    SOCKS_REPLY_GENERAL_FAILURE, SOCKS_REPLY_SUCCEEDED, SocksServerHandle, parse_port,
 };
 
 /// Teamserver-owned SOCKS5 listeners and pending reverse-proxy client sockets.
@@ -320,6 +320,70 @@ impl SocketRelayManager {
             warn!(agent_id = format_args!("{agent_id:08X}"), socket_id = format_args!("{socket_id:08X}"), %error, "SOCKS5 close_client: writer shutdown failed");
         }
         Ok(())
+    }
+
+    /// Record an active reverse port forward for an agent.
+    pub async fn add_port_fwd(&self, agent_id: u32, socket_id: u32, display: String) {
+        let mut state = self.state.write().await;
+        let agent_state = state.entry(agent_id).or_default();
+        agent_state.port_fwds.insert(socket_id, PortFwdEntry { display });
+    }
+
+    /// Remove a single reverse port forward record for an agent.
+    pub async fn remove_port_fwd(&self, agent_id: u32, socket_id: u32) {
+        let mut state = self.state.write().await;
+        if let Some(agent_state) = state.get_mut(&agent_id) {
+            agent_state.port_fwds.remove(&socket_id);
+        }
+    }
+
+    /// Remove all reverse port forward records for an agent.
+    pub async fn clear_port_fwds(&self, agent_id: u32) {
+        let mut state = self.state.write().await;
+        if let Some(agent_state) = state.get_mut(&agent_id) {
+            agent_state.port_fwds.clear();
+        }
+    }
+
+    /// Return a snapshot of all active socket relay state for an agent.
+    pub async fn agent_socket_snapshot(&self, agent_id: u32) -> AgentSocketSnapshot {
+        let state = self.state.read().await;
+        let Some(agent_state) = state.get(&agent_id) else {
+            return AgentSocketSnapshot::default();
+        };
+
+        let port_fwds = agent_state.port_fwds.values().map(|e| e.display.clone()).collect();
+
+        let socks_svr = agent_state.servers.values().map(|s| s.local_addr.clone()).collect();
+
+        let socks_cli = agent_state.clients.values().map(format_socks_client).collect();
+
+        AgentSocketSnapshot { port_fwds, socks_svr, socks_cli }
+    }
+}
+
+fn format_socks_client(client: &types::PendingClient) -> String {
+    let dest = format_socks_address(client.atyp, &client.address, client.port);
+    let state = if client.connected { "connected" } else { "connecting" };
+    format!("{dest} [{state}]")
+}
+
+fn format_socks_address(atyp: u8, address: &[u8], port: u16) -> String {
+    use types::{SOCKS_ATYP_DOMAIN, SOCKS_ATYP_IPV4, SOCKS_ATYP_IPV6};
+    match atyp {
+        SOCKS_ATYP_IPV4 if address.len() == 4 => {
+            format!("{}.{}.{}.{}:{port}", address[0], address[1], address[2], address[3])
+        }
+        SOCKS_ATYP_DOMAIN => {
+            let host = String::from_utf8_lossy(address);
+            format!("{host}:{port}")
+        }
+        SOCKS_ATYP_IPV6 if address.len() == 16 => {
+            let octets: [u8; 16] = address.try_into().unwrap_or([0u8; 16]);
+            let addr = std::net::Ipv6Addr::from(octets);
+            format!("[{addr}]:{port}")
+        }
+        _ => format!("<unknown>:{port}"),
     }
 }
 

@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use crate::agent_events::agent_new_event;
 use crate::audit::{AuditResultStatus, audit_details};
+use crate::sockets::AgentSocketSnapshot;
 use crate::{AgentRegistry, AuditWebhookNotifier, Database, EventBus, PivotInfo};
 
 use super::logging::{log_service_action, service_log_event};
@@ -368,7 +369,8 @@ pub(super) async fn handle_agent_instance_register(
     };
 
     let pivots = PivotInfo::default();
-    let event = agent_new_event("service", magic_value, &agent, &pivots);
+    let event =
+        agent_new_event("service", magic_value, &agent, &pivots, AgentSocketSnapshot::default());
 
     agent_registry.insert(agent).await?;
     info!(agent_id = %agent_id_str, "service agent instance registered");

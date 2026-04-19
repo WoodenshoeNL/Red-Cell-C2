@@ -30,6 +30,13 @@ pub(super) async fn handle_socket_callback(
             let forward_addr = int_to_ipv4(parser.read_u32("rportfwd add forward addr")?);
             let forward_port = parser.read_u32("rportfwd add forward port")?;
             let (kind, message) = if success != 0 {
+                sockets
+                    .add_port_fwd(
+                        agent_id,
+                        socket_id,
+                        format!("{local_addr}:{local_port} -> {forward_addr}:{forward_port}"),
+                    )
+                    .await;
                 (
                     "Info",
                     format!(
@@ -72,6 +79,7 @@ pub(super) async fn handle_socket_callback(
             let forward_addr = int_to_ipv4(parser.read_u32("rportfwd remove forward addr")?);
             let forward_port = parser.read_u32("rportfwd remove forward port")?;
             if socket_type == u32::from(DemonSocketType::ReversePortForward) {
+                sockets.remove_port_fwd(agent_id, socket_id).await;
                 events.broadcast(agent_response_event(
                     agent_id,
                     u32::from(DemonCommand::CommandSocket),
@@ -87,6 +95,7 @@ pub(super) async fn handle_socket_callback(
         DemonSocketCommand::ReversePortForwardClear => {
             let success = parser.read_u32("rportfwd clear success")?;
             let (kind, message) = if success != 0 {
+                sockets.clear_port_fwds(agent_id).await;
                 ("Good", "Successful closed and removed all rportfwds")
             } else {
                 ("Error", "Failed to closed and remove all rportfwds")
@@ -274,6 +283,13 @@ pub(super) async fn handle_socket_callback(
             let forward_addr = int_to_ipv4(parser.read_u32("rportfwd add local forward addr")?);
             let forward_port = parser.read_u32("rportfwd add local forward port")?;
             let (kind, message) = if success != 0 {
+                sockets
+                    .add_port_fwd(
+                        agent_id,
+                        socket_id,
+                        format!("{local_addr}:{local_port} -> {forward_addr}:{forward_port}"),
+                    )
+                    .await;
                 (
                     "Info",
                     format!(

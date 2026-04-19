@@ -8,12 +8,14 @@ use red_cell_common::operator::{
 use serde_json::Value;
 
 use crate::PivotInfo;
+use crate::sockets::AgentSocketSnapshot;
 
 pub(crate) fn agent_new_event(
     listener_name: &str,
     magic_value: u32,
     agent: &AgentRecord,
     pivots: &PivotInfo,
+    sockets: AgentSocketSnapshot,
 ) -> OperatorMessage {
     OperatorMessage::AgentNew(Box::new(Message {
         head: MessageHead {
@@ -22,7 +24,7 @@ pub(crate) fn agent_new_event(
             timestamp: agent.last_call_in.clone(),
             one_time: "true".to_owned(),
         },
-        info: operator_agent_info(listener_name, magic_value, agent, pivots),
+        info: operator_agent_info(listener_name, magic_value, agent, pivots, sockets),
     }))
 }
 
@@ -32,6 +34,7 @@ pub(crate) fn agent_reregistered_event(
     magic_value: u32,
     agent: &AgentRecord,
     pivots: &PivotInfo,
+    sockets: AgentSocketSnapshot,
 ) -> OperatorMessage {
     OperatorMessage::AgentReregistered(Box::new(Message {
         head: MessageHead {
@@ -40,7 +43,7 @@ pub(crate) fn agent_reregistered_event(
             timestamp: agent.last_call_in.clone(),
             one_time: "true".to_owned(),
         },
-        info: operator_agent_info(listener_name, magic_value, agent, pivots),
+        info: operator_agent_info(listener_name, magic_value, agent, pivots, sockets),
     }))
 }
 
@@ -62,6 +65,7 @@ pub(crate) fn operator_agent_info(
     magic_value: u32,
     agent: &AgentRecord,
     pivots: &PivotInfo,
+    sockets: AgentSocketSnapshot,
 ) -> OperatorAgentInfo {
     let parent = pivots.parent.map(|agent_id| format!("{agent_id:08X}"));
     let links = pivots.children.iter().map(|agent_id| format!("{agent_id:08X}")).collect();
@@ -83,7 +87,7 @@ pub(crate) fn operator_agent_info(
         os_build: agent.os_build.to_string(),
         os_version: agent.os_version.clone(),
         pivots: AgentPivotsInfo { parent: parent.clone(), links },
-        port_fwds: Vec::new(),
+        port_fwds: sockets.port_fwds,
         process_arch: agent.process_arch.clone(),
         process_name: agent.process_name.clone(),
         process_pid: agent.process_pid.to_string(),
@@ -95,9 +99,9 @@ pub(crate) fn operator_agent_info(
         sleep_jitter: Value::from(agent.sleep_jitter),
         kill_date: agent.kill_date.map_or(Value::Null, Value::from),
         working_hours: agent.working_hours.map_or(Value::Null, Value::from),
-        socks_cli: Vec::new(),
+        socks_cli: sockets.socks_cli,
         socks_cli_mtx: None,
-        socks_svr: Vec::new(),
+        socks_svr: sockets.socks_svr,
         tasked_once: false,
         username: agent.username.clone(),
         pivot_parent: parent.unwrap_or_default(),
@@ -108,6 +112,7 @@ pub(crate) fn operator_agent_info(
 mod tests {
     use super::{agent_mark_event, agent_new_event, agent_reregistered_event, operator_agent_info};
     use crate::PivotInfo;
+    use crate::sockets::AgentSocketSnapshot;
     use red_cell_common::operator::OperatorMessage;
     use red_cell_common::{AgentEncryptionInfo, AgentRecord};
     use zeroize::Zeroizing;
@@ -153,7 +158,13 @@ mod tests {
         let pivots =
             PivotInfo { parent: Some(0x0102_0304), children: vec![0x2122_2324, 0x3132_3334] };
 
-        let info = operator_agent_info("smb", 0xDEAD_BEEF, &agent, &pivots);
+        let info = operator_agent_info(
+            "smb",
+            0xDEAD_BEEF,
+            &agent,
+            &pivots,
+            AgentSocketSnapshot::default(),
+        );
 
         assert_eq!(info.listener, "smb");
         assert_eq!(info.magic_value, "deadbeef");
@@ -167,7 +178,13 @@ mod tests {
         let agent = sample_agent(0x1112_1314);
         let pivots = PivotInfo { parent: None, children: vec![] };
 
-        let info = operator_agent_info("http", 0xDEAD_BEEF, &agent, &pivots);
+        let info = operator_agent_info(
+            "http",
+            0xDEAD_BEEF,
+            &agent,
+            &pivots,
+            AgentSocketSnapshot::default(),
+        );
 
         assert!(
             info.pivot_parent.is_empty(),
@@ -185,7 +202,13 @@ mod tests {
         let agent = sample_agent(0x1112_1314);
         let pivots = PivotInfo { parent: Some(0x0102_0304), children: vec![] };
 
-        let event = agent_new_event("http-main", 0x1234_5678, &agent, &pivots);
+        let event = agent_new_event(
+            "http-main",
+            0x1234_5678,
+            &agent,
+            &pivots,
+            AgentSocketSnapshot::default(),
+        );
 
         let OperatorMessage::AgentNew(message) = event else {
             panic!("expected AgentNew event");
@@ -202,7 +225,13 @@ mod tests {
         let agent = sample_agent(0x1112_1314);
         let pivots = PivotInfo { parent: Some(0x0102_0304), children: vec![] };
 
-        let event = agent_reregistered_event("http-main", 0x1234_5678, &agent, &pivots);
+        let event = agent_reregistered_event(
+            "http-main",
+            0x1234_5678,
+            &agent,
+            &pivots,
+            AgentSocketSnapshot::default(),
+        );
 
         let OperatorMessage::AgentReregistered(message) = event else {
             panic!("expected AgentReregistered event");
@@ -226,7 +255,13 @@ mod tests {
         agent.active = false;
         let pivots = PivotInfo { parent: None, children: vec![] };
 
-        let info = operator_agent_info("http", 0xDEAD_BEEF, &agent, &pivots);
+        let info = operator_agent_info(
+            "http",
+            0xDEAD_BEEF,
+            &agent,
+            &pivots,
+            AgentSocketSnapshot::default(),
+        );
 
         assert_eq!(info.active, "false");
     }
@@ -267,7 +302,13 @@ mod tests {
         agent.os_build = 22000;
         let pivots = PivotInfo { parent: None, children: vec![] };
 
-        let info = operator_agent_info("http", 0xDEAD_BEEF, &agent, &pivots);
+        let info = operator_agent_info(
+            "http",
+            0xDEAD_BEEF,
+            &agent,
+            &pivots,
+            AgentSocketSnapshot::default(),
+        );
 
         assert_eq!(info.os_build, "22000", "os_build must be the build number string");
     }
@@ -278,7 +319,13 @@ mod tests {
         agent.os_build = 0;
         let pivots = PivotInfo { parent: None, children: vec![] };
 
-        let info = operator_agent_info("http", 0xDEAD_BEEF, &agent, &pivots);
+        let info = operator_agent_info(
+            "http",
+            0xDEAD_BEEF,
+            &agent,
+            &pivots,
+            AgentSocketSnapshot::default(),
+        );
 
         assert_eq!(info.os_build, "0");
     }
@@ -288,7 +335,13 @@ mod tests {
         let agent = sample_agent(0x1112_1314);
         let pivots = PivotInfo { parent: None, children: vec![] };
 
-        let info = operator_agent_info("http", 0xDEAD_BEEF, &agent, &pivots);
+        let info = operator_agent_info(
+            "http",
+            0xDEAD_BEEF,
+            &agent,
+            &pivots,
+            AgentSocketSnapshot::default(),
+        );
 
         assert_eq!(info.process_name, "explorer.exe");
         assert_eq!(info.process_path, "C:\\Windows\\explorer.exe");
@@ -309,7 +362,13 @@ mod tests {
         let pivots =
             PivotInfo { parent: Some(0x0102_0304), children: vec![0x2122_2324, 0x3132_3334] };
 
-        let info = operator_agent_info("http-main", 0xDEAD_BEEF, &agent, &pivots);
+        let info = operator_agent_info(
+            "http-main",
+            0xDEAD_BEEF,
+            &agent,
+            &pivots,
+            AgentSocketSnapshot::default(),
+        );
         let json = serde_json::to_value(&info).expect("AgentInfo must serialize to JSON");
         let obj = json.as_object().expect("serialized AgentInfo must be a JSON object");
 
@@ -415,7 +474,8 @@ mod tests {
         let agent = sample_agent(0x1112_1314);
         let pivots = PivotInfo { parent: None, children: vec![] };
 
-        let event = agent_new_event("http", 0xDEAD_BEEF, &agent, &pivots);
+        let event =
+            agent_new_event("http", 0xDEAD_BEEF, &agent, &pivots, AgentSocketSnapshot::default());
 
         let OperatorMessage::AgentNew(message) = event else {
             panic!("expected AgentNew event");
@@ -464,7 +524,8 @@ mod tests {
         let agent = sample_agent(0x1112_1314);
         let pivots = PivotInfo { parent: None, children: vec![] };
 
-        let event = agent_new_event("http", 0xDEAD_BEEF, &agent, &pivots);
+        let event =
+            agent_new_event("http", 0xDEAD_BEEF, &agent, &pivots, AgentSocketSnapshot::default());
 
         let OperatorMessage::AgentNew(message) = event else {
             panic!("expected AgentNew event");
@@ -488,7 +549,8 @@ mod tests {
         agent.working_hours = None;
         let pivots = PivotInfo { parent: None, children: vec![] };
 
-        let event = agent_new_event("http", 0xDEAD_BEEF, &agent, &pivots);
+        let event =
+            agent_new_event("http", 0xDEAD_BEEF, &agent, &pivots, AgentSocketSnapshot::default());
 
         let OperatorMessage::AgentNew(message) = event else {
             panic!("expected AgentNew event");
@@ -514,7 +576,13 @@ mod tests {
         agent.note = "high-value target".to_owned();
         let pivots = PivotInfo { parent: None, children: vec![] };
 
-        let mut info = operator_agent_info("http", 0xDEAD_BEEF, &agent, &pivots);
+        let mut info = operator_agent_info(
+            "http",
+            0xDEAD_BEEF,
+            &agent,
+            &pivots,
+            AgentSocketSnapshot::default(),
+        );
         info.socks_cli_mtx = Some(serde_json::Value::String("mutex-1".to_owned()));
 
         let json = serde_json::to_value(&info).expect("AgentInfo must serialize to JSON");
@@ -566,7 +634,13 @@ mod tests {
         // sample_agent sets kill_date = Some(1_893_456_000), working_hours = Some(0b101010)
         let pivots = PivotInfo { parent: None, children: vec![] };
 
-        let info = operator_agent_info("http", 0xDEAD_BEEF, &agent, &pivots);
+        let info = operator_agent_info(
+            "http",
+            0xDEAD_BEEF,
+            &agent,
+            &pivots,
+            AgentSocketSnapshot::default(),
+        );
 
         assert_eq!(
             info.kill_date,
@@ -587,7 +661,13 @@ mod tests {
         agent.working_hours = None;
         let pivots = PivotInfo { parent: None, children: vec![] };
 
-        let info = operator_agent_info("http", 0xDEAD_BEEF, &agent, &pivots);
+        let info = operator_agent_info(
+            "http",
+            0xDEAD_BEEF,
+            &agent,
+            &pivots,
+            AgentSocketSnapshot::default(),
+        );
 
         assert_eq!(
             info.kill_date,
@@ -599,5 +679,23 @@ mod tests {
             serde_json::Value::Null,
             "working_hours must be Value::Null when None"
         );
+    }
+
+    #[test]
+    fn operator_agent_info_socket_snapshot_populates_port_fwds_socks_svr_socks_cli() {
+        let agent = sample_agent(0x1112_1314);
+        let pivots = PivotInfo::default();
+
+        let snapshot = AgentSocketSnapshot {
+            port_fwds: vec!["127.0.0.1:8080 -> 10.0.0.1:80".to_owned()],
+            socks_svr: vec!["127.0.0.1:1080".to_owned()],
+            socks_cli: vec!["example.com:443 [connected]".to_owned()],
+        };
+
+        let info = operator_agent_info("http", 0xDEAD_BEEF, &agent, &pivots, snapshot);
+
+        assert_eq!(info.port_fwds, vec!["127.0.0.1:8080 -> 10.0.0.1:80".to_owned()]);
+        assert_eq!(info.socks_svr, vec!["127.0.0.1:1080".to_owned()]);
+        assert_eq!(info.socks_cli, vec!["example.com:443 [connected]".to_owned()]);
     }
 }

@@ -191,6 +191,7 @@ pub(super) async fn handle_pivot_connect_callback(
             red_cell_common::demon::DEMON_MAGIC_VALUE,
             &agent,
             &pivots,
+            crate::sockets::AgentSocketSnapshot::default(),
         ));
         agent
     };

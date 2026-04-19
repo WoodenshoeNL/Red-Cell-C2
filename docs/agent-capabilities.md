@@ -21,19 +21,17 @@ Status legend: ✅ implemented · 🔨 in progress · ☐ planned · — not app
 | **Screenshot**             | ✅            | ☐              | ✅                   | ✅                 |
 | **Kerberos (ask TGT)**     | ✅            | ☐              | —                    | ✅                 |
 | **Kerberos (ask ST)**      | ✅            | ☐              | —                    | ✅                 |
-| **Pivot dispatch**         | ✅            | ☐              | ✅                   | ☐                  |
-| **Token impersonation**    | ✅            | ☐              | —                    | 🔨                 |
+| **Pivot dispatch**         | ✅            | ☐              | ✅                   | ✅                 |
+| **Token impersonation**    | ✅            | ☐              | —                    | ✅                 |
 | **Memory injection**       | ✅            | ☐              | ✅                   | ✅                 |
 | **Sleep / jitter control** | ✅            | ☐              | ✅                   | ✅                 |
 | **Self-destruct / exit**   | ✅            | ☐              | ✅                   | ✅                 |
 | **Net enumeration**        | ✅            | ☐              | ✅                   | ✅                 |
-| **SOCKS / socket relay**   | ✅            | ☐              | ✅                   | ☐                  |
+| **SOCKS / socket relay**   | ✅            | ☐              | ✅                   | ✅                 |
 | **In-memory file staging** | ✅            | ☐              | ✅                   | ✅                 |
 
 Notes:
 - Phantom **Screenshot** uses best-effort Linux tooling (`import`, `scrot`, `gnome-screenshot`).
-- Specter **Token impersonation** handles impersonate/steal/list/privs/make/getuid/revert/remove/clear; `Token::FindTokens` (full system handle enumeration) is a known stub tracked in issue `red-cell-c2-18vix`.
-- Specter **Pivot dispatch** and **SOCKS/socket relay** are not yet handled — both fall to the "unimplemented" response path.
 
 ---
 
@@ -67,4 +65,4 @@ See `teamserver/src/protocol/` for the full specification and
 
 ---
 
-*Last updated: 2026-03-30. Update this file as agent work progresses.*
+*Last updated: 2026-04-19. Update this file as agent work progresses.*

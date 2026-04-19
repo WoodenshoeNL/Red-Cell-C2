@@ -88,7 +88,7 @@ def _apply_patches(patches):
     return _ctx()
 
 
-# ── Scenario 04: Linux agent (Demon + Phantom) ───────────────────────────────
+# ── Scenario 04: Linux agent (Phantom only — Demon is Windows-only) ──────────
 
 class TestScenario04(unittest.TestCase):
     @classmethod
@@ -99,22 +99,32 @@ class TestScenario04(unittest.TestCase):
         ctx = _linux_ctx()
         with _apply_patches(_LISTENER_PATCHES):
             with self.assertRaises(CliError) as cm:
-                self.mod._run_for_agent(ctx, "phantom", "bin", "test-linux-phantom")
+                self.mod._run_for_agent(ctx, "phantom", "elf", "test-linux-phantom")
         self.assertEqual(cm.exception.code, "BUILD_FAILED")
 
-    def test_phantom_skipped_when_not_in_available(self) -> None:
-        """run() skips the phantom pass silently; no exception raised."""
+    def test_skipped_when_phantom_not_in_available(self) -> None:
+        """run() raises ScenarioSkipped when phantom is not listed in agents.available.
+
+        Demon is Windows-only and cannot run on Linux, so the scenario has no
+        work to do without Phantom.
+        """
+        from lib import ScenarioSkipped
+        ctx = _linux_ctx()  # env has only "demon" in available
+        with patch("lib.deploy.preflight_ssh"):
+            with self.assertRaises(ScenarioSkipped):
+                self.mod.run(ctx)
+
+    def test_phantom_pass_when_in_available(self) -> None:
+        """run() calls _run_for_agent with phantom+elf when phantom is available."""
         ctx = _linux_ctx()
-        # phantom not in available_agents; mock _run_for_agent so demon pass
-        # succeeds without network.
+        ctx.env["agents"]["available"] = ["demon", "phantom"]
         with patch("lib.deploy.preflight_ssh"), \
              patch.object(self.mod, "_run_for_agent") as mock_run:
             self.mod.run(ctx)
-        # _run_for_agent called exactly once — for the demon pass only.
         mock_run.assert_called_once()
-        agent_types = [c.kwargs["agent_type"] for c in mock_run.call_args_list]
-        self.assertIn("demon", agent_types)
-        self.assertNotIn("phantom", agent_types)
+        call = mock_run.call_args_list[0]
+        self.assertEqual(call.kwargs["agent_type"], "phantom")
+        self.assertEqual(call.kwargs["fmt"], "elf")
 
 
 # ── Scenario 05: Windows agent (Demon + Specter) ─────────────────────────────

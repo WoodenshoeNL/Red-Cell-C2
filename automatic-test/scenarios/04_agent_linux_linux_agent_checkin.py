@@ -2,11 +2,14 @@
 Scenario 04_agent_linux: Linux agent checkin
 
 Deploy a Linux agent to Ubuntu, wait for checkin, run command suite.
-Runs once for Demon (always).  The Phantom pass runs only when
-``"phantom"`` is listed in ``agents.available`` in env.toml; if it is listed
-and the payload build fails, the scenario fails so the regression is caught.
 
-Skip if ctx.linux is None.
+Demon is a Windows-only agent (Windows PE / Win32 API) and cannot run on
+Linux.  This scenario therefore skips when no Linux-capable agent is
+available.  The Phantom pass runs only when ``"phantom"`` is listed in
+``agents.available`` in env.toml; if it is listed and the payload build
+fails, the scenario fails so the regression is caught.
+
+Skip if ctx.linux is None or no Linux-capable agent is available.
 
 Steps (per agent pass):
   1. Create + start HTTP listener
@@ -19,7 +22,7 @@ Steps (per agent pass):
   7. Kill agent, stop listener, clean up work_dir on target
 """
 
-DESCRIPTION = "Linux agent checkin (Demon + Phantom)"
+DESCRIPTION = "Linux agent checkin (Phantom)"
 
 import uuid
 
@@ -227,14 +230,15 @@ def run(ctx):
     except DeployError as exc:
         raise ScenarioSkipped(str(exc)) from exc
 
-    # ── Demon pass (primary baseline) ───────────────────────────────────────
-    print("\n  === Agent pass: demon ===")
-    _run_for_agent(ctx, agent_type="demon", fmt="bin", name_prefix="test-linux-demon")
-
-    # ── Phantom pass (Rust Linux agent) ─────────────────────────────────────
-    available_agents = set(ctx.env.get("agents", {}).get("available", ["demon"]))
-    print("\n  === Agent pass: phantom ===")
+    # Demon is a Windows-only agent (Windows PE + Win32/NTAPI) — it cannot
+    # execute on Linux.  Gate on Phantom availability instead.
+    available_agents = set(ctx.env.get("agents", {}).get("available", []))
     if "phantom" not in available_agents:
-        print("  [phantom] SKIPPED — 'phantom' not listed in agents.available")
-    else:
-        _run_for_agent(ctx, agent_type="phantom", fmt="bin", name_prefix="test-linux-phantom")
+        raise ScenarioSkipped(
+            "No Linux-capable agent available — Demon is Windows-only; "
+            "add 'phantom' to agents.available in env.toml once Phantom is implemented"
+        )
+
+    # ── Phantom pass (Rust Linux ELF agent) ─────────────────────────────────
+    print("\n  === Agent pass: phantom ===")
+    _run_for_agent(ctx, agent_type="phantom", fmt="elf", name_prefix="test-linux-phantom")

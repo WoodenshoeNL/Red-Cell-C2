@@ -234,6 +234,9 @@ impl ClientApp {
                                 ui.end_row();
                             },
                         );
+                        if let Some(err) = &dialog.validation_error {
+                            ui.colored_label(Color32::from_rgb(230, 80, 80), err);
+                        }
                     }
                     ListenerProtocol::External => {
                         egui::Grid::new("external_fields").num_columns(2).spacing([8.0, 6.0]).show(
@@ -263,17 +266,33 @@ impl ClientApp {
             });
 
         if save_clicked {
-            if let Some(dialog) = &self.session_panel.listener_dialog {
-                let operator =
-                    state.operator_info.as_ref().map(|op| op.username.as_str()).unwrap_or_default();
-                let info = dialog.to_listener_info();
-                let message = match dialog.mode {
-                    ListenerDialogMode::Create => build_listener_new(info, operator),
-                    ListenerDialogMode::Edit => build_listener_edit(info, operator),
-                };
-                self.session_panel.pending_messages.push(message);
+            let dns_domain_empty = self
+                .session_panel
+                .listener_dialog
+                .as_ref()
+                .map(|d| d.protocol == ListenerProtocol::Dns && d.dns_domain.trim().is_empty())
+                .unwrap_or(false);
+
+            if dns_domain_empty {
+                if let Some(dialog) = &mut self.session_panel.listener_dialog {
+                    dialog.validation_error = Some("Domain is required".to_owned());
+                }
+            } else {
+                if let Some(dialog) = &self.session_panel.listener_dialog {
+                    let operator = state
+                        .operator_info
+                        .as_ref()
+                        .map(|op| op.username.as_str())
+                        .unwrap_or_default();
+                    let info = dialog.to_listener_info();
+                    let message = match dialog.mode {
+                        ListenerDialogMode::Create => build_listener_new(info, operator),
+                        ListenerDialogMode::Edit => build_listener_edit(info, operator),
+                    };
+                    self.session_panel.pending_messages.push(message);
+                }
+                self.session_panel.listener_dialog = None;
             }
-            self.session_panel.listener_dialog = None;
         } else if close_requested {
             self.session_panel.listener_dialog = None;
         }

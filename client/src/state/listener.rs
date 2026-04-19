@@ -65,6 +65,8 @@ pub(crate) struct ListenerDialogState {
     pub(crate) dns_record_types: String,
     // External fields
     pub(crate) endpoint: String,
+    /// Inline validation error shown in the dialog; cleared on successful submit.
+    pub(crate) validation_error: Option<String>,
 }
 
 impl ListenerDialogState {
@@ -89,6 +91,7 @@ impl ListenerDialogState {
             dns_domain: String::new(),
             dns_record_types: "TXT,A".to_owned(),
             endpoint: String::new(),
+            validation_error: None,
         }
     }
 
@@ -145,6 +148,7 @@ impl ListenerDialogState {
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_owned(),
+            validation_error: None,
         }
     }
 

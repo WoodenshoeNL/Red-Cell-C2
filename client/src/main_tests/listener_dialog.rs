@@ -241,6 +241,34 @@ fn listener_dialog_new_edit_dns_preserves_fields() {
 }
 
 #[test]
+fn listener_dialog_dns_empty_domain_still_inserts_empty_string_in_extra() {
+    // `to_listener_info()` itself does not validate — it just builds the payload.
+    // The caller (save handler) is responsible for rejecting an empty domain before
+    // calling this method. This test documents the current behaviour so a future
+    // refactor cannot accidentally change it without noticing.
+    let mut dialog = ListenerDialogState::new_create();
+    dialog.name = "dns-bad".to_owned();
+    dialog.protocol = ListenerProtocol::Dns;
+    dialog.dns_domain = String::new(); // intentionally empty
+
+    let info = dialog.to_listener_info();
+    // The raw payload carries an empty string — the save handler must guard against this.
+    assert_eq!(info.extra.get("Domain").and_then(|v| v.as_str()), Some(""));
+}
+
+#[test]
+fn listener_dialog_dns_non_empty_domain_passes_through() {
+    let mut dialog = ListenerDialogState::new_create();
+    dialog.name = "dns-ok".to_owned();
+    dialog.protocol = ListenerProtocol::Dns;
+    dialog.dns_domain = "  c2.example.com  ".to_owned();
+
+    let info = dialog.to_listener_info();
+    // to_listener_info does not trim; the raw value is forwarded unchanged.
+    assert_eq!(info.extra.get("Domain").and_then(|v| v.as_str()), Some("  c2.example.com  "));
+}
+
+#[test]
 fn listener_dialog_http_empty_optional_fields_produce_none() {
     let mut dialog = ListenerDialogState::new_create();
     dialog.name = "minimal".to_owned();

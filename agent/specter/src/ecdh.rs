@@ -80,6 +80,10 @@ pub fn decode_listener_pub_key(encoded: &str) -> Result<[u8; 32], SpecterError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use red_cell_common::crypto::ecdh::{
+        ListenerKeypair, build_registration_response, open_registration_packet, open_session_packet,
+        seal_session_response,
+    };
 
     fn test_keypair() -> ListenerKeypair {
         ListenerKeypair::generate().expect("keypair")

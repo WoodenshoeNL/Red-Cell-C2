@@ -618,7 +618,7 @@ async fn legacy_ctr_encrypt_always_uses_offset_zero() -> Result<(), TeamserverEr
     let agent = sample_agent_with_crypto(0x100A_0C01, key, iv);
 
     // Insert with legacy_ctr = true
-    registry.insert_full(agent.clone(), "http-legacy", 0, true).await?;
+    registry.insert_full(agent.clone(), "http-legacy", 0, true, false).await?;
     assert!(registry.legacy_ctr(agent.agent_id).await?);
 
     let plaintext = b"legacy demon callback data";
@@ -645,7 +645,7 @@ async fn legacy_ctr_decrypt_always_uses_offset_zero() -> Result<(), TeamserverEr
     let iv = test_iv(0xD2);
     let agent = sample_agent_with_crypto(0x100A_0C02, key, iv);
 
-    registry.insert_full(agent.clone(), "http-legacy", 0, true).await?;
+    registry.insert_full(agent.clone(), "http-legacy", 0, true, false).await?;
 
     let plaintext = b"response from demon agent";
     let ciphertext = encrypt_agent_data_at_offset(&key, &iv, 0, plaintext)?;
@@ -666,7 +666,7 @@ async fn legacy_ctr_advance_is_noop() -> Result<(), TeamserverError> {
     let registry = AgentRegistry::new(test_database().await?);
     let agent = sample_agent_with_crypto(0x100A_0C03, test_key(0xC3), test_iv(0xD3));
 
-    registry.insert_full(agent.clone(), "http-legacy", 0, true).await?;
+    registry.insert_full(agent.clone(), "http-legacy", 0, true, false).await?;
 
     registry.advance_ctr_for_agent(agent.agent_id, 1024).await?;
     assert_eq!(
@@ -688,7 +688,7 @@ async fn set_legacy_ctr_toggles_mode_and_persists() -> Result<(), TeamserverErro
     let plaintext = b"mode switch test";
 
     // Start in legacy mode
-    registry.insert_full(agent.clone(), "http-legacy", 0, true).await?;
+    registry.insert_full(agent.clone(), "http-legacy", 0, true, false).await?;
     assert!(registry.legacy_ctr(agent.agent_id).await?);
 
     let ct_legacy = registry.encrypt_for_agent(agent.agent_id, plaintext).await?;
@@ -721,7 +721,7 @@ async fn legacy_ctr_persists_across_registry_reload() -> Result<(), TeamserverEr
     {
         let registry = AgentRegistry::new(database.clone());
         let agent = sample_agent_with_crypto(0x100A_0C05, test_key(0xC5), test_iv(0xD5));
-        registry.insert_full(agent, "http-legacy", 0, true).await?;
+        registry.insert_full(agent, "http-legacy", 0, true, false).await?;
     }
 
     // Second registry: reload from DB

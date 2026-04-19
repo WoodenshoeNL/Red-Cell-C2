@@ -67,6 +67,13 @@ pub struct SpecterConfig {
     /// Defaults to Cloudflare (`1.1.1.1`).
     /// Configurable via `SPECTER_DOH_PROVIDER` / `--doh-provider` (`cloudflare` or `google`).
     pub doh_provider: DohProvider,
+    /// Base64-encoded X25519 listener public key for ECDH new-protocol transport.
+    ///
+    /// When set, the agent performs an ECDH handshake on first check-in and sends
+    /// all subsequent traffic as AES-256-GCM encrypted session packets with no
+    /// plaintext magic, size, or agent ID on the wire.
+    /// When `None`, the agent uses the legacy Demon binary protocol.
+    pub listener_pub_key: Option<String>,
 }
 
 impl SpecterConfig {
@@ -117,6 +124,7 @@ impl SpecterConfig {
             "  --callback-url URL       Teamserver callback endpoint\n",
             "  --init-secret SECRET     HKDF listener init secret\n",
             "  --init-secret-version N  Secret version byte (0-255) for InitSecrets rotation\n",
+            "  --listener-pub-key KEY   Base64 X25519 listener public key for ECDH transport\n",
             "  --user-agent VALUE       HTTP User-Agent header\n",
             "  --sleep-delay-ms N       Base sleep interval in milliseconds\n",
             "  --sleep-jitter N         Sleep jitter percentage (0-100)\n",
@@ -127,7 +135,7 @@ impl SpecterConfig {
             "  -h, --help               Show this help text\n\n",
             "Environment:\n",
             "  SPECTER_CALLBACK_URL, SPECTER_INIT_SECRET, SPECTER_INIT_SECRET_VERSION,\n",
-            "  SPECTER_USER_AGENT,\n",
+            "  SPECTER_LISTENER_PUB_KEY, SPECTER_USER_AGENT,\n",
             "  SPECTER_SLEEP_DELAY_MS, SPECTER_SLEEP_JITTER, SPECTER_KILL_DATE,\n",
             "  SPECTER_WORKING_HOURS, SPECTER_PINNED_CERT_PEM,\n",
             "  SPECTER_DOH_DOMAIN, SPECTER_DOH_PROVIDER\n",
@@ -178,6 +186,10 @@ impl SpecterConfig {
                 Some("SPECTER_DOH_PROVIDER") => {
                     let s = parse_os_string(value, "SPECTER_DOH_PROVIDER")?;
                     self.doh_provider = parse_doh_provider(&s, "SPECTER_DOH_PROVIDER")?;
+                }
+                Some("SPECTER_LISTENER_PUB_KEY") => {
+                    self.listener_pub_key =
+                        Some(parse_os_string(value, "SPECTER_LISTENER_PUB_KEY")?);
                 }
                 _ => {}
             }
@@ -238,6 +250,9 @@ impl SpecterConfig {
                 "--doh-provider" => {
                     self.doh_provider = parse_doh_provider(&value, flag)?;
                 }
+                "--listener-pub-key" => {
+                    self.listener_pub_key = Some(value);
+                }
                 _ => return Err(SpecterError::Argument(format!("unknown argument {flag}"))),
             }
         }
@@ -275,6 +290,7 @@ impl Default for SpecterConfig {
             spawn32: None,
             doh_domain: None,
             doh_provider: DohProvider::Cloudflare,
+            listener_pub_key: None,
         }
     }
 }

@@ -420,6 +420,13 @@ pub enum ListenerCommands {
         #[arg(long, default_value_t = false)]
         secure: bool,
 
+        /// Accept legacy Demon packets (0xDEADBEEF magic) on HTTP listeners.
+        /// Required when the listener will receive traffic from unmodified
+        /// Havoc Demon or Archon agents that have not been recompiled for the
+        /// new protocol.
+        #[arg(long, default_value_t = false)]
+        legacy_mode: bool,
+
         /// Full listener config as a raw JSON object (overrides all flags
         /// above; the JSON must match the server's inner config shape for
         /// the chosen --type)

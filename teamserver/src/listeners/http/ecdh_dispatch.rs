@@ -123,7 +123,7 @@ async fn process_ecdh_registration(
 
     // Register in registry + DB.  The ECDH agent has no AES key — use zeros
     // (the session key is stored separately in ts_ecdh_sessions).
-    registry.insert_full(agent.clone(), listener_name, 0, legacy_ctr).await.map_err(|e| {
+    registry.insert_full(agent.clone(), listener_name, 0, legacy_ctr, true).await.map_err(|e| {
         ListenerManagerError::InvalidConfig {
             message: format!("ECDH agent registry insert failed: {e}"),
         }

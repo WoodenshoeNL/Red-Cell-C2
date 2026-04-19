@@ -60,6 +60,17 @@ impl AgentRegistry {
         Ok(entry.legacy_ctr.load(Ordering::Relaxed))
     }
 
+    /// Query whether an agent uses ECDH transport (Phantom/Specter new protocol).
+    ///
+    /// ECDH agents have no AES session key. Job payloads must be returned unencrypted
+    /// because the outer AES-256-GCM in the ECDH session provides confidentiality.
+    pub async fn is_ecdh_transport(&self, agent_id: u32) -> bool {
+        self.entry(agent_id)
+            .await
+            .map(|e| e.ecdh_transport.load(Ordering::Relaxed))
+            .unwrap_or(false)
+    }
+
     /// Set the legacy CTR mode for an agent and persist the change.
     ///
     /// When `legacy` is `true`, AES-CTR resets to block offset 0 for every packet

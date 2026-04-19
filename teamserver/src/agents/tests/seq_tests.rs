@@ -129,7 +129,7 @@ async fn reregister_full_resets_last_seen_seq() -> Result<(), TeamserverError> {
     let iv = test_iv(0xF6);
     let mut agent = sample_agent_with_crypto(0x200A_0006, key, iv);
     agent.active = true;
-    registry.insert_full(agent.clone(), "http", 0, false).await?;
+    registry.insert_full(agent.clone(), "http", 0, false, false).await?;
 
     // Advance seq so it is non-zero before re-registration.
     registry.advance_last_seen_seq(agent.agent_id, 99).await?;

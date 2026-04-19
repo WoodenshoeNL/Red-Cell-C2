@@ -950,11 +950,16 @@ async fn handle_get_job(
         return Ok(None);
     }
 
+    // ECDH agents have no AES session key — the outer AES-256-GCM seal in
+    // `process_ecdh_session` provides confidentiality, so job payloads must
+    // be returned as plaintext (no inner AES-CTR layer).
+    let skip_aes = registry.is_ecdh_transport(agent_id).await;
+
     let mut packages = Vec::with_capacity(jobs.len());
 
     for job in jobs {
-        let payload = if job.payload.is_empty() {
-            Vec::new()
+        let payload = if job.payload.is_empty() || skip_aes {
+            job.payload
         } else {
             registry.encrypt_for_agent(agent_id, &job.payload).await?
         };

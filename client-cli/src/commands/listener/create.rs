@@ -35,6 +35,7 @@ pub(super) async fn create(
     pipe_name: Option<&str>,
     endpoint: Option<&str>,
     secure: bool,
+    legacy_mode: bool,
     config_json: Option<&str>,
 ) -> Result<ListenerDetail, CliError> {
     let body = build_create_body(
@@ -46,6 +47,7 @@ pub(super) async fn create(
         pipe_name,
         endpoint,
         secure,
+        legacy_mode,
         config_json,
     )?;
     let raw: RawListenerSummary = client.post("/listeners", &body).await?;
@@ -68,6 +70,7 @@ pub(crate) fn build_create_body(
     pipe_name: Option<&str>,
     endpoint: Option<&str>,
     secure: bool,
+    legacy_mode: bool,
     config_json: Option<&str>,
 ) -> Result<serde_json::Value, CliError> {
     let protocol = listener_type.to_lowercase();
@@ -95,6 +98,7 @@ pub(crate) fn build_create_body(
                 "port_bind": port_bind,
                 "host_rotation": "round-robin",
                 "secure": secure,
+                "legacy_mode": legacy_mode,
             })
         }
         "dns" => {
@@ -188,7 +192,7 @@ mod tests {
     #[test]
     fn build_create_body_http_uses_default_port_443() {
         let body =
-            build_create_body("http1", "http", None, "0.0.0.0", None, None, None, false, None)
+            build_create_body("http1", "http", None, "0.0.0.0", None, None, None, false, false, None)
                 .expect("build");
         assert_eq!(body["protocol"], "http");
         assert_eq!(body["config"]["port_bind"], 443);
@@ -198,7 +202,7 @@ mod tests {
     #[test]
     fn build_create_body_http_respects_explicit_port() {
         let body =
-            build_create_body("h2", "http", Some(8080), "10.0.0.1", None, None, None, true, None)
+            build_create_body("h2", "http", Some(8080), "10.0.0.1", None, None, None, true, false, None)
                 .expect("build");
         assert_eq!(body["config"]["port_bind"], 8080);
         assert_eq!(body["config"]["secure"], true);
@@ -208,14 +212,22 @@ mod tests {
     #[test]
     fn build_create_body_https_maps_to_http_protocol() {
         let body =
-            build_create_body("h1", "https", Some(443), "0.0.0.0", None, None, None, true, None)
+            build_create_body("h1", "https", Some(443), "0.0.0.0", None, None, None, true, false, None)
                 .expect("build");
         assert_eq!(body["protocol"], "http");
     }
 
     #[test]
+    fn build_create_body_http_legacy_mode_true() {
+        let body =
+            build_create_body("h1", "http", Some(8080), "0.0.0.0", None, None, None, false, true, None)
+                .expect("build");
+        assert_eq!(body["config"]["legacy_mode"], true);
+    }
+
+    #[test]
     fn build_create_body_dns_requires_domain() {
-        let err = build_create_body("dns1", "dns", None, "0.0.0.0", None, None, None, false, None)
+        let err = build_create_body("dns1", "dns", None, "0.0.0.0", None, None, None, false, false, None)
             .expect_err("should fail without domain");
         assert!(matches!(err, CliError::InvalidArgs(_)));
     }
@@ -230,6 +242,7 @@ mod tests {
             Some("c2.evil.example"),
             None,
             None,
+            false,
             false,
             None,
         )
@@ -250,6 +263,7 @@ mod tests {
             None,
             None,
             false,
+            false,
             None,
         )
         .expect("build");
@@ -258,7 +272,7 @@ mod tests {
 
     #[test]
     fn build_create_body_smb_requires_pipe_name() {
-        let err = build_create_body("smb1", "smb", None, "0.0.0.0", None, None, None, false, None)
+        let err = build_create_body("smb1", "smb", None, "0.0.0.0", None, None, None, false, false, None)
             .expect_err("should fail without pipe_name");
         assert!(matches!(err, CliError::InvalidArgs(_)));
     }
@@ -274,6 +288,7 @@ mod tests {
             Some("my-pipe"),
             None,
             false,
+            false,
             None,
         )
         .expect("build");
@@ -285,7 +300,7 @@ mod tests {
     #[test]
     fn build_create_body_external_requires_endpoint() {
         let err =
-            build_create_body("ext1", "external", None, "0.0.0.0", None, None, None, false, None)
+            build_create_body("ext1", "external", None, "0.0.0.0", None, None, None, false, false, None)
                 .expect_err("should fail without endpoint");
         assert!(matches!(err, CliError::InvalidArgs(_)));
     }
@@ -301,6 +316,7 @@ mod tests {
             None,
             Some("/bridge"),
             false,
+            false,
             None,
         )
         .expect("build");
@@ -310,7 +326,7 @@ mod tests {
 
     #[test]
     fn build_create_body_unknown_type_returns_invalid_args() {
-        let err = build_create_body("x", "grpc", None, "0.0.0.0", None, None, None, false, None)
+        let err = build_create_body("x", "grpc", None, "0.0.0.0", None, None, None, false, false, None)
             .expect_err("unknown type should fail");
         assert!(matches!(err, CliError::InvalidArgs(_)));
     }
@@ -326,6 +342,7 @@ mod tests {
             None,
             None,
             None,
+            false,
             false,
             Some(raw),
         )
@@ -346,6 +363,7 @@ mod tests {
             None,
             None,
             false,
+            false,
             Some("{not json"),
         )
         .expect_err("bad json");
@@ -357,7 +375,7 @@ mod tests {
         let raw =
             r#"{"name":"dns1","host_bind":"0.0.0.0","port_bind":53,"domain":"c2.example.com"}"#;
         let err =
-            build_create_body("x", "http", None, "0.0.0.0", None, None, None, false, Some(raw))
+            build_create_body("x", "http", None, "0.0.0.0", None, None, None, false, false, Some(raw))
                 .expect_err("wrong schema for --type http");
         let CliError::InvalidArgs(msg) = err else {
             panic!("expected InvalidArgs, got {err:?}");
@@ -369,7 +387,7 @@ mod tests {
     fn build_create_body_config_json_http_shape_rejected_for_dns_type() {
         let raw = r#"{"name":"h1","host_bind":"0.0.0.0","port_bind":443,"host_rotation":"round-robin","secure":false}"#;
         let err =
-            build_create_body("x", "dns", None, "0.0.0.0", None, None, None, false, Some(raw))
+            build_create_body("x", "dns", None, "0.0.0.0", None, None, None, false, false, Some(raw))
                 .expect_err("wrong schema for --type dns");
         let CliError::InvalidArgs(msg) = err else {
             panic!("expected InvalidArgs, got {err:?}");
@@ -388,6 +406,7 @@ mod tests {
             None,
             None,
             None,
+            false,
             false,
             Some(raw),
         )

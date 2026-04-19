@@ -213,6 +213,7 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: ListenerCommand
             pipe_name,
             endpoint,
             secure,
+            legacy_mode,
             config_json,
         } => {
             match create::create(
@@ -225,6 +226,7 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: ListenerCommand
                 pipe_name.as_deref(),
                 endpoint.as_deref(),
                 secure,
+                legacy_mode,
                 config_json.as_deref(),
             )
             .await

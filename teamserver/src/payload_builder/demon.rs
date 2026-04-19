@@ -26,6 +26,7 @@ use super::{
 };
 
 impl PayloadBuilderService {
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn build_impl<F>(
         &self,
         listener: &ListenerConfig,

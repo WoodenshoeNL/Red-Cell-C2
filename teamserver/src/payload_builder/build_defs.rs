@@ -805,4 +805,62 @@ mod tests {
             assert!(flags.contains(&"-nostdlib"), "missing -nostdlib for {format:?}");
         }
     }
+
+    // ── archon_ecdh_defines tests ─────────────────────────────────────────
+
+    #[test]
+    fn archon_ecdh_defines_produces_mode_flag() -> Result<(), Box<dyn std::error::Error>> {
+        let key = [0u8; 32];
+        let defines = archon_ecdh_defines(&key)?;
+        assert!(
+            defines.iter().any(|d| d == "ARCHON_ECDH_MODE"),
+            "ARCHON_ECDH_MODE define missing; got: {defines:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn archon_ecdh_defines_embeds_pubkey_bytes() -> Result<(), Box<dyn std::error::Error>> {
+        let mut key = [0u8; 32];
+        key[0] = 0xAB;
+        key[31] = 0xCD;
+        let defines = archon_ecdh_defines(&key)?;
+        let key_define = defines
+            .iter()
+            .find(|d| d.starts_with("ARCHON_LISTENER_PUBKEY="))
+            .expect("ARCHON_LISTENER_PUBKEY define missing");
+        assert!(key_define.contains("0xab"), "first byte 0xab not found in define: {key_define}");
+        assert!(key_define.contains("0xcd"), "last byte 0xcd not found in define: {key_define}");
+        assert!(
+            key_define.starts_with("ARCHON_LISTENER_PUBKEY={"),
+            "define should use C array initialiser syntax"
+        );
+        assert!(key_define.ends_with('}'), "define should end with closing brace");
+        Ok(())
+    }
+
+    #[test]
+    fn archon_ecdh_defines_returns_exactly_two_defines() -> Result<(), Box<dyn std::error::Error>> {
+        let key = [0xFFu8; 32];
+        let defines = archon_ecdh_defines(&key)?;
+        assert_eq!(defines.len(), 2, "expected exactly [ARCHON_ECDH_MODE, ARCHON_LISTENER_PUBKEY]");
+        Ok(())
+    }
+
+    #[test]
+    fn archon_ecdh_defines_key_has_32_bytes() -> Result<(), Box<dyn std::error::Error>> {
+        let key = [0x12u8; 32];
+        let defines = archon_ecdh_defines(&key)?;
+        let key_define = defines
+            .iter()
+            .find(|d| d.starts_with("ARCHON_LISTENER_PUBKEY="))
+            .expect("ARCHON_LISTENER_PUBKEY define missing");
+        // Count occurrences of "0x" — should be 32 (one per byte).
+        let count = key_define.matches("0x").count();
+        assert_eq!(
+            count, 32,
+            "expected 32 byte values in define, got {count}; define: {key_define}"
+        );
+        Ok(())
+    }
 }

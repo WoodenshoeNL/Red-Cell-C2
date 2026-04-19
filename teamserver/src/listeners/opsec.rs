@@ -18,8 +18,8 @@ const BAD_UA_PATTERNS: &[&str] = &["Chrome/96", "Mozilla/5.0"];
 /// `suppress_opsec_warnings` set to `true`.
 pub(super) fn opsec_warnings(config: &ListenerConfig) -> Vec<&'static str> {
     match config {
-        ListenerConfig::from(c) => http_warnings(c),
-        ListenerConfig::from(c) => dns_warnings(c),
+        ListenerConfig::Http(c) => http_warnings(c),
+        ListenerConfig::Dns(c) => dns_warnings(c),
         ListenerConfig::Smb(_) | ListenerConfig::External(_) => vec![],
     }
 }

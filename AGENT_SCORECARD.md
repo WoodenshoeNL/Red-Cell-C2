@@ -33,7 +33,7 @@ Each loop run updates the running totals and appends a review entry.
 | Availability / timeout regressions | 5 | 5 | 0 |
 | Correctness / pagination | 68 | 9 | 1 |
 | Workflow / close-hygiene | 39 | 1 | 2 |
-| Code reuse / duplication | 14 | 0 | 0 |
+| Code reuse / duplication | 15 | 0 | 0 |
 | Incomplete commits (stranded work) | 7 | 3 | 0 |
 
 ---
@@ -7237,3 +7237,21 @@ Build: **cargo check** — passed (clean). **cargo clippy -- -D warnings** — c
 **Issues filed this run:** 1 — red-cell-c2-oyqyd (test infrastructure / flakiness P2, zone:teamserver).
 
 **Codebase health:** Excellent. 27 tasks closed in this period — all refactors systematically splitting oversized files (1k–2k lines) into focused submodules across all crates. Zero production `unwrap`/`expect`, zero clippy warnings. The only issue is the recurring double-spawn ENOENT race for a newly-refactored integration test binary (`database_audit`). Claude's bug rate improved slightly (0.19 → 0.18, quality score 81% → 82%) due to high task throughput with minimal new defects.
+
+### Arch Review — 2026-04-19 12:00 — 8894e972
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 1 | code reuse / duplication (1) | `agent/phantom/src/protocol.rs` (671L) and `agent/specter/src/protocol.rs` (623L) contain near-identical AgentMetadata, serialize_init_metadata, build_init_packet, build_callback_packet, parse_init_ack implementations — filed red-cell-c2-5w5xh P3, zone:common. |
+| Codex | 0 | — | No in-scope code written in this range. |
+| Cursor | 0 | — | No in-scope code written in this range. |
+
+Build: **cargo check** — passed (clean). **cargo clippy -- -D warnings** — clean (0 warnings). **cargo nextest run --workspace** — 5469/5469 tests passed (all green, no failures).
+
+**Issues filed this run:** 1 — red-cell-c2-5w5xh (code reuse / duplication P3, zone:common).
+
+**Security posture:** Strong. AES-256-CTR with monotonic offset tracking prevents two-time-pad. HKDF-SHA256 key derivation with versioned secrets. AES-256-GCM for DB at-rest encryption with per-row random nonce. HMAC-SHA256 with `subtle::ConstantTimeEq` for WS frame integrity. Argon2id with OWASP params. Constant-time session token lookup. ZeroizeOnDrop on all key material. No raw SQL (sqlx parameterized queries throughout). Rate limiting on all inbound paths with memory-bounded eviction. Deferred CTR offset advance prevents desync from crafted packets.
+
+**Biggest blindspot:** Protocol code duplication between phantom and specter agents — any future protocol change must be applied in two places, risking silent drift.
+
+**Codebase health:** Excellent. Zero `unwrap`/`expect` in production code. Zero clippy warnings. Zero `todo!`/`unimplemented!`. 5469 tests all passing. Crypto, auth, and protocol layers are well-tested with golden vector tests. Architecture compliance verified: edition 2024, Axum+Tokio, SQLite/sqlx, HCL config, thiserror in libs/anyhow in main only, egui client. The only finding is the phantom/specter protocol duplication (P3 refactor). No security vulnerabilities, no correctness bugs, no architecture drift.

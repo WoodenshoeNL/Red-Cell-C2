@@ -1,13 +1,12 @@
 # Red Cell C2
 
-A Rust rewrite of the [Havoc C2 framework](https://github.com/HavocFramework/Havoc) — teamserver and operator client. The original Demon agent (C/ASM) is preserved as-is; full binary protocol compatibility is maintained.
-
-> **Status**: Planning complete, implementation in progress. See [issue tracker](#issue-tracker) for current state.
+A Rust rewrite of the [Havoc C2 framework](https://github.com/HavocFramework/Havoc) —
+teamserver, operator GUI client, and AI-agent CLI client. The original Demon agent (C/ASM)
+is preserved as-is; full binary protocol compatibility is maintained.
 
 > **This is a vibe-coded hobby project.** The entire codebase is written by AI agent
 > loops (Claude, Codex, Cursor) with human direction. It is not production-grade
-> software — use it for learning, experimentation, and authorized security testing
-> only.
+> software — use it for learning, experimentation, and authorized security testing only.
 
 ## Disclaimer
 
@@ -15,11 +14,10 @@ This software is provided for **authorized security testing, research, and educa
 purposes only**. It is intended for use by security professionals in controlled
 environments with proper authorization.
 
-- Do not use this tool against systems you do not own or have explicit written
-  permission to test.
+- Do not use this tool against systems you do not own or have explicit written permission to test.
 - The authors assume no liability for misuse or damage caused by this software.
-- Users are solely responsible for compliance with all applicable local, state,
-  national, and international laws.
+- Users are solely responsible for compliance with all applicable local, state, national,
+  and international laws.
 
 By using this software you agree to these terms.
 
@@ -27,11 +25,15 @@ By using this software you agree to these terms.
 
 ## Overview
 
-| Component | Language | Status |
-|---|---|---|
-| **Teamserver** | Rust (Axum + Tokio) | In development |
-| **Operator client** | Rust (egui) | In development |
-| **Demon agent** | C + x86/x64 ASM | Unchanged — `./agent/demon` |
+| Component | Language | Binary | Status |
+|---|---|---|---|
+| **Teamserver** | Rust (Axum + Tokio) | `red-cell` | In development |
+| **Operator client** | Rust (egui) | `red-cell-client` | In development |
+| **AI-agent CLI client** | Rust | `red-cell-cli` | In development |
+| **Demon agent** | C + x86/x64 ASM | — | Frozen — `./agent/demon` |
+| **Archon agent** | C + x86/x64 ASM | — | In development — `./agent/archon` |
+| **Phantom agent** | Rust | — | In development — `./agent/phantom` |
+| **Specter agent** | Rust | — | In development — `./agent/specter` |
 
 See [HAVOC_ATTRIBUTION.md](HAVOC_ATTRIBUTION.md) for Havoc-derived files and licensing.
 
@@ -41,18 +43,19 @@ See [HAVOC_ATTRIBUTION.md](HAVOC_ATTRIBUTION.md) for Havoc-derived files and lic
 
 | Concern | Decision |
 |---|---|
-| Repo structure | Cargo workspace: `./teamserver`, `./client`, `./common` at repo root |
-| Binaries | `red-cell` (teamserver), `red-cell-client` (operator GUI) |
+| Repo structure | Cargo workspace: `./teamserver`, `./client`, `./client-cli`, `./common` at repo root |
+| Binaries | `red-cell` (teamserver), `red-cell-client` (operator GUI), `red-cell-cli` (AI-agent CLI) |
 | Rust edition | 2024, latest stable |
-| Teamserver framework | Axum |
-| Database | SQLite via sqlx |
+| Teamserver framework | Axum + Tokio |
+| Database | SQLite via sqlx — runtime `sqlx::query()` with `.bind()` |
 | Config format | HCL/YAOTL (same `.yaotl` profile format as Havoc) |
 | Operator protocol | JSON over WebSocket |
-| Agent protocol | Demon binary protocol — unchanged (0xDEADBEEF, AES-256-CTR) |
-| Client UI | egui |
-| Plugin system | Python via PyO3 |
+| Agent protocol | Demon binary protocol — unchanged (0xDEADBEEF magic, AES-256-CTR, per-agent keys) |
+| Client UI | egui (pure Rust, immediate-mode) |
+| Plugin system | Python via PyO3 (client + teamserver) |
 | New features | RBAC, REST API, DNS listener, structured audit logging |
-| Testing | Unit + integration (mock Demon agent) + E2E |
+| Agent builds | Demon/Archon: `mingw-w64` + `nasm`; Phantom: Linux Rust; Specter: Windows cross-compiled Rust |
+| Testing | Unit + integration + E2E automated harness (`automatic-test/`) + manual test plan (`docs/test-plan.md`) |
 
 ---
 
@@ -71,23 +74,19 @@ See [HAVOC_ATTRIBUTION.md](HAVOC_ATTRIBUTION.md) for Havoc-derived files and lic
 
 ### Agent loop tools (optional, for autonomous development)
 
-- **Claude Code CLI** — for the Claude dev and QA loops
-- **Codex CLI** — for the Codex dev loop
-- **Cursor Agent CLI** (`agent`) — for the Cursor dev loop
+- **Claude Code CLI** — for Claude dev, QA, arch, quality, coverage, and feature loops
+- **Codex CLI** — for Codex dev loops
+- **Cursor Agent CLI** (`agent`) — for Cursor dev loops
 
 ---
 
 ## Getting Started
 
-## CI Policy
+### CI Policy
 
 This repository does not use GitHub Actions or any other hosted CI.
-Builds, tests, linting, and end-to-end validation must run on the VM where the
-repo is checked out.
-
-Use the local dev/QA/arch loops and the VM-hosted test harness for validation.
-If a GitHub Actions workflow or other external CI config is added, remove it
-instead of extending it.
+Builds, tests, linting, and end-to-end validation must run on the VM where the repo is
+checked out. If a GitHub Actions workflow is added, remove it instead of extending it.
 
 ### First time on a new machine
 
@@ -97,11 +96,11 @@ cd Red-Cell-C2
 ./setup.sh
 ```
 
-`setup.sh` checks required tools, enforces the correct `br` issue prefix, and builds the local beads DB from the committed JSONL.
+`setup.sh` checks required tools, enforces the correct `br` issue prefix, and builds the
+local beads DB from the committed JSONL. On the first run it also downloads the musl.cc
+MinGW-w64 cross-compilers into `data/` for Havoc-compatible payload builds.
 
-On the first run it also downloads the musl.cc MinGW-w64 cross-compilers into `data/` so Havoc-compatible payload builds can use the default profile paths.
-
-### Switching between machines during the day
+### Switching between machines
 
 Run `setup.sh` at the start of every session — it is idempotent and safe to run repeatedly:
 
@@ -111,27 +110,14 @@ Run `setup.sh` at the start of every session — it is idempotent and safe to ru
 
 It will:
 1. Check required tools
-2. `git pull --ff-only` to fetch work committed on another VM (skips if you have uncommitted changes)
+2. `git pull --ff-only` to fetch work committed on another VM
 3. Enforce `br issue_prefix = red-cell-c2`
-4. Download and extract the musl.cc MinGW-w64 toolchains into `data/` when they are missing
+4. Download MinGW-w64 toolchains into `data/` when missing
 5. Rebuild the beads DB from the updated JSONL
 6. Warn about any `in_progress` tasks left running on another VM
 7. Print the agent loop commands for this machine
 
-### Payload toolchain bootstrap
-
-If you only need the payload build toolchains without the rest of the session bootstrap, run:
-
-```bash
-./scripts/install-toolchains.sh
-```
-
-The installer is idempotent. It ensures these default Havoc-compatible compiler paths exist:
-
-- `data/x86_64-w64-mingw32-cross/bin/x86_64-w64-mingw32-gcc`
-- `data/i686-w64-mingw32-cross/bin/i686-w64-mingw32-gcc`
-
-### Build (once crates exist)
+### Build
 
 ```bash
 cargo build --workspace
@@ -142,88 +128,182 @@ cargo test --workspace
 
 ## Agent Loop System
 
-This project uses autonomous AI agent loops for development. Three loops are available — run them in any combination depending on what tools you have available.
-
-### Loops at a glance
-
-| Script | Agent | Role | Cadence |
-|---|---|---|---|
-| `./codex_loop.sh` | Codex | Development | Continuous |
-| `./claude_dev_loop.sh` | Claude | Development | Continuous |
-| `./cursor_loop.sh` | Cursor Agent | Development | Continuous |
-| `./claude_loop.sh` | Claude | QA review | Every 20 min |
-| `./claude_arch_loop.sh` | Claude | Architecture review | Every 45–90 min |
-
-### Development loops (`codex_loop.sh`, `claude_dev_loop.sh`, `cursor_loop.sh`)
-
-Pick the highest-priority unblocked task from the issue tracker, implement it, run tests, commit, push, and close the issue — then repeat.
+All loops are driven by a single entry point:
 
 ```bash
-# Run forever
-./codex_loop.sh
-./claude_dev_loop.sh
-./cursor_loop.sh
-
-# Run exactly N loops then exit
-./codex_loop.sh 5
-./claude_dev_loop.sh 3
-./cursor_loop.sh 3
+./loop.sh [--service] --agent <agent> --loop <type> [options]
 ```
 
-Logs: `logs/codex_dev.log`, `logs/claude_dev.log`, `logs/cursor_dev.log`
+`loop.sh` is a thin wrapper around `loop.py`. Without `--service` it runs in the
+foreground. With `--service` it launches as a transient systemd user service that survives
+terminal close and oomd kill (see [Service mode](#service-mode) below).
 
-### QA review loop (`claude_loop.sh`)
+### Loop types
 
-Runs every 20 minutes. Reviews commits since the last QA checkpoint, checks build health, verifies architecture compliance, and creates beads issues for any problems found. Does not write code.
+| Loop | Role | Default cadence |
+|---|---|---|
+| `dev` | Claims beads tasks, implements them, then runs a lite QA pass | Continuous |
+| `qa` | Reviews recent commits, checks build health, files issues | Every 20 min |
+| `arch` | Deep full-codebase review: security, drift, test gaps, stubs | Every 120 min |
+| `quality` | Evaluates quality of existing tests | Every 30 min |
+| `coverage` | Finds untested public functions | Every 30 min |
+| `maintenance` | Disk, git, and process health checks | Every 60 min |
+| `feature` | Feature completeness + integration gap analysis per zone | 1 run (default) |
+
+### Agents
+
+| Agent | `--agent` value |
+|---|---|
+| Claude Code | `claude` |
+| Codex | `codex` |
+| Cursor | `cursor` |
+
+### Common options
+
+```
+--zone ZONE [ZONE ...]   Restrict to one or more zones (see Zone system below)
+--iterations N           Max iterations before exit; 0 = run forever
+--sleep N                Minutes to sleep between iterations
+--jitter N               ±N minutes of random jitter on --sleep
+--pre-sleep N            Sleep N minutes before the first run
+--model MODEL            Claude model override (claude agent only)
+--node-id ID             Override machine identifier used in commit tags
+--dev-light              Dev loop only: skip the lite QA pass (original single-call behaviour)
+--service                Run as a systemd user service (survives terminal close)
+```
+
+### Examples
 
 ```bash
-./claude_loop.sh
+# Development
+./loop.sh --agent claude --loop dev
+./loop.sh --agent claude --loop dev --zone client-cli
+./loop.sh --agent codex  --loop dev --zone teamserver
+./loop.sh --agent cursor --loop dev --zone client-cli client
+./loop.sh --agent claude --loop dev --dev-light          # skip lite QA
+
+# QA and review
+./loop.sh --agent claude --loop qa
+./loop.sh --agent claude --loop arch
+./loop.sh --agent claude --loop arch --zone teamserver
+./loop.sh --agent claude --loop quality --zone teamserver
+./loop.sh --agent claude --loop coverage --zone common
+
+# Feature completeness review (runs once and reports)
+./loop.sh --agent claude --loop feature --zone teamserver client-cli
+./loop.sh --agent claude --loop feature --zone teamserver phantom
+./loop.sh --agent claude --loop feature --zone teamserver  # single zone
+
+# Maintenance
+./loop.sh --loop maintenance
+
+# Run as background service
+./loop.sh --service --agent claude --loop dev --zone teamserver
+./loop.sh --service --agent claude --loop qa
 ```
+
+### Loop descriptions
+
+#### `dev` — Development loop
+
+Claims the highest-priority unblocked task from the issue tracker, implements it, commits,
+pushes, and closes the issue. After each completed task it runs a **lite QA pass** — a
+second, read-only agent call that reviews the code quality of the changes just made and
+files follow-up issues. Use `--dev-light` to skip the lite QA and get the original
+single-agent-call behaviour.
+
+Logs: `logs/claude_dev.log`, `logs/codex_dev.log`, `logs/cursor_dev.log`
+
+#### `qa` — QA review loop
+
+Runs every 20 minutes. Reviews commits since the last QA checkpoint, runs `cargo check`
+and `cargo nextest`, verifies architecture compliance, and files beads issues for any
+problems found. Updates `AGENT_SCORECARD.md` with per-agent quality metrics. Does not
+write code.
 
 Log: `logs/claude_qa.log`
 
-### QA review loop (`codex_qa_loop.sh`)
+#### `arch` — Architecture review loop
 
-Runs every 20 minutes. Same QA workflow as the Claude loop, but executed by Codex.
-Reviews commits since the last QA checkpoint, checks build health, verifies architecture
-compliance, and creates beads issues for any problems found. Does not write code.
+Runs every 120 minutes. Reads the **entire codebase from scratch** — not just recent
+commits. Checks security, protocol correctness, error handling, architectural drift,
+test coverage blindspots, oversized files, and unimplemented stubs. Files beads issues
+for all findings. Updates `AGENT_SCORECARD.md`. Does not write code.
+
+Logs: `logs/claude_arch.log` + per-run `logs/claude_arch_YYYYMMDD_HHMMSS.log`
+
+#### `quality` — Test quality loop
+
+Reviews the quality of existing tests — are they testing the right things, covering error
+paths, and structured correctly? Files issues for weak or missing tests.
+
+Logs: `logs/claude_quality.log` + per-run timestamped log
+
+#### `coverage` — Test coverage loop
+
+Scans for public functions and types that have no test coverage at all. Files issues for
+each gap. Complementary to `quality` — `coverage` finds what's missing, `quality` reviews
+what's there.
+
+Logs: `logs/claude_coverage.log` + per-run timestamped log
+
+#### `feature` — Feature completeness loop
+
+Runs once by default (`--iterations 1`). Analyses one or more zones against the project
+spec (AGENTS.md) and beads issues to answer: *what was planned, what exists, and what's
+missing?* When multiple zones are given it also analyses integration gaps between them —
+interface contracts, missing glue, end-to-end flow breaks. Can flag problems with the spec
+or roadmap itself for human review. Files actionable beads issues for all gaps. Does not
+write code or run tests.
+
+Logs: `logs/claude_feature.log` + per-run timestamped log
+
+#### `maintenance` — Maintenance loop
+
+Runs every 60 minutes. Checks disk space, stale cargo processes, old git stashes, and
+orphaned worktrees. Cleans up build artifacts. Does not write code or file issues.
+
+Log: `logs/maintenance.log`
+
+### Service mode
+
+With `--service`, `loop.sh` launches `loop.py` as a transient systemd user service. This
+protects the loop from being killed when the terminal closes or when systemd-oomd reclaims
+memory under the terminal's cgroup.
 
 ```bash
-./codex_qa_loop.sh
+# Start
+./loop.sh --service --agent claude --loop dev --zone teamserver
+
+# Monitor
+journalctl --user -u loop-claude-dev-teamserver -f
+
+# Stop
+systemctl --user stop loop-claude-dev-teamserver
+
+# List running loops
+systemctl --user list-units 'loop-*.service'
 ```
 
-Log: `logs/codex_qa.log`
+### Zone system
 
-### Architecture review loop (`claude_arch_loop.sh`)
+Loops can be scoped to one or more zones so multiple agents can work in parallel without
+file conflicts. Each zone maps to a workspace crate or directory.
 
-Runs every 45–90 minutes (randomised interval). Reads the **entire codebase from scratch** — not just recent commits. Looks for security issues, architectural drift, missing test coverage, protocol correctness, and stubbed-out code that silently does nothing. Files beads issues for all findings. Does not write code.
+| Zone | Paths |
+|---|---|
+| `teamserver` | `teamserver/` |
+| `client` | `client/` |
+| `client-cli` | `client-cli/` |
+| `common` | `common/` |
+| `archon` | `agent/archon/` |
+| `phantom` | `agent/phantom/` |
+| `specter` | `agent/specter/` |
+| `autotest` | `automatic-test/` |
 
-```bash
-# Run forever
-./claude_arch_loop.sh
-
-# Run exactly N reviews then exit
-./claude_arch_loop.sh 3
-```
-
-Logs: `logs/claude_arch.log` (loop control), `logs/arch_review_YYYYMMDD_HHMMSS.log` (per run)
-
-### Architecture review loop (`codex_arch_loop.sh`)
-
-Runs every 45–90 minutes (randomised interval). Same architecture review workflow as the
-Claude loop, but executed by Codex. Reads the entire codebase from scratch, looks for
-security issues, architectural drift, missing coverage, protocol correctness problems, and
-stubbed-out behavior that silently does nothing.
-
-```bash
-# Run forever
-./codex_arch_loop.sh
-
-# Run exactly N reviews then exit
-./codex_arch_loop.sh 3
-```
-
-Logs: `logs/codex_arch.log` (loop control), `logs/codex_arch_review_YYYYMMDD_HHMMSS.log` (per run)
+A dev agent in a zone is strictly prohibited from modifying files outside it. If work in
+another zone is needed, the agent creates a beads issue labelled `zone:<name>` for a
+future session.
 
 ### Stopping a loop
 
@@ -240,67 +320,61 @@ To stop a remote agent (e.g. Codex running in the cloud):
 touch .stop && git add .stop && git commit -m "chore: stop dev loop" && git push
 ```
 
-### Typical multi-agent setup (single machine)
+### Typical multi-agent setup
 
 ```bash
-./codex_loop.sh &           # Codex doing dev work
-./cursor_loop.sh &          # Cursor Agent doing dev work
-./claude_loop.sh &          # Claude QA running every 10 min
-./claude_arch_loop.sh       # Claude deep architecture review in foreground
+# Two dev agents covering different zones
+./loop.sh --service --agent claude --loop dev --zone teamserver
+./loop.sh --service --agent codex  --loop dev --zone client-cli
+
+# QA and arch review (one of each is enough)
+./loop.sh --service --agent claude --loop qa
+./loop.sh --service --agent claude --loop arch
+
+# Feature completeness check on demand
+./loop.sh --agent claude --loop feature --zone teamserver client-cli
 ```
 
 ### Running on multiple VMs in parallel
 
-Both dev loops are safe to run simultaneously across machines. Each loop claims a task by immediately pushing a git commit — if two agents select the same task at the same moment, the one whose push lands second detects the conflict, releases the claim, and picks a different task.
+Dev loops are safe to run simultaneously across machines. Each loop claims a task by
+pushing a git commit immediately — if two agents select the same task at the same moment,
+the one whose push lands second detects the conflict, releases the claim, and picks a
+different task.
 
-Each agent identifies itself as `<hostname>-claude`, `<hostname>-codex`, or `<hostname>-cursor` in git commit messages and log lines, so it is always clear which machine did what.
-
-**On each VM, start with:**
-```bash
-./setup.sh          # pull latest, sync DB, check config
-```
-
-**Then start loops:**
-
-```bash
-# VM 1
-./codex_loop.sh &
-./claude_dev_loop.sh
-
-# VM 2
-./codex_loop.sh &
-./claude_dev_loop.sh
-```
-
-The QA loop (`claude_loop.sh`) and architecture loop (`claude_arch_loop.sh`) only need to run on one machine.
-
-Codex QA and architecture loops are alternatives to the Claude review loops, not companions.
-Run one QA loop and one architecture loop total.
+Each agent identifies itself as `<node-id>-<agent>` in commit messages and log lines
+(e.g. `ubuntu-c2-dev01-a3kx-claude`), so it is always clear which machine did what. The
+node ID is auto-generated on first run and stored in `.node-id`.
 
 ### Prompt files
 
-Each loop has a corresponding prompt file that controls agent behaviour:
+All prompts live in `prompts/`:
 
 | Prompt | Used by |
 |---|---|
-| `CODEX_PROMPT.md` | `codex_loop.sh` |
-| `CLAUDE_DEV_PROMPT.md` | `claude_dev_loop.sh` |
-| `CURSOR_PROMPT.md` | `cursor_loop.sh` |
-| `CLAUDE_PROMPT.md` | `claude_loop.sh` |
-| `CLAUDE_ARCH_PROMPT.md` | `claude_arch_loop.sh` |
-| `CODEX_QA_PROMPT.md` | `codex_qa_loop.sh` |
-| `CODEX_ARCH_PROMPT.md` | `codex_arch_loop.sh` |
+| `prompts/CLAUDE_DEV_PROMPT.md` | `dev` loop (Claude) |
+| `prompts/CODEX_PROMPT.md` | `dev` loop (Codex) |
+| `prompts/CURSOR_PROMPT.md` | `dev` loop (Cursor) |
+| `prompts/DEV_LITEQA_PROMPT.md` | lite QA pass after each dev task |
+| `prompts/CLAUDE_PROMPT.md` | `qa` loop |
+| `prompts/CLAUDE_ARCH_PROMPT.md` | `arch` loop |
+| `prompts/CLAUDE_TEST_PROMPT.md` | `quality` loop |
+| `prompts/CODEX_TEST_PROMPT.md` | `coverage` loop |
+| `prompts/CLAUDE_FEATURE_PROMPT.md` | `feature` loop |
 
 ---
 
 ## Issue Tracker
 
-This project uses [beads_rust](https://github.com/Dicklesworthstone/beads_rust) (`br`) for issue tracking. Issues are stored in `.beads/issues.jsonl` and synced via git — no external service required.
+This project uses [beads_rust](https://github.com/Dicklesworthstone/beads_rust) (`br`)
+for issue tracking. Issues are stored in `.beads/issues.jsonl` and synced via git — no
+external service required.
 
 ```bash
 br ready                    # show unblocked work
 br show <id>                # full issue details
-br stats                    # project statistics
+br list --status=open       # all open issues
+br search "keyword"         # full-text search
 
 br create \
   --title="..." \
@@ -313,8 +387,6 @@ br close <id> --reason="done"
 ```
 
 ### Syncing across machines
-
-After changes to issues, sync back to git:
 
 ```bash
 br sync --flush-only
@@ -333,22 +405,28 @@ On another machine, `./setup.sh` pulls and rebuilds the DB in one step.
 Red-Cell-C2/
 ├── teamserver/              # Axum-based C2 server (red-cell binary)
 ├── client/                  # egui operator client (red-cell-client binary)
+├── client-cli/              # AI-agent CLI client (red-cell-cli binary)
 ├── common/                  # Shared types: protocol, crypto, config
-├── agent/                   # Agent source: demon/, archon/, phantom/, specter/
+├── agent/
+│   ├── demon/               # Original Havoc Demon — frozen, do not modify
+│   ├── archon/              # Fork of Demon — C/ASM, Phase 2a
+│   ├── phantom/             # Linux Rust agent — Phase 2b
+│   └── specter/             # Windows Rust agent — Phase 2c
+├── automatic-test/          # E2E test harness (Python)
+│   ├── test.py              # Main runner: --scenario all|01|02|...
+│   ├── config/              # env.toml (committed), targets.toml (gitignored)
+│   ├── scenarios/           # Per-scenario test scripts
+│   └── lib/                 # CLI wrapper, SSH helpers, poll helpers
+├── profiles/                # Teamserver profiles (.yaotl + TLS certs)
+├── docs/                    # Documentation and test plans
+├── prompts/                 # Agent loop prompt files
 ├── logs/                    # Agent loop log output (gitignored)
-├── .beads/                  # Issue tracker database
-│   └── issues.jsonl         # Issues — committed to git for sync
+├── .beads/
+│   └── issues.jsonl         # Issue tracker — committed to git for sync
+├── loop.py                  # Unified agent loop runner
+├── loop.sh                  # Wrapper: foreground or --service mode
 ├── AGENTS.md                # Agent instructions and architecture decisions
-├── CLAUDE_PROMPT.md         # QA reviewer prompt
-├── CLAUDE_DEV_PROMPT.md     # Claude developer prompt
-├── CLAUDE_ARCH_PROMPT.md    # Architecture reviewer prompt
-├── CODEX_PROMPT.md          # Codex developer prompt
-├── CURSOR_PROMPT.md         # Cursor Agent developer prompt
-├── claude_loop.sh           # QA review loop (every 20 min)
-├── claude_dev_loop.sh       # Claude development loop
-├── claude_arch_loop.sh      # Architecture review loop (every 45–90 min)
-├── codex_loop.sh            # Codex development loop
-├── cursor_loop.sh           # Cursor Agent development loop
+├── AGENT_SCORECARD.md       # Per-agent quality metrics
 └── setup.sh                 # Session start / machine onboarding script
 ```
 
@@ -357,5 +435,5 @@ Red-Cell-C2/
 ## Status
 
 This is a vibe-coded personal hobby project — built entirely by AI agent loops with
-human direction. It is not open for contributions. Feel free to follow along or use
-it as inspiration, but please do not open pull requests.
+human direction. It is not open for contributions. Feel free to follow along or use it
+as inspiration, but please do not open pull requests.

@@ -367,7 +367,7 @@ havoc.RegisterCommand("exfil", "exfiltrate data", run_exfil)
     )
     .await?;
 
-    let loaded = runtime.load_plugins().await?;
+    let (loaded, _failed) = runtime.load_plugins().await?;
     assert_eq!(loaded.len(), 2);
 
     // command_names returns sorted keys from BTreeMap.
@@ -430,7 +430,7 @@ havoc.RegisterCommand("scan", "second scan", run_scan)
     )
     .await?;
 
-    let loaded = runtime.load_plugins().await?;
+    let (loaded, _failed) = runtime.load_plugins().await?;
     assert_eq!(loaded.len(), 2);
 
     // Only one "scan" entry should exist (BTreeMap key deduplication).

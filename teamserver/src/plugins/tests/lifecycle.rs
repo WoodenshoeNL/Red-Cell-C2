@@ -149,9 +149,10 @@ havoc.RegisterCommand("demo", "demo command", run)
     )
     .await?;
 
-    let loaded = runtime.load_plugins().await?;
+    let (loaded, failed) = runtime.load_plugins().await?;
 
     assert_eq!(loaded, vec!["sample_plugin".to_owned()]);
+    assert_eq!(failed, 0);
     assert_eq!(runtime.command_names().await, vec!["demo".to_owned()]);
     assert_eq!(runtime.command_descriptions().await.get("demo"), Some(&"demo command".to_owned()));
     Ok(())
@@ -179,8 +180,9 @@ async fn load_plugins_skips_plugin_with_syntax_error() -> Result<(), Box<dyn std
     )
     .await?;
 
-    let loaded = runtime.load_plugins().await?;
+    let (loaded, failed) = runtime.load_plugins().await?;
     assert!(loaded.is_empty(), "broken plugin should be skipped, got {loaded:?}");
+    assert_eq!(failed, 1, "syntax error plugin should count as 1 failure");
     Ok(())
 }
 
@@ -229,10 +231,11 @@ havoc.RegisterCallback("agent_checkin", on_checkin)
     )
     .await?;
 
-    let loaded = runtime.load_plugins().await?;
+    let (loaded, failed) = runtime.load_plugins().await?;
 
     // alpha and gamma should load; beta (syntax error) should be skipped.
     assert_eq!(loaded, vec!["alpha".to_owned(), "gamma".to_owned()]);
+    assert_eq!(failed, 1, "beta.py syntax error should count as 1 failure");
 
     // alpha's command should be registered.
     assert_eq!(runtime.command_names().await, vec!["alpha_cmd".to_owned()]);
@@ -300,8 +303,9 @@ async fn load_plugins_skips_plugin_with_interior_nul_in_source()
     )
     .await?;
 
-    let loaded = runtime.load_plugins().await?;
-    assert!(loaded.is_empty(), "plugin with interior NUL should be skipped, got {loaded:?}",);
+    let (loaded, failed) = runtime.load_plugins().await?;
+    assert!(loaded.is_empty(), "plugin with interior NUL should be skipped, got {loaded:?}");
+    assert_eq!(failed, 1, "plugin with interior NUL byte should count as 1 failure");
     Ok(())
 }
 
@@ -338,8 +342,9 @@ async fn load_plugins_returns_empty_when_no_dir_configured()
     let (_database, _registry, _events, _sockets, runtime) =
         runtime_fixture("plugins-no-dir").await?;
 
-    let loaded = runtime.load_plugins().await?;
+    let (loaded, failed) = runtime.load_plugins().await?;
     assert!(loaded.is_empty(), "expected empty vec when no plugins_dir configured");
+    assert_eq!(failed, 0);
     Ok(())
 }
 
@@ -365,8 +370,9 @@ async fn load_plugins_skips_non_py_files() -> Result<(), Box<dyn std::error::Err
     )
     .await?;
 
-    let loaded = runtime.load_plugins().await?;
+    let (loaded, failed) = runtime.load_plugins().await?;
     assert_eq!(loaded, vec!["real_plugin".to_owned()]);
+    assert_eq!(failed, 0, "non-.py files should not count as failures");
     Ok(())
 }
 
@@ -549,8 +555,9 @@ async fn load_plugins_returns_empty_for_empty_directory() -> Result<(), Box<dyn 
     )
     .await?;
 
-    let loaded = runtime.load_plugins().await?;
+    let (loaded, failed) = runtime.load_plugins().await?;
     assert!(loaded.is_empty(), "empty directory should produce no loaded plugins");
+    assert_eq!(failed, 0);
     Ok(())
 }
 

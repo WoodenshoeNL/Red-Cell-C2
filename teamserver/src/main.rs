@@ -223,10 +223,16 @@ async fn main() -> Result<()> {
     listeners.sync_profile(&profile).await?;
     listeners.restore_running().await?;
     start_new_profile_listeners(&listeners, &profile).await?;
-    let loaded_plugins = plugins.load_plugins().await.context("failed to load Python plugins")?;
+    let (loaded_plugins, plugins_failed) =
+        plugins.load_plugins().await.context("failed to load Python plugins")?;
     let plugins_loaded = u32::try_from(loaded_plugins.len()).unwrap_or(u32::MAX);
-    if !loaded_plugins.is_empty() {
-        info!(count = loaded_plugins.len(), plugins = ?loaded_plugins, "loaded Python plugins");
+    if !loaded_plugins.is_empty() || plugins_failed > 0 {
+        info!(
+            count = loaded_plugins.len(),
+            failed = plugins_failed,
+            plugins = ?loaded_plugins,
+            "loaded Python plugins",
+        );
     }
 
     let bind_addr = resolve_bind_addr(&profile).await?;
@@ -262,7 +268,7 @@ async fn main() -> Result<()> {
             .transpose()?,
         started_at: std::time::Instant::now(),
         plugins_loaded,
-        plugins_failed: 0,
+        plugins_failed,
         metrics: metrics_handle,
     };
     let router = build_router(state.clone());

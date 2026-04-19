@@ -208,9 +208,13 @@ impl PluginRuntime {
 
     /// Load all `.py` modules from the configured plugins directory.
     #[instrument(skip(self))]
-    pub async fn load_plugins(&self) -> Result<Vec<String>, PluginError> {
+    /// Load all Python plugins from the configured plugin directory.
+    ///
+    /// Returns `(loaded_names, failed_count)` where `failed_count` is the number
+    /// of `.py` files that were found but could not be loaded successfully.
+    pub async fn load_plugins(&self) -> Result<(Vec<String>, u32), PluginError> {
         let Some(directory) = self.inner.plugins_dir.clone() else {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), 0));
         };
 
         if !directory.is_dir() {
@@ -480,14 +484,14 @@ impl PluginRuntime {
         Ok(())
     }
 
-    fn load_plugins_blocking(&self, directory: &Path) -> Result<Vec<String>, PluginError> {
+    fn load_plugins_blocking(&self, directory: &Path) -> Result<(Vec<String>, u32), PluginError> {
         let mut entries = std::fs::read_dir(directory)
             .map_err(|_| PluginError::InvalidPluginDirectory { path: directory.to_path_buf() })?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| PluginError::InvalidPluginDirectory { path: directory.to_path_buf() })?;
         entries.sort_by_key(|entry| entry.path());
 
-        Python::with_gil(|py| -> Result<Vec<String>, PluginError> {
+        Python::with_gil(|py| -> Result<(Vec<String>, u32), PluginError> {
             self.install_api_module(py)?;
 
             let sys = py.import("sys")?;
@@ -495,6 +499,7 @@ impl PluginRuntime {
             path.call_method1("insert", (0, directory.display().to_string()))?;
 
             let mut loaded = Vec::new();
+            let mut failed: u32 = 0;
             for entry in entries {
                 let path = entry.path();
                 if path.extension().and_then(|extension| extension.to_str()) != Some("py") {
@@ -505,6 +510,7 @@ impl PluginRuntime {
                     Some(name) => name.to_owned(),
                     None => {
                         warn!(path = %path.display(), "skipping plugin with invalid module name");
+                        failed = failed.saturating_add(1);
                         continue;
                     }
                 };
@@ -512,6 +518,7 @@ impl PluginRuntime {
                     Ok(code) => code,
                     Err(err) => {
                         warn!(path = %path.display(), %err, "skipping plugin that could not be read");
+                        failed = failed.saturating_add(1);
                         continue;
                     }
                 };
@@ -520,6 +527,7 @@ impl PluginRuntime {
                     Ok(code) => code,
                     Err(_) => {
                         warn!(path = %path.display(), "skipping plugin with interior NUL byte in source");
+                        failed = failed.saturating_add(1);
                         continue;
                     }
                 };
@@ -527,6 +535,7 @@ impl PluginRuntime {
                     Ok(filename) => filename,
                     Err(_) => {
                         warn!(path = %path.display(), "skipping plugin with interior NUL byte in path");
+                        failed = failed.saturating_add(1);
                         continue;
                     }
                 };
@@ -534,6 +543,7 @@ impl PluginRuntime {
                     Ok(cstr) => cstr,
                     Err(_) => {
                         warn!(path = %path.display(), "skipping plugin with interior NUL byte in module name");
+                        failed = failed.saturating_add(1);
                         continue;
                     }
                 };
@@ -557,18 +567,20 @@ impl PluginRuntime {
                             .and_then(|modules| modules.set_item(module_name.as_str(), module))
                         {
                             warn!(plugin = %module_name, %err, "failed to register plugin module in sys.modules");
+                            failed = failed.saturating_add(1);
                             continue;
                         }
                         loaded.push(module_name);
                     }
                     Err(err) => {
                         warn!(plugin = %module_name, %err, "skipping plugin that failed to load");
+                        failed = failed.saturating_add(1);
                         continue;
                     }
                 }
             }
 
-            Ok(loaded)
+            Ok((loaded, failed))
         })
     }
 

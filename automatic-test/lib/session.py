@@ -71,7 +71,8 @@ class Session:
         env["RC_SERVER"] = self._cfg.server
         env["RC_TOKEN"] = self._cfg.token
 
-        cmd = [self._cfg.binary, "--output", "json", "session"]
+        fp_args = ["--cert-fingerprint", self._cfg.cert_fingerprint] if self._cfg.cert_fingerprint else []
+        cmd = [self._cfg.binary, "--output", "json", *fp_args, "session"]
         if self._agent:
             cmd += ["--agent", self._agent]
 

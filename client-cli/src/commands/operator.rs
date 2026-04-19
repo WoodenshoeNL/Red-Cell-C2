@@ -284,7 +284,7 @@ async fn create(
     let body = serde_json::json!({ "username": username, "password": password, "role": role });
     let raw: RawCreateResponse = client.post("/operators", &body).await?;
 
-    Ok(CreateResult { username: raw.username, role: raw.role })
+    Ok(CreateResult { username: raw.username, role: raw.role.to_lowercase() })
 }
 
 /// `operator delete <username>` — permanently remove an operator account.
@@ -317,7 +317,7 @@ async fn set_role(
     let body = serde_json::json!({ "role": role });
     let raw: RawOperatorSummary = client.put(&format!("/operators/{username}/role"), &body).await?;
 
-    Ok(SetRoleResult { username: raw.username, role: raw.role })
+    Ok(SetRoleResult { username: raw.username, role: raw.role.to_lowercase() })
 }
 
 /// `operator show-agent-groups <username>` — fetch RBAC agent-group restrictions.

@@ -621,7 +621,7 @@ def repair_db_if_needed(log: Logger, rename_prefix: bool):
         log.log("WARNING: DB rebuild failed")
 
 
-DEBUG_SIZE_LIMIT_GB   = 8      # nuke target/* build subdirs when total target/ exceeds this size
+DEBUG_SIZE_LIMIT_GB   = 4      # nuke target/* build subdirs when total target/ exceeds this size
 MIN_FREE_DISK_GB      = 30.0  # bail if less than this many GB free before starting a session
 
 
@@ -744,18 +744,22 @@ def _dir_size_gb(path) -> float:
     return total / (1024 ** 3)
 
 
-def clean_build_artifacts(log: Logger):
+def clean_build_artifacts(log: Logger, force: bool = False):
     """
     Remove stale Rust build artifacts to keep target/ from growing unboundedly.
 
     Strategy:
     - Measure total target/ size (debug + all codex-* alternate target dirs).
-    - If total exceeds DEBUG_SIZE_LIMIT_GB, nuke heavyweight subdirs
+    - If total exceeds DEBUG_SIZE_LIMIT_GB (or force=True), nuke heavyweight subdirs
       (incremental, deps, build, .fingerprint) in every target profile dir.
     - Uses ignore_errors=True on rmtree to survive races with concurrent cargo
       processes that may be writing into the same dirs.
 
+    force=True: skip the size threshold check and always clean. Used before starting
+    a new agent session to guarantee the session doesn't inherit stale artifact bloat.
+
     Called after every review-loop iteration and every DEV_CLEAN_EVERY dev iterations.
+    Also called unconditionally (force=True) before each dev agent session starts.
     """
     import shutil
 
@@ -780,7 +784,7 @@ def clean_build_artifacts(log: Logger):
         return
 
     total_gb = sum(_dir_size_gb(d) for d in profile_dirs)
-    if total_gb < DEBUG_SIZE_LIMIT_GB:
+    if not force and total_gb < DEBUG_SIZE_LIMIT_GB:
         log.log(f"build cache: target/ build dirs are {total_gb:.1f} GB — under limit, skipping")
         return
 
@@ -788,7 +792,8 @@ def clean_build_artifacts(log: Logger):
         log.log("build cache: cargo build in progress — skipping cleanup to avoid mid-build wipe")
         return
 
-    log.log(f"build cache: target/ build dirs are {total_gb:.1f} GB — exceeds {DEBUG_SIZE_LIMIT_GB} GB limit, nuking")
+    reason = "pre-session forced clean" if force else f"exceeds {DEBUG_SIZE_LIMIT_GB} GB limit"
+    log.log(f"build cache: target/ build dirs are {total_gb:.1f} GB — {reason}, nuking")
 
     heavyweight_dirs = ["incremental", "deps", "build", ".fingerprint"]
     removed = []
@@ -1502,6 +1507,14 @@ Start directly with understanding the task and implementing it.
                 log.log(f"CARGO_TARGET_DIR: {zone_target}")
 
         before_sha = git(["rev-parse", "HEAD"]).stdout.strip()
+
+        # Force-clean build artifacts before every session. A 150-turn session can
+        # compile multiple crates many times and accumulate tens of GB in target/.
+        # The post-task cleanup uses a size threshold and would have missed 6.9 GB
+        # (under the old 8 GB limit) — so this pre-session clean is unconditional.
+        clean_build_artifacts(log, force=True)
+        clean_tmp_worktrees(log)
+        clean_tmp_cargo_targets(log)
 
         log.log(f"Running {agent.title()} on task {next_id}...")
         exit_code, output, result_subtype = run_agent(

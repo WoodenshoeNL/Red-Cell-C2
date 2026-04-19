@@ -38,6 +38,18 @@ Api {
     }
 }
 
+Listeners {
+    Http {
+        Name         = "default"
+        Hosts        = ["127.0.0.1"]
+        HostBind     = "0.0.0.0"
+        HostRotation = "round-robin"
+        PortBind     = 19081
+        PortConn     = 19081
+        Secure       = false
+    }
+}
+
 Demon {
     Sleep = 2
     Jitter = 15

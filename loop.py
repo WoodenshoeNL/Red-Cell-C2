@@ -2142,32 +2142,58 @@ def harvest_worktree_beads(worktree_path: Path, log: Logger):
         log.log("harvest: no new issues to harvest from worktree")
         return
 
-    # Append new lines to main JSONL, import into main DB, commit, push.
-    with main_jsonl.open("a") as fh:
-        for line in new_lines:
-            fh.write(line + "\n")
-
-    subprocess.run(["br", "sync", "--import-only", "--quiet"], cwd=str(SCRIPT_DIR))
-
-    git(["add", ".beads/issues.jsonl"])
-    ids_str = ", ".join(
-        json.loads(l)["id"] for l in new_lines
-    )
-    msg = f"chore: harvest {len(new_lines)} issue(s) from review worktree ({ids_str})"
-    if git(["commit", "-m", msg, "--quiet"]).returncode != 0:
-        git(["restore", "--staged", ".beads/issues.jsonl"])
-        log.log("harvest: commit failed — changes unstaged")
-        return
+    # All new issue IDs — used in commit messages and final log.
+    ids_str = ", ".join(json.loads(l)["id"] for l in new_lines)
 
     retries = 3
     for attempt in range(retries):
-        git(["pull", "--rebase", "--quiet"])
-        if git(["push", "--quiet"]).returncode == 0:
-            log.log(f"harvest: pushed {len(new_lines)} new issue(s): {ids_str}")
+        # Pull latest state so we commit on top of HEAD.
+        pull_r = git(["pull", "--rebase", "--quiet"])
+        if pull_r.returncode != 0:
+            # Abort a stuck rebase and try again next iteration.
+            git(["rebase", "--abort"])
+            log.log(f"harvest: pull --rebase failed on attempt {attempt + 1}/{retries}, retrying")
+            continue
+
+        # Re-read main JSONL after the pull — another loop may have pushed some
+        # of these issues already.
+        present_ids: set[str] = set()
+        if main_jsonl.exists():
+            for line in main_jsonl.read_text().splitlines():
+                line = line.strip()
+                try:
+                    present_ids.add(json.loads(line)["id"])
+                except (json.JSONDecodeError, KeyError):
+                    pass
+
+        still_new = [l for l in new_lines if json.loads(l)["id"] not in present_ids]
+        if not still_new:
+            log.log("harvest: all issues already pushed by another loop — nothing to do")
             return
+
+        with main_jsonl.open("a") as fh:
+            for line in still_new:
+                fh.write(line + "\n")
+
+        subprocess.run(["br", "sync", "--import-only", "--quiet"], cwd=str(SCRIPT_DIR))
+
+        git(["add", ".beads/issues.jsonl"])
+        still_ids = ", ".join(json.loads(l)["id"] for l in still_new)
+        msg = f"chore: harvest {len(still_new)} issue(s) from review worktree ({still_ids})"
+        if git(["commit", "-m", msg, "--quiet"]).returncode != 0:
+            git(["restore", "--staged", ".beads/issues.jsonl"])
+            log.log(f"harvest: commit failed on attempt {attempt + 1}/{retries}, retrying")
+            continue
+
+        if git(["push", "--quiet"]).returncode == 0:
+            log.log(f"harvest: pushed {len(still_new)} new issue(s): {still_ids}")
+            return
+
+        # Push failed — reset our commit and retry from the pull step.
+        git(["reset", "HEAD~1", "--mixed", "--quiet"])
         log.log(f"harvest: push attempt {attempt + 1}/{retries} failed, retrying")
 
-    log.log(f"WARNING: harvest: could not push after {retries} attempts — issues saved locally")
+    log.log(f"WARNING: harvest: could not push after {retries} attempts — issues saved locally: {ids_str}")
 
 
 def remove_review_worktree(worktree_path: Path, log: Logger):

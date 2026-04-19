@@ -191,9 +191,10 @@ mod tests {
 
     #[test]
     fn build_create_body_http_uses_default_port_443() {
-        let body =
-            build_create_body("http1", "http", None, "0.0.0.0", None, None, None, false, false, None)
-                .expect("build");
+        let body = build_create_body(
+            "http1", "http", None, "0.0.0.0", None, None, None, false, false, None,
+        )
+        .expect("build");
         assert_eq!(body["protocol"], "http");
         assert_eq!(body["config"]["port_bind"], 443);
         assert_eq!(body["config"]["name"], "http1");
@@ -201,9 +202,19 @@ mod tests {
 
     #[test]
     fn build_create_body_http_respects_explicit_port() {
-        let body =
-            build_create_body("h2", "http", Some(8080), "10.0.0.1", None, None, None, true, false, None)
-                .expect("build");
+        let body = build_create_body(
+            "h2",
+            "http",
+            Some(8080),
+            "10.0.0.1",
+            None,
+            None,
+            None,
+            true,
+            false,
+            None,
+        )
+        .expect("build");
         assert_eq!(body["config"]["port_bind"], 8080);
         assert_eq!(body["config"]["secure"], true);
         assert_eq!(body["config"]["host_bind"], "10.0.0.1");
@@ -211,24 +222,45 @@ mod tests {
 
     #[test]
     fn build_create_body_https_maps_to_http_protocol() {
-        let body =
-            build_create_body("h1", "https", Some(443), "0.0.0.0", None, None, None, true, false, None)
-                .expect("build");
+        let body = build_create_body(
+            "h1",
+            "https",
+            Some(443),
+            "0.0.0.0",
+            None,
+            None,
+            None,
+            true,
+            false,
+            None,
+        )
+        .expect("build");
         assert_eq!(body["protocol"], "http");
     }
 
     #[test]
     fn build_create_body_http_legacy_mode_true() {
-        let body =
-            build_create_body("h1", "http", Some(8080), "0.0.0.0", None, None, None, false, true, None)
-                .expect("build");
+        let body = build_create_body(
+            "h1",
+            "http",
+            Some(8080),
+            "0.0.0.0",
+            None,
+            None,
+            None,
+            false,
+            true,
+            None,
+        )
+        .expect("build");
         assert_eq!(body["config"]["legacy_mode"], true);
     }
 
     #[test]
     fn build_create_body_dns_requires_domain() {
-        let err = build_create_body("dns1", "dns", None, "0.0.0.0", None, None, None, false, false, None)
-            .expect_err("should fail without domain");
+        let err =
+            build_create_body("dns1", "dns", None, "0.0.0.0", None, None, None, false, false, None)
+                .expect_err("should fail without domain");
         assert!(matches!(err, CliError::InvalidArgs(_)));
     }
 
@@ -272,8 +304,9 @@ mod tests {
 
     #[test]
     fn build_create_body_smb_requires_pipe_name() {
-        let err = build_create_body("smb1", "smb", None, "0.0.0.0", None, None, None, false, false, None)
-            .expect_err("should fail without pipe_name");
+        let err =
+            build_create_body("smb1", "smb", None, "0.0.0.0", None, None, None, false, false, None)
+                .expect_err("should fail without pipe_name");
         assert!(matches!(err, CliError::InvalidArgs(_)));
     }
 
@@ -299,9 +332,10 @@ mod tests {
 
     #[test]
     fn build_create_body_external_requires_endpoint() {
-        let err =
-            build_create_body("ext1", "external", None, "0.0.0.0", None, None, None, false, false, None)
-                .expect_err("should fail without endpoint");
+        let err = build_create_body(
+            "ext1", "external", None, "0.0.0.0", None, None, None, false, false, None,
+        )
+        .expect_err("should fail without endpoint");
         assert!(matches!(err, CliError::InvalidArgs(_)));
     }
 
@@ -326,8 +360,9 @@ mod tests {
 
     #[test]
     fn build_create_body_unknown_type_returns_invalid_args() {
-        let err = build_create_body("x", "grpc", None, "0.0.0.0", None, None, None, false, false, None)
-            .expect_err("unknown type should fail");
+        let err =
+            build_create_body("x", "grpc", None, "0.0.0.0", None, None, None, false, false, None)
+                .expect_err("unknown type should fail");
         assert!(matches!(err, CliError::InvalidArgs(_)));
     }
 
@@ -374,9 +409,19 @@ mod tests {
     fn build_create_body_config_json_dns_shape_rejected_for_http_type() {
         let raw =
             r#"{"name":"dns1","host_bind":"0.0.0.0","port_bind":53,"domain":"c2.example.com"}"#;
-        let err =
-            build_create_body("x", "http", None, "0.0.0.0", None, None, None, false, false, Some(raw))
-                .expect_err("wrong schema for --type http");
+        let err = build_create_body(
+            "x",
+            "http",
+            None,
+            "0.0.0.0",
+            None,
+            None,
+            None,
+            false,
+            false,
+            Some(raw),
+        )
+        .expect_err("wrong schema for --type http");
         let CliError::InvalidArgs(msg) = err else {
             panic!("expected InvalidArgs, got {err:?}");
         };
@@ -386,9 +431,19 @@ mod tests {
     #[test]
     fn build_create_body_config_json_http_shape_rejected_for_dns_type() {
         let raw = r#"{"name":"h1","host_bind":"0.0.0.0","port_bind":443,"host_rotation":"round-robin","secure":false}"#;
-        let err =
-            build_create_body("x", "dns", None, "0.0.0.0", None, None, None, false, false, Some(raw))
-                .expect_err("wrong schema for --type dns");
+        let err = build_create_body(
+            "x",
+            "dns",
+            None,
+            "0.0.0.0",
+            None,
+            None,
+            None,
+            false,
+            false,
+            Some(raw),
+        )
+        .expect_err("wrong schema for --type dns");
         let CliError::InvalidArgs(msg) = err else {
             panic!("expected InvalidArgs, got {err:?}");
         };

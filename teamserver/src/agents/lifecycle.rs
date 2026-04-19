@@ -115,8 +115,8 @@ impl AgentRegistry {
                 listener_name.to_owned(),
                 ctr_block_offset,
                 legacy_ctr,
-                0,             // last_seen_seq starts at 0 for new agents
-                false,         // seq_protected defaults to false (Demon/Archon compatibility)
+                0,     // last_seen_seq starts at 0 for new agents
+                false, // seq_protected defaults to false (Demon/Archon compatibility)
                 ecdh_transport,
             )),
         );

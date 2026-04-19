@@ -18,6 +18,7 @@ output-dispatch-harvest-serial = { max-threads = 1 }
 service-bridge-serial = { max-threads = 1 }
 client-cli-contract-serial = { max-threads = 1 }
 dispatch-util-serial = { max-threads = 1 }
+red-cell-lib-serial = { max-threads = 1 }
 
 [[profile.default.overrides]]
 filter = 'package(red-cell) & binary(assembly_dispatch)'
@@ -70,3 +71,7 @@ test-group = 'client-cli-contract-serial'
 [[profile.default.overrides]]
 filter = 'package(red-cell) & test(dispatch::util::tests)'
 test-group = 'dispatch-util-serial'
+
+[[profile.default.overrides]]
+filter = 'binary_id(red-cell)'
+test-group = 'red-cell-lib-serial'

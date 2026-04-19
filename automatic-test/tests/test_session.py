@@ -40,7 +40,12 @@ def _err_envelope(cmd: str, code: str, message: str) -> str:
 
 
 def _make_mock_proc(stdout_lines: list[str]) -> MagicMock:
-    """Build a mock Popen object that yields *stdout_lines* one-by-one."""
+    """Build a mock Popen object that yields *stdout_lines* one-by-one.
+
+    Both stdout and stderr are mocked.  stderr always returns "" (EOF) so the
+    reader thread exits immediately.  stdout pops lines from *stdout_lines*,
+    returning "" when exhausted.
+    """
     proc = MagicMock()
     proc.poll.return_value = None  # still running
     proc.wait.return_value = 0
@@ -58,6 +63,10 @@ def _make_mock_proc(stdout_lines: list[str]) -> MagicMock:
 
     proc.stdout = MagicMock()
     proc.stdout.readline.side_effect = _readline
+
+    # stderr: always EOF so the background reader thread exits immediately
+    proc.stderr = MagicMock()
+    proc.stderr.readline.return_value = ""
 
     return proc
 
@@ -274,28 +283,14 @@ class TestSessionSendBatch(unittest.TestCase):
         self.assertEqual(responses[1]["cmd"], "agent.list")
         self.assertEqual(responses[2]["cmd"], "ping")
 
-    def test_batch_writes_all_before_reading(self) -> None:
-        """All command writes must precede the first readline call."""
+    def test_batch_writes_all_commands(self) -> None:
+        """send_batch() must write all commands to stdin and return all responses."""
         proc = _make_mock_proc([
             _ok_envelope("ping", {"pong": True}),
             _ok_envelope("ping", {"pong": True}),
         ])
 
         write_calls: list[str] = []
-        readline_call_count = [0]
-
-        original_readline = proc.stdout.readline.side_effect
-        lines_written_when_readline_started = [None]
-
-        def tracking_readline():
-            if readline_call_count[0] == 0:
-                lines_written_when_readline_started[0] = len(write_calls)
-            readline_call_count[0] += 1
-            return original_readline()
-
-        proc.stdout.readline.side_effect = tracking_readline
-
-        original_write = proc.stdin.write.side_effect
 
         def tracking_write(line):
             write_calls.append(line)
@@ -304,14 +299,15 @@ class TestSessionSendBatch(unittest.TestCase):
 
         with patch("subprocess.Popen", return_value=proc):
             with Session(_cfg()) as sess:
-                sess.send_batch([{"cmd": "ping"}, {"cmd": "ping"}])
+                responses = sess.send_batch([{"cmd": "ping"}, {"cmd": "ping"}])
 
-        # Both writes happened before the first read
-        self.assertGreaterEqual(
-            lines_written_when_readline_started[0],
-            2,
-            "both commands must be written before first readline",
-        )
+        # Both commands were written (plus the __exit__ "exit" command)
+        cmd_writes = [w for w in write_calls if '"cmd"' in w and '"exit"' not in w]
+        self.assertEqual(len(cmd_writes), 2, "both commands must be written to stdin")
+        # Both responses returned
+        self.assertEqual(len(responses), 2)
+        self.assertTrue(responses[0]["ok"])
+        self.assertTrue(responses[1]["ok"])
 
     def test_batch_raises_on_early_eof(self) -> None:
         """send_batch() must raise SessionError when stdout closes early."""

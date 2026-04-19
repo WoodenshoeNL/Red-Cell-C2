@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import subprocess
+import threading
 from typing import Any
 
 from .cli import CliConfig
@@ -63,6 +65,7 @@ class Session:
         self._cfg = cfg
         self._agent = agent
         self._proc: subprocess.Popen[str] | None = None
+        self._lines: queue.Queue[str | None] = queue.Queue()
 
     # ── context manager ───────────────────────────────────────────────────────
 
@@ -85,6 +88,11 @@ class Session:
             env=env,
             bufsize=1,  # line-buffered
         )
+        # Drain both stdout and stderr into a shared queue so error envelopes
+        # (which the CLI routes to stderr) are not missed by send().
+        for stream in (self._proc.stdout, self._proc.stderr):
+            t = threading.Thread(target=self._reader_thread, args=(stream,), daemon=True)
+            t.start()
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
@@ -103,6 +111,42 @@ class Session:
         except subprocess.TimeoutExpired:
             self._proc.kill()
             self._proc.wait()
+
+    # ── internal helpers ──────────────────────────────────────────────────────
+
+    def _reader_thread(self, stream) -> None:
+        """Read lines from *stream* and put them into the shared queue."""
+        try:
+            while True:
+                line = stream.readline()
+                if not line:
+                    break
+                stripped = line.strip()
+                if stripped:
+                    self._lines.put(stripped)
+        finally:
+            # Signal EOF on this stream; we put two sentinels (one per stream)
+            # so the first EOF doesn't confuse send() waiting for a response.
+            self._lines.put(None)
+
+    def _readline(self, timeout: float | None = None) -> str:
+        """Return the next non-empty line from either stdout or stderr.
+
+        Raises SessionError on EOF (both streams closed).
+        """
+        # We have two reader threads; track how many EOF sentinels we've seen.
+        eofs_seen = 0
+        while True:
+            try:
+                item = self._lines.get(timeout=timeout)
+            except queue.Empty:
+                raise SessionError("TIMEOUT", "timed out waiting for session response")
+            if item is None:
+                eofs_seen += 1
+                if eofs_seen >= 2:
+                    raise SessionError("EOF", "session process closed stdout/stderr unexpectedly")
+                continue
+            return item
 
     # ── public API ────────────────────────────────────────────────────────────
 
@@ -134,12 +178,10 @@ class Session:
         self._proc.stdin.write(json.dumps(cmd) + "\n")
         self._proc.stdin.flush()
 
-        response_line = self._proc.stdout.readline()
-        if not response_line:
-            raise SessionError("EOF", "session process closed stdout unexpectedly")
+        response_line = self._readline()
 
         try:
-            envelope = json.loads(response_line.strip())
+            envelope = json.loads(response_line)
         except json.JSONDecodeError as exc:
             raise SessionError("PARSE_ERROR", f"non-JSON response: {response_line!r}") from exc
 
@@ -175,13 +217,8 @@ class Session:
 
         responses: list[dict[str, Any]] = []
         for _ in cmds:
-            line = self._proc.stdout.readline()
-            if not line:
-                raise SessionError(
-                    "EOF",
-                    f"session closed after {len(responses)}/{len(cmds)} responses",
-                )
-            responses.append(json.loads(line.strip()))
+            line = self._readline()
+            responses.append(json.loads(line))
         return responses
 
     def close_stdin(self) -> None:

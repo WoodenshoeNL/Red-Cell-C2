@@ -1,40 +1,14 @@
-//! Session WebSocket dispatch — maps session NDJSON commands to internal REST requests.
+//! Per-command HTTP request builders for session WebSocket dispatch.
 
-use std::net::SocketAddr;
-use std::time::Duration;
-
-use axum::Router;
-use axum::body::{Body, to_bytes};
-use axum::extract::ConnectInfo;
-use axum::http::HeaderValue;
+use axum::body::Body;
 use axum::http::Request as HttpRequest;
 use axum::http::header::CONTENT_TYPE;
 use red_cell_common::ListenerConfig;
 use serde_json::Value;
-use tokio::time::Instant;
-use tower::ServiceExt as _;
-
-use super::auth::API_KEY_HEADER;
-
-/// Maximum response body size (in bytes) that session WebSocket dispatch will buffer.
-///
-/// Responses exceeding this limit are rejected with a `RESPONSE_TOO_LARGE` error
-/// instead of being buffered into memory. 50 MiB is generous for normal API
-/// responses while preventing unbounded allocation from large binary downloads.
-pub(crate) const SESSION_MAX_RESPONSE_BODY: usize = 50 * 1024 * 1024;
-
-/// Default timeout (in seconds) for `agent.exec` with `wait=true`.
-const SESSION_EXEC_WAIT_DEFAULT_TIMEOUT_SECS: u64 = 30;
-
-/// Maximum timeout (in seconds) allowed for `agent.exec` with `wait=true`.
-const SESSION_EXEC_WAIT_MAX_TIMEOUT_SECS: u64 = 300;
-
-/// Base poll interval for `agent.exec` wait mode.
-const SESSION_EXEC_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Errors while mapping a session `cmd` to an internal REST request.
 #[derive(Debug, thiserror::Error)]
-enum SessionBuildError {
+pub(super) enum SessionBuildError {
     #[error("unknown session command `{0}`")]
     UnknownCommand(String),
     #[error("missing field `{field}` for command `{cmd}`")]
@@ -44,14 +18,14 @@ enum SessionBuildError {
 }
 
 impl SessionBuildError {
-    fn missing(cmd: &str, field: &str) -> Self {
+    pub(super) fn missing(cmd: &str, field: &str) -> Self {
         Self::MissingField { cmd: cmd.to_owned(), field: field.to_owned() }
     }
 }
 
 /// Build `application/x-www-form-urlencoded` query string from a JSON object,
 /// skipping meta keys (`cmd`, `wait`, `timeout`) and null values.
-fn session_query_string_from_value(val: &Value) -> Result<String, SessionBuildError> {
+pub(super) fn session_query_string_from_value(val: &Value) -> Result<String, SessionBuildError> {
     use std::collections::BTreeMap as SortedMap;
     let obj = val
         .as_object()
@@ -82,7 +56,7 @@ fn session_query_string_from_value(val: &Value) -> Result<String, SessionBuildEr
     }
 }
 
-fn session_strip_meta_object(val: &Value) -> Result<Value, SessionBuildError> {
+pub(super) fn session_strip_meta_object(val: &Value) -> Result<Value, SessionBuildError> {
     let mut v = val.clone();
     let Some(obj) = v.as_object_mut() else {
         return Err(SessionBuildError::InvalidBody("expected JSON object".to_owned()));
@@ -93,7 +67,7 @@ fn session_strip_meta_object(val: &Value) -> Result<Value, SessionBuildError> {
     Ok(Value::Object(std::mem::take(obj)))
 }
 
-fn build_session_rest_request(
+pub(super) fn build_session_rest_request(
     cmd: &str,
     val: &Value,
 ) -> Result<HttpRequest<Body>, SessionBuildError> {
@@ -529,7 +503,7 @@ fn build_session_rest_request(
     }
 }
 
-fn session_build_error_envelope(cmd: &str, err: &SessionBuildError) -> String {
+pub(super) fn session_build_error_envelope(cmd: &str, err: &SessionBuildError) -> String {
     let (code, message) = match err {
         SessionBuildError::UnknownCommand(c) => {
             ("UNKNOWN_COMMAND", format!("unknown command `{c}`"))
@@ -548,266 +522,6 @@ fn session_build_error_envelope(cmd: &str, err: &SessionBuildError) -> String {
     .to_string()
 }
 
-pub(crate) async fn session_ws_envelope_response(
-    cmd: &str,
-    response: axum::response::Response,
-) -> String {
-    use base64::Engine as _;
-
-    let status = response.status();
-    let headers = response.headers().clone();
-    let ct = headers.get(CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("");
-    let bytes = match to_bytes(response.into_body(), SESSION_MAX_RESPONSE_BODY).await {
-        Ok(b) => b,
-        Err(_) => {
-            return serde_json::json!({
-                "ok": false,
-                "cmd": cmd,
-                "error": "RESPONSE_TOO_LARGE",
-                "message": format!(
-                    "response body exceeds session limit of {} bytes — use the REST API directly for large downloads",
-                    SESSION_MAX_RESPONSE_BODY,
-                ),
-            })
-            .to_string();
-        }
-    };
-
-    if status.is_success() {
-        let data: Value = if bytes.is_empty() {
-            Value::Null
-        } else if ct.contains("octet-stream") {
-            serde_json::json!({
-                "encoding": "base64",
-                "data": base64::engine::general_purpose::STANDARD.encode(bytes.as_ref()),
-            })
-        } else {
-            serde_json::from_slice(bytes.as_ref()).unwrap_or_else(|_| {
-                Value::String(String::from_utf8_lossy(bytes.as_ref()).into_owned())
-            })
-        };
-        serde_json::json!({ "ok": true, "cmd": cmd, "data": data }).to_string()
-    } else {
-        let parsed: Value = serde_json::from_slice(bytes.as_ref()).unwrap_or(Value::Null);
-        let code = parsed["error"]["code"]
-            .as_str()
-            .unwrap_or("HTTP_ERROR")
-            .to_ascii_uppercase()
-            .replace('.', "_");
-        let message = parsed["error"]["message"].as_str().unwrap_or("request failed").to_owned();
-        serde_json::json!({
-            "ok": false,
-            "cmd": cmd,
-            "error": code,
-            "message": message,
-        })
-        .to_string()
-    }
-}
-
-/// Build and dispatch a single internal REST request through the Axum router,
-/// returning the raw [`axum::response::Response`].
-async fn dispatch_one(
-    app: &Router,
-    req: HttpRequest<Body>,
-    api_key: &str,
-    client_ip: SocketAddr,
-) -> Result<axum::response::Response, String> {
-    let mut req = req;
-    match HeaderValue::from_str(api_key) {
-        Ok(hv) => {
-            req.headers_mut().insert(API_KEY_HEADER, hv);
-        }
-        Err(_) => {
-            return Err(serde_json::json!({
-                "ok": false,
-                "cmd": "agent.exec",
-                "error": "INVALID_API_KEY_HEADER",
-                "message": "API key header value is not valid HTTP"
-            })
-            .to_string());
-        }
-    }
-    req.extensions_mut().insert(ConnectInfo(client_ip));
-
-    app.clone().oneshot(req).await.map_err(|_| {
-        serde_json::json!({
-            "ok": false,
-            "cmd": "agent.exec",
-            "error": "DISPATCH_FAILED",
-            "message": "failed to dispatch session request"
-        })
-        .to_string()
-    })
-}
-
-/// Handle `agent.exec` with `wait=true`: submit the task, then poll for output
-/// until an entry matching the submitted `task_id` appears or the timeout expires.
-async fn session_exec_wait(
-    app: &Router,
-    value: &Value,
-    client_ip: SocketAddr,
-    api_key: &str,
-) -> String {
-    let cmd = "agent.exec";
-
-    // Build and dispatch the task submission request.
-    let submit_req = match build_session_rest_request(cmd, value) {
-        Ok(r) => r,
-        Err(e) => return session_build_error_envelope(cmd, &e),
-    };
-
-    let submit_resp = match dispatch_one(app, submit_req, api_key, client_ip).await {
-        Ok(r) => r,
-        Err(envelope) => return envelope,
-    };
-
-    if !submit_resp.status().is_success() {
-        return session_ws_envelope_response(cmd, submit_resp).await;
-    }
-
-    // Parse the submission response to extract task_id and agent_id.
-    let submit_bytes = match to_bytes(submit_resp.into_body(), SESSION_MAX_RESPONSE_BODY).await {
-        Ok(b) => b,
-        Err(_) => {
-            return serde_json::json!({
-                "ok": false,
-                "cmd": cmd,
-                "error": "RESPONSE_TOO_LARGE",
-                "message": "task submission response too large"
-            })
-            .to_string();
-        }
-    };
-    let submit_data: Value = match serde_json::from_slice(submit_bytes.as_ref()) {
-        Ok(v) => v,
-        Err(_) => {
-            return serde_json::json!({
-                "ok": false,
-                "cmd": cmd,
-                "error": "INVALID_SUBMIT_RESPONSE",
-                "message": "could not parse task submission response"
-            })
-            .to_string();
-        }
-    };
-
-    let task_id = submit_data["task_id"].as_str().unwrap_or_default().to_owned();
-    let agent_id = match value.get("id").and_then(|v| v.as_str()) {
-        Some(id) => id.to_owned(),
-        None => {
-            return session_build_error_envelope(cmd, &SessionBuildError::missing(cmd, "id"));
-        }
-    };
-
-    // Determine timeout from `timeout` field (seconds), clamped to max.
-    let timeout_secs = value
-        .get("timeout")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(SESSION_EXEC_WAIT_DEFAULT_TIMEOUT_SECS)
-        .min(SESSION_EXEC_WAIT_MAX_TIMEOUT_SECS);
-    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
-
-    let mut cursor: Option<i64> = None;
-
-    loop {
-        if Instant::now() >= deadline {
-            return serde_json::json!({
-                "ok": false,
-                "cmd": cmd,
-                "error": "EXEC_TIMEOUT",
-                "message": format!(
-                    "timed out waiting for output from task `{task_id}` after {timeout_secs}s"
-                ),
-                "data": {
-                    "task_id": task_id,
-                    "agent_id": agent_id,
-                }
-            })
-            .to_string();
-        }
-
-        tokio::time::sleep(SESSION_EXEC_WAIT_POLL_INTERVAL).await;
-
-        // Build the output poll request.
-        let uri = match cursor {
-            Some(since) => format!("/agents/{agent_id}/output?since={since}"),
-            None => format!("/agents/{agent_id}/output"),
-        };
-        let poll_req = match HttpRequest::builder().method("GET").uri(&uri).body(Body::empty()) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-
-        let poll_resp = match dispatch_one(app, poll_req, api_key, client_ip).await {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-
-        if !poll_resp.status().is_success() {
-            // Transient failure — retry on next poll.
-            continue;
-        }
-
-        let poll_bytes = match to_bytes(poll_resp.into_body(), SESSION_MAX_RESPONSE_BODY).await {
-            Ok(b) => b,
-            Err(_) => continue,
-        };
-        let poll_data: Value = match serde_json::from_slice(poll_bytes.as_ref()) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        if let Some(entries) = poll_data["entries"].as_array() {
-            for entry in entries {
-                // Advance cursor to the latest entry id seen.
-                if let Some(id) = entry["id"].as_i64() {
-                    cursor = Some(id);
-                }
-                // Check if this entry matches our task.
-                if entry["task_id"].as_str() == Some(&task_id) && !task_id.is_empty() {
-                    return serde_json::json!({
-                        "ok": true,
-                        "cmd": cmd,
-                        "data": {
-                            "task_id": task_id,
-                            "agent_id": agent_id,
-                            "output": entry["output"],
-                            "exit_code": entry["exit_code"],
-                        }
-                    })
-                    .to_string();
-                }
-            }
-        }
-    }
-}
-
-/// Dispatch one session NDJSON command through the same REST [`super::api_routes`] router.
-pub(crate) async fn session_api_dispatch_line(
-    app: &Router,
-    cmd: &str,
-    value: &Value,
-    client_ip: SocketAddr,
-    api_key: &str,
-) -> String {
-    // Intercept agent.exec with wait=true to poll for output.
-    if cmd == "agent.exec" && value.get("wait").and_then(|v| v.as_bool()) == Some(true) {
-        return session_exec_wait(app, value, client_ip, api_key).await;
-    }
-
-    let inner = match build_session_rest_request(cmd, value) {
-        Ok(r) => r,
-        Err(e) => return session_build_error_envelope(cmd, &e),
-    };
-
-    let response = match dispatch_one(app, inner, api_key, client_ip).await {
-        Ok(r) => r,
-        Err(envelope) => return envelope,
-    };
-    session_ws_envelope_response(cmd, response).await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -816,7 +530,7 @@ mod tests {
     /// time so this test tracks the actual CLI file rather than a local copy.
     /// If the file moves or is renamed, update this path and the parser below.
     const CLIENT_CLI_SESSION_ALLOWLIST_SRC: &str =
-        include_str!("../../../client-cli/src/commands/session/normalize.rs");
+        include_str!("../../../../client-cli/src/commands/session/normalize.rs");
 
     /// Extract the string literals inside the `HashSet::from([...])` block that
     /// initialises `SESSION_KNOWN_COMMANDS` in the client-cli source.  The

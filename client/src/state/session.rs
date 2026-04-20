@@ -85,7 +85,7 @@ impl Default for AuditLogPanelState {
             http_client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(15))
                 .build()
-                .unwrap_or_default(),
+                .expect("reqwest client init failed"),
         }
     }
 }

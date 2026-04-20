@@ -123,6 +123,13 @@ def run(ctx):
     except DeployError as exc:
         raise ScenarioSkipped(str(exc)) from exc
 
+    available_agents = set(ctx.env.get("agents", {}).get("available", ["demon"]))
+    if not is_windows and "phantom" not in available_agents:
+        raise ScenarioSkipped(
+            "Linux screenshot target selected but Demon is Windows-only; "
+            "add 'phantom' to agents.available in env.toml"
+        )
+
     if not is_windows:
         linux_display = getattr(ctx.linux, "display", None) or ctx.env.get(
             "linux", {}
@@ -169,9 +176,12 @@ def run(ctx):
     agent_id = None
     try:
         # ── Steps 2-5: Build, deploy, exec, wait for checkin ─────────────────
+        # Demon is Windows-only; use Phantom for Linux targets.
+        agent_type = "demon" if is_windows else "phantom"
+        actual_fmt = payload_fmt if is_windows else "elf"
         agent = deploy_and_checkin(
             ctx, cli, target,
-            agent_type="demon", fmt=payload_fmt,
+            agent_type=agent_type, fmt=actual_fmt,
             listener_name=listener_name,
         )
         agent_id = agent["id"]

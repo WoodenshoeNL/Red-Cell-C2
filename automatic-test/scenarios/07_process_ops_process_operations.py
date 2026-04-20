@@ -402,14 +402,13 @@ def run(ctx):
         except DeployError as exc:
             raise ScenarioSkipped(str(exc)) from exc
         ran_any = True
-        # ── Demon pass (primary Linux baseline) ─────────────────────────────
-        print("\n  === Agent pass: demon (Linux) ===")
-        _run_for_agent(ctx, agent_type="demon", fmt="bin", name_prefix="test-procops-demon")
-
-        # ── Phantom pass (Rust Linux agent) ─────────────────────────────────
+        # ── Phantom pass (Linux) — Demon is Windows-only (PE/Win32) ─────────
         print("\n  === Agent pass: phantom (Linux) ===")
         if "phantom" not in available_agents:
-            print("  [phantom] SKIPPED — 'phantom' not listed in agents.available")
+            print(
+                "  [phantom] SKIPPED — Demon is Windows-only; "
+                "add 'phantom' to agents.available in env.toml"
+            )
         else:
             _run_for_agent(ctx, agent_type="phantom", fmt="bin", name_prefix="test-procops-phantom")
     else:

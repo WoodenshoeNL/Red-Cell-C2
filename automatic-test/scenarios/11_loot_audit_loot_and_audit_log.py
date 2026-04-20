@@ -89,6 +89,13 @@ def run(ctx):
     if target is None:
         raise ScenarioSkipped("no target configured (ctx.linux and ctx.windows are both None)")
 
+    available_agents = set(ctx.env.get("agents", {}).get("available", ["demon"]))
+    if not is_windows and "phantom" not in available_agents:
+        raise ScenarioSkipped(
+            "Linux target selected but Demon is Windows-only; "
+            "add 'phantom' to agents.available in env.toml"
+        )
+
     from lib.audit_checks import (
         assert_minimum_action_counts,
         assert_multiset_equal,
@@ -126,10 +133,14 @@ def run(ctx):
         19082 if is_windows else 19081,
     )
 
+    # Demon is Windows-only; use Phantom (ELF) for Linux targets.
+    agent_name = "demon" if is_windows else "phantom"
+    actual_fmt = payload_fmt if is_windows else "elf"
+
     if is_windows:
         remote_payload = f"{target.work_dir}\\agent-{uid}.exe"
     else:
-        remote_payload = f"{target.work_dir}/agent-{uid}.bin"
+        remote_payload = f"{target.work_dir}/agent-{uid}.elf"
 
     # ── Step 1: Record test_start before any operations ──────────────────────
     test_start = _utc_now_iso()
@@ -148,7 +159,7 @@ def run(ctx):
     except Exception:
         pre_existing_loot_ids = set()
 
-    _fd, local_payload = tempfile.mkstemp(suffix="." + payload_fmt)
+    _fd, local_payload = tempfile.mkstemp(suffix="." + actual_fmt)
     os.close(_fd)
     _fd, local_download_dst = tempfile.mkstemp(suffix=".txt")
     os.close(_fd)
@@ -161,10 +172,10 @@ def run(ctx):
 
     agent_id = None
     try:
-        # ── Step 3: Build Demon payload ───────────────────────────────────────
-        print(f"  [payload] building Demon {payload_fmt} x64 for {target_label} target")
+        # ── Step 3: Build agent payload ───────────────────────────────────────
+        print(f"  [payload] building {agent_name} {actual_fmt} x64 for {target_label} target")
         raw = payload_build_and_fetch(
-            cli, listener=listener_name, arch="x64", fmt=payload_fmt
+            cli, listener=listener_name, arch="x64", fmt=actual_fmt, agent=agent_name
         )
         assert len(raw) > 0, "payload is empty"
         print(f"  [payload] built ({len(raw)} bytes)")

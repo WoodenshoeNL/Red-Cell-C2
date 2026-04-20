@@ -47,6 +47,13 @@ def run(ctx):
     except DeployError as exc:
         raise ScenarioSkipped(str(exc)) from exc
 
+    available_agents = set(ctx.env.get("agents", {}).get("available", ["demon"]))
+    if "phantom" not in available_agents:
+        raise ScenarioSkipped(
+            "Demon is Windows-only and cannot run on Linux; "
+            "add 'phantom' to agents.available in env.toml"
+        )
+
     cli = ctx.cli
     target = ctx.linux
     uid = _short_id()
@@ -68,8 +75,8 @@ def run(ctx):
             ctx,
             cli,
             target,
-            agent_type="demon",
-            fmt="bin",
+            agent_type="phantom",
+            fmt="elf",
             listener_name=listener_name,
             sleep_secs=sleep_secs,
             label="24",

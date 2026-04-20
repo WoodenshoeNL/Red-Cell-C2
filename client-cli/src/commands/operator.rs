@@ -476,7 +476,7 @@ async fn logout(client: &ApiClient, username: &str) -> Result<LogoutResult, CliE
 fn operator_row_from_raw(raw: RawOperatorSummary) -> OperatorRow {
     OperatorRow {
         username: raw.username,
-        role: raw.role,
+        role: raw.role.to_lowercase(),
         online: raw.online,
         last_seen: raw.last_seen,
     }
@@ -684,6 +684,21 @@ mod tests {
         assert_eq!(row.role, "operator");
         assert!(row.online);
         assert_eq!(row.last_seen.as_deref(), Some("2026-01-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn operator_row_from_raw_lowercases_role() {
+        for (input, expected) in
+            [("Analyst", "analyst"), ("Operator", "operator"), ("Admin", "admin")]
+        {
+            let raw = RawOperatorSummary {
+                username: "x".to_owned(),
+                role: input.to_owned(),
+                online: false,
+                last_seen: None,
+            };
+            assert_eq!(operator_row_from_raw(raw).role, expected);
+        }
     }
 
     #[test]

@@ -391,4 +391,16 @@ mod tests {
         let info = ListenerInfo { extra: BTreeMap::new(), ..Default::default() };
         assert_eq!(parse_optional_extra_bool(&info, EXTRA_LEGACY_MODE).unwrap(), None);
     }
+
+    #[test]
+    fn parse_optional_extra_bool_json_string_true() {
+        let info = info_with_extra(EXTRA_LEGACY_MODE, serde_json::Value::String("true".into()));
+        assert_eq!(parse_optional_extra_bool(&info, EXTRA_LEGACY_MODE).unwrap(), Some(true));
+    }
+
+    #[test]
+    fn parse_optional_extra_bool_json_string_false() {
+        let info = info_with_extra(EXTRA_LEGACY_MODE, serde_json::Value::String("false".into()));
+        assert_eq!(parse_optional_extra_bool(&info, EXTRA_LEGACY_MODE).unwrap(), Some(false));
+    }
 }

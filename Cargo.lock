@@ -4006,6 +4006,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "x11-dl",
+ "zeroize",
 ]
 
 [[package]]
@@ -5432,6 +5433,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "windows-sys 0.59.0",
+ "zeroize",
 ]
 
 [[package]]

@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1489 | 255 | 97 |
+| Tasks closed | 1510 | 255 | 97 |
 | Bugs filed against | 263 | 50 | 15 |
-| Bug rate (bugs/task) | 0.18 | 0.20 | 0.15 |
-| Quality score | 82% | 80% | 85% |
+| Bug rate (bugs/task) | 0.17 | 0.20 | 0.15 |
+| Quality score | 83% | 80% | 85% |
 
-*Bug rates: Claude 263/1489=0.1766→0.18, Codex 50/255=0.1961→0.20, Cursor 15/97=0.1546→0.15*
+*Bug rates: Claude 263/1510=0.1742→0.17, Codex 50/255=0.1961→0.20, Cursor 15/97=0.1546→0.15*
 
 ## Violation Breakdown
 
@@ -7251,3 +7251,17 @@ Build: **cargo check** — passed. **cargo clippy -- -D warnings** — clean (0 
 **Issues filed this run:** 2 — red-cell-c2-9qj1a (test infra / flakiness P2, zone:autotest), red-cell-c2-3n4tb (missing tests P3, zone:client-cli).
 
 **Codebase health: on track.** Largest sprint in recent memory: full ECDH key exchange protocol shipped across Archon (C/ASM), Phantom (Rust/Linux), and Specter (Rust/Windows). Protocol is now fully encrypted with no plaintext fingerprints on the wire. Known open bugs: red-cell-c2-zix71 (agent_id: 0 in ecdh_send_packages — functional impact low since agent_id is not used in the session packet encryption, but correctness defect). Claude quality score stable at 82%.
+
+### QA Review — 2026-04-20 10:30 — 0838b769..fed9dd3f
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 21 | 0 | Autotest polish sprint: `--hosts` flag for `listener create` (red-cell-c2-f10eb), auto-inject `/etc/hosts` entry on Linux target (red-cell-c2-twh98), scenario 14 Windows/Linux path handling + OS-gating, callback_host wiring in scenario 04, `legacy_mode` regression fix (red-cell-c2-b3y6k via red-cell-c2-5ado4 re-regression), list-kwargs dispatch fix (red-cell-c2-3nkw8), QA CARGO_TARGET_DIR isolation (red-cell-c2-9qj1a), agent_id copy fix in ecdh_send_packages (red-cell-c2-zix71), wiremock tests for log purge (red-cell-c2-3n4tb), mock-transport unit tests for ECDH (red-cell-c2-10ejj), regression test for split-EOF accumulation (red-cell-c2-8mdxh), TestScenario20 for inject_hosts_entry (red-cell-c2-eo8sb). |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **cargo check** — passed (clean). **cargo clippy -- -D warnings** — clean (0 warnings). **cargo nextest run --workspace** — 5647/5647 tests passed (100% pass rate, no failures).
+
+**Issues filed this run:** 0 — no new bugs found.
+
+**Codebase health: excellent.** Clean autotest hardening sprint: hosts injection, scenario 14 cross-platform fixes, ECDH agent_id correctness, CARGO_TARGET_DIR isolation all landed cleanly. All 5647 tests pass with zero failures — best test pass rate in recent history. Claude quality score improved: 82% → 83% (263 bugs / 1510 tasks, bug rate 0.18 → 0.17).

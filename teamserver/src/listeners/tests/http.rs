@@ -322,12 +322,18 @@ async fn collect_body_with_magic_precheck_rejects_empty_body() {
 // ── legacy_mode = false (new-protocol listeners) ─────────────────────────────
 
 #[tokio::test]
-async fn non_legacy_precheck_rejects_demon_magic() {
-    // A body with 0xDEADBEEF at bytes 4–7 must be rejected by a non-legacy listener.
+async fn non_legacy_precheck_accepts_body_with_deadbeef_at_bytes_4_7() {
+    // Non-legacy listeners must NOT reject bodies with 0xDEADBEEF at bytes 4–7.
+    // For Archon packets bytes 4–7 are agent_id, and for ECDH packets they are part of
+    // the random connection_id — neither is a magic field.  See hxg94.
     let body = valid_demon_request_body(0x1234_5678);
     let result =
-        collect_body_with_magic_precheck(Body::from(body), MAX_AGENT_MESSAGE_LEN, false).await;
-    assert!(result.is_none(), "0xDEADBEEF must be rejected by a non-legacy listener");
+        collect_body_with_magic_precheck(Body::from(body.clone()), MAX_AGENT_MESSAGE_LEN, false)
+            .await;
+    assert!(
+        result.is_some(),
+        "non-legacy precheck must not reject bodies with 0xDEADBEEF at bytes 4-7"
+    );
 }
 
 #[tokio::test]

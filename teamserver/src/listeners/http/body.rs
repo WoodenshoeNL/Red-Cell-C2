@@ -17,22 +17,26 @@ pub(crate) const MINIMUM_DEMON_CALLBACK_BYTES: usize = DemonHeader::SERIALIZED_L
 /// Buffers an HTTP request body while performing an early pre-screen on the
 /// Demon transport magic value.
 ///
-/// The Demon magic value (`0xDEADBEEF`) occupies bytes 4–7 of every valid
-/// Demon packet.  The `legacy_mode` flag controls how the magic is treated:
+/// The `legacy_mode` flag controls how the magic check is applied:
 ///
-/// - **`legacy_mode = true`** (Demon listeners): the body is accepted only if
-///   bytes 4–7 equal `0xDEADBEEF`.  Any other value causes immediate rejection
-///   after the first 8 bytes have been buffered, limiting per-connection
-///   allocation to a single network chunk (~16 KiB).
+/// - **`legacy_mode = true`** (Demon listeners): bytes 4–7 of the Demon wire
+///   format carry the fixed magic `0xDEADBEEF`.  The body is accepted only if
+///   those bytes match; anything else is rejected immediately after the first
+///   8 bytes have been buffered, limiting per-connection allocation to a single
+///   network chunk (~16 KiB).
 ///
-/// - **`legacy_mode = false`** (new-protocol listeners): the body is accepted
-///   only if bytes 4–7 do **not** equal `0xDEADBEEF`.  Packets that carry the
-///   plaintext Havoc fingerprint are rejected at this pre-filter stage, before
-///   any DB look-up, so that non-legacy listeners carry no detectable Demon
-///   fingerprint.
+/// - **`legacy_mode = false`** (new-protocol listeners): **no magic check is
+///   applied**.  For Archon packets bytes 4–7 are the `agent_id`, and for ECDH
+///   registration/session packets bytes 0–15 are a random `connection_id`.
+///   Neither field has a fixed value, so checking bytes 4–7 for `0xDEADBEEF`
+///   would incorrectly drop legitimate packets (e.g. an Archon agent whose
+///   `agent_id` happens to be `0xDEADBEEF`, or an ECDH packet whose random
+///   `connection_id[4..8]` collides with the magic value).  Protocol
+///   discrimination for non-legacy traffic happens entirely in the downstream
+///   ECDH dispatcher and Archon handler.
 ///
 /// Returns `None` if the body exceeds `max_len`, contains a read error, or
-/// fails the mode-appropriate magic check.
+/// (legacy mode only) fails the magic check.
 pub(crate) async fn collect_body_with_magic_precheck(
     body: Body,
     max_len: usize,
@@ -54,23 +58,18 @@ pub(crate) async fn collect_body_with_magic_precheck(
             return None;
         }
         buf.extend_from_slice(&data);
-        // As soon as we have the 8 bytes that cover the magic field (bytes 4–7),
-        // apply the mode-appropriate check.
+        // For legacy listeners only: reject as soon as we can tell bytes 4–7
+        // are not 0xDEADBEEF.  For non-legacy listeners we skip this check
+        // entirely — see the doc comment above.
         if !magic_checked && buf.len() >= 8 {
-            let has_demon_magic = buf[4..8] == DEMON_MAGIC_VALUE.to_be_bytes();
-            if legacy_mode && !has_demon_magic {
-                // Legacy listener: require 0xDEADBEEF — reject anything else.
-                return None;
-            }
-            if !legacy_mode && has_demon_magic {
-                // Non-legacy listener: reject 0xDEADBEEF before DB look-up.
+            if legacy_mode && buf[4..8] != DEMON_MAGIC_VALUE.to_be_bytes() {
                 return None;
             }
             magic_checked = true;
         }
     }
 
-    // Bodies shorter than 8 bytes cannot pass the magic check.
+    // Bodies shorter than 8 bytes cannot carry a valid header.
     if !magic_checked {
         return None;
     }
@@ -283,6 +282,78 @@ mod tests {
         for _ in 0..(MAX_DEMON_INIT_ATTEMPTS_PER_IP + 5) {
             let allowed = allow_demon_init_for_ip("test-listener", &rl, ip, &pkt, false).await;
             assert!(allowed, "non-init Archon packets must never be rate-limited");
+        }
+    }
+
+    // ── collect_body_with_magic_precheck — DEADBEEF collision regression ───
+
+    fn make_body(bytes: Vec<u8>) -> Body {
+        Body::from(Bytes::from(bytes))
+    }
+
+    /// Archon packet whose agent_id == 0xDEADBEEF must NOT be rejected by a
+    /// non-legacy listener's precheck (regression for the bug fixed in hxg94).
+    #[tokio::test]
+    async fn archon_agent_id_deadbeef_passes_non_legacy_precheck() {
+        // agent_id = 0xDEADBEEF, per-build magic = 0xCAFEBABE
+        let pkt = make_archon_init_packet(0xCAFE_BABE);
+        // Reconstruct with the specific agent_id we want.
+        let envelope = ArchonEnvelope::new(0xDEAD_BEEF, 0xCAFE_BABE, demon_init_payload()).unwrap();
+        let raw = envelope.to_bytes();
+        // Verify the bytes-4-7 are indeed 0xDEADBEEF.
+        assert_eq!(&raw[4..8], &0xDEAD_BEEFu32.to_be_bytes());
+        let _ = pkt; // suppress unused warning
+
+        let result = collect_body_with_magic_precheck(make_body(raw), usize::MAX, false).await;
+        assert!(
+            result.is_some(),
+            "Archon packet with agent_id=0xDEADBEEF must pass the non-legacy precheck"
+        );
+    }
+
+    /// Legacy listener must still reject an Archon packet (bytes 4-7 != 0xDEADBEEF).
+    #[tokio::test]
+    async fn archon_packet_rejected_by_legacy_precheck() {
+        let envelope = ArchonEnvelope::new(0x0000_0001, 0xCAFE_BABE, demon_init_payload()).unwrap();
+        let raw = envelope.to_bytes();
+        let result = collect_body_with_magic_precheck(make_body(raw), usize::MAX, true).await;
+        assert!(result.is_none(), "legacy precheck must reject Archon packets");
+    }
+
+    /// ECDH packet whose connection_id[4..8] == 0xDEADBEEF must pass the
+    /// non-legacy precheck (regression for the bug fixed in hxg94).
+    #[tokio::test]
+    async fn ecdh_packet_deadbeef_collision_passes_non_legacy_precheck() {
+        // Craft a synthetic ECDH-shaped body: 16-byte connection_id with
+        // bytes 4-7 == 0xDEADBEEF, followed by enough padding to exceed 8 bytes.
+        let mut raw = vec![0u8; 32];
+        raw[4..8].copy_from_slice(&0xDEAD_BEEFu32.to_be_bytes());
+        let result = collect_body_with_magic_precheck(make_body(raw), usize::MAX, false).await;
+        assert!(
+            result.is_some(),
+            "ECDH packet with connection_id[4..8]=0xDEADBEEF must pass the non-legacy precheck"
+        );
+    }
+
+    /// A real legacy Demon packet must still be accepted by the legacy precheck.
+    #[tokio::test]
+    async fn legacy_demon_packet_accepted_by_legacy_precheck() {
+        let raw = make_legacy_init_packet();
+        let result = collect_body_with_magic_precheck(make_body(raw), usize::MAX, true).await;
+        assert!(result.is_some(), "legacy Demon packet must pass the legacy precheck");
+    }
+
+    /// A body shorter than 8 bytes must be rejected regardless of mode.
+    #[tokio::test]
+    async fn short_body_rejected() {
+        for legacy_mode in [true, false] {
+            let result =
+                collect_body_with_magic_precheck(make_body(vec![0u8; 7]), usize::MAX, legacy_mode)
+                    .await;
+            assert!(
+                result.is_none(),
+                "body < 8 bytes must be rejected (legacy_mode={legacy_mode})"
+            );
         }
     }
 }

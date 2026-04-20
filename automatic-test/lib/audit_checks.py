@@ -9,14 +9,9 @@ base URL is available — ``until`` date-range queries via ``GET /api/v1/audit``
 
 from __future__ import annotations
 
-import json
-import ssl
-import urllib.error
-import urllib.request
 from collections import Counter
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import urlencode
 
 
 def parse_audit_ts(iso_ts: str) -> datetime:
@@ -215,59 +210,3 @@ def api_item_to_cli_shape(item: dict[str, Any]) -> dict[str, Any]:
         "detail": detail,
         "result_status": rs_str,
     }
-
-
-def fetch_audit_items_rest(
-    base_url: str,
-    api_key: str,
-    *,
-    since: str | None = None,
-    until: str | None = None,
-    limit: int = 200,
-    timeout: float = 30.0,
-) -> list[dict[str, Any]]:
-    """Fetch audit rows via REST (same source as CLI) including optional ``until`` filter."""
-    base = base_url.rstrip("/")
-    params: list[tuple[str, str]] = [("limit", str(limit))]
-    if since:
-        params.append(("since", since))
-    if until:
-        params.append(("until", until))
-    url = f"{base}/api/v1/audit?{urlencode(params)}"
-
-    req = urllib.request.Request(
-        url,
-        headers={"x-api-key": api_key, "accept": "application/json"},
-        method="GET",
-    )
-
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body = resp.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        err_body = exc.read().decode("utf-8", "replace") if exc.fp else ""
-        raise AssertionError(
-            f"audit REST fetch failed: HTTP {exc.code} {exc.reason} — {err_body[:4000]}"
-        ) from exc
-    except urllib.error.URLError as exc:
-        if not _looks_like_tls_verify_failure(exc):
-            raise AssertionError(f"audit REST fetch failed: {exc}") from exc
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
-            body = resp.read().decode("utf-8")
-    except OSError as exc:
-        raise AssertionError(f"audit REST fetch failed: {exc}") from exc
-
-    data = json.loads(body)
-    items = data.get("items", [])
-    return [api_item_to_cli_shape(x) for x in items]
-
-
-def _looks_like_tls_verify_failure(exc: urllib.error.URLError) -> bool:
-    reason = getattr(exc, "reason", None)
-    if isinstance(reason, ssl.SSLError):
-        return True
-    text = str(exc).lower()
-    return "certificate verify failed" in text or "certificate_verify_failed" in text

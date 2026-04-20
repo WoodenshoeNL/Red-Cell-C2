@@ -10,13 +10,11 @@ use serde_json::Value;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use base64::Engine as _;
-use red_cell_common::ListenerConfig;
-
 use crate::app::TeamserverState;
 use crate::listeners::ListenerManagerError;
+use crate::payload_builder::ecdh::ecdh_pub_key_for_archon_build;
 use crate::{
-    AuditResultStatus, AuditWebhookNotifier, AuthorizationError, Database, PayloadBuildRecord,
+    AuditResultStatus, AuditWebhookNotifier, AuthorizationError, PayloadBuildRecord,
     audit_details, authorize_listener_access, parameter_object,
 };
 
@@ -376,7 +374,7 @@ pub(super) async fn submit_payload_build(
     // For Archon builds on a non-legacy listener, load the ECDH public key so
     // the compiler can embed it in the binary.  A DB error here is fatal: we
     // must not silently fall back to plaintext key exchange.
-    let ecdh_pub_key = match load_archon_ecdh_pub_key(
+    let ecdh_pub_key = match ecdh_pub_key_for_archon_build(
         agent_type,
         &listener_summary.config,
         &request.listener,
@@ -678,46 +676,6 @@ pub(super) async fn flush_payload_cache(
                 "cache_flush_failed",
                 err.to_string(),
             )
-        }
-    }
-}
-
-/// Return the listener's X25519 public key when this is an Archon build for a
-/// non-legacy HTTP listener.  Returns `Ok(None)` for non-Archon / legacy builds.
-/// Returns `Err` when the keypair cannot be loaded for a build that requires it —
-/// the caller must abort the build rather than fall back to plaintext key exchange.
-async fn load_archon_ecdh_pub_key(
-    agent_type: &str,
-    listener_config: &ListenerConfig,
-    listener_name: &str,
-    database: &Database,
-) -> Result<Option<[u8; 32]>, String> {
-    let is_archon = agent_type.eq_ignore_ascii_case("Archon");
-    let is_non_legacy_http = matches!(
-        listener_config,
-        ListenerConfig::Http(http) if !http.legacy_mode
-    );
-
-    if !is_archon || !is_non_legacy_http {
-        return Ok(None);
-    }
-
-    match database.ecdh().get_or_create_keypair(listener_name).await {
-        Ok(kp) => {
-            tracing::debug!(
-                listener = listener_name,
-                public_key = %base64::engine::general_purpose::STANDARD.encode(kp.public_bytes),
-                "injecting ECDH public key into Archon build"
-            );
-            Ok(Some(kp.public_bytes))
-        }
-        Err(err) => {
-            tracing::error!(
-                listener = listener_name,
-                error = %err,
-                "failed to load ECDH keypair for Archon build — refusing to build without ECDH"
-            );
-            Err(format!("failed to load ECDH keypair for listener '{}': {err}", listener_name))
         }
     }
 }

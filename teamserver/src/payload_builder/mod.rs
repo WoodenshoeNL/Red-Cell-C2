@@ -6,6 +6,7 @@ mod compiler;
 mod config_values;
 mod demon;
 mod demon_config;
+pub(crate) mod ecdh;
 mod formats;
 mod pe_patch;
 mod rust_agent;

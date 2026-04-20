@@ -422,6 +422,139 @@ fn hex_short(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Mock transport that returns a pre-configured response or an error.
+    struct MockTransport {
+        /// Bytes to return from `send`, or `Err(msg)` if `None`.
+        response: Option<Vec<u8>>,
+        /// Captures every packet passed to `send` for inspection.
+        sent: Mutex<Vec<Vec<u8>>>,
+    }
+
+    impl MockTransport {
+        fn ok(response: Vec<u8>) -> Self {
+            Self { response: Some(response), sent: Mutex::new(Vec::new()) }
+        }
+
+        fn error() -> Self {
+            Self { response: None, sent: Mutex::new(Vec::new()) }
+        }
+
+        fn sent_packets(&self) -> Vec<Vec<u8>> {
+            self.sent.lock().expect("lock").clone()
+        }
+    }
+
+    impl AgentTransport for MockTransport {
+        fn send(
+            &self,
+            packet: &[u8],
+        ) -> impl std::future::Future<Output = Result<Vec<u8>, String>> + Send {
+            self.sent.lock().expect("lock").push(packet.to_vec());
+            let result = match &self.response {
+                Some(r) => Ok(r.clone()),
+                None => Err("mock transport error".to_string()),
+            };
+            std::future::ready(result)
+        }
+    }
+
+    /// Transport that simulates the server side of the registration handshake.
+    ///
+    /// On `send` it opens the registration packet with the listener keypair, derives
+    /// the session key, and returns a properly encrypted registration response — the
+    /// same bytes a real teamserver would produce.
+    struct RegistrationServerTransport {
+        keypair: ListenerKeypair,
+        conn_id: ConnectionId,
+        agent_id: u32,
+        sent: Mutex<Vec<Vec<u8>>>,
+    }
+
+    impl AgentTransport for RegistrationServerTransport {
+        fn send(
+            &self,
+            packet: &[u8],
+        ) -> impl std::future::Future<Output = Result<Vec<u8>, String>> + Send {
+            self.sent.lock().expect("lock").push(packet.to_vec());
+            let parsed = open_registration_packet(&self.keypair, 300, packet)
+                .map_err(|e| e.to_string());
+            let conn_id = self.conn_id;
+            let agent_id = self.agent_id;
+            std::future::ready(parsed.and_then(|p| {
+                build_registration_response(&conn_id, &p.session_key, agent_id)
+                    .map_err(|e| e.to_string())
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn perform_registration_calls_transport_and_parses_session() {
+        let kp = ListenerKeypair::generate().expect("keypair");
+        let conn_id = ConnectionId::generate().expect("conn_id");
+        let agent_id = 0xDEAD_BEEFu32;
+        let metadata = b"test-metadata";
+
+        let transport = RegistrationServerTransport {
+            keypair: kp,
+            conn_id,
+            agent_id,
+            sent: Mutex::new(Vec::new()),
+        };
+
+        let session = perform_registration(&transport, &transport.keypair.public_bytes, metadata)
+            .await
+            .expect("registration");
+
+        // Transport was called exactly once.
+        assert_eq!(transport.sent.lock().expect("lock").len(), 1);
+        // The sent packet is long enough to be a registration packet.
+        assert!(transport.sent.lock().expect("lock")[0].len() >= ECDH_REG_MIN_LEN);
+
+        // Session fields match what the mock server put in the response.
+        assert_eq!(session.agent_id, agent_id);
+        assert_eq!(session.connection_id, conn_id);
+        assert_ne!(session.session_key, [0u8; 32]);
+    }
+
+    #[tokio::test]
+    async fn send_session_packet_encrypts_and_decrypts_response() {
+        let kp = ListenerKeypair::generate().expect("keypair");
+        let (_, session_key) = build_registration_packet(&kp.public_bytes, b"meta").expect("build");
+        let conn_id = ConnectionId::generate().expect("conn_id");
+        let session = EcdhSession { connection_id: conn_id, session_key, agent_id: 1 };
+
+        let response_payload = b"server-reply";
+        let server_response =
+            seal_session_response(&session.session_key, response_payload).expect("seal");
+
+        let transport = MockTransport::ok(server_response);
+
+        let decrypted =
+            send_session_packet(&transport, &session, b"agent-payload").await.expect("send");
+
+        // Transport was called exactly once.
+        assert_eq!(transport.sent_packets().len(), 1);
+        // The packet starts with the connection_id.
+        assert_eq!(&transport.sent_packets()[0][..16], &conn_id.0);
+
+        // The decrypted response matches what the server encrypted.
+        assert_eq!(decrypted, response_payload);
+    }
+
+    #[tokio::test]
+    async fn send_session_packet_propagates_transport_error() {
+        let kp = ListenerKeypair::generate().expect("keypair");
+        let (_, session_key) = build_registration_packet(&kp.public_bytes, b"meta").expect("build");
+        let conn_id = ConnectionId::generate().expect("conn_id");
+        let session = EcdhSession { connection_id: conn_id, session_key, agent_id: 1 };
+
+        let transport = MockTransport::error();
+
+        let err = send_session_packet(&transport, &session, b"payload").await.unwrap_err();
+        assert!(matches!(err, EcdhError::Transport(_)));
+    }
 
     fn test_listener_keypair() -> ListenerKeypair {
         ListenerKeypair::generate().expect("keypair")

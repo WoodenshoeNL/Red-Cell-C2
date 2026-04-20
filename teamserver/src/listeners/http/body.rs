@@ -295,14 +295,9 @@ mod tests {
     /// non-legacy listener's precheck (regression for the bug fixed in hxg94).
     #[tokio::test]
     async fn archon_agent_id_deadbeef_passes_non_legacy_precheck() {
-        // agent_id = 0xDEADBEEF, per-build magic = 0xCAFEBABE
-        let pkt = make_archon_init_packet(0xCAFE_BABE);
-        // Reconstruct with the specific agent_id we want.
         let envelope = ArchonEnvelope::new(0xDEAD_BEEF, 0xCAFE_BABE, demon_init_payload()).unwrap();
         let raw = envelope.to_bytes();
-        // Verify the bytes-4-7 are indeed 0xDEADBEEF.
         assert_eq!(&raw[4..8], &0xDEAD_BEEFu32.to_be_bytes());
-        let _ = pkt; // suppress unused warning
 
         let result = collect_body_with_magic_precheck(make_body(raw), usize::MAX, false).await;
         assert!(

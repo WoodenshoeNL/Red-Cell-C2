@@ -180,7 +180,7 @@ def run(ctx):
     if ctx.linux is None:
         raise ScenarioSkipped("ctx.linux is None — no Linux target configured")
     from urllib.parse import urlparse
-    from lib.deploy import DeployError, preflight_dns, preflight_ssh
+    from lib.deploy import DeployError, inject_hosts_entry, preflight_dns, preflight_ssh
     try:
         preflight_ssh(ctx.linux)
     except DeployError as exc:
@@ -193,6 +193,10 @@ def run(ctx):
         or ctx.env.get("server", {}).get("url", "")
     )
     teamserver_ip = urlparse(server_url).hostname or "127.0.0.1"
+    try:
+        inject_hosts_entry(ctx.linux, dns_domain, teamserver_ip)
+    except DeployError as exc:
+        raise ScenarioSkipped(f"cannot inject /etc/hosts entry: {exc}") from exc
     preflight_dns(ctx.linux, dns_domain, teamserver_ip)
 
     # ── Demon pass (primary baseline) ───────────────────────────────────────

@@ -282,6 +282,7 @@ class TestScenario15(unittest.TestCase):
     def test_phantom_skipped_when_not_in_available(self) -> None:
         ctx = _linux_ctx()
         with patch("lib.deploy.preflight_ssh"), \
+             patch("lib.deploy.inject_hosts_entry"), \
              patch("lib.deploy.preflight_dns"), \
              patch.object(self.mod, "_run_for_agent") as mock_run:
             self.mod.run(ctx)

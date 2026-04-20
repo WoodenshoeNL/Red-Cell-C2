@@ -247,6 +247,44 @@ def preflight_dns(target: TargetConfig, domain: str, expected_ip: str) -> None:
         )
 
 
+def inject_hosts_entry(target: TargetConfig, domain: str, ip: str) -> None:
+    """Ensure ``/etc/hosts`` on *target* maps *domain* to *ip*.
+
+    Idempotent — a no-op if the exact ``"ip  domain"`` line is already
+    present.  Uses ``sudo tee -a`` so the SSH user does not need write
+    permission on ``/etc/hosts``; the account must have passwordless sudo.
+
+    DNS scenarios (15, 20) call this before :func:`preflight_dns` so the
+    harness injects the required entry automatically rather than requiring
+    manual host configuration on the test VM.
+
+    Args:
+        target: SSH target to modify (Linux only).
+        domain: Hostname to add (e.g. ``"c2.test.local"``).
+        ip:     IP address to map it to (e.g. ``"192.168.213.157"``).
+
+    Raises:
+        DeployError: if the SSH command exits non-zero.
+    """
+    entry = f"{ip}  {domain}"
+    cmd = (
+        f"grep -qF {shlex.quote(entry)} /etc/hosts || "
+        f"echo {shlex.quote(entry)} | sudo tee -a /etc/hosts > /dev/null"
+    )
+    result = _run_ssh_cli_with_retry(
+        _ssh_args(target) + [cmd],
+        target.host,
+        timeout=15,
+        tool="ssh",
+    )
+    if result.returncode != 0:
+        raise DeployError(
+            f"inject_hosts_entry: failed to add '{entry}' to /etc/hosts on "
+            f"{target.host} — exit {result.returncode}: {result.stderr.strip()}"
+        )
+    logger.debug("inject_hosts_entry: '%s' ensured on %s", entry, target.host)
+
+
 def named_pipe_exists(target: TargetConfig, pipe_name: str, ssh_timeout: int = 25) -> bool:
     """Return True if the named pipe exists on the Windows target (``Test-Path`` on ``\\\\.\\pipe\\``).
 

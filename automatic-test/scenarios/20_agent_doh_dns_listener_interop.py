@@ -362,7 +362,7 @@ def run(ctx):
     from urllib.parse import urlparse
 
     from lib.cli import agent_kill, listener_create, listener_delete, listener_start, listener_stop
-    from lib.deploy import preflight_dns
+    from lib.deploy import DeployError, inject_hosts_entry, preflight_dns
 
     cli = ctx.cli
     listeners_cfg = ctx.env.get("listeners", {})
@@ -377,6 +377,10 @@ def run(ctx):
     teamserver_ip = urlparse(server_url).hostname or "127.0.0.1"
 
     if ctx.linux is not None:
+        try:
+            inject_hosts_entry(ctx.linux, dns_domain, teamserver_ip)
+        except DeployError as exc:
+            raise ScenarioSkipped(f"cannot inject /etc/hosts entry: {exc}") from exc
         preflight_dns(ctx.linux, dns_domain, teamserver_ip)
     listener_name = f"test-doh-dns-{_short_id()}"
     scenario13 = _load_protocol_probe_module()

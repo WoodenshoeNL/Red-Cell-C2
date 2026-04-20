@@ -27,6 +27,7 @@ from lib.deploy import (
     _ssh_args,
     ensure_work_dir,
     execute_background,
+    inject_hosts_entry,
     preflight_dns,
     preflight_ssh,
     run_remote,
@@ -463,6 +464,79 @@ class TestDeployErrorPaths(unittest.TestCase):
         remote_cmd = m.call_args[0][0][-1]
         self.assertIn("nohup", remote_cmd)
         self.assertIn("&", remote_cmd)
+
+
+class TestInjectHostsEntry(unittest.TestCase):
+    """Tests for inject_hosts_entry — idempotent /etc/hosts injection via SSH."""
+
+    def setUp(self) -> None:
+        self.key_path = _module_key_path()
+        self.target = _make_target(host="10.0.0.1", key=self.key_path)
+
+    def _completed(
+        self, returncode: int, stderr: str = "", stdout: str = ""
+    ) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(
+            args=[], returncode=returncode, stdout=stdout, stderr=stderr
+        )
+
+    def test_success_does_not_raise(self) -> None:
+        """inject_hosts_entry must not raise when SSH exits 0 (entry injected or already present)."""
+        with patch("subprocess.run", return_value=self._completed(0)):
+            inject_hosts_entry(self.target, "c2.test.local", "192.168.1.50")
+
+    def test_failure_raises_deploy_error(self) -> None:
+        """Non-zero exit must raise DeployError with host and entry in the message."""
+        with patch("subprocess.run", return_value=self._completed(1, "sudo: command not found")):
+            with self.assertRaises(DeployError) as ctx:
+                inject_hosts_entry(self.target, "c2.test.local", "192.168.1.50")
+        msg = str(ctx.exception)
+        self.assertIn("10.0.0.1", msg)
+        self.assertIn("c2.test.local", msg)
+        self.assertIn("192.168.1.50", msg)
+
+    def test_command_contains_idempotent_grep_check(self) -> None:
+        """SSH command must check /etc/hosts before appending (idempotency)."""
+        with patch("subprocess.run", return_value=self._completed(0)) as mock_run:
+            inject_hosts_entry(self.target, "c2.test.local", "192.168.1.50")
+        remote_cmd = mock_run.call_args[0][0][-1]
+        self.assertIn("grep", remote_cmd)
+        self.assertIn("/etc/hosts", remote_cmd)
+        self.assertIn("tee -a /etc/hosts", remote_cmd)
+
+    def test_command_contains_expected_entry(self) -> None:
+        """SSH command must embed the ip and domain in the hosts entry."""
+        with patch("subprocess.run", return_value=self._completed(0)) as mock_run:
+            inject_hosts_entry(self.target, "c2.test.local", "10.99.0.1")
+        remote_cmd = mock_run.call_args[0][0][-1]
+        self.assertIn("10.99.0.1", remote_cmd)
+        self.assertIn("c2.test.local", remote_cmd)
+
+    def test_domain_with_shell_metacharacters_is_quoted(self) -> None:
+        """Domain with metacharacters must not result in a bare-word injection."""
+        domain = "evil$(rm -rf /)"
+        with patch("subprocess.run", return_value=self._completed(0)) as mock_run:
+            inject_hosts_entry(self.target, domain, "127.0.0.1")
+        remote_cmd = mock_run.call_args[0][0][-1]
+        # shlex.quote wraps the entry in single quotes; the $(…) must never
+        # appear as a bare (unquoted) token in the command string.
+        self.assertIn(shlex.quote(f"127.0.0.1  {domain}"), remote_cmd)
+
+    def test_uses_sudo_tee(self) -> None:
+        """Entry must be appended via sudo so non-root SSH users can write /etc/hosts."""
+        with patch("subprocess.run", return_value=self._completed(0)) as mock_run:
+            inject_hosts_entry(self.target, "c2.test.local", "192.168.1.50")
+        remote_cmd = mock_run.call_args[0][0][-1]
+        self.assertIn("sudo", remote_cmd)
+        self.assertIn("tee", remote_cmd)
+
+    def test_transient_failure_exhausts_retries_and_raises(self) -> None:
+        """Transient SSH failures are retried; exhaustion must raise DeployError."""
+        bad = self._completed(255, "ssh: connect to host 10.0.0.1 port 22: Connection refused")
+        with patch("subprocess.run", return_value=bad):
+            with patch("lib.deploy.time.sleep"):
+                with self.assertRaises(DeployError):
+                    inject_hosts_entry(self.target, "c2.test.local", "192.168.1.50")
 
 
 if __name__ == "__main__":

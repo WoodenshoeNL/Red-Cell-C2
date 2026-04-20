@@ -124,6 +124,64 @@ port     = 22
 user     = "rctest"
 key      = "~/.ssh/red_cell_test"
 work_dir = "/tmp/rc-test"
+display  = ":99"
+```
+
+---
+
+## 10. Set up Xvfb for screenshot scenario (scenario 08)
+
+Scenario 08 captures a screenshot from the agent.  On a headless Linux target,
+an X virtual framebuffer must be running before the scenario runs.
+
+### Install
+
+```bash
+sudo apt-get install -y xvfb x11-utils
+```
+
+`x11-utils` provides `xdpyinfo`, which the test harness uses as a pre-flight
+check to verify the display is actually accepting connections before deploying
+the agent.
+
+### Persistent service (recommended)
+
+Create a systemd user service so Xvfb survives reboots and SSH session ends:
+
+```bash
+mkdir -p ~/.config/systemd/user
+cat > ~/.config/systemd/user/xvfb-99.service << 'EOF'
+[Unit]
+Description=Xvfb virtual framebuffer :99
+After=default.target
+
+[Service]
+ExecStart=/usr/bin/Xvfb :99 -screen 0 1920x1080x24
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+EOF
+
+systemctl --user daemon-reload
+systemctl --user enable --now xvfb-99.service
+
+# Allow the service to stay running after logout (requires sudo)
+sudo loginctl enable-linger rctest
+```
+
+Verify:
+
+```bash
+DISPLAY=:99 xdpyinfo | head -3
+# Should print "name of display:    :99" (or similar)
+```
+
+### Quick one-shot start (for ad-hoc runs)
+
+```bash
+Xvfb :99 -screen 0 1920x1080x24 &>/tmp/xvfb.log &
 ```
 
 ---
@@ -136,6 +194,8 @@ work_dir = "/tmp/rc-test"
 | `Connection refused` | Verify `sshd` is running: `sudo systemctl status ssh` |
 | Payload won't execute | Ensure `rctest` is in the `sudo` group and has NOPASSWD sudoers entry |
 | AppArmor blocks execution | Check `sudo dmesg | grep apparmor` and add an AppArmor exception if needed |
+| Scenario 08 skipped ("no DISPLAY") | `display` key missing from `targets.toml [linux]` — set `display = ":99"` and ensure Xvfb is running |
+| `xdpyinfo` fails over SSH | Xvfb not running; start with `systemctl --user start xvfb-99.service` or the one-shot command above |
 
 ---
 

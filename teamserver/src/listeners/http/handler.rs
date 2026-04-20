@@ -99,6 +99,7 @@ pub(super) async fn http_listener_handler(
         &state.demon_init_rate_limiter,
         external_ip,
         body.as_ref(),
+        state.config.legacy_mode,
     )
     .await
     {

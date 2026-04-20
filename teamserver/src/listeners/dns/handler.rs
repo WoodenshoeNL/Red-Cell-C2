@@ -50,6 +50,7 @@ impl DnsListenerState {
             &self.demon_init_rate_limiter,
             peer_ip,
             &assembled,
+            true, // DNS listener is always legacy mode
         )
         .await
         {
@@ -348,6 +349,7 @@ impl DnsListenerState {
             &self.demon_init_rate_limiter,
             peer_ip,
             &assembled,
+            true, // DNS listener is always legacy mode
         )
         .await
         {

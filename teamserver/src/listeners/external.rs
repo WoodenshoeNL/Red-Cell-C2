@@ -153,8 +153,14 @@ pub async fn handle_external_request(
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     };
 
-    if !allow_demon_init_for_ip(&state.config.name, &state.demon_init_rate_limiter, peer.ip(), body)
-        .await
+    if !allow_demon_init_for_ip(
+        &state.config.name,
+        &state.demon_init_rate_limiter,
+        peer.ip(),
+        body,
+        true, // external listener is always legacy mode
+    )
+    .await
     {
         return Err(StatusCode::NOT_FOUND);
     }

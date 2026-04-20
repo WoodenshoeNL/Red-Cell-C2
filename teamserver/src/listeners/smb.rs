@@ -105,7 +105,7 @@ async fn allow_demon_init_for_smb_connection(
     window: &Mutex<AttemptWindow>,
     body: &[u8],
 ) -> bool {
-    if classify_demon_transport(body) != Some(DemonTransportKind::Init) {
+    if classify_demon_transport(body, true) != Some(DemonTransportKind::Init) {
         return true;
     }
 

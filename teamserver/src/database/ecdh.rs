@@ -166,14 +166,16 @@ impl EcdhRepository {
         connection_id_bytes: &[u8; CONNECTION_ID_LEN],
         candidate_seq: u64,
     ) -> Result<bool, TeamserverError> {
+        let seq_i64 = i64::try_from(candidate_seq)
+            .map_err(|_| TeamserverError::SeqNumOverflow { seq_num: candidate_seq })?;
         let rows_affected = sqlx::query(
             "UPDATE ts_ecdh_sessions \
              SET last_seq_num = ? \
              WHERE connection_id = ? AND last_seq_num < ?",
         )
-        .bind(i64::try_from(candidate_seq).unwrap_or(i64::MAX))
+        .bind(seq_i64)
         .bind(connection_id_bytes.as_slice())
-        .bind(i64::try_from(candidate_seq).unwrap_or(i64::MAX))
+        .bind(seq_i64)
         .execute(&self.pool)
         .await
         .map_err(TeamserverError::Sqlx)?
@@ -371,5 +373,29 @@ mod tests {
 
         // No session stored — advance_seq_num must return false (not an error).
         assert!(!repo.advance_seq_num(&[0u8; 16], 1).await.expect("advance"), "no session → false");
+    }
+
+    #[tokio::test]
+    async fn advance_seq_num_rejects_overflow() {
+        let (db, master_key) = test_db().await;
+        let repo = EcdhRepository::new(db.pool().clone(), master_key);
+
+        let conn_id = ConnectionId::generate().expect("conn_id");
+        repo.store_session(&conn_id, 6, &[0u8; 32]).await.expect("store");
+
+        // seq_num values that exceed i64::MAX must return SeqNumOverflow, not silently cap.
+        let overflow = (i64::MAX as u64) + 1;
+        let err = repo.advance_seq_num(&conn_id.0, overflow).await.unwrap_err();
+        assert!(
+            matches!(err, TeamserverError::SeqNumOverflow { seq_num } if seq_num == overflow),
+            "expected SeqNumOverflow, got {err:?}"
+        );
+
+        // i64::MAX itself must be accepted (boundary: still fits).
+        let max_ok = i64::MAX as u64;
+        assert!(
+            repo.advance_seq_num(&conn_id.0, max_ok).await.expect("advance at i64::MAX"),
+            "seq i64::MAX must be accepted"
+        );
     }
 }

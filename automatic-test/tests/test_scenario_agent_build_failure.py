@@ -279,16 +279,29 @@ class TestScenario15(unittest.TestCase):
                 self.mod._run_for_agent(ctx, "phantom", "bin", "test-dns-phantom")
         self.assertEqual(cm.exception.code, "BUILD_FAILED")
 
-    def test_phantom_skipped_when_not_in_available(self) -> None:
+    def test_scenario_skipped_when_phantom_not_in_available(self) -> None:
+        # Demon has no DNS transport — when phantom is absent too, the scenario skips.
         ctx = _linux_ctx()
+        from lib import ScenarioSkipped
+        with patch("lib.deploy.preflight_ssh"), \
+             patch("lib.deploy.inject_hosts_entry"), \
+             patch("lib.deploy.preflight_dns"), \
+             patch.object(self.mod, "_run_for_agent"):
+            with self.assertRaises(ScenarioSkipped):
+                self.mod.run(ctx)
+
+    def test_demon_never_run_for_dns(self) -> None:
+        # Demon must never be invoked for DNS transport — it has no TransportDns.
+        ctx = _linux_ctx()
+        ctx.env["agents"]["available"] = ["demon", "phantom"]
         with patch("lib.deploy.preflight_ssh"), \
              patch("lib.deploy.inject_hosts_entry"), \
              patch("lib.deploy.preflight_dns"), \
              patch.object(self.mod, "_run_for_agent") as mock_run:
             self.mod.run(ctx)
-        agent_types = [c.kwargs["agent_type"] for c in mock_run.call_args_list]
-        self.assertIn("demon", agent_types)
-        self.assertNotIn("phantom", agent_types)
+        agent_types = [c.kwargs.get("agent_type") or c.args[1] for c in mock_run.call_args_list]
+        self.assertNotIn("demon", agent_types)
+        self.assertIn("phantom", agent_types)
 
 
 # ── Scenario 20: DoH DNS listener interop ────────────────────────────────────

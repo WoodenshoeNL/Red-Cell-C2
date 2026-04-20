@@ -2,12 +2,15 @@
 Scenario 15_agent_dns: End-to-end agent checkin over DNS listener
 
 Deploy a Linux agent using DNS transport, wait for checkin, run command suite.
-Runs twice: first with Demon (bin), then with Phantom (elf).  The Phantom
-pass is skipped only when ``"phantom"`` is absent from ``agents.available`` in
-env.toml; if it is listed and its build fails, the scenario fails so DNS
-transport regressions are visible.
 
-Skip if ctx.linux is None.
+Demon does not support DNS C2 transport (no TransportDns implementation in the
+upstream agent source — only TransportHttp and TransportSmb exist).  The Demon
+pass is therefore skipped unconditionally; this scenario only runs the Phantom
+pass.  The scenario raises ScenarioSkipped when ``"phantom"`` is absent from
+``agents.available`` in env.toml; if it is listed and its build fails, the
+scenario fails so DNS transport regressions are visible.
+
+Skip if ctx.linux is None or ``"phantom"`` is not in agents.available.
 
 Steps (per agent pass):
   1. Create + start DNS listener
@@ -19,7 +22,7 @@ Steps (per agent pass):
   7. Kill agent, stop listener, clean up work_dir on target
 """
 
-DESCRIPTION = "DNS agent checkin (Demon + Phantom over DNS)"
+DESCRIPTION = "DNS agent checkin (Phantom over DNS)"
 
 import uuid
 
@@ -186,6 +189,14 @@ def run(ctx):
     except DeployError as exc:
         raise ScenarioSkipped(str(exc)) from exc
 
+    # Demon has no DNS transport (TransportHttp and TransportSmb only) — skip it.
+    available_agents = set(ctx.env.get("agents", {}).get("available", []))
+    if "phantom" not in available_agents:
+        raise ScenarioSkipped(
+            "No DNS-capable agent available — Demon lacks DNS transport support; "
+            "add 'phantom' to agents.available in env.toml to enable DNS checkin tests"
+        )
+
     dns_cfg = ctx.env.get("listeners", {})
     dns_domain = dns_cfg.get("dns_domain", "c2.test.local")
     server_url = (
@@ -199,14 +210,6 @@ def run(ctx):
         raise ScenarioSkipped(f"cannot inject /etc/hosts entry: {exc}") from exc
     preflight_dns(ctx.linux, dns_domain, teamserver_ip)
 
-    # ── Demon pass (primary baseline) ───────────────────────────────────────
-    print("\n  === DNS agent pass: demon ===")
-    _run_for_agent(ctx, agent_type="demon", fmt="bin", name_prefix="test-dns-demon")
-
-    # ── Phantom pass (Rust Linux agent) ─────────────────────────────────────
-    available_agents = set(ctx.env.get("agents", {}).get("available", ["demon"]))
+    # ── Phantom pass (Rust Linux agent — only DNS-capable agent) ────────────
     print("\n  === DNS agent pass: phantom ===")
-    if "phantom" not in available_agents:
-        print("  [phantom] SKIPPED — 'phantom' not listed in agents.available")
-    else:
-        _run_for_agent(ctx, agent_type="phantom", fmt="bin", name_prefix="test-dns-phantom")
+    _run_for_agent(ctx, agent_type="phantom", fmt="bin", name_prefix="test-dns-phantom")

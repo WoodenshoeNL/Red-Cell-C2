@@ -391,7 +391,6 @@ async fn record_archon_magic_mismatch(
     let mut params = vec![
         ("listener", serde_json::Value::String(listener_name.to_owned())),
         ("external_ip", serde_json::Value::String(external_ip.to_owned())),
-        ("reason", serde_json::Value::String(reason.to_owned())),
     ];
     if let Some(magic) = actual_magic {
         params.push(("actual_magic", serde_json::Value::String(format!("{magic:08X}"))));

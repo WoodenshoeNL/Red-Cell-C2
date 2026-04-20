@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use red_cell_common::demon::{DemonCommand, DemonPackage, DemonTokenCommand};
 
 use super::super::{DispatchResult, dispatch};
-use super::{decode_command_output_text, decode_error_text, decode_utf16le_null, le_subcmd};
+use super::{decode_utf16le_null, le_subcmd};
 use super::{parse_bytes_le, parse_u32_le};
 use crate::config::SpecterConfig;
 use crate::download::DownloadTracker;

@@ -2,9 +2,9 @@ use std::collections::HashMap;
 
 use red_cell_common::demon::{DemonCommand, DemonNetCommand, DemonPackage, DemonProcessCommand};
 
-use super::super::process::{arch_from_wow64, translate_to_shell_cmd};
+use super::super::process::arch_from_wow64;
 use super::super::{DispatchResult, dispatch};
-use super::{decode_utf16le_null, le_subcmd, le_utf16le_payload, parse_bytes_le, parse_u32_le};
+use super::{decode_utf16le_null, le_subcmd, le_utf16le_payload};
 use crate::config::SpecterConfig;
 use crate::download::DownloadTracker;
 use crate::job::JobStore;

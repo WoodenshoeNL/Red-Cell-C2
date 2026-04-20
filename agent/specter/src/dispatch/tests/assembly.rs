@@ -6,7 +6,6 @@ use super::super::assembly::{
     handle_assembly_inline_execute, handle_assembly_list_versions, handle_inline_execute,
     handle_job, handle_ps_import,
 };
-use super::super::filesystem::handle_memfile;
 use super::super::{DispatchResult, MemFile, MemFileStore, PsScriptStore, dispatch};
 use super::le_u32_pair;
 use crate::config::SpecterConfig;

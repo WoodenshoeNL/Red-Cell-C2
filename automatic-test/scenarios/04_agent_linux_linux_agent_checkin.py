@@ -68,7 +68,11 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
 
     # ── Step 1: Create + start HTTP listener ────────────────────────────────
     print(f"  [{agent_type}][listener] creating HTTP listener {listener_name!r} on port {listener_port}")
-    listener_create(cli, listener_name, "http", port=listener_port)
+    callback_host = ctx.env.get("server", {}).get("callback_host")
+    kw = {"port": listener_port}
+    if callback_host:
+        kw["hosts"] = callback_host
+    listener_create(cli, listener_name, "http", **kw)
     listener_start(cli, listener_name)
     print(f"  [{agent_type}][listener] started")
 

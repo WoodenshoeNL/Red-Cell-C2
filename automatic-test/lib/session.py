@@ -66,6 +66,7 @@ class Session:
         self._agent = agent
         self._proc: subprocess.Popen[str] | None = None
         self._lines: queue.Queue[str | None] = queue.Queue()
+        self._eofs_seen: int = 0
 
     # ── context manager ───────────────────────────────────────────────────────
 
@@ -135,15 +136,15 @@ class Session:
         Raises SessionError on EOF (both streams closed).
         """
         # We have two reader threads; track how many EOF sentinels we've seen.
-        eofs_seen = 0
+        # eofs_seen is an instance variable so counts accumulate across calls.
         while True:
             try:
                 item = self._lines.get(timeout=timeout)
             except queue.Empty:
                 raise SessionError("TIMEOUT", "timed out waiting for session response")
             if item is None:
-                eofs_seen += 1
-                if eofs_seen >= 2:
+                self._eofs_seen += 1
+                if self._eofs_seen >= 2:
                     raise SessionError("EOF", "session process closed stdout/stderr unexpectedly")
                 continue
             return item

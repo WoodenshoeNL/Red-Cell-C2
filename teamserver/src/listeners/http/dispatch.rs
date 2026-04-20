@@ -290,6 +290,53 @@ pub(crate) async fn process_demon_transport(
                 http_disposition: DemonHttpDisposition::Fake404,
             })
         }
+        Err(DemonParserError::ArchonMagicMismatch { agent_id, actual }) => {
+            warn!(
+                listener = listener_name,
+                agent_id = format_args!("{:08X}", agent_id),
+                actual = format_args!("{:08X}", actual),
+                external_ip,
+                "Archon magic mismatch — possible replay or probe from different build"
+            );
+            record_archon_magic_mismatch(
+                database,
+                listener_name,
+                agent_id,
+                &external_ip,
+                Some(actual),
+                "archon_magic_mismatch",
+                "agent.archon_magic_mismatch",
+            )
+            .await;
+            Ok(ProcessedDemonResponse {
+                agent_id,
+                payload: Vec::new(),
+                http_disposition: DemonHttpDisposition::Fake404,
+            })
+        }
+        Err(DemonParserError::ArchonMagicNotOnFile { agent_id }) => {
+            warn!(
+                listener = listener_name,
+                agent_id = format_args!("{:08X}", agent_id),
+                external_ip,
+                "Archon magic not on file — agent may be registered as legacy Demon"
+            );
+            record_archon_magic_mismatch(
+                database,
+                listener_name,
+                agent_id,
+                &external_ip,
+                None,
+                "archon_magic_not_on_file",
+                "agent.archon_magic_not_on_file",
+            )
+            .await;
+            Ok(ProcessedDemonResponse {
+                agent_id,
+                payload: Vec::new(),
+                http_disposition: DemonHttpDisposition::Fake404,
+            })
+        }
         Err(error) => Err(ListenerManagerError::InvalidConfig {
             message: format!("failed to parse demon callback: {error}"),
         }),
@@ -327,6 +374,54 @@ async fn record_unknown_reconnect_probe(
             agent_id = format_args!("{agent_id:08X}"),
             %error,
             "failed to persist unknown reconnect probe audit entry"
+        );
+    }
+}
+
+/// Records an audit entry for an Archon magic mismatch or not-on-file event.
+///
+/// `actual_magic` is `Some` for a mismatch (wrong value was sent) and `None` for not-on-file
+/// (the agent has no stored magic at all).
+async fn record_archon_magic_mismatch(
+    database: &Database,
+    listener_name: &str,
+    agent_id: u32,
+    external_ip: &str,
+    actual_magic: Option<u32>,
+    reason: &str,
+    action: &str,
+) {
+    let mut params = vec![
+        ("listener", serde_json::Value::String(listener_name.to_owned())),
+        ("external_ip", serde_json::Value::String(external_ip.to_owned())),
+        ("reason", serde_json::Value::String(reason.to_owned())),
+    ];
+    if let Some(magic) = actual_magic {
+        params.push(("actual_magic", serde_json::Value::String(format!("{magic:08X}"))));
+    }
+
+    let details = audit_details(
+        AuditResultStatus::Failure,
+        Some(agent_id),
+        Some(reason),
+        Some(parameter_object(params)),
+    );
+
+    if let Err(error) = record_operator_action(
+        database,
+        "teamserver",
+        action,
+        "agent",
+        Some(format!("{agent_id:08X}")),
+        details,
+    )
+    .await
+    {
+        warn!(
+            listener = listener_name,
+            agent_id = format_args!("{agent_id:08X}"),
+            %error,
+            "failed to persist Archon magic audit entry"
         );
     }
 }

@@ -63,6 +63,78 @@ pub enum EcdhError {
     InvalidConnectionId,
     #[error("RNG failure: {0}")]
     Rng(String),
+    #[error("transport error: {0}")]
+    Transport(String),
+    #[error("base64 decode error: {0}")]
+    Base64(String),
+    #[error("invalid key length: expected 32 bytes")]
+    InvalidKeyLength,
+}
+
+/// Live ECDH session after a successful registration handshake.
+#[derive(Debug, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
+pub struct EcdhSession {
+    pub connection_id: ConnectionId,
+    pub session_key: [u8; 32],
+    pub agent_id: u32,
+}
+
+/// Decode a base64-encoded listener public key.
+///
+/// Accepts standard or URL-safe base64, with or without padding.
+pub fn decode_listener_pub_key(encoded: &str) -> Result<[u8; 32], EcdhError> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD_NO_PAD
+        .decode(encoded.trim())
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(encoded.trim()))
+        .map_err(|e| EcdhError::Base64(e.to_string()))?;
+    bytes.try_into().map_err(|_| EcdhError::InvalidKeyLength)
+}
+
+/// Transport abstraction for ECDH helper functions.
+///
+/// Implemented by each agent's HTTP transport so that [`perform_registration`]
+/// and [`send_session_packet`] can be shared without duplicating the ECDH logic.
+pub trait AgentTransport: Send + Sync {
+    fn send(
+        &self,
+        packet: &[u8],
+    ) -> impl std::future::Future<Output = Result<Vec<u8>, String>> + Send;
+}
+
+/// Perform the ECDH registration handshake with the teamserver.
+///
+/// On success returns the negotiated [`EcdhSession`] that must be passed to
+/// [`send_session_packet`] for all subsequent requests.
+pub async fn perform_registration<T: AgentTransport>(
+    transport: &T,
+    listener_pub_key: &[u8; 32],
+    metadata: &[u8],
+) -> Result<EcdhSession, EcdhError> {
+    let (packet, session_key) = build_registration_packet(listener_pub_key, metadata)?;
+
+    let response = transport.send(&packet).await.map_err(EcdhError::Transport)?;
+
+    let (connection_id, agent_id) = parse_registration_response(&session_key, &response)?;
+
+    Ok(EcdhSession { connection_id, session_key, agent_id })
+}
+
+/// Encrypt a payload with the session key, send it, and return the decrypted response.
+pub async fn send_session_packet<T: AgentTransport>(
+    transport: &T,
+    session: &EcdhSession,
+    payload: &[u8],
+) -> Result<Vec<u8>, EcdhError> {
+    let packet = seal_session_packet(&session.connection_id, &session.session_key, payload)?;
+
+    let response = transport.send(&packet).await.map_err(EcdhError::Transport)?;
+
+    if response.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    open_session_response(&session.session_key, &response)
 }
 
 /// A listener's X25519 keypair — the secret half never leaves the teamserver.

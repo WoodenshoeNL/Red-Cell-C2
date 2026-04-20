@@ -5,43 +5,43 @@
 //! encrypted with the negotiated AES-256-GCM session key.  No plaintext magic,
 //! agent ID, or static byte patterns appear on the wire.
 
-use red_cell_common::crypto::ecdh::{
-    ConnectionId, build_registration_packet, open_session_response, parse_registration_response,
-    seal_session_packet,
-};
-
-use zeroize::{Zeroize, ZeroizeOnDrop};
+pub use red_cell_common::crypto::ecdh::EcdhSession;
+use red_cell_common::crypto::ecdh::{AgentTransport, EcdhError};
 
 use crate::error::PhantomError;
 use crate::transport::HttpTransport;
 
-/// Live ECDH session after successful registration.
-#[derive(Debug, Zeroize, ZeroizeOnDrop)]
-pub struct EcdhSession {
-    pub connection_id: ConnectionId,
-    pub session_key: [u8; 32],
-    pub agent_id: u32,
+impl AgentTransport for HttpTransport {
+    async fn send(&self, packet: &[u8]) -> Result<Vec<u8>, String> {
+        HttpTransport::send(self, packet).await.map_err(|e| e.to_string())
+    }
+}
+
+fn map_ecdh(e: EcdhError) -> PhantomError {
+    match e {
+        EcdhError::InvalidKeyLength => PhantomError::InvalidConfig(
+            "listener_pub_key must be exactly 32 bytes (base64-encoded)",
+        ),
+        other => PhantomError::Transport(other.to_string()),
+    }
+}
+
+/// Decode a base64-encoded listener public key from config.
+///
+/// Accepts standard or URL-safe base64, with or without padding.
+pub fn decode_listener_pub_key(encoded: &str) -> Result<[u8; 32], PhantomError> {
+    red_cell_common::crypto::ecdh::decode_listener_pub_key(encoded).map_err(map_ecdh)
 }
 
 /// Perform the ECDH registration handshake with the teamserver.
-///
-/// Sends a registration packet containing the ephemeral public key and
-/// encrypted agent metadata.  On success returns the negotiated session
-/// that must be passed to [`seal_checkin`] for all subsequent requests.
 pub async fn perform_registration(
     transport: &HttpTransport,
     listener_pub_key: &[u8; 32],
     metadata: &[u8],
 ) -> Result<EcdhSession, PhantomError> {
-    let (packet, session_key) = build_registration_packet(listener_pub_key, metadata)
-        .map_err(|e| PhantomError::Transport(format!("ECDH build_registration_packet: {e}")))?;
-
-    let response = transport.send(&packet).await?;
-
-    let (connection_id, agent_id) = parse_registration_response(&session_key, &response)
-        .map_err(|e| PhantomError::Transport(format!("ECDH parse_registration_response: {e}")))?;
-
-    Ok(EcdhSession { connection_id, session_key, agent_id })
+    red_cell_common::crypto::ecdh::perform_registration(transport, listener_pub_key, metadata)
+        .await
+        .map_err(map_ecdh)
 }
 
 /// Encrypt a check-in payload with the session key and send it.
@@ -52,31 +52,9 @@ pub async fn send_session_packet(
     session: &EcdhSession,
     payload: &[u8],
 ) -> Result<Vec<u8>, PhantomError> {
-    let packet = seal_session_packet(&session.connection_id, &session.session_key, payload)
-        .map_err(|e| PhantomError::Transport(format!("ECDH seal_session_packet: {e}")))?;
-
-    let response = transport.send(&packet).await?;
-
-    if response.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    open_session_response(&session.session_key, &response)
-        .map_err(|e| PhantomError::Transport(format!("ECDH open_session_response: {e}")))
-}
-
-/// Decode a base64-encoded listener public key from config.
-///
-/// Accepts standard or URL-safe base64, with or without padding.
-pub fn decode_listener_pub_key(encoded: &str) -> Result<[u8; 32], PhantomError> {
-    use base64::Engine as _;
-    let bytes = base64::engine::general_purpose::STANDARD_NO_PAD
-        .decode(encoded.trim())
-        .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(encoded.trim()))
-        .map_err(|e| PhantomError::Transport(format!("listener_pub_key base64 decode: {e}")))?;
-    bytes.try_into().map_err(|_| {
-        PhantomError::InvalidConfig("listener_pub_key must be exactly 32 bytes (base64-encoded)")
-    })
+    red_cell_common::crypto::ecdh::send_session_packet(transport, session, payload)
+        .await
+        .map_err(map_ecdh)
 }
 
 #[cfg(test)]
@@ -99,7 +77,8 @@ mod tests {
 
         // Agent side: build registration packet.
         let (packet, agent_session_key) =
-            build_registration_packet(&kp.public_bytes, metadata).expect("build");
+            red_cell_common::crypto::ecdh::build_registration_packet(&kp.public_bytes, metadata)
+                .expect("build");
 
         // Teamserver side: open registration.
         let parsed = open_registration_packet(&kp, 300, &packet).expect("open");
@@ -114,7 +93,11 @@ mod tests {
 
         // Agent side: parse response.
         let (parsed_conn_id, parsed_agent_id) =
-            parse_registration_response(&agent_session_key, &response).expect("parse");
+            red_cell_common::crypto::ecdh::parse_registration_response(
+                &agent_session_key,
+                &response,
+            )
+            .expect("parse");
         assert_eq!(parsed_conn_id, conn_id);
         assert_eq!(parsed_agent_id, agent_id);
     }
@@ -122,13 +105,19 @@ mod tests {
     #[test]
     fn session_packet_e2e() {
         let kp = test_keypair();
-        let (_, session_key) = build_registration_packet(&kp.public_bytes, b"meta").expect("build");
+        let (_, session_key) =
+            red_cell_common::crypto::ecdh::build_registration_packet(&kp.public_bytes, b"meta")
+                .expect("build");
         let conn_id = ConnectionId::generate().expect("conn_id");
         let session = EcdhSession { connection_id: conn_id, session_key, agent_id: 1 };
 
         let payload = b"checkin-data";
-        let packet = seal_session_packet(&session.connection_id, &session.session_key, payload)
-            .expect("seal");
+        let packet = red_cell_common::crypto::ecdh::seal_session_packet(
+            &session.connection_id,
+            &session.session_key,
+            payload,
+        )
+        .expect("seal");
 
         // Teamserver decrypts.
         let decrypted = open_session_packet(&session.session_key, &packet[16..]).expect("open");
@@ -140,8 +129,11 @@ mod tests {
             seal_session_response(&session.session_key, response_payload).expect("seal resp");
 
         // Agent decrypts.
-        let opened_resp =
-            open_session_response(&session.session_key, &sealed_resp).expect("open resp");
+        let opened_resp = red_cell_common::crypto::ecdh::open_session_response(
+            &session.session_key,
+            &sealed_resp,
+        )
+        .expect("open resp");
         assert_eq!(opened_resp, response_payload);
     }
 

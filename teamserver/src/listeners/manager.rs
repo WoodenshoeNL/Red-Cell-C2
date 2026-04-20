@@ -208,6 +208,16 @@ impl ListenerManager {
             }
         });
 
+        let cleanup_ecdh_db = database.clone();
+        agent_registry.register_cleanup_hook(move |agent_id| {
+            let db = cleanup_ecdh_db.clone();
+            async move {
+                if let Err(e) = db.ecdh().delete_sessions_for_agent(agent_id).await {
+                    tracing::warn!(%agent_id, error = %e, "failed to purge ECDH session rows during agent cleanup");
+                }
+            }
+        });
+
         Self {
             database,
             agent_registry,

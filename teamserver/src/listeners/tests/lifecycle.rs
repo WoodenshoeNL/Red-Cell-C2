@@ -948,6 +948,63 @@ async fn cleanup_hook_installed_by_with_max_download_bytes_fires_on_agent_remova
     Ok(())
 }
 
+// ── ECDH session cleanup test ─────────────────────────────────────────────
+
+/// Verify that ECDH session rows are deleted from `ts_ecdh_sessions` when an agent
+/// is removed via `AgentRegistry::remove`.
+#[tokio::test]
+async fn ecdh_sessions_purged_on_agent_removal() -> Result<(), ListenerManagerError> {
+    use red_cell_common::crypto::ecdh::ConnectionId;
+
+    let database = Database::connect_in_memory().await?;
+    let registry = AgentRegistry::new(database.clone());
+    let events = EventBus::default();
+    let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+    let _manager = ListenerManager::with_max_download_bytes(
+        database.clone(),
+        registry.clone(),
+        events,
+        sockets,
+        None,
+        1024,
+    );
+
+    let agent_id: u32 = 0xABCD_1234;
+    let agent = sample_agent_info(agent_id, test_key(0x11), test_iv(0x22));
+    registry.insert(agent).await.expect("agent insert");
+
+    // Store two ECDH sessions for this agent.
+    let conn_id1 = ConnectionId::generate().expect("conn_id1");
+    let conn_id2 = ConnectionId::generate().expect("conn_id2");
+    database.ecdh().store_session(&conn_id1, agent_id, &[0u8; 32]).await.expect("store session 1");
+    database.ecdh().store_session(&conn_id2, agent_id, &[0u8; 32]).await.expect("store session 2");
+
+    // Both sessions must be present before removal.
+    assert!(
+        database.ecdh().lookup_session(&conn_id1.0).await.expect("lookup1").is_some(),
+        "session 1 must exist before agent removal",
+    );
+    assert!(
+        database.ecdh().lookup_session(&conn_id2.0).await.expect("lookup2").is_some(),
+        "session 2 must exist before agent removal",
+    );
+
+    // Remove the agent — this triggers the ECDH cleanup hook.
+    registry.remove(agent_id).await.expect("agent removal");
+
+    // Both session rows must have been deleted.
+    assert!(
+        database.ecdh().lookup_session(&conn_id1.0).await.expect("lookup1 after").is_none(),
+        "session 1 must be purged after agent removal",
+    );
+    assert!(
+        database.ecdh().lookup_session(&conn_id2.0).await.expect("lookup2 after").is_none(),
+        "session 2 must be purged after agent removal",
+    );
+
+    Ok(())
+}
+
 // ── Plugin event wiring test ──────────────────────────────────────────────
 
 /// Verify that a successful DemonInit (processed inside `process_demon_transport`)

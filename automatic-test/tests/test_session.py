@@ -212,15 +212,7 @@ class TestSessionSend(unittest.TestCase):
         self.assertEqual(cm.exception.code, "EOF")
 
     def test_send_raises_eof_on_split_sentinel(self) -> None:
-        """Regression for split-EOF accumulation across _readline calls.
-
-        Before the fix (eofs_seen was a local variable), the first None sentinel
-        consumed during send #1 was silently discarded. send #2 would then see only
-        one None and block until timeout, raising TIMEOUT instead of EOF.
-
-        The fix promotes eofs_seen to an instance variable so the count persists
-        across calls, allowing send #2 to detect the second sentinel and raise EOF.
-        """
+        """Regression: split EOF sentinels must accumulate across _readline calls."""
         done = threading.Event()
 
         proc = MagicMock()
@@ -237,9 +229,7 @@ class TestSessionSend(unittest.TestCase):
 
         with patch("subprocess.Popen", return_value=proc):
             with Session(_cfg()) as sess:
-                # Inject: first EOF sentinel before the response (simulates one
-                # reader closing just before the response arrives), then the
-                # response, then the second EOF sentinel.
+                # queue: first-None, real-response, second-None
                 sess._lines.put(None)
                 sess._lines.put(_ok_envelope("ping", {"pong": True}))
                 sess._lines.put(None)

@@ -172,15 +172,33 @@ class TestScenario06(unittest.TestCase):
                 self.mod._run_for_agent_windows(ctx, "specter", "exe", "test-ftransfer-specter")
         self.assertEqual(cm.exception.code, "BUILD_FAILED")
 
-    def test_phantom_skipped_when_not_in_available_linux(self) -> None:
+    def test_phantom_skipped_when_not_in_available_linux_only(self) -> None:
+        """Linux-only + phantom absent → ScenarioSkipped (zero agent passes ran)."""
+        from lib import ScenarioSkipped
         ctx = _linux_ctx()
         ctx.windows = None
         with patch("lib.deploy.preflight_ssh"), \
              patch.object(self.mod, "_run_for_agent") as mock_run, \
              patch.object(self.mod, "_run_for_agent_windows"):
-            self.mod.run(ctx)
+            with self.assertRaises(ScenarioSkipped):
+                self.mod.run(ctx)
         agent_types = [c.kwargs["agent_type"] for c in mock_run.call_args_list]
         self.assertNotIn("phantom", agent_types)
+
+    def test_phantom_skipped_linux_windows_still_runs(self) -> None:
+        """Linux + Windows + phantom absent → Windows passes run, no ScenarioSkipped."""
+        ctx = _linux_ctx()
+        ctx.windows = MagicMock()
+        ctx.windows.work_dir = "C:\\Temp\\rc-test"
+        with patch("lib.deploy.preflight_ssh"), \
+             patch.object(self.mod, "_run_for_agent") as mock_linux, \
+             patch.object(self.mod, "_run_for_agent_windows") as mock_win:
+            self.mod.run(ctx)
+        linux_types = [c.kwargs["agent_type"] for c in mock_linux.call_args_list]
+        self.assertNotIn("phantom", linux_types)
+        # demon always runs on Windows regardless of available list
+        win_types = [c.kwargs["agent_type"] for c in mock_win.call_args_list]
+        self.assertIn("demon", win_types)
 
     def test_specter_skipped_when_not_in_available_windows(self) -> None:
         ctx = _windows_ctx()
@@ -214,15 +232,32 @@ class TestScenario07(unittest.TestCase):
                 self.mod._run_for_agent_windows(ctx, "specter", "exe", "test-procops-specter")
         self.assertEqual(cm.exception.code, "BUILD_FAILED")
 
-    def test_phantom_skipped_when_not_in_available_linux(self) -> None:
+    def test_phantom_skipped_when_not_in_available_linux_only(self) -> None:
+        """Linux-only + phantom absent → ScenarioSkipped (zero agent passes ran)."""
+        from lib import ScenarioSkipped
         ctx = _linux_ctx()
         ctx.windows = None
         with patch("lib.deploy.preflight_ssh"), \
              patch.object(self.mod, "_run_for_agent") as mock_run, \
              patch.object(self.mod, "_run_for_agent_windows"):
-            self.mod.run(ctx)
+            with self.assertRaises(ScenarioSkipped):
+                self.mod.run(ctx)
         agent_types = [c.kwargs["agent_type"] for c in mock_run.call_args_list]
         self.assertNotIn("phantom", agent_types)
+
+    def test_phantom_skipped_linux_windows_still_runs(self) -> None:
+        """Linux + Windows + phantom absent → Windows passes run, no ScenarioSkipped."""
+        ctx = _linux_ctx()
+        ctx.windows = MagicMock()
+        ctx.windows.work_dir = "C:\\Temp\\rc-test"
+        with patch("lib.deploy.preflight_ssh"), \
+             patch.object(self.mod, "_run_for_agent") as mock_linux, \
+             patch.object(self.mod, "_run_for_agent_windows") as mock_win:
+            self.mod.run(ctx)
+        linux_types = [c.kwargs["agent_type"] for c in mock_linux.call_args_list]
+        self.assertNotIn("phantom", linux_types)
+        win_types = [c.kwargs["agent_type"] for c in mock_win.call_args_list]
+        self.assertIn("demon", win_types)
 
     def test_specter_skipped_when_not_in_available_windows(self) -> None:
         ctx = _windows_ctx()

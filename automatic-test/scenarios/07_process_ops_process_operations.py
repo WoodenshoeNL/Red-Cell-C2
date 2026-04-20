@@ -401,7 +401,6 @@ def run(ctx):
             preflight_ssh(ctx.linux)
         except DeployError as exc:
             raise ScenarioSkipped(str(exc)) from exc
-        ran_any = True
         # ── Phantom pass (Linux) — Demon is Windows-only (PE/Win32) ─────────
         print("\n  === Agent pass: phantom (Linux) ===")
         if "phantom" not in available_agents:
@@ -411,6 +410,7 @@ def run(ctx):
             )
         else:
             _run_for_agent(ctx, agent_type="phantom", fmt="elf", name_prefix="test-procops-phantom")
+            ran_any = True
     else:
         print("  [skip] ctx.linux is None — skipping Linux agent passes")
 

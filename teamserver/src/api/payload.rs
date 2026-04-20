@@ -14,8 +14,8 @@ use crate::app::TeamserverState;
 use crate::listeners::ListenerManagerError;
 use crate::payload_builder::ecdh::ecdh_pub_key_for_archon_build;
 use crate::{
-    AuditResultStatus, AuditWebhookNotifier, AuthorizationError, PayloadBuildRecord,
-    audit_details, authorize_listener_access, parameter_object,
+    AuditResultStatus, AuditWebhookNotifier, AuthorizationError, PayloadBuildRecord, audit_details,
+    authorize_listener_access, parameter_object,
 };
 
 use super::{

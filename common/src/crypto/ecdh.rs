@@ -79,9 +79,7 @@ pub struct EcdhSession {
     pub agent_id: u32,
 }
 
-/// Decode a base64-encoded listener public key.
-///
-/// Accepts standard or URL-safe base64, with or without padding.
+/// Decode a base64-encoded listener public key (standard or URL-safe, with or without padding).
 pub fn decode_listener_pub_key(encoded: &str) -> Result<[u8; 32], EcdhError> {
     use base64::Engine as _;
     let bytes = base64::engine::general_purpose::STANDARD_NO_PAD
@@ -91,10 +89,7 @@ pub fn decode_listener_pub_key(encoded: &str) -> Result<[u8; 32], EcdhError> {
     bytes.try_into().map_err(|_| EcdhError::InvalidKeyLength)
 }
 
-/// Transport abstraction for ECDH helper functions.
-///
-/// Implemented by each agent's HTTP transport so that [`perform_registration`]
-/// and [`send_session_packet`] can be shared without duplicating the ECDH logic.
+/// Transport abstraction for ECDH helper functions — implemented by each agent's HTTP transport.
 pub trait AgentTransport: Send + Sync {
     fn send(
         &self,
@@ -102,10 +97,7 @@ pub trait AgentTransport: Send + Sync {
     ) -> impl std::future::Future<Output = Result<Vec<u8>, String>> + Send;
 }
 
-/// Perform the ECDH registration handshake with the teamserver.
-///
-/// On success returns the negotiated [`EcdhSession`] that must be passed to
-/// [`send_session_packet`] for all subsequent requests.
+/// Perform the ECDH registration handshake with the teamserver and return the negotiated session.
 pub async fn perform_registration<T: AgentTransport>(
     transport: &T,
     listener_pub_key: &[u8; 32],

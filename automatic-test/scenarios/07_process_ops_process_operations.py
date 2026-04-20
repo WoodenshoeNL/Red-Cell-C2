@@ -393,6 +393,7 @@ def run(ctx):
     Skips Windows passes when ctx.windows is None.
     """
     ran_any = False
+    skipped_reasons: list[str] = []
     available_agents = set(ctx.env.get("agents", {}).get("available", ["demon"]))
     from lib.deploy import DeployError, preflight_ssh
 
@@ -407,6 +408,10 @@ def run(ctx):
             print(
                 "  [phantom] SKIPPED — Demon is Windows-only; "
                 "add 'phantom' to agents.available in env.toml"
+            )
+            skipped_reasons.append(
+                "Linux target configured but no available Linux agent"
+                " (add 'phantom' to agents.available)"
             )
         else:
             _run_for_agent(ctx, agent_type="phantom", fmt="elf", name_prefix="test-procops-phantom")
@@ -434,4 +439,6 @@ def run(ctx):
         print("  [skip] ctx.windows is None — skipping Windows agent passes")
 
     if not ran_any:
+        if skipped_reasons:
+            raise ScenarioSkipped("; ".join(skipped_reasons))
         raise ScenarioSkipped("neither ctx.linux nor ctx.windows is configured")

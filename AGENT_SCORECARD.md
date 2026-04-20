@@ -9,26 +9,26 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1417 | 255 | 97 |
-| Bugs filed against | 261 | 50 | 15 |
+| Tasks closed | 1489 | 255 | 97 |
+| Bugs filed against | 263 | 50 | 15 |
 | Bug rate (bugs/task) | 0.18 | 0.20 | 0.15 |
 | Quality score | 82% | 80% | 85% |
 
-*Bug rates: Claude 261/1417=0.1842→0.18, Codex 50/255=0.1961→0.20, Cursor 15/97=0.1546→0.15*
+*Bug rates: Claude 263/1489=0.1766→0.18, Codex 50/255=0.1961→0.20, Cursor 15/97=0.1546→0.15*
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 16 | 0 | 0 |
-| Missing tests / stale tests | 82 | 22 | 7 |
+| Missing tests / stale tests | 83 | 22 | 7 |
 | Clippy warnings | 16 | 0 | 2 |
 | Protocol errors | 30 | 32 | 4 |
 | Security issues | 70 | 40 | 0 |
 | Architecture drift | 66 | 25 | 9 |
 | Memory / resource leaks | 16 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 10 | 0 |
-| Test infrastructure / flakiness | 65 | 6 | 1 |
+| Test infrastructure / flakiness | 66 | 6 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 5 | 5 | 0 |
 | Correctness / pagination | 68 | 9 | 1 |
@@ -7237,3 +7237,17 @@ Build: **cargo check** — passed (clean). **cargo clippy -- -D warnings** — c
 **Issues filed this run:** 1 — red-cell-c2-oyqyd (test infrastructure / flakiness P2, zone:teamserver).
 
 **Codebase health:** Excellent. 27 tasks closed in this period — all refactors systematically splitting oversized files (1k–2k lines) into focused submodules across all crates. Zero production `unwrap`/`expect`, zero clippy warnings. The only issue is the recurring double-spawn ENOENT race for a newly-refactored integration test binary (`database_audit`). Claude's bug rate improved slightly (0.19 → 0.18, quality score 81% → 82%) due to high task throughput with minimal new defects.
+
+### QA Review — 2026-04-20 — 8225ac8e..0838b769
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 72 | 2 | Major sprint: ECDH key exchange (Archon/Phantom/Specter), protocol security hardening (no plaintext magic/keys on wire), Phantom/Specter dedup into common, client-cli new commands (log purge, operator active/logout, payload cache-flush, log --until), teamserver socket relay snapshot, seq_num i64::MAX guard, TLS cert randomization, autotest fixes. 2 bugs filed: red-cell-c2-9qj1a (CARGO_TARGET_DIR shared across QA/dev worktrees — test infra P2), red-cell-c2-3n4tb (missing wiremock tests for log purge HTTP path — P3). |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **cargo check** — passed. **cargo clippy -- -D warnings** — clean (0 errors). **cargo nextest run --workspace** — 2791/2792 tests passed; 1 intermittent double-spawn failure (`assembly_dispatch::bof_output_callback_broadcasts_output_to_operator`) confirmed transient (isolated re-run passed) — root cause is shared CARGO_TARGET_DIR with review worktrees (filed red-cell-c2-9qj1a).
+
+**Issues filed this run:** 2 — red-cell-c2-9qj1a (test infra / flakiness P2, zone:autotest), red-cell-c2-3n4tb (missing tests P3, zone:client-cli).
+
+**Codebase health: on track.** Largest sprint in recent memory: full ECDH key exchange protocol shipped across Archon (C/ASM), Phantom (Rust/Linux), and Specter (Rust/Windows). Protocol is now fully encrypted with no plaintext fingerprints on the wire. Known open bugs: red-cell-c2-zix71 (agent_id: 0 in ecdh_send_packages — functional impact low since agent_id is not used in the session packet encryption, but correctness defect). Claude quality score stable at 82%.

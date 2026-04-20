@@ -60,12 +60,6 @@ pub(crate) async fn process_ecdh_packet(
     // Try session first: look up the first 16 bytes as a connection_id.
     if let Some(candidate_id) = extract_connection_id_candidate(body) {
         if let Ok(Some((agent_id, session_key))) = ecdh_db.lookup_session(&candidate_id).await {
-            // Update last_seen in the background — non-critical.
-            let ecdh_db2 = ecdh_db.clone();
-            tokio::spawn(async move {
-                let _ = ecdh_db2.touch_session(&candidate_id).await;
-            });
-
             return Ok(Some(
                 process_ecdh_session(
                     body,
@@ -258,6 +252,9 @@ async fn process_ecdh_session(
             .collect()
     };
 
+    // Packet is authenticated and seq-validated — now it is safe to refresh liveness.
+    let _ = ecdh_db.touch_session(connection_id).await;
+
     let response_bytes = dispatcher
         .dispatch_packages(agent_id, &packages)
         .await
@@ -300,7 +297,57 @@ fn parse_ecdh_session_payload(bytes: &[u8]) -> Result<Vec<DemonPackage>, String>
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use sqlx::Row;
+
+    use crate::database::{Database, DbMasterKey, EcdhRepository};
+    use crate::dispatch::CommandDispatcher;
+
     use super::*;
+
+    async fn test_ecdh_db() -> (Database, EcdhRepository) {
+        let db = Database::connect_in_memory().await.expect("db");
+        let master_key = Arc::new(DbMasterKey::random().expect("master key"));
+        let repo = EcdhRepository::new(db.pool().clone(), master_key);
+        (db, repo)
+    }
+
+    async fn query_last_seen(db: &Database, conn_id: &[u8; 16]) -> i64 {
+        sqlx::query("SELECT last_seen FROM ts_ecdh_sessions WHERE connection_id = ?")
+            .bind(conn_id.as_slice())
+            .fetch_one(db.pool())
+            .await
+            .expect("row")
+            .get(0)
+    }
+
+    /// Invalid ciphertext must not advance `last_seen` — regression for the
+    /// pre-auth touch_session bug.
+    #[tokio::test]
+    async fn invalid_ciphertext_does_not_refresh_last_seen() {
+        let (db, repo) = test_ecdh_db().await;
+        let conn_id = red_cell_common::crypto::ecdh::ConnectionId::generate().expect("conn_id");
+        let session_key = [0u8; 32];
+        repo.store_session(&conn_id, 1, &session_key).await.expect("store");
+
+        let last_seen_before = query_last_seen(&db, &conn_id.0).await;
+
+        // Build a body: [connection_id: 16] | [nonce: 12] | [garbage ciphertext: 1] | [bad tag: 16]
+        let mut body = Vec::with_capacity(16 + 12 + 1 + 16);
+        body.extend_from_slice(&conn_id.0);
+        body.extend_from_slice(&[0u8; 12]); // nonce
+        body.push(0xAB); // ciphertext byte
+        body.extend_from_slice(&[0u8; 16]); // bad tag
+
+        let dispatcher = CommandDispatcher::new();
+        let result =
+            process_ecdh_session(&body, &session_key, 1, &conn_id.0, repo, &dispatcher).await;
+        assert!(result.is_err(), "expected decrypt failure");
+
+        let last_seen_after = query_last_seen(&db, &conn_id.0).await;
+        assert_eq!(last_seen_before, last_seen_after, "last_seen must not change on failed auth");
+    }
 
     #[test]
     fn parse_seq_num_prefix_round_trips() {

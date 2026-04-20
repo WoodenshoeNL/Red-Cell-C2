@@ -263,11 +263,14 @@ def _run_stress_for_agent(
             print(f"  [{agent_type}][deploy] ensuring work dir on target")
             ensure_work_dir(target)
 
+            _win = target.work_dir.startswith("C:\\") or "\\" in target.work_dir
+            _sep = "\\" if _win else "/"
             for i in range(agent_count):
-                remote_path = f"{target.work_dir}/stress-agent-{uid}-{i:02d}.bin"
+                remote_path = f"{target.work_dir}{_sep}stress-agent-{uid}-{i:02d}.{fmt}"
                 remote_payloads.append(remote_path)
                 upload(target, local_payload, remote_path)
-                run_remote(target, f"chmod +x {remote_path}")
+                if not _win:
+                    run_remote(target, f"chmod +x {remote_path}")
                 execute_background(target, remote_path)
                 print(f"  [{agent_type}][deploy] launched agent {i+1}/{agent_count}: {remote_path}")
 
@@ -450,9 +453,13 @@ def _run_stress_for_agent(
             pass
 
         # Remove remote payloads.
+        _win_cleanup = target.work_dir.startswith("C:\\") or "\\" in target.work_dir
         for rp in remote_payloads:
             try:
-                run_remote(target, f"rm -f {rp}", timeout=ssh)
+                if _win_cleanup:
+                    run_remote(target, f'del /f /q "{rp}"', timeout=ssh)
+                else:
+                    run_remote(target, f"rm -f {rp}", timeout=ssh)
             except Exception as exc:
                 print(f"  [{agent_type}][cleanup] remove {rp} failed (non-fatal): {exc}")
 

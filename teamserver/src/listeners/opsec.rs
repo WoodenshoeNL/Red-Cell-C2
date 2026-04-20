@@ -10,7 +10,11 @@ use red_cell_common::{DnsListenerConfig, HttpListenerConfig, ListenerConfig};
 pub(super) const FINGERPRINT_PORT: u16 = 40056;
 
 /// Known-bad User-Agent substrings that indicate a stale or default UA filter.
-const BAD_UA_PATTERNS: &[&str] = &["Chrome/96", "Mozilla/5.0"];
+///
+/// `"Mozilla/5.0"` is checked via exact/trimmed equality (not substring) because every modern
+/// browser UA begins with that prefix — only the bare string is a red flag.
+const BAD_UA_SUBSTRINGS: &[&str] = &["Chrome/96"];
+const BAD_UA_EXACT: &[&str] = &["Mozilla/5.0"];
 
 /// Return a list of opsec-risk warning messages for the given listener config.
 ///
@@ -39,14 +43,13 @@ fn http_warnings(config: &HttpListenerConfig) -> Vec<&'static str> {
     }
 
     if let Some(ua) = &config.user_agent {
-        for pattern in BAD_UA_PATTERNS {
-            if ua.contains(pattern) {
-                warnings.push(
-                    "opsec: User-Agent filter matches a known-bad default value (Chrome/96 or \
-                     bare Mozilla/5.0); update UserAgent to a current browser string",
-                );
-                break;
-            }
+        let is_bad = BAD_UA_SUBSTRINGS.iter().any(|p| ua.contains(p))
+            || BAD_UA_EXACT.iter().any(|p| ua.trim() == *p);
+        if is_bad {
+            warnings.push(
+                "opsec: User-Agent filter matches a known-bad default value (Chrome/96 or \
+                 bare Mozilla/5.0); update UserAgent to a current browser string",
+            );
         }
     }
 
@@ -168,6 +171,19 @@ mod tests {
         let warnings = opsec_warnings(&ListenerConfig::from(c));
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("User-Agent"));
+    }
+
+    #[test]
+    fn no_ua_warning_for_modern_browser_ua() {
+        // A real browser UA starts with "Mozilla/5.0" but must not trigger the bare-string check.
+        let mut c = base_http();
+        c.user_agent = Some(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) \
+             Chrome/120.0.0.0 Safari/537.36"
+                .to_owned(),
+        );
+        let warnings = opsec_warnings(&ListenerConfig::from(c));
+        assert!(warnings.is_empty(), "modern browser UA must not trigger a warning");
     }
 
     #[test]

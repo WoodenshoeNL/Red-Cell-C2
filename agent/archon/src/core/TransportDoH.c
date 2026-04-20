@@ -481,11 +481,7 @@ static BOOL DoHTxtQuery(
     TokenImpersonate( FALSE );
 
     /* Open WinHTTP session */
-#define ARCHON_WSTR_IMPL(x) L ## x
-#define ARCHON_WSTR(x) ARCHON_WSTR_IMPL(x)
     WCHAR UserAgentW[] = ARCHON_WSTR(ARCHON_DOH_USER_AGENT);
-#undef ARCHON_WSTR
-#undef ARCHON_WSTR_IMPL
     hSession = Instance->Win32.WinHttpOpen(
         UserAgentW,
         WINHTTP_ACCESS_TYPE_NO_PROXY,

@@ -26,6 +26,10 @@
 #define ARCHON_DOH_USER_AGENT "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
 #endif
 
+/* Two-level stringify to force macro expansion before wide-string concatenation. */
+#define ARCHON_WSTR_IMPL(x) L ## x
+#define ARCHON_WSTR(x)      ARCHON_WSTR_IMPL(x)
+
 #define WIN_VERSION_UNKNOWN 0
 #define WIN_VERSION_XP      1
 #define WIN_VERSION_VISTA   2

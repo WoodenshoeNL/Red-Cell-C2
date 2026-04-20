@@ -12,6 +12,7 @@ from __future__ import annotations
 import io
 import json
 import sys
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch, PropertyMock
@@ -208,6 +209,49 @@ class TestSessionSend(unittest.TestCase):
                 with self.assertRaises(SessionError) as cm:
                     sess.send({"cmd": "ping"})
 
+        self.assertEqual(cm.exception.code, "EOF")
+
+    def test_send_raises_eof_on_split_sentinel(self) -> None:
+        """Regression for split-EOF accumulation across _readline calls.
+
+        Before the fix (eofs_seen was a local variable), the first None sentinel
+        consumed during send #1 was silently discarded. send #2 would then see only
+        one None and block until timeout, raising TIMEOUT instead of EOF.
+
+        The fix promotes eofs_seen to an instance variable so the count persists
+        across calls, allowing send #2 to detect the second sentinel and raise EOF.
+        """
+        done = threading.Event()
+
+        proc = MagicMock()
+        proc.poll.return_value = None
+        proc.wait.return_value = 0
+        proc.stdin = MagicMock()
+        proc.stdin.__enter__ = lambda s: s
+        proc.stdin.__exit__ = MagicMock(return_value=False)
+        proc.stdout = MagicMock()
+        # Reader threads block so they contribute no queue items of their own.
+        proc.stdout.readline.side_effect = lambda: (done.wait(), "")[1]
+        proc.stderr = MagicMock()
+        proc.stderr.readline.side_effect = lambda: (done.wait(), "")[1]
+
+        with patch("subprocess.Popen", return_value=proc):
+            with Session(_cfg()) as sess:
+                # Inject: first EOF sentinel before the response (simulates one
+                # reader closing just before the response arrives), then the
+                # response, then the second EOF sentinel.
+                sess._lines.put(None)
+                sess._lines.put(_ok_envelope("ping", {"pong": True}))
+                sess._lines.put(None)
+
+                r1 = sess.send({"cmd": "ping"})
+
+                with self.assertRaises(SessionError) as cm:
+                    sess.send({"cmd": "ping"})
+
+            done.set()  # unblock daemon reader threads for clean teardown
+
+        self.assertTrue(r1.get("pong"))
         self.assertEqual(cm.exception.code, "EOF")
 
     def test_send_raises_session_error_on_non_json(self) -> None:

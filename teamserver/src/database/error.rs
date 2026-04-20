@@ -99,7 +99,6 @@ pub enum TeamserverError {
     /// Returned when a sequence number exceeds i64::MAX and cannot be stored in SQLite.
     #[error("seq_num {seq_num} exceeds i64::MAX and cannot be stored")]
     SeqNumOverflow {
-        /// The sequence number that overflowed.
         seq_num: u64,
     },
     /// Returned when a per-agent job queue has reached its capacity limit.

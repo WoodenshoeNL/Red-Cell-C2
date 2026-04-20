@@ -163,6 +163,9 @@ def listener_create(cfg: CliConfig, name: str, type_: str, **kwargs) -> dict:
         if isinstance(v, bool):
             if v:
                 extra.append(flag)
+        elif isinstance(v, list):
+            for item in v:
+                extra += [flag, str(item)]
         else:
             extra += [flag, str(v)]
     return _run(cfg, "listener", "create", "--name", name, "--type", type_, *extra)

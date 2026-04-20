@@ -186,7 +186,8 @@ pub fn generate_self_signed_tls_identity(
     let mut params = CertificateParams::new(subject_alt_names.to_vec())?;
     params.distinguished_name = rcgen::DistinguishedName::new();
     params.distinguished_name.push(rcgen::DnType::CommonName, common_name.as_str());
-    params.not_before = OffsetDateTime::now_utc();
+    let now = OffsetDateTime::now_utc();
+    params.not_before = now;
     // Randomize validity between 60 and 120 days to avoid the static 365-day fingerprint
     // that certificate scanners (Censys, Shodan) flag as a C2 indicator.
     let validity_days = {
@@ -194,7 +195,7 @@ pub fn generate_self_signed_tls_identity(
         getrandom::fill(&mut buf).map_err(|_| TlsError::CertGeneration)?;
         i64::from(60 + (buf[0] % 61))
     };
-    params.not_after = OffsetDateTime::now_utc() + time::Duration::days(validity_days);
+    params.not_after = now + time::Duration::days(validity_days);
 
     let signing_key = match algorithm {
         TlsKeyAlgorithm::EcdsaP256 => KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?,

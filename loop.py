@@ -529,9 +529,9 @@ br create \\
   --description="**Failing test**: <exact test name>
 **Repro command**: <exact cargo test command that reproduces it>
 **Full error output**:
-\`\`\`
+```
 <paste the complete test failure output here — do not truncate>
-\`\`\`
+```
 **Context**: Encountered while working on <your-issue-id> in zone(s): {', '.join(f'`{z}`' for z in zones)}.
 This is outside my zone — needs teamserver/common/client follow-up." \\
   --type=bug \\
@@ -1006,7 +1006,7 @@ def _clean_cargo_target_inplace(target_dir: Path, label: str, size_limit_gb: flo
         log.log(f"tmp cargo: cleaned {label}/{{{','.join(cleaned)}}}")
 
 
-def clean_tmp_cargo_targets(log: Logger):
+def clean_tmp_cargo_targets(log: Logger, force: bool = False):
     """
     Remove stale Cargo target directories under /tmp that are NOT git worktrees.
 
@@ -1020,6 +1020,10 @@ def clean_tmp_cargo_targets(log: Logger):
       Skip entirely if a cargo build is actively holding the lock.
     - Transient dirs (everything else): remove entirely if older than
       TMP_CARGO_MAX_AGE_SECS and no process has its CWD inside them.
+
+    force=True: clean all stable dirs unconditionally regardless of size. Used in
+    pre-session cleanup so the zone target dir is always wiped before a new agent
+    session starts, not just when it happens to exceed TMP_CARGO_SIZE_LIMIT_GB.
     """
     import shutil, time as _time
 
@@ -1052,6 +1056,7 @@ def clean_tmp_cargo_targets(log: Logger):
             if path_str not in registered_worktrees:
                 stable_targets[path_str] = entry
 
+    size_limit = 0.0 if force else TMP_CARGO_SIZE_LIMIT_GB
     for path_str, target_dir in stable_targets.items():
         if not target_dir.exists():
             continue
@@ -1059,7 +1064,7 @@ def clean_tmp_cargo_targets(log: Logger):
             log.log(f"tmp cargo: {target_dir.name} — build in progress, skipping")
             continue
         label = target_dir.name
-        _clean_cargo_target_inplace(target_dir, label, TMP_CARGO_SIZE_LIMIT_GB, log)
+        _clean_cargo_target_inplace(target_dir, label, size_limit, log)
 
     # Sweep all remaining /tmp/red-cell* dirs that are plain transient cargo caches.
     for entry in tmp_entries:
@@ -1510,11 +1515,12 @@ Start directly with understanding the task and implementing it.
 
         # Force-clean build artifacts before every session. A 150-turn session can
         # compile multiple crates many times and accumulate tens of GB in target/.
-        # The post-task cleanup uses a size threshold and would have missed 6.9 GB
-        # (under the old 8 GB limit) — so this pre-session clean is unconditional.
+        # Both the main target/ and the per-zone CARGO_TARGET_DIR in /tmp must be
+        # wiped — clean_build_artifacts covers target/, clean_tmp_cargo_targets(force)
+        # covers /tmp/red-cell-target-<zone> regardless of its current size.
         clean_build_artifacts(log, force=True)
         clean_tmp_worktrees(log)
-        clean_tmp_cargo_targets(log)
+        clean_tmp_cargo_targets(log, force=True)
 
         log.log(f"Running {agent.title()} on task {next_id}...")
         exit_code, output, result_subtype = run_agent(
@@ -1977,6 +1983,40 @@ def maint_check_processes(log: Logger, loops: list[dict]) -> list[str]:
     return actions
 
 
+def maint_clean_tmp_sqlite(log: Logger) -> list[str]:
+    """
+    Remove stale red-cell SQLite files left behind in /tmp by the teamserver.
+
+    Integration tests and the teamserver itself create per-run SQLite databases
+    in /tmp (red-cell-agent-registry-*.sqlite* and red-cell-teamserver-db-*.sqlite*).
+    These are never cleaned up automatically and can accumulate to tens of GB and
+    hundreds of thousands of files.  Remove any that are older than 1 hour.
+    """
+    actions = []
+    cutoff = time.time() - 3600
+    removed = 0
+    try:
+        for entry in Path("/tmp").iterdir():
+            if not entry.name.startswith("red-cell-"):
+                continue
+            if not any(entry.name.endswith(s) for s in (".sqlite", ".sqlite-wal", ".sqlite-shm")):
+                continue
+            try:
+                if entry.stat().st_mtime < cutoff:
+                    entry.unlink()
+                    removed += 1
+            except OSError:
+                pass
+    except OSError:
+        pass
+    if removed:
+        log.log(f"tmp sqlite: removed {removed} stale red-cell *.sqlite* file(s)")
+        actions.append(f"removed {removed} stale tmp sqlite file(s)")
+    else:
+        log.log("tmp sqlite: nothing to remove")
+    return actions
+
+
 def maint_prune_stashes(log: Logger) -> list[str]:
     """Prune git stashes older than MAINTENANCE_STASH_MAX_AGE_DAYS."""
     actions = []
@@ -2067,6 +2107,9 @@ def maintenance_loop(args, log: Logger):
         # 6. Worktree and tmp cleanup (even if disk is fine, prevent accumulation)
         clean_tmp_worktrees(log)
         clean_tmp_cargo_targets(log)
+
+        # 7. Stale SQLite files left by teamserver/integration tests
+        all_actions.extend(maint_clean_tmp_sqlite(log))
 
         # Summary
         if all_actions:

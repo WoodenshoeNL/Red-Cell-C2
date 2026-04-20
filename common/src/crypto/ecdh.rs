@@ -460,11 +460,7 @@ mod tests {
         }
     }
 
-    /// Transport that simulates the server side of the registration handshake.
-    ///
-    /// On `send` it opens the registration packet with the listener keypair, derives
-    /// the session key, and returns a properly encrypted registration response — the
-    /// same bytes a real teamserver would produce.
+    /// Server-side ECDH transport: opens the registration packet and returns a valid encrypted response.
     struct RegistrationServerTransport {
         keypair: ListenerKeypair,
         conn_id: ConnectionId,

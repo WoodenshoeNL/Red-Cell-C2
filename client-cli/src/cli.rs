@@ -429,6 +429,13 @@ pub enum ListenerCommands {
         #[arg(long, default_value_t = false)]
         legacy_mode: bool,
 
+        /// Routable callback address(es) that agents use to reach this
+        /// listener (repeat for multiple: --hosts 1.2.3.4 --hosts 5.6.7.8).
+        /// Used when the teamserver bind address is not directly reachable
+        /// from target hosts (e.g. NAT, redirector, or multi-homed setup).
+        #[arg(long = "hosts", value_name = "HOST")]
+        hosts: Vec<String>,
+
         /// Full listener config as a raw JSON object (overrides all flags
         /// above; the JSON must match the server's inner config shape for
         /// the chosen --type)

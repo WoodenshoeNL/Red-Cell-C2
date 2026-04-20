@@ -36,6 +36,7 @@ pub(super) async fn create(
     endpoint: Option<&str>,
     secure: bool,
     legacy_mode: bool,
+    hosts: &[String],
     config_json: Option<&str>,
 ) -> Result<ListenerDetail, CliError> {
     let body = build_create_body(
@@ -48,6 +49,7 @@ pub(super) async fn create(
         endpoint,
         secure,
         legacy_mode,
+        hosts,
         config_json,
     )?;
     let raw: RawListenerSummary = client.post("/listeners", &body).await?;
@@ -71,6 +73,7 @@ pub(crate) fn build_create_body(
     endpoint: Option<&str>,
     secure: bool,
     legacy_mode: bool,
+    hosts: &[String],
     config_json: Option<&str>,
 ) -> Result<serde_json::Value, CliError> {
     let protocol = listener_type.to_lowercase();
@@ -92,26 +95,34 @@ pub(crate) fn build_create_body(
     let inner: serde_json::Value = match protocol {
         "http" => {
             let port_bind = port.unwrap_or(443);
-            serde_json::json!({
+            let mut obj = serde_json::json!({
                 "name": name,
                 "host_bind": host,
                 "port_bind": port_bind,
                 "host_rotation": "round-robin",
                 "secure": secure,
                 "legacy_mode": legacy_mode,
-            })
+            });
+            if !hosts.is_empty() {
+                obj["hosts"] = serde_json::json!(hosts);
+            }
+            obj
         }
         "dns" => {
             let dom = domain.ok_or_else(|| {
                 CliError::InvalidArgs("--domain is required for --type dns".to_owned())
             })?;
             let port_bind = port.unwrap_or(53);
-            serde_json::json!({
+            let mut obj = serde_json::json!({
                 "name": name,
                 "host_bind": host,
                 "port_bind": port_bind,
                 "domain": dom,
-            })
+            });
+            if !hosts.is_empty() {
+                obj["hosts"] = serde_json::json!(hosts);
+            }
+            obj
         }
         "smb" => {
             let pipe = pipe_name.ok_or_else(|| {
@@ -192,7 +203,17 @@ mod tests {
     #[test]
     fn build_create_body_http_uses_default_port_443() {
         let body = build_create_body(
-            "http1", "http", None, "0.0.0.0", None, None, None, false, false, None,
+            "http1",
+            "http",
+            None,
+            "0.0.0.0",
+            None,
+            None,
+            None,
+            false,
+            false,
+            &[],
+            None,
         )
         .expect("build");
         assert_eq!(body["protocol"], "http");
@@ -212,6 +233,7 @@ mod tests {
             None,
             true,
             false,
+            &[],
             None,
         )
         .expect("build");
@@ -232,6 +254,7 @@ mod tests {
             None,
             true,
             false,
+            &[],
             None,
         )
         .expect("build");
@@ -250,6 +273,7 @@ mod tests {
             None,
             false,
             true,
+            &[],
             None,
         )
         .expect("build");
@@ -258,9 +282,20 @@ mod tests {
 
     #[test]
     fn build_create_body_dns_requires_domain() {
-        let err =
-            build_create_body("dns1", "dns", None, "0.0.0.0", None, None, None, false, false, None)
-                .expect_err("should fail without domain");
+        let err = build_create_body(
+            "dns1",
+            "dns",
+            None,
+            "0.0.0.0",
+            None,
+            None,
+            None,
+            false,
+            false,
+            &[],
+            None,
+        )
+        .expect_err("should fail without domain");
         assert!(matches!(err, CliError::InvalidArgs(_)));
     }
 
@@ -276,6 +311,7 @@ mod tests {
             None,
             false,
             false,
+            &[],
             None,
         )
         .expect("build");
@@ -296,6 +332,7 @@ mod tests {
             None,
             false,
             false,
+            &[],
             None,
         )
         .expect("build");
@@ -304,9 +341,20 @@ mod tests {
 
     #[test]
     fn build_create_body_smb_requires_pipe_name() {
-        let err =
-            build_create_body("smb1", "smb", None, "0.0.0.0", None, None, None, false, false, None)
-                .expect_err("should fail without pipe_name");
+        let err = build_create_body(
+            "smb1",
+            "smb",
+            None,
+            "0.0.0.0",
+            None,
+            None,
+            None,
+            false,
+            false,
+            &[],
+            None,
+        )
+        .expect_err("should fail without pipe_name");
         assert!(matches!(err, CliError::InvalidArgs(_)));
     }
 
@@ -322,6 +370,7 @@ mod tests {
             None,
             false,
             false,
+            &[],
             None,
         )
         .expect("build");
@@ -333,7 +382,17 @@ mod tests {
     #[test]
     fn build_create_body_external_requires_endpoint() {
         let err = build_create_body(
-            "ext1", "external", None, "0.0.0.0", None, None, None, false, false, None,
+            "ext1",
+            "external",
+            None,
+            "0.0.0.0",
+            None,
+            None,
+            None,
+            false,
+            false,
+            &[],
+            None,
         )
         .expect_err("should fail without endpoint");
         assert!(matches!(err, CliError::InvalidArgs(_)));
@@ -351,6 +410,7 @@ mod tests {
             Some("/bridge"),
             false,
             false,
+            &[],
             None,
         )
         .expect("build");
@@ -360,9 +420,20 @@ mod tests {
 
     #[test]
     fn build_create_body_unknown_type_returns_invalid_args() {
-        let err =
-            build_create_body("x", "grpc", None, "0.0.0.0", None, None, None, false, false, None)
-                .expect_err("unknown type should fail");
+        let err = build_create_body(
+            "x",
+            "grpc",
+            None,
+            "0.0.0.0",
+            None,
+            None,
+            None,
+            false,
+            false,
+            &[],
+            None,
+        )
+        .expect_err("unknown type should fail");
         assert!(matches!(err, CliError::InvalidArgs(_)));
     }
 
@@ -379,6 +450,7 @@ mod tests {
             None,
             false,
             false,
+            &[],
             Some(raw),
         )
         .expect("build");
@@ -399,6 +471,7 @@ mod tests {
             None,
             false,
             false,
+            &[],
             Some("{not json"),
         )
         .expect_err("bad json");
@@ -419,6 +492,7 @@ mod tests {
             None,
             false,
             false,
+            &[],
             Some(raw),
         )
         .expect_err("wrong schema for --type http");
@@ -441,6 +515,7 @@ mod tests {
             None,
             false,
             false,
+            &[],
             Some(raw),
         )
         .expect_err("wrong schema for --type dns");
@@ -463,10 +538,75 @@ mod tests {
             None,
             false,
             false,
+            &[],
             Some(raw),
         )
         .expect("unknown protocol should not run local serde validation");
         assert_eq!(body["protocol"], "future_proto");
         assert_eq!(body["config"]["port_bind"], 443);
+    }
+
+    #[test]
+    fn build_create_body_http_hosts_included_in_config() {
+        let hosts = vec!["1.2.3.4".to_owned(), "5.6.7.8".to_owned()];
+        let body = build_create_body(
+            "http1",
+            "http",
+            Some(443),
+            "0.0.0.0",
+            None,
+            None,
+            None,
+            false,
+            false,
+            &hosts,
+            None,
+        )
+        .expect("build");
+        let got = body["config"]["hosts"].as_array().expect("hosts array");
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0], "1.2.3.4");
+        assert_eq!(got[1], "5.6.7.8");
+    }
+
+    #[test]
+    fn build_create_body_http_no_hosts_field_when_empty() {
+        let body = build_create_body(
+            "http1",
+            "http",
+            None,
+            "0.0.0.0",
+            None,
+            None,
+            None,
+            false,
+            false,
+            &[],
+            None,
+        )
+        .expect("build");
+        assert!(body["config"]["hosts"].is_null(), "hosts should be absent when empty");
+    }
+
+    #[test]
+    fn build_create_body_dns_hosts_included_in_config() {
+        let hosts = vec!["10.0.0.1".to_owned()];
+        let body = build_create_body(
+            "dns1",
+            "dns",
+            None,
+            "0.0.0.0",
+            Some("c2.evil.example"),
+            None,
+            None,
+            false,
+            false,
+            &hosts,
+            None,
+        )
+        .expect("build");
+        let got = body["config"]["hosts"].as_array().expect("hosts array");
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0], "10.0.0.1");
     }
 }

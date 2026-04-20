@@ -410,7 +410,7 @@ def run(ctx):
                 "add 'phantom' to agents.available in env.toml"
             )
         else:
-            _run_for_agent(ctx, agent_type="phantom", fmt="bin", name_prefix="test-procops-phantom")
+            _run_for_agent(ctx, agent_type="phantom", fmt="elf", name_prefix="test-procops-phantom")
     else:
         print("  [skip] ctx.linux is None — skipping Linux agent passes")
 

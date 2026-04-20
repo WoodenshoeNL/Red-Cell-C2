@@ -212,4 +212,4 @@ def run(ctx):
 
     # ── Phantom pass (Rust Linux agent — only DNS-capable agent) ────────────
     print("\n  === DNS agent pass: phantom ===")
-    _run_for_agent(ctx, agent_type="phantom", fmt="bin", name_prefix="test-dns-phantom")
+    _run_for_agent(ctx, agent_type="phantom", fmt="elf", name_prefix="test-dns-phantom")

@@ -236,7 +236,7 @@ def _run_stress_for_agent(
             "port_bind": listener_port,
             "hosts": [callback_host],
             "secure": False,
-            "legacy_mode": True,
+            "legacy_mode": False,
         }))
     else:
         listener_create(cli, listener_name, "http", port=listener_port)

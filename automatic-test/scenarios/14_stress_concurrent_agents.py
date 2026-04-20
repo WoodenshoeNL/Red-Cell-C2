@@ -171,6 +171,7 @@ def _assert_exec_round(results: list[dict], round_num: int) -> None:
 
 def _run_stress_for_agent(
     ctx,
+    target,
     agent_type: str,
     fmt: str,
     name_prefix: str,
@@ -181,6 +182,7 @@ def _run_stress_for_agent(
 
     Args:
         ctx:         RunContext passed by the harness.
+        target:      TargetConfig for the machine to deploy agents to.
         agent_type:  Agent name passed to ``payload_build`` (e.g. ``"demon"``
                      or ``"phantom"``).
         fmt:         Payload format (e.g. ``"bin"`` or ``"elf"``).
@@ -210,7 +212,6 @@ def _run_stress_for_agent(
     checkin_deadline = int(ctx.timeouts.stress_concurrent_checkin)
     poll_iv = float(ctx.timeouts.poll_interval)
     ssh = int(ctx.timeouts.ssh_connect)
-    target = ctx.linux
     uid = _short_id()
     listener_name = f"{name_prefix}-{uid}"
     listener_port = ctx.env.get("listeners", {}).get("stress_port", 19093)
@@ -471,31 +472,48 @@ def run(ctx):
     Raises AssertionError with a descriptive message on any failure.
     Skips silently when ctx.linux is None.
     """
-    if ctx.linux is None:
-        raise ScenarioSkipped("ctx.linux is None — Linux target required for this scenario")
-
-    # ── Demon pass (full 10-agent baseline) ──────────────────────────────────
-    print("\n  === Agent pass: demon ===")
-    _run_stress_for_agent(
-        ctx,
-        agent_type="demon",
-        fmt="bin",
-        name_prefix="test-stress-demon",
-        agent_count=DEMON_AGENT_COUNT,
-        run_seconds=DEMON_RUN_SECONDS,
-    )
-
-    # ── Phantom pass (5-agent Rust stability check) ───────────────────────────
     available_agents = set(ctx.env.get("agents", {}).get("available", ["demon"]))
+    ran_any = False
+
+    # ── Demon pass (full 10-agent baseline, Windows target) ───────────────────
+    # Demon is a Windows-only agent (PE/shellcode via mingw-w64).
+    print("\n  === Agent pass: demon ===")
+    if ctx.windows is None:
+        print("  [demon] SKIPPED — ctx.windows is None (Windows target required for Demon)")
+    elif "demon" not in available_agents:
+        print("  [demon] SKIPPED — 'demon' not listed in agents.available")
+    else:
+        _run_stress_for_agent(
+            ctx,
+            target=ctx.windows,
+            agent_type="demon",
+            fmt="exe",
+            name_prefix="test-stress-demon",
+            agent_count=DEMON_AGENT_COUNT,
+            run_seconds=DEMON_RUN_SECONDS,
+        )
+        ran_any = True
+
+    # ── Phantom pass (5-agent Rust stability check, Linux target) ─────────────
     print("\n  === Agent pass: phantom ===")
-    if "phantom" not in available_agents:
+    if ctx.linux is None:
+        print("  [phantom] SKIPPED — ctx.linux is None (Linux target required for Phantom)")
+    elif "phantom" not in available_agents:
         print("  [phantom] SKIPPED — 'phantom' not listed in agents.available")
     else:
         _run_stress_for_agent(
             ctx,
+            target=ctx.linux,
             agent_type="phantom",
             fmt="bin",
             name_prefix="test-stress-phantom",
             agent_count=PHANTOM_AGENT_COUNT,
             run_seconds=PHANTOM_RUN_SECONDS,
+        )
+        ran_any = True
+
+    if not ran_any:
+        raise ScenarioSkipped(
+            "no agent passes could run: Windows target needed for Demon, "
+            "Linux target + phantom in agents.available needed for Phantom"
         )

@@ -247,13 +247,17 @@ class TestScenario14(unittest.TestCase):
         with _apply_patches(_LISTENER_PATCHES):
             with self.assertRaises(CliError) as cm:
                 self.mod._run_stress_for_agent(
-                    ctx, "phantom", "bin", "test-stress-phantom",
+                    ctx, ctx.linux, "phantom", "bin", "test-stress-phantom",
                     agent_count=1, run_seconds=5,
                 )
         self.assertEqual(cm.exception.code, "BUILD_FAILED")
 
     def test_phantom_skipped_when_not_in_available(self) -> None:
+        # Demon needs windows target; phantom not in available → only demon runs.
+        from unittest.mock import MagicMock
         ctx = _linux_ctx()
+        ctx.windows = MagicMock()
+        ctx.windows.work_dir = "C:\\Temp\\rc-test"
         with patch.object(self.mod, "_run_stress_for_agent") as mock_run:
             self.mod.run(ctx)
         agent_types = [c.kwargs["agent_type"] for c in mock_run.call_args_list]

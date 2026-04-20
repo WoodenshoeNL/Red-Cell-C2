@@ -35,6 +35,7 @@ class ServerConfig:
     url: str
     rest_url: str | None = None
     cert_fingerprint: str | None = None
+    callback_host: str | None = None
 
 
 @dataclass
@@ -210,7 +211,7 @@ _ALLOWED_ENV_ROOT = frozenset({
     "kerberos",
 })
 
-_ALLOWED_SERVER_KEYS = frozenset({"url", "rest_url", "cert_fingerprint"})
+_ALLOWED_SERVER_KEYS = frozenset({"url", "rest_url", "cert_fingerprint", "callback_host"})
 _ALLOWED_OPERATOR_KEYS = frozenset({"username", "password", "api_key"})
 _ALLOWED_TIMEOUTS_KEYS = frozenset({
     "agent_checkin",
@@ -389,10 +390,13 @@ def parse_env_config(raw: dict[str, Any]) -> EnvConfig:
         rest_url = _optional_str(rest, "[server].rest_url", errors) if rest is not None else None
         fp = server_t.get("cert_fingerprint")
         cert_fingerprint = _optional_str(fp, "[server].cert_fingerprint", errors) if fp is not None else None
+        ch = server_t.get("callback_host")
+        callback_host = _optional_str(ch, "[server].callback_host", errors) if ch is not None else None
     else:
         url = None
         rest_url = None
         cert_fingerprint = None
+        callback_host = None
 
     op_t = _require_table(raw, "operator", errors)
     if op_t is not None:
@@ -641,7 +645,7 @@ def parse_env_config(raw: dict[str, Any]) -> EnvConfig:
     assert dns_port is not None and smb_pipe is not None
 
     return EnvConfig(
-        server=ServerConfig(url=url, rest_url=rest_url, cert_fingerprint=cert_fingerprint),
+        server=ServerConfig(url=url, rest_url=rest_url, cert_fingerprint=cert_fingerprint, callback_host=callback_host),
         operator=OperatorConfig(username=op_user, api_key=api_key, password=password),
         timeouts=TimeoutsConfig(
             agent_checkin=tr["agent_checkin"],  # type: ignore[arg-type]

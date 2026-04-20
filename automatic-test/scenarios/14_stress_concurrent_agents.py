@@ -49,6 +49,7 @@ PHANTOM_RUN_SECONDS = 30
 EXEC_INTERVAL = 10       # seconds between parallel exec rounds during the run
 CPU_LIMIT_PCT = 80.0     # default max teamserver CPU % (override via env.toml [teamserver])
 
+import json
 import os
 import tempfile
 import time
@@ -213,6 +214,7 @@ def _run_stress_for_agent(
     uid = _short_id()
     listener_name = f"{name_prefix}-{uid}"
     listener_port = ctx.env.get("listeners", {}).get("stress_port", 19093)
+    callback_host = ctx.env.get("server", {}).get("callback_host")
 
     # Record pre-existing agent IDs.
     try:
@@ -225,7 +227,19 @@ def _run_stress_for_agent(
 
     # ── Step 1: Create + start listener ──────────────────────────────────────
     print(f"  [{agent_type}][listener] creating HTTP listener {listener_name!r} on port {listener_port}")
-    listener_create(cli, listener_name, "http", port=listener_port)
+    if callback_host:
+        # Embed the routable callback host so agents on remote targets can check in.
+        listener_create(cli, listener_name, "http", config_json=json.dumps({
+            "name": listener_name,
+            "host_bind": "0.0.0.0",
+            "host_rotation": "round-robin",
+            "port_bind": listener_port,
+            "hosts": [callback_host],
+            "secure": False,
+            "legacy_mode": True,
+        }))
+    else:
+        listener_create(cli, listener_name, "http", port=listener_port)
     listener_start(cli, listener_name)
     print(f"  [{agent_type}][listener] started")
 

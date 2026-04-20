@@ -378,10 +378,7 @@ async fn record_unknown_reconnect_probe(
     }
 }
 
-/// Records an audit entry for an Archon magic mismatch or not-on-file event.
-///
-/// `actual_magic` is `Some` for a mismatch (wrong value was sent) and `None` for not-on-file
-/// (the agent has no stored magic at all).
+/// Records an audit entry for an Archon magic mismatch (`actual_magic` = Some) or not-on-file (`actual_magic` = None) event.
 async fn record_archon_magic_mismatch(
     database: &Database,
     listener_name: &str,

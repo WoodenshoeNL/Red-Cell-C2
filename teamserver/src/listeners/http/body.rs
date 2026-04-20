@@ -233,8 +233,7 @@ mod tests {
 
         // Exhaust the per-IP budget.
         for _ in 0..MAX_DEMON_INIT_ATTEMPTS_PER_IP {
-            let allowed =
-                allow_demon_init_for_ip("test-listener", &rl, ip, &pkt, false).await;
+            let allowed = allow_demon_init_for_ip("test-listener", &rl, ip, &pkt, false).await;
             assert!(allowed, "should be allowed while under budget");
         }
 
@@ -260,7 +259,11 @@ mod tests {
 
         // Verify legacy_mode=true would have classified the same packet as None
         // (bypass path), while the fixed non-legacy path correctly blocks.
-        assert_eq!(classify_demon_transport(&pkt, true), None, "legacy parser must reject Archon packet");
+        assert_eq!(
+            classify_demon_transport(&pkt, true),
+            None,
+            "legacy parser must reject Archon packet"
+        );
         let blocked = allow_demon_init_for_ip("test-listener", &rl, ip, &pkt, false).await;
         assert!(!blocked, "non-legacy classifier must block after budget exhaustion");
     }

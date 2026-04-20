@@ -230,6 +230,7 @@ def _run_stress_for_agent(
     kw: dict = {"port": listener_port}
     if callback_host:
         kw["hosts"] = callback_host
+        kw["legacy_mode"] = True
     listener_create(cli, listener_name, "http", **kw)
     listener_start(cli, listener_name)
     print(f"  [{agent_type}][listener] started")

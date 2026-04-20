@@ -291,5 +291,83 @@ class TestScenario15(unittest.TestCase):
         self.assertNotIn("phantom", agent_types)
 
 
+# ── Scenario 20: DoH DNS listener interop ────────────────────────────────────
+
+class TestScenario20(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.mod = _load("20_agent_doh_dns_listener_interop.py")
+
+    def _ctx_with_server(self) -> MagicMock:
+        ctx = _linux_ctx()
+        ctx.env["listeners"] = {"dns_domain": "c2.test.local", "dns_port": 15353}
+        ctx.env["server"] = {"url": "https://10.0.0.2:8443"}
+        return ctx
+
+    def _proto_mock(self) -> MagicMock:
+        m = MagicMock()
+        m.AES_KEY_LEN = 32
+        m.AES_IV_LEN = 16
+        # _aes_256_ctr and _u32le must agree so the init-ACK assertion passes.
+        m._aes_256_ctr.return_value = b"ACK"
+        m._u32le.return_value = b"ACK"
+        return m
+
+    def test_inject_hosts_entry_called_with_correct_args(self) -> None:
+        ctx = self._ctx_with_server()
+        proto = self._proto_mock()
+
+        with patch("lib.deploy.inject_hosts_entry") as mock_inject, \
+             patch("lib.deploy.preflight_dns"), \
+             patch("lib.cli.listener_create", return_value={}), \
+             patch("lib.cli.listener_start", return_value={}), \
+             patch("lib.cli.listener_stop", return_value={}), \
+             patch("lib.cli.listener_delete", return_value={}), \
+             patch("lib.cli.agent_kill", return_value={}), \
+             patch.object(self.mod, "_load_protocol_probe_module", return_value=proto), \
+             patch.object(self.mod, "_wait_for_dns_listener"), \
+             patch.object(self.mod, "_chunk_packet", return_value=["chunk1", "chunk2"]), \
+             patch.object(self.mod, "_random_session_hex", return_value="aabbccdd"), \
+             patch.object(self.mod, "_upload_packet_via_doh_grammar"), \
+             patch.object(self.mod, "_poll_ready_via_doh_grammar", return_value=1), \
+             patch.object(
+                 self.mod,
+                 "_download_response_via_doh_grammar",
+                 side_effect=[b"encrypted_ack", b""],
+             ), \
+             patch.object(self.mod, "_maybe_specter_doh_agent_pass"):
+            self.mod.run(ctx)
+
+        mock_inject.assert_called_once_with(ctx.linux, "c2.test.local", "10.0.0.2")
+
+    def test_inject_hosts_entry_skipped_when_no_linux(self) -> None:
+        ctx = self._ctx_with_server()
+        ctx.linux = None
+        proto = self._proto_mock()
+
+        with patch("lib.deploy.inject_hosts_entry") as mock_inject, \
+             patch("lib.deploy.preflight_dns"), \
+             patch("lib.cli.listener_create", return_value={}), \
+             patch("lib.cli.listener_start", return_value={}), \
+             patch("lib.cli.listener_stop", return_value={}), \
+             patch("lib.cli.listener_delete", return_value={}), \
+             patch("lib.cli.agent_kill", return_value={}), \
+             patch.object(self.mod, "_load_protocol_probe_module", return_value=proto), \
+             patch.object(self.mod, "_wait_for_dns_listener"), \
+             patch.object(self.mod, "_chunk_packet", return_value=["chunk1", "chunk2"]), \
+             patch.object(self.mod, "_random_session_hex", return_value="aabbccdd"), \
+             patch.object(self.mod, "_upload_packet_via_doh_grammar"), \
+             patch.object(self.mod, "_poll_ready_via_doh_grammar", return_value=1), \
+             patch.object(
+                 self.mod,
+                 "_download_response_via_doh_grammar",
+                 side_effect=[b"encrypted_ack", b""],
+             ), \
+             patch.object(self.mod, "_maybe_specter_doh_agent_pass"):
+            self.mod.run(ctx)
+
+        mock_inject.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

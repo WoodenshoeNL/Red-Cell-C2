@@ -478,8 +478,8 @@ mod tests {
             packet: &[u8],
         ) -> impl std::future::Future<Output = Result<Vec<u8>, String>> + Send {
             self.sent.lock().expect("lock").push(packet.to_vec());
-            let parsed = open_registration_packet(&self.keypair, 300, packet)
-                .map_err(|e| e.to_string());
+            let parsed =
+                open_registration_packet(&self.keypair, 300, packet).map_err(|e| e.to_string());
             let conn_id = self.conn_id;
             let agent_id = self.agent_id;
             std::future::ready(parsed.and_then(|p| {

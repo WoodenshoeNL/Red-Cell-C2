@@ -6,7 +6,7 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use red_cell::Job;
 use red_cell_common::config::Profile;
-use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH};
+use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ConnectionId};
 use red_cell_common::operator::{EventCode, FlatInfo, Message, MessageHead, OperatorMessage};
 use serde_json::Value;
 use tokio::time::timeout;
@@ -445,5 +445,88 @@ async fn agent_remove_nonexistent_id_does_not_broadcast() -> Result<(), Box<dyn 
     );
 
     socket.close(None).await?;
+    Ok(())
+}
+
+/// Lifecycle test: ECDH session rows stored for an agent must be purged from
+/// `ts_ecdh_sessions` when that agent is removed.
+///
+/// This proves that the cleanup hook registered in `ListenerManager` actually
+/// calls `delete_sessions_for_agent` through the full removal path.
+#[tokio::test]
+async fn agent_remove_purges_ecdh_session_rows() -> Result<(), Box<dyn std::error::Error>> {
+    let server = common::spawn_test_server(admin_profile()).await?;
+
+    // --- Start HTTP listener and register an agent ---
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
+    let listener_name = "ecdh-cleanup-http";
+    server.listeners.create(common::http_listener_config(listener_name, listener_port)).await?;
+    drop(listener_guard);
+    server.listeners.start(listener_name).await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id: u32 = 0xEC_D0_0001;
+    let key: [u8; AGENT_KEY_LENGTH] = [
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E,
+        0x1F, 0x20,
+    ];
+    let iv: [u8; AGENT_IV_LENGTH] = [
+        0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6, 0x07, 0x18, 0x29, 0x3A, 0x4B, 0x5C, 0x6D, 0x7E, 0x8F,
+        0x90,
+    ];
+    let client = reqwest::Client::new();
+    let _ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    // --- Connect operator WebSocket and consume AgentNew ---
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
+    common::login(&mut socket).await?;
+    read_until(&mut socket, |msg| matches!(msg, OperatorMessage::AgentNew(_))).await?;
+
+    // --- Plant two synthetic ECDH session rows for this agent ---
+    let conn_id_a = ConnectionId([0xAA; 16]);
+    let conn_id_b = ConnectionId([0xBB; 16]);
+    let session_key = [0x42u8; 32];
+    server.database.ecdh().store_session(&conn_id_a, agent_id, &session_key).await?;
+    server.database.ecdh().store_session(&conn_id_b, agent_id, &session_key).await?;
+
+    // Verify both rows exist before removal.
+    assert!(
+        server.database.ecdh().lookup_session(&conn_id_a.0).await?.is_some(),
+        "ECDH session A must exist before agent removal"
+    );
+    assert!(
+        server.database.ecdh().lookup_session(&conn_id_b.0).await?.is_some(),
+        "ECDH session B must exist before agent removal"
+    );
+
+    // --- Issue AgentRemove via operator WebSocket ---
+    socket.send_text(agent_remove_payload("ECD00001")).await?;
+
+    // Wait for AgentRemove broadcast confirming the removal completed.
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let msg = common::read_operator_message(&mut socket).await?;
+            if matches!(&msg, OperatorMessage::AgentRemove(_)) {
+                return Ok::<_, Box<dyn std::error::Error>>(());
+            }
+        }
+    })
+    .await
+    .map_err(|_| "timed out waiting for AgentRemove event")??;
+
+    // --- Verify ECDH session rows were purged ---
+    assert!(
+        server.database.ecdh().lookup_session(&conn_id_a.0).await?.is_none(),
+        "ECDH session A must be purged after agent removal"
+    );
+    assert!(
+        server.database.ecdh().lookup_session(&conn_id_b.0).await?.is_none(),
+        "ECDH session B must be purged after agent removal"
+    );
+
+    socket.close(None).await?;
+    server.listeners.stop(listener_name).await?;
     Ok(())
 }

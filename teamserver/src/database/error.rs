@@ -98,9 +98,7 @@ pub enum TeamserverError {
     Sqlx(sqlx::Error),
     /// Returned when a sequence number exceeds i64::MAX and cannot be stored in SQLite.
     #[error("seq_num {seq_num} exceeds i64::MAX and cannot be stored")]
-    SeqNumOverflow {
-        seq_num: u64,
-    },
+    SeqNumOverflow { seq_num: u64 },
     /// Returned when a per-agent job queue has reached its capacity limit.
     #[error(
         "job queue full for agent 0x{agent_id:08X}: {queued} jobs already queued (max {max_queue_depth})"

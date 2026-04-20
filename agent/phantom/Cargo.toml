@@ -34,6 +34,7 @@ time = { version = "0.3", features = ["local-offset"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 x11-dl = "2"
+zeroize = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 axum = { version = "0.8.8", features = ["ws"] }

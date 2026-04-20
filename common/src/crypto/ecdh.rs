@@ -103,7 +103,7 @@ impl std::fmt::Debug for ListenerKeypair {
 ///
 /// Used as a routing key for subsequent session packets. Contains no information
 /// about the agent identity.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, zeroize::Zeroize)]
 pub struct ConnectionId(pub [u8; CONNECTION_ID_LEN]);
 
 impl ConnectionId {

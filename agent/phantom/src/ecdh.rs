@@ -10,11 +10,13 @@ use red_cell_common::crypto::ecdh::{
     seal_session_packet,
 };
 
+use zeroize::{Zeroize, ZeroizeOnDrop};
+
 use crate::error::PhantomError;
 use crate::transport::HttpTransport;
 
 /// Live ECDH session after successful registration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Zeroize, ZeroizeOnDrop)]
 pub struct EcdhSession {
     pub connection_id: ConnectionId,
     pub session_key: [u8; 32],

@@ -1010,8 +1010,9 @@ def clean_tmp_cargo_targets(log: Logger, force: bool = False):
     """
     Remove stale Cargo target directories under /tmp that are NOT git worktrees.
 
-    The review loop keeps a stable shared target dir (REVIEW_CARGO_TARGET) and dev
-    loops keep per-zone stable dirs (/tmp/red-cell-target-<zone>).  All other
+    Review loops keep stable dirs (REVIEW_CARGO_TARGET for arch/quality/coverage,
+    QA_CARGO_TARGET for qa) and dev loops keep per-zone stable dirs
+    (/tmp/red-cell-target-<zone>).  All other
     /tmp/red-cell* dirs that aren't git worktrees are swept and deleted when stale.
 
     Strategy:
@@ -1658,8 +1659,14 @@ Start directly with understanding the task and implementing it.
 # The Cargo build cache is kept at a stable path between runs so incremental builds
 # work — only changed files trigger recompilation.
 
-# Stable Cargo target dir for all review loop runs. Kept between runs for incremental builds.
+# Stable Cargo target dir for arch/quality/coverage review loop runs.
 REVIEW_CARGO_TARGET = Path("/tmp/red-cell-review-target")
+
+# Stable Cargo target dir for QA review loop runs — kept separate from REVIEW_CARGO_TARGET
+# so that a QA worktree tear-down cannot delete binaries a concurrent arch/quality run is
+# executing, which caused intermittent nextest double-spawn failures.
+# Uses the "red-cell-target-" prefix so clean_tmp_cargo_targets auto-discovers it.
+QA_CARGO_TARGET = Path("/tmp/red-cell-target-qa")
 
 # Prefix for per-zone stable Cargo target dirs used by dev loops.
 # e.g. /tmp/red-cell-target-teamserver, /tmp/red-cell-target-client-cli
@@ -2284,10 +2291,13 @@ def review_loop(args, log: Logger):
 
         # Run the review agent in an isolated worktree so it can never touch the main
         # checkout's working tree (which may have a concurrent dev agent's uncommitted
-        # changes). Use a stable shared Cargo target dir for incremental builds.
+        # changes). Use a stable per-loop-type Cargo target dir for incremental builds.
+        # QA gets its own dir so a worktree tear-down cannot delete binaries a concurrent
+        # arch/quality run is executing (was causing nextest double-spawn failures).
         worktree_path = create_review_worktree(loop_type, log)
         run_cwd = worktree_path or SCRIPT_DIR
-        run_env: dict = {"CARGO_TARGET_DIR": str(REVIEW_CARGO_TARGET)}
+        cargo_target = QA_CARGO_TARGET if loop_type == "qa" else REVIEW_CARGO_TARGET
+        run_env: dict = {"CARGO_TARGET_DIR": str(cargo_target)}
 
         extra_log = None
         if per_run:

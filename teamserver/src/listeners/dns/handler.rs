@@ -372,35 +372,36 @@ impl DnsListenerState {
         .await
         {
             Ok(response) => {
-                if !response.payload.is_empty() {
-                    let chunks = chunk_response_to_doh_b32(&response.payload);
-                    if chunks.len() > DNS_MAX_DOWNLOAD_CHUNKS {
-                        warn!(
-                            listener = %self.config.name,
-                            session = %session,
-                            payload_bytes = response.payload.len(),
-                            chunk_count = chunks.len(),
-                            max_chunks = DNS_MAX_DOWNLOAD_CHUNKS,
-                            "dns doh response exceeds u16 seq limit — dropping to prevent \
-                             silent truncation"
-                        );
-                        return false;
-                    }
-                    let mut responses = self.doh_responses.lock().await;
-                    let accepted = Self::enforce_doh_response_caps(
-                        &mut responses,
-                        &session,
-                        &chunks,
-                        &self.config.name,
+                // Always store a pending response so the ready-poll can resolve even when the
+                // server has nothing to send back (e.g. GET_JOB with an empty job queue).
+                // An empty `chunks` vec signals "ready with 0 chunks"; the client fetches
+                // nothing and reconstructs an empty payload.  Without this, `handle_doh_ready`
+                // would perpetually return `None` (NXDOMAIN) and the client would time out.
+                let chunks = chunk_response_to_doh_b32(&response.payload);
+                if chunks.len() > DNS_MAX_DOWNLOAD_CHUNKS {
+                    warn!(
+                        listener = %self.config.name,
+                        session = %session,
+                        payload_bytes = response.payload.len(),
+                        chunk_count = chunks.len(),
+                        max_chunks = DNS_MAX_DOWNLOAD_CHUNKS,
+                        "dns doh response exceeds u16 seq limit — dropping to prevent \
+                         silent truncation"
                     );
-                    if !accepted {
-                        return false;
-                    }
-                    responses.insert(
-                        session,
-                        DnsPendingResponse { chunks, received_at: Instant::now() },
-                    );
+                    return false;
                 }
+                let mut responses = self.doh_responses.lock().await;
+                let accepted = Self::enforce_doh_response_caps(
+                    &mut responses,
+                    &session,
+                    &chunks,
+                    &self.config.name,
+                );
+                if !accepted {
+                    return false;
+                }
+                responses
+                    .insert(session, DnsPendingResponse { chunks, received_at: Instant::now() });
                 true
             }
             Err(error) => {

@@ -6,8 +6,9 @@ use super::super::*;
 use super::helpers::dns_state;
 
 use super::super::super::dns::{
-    DNS_MAX_PENDING_UPLOADS, DNS_MAX_UPLOAD_CHUNKS, DNS_MAX_UPLOADS_PER_IP,
-    DNS_UPLOAD_TIMEOUT_SECS, DnsPendingResponse, DnsPendingUpload, DnsUploadAssembly,
+    DNS_DOH_RESPONSE_CHUNK_BYTES, DNS_MAX_PENDING_UPLOADS, DNS_MAX_UPLOAD_CHUNKS,
+    DNS_MAX_UPLOADS_PER_IP, DNS_UPLOAD_TIMEOUT_SECS, DnsPendingResponse, DnsPendingUpload,
+    DnsUploadAssembly, base32_rfc4648_decode,
 };
 
 #[tokio::test]
@@ -204,4 +205,189 @@ async fn dns_upload_cleanup_removes_expired_sessions() {
     let responses = state.responses.lock().await;
     assert!(!responses.contains_key(&3));
     assert!(responses.contains_key(&4));
+}
+
+/// Split a packet into DoH uplink chunks (same encoding the Specter/Archon agents use).
+fn doh_chunk_packet(packet: &[u8]) -> Vec<Vec<u8>> {
+    packet.chunks(DNS_DOH_RESPONSE_CHUNK_BYTES).map(<[u8]>::to_vec).collect()
+}
+
+/// Upload all chunks of `packet` via `handle_doh_upload` and assert every chunk returns `true`.
+async fn doh_upload_all(
+    state: &super::super::super::dns::DnsListenerState,
+    session: &str,
+    packet: &[u8],
+    peer_ip: IpAddr,
+) {
+    let raw_chunks = doh_chunk_packet(packet);
+    let total = u16::try_from(raw_chunks.len()).expect("chunk count fits in u16");
+    for (seq, chunk) in raw_chunks.into_iter().enumerate() {
+        let ok = state
+            .handle_doh_upload(
+                session.to_owned(),
+                u16::try_from(seq).expect("seq fits"),
+                total,
+                chunk,
+                peer_ip,
+            )
+            .await;
+        assert!(ok, "handle_doh_upload must return true for seq={seq}");
+    }
+}
+
+/// Download all chunks via `handle_doh_download` and reassemble the payload.
+async fn doh_download_all(
+    state: &super::super::super::dns::DnsListenerState,
+    session: &str,
+    total: usize,
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    for seq in 0..total {
+        let b32 = state.handle_doh_download(session, u16::try_from(seq).expect("seq fits")).await;
+        let chunk = base32_rfc4648_decode(&b32).expect("server chunk must be valid base32");
+        out.extend_from_slice(&chunk);
+    }
+    out
+}
+
+/// The DoH ready-poll must resolve (return Some) even when the server response is empty
+/// (e.g. a GET_JOB with no queued commands).  Prior to the fix, an empty payload was
+/// silently discarded and `handle_doh_ready` would perpetually return `None`, causing
+/// the client to time out waiting for the ready TXT record.
+#[tokio::test]
+async fn doh_empty_response_signals_ready_with_zero_chunks() {
+    let state = dns_state("doh-empty-payload").await;
+    let agent_id = 0xBEEF_0001_u32;
+    let key = test_key(0xAB);
+    let iv = test_iv(0xCD);
+    let peer_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+    // 1. Register the agent via DEMON_INIT so GET_JOB is dispatched correctly.
+    let init_packet = valid_demon_init_body(agent_id, key, iv);
+    let init_session = "doh00000init0001";
+    doh_upload_all(&state, init_session, &init_packet, peer_ip).await;
+    let init_total = state.handle_doh_ready(init_session).await.expect("init ready must resolve");
+    // Consume the init-ACK chunks so the response slot is cleared.
+    for seq in 0..init_total {
+        state.handle_doh_download(init_session, u16::try_from(seq).unwrap()).await;
+    }
+    // Exhaust the "done" sentinel read so the slot is actually removed.
+    state.handle_doh_download(init_session, u16::try_from(init_total).unwrap()).await;
+
+    // 2. Send a GET_JOB callback (no commands queued → empty server response).
+    let get_job_packet = valid_demon_callback_body(
+        agent_id,
+        key,
+        iv,
+        u32::from(red_cell_common::demon::DemonCommand::CommandGetJob),
+        1,
+        &[],
+    );
+    let get_job_session = "doh00000getjob01";
+    doh_upload_all(&state, get_job_session, &get_job_packet, peer_ip).await;
+
+    // 3. The ready poll must resolve with 0 chunks (not time out / return None).
+    let total_chunks = state
+        .handle_doh_ready(get_job_session)
+        .await
+        .expect("DoH ready must resolve even for an empty server response");
+    assert_eq!(total_chunks, 0, "empty server response must yield 0 download chunks");
+
+    // 4. Downloading 0 chunks reconstructs an empty payload.
+    let payload = doh_download_all(&state, get_job_session, total_chunks).await;
+    assert!(payload.is_empty(), "reassembled GET_JOB response must be empty");
+}
+
+/// Full DoH round-trip for a DEMON_INIT packet: upload all chunks, poll ready, download the
+/// init ACK, and verify it decrypts to the agent_id (little-endian u32).
+#[tokio::test]
+async fn doh_full_round_trip_demon_init_upload_ready_download() {
+    let state = dns_state("doh-full-init").await;
+    let agent_id = 0xCAFE_BABE_u32;
+    let key = test_key(0x11);
+    let iv = test_iv(0x22);
+    let peer_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let session = "doh0cafebabetest";
+
+    let init_packet = valid_demon_init_body(agent_id, key, iv);
+
+    // Packet must span at least 2 chunks to exercise multi-chunk reassembly.
+    let chunk_count = init_packet.len().div_ceil(DNS_DOH_RESPONSE_CHUNK_BYTES);
+    assert!(chunk_count >= 2, "DEMON_INIT must span >= 2 chunks; got {chunk_count}");
+
+    // Upload all chunks — each must return true (NXDOMAIN).
+    doh_upload_all(&state, session, &init_packet, peer_ip).await;
+
+    // Ready poll must resolve with a non-zero chunk count.
+    let total = state
+        .handle_doh_ready(session)
+        .await
+        .expect("DoH ready must resolve after all init chunks are uploaded");
+    assert!(total > 0, "init ACK must have at least one chunk");
+
+    // Download and reassemble the init ACK.
+    let ack_ciphertext = doh_download_all(&state, session, total).await;
+
+    // Verify the ACK decrypts to agent_id as little-endian u32 at offset 0.
+    let plaintext = red_cell_common::crypto::decrypt_agent_data(&key, &iv, &ack_ciphertext)
+        .expect("init ACK must decrypt");
+    assert_eq!(
+        plaintext,
+        agent_id.to_le_bytes(),
+        "init ACK plaintext must be agent_id as little-endian u32"
+    );
+}
+
+/// The ready poll for a session that has not been uploaded yet returns None (NXDOMAIN),
+/// and resolves only after the upload completes.
+#[tokio::test]
+async fn doh_ready_returns_none_before_upload_completes() {
+    let state = dns_state("doh-ready-none").await;
+    let peer_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let session = "doh0readynotyet1";
+    let agent_id = 0xDEAD_D00D_u32;
+    let key = test_key(0x33);
+    let iv = test_iv(0x44);
+
+    let init_packet = valid_demon_init_body(agent_id, key, iv);
+    let raw_chunks = doh_chunk_packet(&init_packet);
+    let total = u16::try_from(raw_chunks.len()).unwrap();
+
+    // Before any chunks are uploaded, ready must return None.
+    assert!(state.handle_doh_ready(session).await.is_none(), "ready before upload must be None");
+
+    // Send all-but-last chunks; ready must still be None.
+    for seq in 0..raw_chunks.len() - 1 {
+        let ok = state
+            .handle_doh_upload(
+                session.to_owned(),
+                u16::try_from(seq).unwrap(),
+                total,
+                raw_chunks[seq].clone(),
+                peer_ip,
+            )
+            .await;
+        assert!(ok, "chunk {seq} must be accepted");
+        assert!(
+            state.handle_doh_ready(session).await.is_none(),
+            "ready must be None after chunk {seq}"
+        );
+    }
+
+    // Send the final chunk — ready must now resolve.
+    let last = raw_chunks.len() - 1;
+    let ok = state
+        .handle_doh_upload(
+            session.to_owned(),
+            u16::try_from(last).unwrap(),
+            total,
+            raw_chunks[last].clone(),
+            peer_ip,
+        )
+        .await;
+    assert!(ok, "last chunk must be accepted");
+    assert!(
+        state.handle_doh_ready(session).await.is_some(),
+        "ready must be Some after all chunks are uploaded"
+    );
 }

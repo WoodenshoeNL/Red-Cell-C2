@@ -9,7 +9,11 @@ use red_cell_common::demon::{DemonCommand, DemonMessage, DemonPackage};
 use tracing::{info, warn};
 
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::metadata::{
+    base_address, current_unix_secs, domain_name, hostname, is_elevated, local_ip, os_build,
+    os_major, os_minor, os_service_pack, process_ppid, process_tid, username,
+};
 
 use crate::coffeeldr::{self, BofOutputQueue};
 use crate::config::SpecterConfig;
@@ -784,71 +788,6 @@ impl SpecterAgent {
 
         Ok(DemonMessage::new(packages))
     }
-}
-
-/// Return the current UTC time as a Unix timestamp (seconds since 1970-01-01).
-fn current_unix_secs() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
-}
-
-/// Get the hostname of the current machine via platform-native API.
-fn hostname() -> String {
-    crate::platform::hostname()
-}
-
-/// Get the current username via platform-native API.
-fn username() -> String {
-    crate::platform::username()
-}
-
-/// Get the domain name (or "WORKGROUP") via platform-native API.
-fn domain_name() -> String {
-    crate::platform::domain_name()
-}
-
-/// Get the local IP address via the OS routing table.
-fn local_ip() -> String {
-    crate::platform::local_ip()
-}
-
-/// Get the current thread ID via platform-native API.
-fn process_tid() -> u32 {
-    crate::platform::process_tid()
-}
-
-/// Get the parent process ID via platform-native API.
-fn process_ppid() -> u32 {
-    crate::platform::process_ppid()
-}
-
-/// Return whether the current process is running elevated via platform-native API.
-fn is_elevated() -> bool {
-    crate::platform::is_elevated()
-}
-
-/// Get the base address of the current process image via platform-native API.
-fn base_address() -> u64 {
-    crate::platform::base_address()
-}
-
-/// Get the OS major version via `RtlGetVersion` (Windows) or returns 0 elsewhere.
-fn os_major() -> u32 {
-    crate::platform::os_version().0
-}
-
-/// Get the OS minor version via `RtlGetVersion` (Windows) or returns 0 elsewhere.
-fn os_minor() -> u32 {
-    crate::platform::os_version().1
-}
-
-/// Get the OS build number via `RtlGetVersion` (Windows) or returns 0 elsewhere.
-fn os_build() -> u32 {
-    crate::platform::os_version().2
-}
-
-/// Get the OS service pack major version via `RtlGetVersion` (Windows) or returns 0 elsewhere.
-fn os_service_pack() -> u16 {
-    crate::platform::os_version().3
 }
 
 #[cfg(test)]

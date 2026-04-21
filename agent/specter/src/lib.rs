@@ -14,6 +14,7 @@ pub mod ecdh;
 pub mod error;
 pub mod job;
 pub mod kerberos;
+pub mod metadata;
 pub mod pe_stomp;
 pub mod pivot;
 pub mod platform;

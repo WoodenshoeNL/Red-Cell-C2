@@ -1,153 +1,12 @@
 use eframe::egui::{self, Align, Color32, Key, Layout, RichText, TextEdit, Vec2};
-use red_cell_common::crypto::hash_password_sha3;
-use red_cell_common::operator::{EventCode, LoginInfo, Message, MessageHead, OperatorMessage};
-use zeroize::Zeroizing;
 
-use crate::local_config::LocalConfig;
+use super::state::LoginState;
+use super::types::{LoginAction, TlsFailure, TlsFailureKind};
 
-const MIN_USERNAME_LENGTH: usize = 1;
-const MIN_PASSWORD_LENGTH: usize = 1;
 #[allow(dead_code)]
 const LOGIN_PANEL_WIDTH: f32 = 400.0;
 #[allow(dead_code)]
 const CONNECTING_COLOR: Color32 = Color32::from_rgb(232, 182, 83);
-
-/// Classifies the kind of TLS failure for UI rendering.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TlsFailureKind {
-    /// Regular TLS error (expired, hostname mismatch, etc.)
-    CertificateError,
-    /// First connection to an unknown server — show TOFU accept prompt.
-    UnknownServer,
-    /// Server certificate has changed since first trust — show SSH-style warning.
-    CertificateChanged {
-        /// The previously trusted fingerprint.
-        stored_fingerprint: String,
-    },
-}
-
-/// Details about a TLS connection failure, surfaced to the UI for actionable messaging.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TlsFailure {
-    /// Actionable, human-readable description of what went wrong.
-    pub message: String,
-    /// SHA-256 fingerprint (64 lowercase hex chars) of the server's certificate, if captured.
-    pub cert_fingerprint: Option<String>,
-    /// What kind of failure this is (determines UI rendering).
-    pub kind: TlsFailureKind,
-}
-
-/// Tracks which field should receive initial focus on the next frame.
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
-enum FocusRequest {
-    ServerUrl,
-    Username,
-    Password,
-    None,
-}
-
-/// Mutable state for the login dialog.
-#[derive(Clone, Debug)]
-pub struct LoginState {
-    pub server_url: String,
-    pub username: String,
-    /// Login password, wrapped in [`Zeroizing`] so that heap memory is wiped on drop.
-    pub password: Zeroizing<String>,
-    pub error_message: Option<String>,
-    pub connecting: bool,
-    focus_request: FocusRequest,
-    /// Set when the last connection failed due to a TLS certificate error.
-    pub tls_failure: Option<TlsFailure>,
-}
-
-impl LoginState {
-    /// Create login state pre-populated from local config and CLI defaults.
-    pub fn new(cli_server_url: &str, config: &LocalConfig) -> Self {
-        let server_url = config.server_url.as_deref().unwrap_or(cli_server_url).to_owned();
-        let username = config.username.clone().unwrap_or_default();
-
-        let focus_request =
-            if username.is_empty() { FocusRequest::Username } else { FocusRequest::Password };
-
-        Self {
-            server_url,
-            username,
-            password: Zeroizing::new(String::new()),
-            error_message: None,
-            connecting: false,
-            focus_request,
-            tls_failure: None,
-        }
-    }
-
-    /// Returns true when the form fields pass basic validation.
-    pub fn can_submit(&self) -> bool {
-        !self.connecting
-            && !self.server_url.trim().is_empty()
-            && self.username.trim().len() >= MIN_USERNAME_LENGTH
-            && self.password.len() >= MIN_PASSWORD_LENGTH
-    }
-
-    /// Build the `OperatorMessage::Login` message from the current form state.
-    pub fn build_login_message(&self) -> OperatorMessage {
-        OperatorMessage::Login(Message {
-            head: MessageHead {
-                event: EventCode::InitConnection,
-                user: self.username.trim().to_owned(),
-                timestamp: String::new(),
-                one_time: String::new(),
-            },
-            info: LoginInfo {
-                user: self.username.trim().to_owned(),
-                password: hash_password_sha3(&self.password),
-            },
-        })
-    }
-
-    /// Record an authentication error to display on the login dialog.
-    pub fn set_error(&mut self, message: String) {
-        self.error_message = Some(message);
-        self.connecting = false;
-        self.focus_request = FocusRequest::Password;
-    }
-
-    /// Record a TLS failure with optional certificate fingerprint for the UI prompt.
-    pub fn set_tls_failure(&mut self, failure: TlsFailure) {
-        self.tls_failure = Some(failure);
-    }
-
-    /// Mark the login as in-progress (disables the form).
-    pub fn set_connecting(&mut self) {
-        self.connecting = true;
-        self.error_message = None;
-        self.tls_failure = None;
-    }
-
-    /// Zeroizes the password buffer and replaces it with an empty string.
-    ///
-    /// Call this as soon as authentication succeeds so the plaintext password is not retained
-    /// for the rest of the session. Re-authentication (session expiry, reconnect) must collect
-    /// the password from the user again; [`LoginState::new`](Self::new) starts with an empty
-    /// password field.
-    pub fn clear_password(&mut self) {
-        self.password = Zeroizing::new(String::new());
-    }
-}
-
-/// Outcome of a single login dialog render pass.
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
-pub(crate) enum LoginAction {
-    /// User has not yet submitted.
-    Waiting,
-    /// User submitted the login form.
-    Submit,
-    /// User chose to trust a new server's certificate by its fingerprint.
-    TrustCertificate(String),
-    /// User explicitly accepted a changed certificate (overrides the SSH-style warning).
-    AcceptChangedCertificate(String),
-}
 
 /// Render the login dialog into the given egui context. Returns the action taken.
 #[allow(dead_code)]
@@ -181,9 +40,8 @@ pub(crate) fn render_login_dialog(ctx: &egui::Context, state: &mut LoginState) -
                         TextEdit::singleline(&mut state.server_url)
                             .hint_text("wss://host:port/havoc/"),
                     );
-                    if state.focus_request == FocusRequest::ServerUrl {
+                    if state.take_server_url_focus() {
                         server_response.request_focus();
-                        state.focus_request = FocusRequest::None;
                     }
                     ui.add_space(8.0);
 
@@ -192,9 +50,8 @@ pub(crate) fn render_login_dialog(ctx: &egui::Context, state: &mut LoginState) -
                         Vec2::new(LOGIN_PANEL_WIDTH, 28.0),
                         TextEdit::singleline(&mut state.username).hint_text("operator"),
                     );
-                    if state.focus_request == FocusRequest::Username {
+                    if state.take_username_focus() {
                         username_response.request_focus();
-                        state.focus_request = FocusRequest::None;
                     }
                     ui.add_space(8.0);
 
@@ -205,9 +62,8 @@ pub(crate) fn render_login_dialog(ctx: &egui::Context, state: &mut LoginState) -
                             .password(true)
                             .hint_text("password"),
                     );
-                    if state.focus_request == FocusRequest::Password {
+                    if state.take_password_focus() {
                         password_response.request_focus();
-                        state.focus_request = FocusRequest::None;
                     }
                     ui.add_space(12.0);
 
@@ -397,197 +253,18 @@ fn render_tls_failure_panel(ui: &mut egui::Ui, failure: &TlsFailure) -> Option<L
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::local_config::LocalConfig;
+    use egui::{Event, Modifiers, Pos2, Rect};
 
     fn default_login_state() -> LoginState {
         LoginState::new("wss://127.0.0.1:40056/havoc/", &LocalConfig::default())
     }
 
-    #[test]
-    fn login_state_uses_cli_default_when_config_empty() {
-        let state = default_login_state();
-        assert_eq!(state.server_url, "wss://127.0.0.1:40056/havoc/");
-        assert!(state.username.is_empty());
-        assert!(state.password.is_empty());
-        assert!(!state.connecting);
-        assert!(state.error_message.is_none());
-    }
-
-    #[test]
-    fn login_state_prefers_config_values() {
-        let config = LocalConfig {
-            server_url: Some("wss://saved.example:9999/havoc/".to_owned()),
-            username: Some("saved-user".to_owned()),
-            scripts_dir: None,
-            ca_cert: None,
-            cert_fingerprint: None,
-            python_script_timeout_secs: None,
-            log_dir: None,
-            log_level: None,
-            api_key: None,
-        };
-        let state = LoginState::new("wss://cli-default/havoc/", &config);
-
-        assert_eq!(state.server_url, "wss://saved.example:9999/havoc/");
-        assert_eq!(state.username, "saved-user");
-    }
-
-    #[test]
-    fn can_submit_requires_all_fields() {
-        let mut state = default_login_state();
-        assert!(!state.can_submit());
-
-        state.username = "user".to_owned();
-        assert!(!state.can_submit());
-
-        *state.password = "pass".to_owned();
-        assert!(state.can_submit());
-    }
-
-    #[test]
-    fn can_submit_false_when_connecting() {
-        let mut state = default_login_state();
-        state.username = "user".to_owned();
-        *state.password = "pass".to_owned();
-        state.set_connecting();
-        assert!(!state.can_submit());
-    }
-
-    #[test]
-    fn can_submit_rejects_whitespace_only_fields() {
-        let mut state = default_login_state();
-        state.username = "   ".to_owned();
-        *state.password = "pass".to_owned();
-        assert!(!state.can_submit());
-
-        state.server_url = "  ".to_owned();
-        state.username = "user".to_owned();
-        assert!(!state.can_submit());
-    }
-
-    #[test]
-    fn build_login_message_hashes_password() {
+    fn submittable_login_state() -> LoginState {
         let mut state = default_login_state();
         state.username = "operator".to_owned();
         *state.password = "secret".to_owned();
-
-        let message = state.build_login_message();
-        match message {
-            OperatorMessage::Login(msg) => {
-                assert_eq!(msg.info.user, "operator");
-                assert_eq!(msg.info.password, hash_password_sha3("secret"));
-                assert_eq!(msg.info.password.len(), 64);
-                assert_eq!(msg.head.event, EventCode::InitConnection);
-            }
-            other => panic!("expected Login variant, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn build_login_message_trims_username() {
-        let mut state = default_login_state();
-        state.username = "  operator  ".to_owned();
-        *state.password = "pass".to_owned();
-
-        let message = state.build_login_message();
-        match message {
-            OperatorMessage::Login(msg) => {
-                assert_eq!(msg.info.user, "operator");
-                assert_eq!(msg.head.user, "operator");
-            }
-            other => panic!("expected Login variant, got {other:?}"),
-        }
-    }
-
-    /// Passwords are intentionally NOT trimmed before the length check — a password of spaces
-    /// is valid (the server will reject it during authentication). This test documents that
-    /// contract so that adding `trim()` to the password check in the future is a conscious,
-    /// breaking decision rather than an accidental refactor.
-    #[test]
-    fn can_submit_accepts_whitespace_only_password() {
-        let mut state = default_login_state();
-        state.username = "user".to_owned();
-        *state.password = "   ".to_owned(); // three spaces — meets MIN_PASSWORD_LENGTH
-        assert!(state.can_submit());
-    }
-
-    /// `build_login_message` hashes the raw password without trimming. A password with
-    /// surrounding spaces must be hashed as-is so that the server can verify it against
-    /// the same raw value. This test documents that contract explicitly.
-    #[test]
-    fn build_login_message_does_not_trim_password() {
-        let mut state = default_login_state();
-        state.username = "operator".to_owned();
-        *state.password = " secret".to_owned(); // leading space is intentional
-
-        let message = state.build_login_message();
-        match message {
-            OperatorMessage::Login(msg) => {
-                assert_eq!(msg.info.password, hash_password_sha3(" secret"));
-                assert_ne!(msg.info.password, hash_password_sha3("secret"));
-            }
-            other => panic!("expected Login variant, got {other:?}"),
-        }
-    }
-
-    /// The password field must be `Zeroizing<String>` so that heap memory is wiped on drop.
-    /// This test is a compile-time contract: if the field type is changed to a bare `String`,
-    /// the `Zeroizing::clone` call below will fail to compile.
-    #[test]
-    fn password_field_is_zeroizing() {
-        let mut state = default_login_state();
-        *state.password = "hunter2".to_owned();
-        // Confirm we hold a Zeroizing<String> — the explicit type annotation is the assertion.
-        let _z: Zeroizing<String> = state.password.clone();
-        assert_eq!(*_z, "hunter2");
-    }
-
-    #[test]
-    fn clear_password_removes_secret_and_requires_re_entry_to_submit() {
-        let mut state = default_login_state();
-        state.username = "u".to_owned();
-        *state.password = "secret".to_owned();
-        assert!(state.can_submit());
-
-        state.clear_password();
-        assert!(state.password.is_empty());
-        assert!(!state.can_submit());
-
-        *state.password = "again".to_owned();
-        assert!(state.can_submit());
-    }
-
-    #[test]
-    fn set_error_clears_connecting_flag() {
-        let mut state = default_login_state();
-        state.set_connecting();
-        assert!(state.connecting);
-
-        state.set_error("invalid credentials".to_owned());
-        assert!(!state.connecting);
-        assert_eq!(state.error_message.as_deref(), Some("invalid credentials"));
-    }
-
-    /// After an authentication error the cursor should land on the password field so the
-    /// user can retype immediately without reaching for the mouse.
-    #[test]
-    fn set_error_requests_password_focus() {
-        let mut state = default_login_state();
-        // Start from a neutral focus state.
-        state.focus_request = FocusRequest::None;
-
-        state.set_error("wrong password".to_owned());
-        assert_eq!(state.focus_request, FocusRequest::Password);
-    }
-
-    #[test]
-    fn set_connecting_clears_error() {
-        let mut state = default_login_state();
-        state.set_error("previous error".to_owned());
-        assert!(state.error_message.is_some());
-
-        state.set_connecting();
-        assert!(state.connecting);
-        assert!(state.error_message.is_none());
+        state
     }
 
     fn make_tls_failure(msg: &str, fp: Option<&str>) -> TlsFailure {
@@ -612,38 +289,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn set_tls_failure_stores_failure() {
-        let mut state = default_login_state();
-        let failure = make_tls_failure("certificate not trusted", Some("aabbcc"));
-        state.set_tls_failure(failure.clone());
-        assert_eq!(state.tls_failure, Some(failure));
-    }
-
-    #[test]
-    fn set_connecting_clears_tls_failure() {
-        let mut state = default_login_state();
-        state.set_tls_failure(make_tls_failure("cert error", None));
-        assert!(state.tls_failure.is_some());
-
-        state.set_connecting();
-        assert!(state.tls_failure.is_none());
-    }
-
-    #[test]
-    fn set_error_does_not_clear_tls_failure() {
-        let mut state = default_login_state();
-        let failure = make_tls_failure("cert error", Some("deadbeef"));
-        state.set_tls_failure(failure.clone());
-        state.set_error("auth failed".to_owned());
-        assert_eq!(state.tls_failure, Some(failure));
-    }
-
-    // --- egui widget interaction tests ---
-
-    use egui::{Event, Modifiers, Pos2, Rect};
-
-    /// Helper: create a `RawInput` with a reasonable screen rect so widgets get laid out.
     fn base_raw_input() -> egui::RawInput {
         egui::RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0))),
@@ -651,15 +296,6 @@ mod tests {
         }
     }
 
-    /// Helper: prepare a `LoginState` with valid credentials ready to submit.
-    fn submittable_login_state() -> LoginState {
-        let mut state = default_login_state();
-        state.username = "operator".to_owned();
-        *state.password = "secret".to_owned();
-        state
-    }
-
-    /// Run `render_login_dialog` inside a headless egui frame and return the `LoginAction`.
     fn run_dialog(
         ctx: &egui::Context,
         input: egui::RawInput,
@@ -680,7 +316,6 @@ mod tests {
         (action, output)
     }
 
-    /// Build a `RawInput` that injects an Enter key press.
     fn input_with_enter() -> egui::RawInput {
         let mut input = base_raw_input();
         input.events.push(Event::Key {
@@ -693,7 +328,6 @@ mod tests {
         input
     }
 
-    /// Build a `RawInput` that simulates a pointer click at `pos`.
     fn input_with_click(pos: Pos2) -> egui::RawInput {
         let mut input = base_raw_input();
         input.events.push(Event::PointerMoved(pos));

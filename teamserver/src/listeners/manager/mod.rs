@@ -17,31 +17,27 @@ use axum::response::{IntoResponse, Response};
 use axum_server::tls_rustls::RustlsConfig;
 use red_cell_common::ListenerConfig;
 use red_cell_common::config::Profile;
-use red_cell_common::operator::{
-    EventCode, Message, MessageHead, OperatorMessage, TeamserverLogInfo,
-};
 use red_cell_common::tls::{load_tls_identity, validate_tls_not_expired};
-use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
-use tracing::{info, instrument, warn};
+use tracing::{instrument, warn};
 use zeroize::Zeroizing;
 
 use super::config::profile_listener_configs;
-use super::dns::spawn_dns_listener_runtime;
-use super::external::{ExternalListenerState, spawn_external_listener_runtime};
-use super::http::spawn_http_listener_runtime;
+use super::external::ExternalListenerState;
 use super::rate_limiters::{
     DemonInitRateLimiter, ReconnectProbeRateLimiter, UnknownCallbackProbeAuditLimiter,
 };
-use super::smb::spawn_smb_listener_runtime;
 use super::summary::ListenerSummary;
 use crate::{
-    AgentRegistry, AuditLogEntry, DEFAULT_MAX_DOWNLOAD_BYTES, Database, DemonInitSecretConfig,
-    ListenerRepository, ListenerStatus, PluginRuntime, ShutdownController, SocketRelayManager,
-    TeamserverError, dispatch::DownloadTracker, events::EventBus, json_error_response,
+    AgentRegistry, DEFAULT_MAX_DOWNLOAD_BYTES, Database, DemonInitSecretConfig, ListenerRepository,
+    ListenerStatus, PluginRuntime, ShutdownController, SocketRelayManager, TeamserverError,
+    dispatch::DownloadTracker, events::EventBus, json_error_response,
 };
+
+mod lifecycle;
+#[cfg(test)]
+pub(crate) use lifecycle::spawn_managed_listener_task;
 
 pub(crate) type ListenerRuntimeFuture = Pin<Box<dyn Future<Output = ListenerRuntimeResult> + Send>>;
 pub(crate) type ListenerRuntimeResult = Result<(), String>;
@@ -117,32 +113,32 @@ impl IntoResponse for ListenerManagerError {
 /// Tracks persisted listeners and their active runtime tasks.
 #[derive(Clone, Debug)]
 pub struct ListenerManager {
-    database: Database,
-    agent_registry: AgentRegistry,
-    events: EventBus,
-    sockets: SocketRelayManager,
-    plugins: Option<PluginRuntime>,
+    pub(super) database: Database,
+    pub(super) agent_registry: AgentRegistry,
+    pub(super) events: EventBus,
+    pub(super) sockets: SocketRelayManager,
+    pub(super) plugins: Option<PluginRuntime>,
     pub(super) downloads: DownloadTracker,
-    demon_init_rate_limiter: DemonInitRateLimiter,
-    unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
-    reconnect_probe_rate_limiter: ReconnectProbeRateLimiter,
-    shutdown: ShutdownController,
+    pub(super) demon_init_rate_limiter: DemonInitRateLimiter,
+    pub(super) unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
+    pub(super) reconnect_probe_rate_limiter: ReconnectProbeRateLimiter,
+    pub(super) shutdown: ShutdownController,
     pub(super) active_handles: Arc<RwLock<BTreeMap<String, JoinHandle<()>>>>,
-    operations: Arc<Mutex<()>>,
+    pub(super) operations: Arc<Mutex<()>>,
     /// Active external listener endpoints keyed by path (e.g. `"/bridge"`).
-    external_endpoints: Arc<RwLock<BTreeMap<String, Arc<ExternalListenerState>>>>,
+    pub(super) external_endpoints: Arc<RwLock<BTreeMap<String, Arc<ExternalListenerState>>>>,
     /// Live `RustlsConfig` handles for running HTTPS listeners, keyed by listener name.
     ///
     /// Each entry is a cloneable handle into the running axum-server TLS config.
     /// Calling `reload_from_pem` on a cloned handle atomically swaps in a new
     /// certificate for all subsequent TLS handshakes without dropping any existing
     /// connection.
-    tls_configs: Arc<RwLock<HashMap<String, RustlsConfig>>>,
+    pub(super) tls_configs: Arc<RwLock<HashMap<String, RustlsConfig>>>,
     /// Certificate file-watcher task handles for HTTPS listeners with explicit cert paths.
     ///
     /// These tasks poll the cert file's mtime and call `reload_from_pem` automatically
     /// when the file changes.  They are aborted when the associated listener stops.
-    watcher_handles: Arc<RwLock<HashMap<String, JoinHandle<()>>>>,
+    pub(super) watcher_handles: Arc<RwLock<HashMap<String, JoinHandle<()>>>>,
     /// Server-secret configuration for HKDF-based session key derivation.
     ///
     /// Passed to every [`DemonPacketParser`] spawned by this manager.
@@ -152,13 +148,13 @@ pub struct ListenerManager {
     ///
     /// Stored as `(versioned: bool, secrets: Vec<(u8, Vec<u8>)>)` so the
     /// manager can reconstruct the correct [`DemonInitSecretConfig`] variant.
-    demon_init_secrets: Option<(bool, Vec<(u8, Vec<u8>)>)>,
+    pub(super) demon_init_secrets: Option<(bool, Vec<(u8, Vec<u8>)>)>,
     /// Whether to accept DEMON_INIT registrations that negotiate legacy CTR mode.
     ///
     /// Mirrors `DemonConfig.allow_legacy_ctr` from the HCL profile.  Defaults to
     /// `false`; must be explicitly enabled by the operator before the teamserver
     /// will accept agents that do not set `INIT_EXT_MONOTONIC_CTR`.
-    demon_allow_legacy_ctr: bool,
+    pub(super) demon_allow_legacy_ctr: bool,
     /// Maximum pivot-chain dispatch nesting depth passed to all dispatchers.
     ///
     /// Sourced from `TeamserverConfig.max_pivot_chain_depth`; defaults to
@@ -304,7 +300,7 @@ impl ListenerManager {
     }
 
     /// Build the [`DemonInitSecretConfig`] to pass to listener packet parsers.
-    fn init_secret_config(&self) -> DemonInitSecretConfig {
+    pub(super) fn init_secret_config(&self) -> DemonInitSecretConfig {
         match &self.demon_init_secrets {
             None => DemonInitSecretConfig::None,
             Some((false, secrets)) => {
@@ -471,20 +467,6 @@ impl ListenerManager {
         self.summary(config.name()).await
     }
 
-    /// Start the named listener runtime.
-    #[instrument(skip(self), fields(listener_name = %name))]
-    pub async fn start(&self, name: &str) -> Result<ListenerSummary, ListenerManagerError> {
-        let _guard = self.operations.lock().await;
-        self.start_locked(name).await
-    }
-
-    /// Stop the named listener runtime.
-    #[instrument(skip(self), fields(listener_name = %name))]
-    pub async fn stop(&self, name: &str) -> Result<ListenerSummary, ListenerManagerError> {
-        let _guard = self.operations.lock().await;
-        self.stop_locked(name).await
-    }
-
     /// Delete the named listener, stopping it first if needed.
     #[instrument(skip(self), fields(listener_name = %name))]
     pub async fn delete(&self, name: &str) -> Result<(), ListenerManagerError> {
@@ -573,19 +555,20 @@ impl ListenerManager {
             .await
             .map_err(|e| ListenerManagerError::TlsCertError { message: e.to_string() })?;
 
-        info!(listener = name, "TLS certificate hot-reloaded");
+        tracing::info!(listener = name, "TLS certificate hot-reloaded");
         Ok(())
     }
 
     /// Reconcile persisted listeners against the YAOTL profile.
     #[instrument(skip(self, profile))]
     pub async fn sync_profile(&self, profile: &Profile) -> Result<(), ListenerManagerError> {
+        use std::collections::BTreeMap as BMap;
         let _guard = self.operations.lock().await;
         let repository = self.repository();
         let profile_listeners = profile_listener_configs(profile)?
             .into_iter()
             .map(|config| (config.name().to_owned(), config))
-            .collect::<BTreeMap<_, _>>();
+            .collect::<BMap<_, _>>();
 
         for name in repository.names().await? {
             if !profile_listeners.contains_key(&name) {
@@ -623,120 +606,6 @@ impl ListenerManager {
         Ok(())
     }
 
-    async fn start_locked(&self, name: &str) -> Result<ListenerSummary, ListenerManagerError> {
-        let repository = self.repository();
-        let listener = repository
-            .get(name)
-            .await?
-            .ok_or_else(|| ListenerManagerError::ListenerNotFound { name: name.to_owned() })?;
-        self.prune_finished_handle(name).await;
-        if self.active_handles.read().await.contains_key(name) {
-            return Err(ListenerManagerError::ListenerAlreadyRunning { name: name.to_owned() });
-        }
-
-        match self.spawn_listener_runtime(&listener.config).await {
-            Ok(handle) => {
-                self.active_handles.write().await.insert(name.to_owned(), handle);
-                repository.set_state(name, ListenerStatus::Running, None).await?;
-                info!(listener = name, protocol = %listener.protocol, "listener started");
-                for warning in super::opsec::opsec_warnings(&listener.config) {
-                    warn!(listener = name, "{warning}");
-                    self.events.broadcast(OperatorMessage::TeamserverLog(Message {
-                        head: MessageHead {
-                            event: EventCode::Teamserver,
-                            user: String::new(),
-                            timestamp: String::new(),
-                            one_time: String::new(),
-                        },
-                        info: TeamserverLogInfo { text: warning.to_owned() },
-                    }));
-                    let occurred_at = OffsetDateTime::now_utc()
-                        .format(&Rfc3339)
-                        .unwrap_or_else(|_| String::from("unknown"));
-                    if let Err(err) = self
-                        .database
-                        .audit_log()
-                        .create(&AuditLogEntry {
-                            id: None,
-                            actor: "teamserver".to_owned(),
-                            action: "opsec_warning".to_owned(),
-                            target_kind: "listener".to_owned(),
-                            target_id: Some(name.to_owned()),
-                            details: Some(serde_json::json!({ "warning": warning })),
-                            occurred_at,
-                        })
-                        .await
-                    {
-                        warn!(
-                            listener = name,
-                            error = %err,
-                            "failed to write opsec warning audit log entry"
-                        );
-                    }
-                }
-                self.summary(name).await
-            }
-            Err(error) => {
-                let error_text = error.to_string();
-                repository
-                    .set_state(name, ListenerStatus::Error, Some(error_text.as_str()))
-                    .await?;
-                warn!(listener = name, error = %error_text, "listener failed to start");
-                Err(ListenerManagerError::StartFailed {
-                    name: name.to_owned(),
-                    message: error_text,
-                })
-            }
-        }
-    }
-
-    async fn stop_locked(&self, name: &str) -> Result<ListenerSummary, ListenerManagerError> {
-        let repository = self.repository();
-
-        if repository.get(name).await?.is_none() {
-            return Err(ListenerManagerError::ListenerNotFound { name: name.to_owned() });
-        }
-
-        let Some(handle) = self.active_handles.write().await.remove(name) else {
-            return Err(ListenerManagerError::ListenerNotRunning { name: name.to_owned() });
-        };
-
-        handle.abort();
-        if let Err(error) = handle.await {
-            if error.is_panic() {
-                tracing::warn!(listener = name, "listener task panicked during stop: {error}");
-            }
-        }
-
-        // Clean up external listener endpoint registry entries that won't get
-        // deregistered inside the aborted future.
-        self.external_endpoints.write().await.retain(|_, state| state.listener_name() != name);
-
-        // Stop the cert file-watcher task if one was spawned for this listener.
-        if let Some(watcher) = self.watcher_handles.write().await.remove(name) {
-            watcher.abort();
-            let _ = watcher.await;
-        }
-
-        // Remove the live TLS config handle so hot-reload calls are rejected after stop.
-        self.tls_configs.write().await.remove(name);
-
-        repository.set_state(name, ListenerStatus::Stopped, None).await?;
-        info!(listener = name, "listener stopped");
-        self.summary(name).await
-    }
-
-    async fn prune_finished_handle(&self, name: &str) {
-        let should_remove = {
-            let handles = self.active_handles.read().await;
-            handles.get(name).is_some_and(JoinHandle::is_finished)
-        };
-
-        if should_remove {
-            self.active_handles.write().await.remove(name);
-        }
-    }
-
     async fn delete_removed_profile_listener_locked(
         &self,
         name: &str,
@@ -754,140 +623,8 @@ impl ListenerManager {
         }
 
         self.repository().delete(name).await?;
-        info!(listener = name, "removed persisted listener absent from profile");
+        tracing::info!(listener = name, "removed persisted listener absent from profile");
 
         Ok(())
     }
-
-    async fn spawn_listener_runtime(
-        &self,
-        config: &ListenerConfig,
-    ) -> Result<JoinHandle<()>, ListenerManagerError> {
-        let runtime = match config {
-            ListenerConfig::Http(config) => {
-                spawn_http_listener_runtime(
-                    config,
-                    self.agent_registry.clone(),
-                    self.events.clone(),
-                    self.database.clone(),
-                    self.sockets.clone(),
-                    self.plugins.clone(),
-                    self.downloads.clone(),
-                    self.demon_init_rate_limiter.clone(),
-                    self.unknown_callback_probe_audit_limiter.clone(),
-                    self.reconnect_probe_rate_limiter.clone(),
-                    self.shutdown.clone(),
-                    self.max_pivot_chain_depth,
-                    self.init_secret_config(),
-                    self.demon_allow_legacy_ctr,
-                    self.tls_configs.clone(),
-                    self.watcher_handles.clone(),
-                )
-                .await
-            }
-            ListenerConfig::Smb(config) => {
-                spawn_smb_listener_runtime(
-                    config,
-                    self.agent_registry.clone(),
-                    self.events.clone(),
-                    self.database.clone(),
-                    self.sockets.clone(),
-                    self.plugins.clone(),
-                    self.downloads.clone(),
-                    self.unknown_callback_probe_audit_limiter.clone(),
-                    self.reconnect_probe_rate_limiter.clone(),
-                    self.demon_init_rate_limiter.clone(),
-                    self.shutdown.clone(),
-                    self.init_secret_config(),
-                    self.max_pivot_chain_depth,
-                    self.demon_allow_legacy_ctr,
-                )
-                .await
-            }
-            ListenerConfig::Dns(config) => {
-                spawn_dns_listener_runtime(
-                    config,
-                    self.agent_registry.clone(),
-                    self.events.clone(),
-                    self.database.clone(),
-                    self.sockets.clone(),
-                    self.plugins.clone(),
-                    self.downloads.clone(),
-                    self.demon_init_rate_limiter.clone(),
-                    self.unknown_callback_probe_audit_limiter.clone(),
-                    self.reconnect_probe_rate_limiter.clone(),
-                    self.shutdown.clone(),
-                    self.init_secret_config(),
-                    self.max_pivot_chain_depth,
-                    self.demon_allow_legacy_ctr,
-                )
-                .await
-            }
-            ListenerConfig::External(config) => spawn_external_listener_runtime(
-                config,
-                self.agent_registry.clone(),
-                self.events.clone(),
-                self.database.clone(),
-                self.sockets.clone(),
-                self.plugins.clone(),
-                self.downloads.clone(),
-                self.demon_init_rate_limiter.clone(),
-                self.unknown_callback_probe_audit_limiter.clone(),
-                self.reconnect_probe_rate_limiter.clone(),
-                self.shutdown.clone(),
-                self.external_endpoints.clone(),
-                self.init_secret_config(),
-                self.max_pivot_chain_depth,
-                self.demon_allow_legacy_ctr,
-            ),
-        }?;
-
-        Ok(spawn_managed_listener_task(
-            config.name().to_owned(),
-            runtime,
-            self.repository(),
-            self.active_handles.clone(),
-        ))
-    }
-}
-
-pub(crate) fn spawn_managed_listener_task(
-    name: String,
-    runtime: ListenerRuntimeFuture,
-    repository: ListenerRepository,
-    active_handles: Arc<RwLock<BTreeMap<String, JoinHandle<()>>>>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let outcome = runtime.await;
-        active_handles.write().await.remove(&name);
-
-        match outcome {
-            Ok(()) => {
-                if let Err(error) = repository.set_state(&name, ListenerStatus::Stopped, None).await
-                {
-                    warn!(
-                        listener = %name,
-                        %error,
-                        "listener runtime exited but stopped state could not be persisted"
-                    );
-                } else {
-                    info!(listener = %name, "listener runtime exited");
-                }
-            }
-            Err(message) => {
-                if let Err(error) =
-                    repository.set_state(&name, ListenerStatus::Error, Some(message.as_str())).await
-                {
-                    warn!(
-                        listener = %name,
-                        runtime_error = %message,
-                        %error,
-                        "listener runtime failed and error state could not be persisted"
-                    );
-                } else {
-                    warn!(listener = %name, error = %message, "listener runtime exited with error");
-                }
-            }
-        }
-    })
 }

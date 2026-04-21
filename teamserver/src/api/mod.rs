@@ -61,8 +61,8 @@ pub fn api_routes(api: ApiRuntime) -> Router<TeamserverState> {
         .route("/agents/{id}", get(agents::get_agent).delete(agents::kill_agent))
         .route("/agents/{id}/task", post(agents::queue_agent_task))
         .route("/agents/{id}/output", get(agents::get_agent_output))
-        .route("/agents/{id}/upload", post(agents::agent_upload))
-        .route("/agents/{id}/download", post(agents::agent_download))
+        .route("/agents/{id}/upload", post(agents::transfer::agent_upload))
+        .route("/agents/{id}/download", post(agents::transfer::agent_download))
         .route("/audit", get(audit::list_audit))
         .route("/audit/purge", delete(audit::purge_audit))
         .route("/session-activity", get(audit::list_session_activity))
@@ -72,7 +72,10 @@ pub fn api_routes(api: ApiRuntime) -> Router<TeamserverState> {
         .route("/jobs/{agent_id}/{request_id}", get(loot::get_job))
         .route("/loot", get(loot::list_loot))
         .route("/loot/{id}", get(loot::get_loot))
-        .route("/agents/{id}/groups", get(agents::get_agent_groups).put(agents::set_agent_groups))
+        .route(
+            "/agents/{id}/groups",
+            get(agents::groups::get_agent_groups).put(agents::groups::set_agent_groups),
+        )
         .route("/operators", get(operators::list_operators).post(operators::create_operator))
         .route("/operators/active", get(operators::active_operators))
         .route("/operators/{username}", delete(operators::delete_operator))

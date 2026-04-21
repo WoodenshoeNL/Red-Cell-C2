@@ -21,11 +21,11 @@ Each loop run updates the running totals and appends a review entry.
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 16 | 0 | 0 |
-| Missing tests / stale tests | 83 | 22 | 7 |
-| Clippy warnings | 16 | 0 | 2 |
-| Protocol errors | 30 | 32 | 4 |
+| Missing tests / stale tests | 85 | 22 | 7 |
+| Clippy warnings | 18 | 0 | 2 |
+| Protocol errors | 31 | 32 | 4 |
 | Security issues | 70 | 40 | 0 |
-| Architecture drift | 66 | 25 | 9 |
+| Architecture drift | 103 | 25 | 9 |
 | Memory / resource leaks | 16 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 10 | 0 |
 | Test infrastructure / flakiness | 66 | 6 | 1 |
@@ -41,6 +41,20 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-04-21 12:17
+
+| Agent | Findings | Categories | Notes |
+|-------|---------:|------------|-------|
+| Claude | 40 | protocol errors (1), clippy/test warnings (2), architecture drift (37) | Non-legacy HTTP precheck still rejects valid ECDH packets when random bytes 8-11 equal DEMON magic (red-cell-c2-5rd8q); nextest emitted two unused-import warnings in Phantom and client-cli tests (red-cell-c2-q0hty, red-cell-c2-adkb9); filed 37 focused oversized-file split tasks across common, teamserver, client, client-cli, phantom, and specter zones. |
+| Codex | 0 | — | No findings attributed in this review. |
+| Cursor | 0 | — | No findings attributed in this review. |
+
+Build: **cargo check --workspace** passed. **cargo nextest run --workspace** passed: 5674 tests, 0 failures, with two unused-import warnings in test targets. **cargo clippy --workspace -- -D warnings** passed clean.
+
+Overall codebase health: **on track** — the protocol/auth/crypto paths are substantially hardened and the full workspace test suite is green. The main live risk is a rare but real non-legacy listener packet-drop bug; the main structural drag is widespread oversized-file debt.
+
+Biggest blindspot: **non-legacy listener classification still contains Demon-magic assumptions** — ECDH traffic is random-looking bytes and should be classified by the ECDH parser/session lookup, not by fixed offsets in a shared precheck.
 
 ### QA Review — 2026-04-18 — c078eb63..592b3627
 

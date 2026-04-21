@@ -41,9 +41,8 @@ pub(crate) const NONLEGACY_PRECHECK_HEADER_LEN: usize = ArchonHeader::SERIALIZED
 ///   enforced downstream by `is_valid_archon_callback_request`, but checking
 ///   it here limits unauthenticated buffering to [`NONLEGACY_PRECHECK_HEADER_LEN`]
 ///   bytes for bodies that would be rejected anyway).  Packets where an ECDH
-///   `connection_id[4..8]` or `connection_id[8..12]` coincidentally equals
-///   `0xDEADBEEF` are also rejected here — consistent with the downstream
-///   validator's behaviour.
+///   `connection_id[8..12]` coincidentally equals `0xDEADBEEF` are also
+///   rejected here — consistent with the downstream validator’s behaviour.
 ///
 /// Returns `None` if the body exceeds `max_len`, contains a read error, or
 /// fails the appropriate magic check.

@@ -4,7 +4,7 @@ use std::net::IpAddr;
 
 use axum::body::{Body, Bytes};
 use red_cell_common::demon::{
-    ArchonEnvelope, DEMON_MAGIC_VALUE, DemonCommand, DemonEnvelope, DemonHeader,
+    ArchonEnvelope, ArchonHeader, DEMON_MAGIC_VALUE, DemonCommand, DemonEnvelope, DemonHeader,
 };
 use tracing::warn;
 
@@ -13,6 +13,14 @@ use crate::listeners::{
 };
 
 pub(crate) const MINIMUM_DEMON_CALLBACK_BYTES: usize = DemonHeader::SERIALIZED_LEN + 8;
+
+/// Minimum bytes buffered before the non-legacy shape precheck fires.
+///
+/// Equals the full Archon header length (size | agent_id | magic = 12 bytes).
+/// This is the unauthenticated buffering ceiling for non-legacy listeners:
+/// bodies that fail the precheck are rejected after at most this many bytes
+/// instead of after the full `MAX_AGENT_MESSAGE_LEN` cap.
+pub(crate) const NONLEGACY_PRECHECK_HEADER_LEN: usize = ArchonHeader::SERIALIZED_LEN; // 12
 
 /// Buffers an HTTP request body while performing an early pre-screen on the
 /// Demon transport magic value.
@@ -25,24 +33,30 @@ pub(crate) const MINIMUM_DEMON_CALLBACK_BYTES: usize = DemonHeader::SERIALIZED_L
 ///   8 bytes have been buffered, limiting per-connection allocation to a single
 ///   network chunk (~16 KiB).
 ///
-/// - **`legacy_mode = false`** (new-protocol listeners): **no magic check is
-///   applied**.  For Archon packets bytes 4–7 are the `agent_id`, and for ECDH
-///   registration/session packets bytes 0–15 are a random `connection_id`.
-///   Neither field has a fixed value, so checking bytes 4–7 for `0xDEADBEEF`
-///   would incorrectly drop legitimate packets (e.g. an Archon agent whose
-///   `agent_id` happens to be `0xDEADBEEF`, or an ECDH packet whose random
-///   `connection_id[4..8]` collides with the magic value).  Protocol
-///   discrimination for non-legacy traffic happens entirely in the downstream
-///   ECDH dispatcher and Archon handler.
+/// - **`legacy_mode = false`** (new-protocol listeners): bytes 4–7 are the
+///   Archon `agent_id` (not fixed) and bytes 0–15 are a random ECDH
+///   `connection_id`, so the legacy bytes-4–7 check cannot be applied.
+///   Instead, the Archon magic field at **bytes 8–11** is checked: it must
+///   never equal `0xDEADBEEF` for any valid non-legacy packet (this is also
+///   enforced downstream by `is_valid_archon_callback_request`, but checking
+///   it here limits unauthenticated buffering to [`NONLEGACY_PRECHECK_HEADER_LEN`]
+///   bytes for bodies that would be rejected anyway).  Packets where an ECDH
+///   `connection_id[4..8]` or `connection_id[8..12]` coincidentally equals
+///   `0xDEADBEEF` are also rejected here — consistent with the downstream
+///   validator's behaviour.
 ///
 /// Returns `None` if the body exceeds `max_len`, contains a read error, or
-/// (legacy mode only) fails the magic check.
+/// fails the appropriate magic check.
 pub(crate) async fn collect_body_with_magic_precheck(
     body: Body,
     max_len: usize,
     legacy_mode: bool,
 ) -> Option<Bytes> {
     use http_body_util::BodyExt as _;
+
+    // Precheck fires after this many bytes: 8 for legacy (bytes 4–7),
+    // 12 for non-legacy (bytes 8–11 = Archon magic field).
+    let precheck_threshold = if legacy_mode { 8 } else { NONLEGACY_PRECHECK_HEADER_LEN };
 
     let mut body = body;
     let mut buf: Vec<u8> = Vec::new();
@@ -58,18 +72,28 @@ pub(crate) async fn collect_body_with_magic_precheck(
             return None;
         }
         buf.extend_from_slice(&data);
-        // For legacy listeners only: reject as soon as we can tell bytes 4–7
-        // are not 0xDEADBEEF.  For non-legacy listeners we skip this check
-        // entirely — see the doc comment above.
-        if !magic_checked && buf.len() >= 8 {
-            if legacy_mode && buf[4..8] != DEMON_MAGIC_VALUE.to_be_bytes() {
-                return None;
+
+        if !magic_checked && buf.len() >= precheck_threshold {
+            if legacy_mode {
+                // Legacy: bytes 4–7 must be 0xDEADBEEF.
+                if buf[4..8] != DEMON_MAGIC_VALUE.to_be_bytes() {
+                    return None;
+                }
+            } else {
+                // Non-legacy: bytes 8–11 (Archon magic field) must NOT be
+                // 0xDEADBEEF.  Firing here rather than in the downstream
+                // validator limits unauthenticated memory use to
+                // NONLEGACY_PRECHECK_HEADER_LEN bytes for these bodies.
+                if buf[8..12] == DEMON_MAGIC_VALUE.to_be_bytes() {
+                    return None;
+                }
             }
             magic_checked = true;
         }
     }
 
-    // Bodies shorter than 8 bytes cannot carry a valid header.
+    // Bodies shorter than 8 (legacy) or 12 (non-legacy) bytes cannot carry
+    // a valid header.
     if !magic_checked {
         return None;
     }
@@ -350,5 +374,94 @@ mod tests {
                 "body < 8 bytes must be rejected (legacy_mode={legacy_mode})"
             );
         }
+    }
+
+    // ── non-legacy early precheck — regression tests for the DEADBEEF-at-magic-position fix ──
+
+    /// Bodies of 8–11 bytes must be rejected in non-legacy mode because the
+    /// non-legacy precheck fires at NONLEGACY_PRECHECK_HEADER_LEN (12) bytes.
+    #[tokio::test]
+    async fn nonlegacy_body_8_to_11_bytes_rejected() {
+        for len in 8..=11 {
+            let result =
+                collect_body_with_magic_precheck(make_body(vec![0u8; len]), usize::MAX, false)
+                    .await;
+            assert!(result.is_none(), "non-legacy body of {len} bytes must be rejected");
+        }
+    }
+
+    /// A non-legacy body whose bytes 8–11 equal DEMON_MAGIC_VALUE must be
+    /// rejected immediately — this is an impossible Archon shape (the Archon
+    /// magic field must never be 0xDEADBEEF) and is also rejected by the
+    /// downstream is_valid_archon_callback_request validator, but the early
+    /// precheck fires at NONLEGACY_PRECHECK_HEADER_LEN bytes rather than
+    /// after buffering up to MAX_AGENT_MESSAGE_LEN.
+    #[tokio::test]
+    async fn nonlegacy_deadbeef_at_archon_magic_position_rejected() {
+        // 1 KiB body that would pass the max_len check but carries 0xDEADBEEF
+        // at the Archon magic field position (bytes 8–11).
+        let mut raw = vec![0u8; 1024];
+        raw[8..12].copy_from_slice(&DEMON_MAGIC_VALUE.to_be_bytes());
+
+        let result = collect_body_with_magic_precheck(make_body(raw), usize::MAX, false).await;
+        assert!(
+            result.is_none(),
+            "non-legacy body with 0xDEADBEEF at Archon magic position must be rejected"
+        );
+    }
+
+    /// The same body accepted by legacy precheck must be rejected by the non-legacy
+    /// precheck because the Archon magic field (bytes 8–11 = 0xDEADBEEF) is invalid.
+    #[tokio::test]
+    async fn legacy_magic_body_rejected_by_nonlegacy_precheck() {
+        // Build a synthetic body that passes legacy precheck (bytes 4–7 = 0xDEADBEEF)
+        // but must be rejected by non-legacy (bytes 8–11 = 0xDEADBEEF).
+        let mut raw = vec![0u8; 32];
+        raw[4..8].copy_from_slice(&DEMON_MAGIC_VALUE.to_be_bytes());
+        raw[8..12].copy_from_slice(&DEMON_MAGIC_VALUE.to_be_bytes());
+
+        // Legacy precheck fires at bytes 4–7 = 0xDEADBEEF → passes.
+        let legacy_result =
+            collect_body_with_magic_precheck(make_body(raw.clone()), usize::MAX, true).await;
+        assert!(legacy_result.is_some(), "body with DEADBEEF at bytes 4–7 must pass legacy check");
+
+        // Non-legacy precheck fires at bytes 8–11 = 0xDEADBEEF → rejected.
+        let nonlegacy_result =
+            collect_body_with_magic_precheck(make_body(raw), usize::MAX, false).await;
+        assert!(
+            nonlegacy_result.is_none(),
+            "body with DEADBEEF at Archon magic position must be rejected by non-legacy precheck"
+        );
+    }
+
+    /// A junk body whose bytes 8–11 equal DEMON_MAGIC_VALUE is rejected after
+    /// buffering only NONLEGACY_PRECHECK_HEADER_LEN bytes, not after the full
+    /// body.  This test proves the early-rejection property using a streaming
+    /// body that would exhaust MAX_AGENT_MESSAGE_LEN if the precheck were
+    /// absent.
+    #[tokio::test]
+    async fn nonlegacy_junk_rejected_before_full_body_accumulation() {
+        use axum::body::Body;
+        use futures_util::stream;
+
+        // Two-frame body: first frame has the magic at [8..12], second is large junk.
+        // Without the early precheck the collector would buffer both frames.
+        // With the fix it returns None after the first frame (12+ bytes read).
+        let mut header_bytes = vec![0u8; NONLEGACY_PRECHECK_HEADER_LEN];
+        header_bytes[8..12].copy_from_slice(&DEMON_MAGIC_VALUE.to_be_bytes());
+
+        let stream = stream::iter([
+            Ok::<Bytes, std::convert::Infallible>(Bytes::from(header_bytes)),
+            // A second frame with valid-looking (non-DEADBEEF) bytes that would
+            // normally push the buffer past any reasonable pre-auth ceiling.
+            Ok::<Bytes, std::convert::Infallible>(Bytes::from(vec![0xABu8; 4096])),
+        ]);
+        let body = Body::from_stream(stream);
+
+        let result = collect_body_with_magic_precheck(body, usize::MAX, false).await;
+        assert!(
+            result.is_none(),
+            "non-legacy precheck must reject junk before the second (large) frame is consumed"
+        );
     }
 }

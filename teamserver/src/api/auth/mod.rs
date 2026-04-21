@@ -1,23 +1,24 @@
 //! REST API authentication, authorization, and rate-limiting.
 
+mod key;
+mod rate_limit;
+
 use std::collections::{BTreeMap, HashMap};
 use std::marker::PhantomData;
 use std::net::IpAddr;
 use std::ops::Deref;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use subtle::ConstantTimeEq;
 
 use axum::extract::{ConnectInfo, FromRequestParts, Request, State};
-use axum::http::header::{AUTHORIZATION, RETRY_AFTER};
+use axum::http::header::RETRY_AFTER;
 use axum::http::{HeaderMap, StatusCode, request::Parts};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use hmac::{Hmac, Mac};
 use red_cell_common::config::{OperatorRole, Profile};
 use serde_json::Value;
-use sha2::Sha256;
 use thiserror::Error;
 use tokio::sync::Mutex;
 use tracing::{debug, instrument};
@@ -31,59 +32,18 @@ use crate::{audit_details, parameter_object, record_operator_action_with_notific
 
 use super::errors::json_error_response;
 
-pub(super) const API_KEY_HEADER: &str = "x-api-key";
-const BEARER_PREFIX: &str = "Bearer ";
-const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
-/// Maximum number of failed API-key auth attempts from one IP before that IP is blocked.
+use key::{API_KEY_HASH_SECRET_SIZE, ApiKeyDigest, generate_key_hash_secret, hash_api_key};
+use rate_limit::{
+    RATE_LIMIT_WINDOW, RateLimitSubject, RateLimitWindow, prune_expired_rate_limit_windows,
+    rate_limit_subject_for_failed_auth,
+};
+
+// Re-export items used by sibling modules within `api`.
+pub(crate) use key::{API_KEY_HEADER, extract_api_key};
+pub use rate_limit::ApiRateLimit;
+
 pub(super) const MAX_FAILED_API_AUTH_ATTEMPTS: u32 = 5;
-/// Maximum number of per-IP auth-failure windows retained before the oldest are evicted.
 const MAX_API_AUTH_FAILURE_WINDOWS: usize = 10_000;
-const API_KEY_HASH_SECRET_SIZE: usize = 32;
-
-type ApiKeyMac = Hmac<Sha256>;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct ApiKeyDigest([u8; 32]);
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-enum RateLimitSubject {
-    ClientIp(IpAddr),
-    PresentedCredential(ApiKeyDigest),
-    MissingApiKey,
-    InvalidAuthorizationHeader,
-}
-
-/// Fixed REST API rate-limiting configuration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ApiRateLimit {
-    /// Maximum accepted requests per API key, per minute.
-    pub requests_per_minute: u32,
-}
-
-impl ApiRateLimit {
-    pub(super) fn disabled(self) -> bool {
-        self.requests_per_minute == 0
-    }
-}
-
-#[derive(Debug, Clone)]
-struct RateLimitWindow {
-    started_at: Instant,
-    request_count: u32,
-}
-
-impl Default for RateLimitWindow {
-    fn default() -> Self {
-        Self { started_at: Instant::now(), request_count: 0 }
-    }
-}
-
-fn prune_expired_rate_limit_windows(
-    windows: &mut BTreeMap<RateLimitSubject, RateLimitWindow>,
-    now: Instant,
-) {
-    windows.retain(|_, window| now.duration_since(window.started_at) < RATE_LIMIT_WINDOW);
-}
 
 /// Authenticated REST API identity derived from an API key.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,7 +75,7 @@ impl ApiRuntime {
     /// Returns an error if the OS random-number generator is unavailable when
     /// generating the HMAC secret used to hash API keys.
     pub fn from_profile(profile: &Profile) -> Result<Self, crate::TeamserverError> {
-        let key_hash_secret = Arc::new(Self::generate_key_hash_secret()?);
+        let key_hash_secret = Arc::new(generate_key_hash_secret()?);
         let (keys, requests_per_minute) = profile
             .api
             .as_ref()
@@ -125,7 +85,7 @@ impl ApiRuntime {
                     .iter()
                     .map(|(name, key)| {
                         (
-                            Self::hash_api_key(&key_hash_secret, &key.value),
+                            hash_api_key(&key_hash_secret, &key.value),
                             ApiIdentity { key_id: name.clone(), role: key.role },
                         )
                     })
@@ -175,8 +135,8 @@ impl ApiRuntime {
             }
         }
 
-        let presented_key = match extract_api_key(headers) {
-            Ok(key) => key,
+        let presented_key = match key::extract_api_key(headers) {
+            Ok(k) => k,
             Err(
                 error @ (ApiAuthError::MissingApiKey | ApiAuthError::InvalidAuthorizationHeader),
             ) => {
@@ -187,7 +147,7 @@ impl ApiRuntime {
             Err(error) => return Err(error),
         };
 
-        let presented_key_digest = Self::hash_api_key(&self.key_hash_secret, &presented_key);
+        let presented_key_digest = hash_api_key(&self.key_hash_secret, &presented_key);
         let rate_limit_subject = RateLimitSubject::PresentedCredential(presented_key_digest);
 
         self.check_rate_limit(&rate_limit_subject).await?;
@@ -260,22 +220,6 @@ impl ApiRuntime {
             }
         }
         found
-    }
-
-    fn hash_api_key(secret: &[u8; API_KEY_HASH_SECRET_SIZE], api_key: &str) -> ApiKeyDigest {
-        let mut mac = ApiKeyMac::new_from_slice(secret)
-            .unwrap_or_else(|_| unreachable!("hmac accepts arbitrary secret lengths"));
-        mac.update(api_key.as_bytes());
-        let digest = mac.finalize().into_bytes();
-        let mut bytes = [0_u8; 32];
-        bytes.copy_from_slice(&digest);
-        ApiKeyDigest(bytes)
-    }
-
-    fn generate_key_hash_secret() -> Result<[u8; API_KEY_HASH_SECRET_SIZE], getrandom::Error> {
-        let mut bytes = [0_u8; API_KEY_HASH_SECRET_SIZE];
-        getrandom::fill(&mut bytes)?;
-        Ok(bytes)
     }
 
     async fn check_rate_limit(&self, subject: &RateLimitSubject) -> Result<(), ApiAuthError> {
@@ -462,46 +406,9 @@ pub(super) async fn api_auth_middleware(
     Ok(next.run(request).await)
 }
 
-/// Extract API key from request headers (X-API-Key or Bearer token).
-pub(crate) fn extract_api_key(headers: &HeaderMap) -> Result<String, ApiAuthError> {
-    if let Some(value) = headers.get(API_KEY_HEADER) {
-        let key = value.to_str().map_err(|_| ApiAuthError::InvalidAuthorizationHeader)?;
-        if key.trim().is_empty() {
-            return Err(ApiAuthError::MissingApiKey);
-        }
-
-        return Ok(key.to_owned());
-    }
-
-    let Some(value) = headers.get(AUTHORIZATION) else {
-        return Err(ApiAuthError::MissingApiKey);
-    };
-    let value = value.to_str().map_err(|_| ApiAuthError::InvalidAuthorizationHeader)?;
-    let Some(token) = value.strip_prefix(BEARER_PREFIX) else {
-        return Err(ApiAuthError::InvalidAuthorizationHeader);
-    };
-
-    if token.trim().is_empty() {
-        return Err(ApiAuthError::MissingApiKey);
-    }
-
-    Ok(token.to_owned())
-}
-
 fn client_ip(request: &Request) -> Option<IpAddr> {
     use std::net::SocketAddr;
     request.extensions().get::<ConnectInfo<SocketAddr>>().map(|connect_info| connect_info.0.ip())
-}
-
-fn rate_limit_subject_for_failed_auth(
-    client_ip: Option<IpAddr>,
-    error: &ApiAuthError,
-) -> RateLimitSubject {
-    client_ip.map(RateLimitSubject::ClientIp).unwrap_or_else(|| match error {
-        ApiAuthError::MissingApiKey => RateLimitSubject::MissingApiKey,
-        ApiAuthError::InvalidAuthorizationHeader => RateLimitSubject::InvalidAuthorizationHeader,
-        _ => unreachable!("only missing/invalid header auth errors map to failed auth buckets"),
-    })
 }
 
 fn authorize_api_role(role: OperatorRole, permission: Permission) -> Result<(), ApiAuthError> {
@@ -527,8 +434,11 @@ const fn api_role_allows(role: OperatorRole, permission: Permission) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::key::ApiKeyDigest;
+    use super::rate_limit::{ApiRateLimit, RATE_LIMIT_WINDOW, RateLimitSubject, RateLimitWindow};
     use super::*;
     use std::net::Ipv4Addr;
+    use std::time::Duration;
 
     fn make_digest(byte: u8) -> ApiKeyDigest {
         ApiKeyDigest([byte; 32])
@@ -541,7 +451,7 @@ mod tests {
     fn test_api_runtime(requests_per_minute: u32) -> ApiRuntime {
         ApiRuntime {
             key_hash_secret: Arc::new(
-                ApiRuntime::generate_key_hash_secret().expect("rng should work in tests"),
+                generate_key_hash_secret().expect("rng should work in tests"),
             ),
             keys: Arc::new(Vec::new()),
             rate_limit: ApiRateLimit { requests_per_minute },
@@ -591,8 +501,7 @@ mod tests {
 
     #[tokio::test]
     async fn rate_limiting_prunes_expired_windows_for_inactive_keys() {
-        let secret =
-            Arc::new(ApiRuntime::generate_key_hash_secret().expect("rng should work in tests"));
+        let secret = Arc::new(generate_key_hash_secret().expect("rng should work in tests"));
         let api = ApiRuntime {
             key_hash_secret: Arc::clone(&secret),
             keys: Arc::new(Vec::new()),
@@ -613,7 +522,7 @@ mod tests {
             auth_failure_windows: Arc::new(Mutex::new(HashMap::new())),
         };
 
-        api.check_rate_limit(&RateLimitSubject::PresentedCredential(ApiRuntime::hash_api_key(
+        api.check_rate_limit(&RateLimitSubject::PresentedCredential(hash_api_key(
             &secret, "new-key",
         )))
         .await
@@ -622,9 +531,9 @@ mod tests {
         let windows = api.windows.lock().await;
         assert!(!windows.contains_key(&RateLimitSubject::MissingApiKey));
         assert!(windows.contains_key(&RateLimitSubject::InvalidAuthorizationHeader));
-        assert!(windows.contains_key(&RateLimitSubject::PresentedCredential(
-            ApiRuntime::hash_api_key(&secret, "new-key")
-        )));
+        assert!(windows.contains_key(&RateLimitSubject::PresentedCredential(hash_api_key(
+            &secret, "new-key"
+        ))));
         assert_eq!(windows.len(), 2);
     }
 

@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 
+use super::super::runtime::PythonRuntimeError;
 use super::super::*;
 use super::helpers::*;
 

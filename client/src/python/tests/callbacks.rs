@@ -1,6 +1,7 @@
 //! Event dispatch: agent check-in, command response, loot, listeners, and concurrent output.
 
 use std::sync::Arc;
+use std::thread;
 
 use tempfile::TempDir;
 

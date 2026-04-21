@@ -1,6 +1,7 @@
 //! Script watchdog timeout and `KeyboardInterrupt` injection.
 
 use std::sync::Arc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
@@ -18,16 +19,10 @@ fn set_script_timeout_updates_stored_value() {
         .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
 
     // Default is 10 s.
-    assert_eq!(
-        runtime.inner.api_state.script_timeout_secs.load(std::sync::atomic::Ordering::Relaxed),
-        DEFAULT_SCRIPT_TIMEOUT_SECS,
-    );
+    assert_eq!(runtime.script_timeout_secs_raw(), DEFAULT_SCRIPT_TIMEOUT_SECS,);
 
     runtime.set_script_timeout(30);
-    assert_eq!(
-        runtime.inner.api_state.script_timeout_secs.load(std::sync::atomic::Ordering::Relaxed),
-        30,
-    );
+    assert_eq!(runtime.script_timeout_secs_raw(), 30);
 }
 #[test]
 fn timeout_interrupts_infinite_loop_in_registered_command() {

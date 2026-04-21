@@ -18,7 +18,9 @@ pub(crate) mod ops;
 pub(crate) use ccache::parse_ccache;
 pub(crate) use format::{format_keytabs, format_klist};
 pub(crate) use keytab::parse_keytab;
-pub(crate) use ops::{inject_ticket, purge_ccache_files, resolve_ccache_paths, resolve_keytab_paths};
+pub(crate) use ops::{
+    inject_ticket, purge_ccache_files, resolve_ccache_paths, resolve_keytab_paths,
+};
 
 #[cfg(test)]
 mod tests;

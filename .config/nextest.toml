@@ -7,6 +7,10 @@
 #
 # Add binaries here if they show the same intermittent ENOENT (see red-cell-c2-b6i4g).
 # client-cli `*_contract` integration tests: red-cell-c2-0h7q9 (same double-spawn as b6i4g).
+#
+# NOTE: use `package(name) & binary(rust_name)` (underscores), NOT `binary_id(name)` (hyphens).
+# Nextest derives lib binary IDs from the compiled artifact name which uses underscores.
+# `binary_id(red-cell)` does not match the lib binary — the actual binary name is `red_cell`.
 
 [test-groups]
 assembly-dispatch-serial = { max-threads = 1 }
@@ -69,7 +73,7 @@ filter = 'package(red-cell-cli) & binary(operator_api_contract)'
 test-group = 'client-cli-contract-serial'
 
 [[profile.default.overrides]]
-filter = 'binary_id(red-cell)'
+filter = 'package(red-cell) & binary(red_cell)'
 test-group = 'red-cell-lib-serial'
 
 [[profile.default.overrides]]

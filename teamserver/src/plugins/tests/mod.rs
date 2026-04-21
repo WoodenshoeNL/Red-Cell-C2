@@ -5,6 +5,8 @@ use zeroize::Zeroizing;
 
 use super::registry::{NamedCallback, RegisteredCommand};
 pub(super) use super::*;
+pub(super) use pyo3::types::PyList;
+pub(super) use red_cell_common::operator::{AgentTaskInfo, OperatorMessage};
 
 // Tests that install a `PluginRuntime` as the active global must hold
 // `super::PLUGIN_RUNTIME_TEST_MUTEX` so that wiring tests in other modules that

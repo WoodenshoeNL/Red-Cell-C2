@@ -6,17 +6,18 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use red_cell_common::demon::{DemonCommand, DemonMessage, DemonPackage, DemonProtocolError};
-use thiserror::Error;
 
 use crate::DEFAULT_MAX_DOWNLOAD_BYTES;
 use crate::{
     AgentRegistry, Database, DemonCallbackPackage, DemonInitSecretConfig, EventBus, PluginRuntime,
-    SocketRelayManager, TeamserverError,
+    SocketRelayManager,
 };
 
 mod assembly;
 mod checkin;
+mod context;
 mod download;
+mod error;
 mod filesystem;
 mod harvest;
 mod kerberos;
@@ -31,8 +32,20 @@ mod token;
 mod transfer;
 pub(crate) mod util;
 
+pub use error::CommandDispatchError;
+
 // `DownloadTracker` is also used from `listeners/`, so it needs crate-level visibility.
 pub(crate) use download::DownloadTracker;
+
+pub(crate) use context::DEFAULT_MAX_PIVOT_CHAIN_DEPTH;
+
+// Flatten the context types and constants into this module's namespace so submodules
+// can reach them via `super::Foo`.
+#[allow(unused_imports)]
+use context::{
+    BuiltinDispatchContext, BuiltinHandlerDependencies, DOTNET_INFO_ENTRYPOINT_EXECUTED,
+    DOTNET_INFO_FAILED, DOTNET_INFO_FINISHED, DOTNET_INFO_NET_VERSION, DOTNET_INFO_PATCHED,
+};
 
 // Bring all remaining shared types into this module's namespace so submodules can
 // reach them via `super::Foo`.  These imports are not used directly within mod.rs
@@ -55,141 +68,6 @@ use util::CallbackParser;
 type HandlerFuture =
     Pin<Box<dyn Future<Output = Result<Option<Vec<u8>>, CommandDispatchError>> + Send>>;
 type Handler = dyn Fn(u32, u32, Vec<u8>) -> HandlerFuture + Send + Sync + 'static;
-
-const DOTNET_INFO_PATCHED: u32 = 0x1;
-const DOTNET_INFO_NET_VERSION: u32 = 0x2;
-const DOTNET_INFO_ENTRYPOINT_EXECUTED: u32 = 0x3;
-const DOTNET_INFO_FINISHED: u32 = 0x4;
-const DOTNET_INFO_FAILED: u32 = 0x5;
-
-/// Default maximum pivot-chain dispatch depth used when no profile override is present.
-pub(crate) const DEFAULT_MAX_PIVOT_CHAIN_DEPTH: usize = 10;
-
-#[derive(Clone)]
-struct BuiltinDispatchContext<'a> {
-    registry: &'a AgentRegistry,
-    events: &'a EventBus,
-    database: &'a Database,
-    sockets: &'a SocketRelayManager,
-    downloads: &'a DownloadTracker,
-    plugins: Option<&'a PluginRuntime>,
-    /// Current pivot dispatch nesting depth — incremented each time a pivot
-    /// command callback is recursively dispatched through a child agent.
-    pivot_dispatch_depth: usize,
-    /// Configured maximum allowed pivot dispatch nesting depth.
-    ///
-    /// When `pivot_dispatch_depth` reaches this value the dispatch is rejected,
-    /// an audit log entry is written, and an error event is broadcast to
-    /// operators. Sourced from the profile `Teamserver.MaxPivotChainDepth`
-    /// field; defaults to [`DEFAULT_MAX_PIVOT_CHAIN_DEPTH`] when absent.
-    max_pivot_chain_depth: usize,
-    /// Whether to accept pivot-child DEMON_INIT packets that use legacy AES-CTR
-    /// (no `INIT_EXT_MONOTONIC_CTR` flag).  Mirrors `DemonConfig::allow_legacy_ctr`.
-    allow_legacy_ctr: bool,
-    /// HKDF init-secret configuration to enforce on pivot-child DEMON_INIT packets.
-    /// Mirrors the listener's `DemonInitSecretConfig` so SMB pivot registration is
-    /// subject to the same server-secret check as direct HTTP/DNS/SMB connections.
-    init_secret_config: DemonInitSecretConfig,
-}
-
-#[derive(Clone)]
-struct BuiltinHandlerDependencies {
-    registry: AgentRegistry,
-    events: EventBus,
-    database: Database,
-    sockets: SocketRelayManager,
-    downloads: DownloadTracker,
-    plugins: Option<PluginRuntime>,
-    /// Pivot dispatch nesting depth captured at handler-registration time.
-    pivot_dispatch_depth: usize,
-    /// Configured maximum allowed pivot dispatch nesting depth.
-    max_pivot_chain_depth: usize,
-    /// Mirrors `DemonConfig::allow_legacy_ctr` — controls whether child-agent
-    /// pivot registrations may use legacy (non-monotonic) AES-CTR.
-    allow_legacy_ctr: bool,
-    /// HKDF init-secret configuration for pivot-child DEMON_INIT packets.
-    init_secret_config: DemonInitSecretConfig,
-}
-
-/// Error returned while routing or executing a Demon command handler.
-#[derive(Debug, Error)]
-pub enum CommandDispatchError {
-    /// The dispatcher could not update shared teamserver state.
-    #[error("{0}")]
-    Registry(#[from] TeamserverError),
-    /// A handler failed to serialize its response in Havoc's package format.
-    #[error("failed to serialize demon response: {0}")]
-    Protocol(#[from] DemonProtocolError),
-    /// The dispatcher could not format a callback timestamp.
-    #[error("failed to format callback timestamp: {0}")]
-    Timestamp(#[from] time::error::Format),
-    /// A callback payload could not be parsed according to the Havoc wire format.
-    #[error("failed to parse callback payload for command 0x{command_id:08X}: {message}")]
-    InvalidCallbackPayload {
-        /// Raw command identifier associated with the callback.
-        command_id: u32,
-        /// Human-readable parser error.
-        message: String,
-    },
-    /// A download exceeded the configured in-memory accumulation cap and was dropped.
-    #[error(
-        "download 0x{file_id:08X} for agent 0x{agent_id:08X} exceeded max_download_bytes ({max_download_bytes} bytes)"
-    )]
-    DownloadTooLarge {
-        /// Agent owning the dropped download.
-        agent_id: u32,
-        /// File identifier associated with the dropped download.
-        file_id: u32,
-        /// Configured maximum number of bytes allowed in memory for a single download.
-        max_download_bytes: usize,
-    },
-    /// Active partial downloads exceeded the configured aggregate in-memory cap and one was dropped.
-    #[error(
-        "active downloads for agent 0x{agent_id:08X} exceeded aggregate max_download_bytes ({max_total_download_bytes} bytes) while tracking file 0x{file_id:08X}"
-    )]
-    DownloadAggregateTooLarge {
-        /// Agent owning the dropped download.
-        agent_id: u32,
-        /// File identifier associated with the dropped download.
-        file_id: u32,
-        /// Configured maximum number of bytes allowed in memory across all active downloads.
-        max_total_download_bytes: usize,
-    },
-    /// A new download start was rejected because the per-agent concurrent-download cap was reached.
-    #[error(
-        "agent 0x{agent_id:08X} already has {max_concurrent} concurrent downloads in progress; rejecting new download 0x{file_id:08X}"
-    )]
-    DownloadConcurrentLimitExceeded {
-        /// Agent that attempted to open a new download.
-        agent_id: u32,
-        /// File identifier from the rejected start request.
-        file_id: u32,
-        /// Configured maximum number of concurrent in-progress downloads allowed per agent.
-        max_concurrent: usize,
-    },
-    /// A pivot command callback was nested deeper than `MAX_PIVOT_CHAIN_DEPTH`.
-    #[error(
-        "pivot dispatch depth {depth} exceeds maximum ({max_depth}); possible recursive envelope attack"
-    )]
-    PivotDispatchDepthExceeded {
-        /// The depth that was rejected.
-        depth: usize,
-        /// The configured maximum allowed depth.
-        max_depth: usize,
-    },
-    /// No handler is registered for the command identifier carried by the callback.
-    #[error(
-        "no handler registered for command 0x{command_id:08X} from agent 0x{agent_id:08X} (request 0x{request_id:08X})"
-    )]
-    UnknownCommand {
-        /// Agent that sent the callback.
-        agent_id: u32,
-        /// Unrecognised command identifier.
-        command_id: u32,
-        /// Request identifier from the callback header.
-        request_id: u32,
-    },
-}
 
 /// Central registry of Demon command handlers keyed by command identifier.
 #[derive(Clone)]

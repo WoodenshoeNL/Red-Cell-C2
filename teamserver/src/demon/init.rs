@@ -263,6 +263,10 @@ pub(crate) fn parse_ecdh_agent_metadata(
     let mut offset = 0_usize;
 
     let agent_id = read_u32_be(metadata, &mut offset, "ecdh init agent_id")?;
+    if agent_id == 0 {
+        warn!("rejecting ECDH registration with reserved agent_id 0x00000000");
+        return Err(DemonParserError::InvalidInit("agent_id 0 is reserved and not allowed"));
+    }
     let hostname = read_length_prefixed_string_be(metadata, &mut offset, "hostname")?;
     let username = read_length_prefixed_string_be(metadata, &mut offset, "username")?;
     let domain_name = read_length_prefixed_string_be(metadata, &mut offset, "domain name")?;
@@ -294,6 +298,16 @@ pub(crate) fn parse_ecdh_agent_metadata(
     } else {
         (true, false)
     };
+
+    if offset < metadata.len() {
+        let trailing = metadata.len() - offset;
+        warn!(
+            agent_id = format_args!("0x{agent_id:08X}"),
+            trailing_bytes = trailing,
+            "rejecting ECDH registration with trailing bytes after extension flags"
+        );
+        return Err(DemonParserError::InvalidInit("trailing bytes after ECDH init metadata"));
+    }
 
     let timestamp =
         now.format(&Rfc3339).map_err(|_| DemonParserError::InvalidInit("invalid timestamp"))?;

@@ -1092,3 +1092,80 @@ async fn seq_protected_init_sets_seq_protected_flag() {
         "INIT_EXT_SEQ_PROTECTED must set seq_protected = true in the registry"
     );
 }
+
+// --- ECDH metadata parser focused tests ---
+
+use crate::demon::parse_ecdh_agent_metadata;
+
+#[test]
+fn ecdh_metadata_rejects_reserved_agent_id_zero() {
+    let metadata = build_init_metadata(0x0000_0000);
+    let result =
+        parse_ecdh_agent_metadata(&metadata, "10.0.0.1", datetime!(2026-01-01 00:00:00 UTC));
+    assert!(
+        matches!(result, Err(DemonParserError::InvalidInit(_))),
+        "agent_id 0 must be rejected; got: {result:?}"
+    );
+}
+
+#[test]
+fn ecdh_metadata_rejects_trailing_bytes_after_standard_fields() {
+    let mut metadata = build_init_metadata(0x1234_5678);
+    metadata.push(0xFF);
+    let result =
+        parse_ecdh_agent_metadata(&metadata, "10.0.0.1", datetime!(2026-01-01 00:00:00 UTC));
+    assert!(
+        matches!(result, Err(DemonParserError::InvalidInit(_))),
+        "trailing byte after standard fields must be rejected; got: {result:?}"
+    );
+}
+
+#[test]
+fn ecdh_metadata_rejects_trailing_bytes_after_ext_flags() {
+    let mut metadata = build_init_metadata_with_ext_flags(0x1234_5678, INIT_EXT_MONOTONIC_CTR);
+    metadata.push(0xDE);
+    let result =
+        parse_ecdh_agent_metadata(&metadata, "10.0.0.1", datetime!(2026-01-01 00:00:00 UTC));
+    assert!(
+        matches!(result, Err(DemonParserError::InvalidInit(_))),
+        "trailing byte after ext_flags must be rejected; got: {result:?}"
+    );
+}
+
+#[test]
+fn ecdh_metadata_accepts_valid_ext_flags_monotonic_ctr() {
+    let metadata = build_init_metadata_with_ext_flags(0x1234_5678, INIT_EXT_MONOTONIC_CTR);
+    let result =
+        parse_ecdh_agent_metadata(&metadata, "10.0.0.1", datetime!(2026-01-01 00:00:00 UTC));
+    let (record, legacy_ctr, seq_protected) = result.expect("valid ECDH metadata must parse");
+    assert_eq!(record.agent_id, 0x1234_5678);
+    assert!(!legacy_ctr, "INIT_EXT_MONOTONIC_CTR must set legacy_ctr = false");
+    assert!(!seq_protected);
+}
+
+#[test]
+fn ecdh_metadata_accepts_valid_ext_flags_seq_protected() {
+    let metadata = build_init_metadata_with_ext_flags(
+        0x1234_5678,
+        INIT_EXT_MONOTONIC_CTR | INIT_EXT_SEQ_PROTECTED,
+    );
+    let result =
+        parse_ecdh_agent_metadata(&metadata, "10.0.0.1", datetime!(2026-01-01 00:00:00 UTC));
+    let (record, legacy_ctr, seq_protected) = result.expect("valid ECDH metadata must parse");
+    assert_eq!(record.agent_id, 0x1234_5678);
+    assert!(!legacy_ctr);
+    assert!(seq_protected, "INIT_EXT_SEQ_PROTECTED must set seq_protected = true");
+}
+
+#[test]
+fn ecdh_metadata_accepts_valid_fields_without_ext_flags() {
+    let metadata = build_init_metadata(0xDEAD_BEEF);
+    let result =
+        parse_ecdh_agent_metadata(&metadata, "203.0.113.5", datetime!(2026-01-01 00:00:00 UTC));
+    let (record, legacy_ctr, seq_protected) =
+        result.expect("valid ECDH metadata without ext flags must parse");
+    assert_eq!(record.agent_id, 0xDEAD_BEEF);
+    assert_eq!(record.external_ip, "203.0.113.5");
+    assert!(legacy_ctr, "absence of ext flags must result in legacy_ctr = true");
+    assert!(!seq_protected);
+}

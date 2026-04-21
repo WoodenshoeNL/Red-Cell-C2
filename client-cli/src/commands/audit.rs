@@ -543,7 +543,6 @@ mod tests {
     fn agent_id(value: u32) -> AgentId {
         AgentId::new(value)
     }
-    use crate::output::TextRender as _;
 
     fn sample_raw_record(
         actor: &str,

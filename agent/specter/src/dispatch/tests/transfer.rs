@@ -2,9 +2,8 @@ use std::collections::HashMap;
 
 use red_cell_common::demon::{DemonCommand, DemonPackage};
 
-use super::super::filesystem::{
-    handle_fs_download, handle_fs_upload, handle_memfile, handle_transfer,
-};
+use super::super::filesystem::{handle_fs_download, handle_fs_upload, handle_memfile};
+use super::super::transfer::handle_transfer;
 use super::super::{DispatchResult, MemFile, MemFileStore, dispatch};
 use super::{le_utf16le_payload, parse_u64_le};
 use crate::config::SpecterConfig;

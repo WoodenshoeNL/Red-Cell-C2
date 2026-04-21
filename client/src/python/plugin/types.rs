@@ -8,11 +8,12 @@ use pyo3::types::PyTuple;
 use crate::python::{ScriptOutputStream, active_api_state, current_operator_username};
 use crate::transport::LootItem;
 
-use super::{
-    CommandOption, CommandOptionType, agent_summary_to_json, build_agent_command_message,
-    build_console_task_message, json_value_to_object, listener_summary_to_json,
-    next_task_id_string, normalize_agent_id, normalize_listener_name,
+use super::helpers::{
+    agent_summary_to_json, json_value_to_object, listener_summary_to_json, normalize_agent_id,
+    normalize_listener_name,
 };
+use super::tasks::{build_agent_command_message, build_console_task_message, next_task_id_string};
+use super::{CommandOption, CommandOptionType};
 
 // ── PyAgent ──────────────────────────────────────────────────────────────────
 

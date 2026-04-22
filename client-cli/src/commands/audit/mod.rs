@@ -24,6 +24,7 @@ use crate::client::ApiClient;
 use crate::defaults::AUDIT_TAIL_FOLLOW_POLL_INTERVAL_SECS;
 use crate::error::{CliError, EXIT_GENERAL, EXIT_SUCCESS};
 use crate::output::{OutputFormat, TextRender, TextRow, print_error, print_success};
+use crate::util::percent_encode;
 use follow::{FollowCursor, follow_consecutive_timeouts_exhausted, print_entry_line};
 
 /// Number of entries fetched by `log tail` (without --follow).
@@ -403,28 +404,6 @@ fn audit_entry_from_raw(raw: RawAuditRecord) -> AuditEntry {
     }
 }
 
-/// Percent-encode a query-parameter value.
-///
-/// Characters safe in a URL query string are left unchanged; all others are
-/// encoded as `%XX`.  The set of safe characters matches RFC 3986 unreserved
-/// characters plus `:` (for ISO 8601 timestamps).
-fn percent_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for byte in s.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b':' => {
-                out.push(byte as char)
-            }
-            b => {
-                out.push('%');
-                out.push(char::from_digit((b >> 4) as u32, 16).unwrap_or('0'));
-                out.push(char::from_digit((b & 0xf) as u32, 16).unwrap_or('0'));
-            }
-        }
-    }
-    out
-}
-
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -630,42 +609,6 @@ mod tests {
     fn vec_audit_entry_empty_renders_none() {
         let entries: Vec<AuditEntry> = vec![];
         assert_eq!(entries.render_text(), "(none)");
-    }
-
-    // ── percent_encode ────────────────────────────────────────────────────────
-
-    #[test]
-    fn percent_encode_leaves_safe_chars_unchanged() {
-        assert_eq!(percent_encode("abc123-_.~:"), "abc123-_.~:");
-    }
-
-    #[test]
-    fn percent_encode_encodes_space() {
-        assert_eq!(percent_encode("hello world"), "hello%20world");
-    }
-
-    #[test]
-    fn percent_encode_encodes_ampersand_and_equals() {
-        assert_eq!(percent_encode("a=b&c=d"), "a%3db%26c%3dd");
-    }
-
-    #[test]
-    fn percent_encode_iso8601_timestamp_unchanged() {
-        // Colons in ISO 8601 timestamps must not be encoded.
-        assert_eq!(percent_encode("2026-03-21T12:00:00Z"), "2026-03-21T12:00:00Z");
-    }
-
-    #[test]
-    fn percent_encode_until_timestamp_unchanged() {
-        assert_eq!(percent_encode("2026-03-22T23:59:59Z"), "2026-03-22T23:59:59Z");
-    }
-
-    #[test]
-    fn percent_encode_at_sign_in_operator_name() {
-        // @ is not in the safe set and must be encoded.
-        let encoded = percent_encode("alice@example.com");
-        assert!(encoded.contains('%'));
-        assert!(!encoded.contains('@'));
     }
 
     // ── purge wiremock ────────────────────────────────────────────────────────

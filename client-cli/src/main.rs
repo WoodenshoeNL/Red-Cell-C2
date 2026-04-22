@@ -10,6 +10,7 @@ mod dispatch;
 mod error;
 mod output;
 mod tls;
+mod util;
 
 pub(crate) use agent_id::AgentId;
 pub(crate) use cli::{

@@ -4,7 +4,9 @@ use tracing::{info, warn};
 
 use super::SpecterAgent;
 use crate::dispatch::{self, DispatchResult};
-use crate::ecdh::{EcdhSession, decode_listener_pub_key, perform_registration, send_session_packet};
+use crate::ecdh::{
+    EcdhSession, decode_listener_pub_key, perform_registration, send_session_packet,
+};
 use crate::error::SpecterError;
 
 impl SpecterAgent {

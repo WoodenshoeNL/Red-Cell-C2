@@ -1,6 +1,13 @@
 mod dns;
 mod external;
-mod http;
+mod http_body_precheck;
+mod http_callbacks;
+mod http_proxy_headers;
+mod http_rate_limiting;
+mod http_registration;
+mod http_request_matching;
+mod http_response_headers;
+mod http_tls;
 mod lifecycle;
 mod lifecycle_dns;
 mod lifecycle_external;

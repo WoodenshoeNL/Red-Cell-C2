@@ -125,6 +125,14 @@ impl<'a> BinaryParser<'a> {
             .map_err(|_| PhantomError::TaskParse("ccache: invalid UTF-8 in string"))
     }
 
+    /// Read a counted string: `u16 length` followed by `length` bytes of UTF-8.
+    pub(super) fn counted_string_u16(&mut self) -> Result<String, PhantomError> {
+        let len = self.u16()? as usize;
+        let data = self.bytes(len)?;
+        String::from_utf8(data.to_vec())
+            .map_err(|_| PhantomError::TaskParse("ccache: invalid UTF-8 in string"))
+    }
+
     /// Read a counted octet string: `u32 length` followed by `length` bytes.
     pub(super) fn counted_bytes(&mut self) -> Result<Vec<u8>, PhantomError> {
         let len = self.u32()? as usize;

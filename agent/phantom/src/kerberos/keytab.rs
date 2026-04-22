@@ -52,10 +52,10 @@ pub(crate) fn parse_keytab(data: &[u8], source_path: &str) -> Result<Keytab, Pha
 
         // Parse entry fields (keytab v2 uses big-endian u16 counts).
         let num_components = p.u16()? as usize;
-        let realm = p.counted_string()?;
+        let realm = p.counted_string_u16()?;
         let mut components = Vec::with_capacity(num_components);
         for _ in 0..num_components {
-            components.push(p.counted_string()?);
+            components.push(p.counted_string_u16()?);
         }
         let name_type = p.u32()?;
         let timestamp = p.u32()?;

@@ -1,4 +1,4 @@
-use super::ccache::{CCache, parse_ccache};
+use super::ccache::parse_ccache;
 use super::format::{
     enctype_name, format_keytabs, format_klist, format_timestamp, ticket_flags_str,
 };
@@ -73,13 +73,13 @@ pub(super) fn make_test_keytab() -> Vec<u8> {
     // num_components (u16) = 2
     entry.extend_from_slice(&2u16.to_be_bytes());
     // realm
-    entry.extend_from_slice(&11u32.to_be_bytes());
+    entry.extend_from_slice(&11u16.to_be_bytes());
     entry.extend_from_slice(b"EXAMPLE.COM");
     // component 1: "host"
-    entry.extend_from_slice(&4u32.to_be_bytes());
+    entry.extend_from_slice(&4u16.to_be_bytes());
     entry.extend_from_slice(b"host");
     // component 2: "server1.example.com"
-    entry.extend_from_slice(&19u32.to_be_bytes());
+    entry.extend_from_slice(&19u16.to_be_bytes());
     entry.extend_from_slice(b"server1.example.com");
     // name_type = 1
     entry.extend_from_slice(&1u32.to_be_bytes());
@@ -271,9 +271,9 @@ fn parse_keytab_with_deleted_entry() {
     // Real entry
     let mut entry = Vec::new();
     entry.extend_from_slice(&1u16.to_be_bytes()); // 1 component
-    entry.extend_from_slice(&4u32.to_be_bytes());
+    entry.extend_from_slice(&4u16.to_be_bytes());
     entry.extend_from_slice(b"TEST");
-    entry.extend_from_slice(&4u32.to_be_bytes());
+    entry.extend_from_slice(&4u16.to_be_bytes());
     entry.extend_from_slice(b"user");
     entry.extend_from_slice(&1u32.to_be_bytes()); // name_type
     entry.extend_from_slice(&0u32.to_be_bytes()); // timestamp

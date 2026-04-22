@@ -117,3 +117,226 @@ pub fn encode_utf16(value: &str) -> Vec<u8> {
     encoded.extend_from_slice(&[0, 0]);
     encoded
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use red_cell_common::demon::DemonInjectWay;
+
+    // ── parse_injection_way ──────────────────────────────────────────────────
+
+    #[test]
+    fn parse_injection_way_inject() {
+        assert_eq!(parse_injection_way("inject").unwrap(), DemonInjectWay::Inject);
+    }
+
+    #[test]
+    fn parse_injection_way_spawn() {
+        assert_eq!(parse_injection_way("spawn").unwrap(), DemonInjectWay::Spawn);
+    }
+
+    #[test]
+    fn parse_injection_way_case_insensitive() {
+        assert_eq!(parse_injection_way("INJECT").unwrap(), DemonInjectWay::Inject);
+        assert_eq!(parse_injection_way("SPAWN").unwrap(), DemonInjectWay::Spawn);
+    }
+
+    #[test]
+    fn parse_injection_way_unknown() {
+        let err = parse_injection_way("execute").unwrap_err();
+        assert!(matches!(err, AgentCommandError::UnsupportedInjectionWay { .. }));
+    }
+
+    // ── parse_memory_protection ──────────────────────────────────────────────
+
+    #[test]
+    fn parse_memory_protection_known_constants() {
+        let cases = [
+            ("PAGE_NOACCESS", 0x01u32),
+            ("PAGE_READONLY", 0x02),
+            ("PAGE_READWRITE", 0x04),
+            ("PAGE_WRITECOPY", 0x08),
+            ("PAGE_EXECUTE", 0x10),
+            ("PAGE_EXECUTE_READ", 0x20),
+            ("PAGE_EXECUTE_READWRITE", 0x40),
+            ("PAGE_EXECUTE_WRITECOPY", 0x80),
+            ("PAGE_GUARD", 0x100),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(parse_memory_protection(input).unwrap(), expected, "failed for {input}");
+        }
+    }
+
+    #[test]
+    fn parse_memory_protection_case_insensitive() {
+        assert_eq!(parse_memory_protection("page_readwrite").unwrap(), 0x04);
+    }
+
+    #[test]
+    fn parse_memory_protection_unknown() {
+        let err = parse_memory_protection("PAGE_UNKNOWN").unwrap_err();
+        assert!(matches!(err, AgentCommandError::InvalidNumericField { .. }));
+    }
+
+    // ── parse_injection_technique ────────────────────────────────────────────
+
+    #[test]
+    fn parse_injection_technique_known_values() {
+        let cases = [
+            ("default", 0u32),
+            ("createremotethread", 1),
+            ("ntcreatethreadex", 2),
+            ("ntqueueapcthread", 3),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(parse_injection_technique(input).unwrap(), expected, "failed for {input}");
+        }
+    }
+
+    #[test]
+    fn parse_injection_technique_case_insensitive() {
+        assert_eq!(parse_injection_technique("CreateRemoteThread").unwrap(), 1);
+    }
+
+    #[test]
+    fn parse_injection_technique_unknown() {
+        let err = parse_injection_technique("earlybird").unwrap_err();
+        assert!(matches!(err, AgentCommandError::UnsupportedInjectionTechnique { .. }));
+    }
+
+    // ── arch_to_flag ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn arch_to_flag_x86() {
+        assert_eq!(arch_to_flag("x86").unwrap(), 0);
+    }
+
+    #[test]
+    fn arch_to_flag_x64() {
+        assert_eq!(arch_to_flag("x64").unwrap(), 1);
+    }
+
+    #[test]
+    fn arch_to_flag_case_insensitive() {
+        assert_eq!(arch_to_flag("X86").unwrap(), 0);
+        assert_eq!(arch_to_flag("X64").unwrap(), 1);
+    }
+
+    #[test]
+    fn arch_to_flag_unknown() {
+        let err = arch_to_flag("arm64").unwrap_err();
+        assert!(matches!(err, AgentCommandError::UnsupportedArchitecture { .. }));
+    }
+
+    // ── parse_bool_field ─────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_bool_field_truthy_values() {
+        assert!(parse_bool_field("enabled", "1").unwrap());
+        assert!(parse_bool_field("enabled", "true").unwrap());
+        assert!(parse_bool_field("enabled", "TRUE").unwrap());
+    }
+
+    #[test]
+    fn parse_bool_field_falsy_values() {
+        assert!(!parse_bool_field("enabled", "0").unwrap());
+        assert!(!parse_bool_field("enabled", "false").unwrap());
+        assert!(!parse_bool_field("enabled", "FALSE").unwrap());
+    }
+
+    #[test]
+    fn parse_bool_field_invalid() {
+        let err = parse_bool_field("enabled", "yes").unwrap_err();
+        assert!(matches!(err, AgentCommandError::InvalidBooleanField { .. }));
+    }
+
+    // ── parse_u32_field ──────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_u32_field_valid() {
+        assert_eq!(parse_u32_field("timeout", "42").unwrap(), 42u32);
+        assert_eq!(parse_u32_field("timeout", "0").unwrap(), 0);
+        assert_eq!(parse_u32_field("timeout", "4294967295").unwrap(), u32::MAX);
+    }
+
+    #[test]
+    fn parse_u32_field_trims_whitespace() {
+        assert_eq!(parse_u32_field("timeout", "  7  ").unwrap(), 7);
+    }
+
+    #[test]
+    fn parse_u32_field_invalid() {
+        let err = parse_u32_field("timeout", "abc").unwrap_err();
+        assert!(matches!(err, AgentCommandError::InvalidNumericField { .. }));
+    }
+
+    #[test]
+    fn parse_u32_field_overflow() {
+        let err = parse_u32_field("timeout", "4294967296").unwrap_err();
+        assert!(matches!(err, AgentCommandError::InvalidNumericField { .. }));
+    }
+
+    // ── parse_hex_u32 ────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_hex_u32_with_prefix() {
+        assert_eq!(parse_hex_u32("0xDEADBEEF").unwrap(), 0xDEAD_BEEF);
+        assert_eq!(parse_hex_u32("0XDEADBEEF").unwrap(), 0xDEAD_BEEF);
+    }
+
+    #[test]
+    fn parse_hex_u32_without_prefix() {
+        assert_eq!(parse_hex_u32("DEADBEEF").unwrap(), 0xDEAD_BEEF);
+        assert_eq!(parse_hex_u32("deadbeef").unwrap(), 0xDEAD_BEEF);
+    }
+
+    #[test]
+    fn parse_hex_u32_trims_whitespace() {
+        assert_eq!(parse_hex_u32("  0xff  ").unwrap(), 0xFF);
+    }
+
+    #[test]
+    fn parse_hex_u32_invalid() {
+        let err = parse_hex_u32("0xGGGG").unwrap_err();
+        assert!(matches!(err, AgentCommandError::InvalidNumericField { .. }));
+    }
+
+    #[test]
+    fn parse_hex_u32_overflow() {
+        let err = parse_hex_u32("0x1FFFFFFFF").unwrap_err();
+        assert!(matches!(err, AgentCommandError::InvalidNumericField { .. }));
+    }
+
+    // ── ipv4_to_u32 ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn ipv4_to_u32_valid() {
+        // 127.0.0.1 → little-endian bytes [127, 0, 0, 1]
+        let expected = u32::from_le_bytes([127, 0, 0, 1]);
+        assert_eq!(ipv4_to_u32("127.0.0.1").unwrap(), expected);
+    }
+
+    #[test]
+    fn ipv4_to_u32_broadcast() {
+        let expected = u32::from_le_bytes([255, 255, 255, 255]);
+        assert_eq!(ipv4_to_u32("255.255.255.255").unwrap(), expected);
+    }
+
+    #[test]
+    fn ipv4_to_u32_trims_whitespace() {
+        let expected = u32::from_le_bytes([10, 0, 0, 1]);
+        assert_eq!(ipv4_to_u32("  10.0.0.1  ").unwrap(), expected);
+    }
+
+    #[test]
+    fn ipv4_to_u32_invalid() {
+        let err = ipv4_to_u32("not-an-ip").unwrap_err();
+        assert!(matches!(err, AgentCommandError::InvalidNumericField { .. }));
+    }
+
+    #[test]
+    fn ipv4_to_u32_out_of_range_octet() {
+        let err = ipv4_to_u32("256.0.0.1").unwrap_err();
+        assert!(matches!(err, AgentCommandError::InvalidNumericField { .. }));
+    }
+}

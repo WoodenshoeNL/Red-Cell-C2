@@ -15,23 +15,6 @@ compatibility is maintained.
    (see *Agent Variants* below). Archon first (C/ASM fork of Demon, compile +
    test parity), then Phantom (Rust, Linux), then Specter (Rust, Windows).
 
-## Onboarding (new VM setup)
-
-1. **Install `br`** (beads_rust issue tracker):
-   ```bash
-   curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/beads_rust/main/install.sh" | bash
-   ```
-2. **Clone the repo** (or `git pull` if already cloned) — `br` auto-imports issues from `.beads/issues.jsonl` on first use.
-3. **Tune systemd-oomd** so cargo builds don't trigger terminal/desktop OOM kills:
-   ```bash
-   ./oomd-setup.sh   # idempotent, prompts for sudo
-   ```
-4. **Install loop-log rotation** (otherwise `logs/claude_dev.log` grows to hundreds of MB):
-   ```bash
-   ./logrotate-setup.sh   # idempotent, prompts for sudo
-   ```
-5. **Verify**: `br ready` should show available work.
-
 ## CI Policy
 
 Do not use GitHub Actions for this repository.
@@ -242,82 +225,6 @@ cd agent/specter
 cargo build --release --target x86_64-pc-windows-gnu
 ```
 
-## Phase 2: Real-World Testing
-
-### Automated test harness (`automatic-test/`)
-
-The harness drives the full `red-cell-cli → teamserver → agent` flow against real
-target machines. All interaction goes through `red-cell-cli` (JSON output, stable
-exit codes) so AI agents can run it unattended and file bugs for failures.
-
-```
-automatic-test/
-  test.py                     # main runner: --scenario all|01|02|...
-  config/
-    env.toml                  # teamserver URL + operator credentials (commit safe)
-    targets.toml              # test-machine SSH details — GITIGNORED
-    targets.toml.example      # template with placeholders
-  scenarios/
-    01_auth.py                # login, token expiry, RBAC enforcement
-    02_listeners.py           # HTTP/DNS/SMB create/start/stop/delete
-    03_payload_build.py       # all format × arch combos, PE validation
-    04_agent_linux.py         # deploy → checkin → command suite on Ubuntu
-    05_agent_windows.py       # deploy → checkin → command suite on Windows 11
-    06_file_transfer.py       # upload + download round-trip
-    07_process_ops.py         # list, kill, inject
-    08_screenshot.py          # screenshot capture + loot entry
-    09_kerberos.py            # token operations
-    10_pivot.py               # pivot chain dispatch
-    11_loot_audit.py          # loot entries, audit log completeness
-    12_rbac.py                # role enforcement across all endpoints
-  lib/
-    cli.py                    # subprocess wrapper for red-cell-cli
-    deploy.py                 # SSH/SCP helpers (Linux + Windows)
-    wait.py                   # poll helpers: wait_for_agent, wait_for_output
-  PROMPTS/
-    AGENT_TEST_PROMPT.md      # prompt for AI-agent-driven test runs
-```
-
-**Running the harness:**
-```bash
-cd automatic-test
-# Run all scenarios against both targets
-python3 test.py --scenario all
-
-# Run a single scenario
-python3 test.py --scenario 04
-
-# Dry-run (validate config only, no actual deployment)
-python3 test.py --dry-run
-```
-
-### Target machines
-
-| Target | OS | Deploy method |
-|--------|----|---------------|
-| `linux-test` | Ubuntu Desktop (latest LTS) | SSH + SCP |
-| `windows-test` | Windows 11 | SSH (OpenSSH for Windows) |
-
-Connection details live in `automatic-test/config/targets.toml` (gitignored).
-See `automatic-test/config/targets.toml.example` for the required fields.
-
-For Windows SSH setup, see `docs/win11-ssh-setup.md`.
-
-### Manual test plan
-
-A checklist-style test plan for operator-driven validation lives in
-`docs/test-plan.md`. It covers every layer: auth, listeners, payload generation,
-agent commands, events, loot, plugins, and the REST API.
-
-### Zone for test harness work
-
-Use `--zone autotest` when running a dev loop against `automatic-test/`:
-```bash
-./loop.py --agent claude --loop dev --zone autotest
-```
-
----
-
 ## Large Task Policy
 
 **Never attempt a refactor or file split larger than ~300 lines in a single session.**
@@ -351,33 +258,7 @@ Then pick the **first** sub-issue and implement only that module in this session
 
 ---
 
-## Stopping a Dev Loop
-
-Both the Claude and Codex dev loops check for a `.stop` file at the repo root before each
-pass. If the file exists the agent halts cleanly without claiming new work.
-
-**To stop a locally running loop:**
-```bash
-touch .stop
-```
-
-**To stop a remote/cloud loop (e.g. Codex):**
-```bash
-touch .stop && git add .stop && git commit -m "chore: stop dev loop" && git push
-```
-
-**To resume after stopping:**
-```bash
-rm .stop && git add .stop && git commit -m "chore: resume dev loop" && git push
-# or locally:
-rm .stop
-```
-
-The `.stop` file is intentionally not gitignored so it can be pushed to stop remote agents.
-
 <!-- br-agent-instructions-v1 -->
-
----
 
 ## Beads Workflow Integration
 

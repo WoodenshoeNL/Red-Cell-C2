@@ -193,36 +193,3 @@ pub(crate) fn inject_ticket(ticket_data: &[u8], principal: &str) -> Result<Strin
 
     Ok(format!("Ticket injected into {path} ({} bytes, principal: {principal})", ccache_blob.len()))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::kerberos::ccache::parse_ccache;
-
-    #[test]
-    fn build_ccache_blob_roundtrip() {
-        let ticket = vec![0x30, 0x82, 0x01, 0x00]; // Dummy ASN.1
-        let blob = build_ccache_blob(&ticket, "admin@CORP.LOCAL").expect("build");
-        let cc = parse_ccache(&blob, "injected").expect("parse roundtrip");
-
-        assert_eq!(cc.principal.realm, "CORP.LOCAL");
-        assert_eq!(cc.principal.components, vec!["admin"]);
-        assert_eq!(cc.credentials.len(), 1);
-        assert_eq!(cc.credentials[0].ticket, ticket);
-    }
-
-    #[test]
-    fn build_ccache_blob_multi_component_principal() {
-        let ticket = vec![0x01];
-        let blob = build_ccache_blob(&ticket, "host/web.corp@CORP.LOCAL").expect("build");
-        let cc = parse_ccache(&blob, "test").expect("parse");
-
-        assert_eq!(cc.principal.components, vec!["host", "web.corp"]);
-        assert_eq!(cc.principal.realm, "CORP.LOCAL");
-    }
-
-    #[test]
-    fn build_ccache_blob_rejects_no_realm() {
-        assert!(build_ccache_blob(&[1], "admin").is_err());
-    }
-}

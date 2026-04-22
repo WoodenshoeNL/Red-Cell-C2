@@ -1,5 +1,6 @@
 //! Integration and unit tests for the command dispatch module.
 
+mod assembly;
 mod checkin;
 mod common;
 mod config;

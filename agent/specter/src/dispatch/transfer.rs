@@ -69,30 +69,7 @@ fn handle_transfer_stop(
     rest: &[u8],
     downloads: &mut DownloadTracker,
 ) -> DispatchResult {
-    let mut offset = 0;
-    let file_id = match parse_u32_le(rest, &mut offset) {
-        Ok(v) => v,
-        Err(e) => {
-            warn!("Transfer::Stop: failed to parse file_id: {e}");
-            return DispatchResult::Ignore;
-        }
-    };
-
-    let found = if let Some(entry) = downloads.get_mut(file_id) {
-        entry.state = DownloadState::Stopped;
-        info!(file_id = format_args!("{file_id:08x}"), "Transfer::Stop: stopped");
-        1u32
-    } else {
-        info!(file_id = format_args!("{file_id:08x}"), "Transfer::Stop: not found");
-        0u32
-    };
-
-    let mut out = Vec::new();
-    write_u32_le(&mut out, subcmd_raw);
-    write_u32_le(&mut out, found);
-    write_u32_le(&mut out, file_id);
-
-    DispatchResult::Respond(Response::new(DemonCommand::CommandTransfer, out))
+    handle_transfer_set_state(subcmd_raw, rest, downloads, DownloadState::Stopped, "stopped")
 }
 
 /// `Transfer::Resume (2)` — resume a stopped download.
@@ -104,21 +81,31 @@ fn handle_transfer_resume(
     rest: &[u8],
     downloads: &mut DownloadTracker,
 ) -> DispatchResult {
+    handle_transfer_set_state(subcmd_raw, rest, downloads, DownloadState::Running, "resumed")
+}
+
+fn handle_transfer_set_state(
+    subcmd_raw: u32,
+    rest: &[u8],
+    downloads: &mut DownloadTracker,
+    new_state: DownloadState,
+    label: &str,
+) -> DispatchResult {
     let mut offset = 0;
     let file_id = match parse_u32_le(rest, &mut offset) {
         Ok(v) => v,
         Err(e) => {
-            warn!("Transfer::Resume: failed to parse file_id: {e}");
+            warn!(action = label, "Transfer: failed to parse file_id: {e}");
             return DispatchResult::Ignore;
         }
     };
 
     let found = if let Some(entry) = downloads.get_mut(file_id) {
-        entry.state = DownloadState::Running;
-        info!(file_id = format_args!("{file_id:08x}"), "Transfer::Resume: resumed");
+        entry.state = new_state;
+        info!(action = label, file_id = format_args!("{file_id:08x}"), "Transfer state updated");
         1u32
     } else {
-        info!(file_id = format_args!("{file_id:08x}"), "Transfer::Resume: not found");
+        info!(action = label, file_id = format_args!("{file_id:08x}"), "Transfer target not found");
         0u32
     };
 

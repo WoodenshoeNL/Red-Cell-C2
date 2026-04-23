@@ -2,8 +2,8 @@
 
 use eframe::egui::{self, RichText};
 
+use crate::ClientApp;
 use crate::transport::AgentFileBrowserState;
-use crate::{ClientApp, find_file_entry, selected_remote_directory, upload_destination};
 
 use super::{breadcrumb, downloads, tree};
 
@@ -33,51 +33,7 @@ pub(crate) fn render_file_browser_panel(
     }
 
     ui.add_space(6.0);
-    ui.horizontal_wrapped(|ui| {
-        let selected_path = app
-            .session_panel
-            .file_browser_state
-            .get(agent_id)
-            .and_then(|state| state.selected_path.clone());
-        let selected_entry = browser.and_then(|state| {
-            selected_path.as_deref().and_then(|path| find_file_entry(state, path))
-        });
-        let selected_directory = selected_remote_directory(browser, selected_path.as_deref());
-
-        if ui
-            .add_enabled(selected_directory.is_some(), egui::Button::new("Set Working Dir"))
-            .clicked()
-            && let Some(path) = selected_directory.as_deref()
-        {
-            app.queue_file_browser_cd(agent_id, path);
-            app.queue_file_browser_list(agent_id, path);
-        }
-
-        if ui
-            .add_enabled(
-                selected_entry.is_some_and(|entry| !entry.is_dir),
-                egui::Button::new("Download"),
-            )
-            .clicked()
-        {
-            if let Some(path) = selected_path.as_deref() {
-                app.queue_file_browser_download(agent_id, path);
-            }
-        }
-
-        if ui.button("Upload").clicked() {
-            app.queue_file_browser_upload(
-                agent_id,
-                upload_destination(browser, selected_path.as_deref()),
-            );
-        }
-
-        if ui.add_enabled(selected_path.is_some(), egui::Button::new("Delete")).clicked() {
-            if let Some(path) = selected_path.as_deref() {
-                app.queue_file_browser_delete(agent_id, path);
-            }
-        }
-    });
+    breadcrumb::render_file_browser_toolbar(app, ui, agent_id, browser, false);
 
     ui.add_space(6.0);
     if let Some(browser) = browser {

@@ -55,7 +55,7 @@ pub(crate) fn render_file_browser_tab(
         ui.add_space(4.0);
 
         // ── Action toolbar ────────────────────────────────────
-        breadcrumb::render_file_browser_toolbar(app, ui, agent_id, browser);
+        breadcrumb::render_file_browser_toolbar(app, ui, agent_id, browser, true);
 
         // ── Status messages ───────────────────────────────────
         let browser_status = browser.and_then(|s| s.status_message.as_deref());

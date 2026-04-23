@@ -108,11 +108,15 @@ pub(crate) fn render_file_browser_breadcrumb(
 }
 
 /// Action toolbar for the file browser tab (Download, Upload, Delete, Set Working Dir).
+///
+/// When `show_selected_path_label` is true, a trailing monospace label shows the current
+/// selection (standalone tab). Embedded panels pass false to keep the strip compact.
 pub(crate) fn render_file_browser_toolbar(
     app: &mut ClientApp,
     ui: &mut egui::Ui,
     agent_id: &str,
     browser: Option<&AgentFileBrowserState>,
+    show_selected_path_label: bool,
 ) {
     ui.horizontal_wrapped(|ui| {
         let selected_path = app
@@ -159,9 +163,11 @@ pub(crate) fn render_file_browser_toolbar(
             }
         }
 
-        if let Some(path) = &selected_path {
-            ui.separator();
-            ui.label(RichText::new(format!("Selected: {path}")).weak().monospace());
+        if show_selected_path_label {
+            if let Some(path) = &selected_path {
+                ui.separator();
+                ui.label(RichText::new(format!("Selected: {path}")).weak().monospace());
+            }
         }
     });
 }

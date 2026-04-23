@@ -192,7 +192,7 @@ fn add_bytes_writes_length_prefixed_data() -> Result<(), PayloadBuildError> {
 }
 
 #[test]
-fn add_bytes_returns_error_for_empty_after_wstring() -> Result<(), PayloadBuildError> {
+fn add_wstring_empty_string_emits_null_terminator() -> Result<(), PayloadBuildError> {
     let mut buf = Vec::new();
     add_wstring(&mut buf, "")?;
     assert_eq!(&buf[..4], &2_u32.to_le_bytes(), "empty string still has null terminator");

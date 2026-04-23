@@ -123,7 +123,19 @@ async fn inline_execute_bof_ran_ok_broadcasts_event() {
     let msg = receiver.recv().await.expect("should receive broadcast");
     match msg {
         OperatorMessage::AgentResponse(resp) => {
-            assert!(resp.info.output.is_empty() || resp.info.output.contains("BOF"));
+            let extra = &resp.info.extra;
+            assert_eq!(
+                extra.get("Type"),
+                Some(&serde_json::Value::String("Good".to_owned())),
+                "BOF_RAN_OK should produce Type=Good"
+            );
+            assert_eq!(
+                extra.get("Message"),
+                Some(&serde_json::Value::String(
+                    "BOF execution completed".to_owned()
+                )),
+                "BOF_RAN_OK should produce Message='BOF execution completed'"
+            );
         }
         other => panic!("expected AgentResponse, got {other:?}"),
     }

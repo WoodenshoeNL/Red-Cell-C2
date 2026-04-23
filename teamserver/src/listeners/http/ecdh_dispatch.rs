@@ -42,6 +42,26 @@ pub(crate) struct EcdhResponse {
     pub(crate) payload: Vec<u8>,
 }
 
+/// Outcome of an ECDH packet dispatch attempt.
+///
+/// Distinguishes "successfully handled" from "not an ECDH packet, try Archon"
+/// from "registration rejected by the per-IP limiter".  The rate-limited case
+/// is a routine runtime event rather than a listener error, so it lives on the
+/// `Ok` side and is emitted without reusing `ListenerManagerError::InvalidConfig`
+/// (which would misleadingly read as a configuration problem in logs).
+#[derive(Debug)]
+pub(crate) enum EcdhOutcome {
+    /// Packet was handled end-to-end; `payload` is the body to return.
+    Handled(EcdhResponse),
+    /// Body is not an ECDH packet — caller should fall through to the Archon
+    /// handler.
+    NotEcdh,
+    /// Registration-shaped body was rejected by the per-IP rate limiter.
+    /// The helper has already emitted a structured WARN; the caller should
+    /// return a fake 404 without a second log line.
+    RateLimited,
+}
+
 /// Returns `true` when the client IP is allowed to attempt an ECDH
 /// registration; `false` if the per-IP budget for the current window has
 /// been exhausted.  Logs a warning on rejection so operators can see the
@@ -73,8 +93,10 @@ pub(crate) async fn allow_ecdh_registration_for_ip(
 /// Process a non-legacy HTTP body as an ECDH new-protocol packet.
 ///
 /// First tries to classify as a session packet (connection_id lookup), then as
-/// a registration packet. Returns `None` if the packet is not a valid ECDH packet
-/// (caller should fall through to the Archon handler).
+/// a registration packet. Returns [`EcdhOutcome::NotEcdh`] when the body is not
+/// a valid ECDH packet (caller should fall through to the Archon handler) and
+/// [`EcdhOutcome::RateLimited`] when a registration-shaped body is dropped by
+/// the per-IP limiter (caller should return a fake 404).
 ///
 /// Registration-shaped bodies are gated by a per-IP rate limiter applied before
 /// the X25519 + AES-GCM work in [`open_registration_packet`].  Both valid and
@@ -91,13 +113,13 @@ pub(crate) async fn process_ecdh_packet(
     registration_rate_limiter: &EcdhRegistrationRateLimiter,
     body: &[u8],
     external_ip: IpAddr,
-) -> Result<Option<EcdhResponse>, ListenerManagerError> {
+) -> Result<EcdhOutcome, ListenerManagerError> {
     let ecdh_db = database.ecdh();
 
     // Try session first: look up the first 16 bytes as a connection_id.
     if let Some(candidate_id) = extract_connection_id_candidate(body) {
         if let Ok(Some((agent_id, session_key))) = ecdh_db.lookup_session(&candidate_id).await {
-            return Ok(Some(
+            return Ok(EcdhOutcome::Handled(
                 process_ecdh_session(
                     body,
                     &session_key,
@@ -114,11 +136,11 @@ pub(crate) async fn process_ecdh_packet(
     // Try registration.
     let Some(kp) = keypair else {
         // Non-legacy listener without a keypair cannot handle ECDH registration.
-        return Ok(None);
+        return Ok(EcdhOutcome::NotEcdh);
     };
 
     if body.len() < ECDH_REG_MIN_LEN {
-        return Ok(None);
+        return Ok(EcdhOutcome::NotEcdh);
     }
 
     // Registration-shaped body — gate on the per-IP limiter before any
@@ -126,22 +148,18 @@ pub(crate) async fn process_ecdh_packet(
     // garbage-packet spam cannot bypass the limiter.
     if !allow_ecdh_registration_for_ip(listener_name, registration_rate_limiter, external_ip).await
     {
-        return Err(ListenerManagerError::InvalidConfig {
-            message: format!(
-                "ECDH registration rejected: per-IP rate limit exceeded for {external_ip}"
-            ),
-        });
+        return Ok(EcdhOutcome::RateLimited);
     }
 
     let parsed = match open_registration_packet(kp, ECDH_REPLAY_WINDOW_SECS, body) {
         Ok(parsed) => parsed,
         Err(e) => {
             debug!(listener = listener_name, error = %e, "ECDH registration packet failed to decrypt");
-            return Ok(None);
+            return Ok(EcdhOutcome::NotEcdh);
         }
     };
 
-    Ok(Some(
+    Ok(EcdhOutcome::Handled(
         process_ecdh_registration(
             listener_name,
             parsed.session_key,
@@ -516,7 +534,7 @@ mod tests {
         let ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 42));
         let body = invalid_registration_body();
 
-        // Send MAX invalid registrations — each returns Ok(None) (crypto fails)
+        // Send MAX invalid registrations — each returns NotEcdh (crypto fails)
         // but each consumes one budget slot.
         for _ in 0..MAX_ECDH_REGISTRATIONS_PER_IP {
             let result = process_ecdh_packet(
@@ -532,7 +550,7 @@ mod tests {
             )
             .await;
             assert!(
-                matches!(result, Ok(None)),
+                matches!(result, Ok(EcdhOutcome::NotEcdh)),
                 "invalid body must decrypt-fail but not trigger rate limiter yet; got: {result:?}"
             );
         }
@@ -551,8 +569,7 @@ mod tests {
         )
         .await;
         assert!(
-            matches!(blocked, Err(ListenerManagerError::InvalidConfig { ref message })
-                if message.contains("rate limit")),
+            matches!(blocked, Ok(EcdhOutcome::RateLimited)),
             "invalid registration must be rate-limited after budget exhaustion; got: {blocked:?}"
         );
     }
@@ -601,8 +618,7 @@ mod tests {
         )
         .await;
         assert!(
-            matches!(blocked, Err(ListenerManagerError::InvalidConfig { ref message })
-                if message.contains("rate limit")),
+            matches!(blocked, Ok(EcdhOutcome::RateLimited)),
             "valid registration must be rate-limited after budget exhaustion; got: {blocked:?}"
         );
 
@@ -622,8 +638,7 @@ mod tests {
         )
         .await;
         assert!(
-            !matches!(other_result, Err(ListenerManagerError::InvalidConfig { ref message })
-                if message.contains("rate limit")),
+            !matches!(other_result, Ok(EcdhOutcome::RateLimited)),
             "a fresh IP must not be rate-limited; got: {other_result:?}"
         );
     }
@@ -637,7 +652,7 @@ mod tests {
         let ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 45));
         let short = vec![0xCDu8; ECDH_REG_MIN_LEN - 1];
 
-        // Send many short bodies — they fall through (Ok(None)) without
+        // Send many short bodies — they fall through (NotEcdh) without
         // consuming budget.
         for _ in 0..(MAX_ECDH_REGISTRATIONS_PER_IP * 2) {
             let result = process_ecdh_packet(
@@ -653,7 +668,7 @@ mod tests {
             )
             .await;
             assert!(
-                matches!(result, Ok(None)),
+                matches!(result, Ok(EcdhOutcome::NotEcdh)),
                 "short body must fall through to Archon path; got: {result:?}"
             );
         }
@@ -733,7 +748,7 @@ mod tests {
             )
             .await;
             assert!(
-                matches!(result, Ok(None)),
+                matches!(result, Ok(EcdhOutcome::NotEcdh)),
                 "no-keypair must fall through to Archon; got: {result:?}"
             );
         }
@@ -834,7 +849,10 @@ mod tests {
         )
         .await
         .expect("registration should succeed");
-        assert!(resp.is_some(), "expected registration response");
+        assert!(
+            matches!(resp, EcdhOutcome::Handled(_)),
+            "expected registration response; got: {resp:?}"
+        );
 
         assert!(
             registry.is_seq_protected(agent_id).await,

@@ -17,7 +17,7 @@ use super::body::{
     allow_demon_init_for_ip, collect_body_with_magic_precheck, is_valid_callback_request,
 };
 use super::dispatch::{DemonHttpDisposition, process_demon_transport};
-use super::ecdh_dispatch::process_ecdh_packet;
+use super::ecdh_dispatch::{EcdhOutcome, process_ecdh_packet};
 use super::proxy::extract_external_ip;
 
 pub(super) async fn http_listener_handler(
@@ -78,15 +78,20 @@ pub(super) async fn http_listener_handler(
         )
         .await
         {
-            Ok(Some(ecdh_resp)) => {
+            Ok(EcdhOutcome::Handled(ecdh_resp)) => {
                 return if ecdh_resp.payload.is_empty() {
                     state.callback_empty_response()
                 } else {
                     state.callback_bytes_response(&ecdh_resp.payload)
                 };
             }
-            Ok(None) => {
+            Ok(EcdhOutcome::NotEcdh) => {
                 // Not an ECDH packet — fall through to Archon handler below.
+            }
+            Ok(EcdhOutcome::RateLimited) => {
+                // The helper already emitted a structured WARN; returning a
+                // fake 404 here avoids a second log line per rejected packet.
+                return state.fake_404_response();
             }
             Err(error) => {
                 warn!(listener = %state.config.name, %error, "ECDH packet processing failed");

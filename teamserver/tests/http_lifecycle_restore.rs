@@ -111,8 +111,8 @@ async fn restore_running_with_port_in_use_transitions_to_error_state()
 }
 
 #[tokio::test]
-async fn restore_running_failure_halts_before_remaining_listeners()
--> Result<(), Box<dyn std::error::Error>> {
+async fn restore_running_continues_past_failed_listener() -> Result<(), Box<dyn std::error::Error>>
+{
     let database = Database::connect_in_memory().await?;
     let (port_fail, guard_fail) = common::available_port()?;
     let (port_ok, guard_ok) = common::available_port_excluding(port_fail)?;
@@ -120,7 +120,7 @@ async fn restore_running_failure_halts_before_remaining_listeners()
     // Seed two listeners as Running in the DB.  Names are chosen so that the
     // failing listener ("lc-restore-aa-fail") sorts before the healthy one
     // ("lc-restore-bb-ok") in the `ORDER BY name` iteration that
-    // `restore_running` uses.
+    // `restore_running` uses — the failing listener is attempted first.
     {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
@@ -158,16 +158,68 @@ async fn restore_running_failure_halts_before_remaining_listeners()
         "the failing listener must record an error message"
     );
 
-    // Because restore_running returns early on the first bind failure, the
-    // second listener is never attempted — it still has its stale Running
-    // status from the previous session, with no live runtime behind it.
+    // After the fix, restore_running must continue past the failed listener
+    // and attempt every remaining persisted Running listener.  The second
+    // listener binds a free port and should be live.
     let ok_summary = restored.summary("lc-restore-bb-ok").await?;
     assert_eq!(
         ok_summary.state.status,
         ListenerStatus::Running,
-        "the second listener is left with stale Running state (early return)"
+        "the second listener must be started even when an earlier one fails"
+    );
+    timeout(Duration::from_secs(2), common::wait_for_listener(port_ok)).await??;
+
+    restored.stop("lc-restore-bb-ok").await?;
+    drop(guard_fail);
+    Ok(())
+}
+
+#[tokio::test]
+async fn restore_running_transitions_all_failing_listeners_to_error()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = Database::connect_in_memory().await?;
+    let (port_a, guard_a) = common::available_port()?;
+    let (port_b, guard_b) = common::available_port_excluding(port_a)?;
+
+    // Seed two listeners as Running in the DB — both will fail to bind because
+    // the guards keep the ports occupied for the duration of the restore.
+    {
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let manager = ListenerManager::new(database.clone(), registry, events, sockets, None)
+            .with_demon_allow_legacy_ctr(true);
+        manager.create(http_config("lc-restore-fail-a", port_a)).await?;
+        manager.create(http_config("lc-restore-fail-b", port_b)).await?;
+        manager.repository().set_state("lc-restore-fail-a", ListenerStatus::Running, None).await?;
+        manager.repository().set_state("lc-restore-fail-b", ListenerStatus::Running, None).await?;
+    }
+
+    let registry = AgentRegistry::new(database.clone());
+    let events = EventBus::default();
+    let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+    let restored = ListenerManager::new(database, registry, events, sockets, None)
+        .with_demon_allow_legacy_ctr(true);
+
+    let result = restored.restore_running().await;
+    assert!(
+        result.is_err(),
+        "restore_running must return an error when any listener fails to rebind"
     );
 
-    drop(guard_fail);
+    // Both listeners must have been attempted and transitioned to Error — no
+    // stale Running rows may be left behind by an early return.
+    for name in ["lc-restore-fail-a", "lc-restore-fail-b"] {
+        let summary = restored.summary(name).await?;
+        assert_eq!(
+            summary.state.status,
+            ListenerStatus::Error,
+            "listener {name} must be attempted and transitioned to Error"
+        );
+        assert!(summary.state.last_error.is_some(), "listener {name} must record an error message");
+    }
+
+    drop(guard_a);
+    drop(guard_b);
     Ok(())
 }

@@ -593,20 +593,30 @@ impl ListenerManager {
     }
 
     /// Start listeners that were last persisted in the running state.
+    ///
+    /// Every persisted `Running` listener is attempted, even if earlier ones
+    /// fail to start.  `start()` already transitions a failed listener to
+    /// `Error` in the database with a descriptive `last_error` message, so
+    /// continuing the loop ensures no listener is left stranded in a stale
+    /// `Running` state without a live runtime behind it.  If any listener
+    /// failed to start, the first error is returned after the full pass.
     #[instrument(skip(self))]
     pub async fn restore_running(&self) -> Result<(), ListenerManagerError> {
         let listeners = self.repository().list().await?;
 
+        let mut first_error: Option<ListenerManagerError> = None;
         for listener in listeners {
-            if listener.state.status == ListenerStatus::Running {
-                match self.start(&listener.name).await {
-                    Ok(_) => {}
-                    Err(error) => return Err(error),
-                }
+            if listener.state.status == ListenerStatus::Running
+                && let Err(error) = self.start(&listener.name).await
+            {
+                first_error.get_or_insert(error);
             }
         }
 
-        Ok(())
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     async fn delete_removed_profile_listener_locked(

@@ -147,6 +147,63 @@ async fn reregister_full_resets_last_seen_seq() -> Result<(), TeamserverError> {
     Ok(())
 }
 
+/// Regression test for red-cell-c2-z1ot9: `reregister_full` must persist
+/// `seq_protected` to the DB and update the in-memory atomic in a single
+/// step so that [`AgentRegistry::is_seq_protected`] and the SQLite row can
+/// never disagree after a re-init. Covers both transitions (false→true and
+/// true→false) since the parent bug allowed either direction to diverge if
+/// the two-step pattern was reintroduced.
+#[tokio::test]
+async fn reregister_full_persists_seq_protected_atomically() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let registry = AgentRegistry::new(database.clone());
+    let key = test_key(0xEA);
+    let iv = test_iv(0xFA);
+    let mut agent = sample_agent_with_crypto(0x200A_000A, key, iv);
+    agent.active = true;
+    registry.insert_full(agent.clone(), "http", 0, false, false, false).await?;
+
+    // Pre-condition: starts unprotected in both memory and DB.
+    assert!(
+        !registry.is_seq_protected(agent.agent_id).await,
+        "fresh agent must not be seq-protected in memory"
+    );
+    let persisted =
+        database.agents().get_persisted(agent.agent_id).await?.expect("agent must exist");
+    assert!(!persisted.seq_protected, "fresh agent must not be seq-protected in DB");
+
+    // Re-register simulating an INIT_EXT_SEQ_PROTECTED upgrade (false → true).
+    registry.reregister_full(agent.clone(), "http", false, true).await?;
+
+    assert!(
+        registry.is_seq_protected(agent.agent_id).await,
+        "is_seq_protected must reflect the upgrade in memory"
+    );
+    let persisted =
+        database.agents().get_persisted(agent.agent_id).await?.expect("agent must exist");
+    assert!(
+        persisted.seq_protected,
+        "seq_protected must be persisted to DB by the same reregister_full call \
+         — in-memory and DB state must not diverge"
+    );
+
+    // Inverse direction: re-register without the seq-protection flag (true → false).
+    registry.reregister_full(agent.clone(), "http", false, false).await?;
+
+    assert!(
+        !registry.is_seq_protected(agent.agent_id).await,
+        "is_seq_protected must reflect the downgrade in memory"
+    );
+    let persisted =
+        database.agents().get_persisted(agent.agent_id).await?.expect("agent must exist");
+    assert!(
+        !persisted.seq_protected,
+        "seq_protected=false must be persisted to DB on the downgrade re-registration"
+    );
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn is_seq_protected_returns_false_for_unknown_agent() {
     let registry = AgentRegistry::new(test_database().await.expect("db"));

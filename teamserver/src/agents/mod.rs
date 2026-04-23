@@ -172,6 +172,14 @@ impl AgentRegistry {
             });
         }
 
+        // Reconstruct `ecdh_transport` from persisted ECDH sessions.  Phantom/
+        // Specter agents created via `process_ecdh_registration` always have at
+        // least one row in `ts_ecdh_sessions`, so their presence identifies an
+        // ECDH transport agent across teamserver restarts.  Without this,
+        // `handle_get_job` would fall back to legacy AES-CTR encryption of job
+        // payloads and break the ECDH AES-256-GCM envelope the agent expects.
+        let ecdh_agent_ids = database.ecdh().list_agent_ids_with_sessions().await?;
+
         let registry = Self::with_max_registered_agents(database.clone(), max_registered_agents);
         let links = database.links().list().await?;
         let mut entries = registry.entries.write().await;
@@ -179,6 +187,7 @@ impl AgentRegistry {
         let mut child_links = registry.child_links.write().await;
 
         for agent in agents {
+            let ecdh_transport = ecdh_agent_ids.contains(&agent.info.agent_id);
             entries.insert(
                 agent.info.agent_id,
                 Arc::new(AgentEntry::new(
@@ -188,7 +197,7 @@ impl AgentRegistry {
                     agent.legacy_ctr,
                     agent.last_seen_seq,
                     agent.seq_protected,
-                    false, // ecdh_transport: legacy-loaded agents use Demon protocol
+                    ecdh_transport,
                 )),
             );
         }

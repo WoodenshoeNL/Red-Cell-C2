@@ -207,6 +207,29 @@ impl EcdhRepository {
             .map_err(TeamserverError::Sqlx)?;
         Ok(())
     }
+
+    /// Return the distinct set of `agent_id`s that currently have at least one
+    /// persisted ECDH session.  Used on teamserver startup to restore the
+    /// `ecdh_transport` flag for Phantom/Specter agents: an agent with any
+    /// session row in `ts_ecdh_sessions` is an ECDH agent, so its job payloads
+    /// must not be double-encrypted with the legacy AES-CTR path.
+    pub async fn list_agent_ids_with_sessions(
+        &self,
+    ) -> Result<std::collections::HashSet<u32>, TeamserverError> {
+        let rows: Vec<(i64,)> = sqlx::query_as("SELECT DISTINCT agent_id FROM ts_ecdh_sessions")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(TeamserverError::Sqlx)?;
+
+        let mut ids = std::collections::HashSet::with_capacity(rows.len());
+        for (agent_id_i64,) in rows {
+            let agent_id = u32::try_from(agent_id_i64).map_err(|_| {
+                TeamserverError::Internal(format!("ECDH session agent_id overflow: {agent_id_i64}"))
+            })?;
+            ids.insert(agent_id);
+        }
+        Ok(ids)
+    }
 }
 
 fn now_secs() -> i64 {

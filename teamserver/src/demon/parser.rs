@@ -270,10 +270,9 @@ impl DemonPacketParser {
                 return Err(DemonParserError::LegacyCtrNotAllowed);
             }
 
-            self.registry.insert_full(agent.clone(), listener_name, 0, legacy_ctr, false).await?;
-            if seq_protected {
-                self.registry.set_seq_protected(envelope.header.agent_id, seq_protected).await?;
-            }
+            self.registry
+                .insert_full(agent.clone(), listener_name, 0, legacy_ctr, false, seq_protected)
+                .await?;
 
             return Ok(ParsedDemonPacket::Init(Box::new(ParsedDemonInit {
                 header: envelope.header,

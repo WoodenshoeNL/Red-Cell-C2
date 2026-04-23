@@ -43,7 +43,9 @@ fn stub_agent(agent_id: u32) -> AgentRecord {
 async fn create_full_persists_listener_ctr_offset_and_legacy_ctr() {
     let db = Database::connect_in_memory().await.expect("db");
     let repo = db.agents();
-    repo.create_full(&stub_agent(0xAA), "https-listener", 42, true).await.expect("create_full");
+    repo.create_full(&stub_agent(0xAA), "https-listener", 42, true, false)
+        .await
+        .expect("create_full");
     let persisted = repo.get_persisted(0xAA).await.expect("get").expect("should exist");
     assert_eq!(persisted.listener_name, "https-listener");
     assert_eq!(persisted.ctr_block_offset, 42);
@@ -66,7 +68,7 @@ async fn set_legacy_ctr_on_missing_agent_returns_agent_not_found() {
 async fn toggle_legacy_ctr_preserves_other_fields() {
     let db = Database::connect_in_memory().await.expect("db");
     let repo = db.agents();
-    repo.create_full(&stub_agent(0xBB), "smb-pipe", 99, true).await.expect("create_full");
+    repo.create_full(&stub_agent(0xBB), "smb-pipe", 99, true, false).await.expect("create_full");
     repo.set_legacy_ctr(0xBB, false).await.expect("set_legacy_ctr");
     let persisted = repo.get_persisted(0xBB).await.expect("get").expect("should exist");
     assert!(!persisted.legacy_ctr, "legacy_ctr should now be false");
@@ -78,7 +80,9 @@ async fn toggle_legacy_ctr_preserves_other_fields() {
 async fn set_status_persists_active_and_reason() {
     let db = Database::connect_in_memory().await.expect("db");
     let repo = db.agents();
-    repo.create_full(&stub_agent(0xCC), "https-listener", 0, false).await.expect("create_full");
+    repo.create_full(&stub_agent(0xCC), "https-listener", 0, false, false)
+        .await
+        .expect("create_full");
     repo.set_status(0xCC, false, "timed out").await.expect("set_status");
     let persisted = repo.get_persisted(0xCC).await.expect("get").expect("should exist");
     assert!(!persisted.info.active, "active should be false after set_status");

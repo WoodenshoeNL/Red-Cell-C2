@@ -73,16 +73,21 @@ impl AgentRepository {
         listener_name: &str,
         ctr_block_offset: u64,
     ) -> Result<(), TeamserverError> {
-        self.create_full(agent, listener_name, ctr_block_offset, false).await
+        self.create_full(agent, listener_name, ctr_block_offset, false, false).await
     }
 
     /// Insert a new agent row with all transport parameters.
+    ///
+    /// `seq_protected` records whether the agent negotiated callback sequence-number
+    /// replay protection (via the `INIT_EXT_SEQ_PROTECTED` extension flag) and is
+    /// persisted atomically with the agent row.
     pub async fn create_full(
         &self,
         agent: &AgentRecord,
         listener_name: &str,
         ctr_block_offset: u64,
         legacy_ctr: bool,
+        seq_protected: bool,
     ) -> Result<(), TeamserverError> {
         let enc_key = self.master_key.encrypt(&agent.encryption.aes_key)?;
         let enc_iv = self.master_key.encrypt(&agent.encryption.aes_iv)?;
@@ -93,6 +98,7 @@ impl AgentRepository {
             listener_name,
             ctr_block_offset,
             legacy_ctr,
+            seq_protected,
             &enc_key,
             &enc_iv,
         )
@@ -405,6 +411,7 @@ pub(super) async fn insert_agent_row(
     listener_name: &str,
     ctr_block_offset: u64,
     legacy_ctr: bool,
+    seq_protected: bool,
     enc_key: &str,
     enc_iv: &str,
 ) -> Result<(), TeamserverError> {
@@ -453,7 +460,7 @@ pub(super) async fn insert_agent_row(
     .bind(&agent.first_call_in)
     .bind(&agent.last_call_in)
     .bind(0_i64) // last_seen_seq starts at 0
-    .bind(0_i64) // seq_protected defaults to false
+    .bind(super::bool_to_i64(seq_protected))
     .bind(agent.archon_magic.map(i64::from))
     .execute(executor)
     .await?;

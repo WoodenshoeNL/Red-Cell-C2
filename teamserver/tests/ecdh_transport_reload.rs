@@ -87,6 +87,7 @@ async fn load_restores_ecdh_transport_from_persisted_session()
                 0,     // ctr_block_offset
                 false, // legacy_ctr
                 true,  // ecdh_transport: this is a Phantom/Specter agent
+                false, // seq_protected
             )
             .await?;
 
@@ -134,7 +135,8 @@ async fn queued_job_for_restored_ecdh_agent_dispatches_plaintext()
                 "https-ecdh",
                 0,
                 false,
-                true, // ecdh_transport = true
+                true,  // ecdh_transport = true
+                false, // seq_protected
             )
             .await?;
         database.ecdh().store_session(&ConnectionId([0xEE; 16]), agent_id, &[0x77_u8; 32]).await?;

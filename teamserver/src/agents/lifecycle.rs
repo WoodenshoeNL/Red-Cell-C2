@@ -39,7 +39,7 @@ impl AgentRegistry {
         listener_name: &str,
         ctr_block_offset: u64,
     ) -> Result<(), TeamserverError> {
-        self.insert_full(agent, listener_name, ctr_block_offset, false, false).await
+        self.insert_full(agent, listener_name, ctr_block_offset, false, false, false).await
     }
 
     /// Insert a newly registered agent with explicit control over all transport parameters.
@@ -47,6 +47,11 @@ impl AgentRegistry {
     /// When `legacy_ctr` is `true`, AES-CTR resets to block offset 0 for every packet
     /// (Demon/Archon compatibility).  When `false`, the monotonic block offset advances
     /// across packets (Specter behaviour).
+    ///
+    /// `seq_protected` records whether the agent negotiated callback sequence-number
+    /// replay protection (`INIT_EXT_SEQ_PROTECTED`).  The flag is persisted atomically
+    /// with the agent row so that any logic keyed off [`AgentRegistry::is_seq_protected`]
+    /// sees the correct state from the moment the agent is registered.
     ///
     /// # Security warning — legacy CTR mode
     ///
@@ -61,7 +66,7 @@ impl AgentRegistry {
     /// `DEMON_INIT`.  **Use it only in controlled environments where traffic
     /// confidentiality is not a requirement.**  All new agent builds should set
     /// `INIT_EXT_MONOTONIC_CTR` so the teamserver registers them with `legacy_ctr = false`.
-    #[instrument(skip(self, agent, listener_name), fields(agent_id = format_args!("0x{:08X}", agent.agent_id), listener_name = %listener_name, ctr_block_offset, legacy_ctr))]
+    #[instrument(skip(self, agent, listener_name), fields(agent_id = format_args!("0x{:08X}", agent.agent_id), listener_name = %listener_name, ctr_block_offset, legacy_ctr, seq_protected))]
     pub async fn insert_full(
         &self,
         agent: AgentRecord,
@@ -69,6 +74,7 @@ impl AgentRegistry {
         ctr_block_offset: u64,
         legacy_ctr: bool,
         ecdh_transport: bool,
+        seq_protected: bool,
     ) -> Result<(), TeamserverError> {
         let mut entries = self.entries.write().await;
 
@@ -98,13 +104,16 @@ impl AgentRegistry {
             listener_name: listener_name.to_owned(),
             ctr_block_offset,
             legacy_ctr,
+            seq_protected,
         };
         let repo = self.repository.clone();
         let ln = listener_name.to_owned();
         self.persist_or_queue(deferred, || {
             let agent_ref = agent.clone();
             let ln = ln.clone();
-            async move { repo.create_full(&agent_ref, &ln, ctr_block_offset, legacy_ctr).await }
+            async move {
+                repo.create_full(&agent_ref, &ln, ctr_block_offset, legacy_ctr, seq_protected).await
+            }
         })
         .await?;
 
@@ -115,8 +124,8 @@ impl AgentRegistry {
                 listener_name.to_owned(),
                 ctr_block_offset,
                 legacy_ctr,
-                0,     // last_seen_seq starts at 0 for new agents
-                false, // seq_protected defaults to false (Demon/Archon compatibility)
+                0, // last_seen_seq starts at 0 for new agents
+                seq_protected,
                 ecdh_transport,
             )),
         );

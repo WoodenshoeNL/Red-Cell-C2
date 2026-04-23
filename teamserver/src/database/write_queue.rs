@@ -34,6 +34,8 @@ pub enum DeferredWrite {
         ctr_block_offset: u64,
         /// Whether legacy (reset-per-packet) CTR mode is active.
         legacy_ctr: bool,
+        /// Whether the agent negotiated callback sequence-number replay protection.
+        seq_protected: bool,
     },
     /// Update an agent row after re-registration.
     AgentReregisterFull {
@@ -178,10 +180,16 @@ impl WriteQueue {
 /// Replay a single deferred write against the database.
 async fn replay_write(database: &Database, write: &DeferredWrite) -> Result<(), TeamserverError> {
     match write {
-        DeferredWrite::AgentCreateFull { agent, listener_name, ctr_block_offset, legacy_ctr } => {
+        DeferredWrite::AgentCreateFull {
+            agent,
+            listener_name,
+            ctr_block_offset,
+            legacy_ctr,
+            seq_protected,
+        } => {
             database
                 .agents()
-                .create_full(agent, listener_name, *ctr_block_offset, *legacy_ctr)
+                .create_full(agent, listener_name, *ctr_block_offset, *legacy_ctr, *seq_protected)
                 .await
         }
         DeferredWrite::AgentReregisterFull { agent, listener_name, legacy_ctr } => {

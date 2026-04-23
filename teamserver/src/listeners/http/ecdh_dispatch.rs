@@ -167,7 +167,7 @@ async fn process_ecdh_registration(
     let now = OffsetDateTime::now_utc();
     let external_ip_str = external_ip.to_string();
 
-    let (agent, legacy_ctr, _seq_protected) =
+    let (agent, legacy_ctr, seq_protected) =
         parse_ecdh_agent_metadata(metadata, &external_ip_str, now).map_err(|e| {
             ListenerManagerError::InvalidConfig {
                 message: format!("ECDH metadata parse failed: {e}"),
@@ -178,11 +178,12 @@ async fn process_ecdh_registration(
 
     // Register in registry + DB.  The ECDH agent has no AES key — use zeros
     // (the session key is stored separately in ts_ecdh_sessions).
-    registry.insert_full(agent.clone(), listener_name, 0, legacy_ctr, true).await.map_err(|e| {
-        ListenerManagerError::InvalidConfig {
+    registry
+        .insert_full(agent.clone(), listener_name, 0, legacy_ctr, true, seq_protected)
+        .await
+        .map_err(|e| ListenerManagerError::InvalidConfig {
             message: format!("ECDH agent registry insert failed: {e}"),
-        }
-    })?;
+        })?;
 
     // Persist ECDH session: connection_id → (agent_id, session_key).
     let connection_id =
@@ -742,5 +743,144 @@ mod tests {
             0,
             "no-keypair path must not touch the limiter"
         );
+    }
+
+    // ── ECDH registration seq_protected persistence ─────────────────────
+    //
+    // Helpers for building valid ECDH init metadata inline — the demon
+    // test module is private, so we reconstruct the payload layout here.
+
+    fn put_u32_be(buf: &mut Vec<u8>, v: u32) {
+        buf.extend_from_slice(&v.to_be_bytes());
+    }
+
+    fn put_u64_be(buf: &mut Vec<u8>, v: u64) {
+        buf.extend_from_slice(&v.to_be_bytes());
+    }
+
+    fn put_str_be(buf: &mut Vec<u8>, s: &str) {
+        let bytes = s.as_bytes();
+        put_u32_be(buf, u32::try_from(bytes.len()).expect("str len fits in u32"));
+        buf.extend_from_slice(bytes);
+    }
+
+    fn put_utf16_be(buf: &mut Vec<u8>, s: &str) {
+        let utf16: Vec<u16> = s.encode_utf16().collect();
+        let nbytes = utf16.len() * 2;
+        put_u32_be(buf, u32::try_from(nbytes).expect("utf16 len fits in u32"));
+        for unit in utf16 {
+            buf.extend_from_slice(&unit.to_be_bytes());
+        }
+    }
+
+    fn build_ecdh_init_metadata(agent_id: u32, ext_flags: u32) -> Vec<u8> {
+        let mut m = Vec::new();
+        put_u32_be(&mut m, agent_id);
+        put_str_be(&mut m, "wkstn-01");
+        put_str_be(&mut m, "operator");
+        put_str_be(&mut m, "REDCELL");
+        put_str_be(&mut m, "10.0.0.25");
+        put_utf16_be(&mut m, "C:\\Windows\\explorer.exe");
+        put_u32_be(&mut m, 1337); // process_pid
+        put_u32_be(&mut m, 1338); // process_tid
+        put_u32_be(&mut m, 512); // process_ppid
+        put_u32_be(&mut m, 2); // process_arch
+        put_u32_be(&mut m, 1); // elevated
+        put_u64_be(&mut m, 0x0040_1000); // base_address
+        put_u32_be(&mut m, 10); // os major
+        put_u32_be(&mut m, 0); // os minor
+        put_u32_be(&mut m, 1); // os product type
+        put_u32_be(&mut m, 0); // os service pack
+        put_u32_be(&mut m, 22000); // os build
+        put_u32_be(&mut m, 9); // os arch
+        put_u32_be(&mut m, 15); // sleep delay
+        put_u32_be(&mut m, 20); // sleep jitter
+        put_u64_be(&mut m, 1_893_456_000); // kill date
+        m.extend_from_slice(&0_i32.to_be_bytes()); // working hours
+        put_u32_be(&mut m, ext_flags);
+        m
+    }
+
+    /// Regression for red-cell-c2-pivna: an ECDH registration that sets
+    /// `INIT_EXT_SEQ_PROTECTED` must register the agent with
+    /// `seq_protected = true` both in the in-memory registry and in the
+    /// persisted row, so `handle_checkin` does not emit a bogus replay
+    /// warning and any future logic keyed off `is_seq_protected()` sees
+    /// the correct state.
+    #[tokio::test]
+    async fn ecdh_registration_persists_seq_protected_flag() {
+        use crate::demon::{INIT_EXT_MONOTONIC_CTR, INIT_EXT_SEQ_PROTECTED};
+
+        let (db, registry, events, _dispatcher, keypair, _limiter) = ecdh_test_fixture().await;
+        let agent_id: u32 = 0xFEED_BEEF;
+        let metadata =
+            build_ecdh_init_metadata(agent_id, INIT_EXT_MONOTONIC_CTR | INIT_EXT_SEQ_PROTECTED);
+        let (packet, _session_key) =
+            build_registration_packet(&keypair.public_bytes, &metadata).expect("build packet");
+
+        let limiter = EcdhRegistrationRateLimiter::new();
+        let ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 99));
+        let dispatcher = CommandDispatcher::new();
+        let resp = process_ecdh_packet(
+            "test-listener",
+            Some(&keypair),
+            &registry,
+            &db,
+            &events,
+            &dispatcher,
+            &limiter,
+            &packet,
+            ip,
+        )
+        .await
+        .expect("registration should succeed");
+        assert!(resp.is_some(), "expected registration response");
+
+        assert!(
+            registry.is_seq_protected(agent_id).await,
+            "ECDH registration with INIT_EXT_SEQ_PROTECTED must set registry.is_seq_protected = true"
+        );
+
+        let persisted =
+            db.agents().get_persisted(agent_id).await.expect("db query").expect("agent row");
+        assert!(
+            persisted.seq_protected,
+            "ECDH registration with INIT_EXT_SEQ_PROTECTED must persist seq_protected = true"
+        );
+    }
+
+    /// Counterpart: an ECDH registration that does NOT set
+    /// `INIT_EXT_SEQ_PROTECTED` must leave `seq_protected = false`.
+    #[tokio::test]
+    async fn ecdh_registration_without_seq_protected_flag_defaults_false() {
+        use crate::demon::INIT_EXT_MONOTONIC_CTR;
+
+        let (db, registry, events, _dispatcher, keypair, _limiter) = ecdh_test_fixture().await;
+        let agent_id: u32 = 0xC0FF_EE01;
+        let metadata = build_ecdh_init_metadata(agent_id, INIT_EXT_MONOTONIC_CTR);
+        let (packet, _session_key) =
+            build_registration_packet(&keypair.public_bytes, &metadata).expect("build packet");
+
+        let limiter = EcdhRegistrationRateLimiter::new();
+        let ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 100));
+        let dispatcher = CommandDispatcher::new();
+        process_ecdh_packet(
+            "test-listener",
+            Some(&keypair),
+            &registry,
+            &db,
+            &events,
+            &dispatcher,
+            &limiter,
+            &packet,
+            ip,
+        )
+        .await
+        .expect("registration should succeed");
+
+        assert!(!registry.is_seq_protected(agent_id).await);
+        let persisted =
+            db.agents().get_persisted(agent_id).await.expect("db query").expect("agent row");
+        assert!(!persisted.seq_protected);
     }
 }

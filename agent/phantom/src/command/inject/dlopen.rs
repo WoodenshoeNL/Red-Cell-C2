@@ -3,7 +3,7 @@
 use std::fs;
 
 /// Find the base address of libc in a target process by parsing `/proc/<pid>/maps`.
-pub(crate) fn find_libc_base(pid: u32) -> Option<u64> {
+pub(super) fn find_libc_base(pid: u32) -> Option<u64> {
     let maps = fs::read_to_string(format!("/proc/{pid}/maps")).ok()?;
     for line in maps.lines() {
         if (line.contains("libc.so") || line.contains("libc-")) && line.contains("r-xp") {
@@ -19,7 +19,7 @@ pub(crate) fn find_libc_base(pid: u32) -> Option<u64> {
 /// We find the offset in our own libc and combine it with the target's libc
 /// base address. This works because both processes load the same libc version
 /// (same system).
-pub(crate) fn resolve_dlopen_in_target(target_libc_base: u64) -> Option<u64> {
+pub(super) fn resolve_dlopen_in_target(target_libc_base: u64) -> Option<u64> {
     // Find our own libc base.
     let our_libc_base = find_libc_base(std::process::id())?;
 

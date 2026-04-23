@@ -10,11 +10,24 @@ use crate::error::PhantomError;
 
 // Re-export items consumed by command/mod.rs tests.
 #[cfg(test)]
-pub(super) use dlopen::{find_libc_base, resolve_dlopen_in_target};
+pub(super) fn find_libc_base(pid: u32) -> Option<u64> {
+    dlopen::find_libc_base(pid)
+}
+
 #[cfg(test)]
-pub(super) use ptrace::check_ptrace_permission;
+pub(super) fn resolve_dlopen_in_target(target_libc_base: u64) -> Option<u64> {
+    dlopen::resolve_dlopen_in_target(target_libc_base)
+}
+
 #[cfg(test)]
-pub(super) use ptrace::read_from_proc_mem;
+pub(super) fn check_ptrace_permission(target_pid: u32) -> bool {
+    ptrace::check_ptrace_permission(target_pid)
+}
+
+#[cfg(test)]
+pub(super) fn read_from_proc_mem(pid: u32, addr: u64, len: usize) -> std::io::Result<Vec<u8>> {
+    ptrace::read_from_proc_mem(pid, addr, len)
+}
 
 /// Injection way: spawn a new sacrificial process and inject into it.
 const INJECT_WAY_SPAWN: i32 = 0;

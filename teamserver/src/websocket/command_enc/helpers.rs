@@ -16,7 +16,7 @@ pub fn parse_injection_way(value: &str) -> Result<DemonInjectWay, AgentCommandEr
 }
 
 pub fn parse_memory_protection(value: &str) -> Result<u32, AgentCommandError> {
-    match value.to_ascii_uppercase().as_str() {
+    match value.trim().to_ascii_uppercase().as_str() {
         "PAGE_NOACCESS" => Ok(0x01),
         "PAGE_READONLY" => Ok(0x02),
         "PAGE_READWRITE" => Ok(0x04),
@@ -170,6 +170,11 @@ mod tests {
     #[test]
     fn parse_memory_protection_case_insensitive() {
         assert_eq!(parse_memory_protection("page_readwrite").unwrap(), 0x04);
+    }
+
+    #[test]
+    fn parse_memory_protection_trims_whitespace() {
+        assert_eq!(parse_memory_protection(" PAGE_READWRITE ").unwrap(), 0x04);
     }
 
     #[test]

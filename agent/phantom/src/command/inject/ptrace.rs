@@ -101,7 +101,7 @@ pub(super) fn read_from_proc_mem(pid: u32, addr: u64, len: usize) -> std::io::Re
 /// with another `PTRACE_CONT` so they are not silently dropped.
 ///
 /// Returns `true` when the tracee stops with `SIGTRAP`; `false` if the process exits,
-/// is killed, or `waitpid` fails.
+/// is killed, `waitpid` fails, or `PTRACE_CONT` fails while forwarding a signal.
 pub(super) fn wait_for_sigtrap(pid: i32) -> bool {
     loop {
         let mut status: i32 = 0;
@@ -117,7 +117,7 @@ pub(super) fn wait_for_sigtrap(pid: i32) -> bool {
             }
             // Forward the pending signal and continue waiting.
             // SAFETY: valid pid, tracee is stopped under ptrace.
-            unsafe {
+            let cont_ret = unsafe {
                 libc::ptrace(
                     libc::PTRACE_CONT,
                     pid,
@@ -125,6 +125,9 @@ pub(super) fn wait_for_sigtrap(pid: i32) -> bool {
                     sig as usize as *mut libc::c_void,
                 )
             };
+            if cont_ret < 0 {
+                return false;
+            }
         } else {
             // Process exited or was killed before reaching int3.
             return false;

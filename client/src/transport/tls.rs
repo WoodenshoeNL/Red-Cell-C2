@@ -209,7 +209,10 @@ pub(super) fn build_tls_connector(
             warn!(
                 "TLS certificate verification is DISABLED — connections are vulnerable to MITM attacks"
             );
-            let verifier = Arc::new(DangerousCertificateVerifier { provider: provider.clone() });
+            let verifier = Arc::new(DangerousCertificateVerifier {
+                provider: provider.clone(),
+                fingerprint_sink,
+            });
             ClientConfig::builder_with_provider(provider.into())
                 .with_safe_default_protocol_versions()
                 .map_err(|error| TransportError::Rustls(Box::new(error)))?
@@ -351,19 +354,24 @@ impl ServerCertVerifier for FingerprintCertificateVerifier {
 /// Accepts any server certificate without verification. Only used when the operator
 /// explicitly passes `--accept-invalid-certs`.
 #[derive(Debug)]
-struct DangerousCertificateVerifier {
-    provider: crypto::CryptoProvider,
+pub(super) struct DangerousCertificateVerifier {
+    pub(super) provider: crypto::CryptoProvider,
+    pub(super) fingerprint_sink: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl ServerCertVerifier for DangerousCertificateVerifier {
     fn verify_server_cert(
         &self,
-        _end_entity: &CertificateDer<'_>,
+        end_entity: &CertificateDer<'_>,
         _intermediates: &[CertificateDer<'_>],
         _server_name: &ServerName<'_>,
         _ocsp_response: &[u8],
         _now: UnixTime,
     ) -> Result<ServerCertVerified, tokio_rustls::rustls::Error> {
+        let fp = certificate_fingerprint(end_entity.as_ref());
+        if let Ok(mut sink) = self.fingerprint_sink.lock() {
+            *sink = Some(fp);
+        }
         Ok(ServerCertVerified::assertion())
     }
 

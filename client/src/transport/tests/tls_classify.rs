@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use red_cell_common::tls::{TlsKeyAlgorithm, generate_self_signed_tls_identity};
-use tokio_rustls::rustls::client::danger::ServerCertVerifier;
+use tokio_rustls::rustls::client::danger::ServerCertVerifier as _;
 use tokio_rustls::rustls::crypto::aws_lc_rs;
 use tokio_rustls::rustls::pki_types::{ServerName, UnixTime};
 
@@ -169,6 +169,41 @@ fn build_tls_connector_succeeds_for_dangerous_skip_verify() {
     let sink = Arc::new(std::sync::Mutex::new(None));
     let result = build_tls_connector(&TlsVerification::DangerousSkipVerify, sink);
     assert!(result.is_ok(), "DangerousSkipVerify mode should build successfully");
+}
+
+#[test]
+fn dangerous_verifier_captures_fingerprint_into_sink() {
+    red_cell_common::tls::install_default_crypto_provider();
+    let identity =
+        generate_self_signed_tls_identity(&["test.local".to_owned()], TlsKeyAlgorithm::EcdsaP256)
+            .expect("identity generation should succeed");
+
+    let cert_der = {
+        let mut reader = std::io::BufReader::new(identity.certificate_pem());
+        let certs = rustls_pemfile::certs(&mut reader)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("cert PEM should parse");
+        certs.into_iter().next().expect("should have one cert")
+    };
+    let expected_fingerprint = certificate_fingerprint(cert_der.as_ref());
+
+    let provider = aws_lc_rs::default_provider();
+    let sink = Arc::new(std::sync::Mutex::new(None));
+    let verifier = DangerousCertificateVerifier { provider, fingerprint_sink: Arc::clone(&sink) };
+
+    let result = verifier.verify_server_cert(
+        &cert_der,
+        &[],
+        &ServerName::try_from("test.local").expect("valid server name"),
+        &[],
+        UnixTime::now(),
+    );
+    assert!(result.is_ok(), "DangerousCertificateVerifier should always accept");
+    assert_eq!(
+        sink.lock().unwrap().as_deref(),
+        Some(expected_fingerprint.as_str()),
+        "fingerprint sink must be populated even in dangerous skip-verify mode"
+    );
 }
 
 #[test]

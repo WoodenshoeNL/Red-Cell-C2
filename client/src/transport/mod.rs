@@ -8,9 +8,9 @@ pub(crate) use tls::{TlsVerification, classify_tls_error, classify_tls_failure_k
 use tls::{build_tls_connector, is_tls_cert_error, normalize_server_url};
 
 #[cfg(test)]
-use tls::FingerprintCertificateVerifier;
-#[cfg(test)]
 pub(crate) use tls::certificate_fingerprint;
+#[cfg(test)]
+use tls::{DangerousCertificateVerifier, FingerprintCertificateVerifier};
 
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, MutexGuard};

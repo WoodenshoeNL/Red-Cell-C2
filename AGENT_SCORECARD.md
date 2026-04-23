@@ -23,11 +23,11 @@ Each loop run updates the running totals and appends a review entry.
 | unwrap / expect in production | 16 | 0 | 0 |
 | Missing tests / stale tests | 83 | 22 | 7 |
 | Clippy warnings | 16 | 0 | 2 |
-| Protocol errors | 30 | 32 | 4 |
-| Security issues | 70 | 40 | 0 |
+| Protocol errors | 32 | 32 | 4 |
+| Security issues | 71 | 40 | 0 |
 | Architecture drift | 66 | 25 | 9 |
 | Memory / resource leaks | 16 | 11 | 1 |
-| Startup / lifecycle regressions | 4 | 10 | 0 |
+| Startup / lifecycle regressions | 5 | 10 | 0 |
 | Test infrastructure / flakiness | 66 | 6 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 5 | 5 | 0 |
@@ -41,6 +41,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-04-23 11:20
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 4 | security (1), protocol errors (2), startup/lifecycle regressions (1) | ECDH registration bypasses the per-IP init limiter on non-legacy HTTP listeners (red-cell-c2-ej4up, P1); restored agents lose `ecdh_transport` state and `handle_get_job` falls back to legacy AES after restart (red-cell-c2-qo8fd, P2); `restore_running()` aborts on the first failed listener and leaves later persisted listeners stale `Running` (red-cell-c2-4wq31, P2); ECDH registration discards negotiated `seq_protected`, so Phantom/Specter sessions are misclassified as unprotected in shared paths like `handle_checkin` (red-cell-c2-pivna, P3). |
+| Codex | 0 | — | No attributed findings in this review. |
+| Cursor | 0 | — | No attributed findings in this review. |
+
+Overall codebase health: drifting
+Biggest blindspot: ECDH transport state and protections are still not wired through the same lifecycle and rate-limit paths that the legacy Demon transport already uses.
 
 ### QA Review — 2026-04-18 — c078eb63..592b3627
 

@@ -29,6 +29,16 @@ pub(super) fn read_from_proc_mem(pid: u32, addr: u64, len: usize) -> std::io::Re
     ptrace::read_from_proc_mem(pid, addr, len)
 }
 
+#[cfg(test)]
+pub(super) fn write_to_proc_mem(pid: u32, addr: u64, data: &[u8]) -> std::io::Result<()> {
+    ptrace::write_to_proc_mem(pid, addr, data)
+}
+
+#[cfg(test)]
+pub(super) fn wait_for_sigtrap(pid: i32) -> bool {
+    ptrace::wait_for_sigtrap(pid)
+}
+
 /// Injection way: spawn a new sacrificial process and inject into it.
 const INJECT_WAY_SPAWN: i32 = 0;
 /// Injection way: inject into an existing process by PID.

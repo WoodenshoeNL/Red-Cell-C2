@@ -37,7 +37,8 @@ use harvest::{
 #[cfg(test)]
 use inject::{
     INJECT_ERROR_FAILED, INJECT_WAY_EXECUTE, INJECT_WAY_INJECT, check_ptrace_permission,
-    find_libc_base, read_from_proc_mem, resolve_dlopen_in_target,
+    find_libc_base, read_from_proc_mem, resolve_dlopen_in_target, wait_for_sigtrap,
+    write_to_proc_mem,
 };
 #[cfg(test)]
 use persist::remove_shell_rc_block;

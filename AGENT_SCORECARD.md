@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1510 | 255 | 97 |
+| Tasks closed | 1591 | 278 | 97 |
 | Bugs filed against | 263 | 50 | 15 |
-| Bug rate (bugs/task) | 0.17 | 0.20 | 0.15 |
-| Quality score | 83% | 80% | 85% |
+| Bug rate (bugs/task) | 0.17 | 0.18 | 0.15 |
+| Quality score | 83% | 82% | 85% |
 
-*Bug rates: Claude 263/1510=0.1742→0.17, Codex 50/255=0.1961→0.20, Cursor 15/97=0.1546→0.15*
+*Bug rates: Claude 263/1591=0.1653→0.17, Codex 50/278=0.1799→0.18, Cursor 15/97=0.1546→0.15*
 
 ## Violation Breakdown
 
@@ -7265,3 +7265,17 @@ Build: **cargo check** — passed (clean). **cargo clippy -- -D warnings** — c
 **Issues filed this run:** 0 — no new bugs found.
 
 **Codebase health: excellent.** Clean autotest hardening sprint: hosts injection, scenario 14 cross-platform fixes, ECDH agent_id correctness, CARGO_TARGET_DIR isolation all landed cleanly. All 5647 tests pass with zero failures — best test pass rate in recent history. Claude quality score improved: 82% → 83% (263 bugs / 1510 tasks, bug rate 0.18 → 0.17).
+
+### QA Review — 2026-04-23 — fed9dd3f..4942e413
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 81 | 0 | Major large-file refactor sprint (35+ oversized files split across teamserver/client/client-cli/common/phantom/specter) + security hardening: ECDH session purge on agent cleanup (red-cell-c2-s4uot P2), DEMON_INIT rate limiting for Archon listeners (red-cell-c2-qx6mp P1), non-legacy body buffering fix (red-cell-c2-ig5oo), ECDH last_seen refresh after auth (red-cell-c2-vgv82), reserved agent_id 0 rejection (red-cell-c2-4c09m), autotest skipped-reason fixes across 8 scenarios. |
+| Codex | 23 | 0 | Specter socket command handler split (red-cell-c2-vi8fa), sockets test splits (nvxpj/caty2/mjvr9), specter rportfwd remove response tagging fix (red-cell-c2-4pt7u), phantom keytab v2 counted-string fix (red-cell-c2-l83mc), pivot pipe moved off Tokio workers, specter transfer state dedup, command_enc parse tests (red-cell-c2-cx5p5), DangerousCertificateVerifier fingerprint capture. |
+| Cursor | 0 | 0 | Claimed issues but no substantive commits in range. |
+
+Build: **cargo check** — passed (clean). **cargo clippy -- -D warnings** — clean (0 warnings). **cargo nextest run --workspace** — all tests passed (exit code 0).
+
+**Issues filed this run:** 0 — no new bugs found. Code quality excellent across all review dimensions: no production `unwrap`/`expect`, no `todo!`/`unimplemented!`, all security fixes correct and include regression tests.
+
+**Codebase health: excellent.** Large parallel sprint from two machines (tnpl + ncbt). Codex quality score improved: 80% → 82% (50 bugs / 278 tasks, bug rate dropped from 0.20 to 0.18 as Codex closed 23 more tasks without new bugs). Critical security fix: Archon DEMON_INIT per-IP rate limiter was bypassed due to wrong header parser — Claude (red-cell-c2-qx6mp) fixed it with 4 regression tests. All builds and tests clean.

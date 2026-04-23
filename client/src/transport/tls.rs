@@ -117,8 +117,6 @@ pub(crate) fn classify_tls_failure_kind(err: &str) -> TlsFailureKind {
         // Extract the stored (expected) fingerprint from the error message.
         // Format: "certificate fingerprint mismatch: expected <hex64>, got <hex64>"
         let stored = err
-            .strip_suffix(|_: char| false)
-            .unwrap_or(err)
             .split("expected ")
             .nth(1)
             .and_then(|s| s.split(',').next())

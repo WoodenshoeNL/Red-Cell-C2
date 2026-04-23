@@ -283,26 +283,14 @@ async fn inject_so_via_ptrace(pid: u32, so_path: &str) -> u32 {
             "__libc_dlopen_mode returned NULL (path missing, not executable, or bad dependency chain)"
         );
         ptrace_munmap_page(pid, &orig_regs, page_addr);
-        // SAFETY: PTRACE_SETREGS with valid pid and original register state.
-        unsafe {
-            libc::ptrace(
-                libc::PTRACE_SETREGS,
-                pid_i32,
-                0,
-                &orig_regs as *const libc::user_regs_struct,
-            );
-        }
+        // `ptrace_munmap_page` restores `orig_regs` (including on failed munmap stub runs).
         // SAFETY: PTRACE_DETACH with valid pid.
         unsafe { libc::ptrace(libc::PTRACE_DETACH, pid_i32, 0, 0) };
         return INJECT_ERROR_FAILED;
     }
 
     ptrace_munmap_page(pid, &orig_regs, page_addr);
-
-    // SAFETY: PTRACE_SETREGS with valid pid and original register state.
-    unsafe {
-        libc::ptrace(libc::PTRACE_SETREGS, pid_i32, 0, &orig_regs as *const libc::user_regs_struct)
-    };
+    // `ptrace_munmap_page` already applied PTRACE_SETREGS with `orig_regs` after a successful stub.
 
     // SAFETY: PTRACE_DETACH with valid pid.
     unsafe { libc::ptrace(libc::PTRACE_DETACH, pid_i32, 0, 0) };

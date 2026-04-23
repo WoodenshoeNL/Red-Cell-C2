@@ -245,6 +245,9 @@ pub(super) fn ptrace_mmap_page(pid: u32, regs: &libc::user_regs_struct) -> Optio
 /// Deallocate a page previously allocated with `ptrace_mmap_page` by executing
 /// a `munmap` syscall stub in the tracee. Best-effort — failure is logged but
 /// not fatal.
+///
+/// After any `PTRACE_CONT` that runs the stub, restores the tracee's code at
+/// `regs.rip` and applies `PTRACE_SETREGS` with `regs` so callers need not.
 pub(super) fn ptrace_munmap_page(pid: u32, regs: &libc::user_regs_struct, page_addr: u64) {
     let pid_i32 = pid as i32;
     let rip = regs.rip;
@@ -290,6 +293,10 @@ pub(super) fn ptrace_munmap_page(pid: u32, regs: &libc::user_regs_struct, page_a
         tracing::warn!(pid, "tracee did not reach SIGTRAP after munmap stub (exited or killed)");
         // Best-effort: try to restore original bytes even though the stub may not have completed.
         let _ = write_to_proc_mem(pid, rip, &orig_bytes);
+        // Tracee ran the stub (partially or not); restore saved register state before returning.
+        unsafe {
+            libc::ptrace(libc::PTRACE_SETREGS, pid_i32, 0, regs as *const libc::user_regs_struct);
+        }
         return;
     }
 

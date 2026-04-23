@@ -295,7 +295,5 @@ async fn spawn_and_inject_so(so_bytes: &[u8]) -> u32 {
         return INJECT_ERROR_FAILED;
     };
 
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
     inject_so_into_pid(child_pid, so_bytes).await
 }

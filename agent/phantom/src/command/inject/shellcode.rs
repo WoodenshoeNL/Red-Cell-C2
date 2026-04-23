@@ -165,8 +165,6 @@ async fn inject_shellcode_spawn(shellcode: &[u8]) -> u32 {
         return INJECT_ERROR_FAILED;
     };
 
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
     inject_shellcode_into_pid(child_pid, shellcode).await
 }
 

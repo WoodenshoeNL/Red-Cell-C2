@@ -131,9 +131,7 @@ async fn inline_execute_bof_ran_ok_broadcasts_event() {
             );
             assert_eq!(
                 extra.get("Message"),
-                Some(&serde_json::Value::String(
-                    "BOF execution completed".to_owned()
-                )),
+                Some(&serde_json::Value::String("BOF execution completed".to_owned())),
                 "BOF_RAN_OK should produce Message='BOF execution completed'"
             );
         }

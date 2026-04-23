@@ -1,14 +1,10 @@
 use super::super::PayloadBuildError;
 use super::define_utils::{format_config_bytes, validate_define};
-use red_cell_common::ListenerConfig;
+use red_cell_common::{HttpListenerConfig, ListenerConfig};
 
-/// Build the `-D` defines injected into the staged shellcode stager template.
-///
-/// Only HTTP listeners are supported: the stager makes an outbound HTTP(S) GET
-/// request, which has no equivalent for SMB or DNS listeners.
-pub(in super::super) fn build_stager_defines(
+fn extract_http_params(
     listener: &ListenerConfig,
-) -> Result<Vec<String>, PayloadBuildError> {
+) -> Result<(&HttpListenerConfig, &str, u16, &str), PayloadBuildError> {
     let http = match listener {
         ListenerConfig::Http(http) => http,
         _ => {
@@ -17,12 +13,22 @@ pub(in super::super) fn build_stager_defines(
             });
         }
     };
-
     let host = http.hosts.first().ok_or_else(|| PayloadBuildError::InvalidRequest {
         message: "HTTP listener has no configured hosts".to_owned(),
     })?;
     let port = http.port_conn.unwrap_or(http.port_bind);
     let uri = http.uris.first().map(String::as_str).unwrap_or("/");
+    Ok((http, host, port, uri))
+}
+
+/// Build the `-D` defines injected into the staged shellcode stager template.
+///
+/// Only HTTP listeners are supported: the stager makes an outbound HTTP(S) GET
+/// request, which has no equivalent for SMB or DNS listeners.
+pub(in super::super) fn build_stager_defines(
+    listener: &ListenerConfig,
+) -> Result<Vec<String>, PayloadBuildError> {
+    let (http, host, port, uri) = extract_http_params(listener)?;
 
     // Embed host and URI as C byte-array initialisers so that no shell quoting
     // is needed and the values survive the -D argument intact.
@@ -49,20 +55,7 @@ pub(in super::super) fn build_stager_defines(
 pub(in super::super) fn stager_cache_bytes(
     listener: &ListenerConfig,
 ) -> Result<Vec<u8>, PayloadBuildError> {
-    let http = match listener {
-        ListenerConfig::Http(http) => http,
-        _ => {
-            return Err(PayloadBuildError::InvalidRequest {
-                message: "Windows Shellcode Staged requires an HTTP listener".to_owned(),
-            });
-        }
-    };
-
-    let host = http.hosts.first().ok_or_else(|| PayloadBuildError::InvalidRequest {
-        message: "HTTP listener has no configured hosts".to_owned(),
-    })?;
-    let port = http.port_conn.unwrap_or(http.port_bind);
-    let uri = http.uris.first().map(String::as_str).unwrap_or("/");
+    let (http, host, port, uri) = extract_http_params(listener)?;
 
     let mut out = Vec::new();
     out.extend_from_slice(host.as_bytes());

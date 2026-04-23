@@ -449,3 +449,135 @@ fn kerberos_subcommand(
         _ => Err(AgentCommandError::UnsupportedKerberosSubcommand { subcommand: raw }),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use red_cell_common::operator::AgentTaskInfo;
+
+    fn task_info(command: Option<&str>, sub_command: Option<&str>) -> AgentTaskInfo {
+        AgentTaskInfo {
+            command: command.map(str::to_owned),
+            sub_command: sub_command.map(str::to_owned),
+            ..AgentTaskInfo::default()
+        }
+    }
+
+    #[test]
+    fn filesystem_subcommand_accepts_string_alias() {
+        let command = filesystem_subcommand(&task_info(None, Some("dir")))
+            .expect("dir should map to filesystem dir");
+        assert_eq!(command, DemonFilesystemCommand::Dir);
+    }
+
+    #[test]
+    fn filesystem_subcommand_accepts_numeric_alias() {
+        let command = filesystem_subcommand(&task_info(None, Some("1")))
+            .expect("1 should map to filesystem dir");
+        assert_eq!(command, DemonFilesystemCommand::Dir);
+    }
+
+    #[test]
+    fn filesystem_subcommand_rejects_unknown_subcommand() {
+        let err = filesystem_subcommand(&task_info(None, Some("bogus")))
+            .expect_err("unknown filesystem subcommand should fail");
+        assert!(matches!(
+            err,
+            AgentCommandError::UnsupportedFilesystemSubcommand { subcommand }
+            if subcommand == "bogus"
+        ));
+    }
+
+    #[test]
+    fn proc_subcommand_accepts_string_alias() {
+        let command =
+            proc_subcommand(&task_info(None, Some("modules"))).expect("modules should parse");
+        assert_eq!(command, DemonProcessCommand::Modules);
+    }
+
+    #[test]
+    fn proc_subcommand_accepts_numeric_alias() {
+        let command = proc_subcommand(&task_info(None, Some("2"))).expect("2 should parse");
+        assert_eq!(command, DemonProcessCommand::Modules);
+    }
+
+    #[test]
+    fn proc_subcommand_rejects_unknown_subcommand() {
+        let err =
+            proc_subcommand(&task_info(None, Some("bogus"))).expect_err("unknown proc should fail");
+        assert!(matches!(
+            err,
+            AgentCommandError::UnsupportedProcessSubcommand { subcommand }
+            if subcommand == "bogus"
+        ));
+    }
+
+    #[test]
+    fn token_subcommand_accepts_string_alias() {
+        let command = token_subcommand(&task_info(None, Some("impersonate")))
+            .expect("impersonate should parse");
+        assert_eq!(command, DemonTokenCommand::Impersonate);
+    }
+
+    #[test]
+    fn token_subcommand_accepts_numeric_alias() {
+        let command = token_subcommand(&task_info(None, Some("1"))).expect("1 should parse");
+        assert_eq!(command, DemonTokenCommand::Impersonate);
+    }
+
+    #[test]
+    fn token_subcommand_rejects_unknown_subcommand() {
+        let err = token_subcommand(&task_info(None, Some("bogus")))
+            .expect_err("unknown token subcommand should fail");
+        assert!(matches!(
+            err,
+            AgentCommandError::UnsupportedTokenSubcommand { subcommand }
+            if subcommand == "bogus"
+        ));
+    }
+
+    #[test]
+    fn socket_command_accepts_reverse_port_forward_alias() {
+        let (command, normalized) =
+            socket_command(&task_info(Some("rportfwd add"), None)).expect("rportfwd add parses");
+        assert_eq!(command, u32::from(DemonSocketCommand::ReversePortForwardAdd));
+        assert_eq!(normalized, "rportfwd add");
+    }
+
+    #[test]
+    fn socket_command_accepts_socks_alias() {
+        let (command, normalized) =
+            socket_command(&task_info(Some("socks list"), None)).expect("socks list parses");
+        assert_eq!(command, u32::from(DemonSocketCommand::SocksProxyAdd));
+        assert_eq!(normalized, "socks list");
+    }
+
+    #[test]
+    fn socket_command_rejects_unknown_subcommand() {
+        let err = socket_command(&task_info(Some("bogus"), None))
+            .expect_err("unknown socket subcommand should fail");
+        assert!(matches!(
+            err,
+            AgentCommandError::UnsupportedSocketSubcommand { subcommand }
+            if subcommand == "bogus"
+        ));
+    }
+
+    #[test]
+    fn kerberos_subcommand_accepts_string_alias() {
+        let command =
+            kerberos_subcommand(&task_info(Some("luid"), None)).expect("luid should parse");
+        assert_eq!(command, DemonKerberosCommand::Luid);
+    }
+
+    #[test]
+    fn kerberos_subcommand_rejects_unknown_subcommand() {
+        let err = kerberos_subcommand(&task_info(Some("bogus"), None))
+            .expect_err("unknown kerberos subcommand should fail");
+        assert!(matches!(
+            err,
+            AgentCommandError::UnsupportedKerberosSubcommand { subcommand }
+            if subcommand == "bogus"
+        ));
+    }
+}

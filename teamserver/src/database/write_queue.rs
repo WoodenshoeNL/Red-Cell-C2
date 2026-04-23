@@ -45,6 +45,8 @@ pub enum DeferredWrite {
         listener_name: String,
         /// Legacy CTR flag for the new session.
         legacy_ctr: bool,
+        /// Seq-protection flag negotiated on the fresh session.
+        seq_protected: bool,
     },
     /// Persist an agent metadata update (status, last callback, etc.).
     AgentUpdate {
@@ -192,8 +194,11 @@ async fn replay_write(database: &Database, write: &DeferredWrite) -> Result<(), 
                 .create_full(agent, listener_name, *ctr_block_offset, *legacy_ctr, *seq_protected)
                 .await
         }
-        DeferredWrite::AgentReregisterFull { agent, listener_name, legacy_ctr } => {
-            database.agents().reregister_full(agent, listener_name, *legacy_ctr).await
+        DeferredWrite::AgentReregisterFull { agent, listener_name, legacy_ctr, seq_protected } => {
+            database
+                .agents()
+                .reregister_full(agent, listener_name, *legacy_ctr, *seq_protected)
+                .await
         }
         DeferredWrite::AgentUpdate { agent, listener_name } => {
             database.agents().update_with_listener(agent, listener_name).await

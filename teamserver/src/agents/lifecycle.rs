@@ -136,12 +136,18 @@ impl AgentRegistry {
     /// Update an existing agent's full metadata on re-registration (same `agent_id`, fresh
     /// `DEMON_INIT` payload).  Resets the CTR block offset to 0 and persists all new runtime
     /// fields to SQLite.  Preserves the original `first_call_in` and the operator `note`.
-    #[instrument(skip(self, agent, listener_name), fields(agent_id = format_args!("0x{:08X}", agent.agent_id), listener_name = %listener_name, legacy_ctr))]
+    ///
+    /// `seq_protected` records whether the agent negotiated callback sequence-number replay
+    /// protection on the fresh session and is persisted atomically with the rest of the
+    /// re-registration update so that [`AgentRegistry::is_seq_protected`] and the SQLite row
+    /// can never disagree after a re-init.
+    #[instrument(skip(self, agent, listener_name), fields(agent_id = format_args!("0x{:08X}", agent.agent_id), listener_name = %listener_name, legacy_ctr, seq_protected))]
     pub async fn reregister_full(
         &self,
         mut agent: AgentRecord,
         listener_name: &str,
         legacy_ctr: bool,
+        seq_protected: bool,
     ) -> Result<(), TeamserverError> {
         let entry = self
             .entry(agent.agent_id)
@@ -160,13 +166,14 @@ impl AgentRegistry {
             agent: agent.clone(),
             listener_name: listener_name.to_owned(),
             legacy_ctr,
+            seq_protected,
         };
         let repo = self.repository.clone();
         let ln = listener_name.to_owned();
         self.persist_or_queue(deferred, || {
             let agent_ref = agent.clone();
             let ln = ln.clone();
-            async move { repo.reregister_full(&agent_ref, &ln, legacy_ctr).await }
+            async move { repo.reregister_full(&agent_ref, &ln, legacy_ctr, seq_protected).await }
         })
         .await?;
 
@@ -181,8 +188,8 @@ impl AgentRegistry {
         // Reset transport state — the re-registering agent starts a fresh session.
         *entry.ctr_block_offset.lock().await = 0;
         entry.legacy_ctr.store(legacy_ctr, Ordering::Relaxed);
+        entry.seq_protected.store(seq_protected, Ordering::Relaxed);
         // Reset last_seen_seq to 0 so the fresh session begins at seq=1.
-        // seq_protected may be updated separately by the caller after this returns.
         *entry.last_seen_seq.lock().await = 0;
 
         Ok(())

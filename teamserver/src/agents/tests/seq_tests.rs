@@ -135,7 +135,7 @@ async fn reregister_full_resets_last_seen_seq() -> Result<(), TeamserverError> {
     registry.advance_last_seen_seq(agent.agent_id, 99).await?;
 
     // Re-register (simulates agent restart).
-    registry.reregister_full(agent.clone(), "http", false).await?;
+    registry.reregister_full(agent.clone(), "http", false, false).await?;
 
     // last_seen_seq must be reset to 0.
     let persisted = database.agents().get_persisted(agent.agent_id).await?.expect("must exist");

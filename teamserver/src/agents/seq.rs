@@ -139,8 +139,12 @@ impl AgentRegistry {
 
     /// Enable or disable seq-protection for `agent_id` and persist the flag.
     ///
-    /// Called during agent registration when the agent signals seq-protection support
-    /// via a protocol extension flag.  Demon and Archon agents never call this.
+    /// Production registration paths persist `seq_protected` atomically via
+    /// [`AgentRegistry::insert_full`] / [`AgentRegistry::reregister_full`]; this method
+    /// is retained as a test helper that flips the flag on an already-registered agent.
+    /// Unlike the registration paths it performs two non-atomic writes (DB then memory)
+    /// with no write-queue fallback, so it must not be used from production code.
+    #[cfg(test)]
     #[instrument(skip(self), fields(agent_id = format_args!("0x{:08X}", agent_id), seq_protected))]
     pub(crate) async fn set_seq_protected(
         &self,

@@ -147,7 +147,7 @@ async fn session_keys_survive_reregister_roundtrip() {
         },
         ..stub_agent(0x9ABC)
     };
-    db.agents().reregister_full(&rereg, "smb-pipe", false).await.expect("reregister");
+    db.agents().reregister_full(&rereg, "smb-pipe", false, false).await.expect("reregister");
     let loaded = db.agents().get(0x9ABC).await.expect("get").expect("should exist");
     assert_eq!(*loaded.encryption.aes_key, vec![0xEE; 32]);
     assert_eq!(*loaded.encryption.aes_iv, vec![0xFF; 16]);

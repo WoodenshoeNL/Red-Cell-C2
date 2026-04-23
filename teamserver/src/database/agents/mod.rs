@@ -177,11 +177,16 @@ impl AgentRepository {
     /// Update an existing agent row on re-registration, resetting the CTR block offset and
     /// last-seen sequence number to 0 and refreshing all runtime metadata.
     /// Preserves the original `first_call_in` and the operator-authored `note`.
+    ///
+    /// `seq_protected` captures whether the agent negotiated callback sequence-number
+    /// replay protection (`INIT_EXT_SEQ_PROTECTED`) on the fresh session and is persisted
+    /// atomically with the rest of the re-registration update.
     pub async fn reregister_full(
         &self,
         agent: &AgentRecord,
         listener_name: &str,
         legacy_ctr: bool,
+        seq_protected: bool,
     ) -> Result<(), TeamserverError> {
         let enc_key = self.master_key.encrypt(&agent.encryption.aes_key)?;
         let enc_iv = self.master_key.encrypt(&agent.encryption.aes_iv)?;
@@ -189,6 +194,7 @@ impl AgentRepository {
             r#"
             UPDATE ts_agents SET
                 active = 1, reason = '', ctr_block_offset = 0, last_seen_seq = 0, legacy_ctr = ?,
+                seq_protected = ?,
                 aes_key = '', aes_iv = '', aes_key_enc = ?, aes_iv_enc = ?,
                 hostname = ?, username = ?, domain_name = ?,
                 external_ip = ?, internal_ip = ?, process_name = ?, process_path = ?,
@@ -200,6 +206,7 @@ impl AgentRepository {
             "#,
         )
         .bind(super::bool_to_i64(legacy_ctr))
+        .bind(super::bool_to_i64(seq_protected))
         .bind(enc_key)
         .bind(enc_iv)
         .bind(&agent.hostname)
@@ -388,6 +395,10 @@ impl AgentRepository {
     }
 
     /// Persist the seq-protected flag for an agent.
+    ///
+    /// Production code paths persist `seq_protected` atomically via [`Self::create_full`]
+    /// and [`Self::reregister_full`]; this stand-alone update is retained as a test helper.
+    #[cfg(test)]
     pub async fn set_seq_protected(
         &self,
         agent_id: u32,

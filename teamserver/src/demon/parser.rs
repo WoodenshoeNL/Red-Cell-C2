@@ -239,8 +239,9 @@ impl DemonPacketParser {
                     listener_name,
                     "DEMON_INIT re-registration: updating existing agent record (CTR reset to 0)"
                 );
-                self.registry.reregister_full(agent.clone(), listener_name, legacy_ctr).await?;
-                self.registry.set_seq_protected(envelope.header.agent_id, seq_protected).await?;
+                self.registry
+                    .reregister_full(agent.clone(), listener_name, legacy_ctr, seq_protected)
+                    .await?;
 
                 return Ok(ParsedDemonPacket::ReInit(Box::new(ParsedDemonInit {
                     header: envelope.header,

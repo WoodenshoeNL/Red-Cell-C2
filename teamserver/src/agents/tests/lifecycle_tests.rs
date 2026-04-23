@@ -121,7 +121,7 @@ async fn reregister_full_updates_metadata_and_resets_ctr() -> Result<(), Teamser
     updated.active = true;
     updated.reason = String::new();
 
-    registry.reregister_full(updated.clone(), "smb-pivot", false).await?;
+    registry.reregister_full(updated.clone(), "smb-pivot", false, false).await?;
 
     let stored = registry.get(agent.agent_id).await.expect("agent should be present");
     assert_eq!(stored.external_ip, "203.0.113.99");
@@ -161,7 +161,7 @@ async fn reregister_full_preserves_first_call_in_and_note() -> Result<(), Teamse
     updated.first_call_in = "2099-01-01T00:00:00Z".to_owned(); // should be ignored
     updated.note = String::new(); // should be ignored
 
-    registry.reregister_full(updated, "http-new", false).await?;
+    registry.reregister_full(updated, "http-new", false, false).await?;
 
     let stored = registry.get(agent.agent_id).await.expect("agent should be present");
     assert_eq!(stored.first_call_in, original_first_call_in);
@@ -185,7 +185,7 @@ async fn reregister_full_returns_error_for_unknown_agent() -> Result<(), Teamser
     let registry = AgentRegistry::new(database.clone());
     let agent = sample_agent(0xBEEF_0099);
 
-    let result = registry.reregister_full(agent.clone(), "http-main", false).await;
+    let result = registry.reregister_full(agent.clone(), "http-main", false, false).await;
     assert!(matches!(result, Err(TeamserverError::AgentNotFound { agent_id: 0xBEEF_0099 })));
 
     Ok(())

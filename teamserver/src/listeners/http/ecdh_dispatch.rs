@@ -23,7 +23,10 @@ use red_cell_common::demon::{DemonMessage, DemonPackage};
 use crate::database::ecdh::EcdhRepository;
 
 use crate::demon::parse_ecdh_agent_metadata;
-use crate::listeners::ListenerManagerError;
+use crate::listeners::{
+    ECDH_REGISTRATION_WINDOW_DURATION, EcdhRegistrationRateLimiter, ListenerManagerError,
+    MAX_ECDH_REGISTRATIONS_PER_IP,
+};
 use crate::{
     AgentRegistry, AuditResultStatus, CommandDispatcher, Database, DemonCallbackPackage,
     PluginRuntime, agent_events::agent_new_event, audit_details, events::EventBus,
@@ -39,11 +42,44 @@ pub(crate) struct EcdhResponse {
     pub(crate) payload: Vec<u8>,
 }
 
+/// Returns `true` when the client IP is allowed to attempt an ECDH
+/// registration; `false` if the per-IP budget for the current window has
+/// been exhausted.  Logs a warning on rejection so operators can see the
+/// source of abusive traffic.
+///
+/// This mirrors the `allow_demon_init_for_ip` helper used on the Archon
+/// path, with the difference that every registration-shaped body counts
+/// toward the budget (there is no cheap classification step that would let
+/// us distinguish valid from invalid bodies before the AES-GCM tag check).
+pub(crate) async fn allow_ecdh_registration_for_ip(
+    listener_name: &str,
+    rate_limiter: &EcdhRegistrationRateLimiter,
+    client_ip: IpAddr,
+) -> bool {
+    if rate_limiter.allow(client_ip).await {
+        return true;
+    }
+
+    warn!(
+        listener = listener_name,
+        client_ip = %client_ip,
+        max_attempts = MAX_ECDH_REGISTRATIONS_PER_IP,
+        window_seconds = ECDH_REGISTRATION_WINDOW_DURATION.as_secs(),
+        "rejecting ECDH registration because the per-IP rate limit was exceeded"
+    );
+    false
+}
+
 /// Process a non-legacy HTTP body as an ECDH new-protocol packet.
 ///
 /// First tries to classify as a session packet (connection_id lookup), then as
 /// a registration packet. Returns `None` if the packet is not a valid ECDH packet
 /// (caller should fall through to the Archon handler).
+///
+/// Registration-shaped bodies are gated by a per-IP rate limiter applied before
+/// the X25519 + AES-GCM work in [`open_registration_packet`].  Both valid and
+/// invalid registration bodies consume budget so that an unauthenticated
+/// source cannot force unbounded asymmetric crypto by spamming garbage.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn process_ecdh_packet(
     listener_name: &str,
@@ -52,6 +88,7 @@ pub(crate) async fn process_ecdh_packet(
     database: &Database,
     events: &EventBus,
     dispatcher: &CommandDispatcher,
+    registration_rate_limiter: &EcdhRegistrationRateLimiter,
     body: &[u8],
     external_ip: IpAddr,
 ) -> Result<Option<EcdhResponse>, ListenerManagerError> {
@@ -82,6 +119,18 @@ pub(crate) async fn process_ecdh_packet(
 
     if body.len() < ECDH_REG_MIN_LEN {
         return Ok(None);
+    }
+
+    // Registration-shaped body — gate on the per-IP limiter before any
+    // X25519 / AES-GCM work. Invalid bodies still consume budget so
+    // garbage-packet spam cannot bypass the limiter.
+    if !allow_ecdh_registration_for_ip(listener_name, registration_rate_limiter, external_ip).await
+    {
+        return Err(ListenerManagerError::InvalidConfig {
+            message: format!(
+                "ECDH registration rejected: per-IP rate limit exceeded for {external_ip}"
+            ),
+        });
     }
 
     let parsed = match open_registration_packet(kp, ECDH_REPLAY_WINDOW_SECS, body) {
@@ -297,12 +346,17 @@ fn parse_ecdh_session_payload(bytes: &[u8]) -> Result<Vec<DemonPackage>, String>
 
 #[cfg(test)]
 mod tests {
+    use std::net::{IpAddr, Ipv4Addr};
     use std::sync::Arc;
 
+    use red_cell_common::crypto::ecdh::{ListenerKeypair, build_registration_packet};
     use sqlx::Row;
 
+    use crate::AgentRegistry;
     use crate::database::{Database, DbMasterKey, EcdhRepository};
     use crate::dispatch::CommandDispatcher;
+    use crate::events::EventBus;
+    use crate::listeners::MAX_ECDH_REGISTRATIONS_PER_IP;
 
     use super::*;
 
@@ -311,6 +365,44 @@ mod tests {
         let master_key = Arc::new(DbMasterKey::random().expect("master key"));
         let repo = EcdhRepository::new(db.pool().clone(), master_key);
         (db, repo)
+    }
+
+    /// Build the fixed scaffolding shared by the `process_ecdh_packet`
+    /// integration tests: an in-memory database, registry, event bus,
+    /// dispatcher, listener keypair, and a fresh ECDH registration limiter.
+    async fn ecdh_test_fixture() -> (
+        Database,
+        AgentRegistry,
+        EventBus,
+        CommandDispatcher,
+        ListenerKeypair,
+        EcdhRegistrationRateLimiter,
+    ) {
+        let db = Database::connect_in_memory().await.expect("db");
+        let registry = AgentRegistry::new(db.clone());
+        let events = EventBus::default();
+        let dispatcher = CommandDispatcher::new();
+        let keypair = ListenerKeypair::generate().expect("keypair");
+        let limiter = EcdhRegistrationRateLimiter::new();
+        (db, registry, events, dispatcher, keypair, limiter)
+    }
+
+    /// Length-adequate but cryptographically invalid registration body —
+    /// `open_registration_packet` will fail on the AEAD tag check.  The
+    /// body still crosses the `ECDH_REG_MIN_LEN` threshold so the limiter
+    /// must treat the attempt as a registration.
+    fn invalid_registration_body() -> Vec<u8> {
+        vec![0xAB; ECDH_REG_MIN_LEN]
+    }
+
+    /// Cryptographically valid registration body built against `keypair` but
+    /// carrying metadata that will fail `parse_ecdh_agent_metadata`.  The
+    /// limiter must fire before metadata parsing begins.
+    fn valid_registration_body(keypair: &ListenerKeypair) -> Vec<u8> {
+        let (packet, _session_key) =
+            build_registration_packet(&keypair.public_bytes, b"unused-metadata")
+                .expect("build ECDH registration packet");
+        packet
     }
 
     async fn query_last_seen(db: &Database, conn_id: &[u8; 16]) -> i64 {
@@ -382,5 +474,273 @@ mod tests {
     fn parse_seq_num_prefix_too_short_fails() {
         assert!(parse_seq_num_prefix(&[0u8; 7]).is_err());
         assert!(parse_seq_num_prefix(&[]).is_err());
+    }
+
+    // ── ECDH registration rate limiter ────────────────────────────────────
+
+    /// `allow_ecdh_registration_for_ip` must reject a source IP once it has
+    /// used up its per-IP budget in the current window.
+    #[tokio::test]
+    async fn allow_ecdh_registration_for_ip_blocks_after_budget_exhausted() {
+        let limiter = EcdhRegistrationRateLimiter::new();
+        let ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
+
+        for _ in 0..MAX_ECDH_REGISTRATIONS_PER_IP {
+            assert!(
+                allow_ecdh_registration_for_ip("test-listener", &limiter, ip).await,
+                "attempts under the budget must be allowed"
+            );
+        }
+
+        assert!(
+            !allow_ecdh_registration_for_ip("test-listener", &limiter, ip).await,
+            "budget-exceeding attempt must be rejected"
+        );
+
+        // A different IP must still be allowed — budget is per-IP.
+        let other_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 8));
+        assert!(
+            allow_ecdh_registration_for_ip("test-listener", &limiter, other_ip).await,
+            "a second IP must have its own budget"
+        );
+    }
+
+    /// Invalid ECDH registration bodies (garbage bytes of length ≥
+    /// `ECDH_REG_MIN_LEN`) must consume the per-IP budget so that
+    /// garbage-packet spam cannot bypass the limiter and still trigger
+    /// the X25519 + AES-GCM work the helper exists to prevent.
+    #[tokio::test]
+    async fn process_ecdh_packet_rate_limits_invalid_registrations() {
+        let (db, registry, events, dispatcher, keypair, limiter) = ecdh_test_fixture().await;
+        let ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 42));
+        let body = invalid_registration_body();
+
+        // Send MAX invalid registrations — each returns Ok(None) (crypto fails)
+        // but each consumes one budget slot.
+        for _ in 0..MAX_ECDH_REGISTRATIONS_PER_IP {
+            let result = process_ecdh_packet(
+                "test-listener",
+                Some(&keypair),
+                &registry,
+                &db,
+                &events,
+                &dispatcher,
+                &limiter,
+                &body,
+                ip,
+            )
+            .await;
+            assert!(
+                matches!(result, Ok(None)),
+                "invalid body must decrypt-fail but not trigger rate limiter yet; got: {result:?}"
+            );
+        }
+
+        // The next attempt from the same IP must be rejected.
+        let blocked = process_ecdh_packet(
+            "test-listener",
+            Some(&keypair),
+            &registry,
+            &db,
+            &events,
+            &dispatcher,
+            &limiter,
+            &body,
+            ip,
+        )
+        .await;
+        assert!(
+            matches!(blocked, Err(ListenerManagerError::InvalidConfig { ref message })
+                if message.contains("rate limit")),
+            "invalid registration must be rate-limited after budget exhaustion; got: {blocked:?}"
+        );
+    }
+
+    /// Valid ECDH registration bodies (cryptographically correct packets
+    /// against the listener keypair, but carrying unparseable metadata)
+    /// must also consume budget and be rejected once the limit is hit.
+    /// This guards the expensive X25519 + AES-GCM path from unbounded
+    /// abuse by a source that happens to know the listener's public key.
+    #[tokio::test]
+    async fn process_ecdh_packet_rate_limits_valid_registrations() {
+        let (db, registry, events, dispatcher, keypair, limiter) = ecdh_test_fixture().await;
+        let ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 43));
+
+        for _ in 0..MAX_ECDH_REGISTRATIONS_PER_IP {
+            // Each iteration builds a fresh packet with a new ephemeral pubkey
+            // so the server cannot dedupe by shape.
+            let body = valid_registration_body(&keypair);
+            let _ = process_ecdh_packet(
+                "test-listener",
+                Some(&keypair),
+                &registry,
+                &db,
+                &events,
+                &dispatcher,
+                &limiter,
+                &body,
+                ip,
+            )
+            .await;
+        }
+
+        // The (MAX + 1)th valid registration attempt from the same IP must be
+        // rejected by the limiter, regardless of body validity.
+        let body = valid_registration_body(&keypair);
+        let blocked = process_ecdh_packet(
+            "test-listener",
+            Some(&keypair),
+            &registry,
+            &db,
+            &events,
+            &dispatcher,
+            &limiter,
+            &body,
+            ip,
+        )
+        .await;
+        assert!(
+            matches!(blocked, Err(ListenerManagerError::InvalidConfig { ref message })
+                if message.contains("rate limit")),
+            "valid registration must be rate-limited after budget exhaustion; got: {blocked:?}"
+        );
+
+        // A different IP is still allowed — budget is per-IP.
+        let other_ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 44));
+        let body = valid_registration_body(&keypair);
+        let other_result = process_ecdh_packet(
+            "test-listener",
+            Some(&keypair),
+            &registry,
+            &db,
+            &events,
+            &dispatcher,
+            &limiter,
+            &body,
+            other_ip,
+        )
+        .await;
+        assert!(
+            !matches!(other_result, Err(ListenerManagerError::InvalidConfig { ref message })
+                if message.contains("rate limit")),
+            "a fresh IP must not be rate-limited; got: {other_result:?}"
+        );
+    }
+
+    /// Bodies shorter than `ECDH_REG_MIN_LEN` are not registration
+    /// candidates and must not consume the limiter's budget — otherwise
+    /// an attacker could exhaust it with tiny garbage packets.
+    #[tokio::test]
+    async fn process_ecdh_packet_short_body_does_not_consume_budget() {
+        let (db, registry, events, dispatcher, keypair, limiter) = ecdh_test_fixture().await;
+        let ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 45));
+        let short = vec![0xCDu8; ECDH_REG_MIN_LEN - 1];
+
+        // Send many short bodies — they fall through (Ok(None)) without
+        // consuming budget.
+        for _ in 0..(MAX_ECDH_REGISTRATIONS_PER_IP * 2) {
+            let result = process_ecdh_packet(
+                "test-listener",
+                Some(&keypair),
+                &registry,
+                &db,
+                &events,
+                &dispatcher,
+                &limiter,
+                &short,
+                ip,
+            )
+            .await;
+            assert!(
+                matches!(result, Ok(None)),
+                "short body must fall through to Archon path; got: {result:?}"
+            );
+        }
+
+        // The IP must still have a full budget available for real attempts.
+        assert_eq!(
+            limiter.tracked_ip_count().await,
+            0,
+            "short bodies must not register an entry in the limiter"
+        );
+    }
+
+    /// ECDH session packets (first 16 bytes match a known `connection_id`)
+    /// must not consume the registration budget — legitimate agents keep
+    /// calling back with session packets and would otherwise DoS themselves.
+    #[tokio::test]
+    async fn process_ecdh_packet_session_does_not_consume_budget() {
+        let (db, registry, events, dispatcher, keypair, limiter) = ecdh_test_fixture().await;
+        let ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 46));
+
+        // Store an ECDH session so the session-lookup path fires first.
+        let conn_id = red_cell_common::crypto::ecdh::ConnectionId::generate().expect("conn_id");
+        let session_key = [0u8; 32];
+        db.ecdh().store_session(&conn_id, 1, &session_key).await.expect("store");
+
+        // Body: [connection_id: 16] | [nonce: 12] | [ciphertext: 1] | [bad tag: 16]
+        let mut body = Vec::with_capacity(16 + 12 + 1 + 16);
+        body.extend_from_slice(&conn_id.0);
+        body.extend_from_slice(&[0u8; 12]);
+        body.push(0xAB);
+        body.extend_from_slice(&[0u8; 16]);
+
+        // The session path is taken (matched connection_id) and returns Err
+        // on AEAD failure — but the registration limiter is never touched.
+        for _ in 0..(MAX_ECDH_REGISTRATIONS_PER_IP * 2) {
+            let _ = process_ecdh_packet(
+                "test-listener",
+                Some(&keypair),
+                &registry,
+                &db,
+                &events,
+                &dispatcher,
+                &limiter,
+                &body,
+                ip,
+            )
+            .await;
+        }
+
+        assert_eq!(
+            limiter.tracked_ip_count().await,
+            0,
+            "session packets must never register an entry in the registration limiter"
+        );
+    }
+
+    /// Listeners without a keypair (mis-configured non-legacy listeners)
+    /// cannot handle ECDH registrations at all, so registration-shaped
+    /// bodies must fall through to Archon without consuming budget.
+    #[tokio::test]
+    async fn process_ecdh_packet_no_keypair_does_not_consume_budget() {
+        let (db, registry, events, dispatcher, _keypair, limiter) = ecdh_test_fixture().await;
+        let ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 47));
+        let body = invalid_registration_body();
+
+        for _ in 0..(MAX_ECDH_REGISTRATIONS_PER_IP * 2) {
+            let result = process_ecdh_packet(
+                "test-listener",
+                None,
+                &registry,
+                &db,
+                &events,
+                &dispatcher,
+                &limiter,
+                &body,
+                ip,
+            )
+            .await;
+            assert!(
+                matches!(result, Ok(None)),
+                "no-keypair must fall through to Archon; got: {result:?}"
+            );
+        }
+
+        assert_eq!(
+            limiter.tracked_ip_count().await,
+            0,
+            "no-keypair path must not touch the limiter"
+        );
     }
 }

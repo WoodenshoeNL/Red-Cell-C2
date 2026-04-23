@@ -175,6 +175,7 @@ impl ListenerManager {
                     self.demon_init_rate_limiter.clone(),
                     self.unknown_callback_probe_audit_limiter.clone(),
                     self.reconnect_probe_rate_limiter.clone(),
+                    self.ecdh_registration_rate_limiter.clone(),
                     self.shutdown.clone(),
                     self.max_pivot_chain_depth,
                     self.init_secret_config(),

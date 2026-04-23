@@ -19,6 +19,14 @@ use crate::rate_limiter::{AttemptWindow, evict_oldest_windows, prune_expired_win
 pub(crate) const MAX_DEMON_INIT_ATTEMPTS_PER_IP: u32 = 5;
 pub(crate) const DEMON_INIT_WINDOW_DURATION: Duration = Duration::from_secs(60);
 pub(crate) const MAX_DEMON_INIT_ATTEMPT_WINDOWS: usize = 10_000;
+/// Per-IP budget of ECDH registration attempts allowed within
+/// [`ECDH_REGISTRATION_WINDOW_DURATION`] before the limiter starts rejecting.
+pub(crate) const MAX_ECDH_REGISTRATIONS_PER_IP: u32 = 5;
+/// Sliding window applied to the ECDH registration limiter.
+pub(crate) const ECDH_REGISTRATION_WINDOW_DURATION: Duration = Duration::from_secs(60);
+/// Maximum number of per-IP windows held simultaneously by the ECDH limiter
+/// before eviction kicks in — keeps memory bounded under distributed attacks.
+pub(crate) const MAX_ECDH_REGISTRATION_WINDOWS: usize = 10_000;
 pub(crate) const MAX_UNKNOWN_CALLBACK_PROBE_AUDITS_PER_SOURCE: u32 = 1;
 pub(crate) const UNKNOWN_CALLBACK_PROBE_AUDIT_WINDOW_DURATION: Duration = Duration::from_secs(60);
 pub(crate) const MAX_UNKNOWN_CALLBACK_PROBE_AUDIT_WINDOWS: usize = 10_000;
@@ -171,6 +179,62 @@ impl UnknownCallbackProbeAuditLimiter {
 
     #[cfg(test)]
     pub(crate) async fn tracked_source_count(&self) -> usize {
+        self.windows.lock().await.len()
+    }
+}
+
+/// Per-source-IP sliding-window rate limiter for ECDH registration attempts.
+///
+/// The ECDH registration path (Phantom/Specter new-protocol) runs an X25519
+/// key exchange plus AES-GCM authenticated decryption on every inbound
+/// packet whose length meets the registration threshold.  Without a limiter,
+/// an unauthenticated source can force unlimited asymmetric + symmetric
+/// crypto work per request.  This limiter is applied before
+/// `open_registration_packet`, keyed by the external client IP, and counts
+/// **both** valid and invalid registration-shaped bodies toward the budget
+/// so garbage-packet spam cannot bypass it.
+///
+/// Session packets (whose first 16 bytes match a known `connection_id`) are
+/// dispatched earlier in the pipeline and do not consume budget.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct EcdhRegistrationRateLimiter {
+    pub(super) windows: Arc<Mutex<HashMap<IpAddr, AttemptWindow>>>,
+}
+
+impl EcdhRegistrationRateLimiter {
+    #[must_use]
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns `true` when the client IP is allowed to attempt an ECDH
+    /// registration; `false` once the per-IP budget for the current window
+    /// has been exhausted.
+    pub(crate) async fn allow(&self, ip: IpAddr) -> bool {
+        let mut windows = self.windows.lock().await;
+        let now = Instant::now();
+
+        prune_expired_windows(&mut windows, ECDH_REGISTRATION_WINDOW_DURATION, now);
+        if !windows.contains_key(&ip) && windows.len() >= MAX_ECDH_REGISTRATION_WINDOWS {
+            evict_oldest_windows(&mut windows, MAX_ECDH_REGISTRATION_WINDOWS / 2);
+        }
+
+        let window = windows.entry(ip).or_default();
+        if now.duration_since(window.window_start) >= ECDH_REGISTRATION_WINDOW_DURATION {
+            window.attempts = 0;
+            window.window_start = now;
+        }
+
+        if window.attempts >= MAX_ECDH_REGISTRATIONS_PER_IP {
+            return false;
+        }
+
+        window.attempts += 1;
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn tracked_ip_count(&self) -> usize {
         self.windows.lock().await.len()
     }
 }

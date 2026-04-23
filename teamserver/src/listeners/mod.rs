@@ -45,8 +45,9 @@ pub(crate) use http::{
 pub(crate) use manager::ListenerRuntimeFuture;
 pub(crate) use rate_limiters::{
     DEMON_INIT_WINDOW_DURATION, DemonInitRateLimiter, DnsReconBlockLimiter,
-    MAX_DEMON_INIT_ATTEMPTS_PER_IP, MAX_RECONNECT_PROBES_PER_AGENT,
-    RECONNECT_PROBE_WINDOW_DURATION, ReconnectProbeRateLimiter, UnknownCallbackProbeAuditLimiter,
+    ECDH_REGISTRATION_WINDOW_DURATION, EcdhRegistrationRateLimiter, MAX_DEMON_INIT_ATTEMPTS_PER_IP,
+    MAX_ECDH_REGISTRATIONS_PER_IP, MAX_RECONNECT_PROBES_PER_AGENT, RECONNECT_PROBE_WINDOW_DURATION,
+    ReconnectProbeRateLimiter, UnknownCallbackProbeAuditLimiter,
 };
 
 // Test-only re-exports: tests in `listeners::tests::*` reach these through
@@ -72,8 +73,8 @@ pub(crate) use http::{
 #[cfg(test)]
 pub(crate) use rate_limiters::{
     DNS_RECON_WINDOW_DURATION, MAX_DEMON_INIT_ATTEMPT_WINDOWS, MAX_DNS_RECON_QUERIES_PER_IP,
-    MAX_RECONNECT_PROBE_WINDOWS, MAX_UNKNOWN_CALLBACK_PROBE_AUDITS_PER_SOURCE,
-    UNKNOWN_CALLBACK_PROBE_AUDIT_WINDOW_DURATION,
+    MAX_ECDH_REGISTRATION_WINDOWS, MAX_RECONNECT_PROBE_WINDOWS,
+    MAX_UNKNOWN_CALLBACK_PROBE_AUDITS_PER_SOURCE, UNKNOWN_CALLBACK_PROBE_AUDIT_WINDOW_DURATION,
 };
 #[cfg(test)]
 use smb::{MAX_SMB_FRAME_PAYLOAD_LEN, read_smb_frame};

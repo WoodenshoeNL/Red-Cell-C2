@@ -26,7 +26,8 @@ use zeroize::Zeroizing;
 use super::config::profile_listener_configs;
 use super::external::ExternalListenerState;
 use super::rate_limiters::{
-    DemonInitRateLimiter, ReconnectProbeRateLimiter, UnknownCallbackProbeAuditLimiter,
+    DemonInitRateLimiter, EcdhRegistrationRateLimiter, ReconnectProbeRateLimiter,
+    UnknownCallbackProbeAuditLimiter,
 };
 use super::summary::ListenerSummary;
 use crate::{
@@ -122,6 +123,7 @@ pub struct ListenerManager {
     pub(super) demon_init_rate_limiter: DemonInitRateLimiter,
     pub(super) unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
     pub(super) reconnect_probe_rate_limiter: ReconnectProbeRateLimiter,
+    pub(super) ecdh_registration_rate_limiter: EcdhRegistrationRateLimiter,
     pub(super) shutdown: ShutdownController,
     pub(super) active_handles: Arc<RwLock<BTreeMap<String, JoinHandle<()>>>>,
     pub(super) operations: Arc<Mutex<()>>,
@@ -224,6 +226,7 @@ impl ListenerManager {
             demon_init_rate_limiter: DemonInitRateLimiter::new(),
             unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter::new(),
             reconnect_probe_rate_limiter: ReconnectProbeRateLimiter::new(),
+            ecdh_registration_rate_limiter: EcdhRegistrationRateLimiter::new(),
             shutdown: ShutdownController::new(),
             active_handles: Arc::new(RwLock::new(BTreeMap::new())),
             operations: Arc::new(Mutex::new(())),

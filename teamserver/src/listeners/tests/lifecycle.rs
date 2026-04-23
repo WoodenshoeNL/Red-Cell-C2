@@ -2,12 +2,13 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::time::Instant;
 
 use super::super::{
-    DEMON_INIT_WINDOW_DURATION, ListenerEventAction, MAX_DEMON_INIT_ATTEMPT_WINDOWS,
-    MAX_DEMON_INIT_ATTEMPTS_PER_IP, MAX_RECONNECT_PROBE_WINDOWS, MAX_RECONNECT_PROBES_PER_AGENT,
-    MAX_UNKNOWN_CALLBACK_PROBE_AUDITS_PER_SOURCE, RECONNECT_PROBE_WINDOW_DURATION,
-    UNKNOWN_CALLBACK_PROBE_AUDIT_WINDOW_DURATION, action_from_mark, is_past_kill_date,
-    listener_error_event, listener_event_for_action, listener_removed_event,
-    operator_protocol_name, spawn_managed_listener_task,
+    DEMON_INIT_WINDOW_DURATION, ECDH_REGISTRATION_WINDOW_DURATION, EcdhRegistrationRateLimiter,
+    ListenerEventAction, MAX_DEMON_INIT_ATTEMPT_WINDOWS, MAX_DEMON_INIT_ATTEMPTS_PER_IP,
+    MAX_ECDH_REGISTRATION_WINDOWS, MAX_ECDH_REGISTRATIONS_PER_IP, MAX_RECONNECT_PROBE_WINDOWS,
+    MAX_RECONNECT_PROBES_PER_AGENT, MAX_UNKNOWN_CALLBACK_PROBE_AUDITS_PER_SOURCE,
+    RECONNECT_PROBE_WINDOW_DURATION, UNKNOWN_CALLBACK_PROBE_AUDIT_WINDOW_DURATION,
+    action_from_mark, is_past_kill_date, listener_error_event, listener_event_for_action,
+    listener_removed_event, operator_protocol_name, spawn_managed_listener_task,
 };
 use super::*;
 use axum::http::StatusCode;
@@ -102,6 +103,84 @@ async fn demon_init_rate_limiter_evicts_oldest_when_at_capacity() {
     assert!(
         !limiter.windows.lock().await.contains_key(&oldest_ip),
         "oldest IP should have been evicted"
+    );
+}
+
+#[tokio::test]
+async fn ecdh_registration_rate_limiter_blocks_after_threshold() {
+    let limiter = EcdhRegistrationRateLimiter::new();
+    let ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 100));
+
+    for _ in 0..MAX_ECDH_REGISTRATIONS_PER_IP {
+        assert!(limiter.allow(ip).await);
+    }
+
+    assert!(!limiter.allow(ip).await);
+    // A different IP must still be allowed (per-IP budget).
+    let other_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 101));
+    assert!(limiter.allow(other_ip).await);
+}
+
+#[tokio::test]
+async fn ecdh_registration_rate_limiter_resets_after_window_expires() {
+    let limiter = EcdhRegistrationRateLimiter::new();
+    let ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 200));
+
+    {
+        let mut windows = limiter.windows.lock().await;
+        windows.insert(
+            ip,
+            crate::rate_limiter::AttemptWindow {
+                attempts: MAX_ECDH_REGISTRATIONS_PER_IP,
+                window_start: Instant::now()
+                    - ECDH_REGISTRATION_WINDOW_DURATION
+                    - Duration::from_secs(1),
+            },
+        );
+    }
+
+    assert!(limiter.allow(ip).await, "registration must be allowed after window expiry");
+}
+
+#[tokio::test]
+async fn ecdh_registration_rate_limiter_evicts_oldest_when_at_capacity() {
+    let limiter = EcdhRegistrationRateLimiter::new();
+    let base_instant =
+        Instant::now() - Duration::from_secs(MAX_ECDH_REGISTRATION_WINDOWS as u64 + 1);
+
+    {
+        let mut windows = limiter.windows.lock().await;
+        for i in 0..MAX_ECDH_REGISTRATION_WINDOWS {
+            let a = (i / (256 * 256)) as u8;
+            let b = ((i / 256) % 256) as u8;
+            let c = (i % 256) as u8;
+            let ip = IpAddr::V4(Ipv4Addr::new(10, a, b, c));
+            windows.insert(
+                ip,
+                crate::rate_limiter::AttemptWindow {
+                    attempts: 1,
+                    window_start: base_instant + Duration::from_secs(i as u64),
+                },
+            );
+        }
+    }
+
+    let oldest_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0));
+    assert!(limiter.windows.lock().await.contains_key(&oldest_ip));
+
+    let new_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 42, 1));
+    assert!(limiter.allow(new_ip).await);
+
+    let count = limiter.tracked_ip_count().await;
+    assert!(
+        count <= MAX_ECDH_REGISTRATION_WINDOWS / 2 + 1,
+        "expected at most {} entries after eviction, got {}",
+        MAX_ECDH_REGISTRATION_WINDOWS / 2 + 1,
+        count
+    );
+    assert!(
+        !limiter.windows.lock().await.contains_key(&oldest_ip),
+        "oldest IP must have been evicted"
     );
 }
 

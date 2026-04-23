@@ -72,6 +72,7 @@ pub(super) async fn http_listener_handler(
             &state.database,
             &state.events,
             &state.dispatcher,
+            &state.ecdh_registration_rate_limiter,
             body.as_ref(),
             external_ip,
         )

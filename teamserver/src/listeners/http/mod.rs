@@ -40,8 +40,8 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::listeners::{
-    DemonInitRateLimiter, ListenerManagerError, ListenerRuntimeFuture, ReconnectProbeRateLimiter,
-    UnknownCallbackProbeAuditLimiter,
+    DemonInitRateLimiter, EcdhRegistrationRateLimiter, ListenerManagerError, ListenerRuntimeFuture,
+    ReconnectProbeRateLimiter, UnknownCallbackProbeAuditLimiter,
 };
 use base64::Engine as _;
 use red_cell_common::crypto::ecdh::ListenerKeypair;
@@ -71,6 +71,7 @@ pub(super) struct HttpListenerState {
     pub(super) demon_init_rate_limiter: DemonInitRateLimiter,
     pub(super) unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
     pub(super) reconnect_probe_rate_limiter: ReconnectProbeRateLimiter,
+    pub(super) ecdh_registration_rate_limiter: EcdhRegistrationRateLimiter,
     pub(super) method: Method,
     pub(super) required_headers: Vec<ExpectedHeader>,
     pub(super) response_headers: Vec<(HeaderName, HeaderValue)>,
@@ -101,6 +102,7 @@ impl HttpListenerState {
         demon_init_rate_limiter: DemonInitRateLimiter,
         unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
         reconnect_probe_rate_limiter: ReconnectProbeRateLimiter,
+        ecdh_registration_rate_limiter: EcdhRegistrationRateLimiter,
         shutdown: ShutdownController,
         init_secret_config: DemonInitSecretConfig,
         max_pivot_chain_depth: usize,
@@ -153,6 +155,7 @@ impl HttpListenerState {
             demon_init_rate_limiter,
             unknown_callback_probe_audit_limiter,
             reconnect_probe_rate_limiter,
+            ecdh_registration_rate_limiter,
             method,
             required_headers,
             response_headers,
@@ -201,6 +204,7 @@ pub(super) async fn spawn_http_listener_runtime(
     demon_init_rate_limiter: DemonInitRateLimiter,
     unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
     reconnect_probe_rate_limiter: ReconnectProbeRateLimiter,
+    ecdh_registration_rate_limiter: EcdhRegistrationRateLimiter,
     shutdown: ShutdownController,
     max_pivot_chain_depth: usize,
     init_secret_config: DemonInitSecretConfig,
@@ -240,6 +244,7 @@ pub(super) async fn spawn_http_listener_runtime(
         demon_init_rate_limiter,
         unknown_callback_probe_audit_limiter,
         reconnect_probe_rate_limiter,
+        ecdh_registration_rate_limiter,
         shutdown,
         init_secret_config,
         max_pivot_chain_depth,

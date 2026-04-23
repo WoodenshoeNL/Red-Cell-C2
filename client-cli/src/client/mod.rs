@@ -7,7 +7,7 @@
 
 mod http;
 
-use reqwest::{Client, StatusCode};
+use reqwest::Client;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tracing::instrument;
@@ -15,7 +15,7 @@ use tracing::instrument;
 use crate::config::ResolvedConfig;
 use crate::error::CliError;
 
-use self::http::{build_http_client, map_reqwest_error, map_response, parse_retry_after};
+use self::http::{build_http_client, check_response_status, map_reqwest_error, map_response};
 
 /// HTTP header name used by the teamserver for API-key authentication.
 const API_KEY_HEADER: &str = "x-api-key";
@@ -115,26 +115,12 @@ impl ApiClient {
             .await
             .map_err(|e| map_reqwest_error(e, &url))?;
 
-        match response.status() {
-            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Err(CliError::AuthFailure(
-                format!("server rejected credentials ({})", response.status()),
-            )),
-            StatusCode::NOT_FOUND => {
-                Err(CliError::NotFound(format!("{path} does not exist on the server")))
-            }
-            StatusCode::TOO_MANY_REQUESTS => {
-                Err(CliError::RateLimited { retry_after_secs: parse_retry_after(&response) })
-            }
-            s if s.is_success() => response
-                .bytes()
-                .await
-                .map(|b| b.to_vec())
-                .map_err(|e| CliError::General(format!("failed to read response body: {e}"))),
-            s => {
-                let body = response.text().await.unwrap_or_else(|_| "(unreadable)".to_owned());
-                Err(CliError::General(format!("server returned {s}: {body}")))
-            }
-        }
+        let response = check_response_status(response, path).await?;
+        response
+            .bytes()
+            .await
+            .map(|b| b.to_vec())
+            .map_err(|e| CliError::General(format!("failed to read response body: {e}")))
     }
 
     /// Issue an authenticated `POST` request to `path` under `/api/v1` with
@@ -235,23 +221,7 @@ impl ApiClient {
             .await
             .map_err(|e| map_reqwest_error(e, &url))?;
 
-        match response.status() {
-            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Err(CliError::AuthFailure(
-                format!("server rejected credentials ({})", response.status()),
-            )),
-            StatusCode::NOT_FOUND => {
-                Err(CliError::NotFound(format!("{path} does not exist on the server")))
-            }
-            s if s.is_success() => Ok(()),
-            s if s.is_server_error() => {
-                let body = response.text().await.unwrap_or_else(|_| "(unreadable body)".to_owned());
-                Err(CliError::ServerError(format!("server returned {s}: {body}")))
-            }
-            s => {
-                let body = response.text().await.unwrap_or_else(|_| "(unreadable body)".to_owned());
-                Err(CliError::General(format!("server returned {s}: {body}")))
-            }
-        }
+        check_response_status(response, path).await.map(|_| ())
     }
 
     /// Issue an authenticated `DELETE` request to `path` under `/api/v1` and
@@ -354,6 +324,132 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delete_no_body_returns_ok_on_204() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/listeners/foo"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let cfg = test_config(&server.uri());
+        let client = ApiClient::new(&cfg).unwrap();
+        let result = client.delete_no_body("/listeners/foo").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn delete_no_body_returns_auth_failure_on_401() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/listeners/foo"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+
+        let cfg = test_config(&server.uri());
+        let client = ApiClient::new(&cfg).unwrap();
+        let result = client.delete_no_body("/listeners/foo").await;
+        assert!(matches!(result, Err(CliError::AuthFailure(_))));
+    }
+
+    #[tokio::test]
+    async fn delete_no_body_returns_auth_failure_on_403() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/listeners/foo"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+
+        let cfg = test_config(&server.uri());
+        let client = ApiClient::new(&cfg).unwrap();
+        let result = client.delete_no_body("/listeners/foo").await;
+        assert!(matches!(result, Err(CliError::AuthFailure(_))));
+    }
+
+    #[tokio::test]
+    async fn delete_no_body_returns_not_found_on_404() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/listeners/foo"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let cfg = test_config(&server.uri());
+        let client = ApiClient::new(&cfg).unwrap();
+        let result = client.delete_no_body("/listeners/foo").await;
+        assert!(matches!(result, Err(CliError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn delete_no_body_returns_rate_limited_on_429_without_header() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/listeners/foo"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&server)
+            .await;
+
+        let cfg = test_config(&server.uri());
+        let client = ApiClient::new(&cfg).unwrap();
+        let result = client.delete_no_body("/listeners/foo").await;
+        assert!(matches!(result, Err(CliError::RateLimited { retry_after_secs: None })));
+    }
+
+    #[tokio::test]
+    async fn delete_no_body_returns_rate_limited_on_429_with_retry_after() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/listeners/foo"))
+            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "30"))
+            .mount(&server)
+            .await;
+
+        let cfg = test_config(&server.uri());
+        let client = ApiClient::new(&cfg).unwrap();
+        let result = client.delete_no_body("/listeners/foo").await;
+        assert!(matches!(result, Err(CliError::RateLimited { retry_after_secs: Some(30) })));
+    }
+
+    #[tokio::test]
+    async fn delete_no_body_returns_server_error_on_5xx() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/listeners/foo"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("service unavailable"))
+            .mount(&server)
+            .await;
+
+        let cfg = test_config(&server.uri());
+        let client = ApiClient::new(&cfg).unwrap();
+        let result = client.delete_no_body("/listeners/foo").await;
+        assert!(matches!(result, Err(CliError::ServerError(_))));
+    }
+
+    #[tokio::test]
     async fn post_returns_server_unreachable_on_connection_refused() {
         let cfg = test_config("https://127.0.0.1:1");
         let client = ApiClient::new(&cfg).unwrap();
@@ -446,7 +542,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_raw_bytes_returns_general_error_on_5xx() {
+    async fn get_raw_bytes_returns_server_error_on_5xx() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -460,7 +556,7 @@ mod tests {
         let cfg = test_config(&server.uri());
         let client = ApiClient::new(&cfg).unwrap();
         let result = client.get_raw_bytes("/payload/download").await;
-        assert!(matches!(result, Err(CliError::General(_))));
+        assert!(matches!(result, Err(CliError::ServerError(_))));
     }
 
     #[tokio::test]

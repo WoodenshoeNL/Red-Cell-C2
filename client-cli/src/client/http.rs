@@ -43,12 +43,16 @@ pub(super) fn build_http_client(config: &ResolvedConfig) -> Result<Client, CliEr
     Ok(client)
 }
 
-/// Map an HTTP response to `Result<T, CliError>` using the standard status-code
-/// convention shared by all JSON endpoints.
-pub(super) async fn map_response<T: DeserializeOwned>(
+/// Classify an HTTP response by status code, converting error codes to
+/// [`CliError`] and passing successful responses through unchanged.
+///
+/// This is the single authoritative place for the status-code → error mapping
+/// shared by all endpoints (JSON, raw-bytes, and no-body).  Callers handle
+/// only the success body.
+pub(super) async fn check_response_status(
     response: reqwest::Response,
     path: &str,
-) -> Result<T, CliError> {
+) -> Result<reqwest::Response, CliError> {
     match response.status() {
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Err(CliError::AuthFailure(format!(
             "server rejected credentials ({})",
@@ -60,10 +64,7 @@ pub(super) async fn map_response<T: DeserializeOwned>(
         StatusCode::TOO_MANY_REQUESTS => {
             Err(CliError::RateLimited { retry_after_secs: parse_retry_after(&response) })
         }
-        s if s.is_success() => response
-            .json::<T>()
-            .await
-            .map_err(|e| CliError::General(format!("failed to parse server response: {e}"))),
+        s if s.is_success() => Ok(response),
         s if s.is_server_error() => {
             let body = response.text().await.unwrap_or_else(|_| "(unreadable body)".to_owned());
             Err(CliError::ServerError(format!("server returned {s}: {body}")))
@@ -73,6 +74,19 @@ pub(super) async fn map_response<T: DeserializeOwned>(
             Err(CliError::General(format!("server returned {s}: {body}")))
         }
     }
+}
+
+/// Map an HTTP response to `Result<T, CliError>` using the standard status-code
+/// convention shared by all JSON endpoints.
+pub(super) async fn map_response<T: DeserializeOwned>(
+    response: reqwest::Response,
+    path: &str,
+) -> Result<T, CliError> {
+    let response = check_response_status(response, path).await?;
+    response
+        .json::<T>()
+        .await
+        .map_err(|e| CliError::General(format!("failed to parse server response: {e}")))
 }
 
 /// Extract the numeric value of the `Retry-After` response header.

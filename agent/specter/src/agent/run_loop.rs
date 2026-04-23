@@ -396,7 +396,7 @@ impl SpecterAgent {
     /// Send a callback packet with a raw `command_id` (used by the dispatch loop
     /// to forward arbitrary response command IDs without converting through the
     /// typed `DemonCommand` enum).
-    pub(super) async fn send_callback_raw(
+    async fn send_callback_raw(
         &mut self,
         command_id: u32,
         request_id: u32,

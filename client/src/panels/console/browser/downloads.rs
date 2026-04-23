@@ -22,21 +22,13 @@ pub(crate) fn render_download_progress_section(
     agent_id: &str,
     browser: &AgentFileBrowserState,
 ) {
-    // Compute the set of non-dismissed completed downloads before borrowing app mutably.
-    let pending_completed: Vec<(String, String, Vec<u8>)> = browser
-        .completed_downloads
-        .iter()
-        .filter(|(file_id, _)| {
-            !app.session_panel
-                .file_browser_state
-                .get(agent_id)
-                .is_some_and(|s| s.dismissed_downloads.contains(file_id.as_str()))
-        })
-        .map(|(id, c)| (id.clone(), c.remote_path.clone(), c.data.clone()))
-        .collect();
-
     let has_active = !browser.downloads.is_empty();
-    let has_completed = !pending_completed.is_empty();
+    let has_completed = browser.completed_downloads.iter().any(|(file_id, _)| {
+        !app.session_panel
+            .file_browser_state
+            .get(agent_id)
+            .is_some_and(|s| s.dismissed_downloads.contains(file_id.as_str()))
+    });
 
     if !has_active && !has_completed {
         return;
@@ -85,21 +77,29 @@ pub(crate) fn render_download_progress_section(
     }
 
     // ── Completed downloads awaiting save ──────────────────────
-    if !pending_completed.is_empty() {
+    if has_completed {
         ui.add_space(4.0);
         ui.label(RichText::new("Completed — click Save to write to disk:").weak());
     }
 
     let mut to_dismiss: Vec<String> = Vec::new();
-    for (file_id, remote_path, data) in &pending_completed {
+    for (file_id, c) in &browser.completed_downloads {
+        if app
+            .session_panel
+            .file_browser_state
+            .get(agent_id)
+            .is_some_and(|s| s.dismissed_downloads.contains(file_id.as_str()))
+        {
+            continue;
+        }
         ui.horizontal(|ui| {
             ui.label("✅");
             ui.label(
-                RichText::new(format!("{} ({})", remote_path, human_size(data.len() as u64)))
+                RichText::new(format!("{} ({})", c.remote_path, human_size(c.data.len() as u64)))
                     .monospace(),
             );
             if ui.button("Save").clicked() {
-                match save_completed_download(remote_path, data) {
+                match save_completed_download(c.remote_path.as_str(), c.data.as_slice()) {
                     CompletedDownloadSaveOutcome::Cancelled => {}
                     CompletedDownloadSaveOutcome::Saved => {
                         to_dismiss.push(file_id.clone());

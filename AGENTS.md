@@ -15,6 +15,8 @@ compatibility is maintained.
    (see *Agent Variants* below). Archon first (C/ASM fork of Demon, compile +
    test parity), then Phantom (Rust, Linux), then Specter (Rust, Windows).
 
+**New VM setup?** See [docs/setup.md](docs/setup.md) for install steps.
+
 ## CI Policy
 
 Do not use GitHub Actions for this repository.

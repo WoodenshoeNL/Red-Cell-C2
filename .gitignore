@@ -53,6 +53,7 @@ Running
 target-codex-x86m/
 target-pkvbc/
 target-clippy-*/
+target-phantom-*/
 data/
 
 # Automated test harness — credentials (never commit)

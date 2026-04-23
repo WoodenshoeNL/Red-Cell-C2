@@ -3,6 +3,8 @@
 //! All integers use **little-endian** byte order, matching the teamserver's
 //! `CallbackParser`.
 
+use thiserror::Error;
+
 // ─── Serialisation helpers ──────────────────────────────────────────────────
 
 /// Extract the child agent's Demon ID from its init packet.
@@ -62,7 +64,8 @@ pub(super) fn write_utf16le(buf: &mut Vec<u8>, s: &str) {
 // ─── Pipe error type ────────────────────────────────────────────────────────
 
 /// Platform-agnostic pipe error.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Error)]
+#[error("{code}: {message}")]
 pub struct PipeError {
     code: u32,
     message: String,
@@ -90,8 +93,15 @@ impl PipeError {
     }
 }
 
-impl std::fmt::Display for PipeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "[{}] {}", self.code, self.message)
+#[cfg(test)]
+mod tests {
+    use super::PipeError;
+
+    #[test]
+    fn pipe_error_formats_and_implements_error() {
+        let error = PipeError::new(123, "pipe failed");
+
+        assert_eq!(error.to_string(), "123: pipe failed");
+        assert!(std::error::Error::source(&error).is_none());
     }
 }

@@ -316,21 +316,17 @@ mod tests {
 
     #[test]
     fn ipv4_to_u32_valid() {
-        // 127.0.0.1 → little-endian bytes [127, 0, 0, 1]
-        let expected = u32::from_le_bytes([127, 0, 0, 1]);
-        assert_eq!(ipv4_to_u32("127.0.0.1").unwrap(), expected);
+        assert_eq!(ipv4_to_u32("127.0.0.1").unwrap(), 0x0100_007F);
     }
 
     #[test]
     fn ipv4_to_u32_broadcast() {
-        let expected = u32::from_le_bytes([255, 255, 255, 255]);
-        assert_eq!(ipv4_to_u32("255.255.255.255").unwrap(), expected);
+        assert_eq!(ipv4_to_u32("255.255.255.255").unwrap(), 0xFFFF_FFFF);
     }
 
     #[test]
     fn ipv4_to_u32_trims_whitespace() {
-        let expected = u32::from_le_bytes([10, 0, 0, 1]);
-        assert_eq!(ipv4_to_u32("  10.0.0.1  ").unwrap(), expected);
+        assert_eq!(ipv4_to_u32("  10.0.0.1  ").unwrap(), 0x0100_000A);
     }
 
     #[test]

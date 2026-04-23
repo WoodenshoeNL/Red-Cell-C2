@@ -134,9 +134,8 @@ impl SocketState {
         let mut offset = 0;
         let socket_id = parse_u32_le(rest, &mut offset)?;
         if self.reverse_port_forwards.contains_key(&socket_id) {
-            let callbacks_before = self.pending_responses.len();
             self.remove_reverse_port_forward(socket_id);
-            if let Some(resp) = self.pending_responses.get_mut(callbacks_before) {
+            if let Some(resp) = self.pending_responses.last_mut() {
                 resp.request_id = request_id;
             }
         }

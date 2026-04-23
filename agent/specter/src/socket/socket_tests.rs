@@ -1,4 +1,4 @@
-use red_cell_common::demon::{DemonCommand, DemonSocketCommand};
+use red_cell_common::demon::{DemonCommand, DemonSocketCommand, DemonSocketType};
 
 use super::socket_io::{
     SOCKS_METHOD_NOT_ACCEPTABLE, SocksRequestError, encode_bool, encode_bytes, encode_socket_clear,
@@ -374,6 +374,53 @@ async fn rportfwd_add_then_remove() {
     assert!(!responses.is_empty());
 
     assert!(!state.has_active_connections());
+}
+
+#[tokio::test]
+async fn rportfwd_remove_with_clients_tags_final_remove_response() {
+    let mut state = SocketState::new();
+
+    let mut add_payload = Vec::new();
+    add_payload
+        .extend_from_slice(&(u32::from(DemonSocketCommand::ReversePortForwardAdd)).to_le_bytes());
+    add_payload.extend_from_slice(&0x7F000001_u32.to_le_bytes());
+    add_payload.extend_from_slice(&0_u32.to_le_bytes());
+    add_payload.extend_from_slice(&0x7F000001_u32.to_le_bytes());
+    add_payload.extend_from_slice(&8080_u32.to_le_bytes());
+    state.handle_command(1, &add_payload).await.expect("add");
+    let responses = state.drain_responses();
+    assert_eq!(responses.len(), 1);
+
+    let add_response = &responses[0].payload;
+    let listener_id = u32::from_be_bytes(add_response[8..12].try_into().expect("listener_id"));
+    let bound_port = u32::from_be_bytes(add_response[16..20].try_into().expect("bound_port"));
+
+    let _client = std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, bound_port as u16))
+        .expect("connect to reverse port forward listener");
+    state.poll().await.expect("poll accepted client");
+
+    let responses = state.drain_responses();
+    assert_eq!(responses.len(), 1);
+    assert_eq!(responses[0].request_id, 0, "client open callbacks are uncorrelated");
+
+    let mut remove_payload = Vec::new();
+    remove_payload.extend_from_slice(
+        &(u32::from(DemonSocketCommand::ReversePortForwardRemove)).to_le_bytes(),
+    );
+    remove_payload.extend_from_slice(&listener_id.to_le_bytes());
+    state.handle_command(55, &remove_payload).await.expect("remove");
+
+    let responses = state.drain_responses();
+    assert_eq!(responses.len(), 2);
+    assert_eq!(responses[0].request_id, 0, "client removal stays uncorrelated");
+    assert_eq!(responses[1].request_id, 55, "final remove response keeps request id");
+
+    let socket_type = u32::from_be_bytes(responses[1].payload[8..12].try_into().expect("type"));
+    assert_eq!(
+        socket_type,
+        u32::from(DemonSocketType::ReversePortForward),
+        "final callback must be the reverse port forward removal"
+    );
 }
 
 // ── drain_responses produces correct command_id ──────────────────────────

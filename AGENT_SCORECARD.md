@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1591 | 278 | 97 |
+| Tasks closed | 1633 | 296 | 105 |
 | Bugs filed against | 263 | 50 | 15 |
-| Bug rate (bugs/task) | 0.17 | 0.18 | 0.15 |
-| Quality score | 83% | 82% | 85% |
+| Bug rate (bugs/task) | 0.16 | 0.17 | 0.14 |
+| Quality score | 84% | 83% | 86% |
 
-*Bug rates: Claude 263/1591=0.1653→0.17, Codex 50/278=0.1799→0.18, Cursor 15/97=0.1546→0.15*
+*Bug rates: Claude 263/1633=0.1611→0.16, Codex 50/296=0.1689→0.17, Cursor 15/105=0.1429→0.14*
 
 ## Violation Breakdown
 
@@ -7279,3 +7279,17 @@ Build: **cargo check** — passed (clean). **cargo clippy -- -D warnings** — c
 **Issues filed this run:** 0 — no new bugs found. Code quality excellent across all review dimensions: no production `unwrap`/`expect`, no `todo!`/`unimplemented!`, all security fixes correct and include regression tests.
 
 **Codebase health: excellent.** Large parallel sprint from two machines (tnpl + ncbt). Codex quality score improved: 80% → 82% (50 bugs / 278 tasks, bug rate dropped from 0.20 to 0.18 as Codex closed 23 more tasks without new bugs). Critical security fix: Archon DEMON_INIT per-IP rate limiter was bypassed due to wrong header parser — Claude (red-cell-c2-qx6mp) fixed it with 4 regression tests. All builds and tests clean.
+
+### QA Review — 2026-04-23 18:40 — fed9dd3f..0a94cbdf
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 42 | 0 | Large refactor + security sprint: ECDH last_seen refresh after auth (regression test added), unauthenticated body buffering bound on non-legacy listeners, reserved agent_id 0 rejection, ECDH session purge on agent cleanup, DEMON_INIT rate-limiting for Archon, non-legacy DEADBEEF precheck fix. Refactors: command_enc split, build_defs split, dispatcher split, agents.rs split, plugin commands.rs extraction, phantom inject split, phantom kerberos split, specter pivot split, common agent_transport split, client-cli audit split, specter transfer dispatch, specter metadata helpers. WIP commit (0a94cbdf) claimed already-closed issue red-cell-c2-74jph (trivial assertion reformatting in dispatch/tests/assembly.rs — harmless). |
+| Codex | 18 | 0 | Specter socket command handler split, sockets test splits (lifecycle/limits/relay), pivot pipe moved off Tokio workers (spawn_blocking join fix in specter), specter transfer state dedup, phantom kerberos test dedup, command_enc subcommand parse tests, rportfwd remove response tagging, percent_encode helper dedup (client-cli), DangerousCertificateVerifier fingerprint capture (client). |
+| Cursor | 8 | 0 | Client file-browser toolbar sharing refactor, file-browser module split, egui download buffer clone fix, specter pivot state preservation on spawn_blocking failure, 4 phantom ptrace fixes (SETREGS dedup, PTRACE_CONT result check, dlopen RAX check after SIGTRAP, SAFETY doc corrections). |
+
+Build: **cargo check** — passed (clean). **cargo clippy -- -D warnings** — clean (0 warnings). **cargo nextest run --workspace** — 5750/5750 passed, 0 skipped (103 net-new tests vs last checkpoint).
+
+**Issues filed this run:** 0 — no new bugs found. All three agents delivered clean work; zero production `unwrap`/`expect`, zero `todo!`/`unimplemented!`, zero clippy warnings. Test count grew from 5647 → 5750 (+103), reflecting the new regression tests added alongside security fixes.
+
+**Codebase health: excellent.** All three agents improved quality scores (Claude 83% → 84%, Codex 82% → 83%, Cursor 85% → 86%) by closing tasks without introducing new defects. The ECDH `touch_session` pre-auth vulnerability fix from Claude is the most security-relevant change — the fix correctly defers the liveness update until after decryption succeeds, and a regression test prevents re-introduction. Cursor landed a focused ptrace hardening sprint on Phantom. Codex completed the Specter socket refactor cleanly.

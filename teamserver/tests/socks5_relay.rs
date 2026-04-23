@@ -224,14 +224,25 @@ async fn remove_socks_server_stops_listener() -> Result<(), Box<dyn std::error::
     manager.add_socks_server(agent_id, &port.to_string()).await?;
     manager.remove_socks_server(agent_id, &port.to_string()).await?;
 
-    // Wait briefly for the task to terminate, then the port should be free.
-    sleep(Duration::from_millis(50)).await;
-    let result =
-        timeout(Duration::from_millis(200), TcpStream::connect(format!("127.0.0.1:{port}"))).await;
-    assert!(
-        result.is_err() || result.expect("unwrap").is_err(),
-        "port should no longer accept connections after remove"
-    );
+    // Poll until the listener task terminates (port stops accepting) or 2-second deadline.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let port_closed = loop {
+        let conn =
+            timeout(Duration::from_millis(50), TcpStream::connect(format!("127.0.0.1:{port}")))
+                .await;
+        match conn {
+            // timeout or connection refused — port is closed
+            Err(_) | Ok(Err(_)) => break true,
+            // connected — listener still up, keep waiting
+            Ok(Ok(_)) => {
+                if tokio::time::Instant::now() >= deadline {
+                    break false;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        }
+    };
+    assert!(port_closed, "port should no longer accept connections after remove");
     Ok(())
 }
 

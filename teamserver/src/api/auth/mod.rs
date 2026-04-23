@@ -32,13 +32,14 @@ use rate_limit::{
 };
 
 // Re-export items used by sibling modules within `api`.
-pub(crate) use auth_failure::MAX_FAILED_API_AUTH_ATTEMPTS;
 pub use authorization::{
     AdminApiAccess, ApiPermissionGuard, ListenerManagementApiAccess, ReadApiAccess,
     TaskAgentApiAccess,
 };
 pub(crate) use key::{API_KEY_HEADER, extract_api_key};
 pub use rate_limit::ApiRateLimit;
+#[cfg(test)]
+pub(crate) const MAX_FAILED_API_AUTH_ATTEMPTS: u32 = auth_failure::MAX_FAILED_API_AUTH_ATTEMPTS;
 
 /// Authenticated REST API identity derived from an API key.
 #[derive(Debug, Clone, PartialEq, Eq)]

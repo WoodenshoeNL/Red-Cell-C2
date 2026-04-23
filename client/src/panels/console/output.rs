@@ -68,7 +68,7 @@ impl ClientApp {
 ///
 /// The same task ID always produces the same color within a session, making it
 /// easy to visually correlate interleaved output chunks.
-pub(crate) fn task_id_color(task_id: &str) -> Color32 {
+fn task_id_color(task_id: &str) -> Color32 {
     const PALETTE: &[Color32] = &[
         Color32::from_rgb(100, 180, 255), // sky blue
         Color32::from_rgb(255, 180, 80),  // amber

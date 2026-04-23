@@ -255,6 +255,48 @@ async fn inject_so_via_ptrace(pid: u32, so_path: &str) -> u32 {
         return INJECT_ERROR_FAILED;
     }
 
+    // Read RAX — the __libc_dlopen_mode return value (NULL = failure).
+    let mut post_regs: libc::user_regs_struct = unsafe { std::mem::zeroed() };
+    let gr = unsafe {
+        libc::ptrace(
+            libc::PTRACE_GETREGS,
+            pid_i32,
+            0,
+            &mut post_regs as *mut libc::user_regs_struct,
+        )
+    };
+    if gr < 0 {
+        tracing::warn!(
+            pid,
+            "ptrace GETREGS after dlopen stub failed: {}",
+            std::io::Error::last_os_error()
+        );
+        ptrace_munmap_page(pid, &orig_regs, page_addr);
+        // SAFETY: PTRACE_DETACH with valid pid.
+        unsafe { libc::ptrace(libc::PTRACE_DETACH, pid_i32, 0, 0) };
+        return INJECT_ERROR_FAILED;
+    }
+    if post_regs.rax == 0 {
+        tracing::warn!(
+            pid,
+            %so_path,
+            "__libc_dlopen_mode returned NULL (path missing, not executable, or bad dependency chain)"
+        );
+        ptrace_munmap_page(pid, &orig_regs, page_addr);
+        // SAFETY: PTRACE_SETREGS with valid pid and original register state.
+        unsafe {
+            libc::ptrace(
+                libc::PTRACE_SETREGS,
+                pid_i32,
+                0,
+                &orig_regs as *const libc::user_regs_struct,
+            );
+        }
+        // SAFETY: PTRACE_DETACH with valid pid.
+        unsafe { libc::ptrace(libc::PTRACE_DETACH, pid_i32, 0, 0) };
+        return INJECT_ERROR_FAILED;
+    }
+
     ptrace_munmap_page(pid, &orig_regs, page_addr);
 
     // SAFETY: PTRACE_SETREGS with valid pid and original register state.

@@ -339,8 +339,9 @@ fn write_to_proc_mem_round_trips_own_memory() {
 /// This exercises the signal-forwarding loop in `wait_for_sigtrap`.
 #[test]
 fn wait_for_sigtrap_returns_true_after_intervening_signal() {
-    // SAFETY: single-threaded test process; child only calls async-signal-safe
-    // functions and libc::_exit before returning control.
+    // SAFETY: In the child branch we only use async-signal-safe libc, a single
+    // non-allocating `int3` instruction, and `libc::_exit`; no Rust-managed locks.
+    // That remains sound when `cargo test` runs tests in parallel on multiple threads.
     let child_pid = unsafe { libc::fork() };
     assert!(child_pid >= 0, "fork failed: {}", std::io::Error::last_os_error());
 
@@ -393,7 +394,9 @@ fn wait_for_sigtrap_returns_true_after_intervening_signal() {
 /// SIGTRAP, exercising the exit-without-trap path in the function.
 #[test]
 fn wait_for_sigtrap_returns_false_when_tracee_exits() {
-    // SAFETY: same constraints as the sigtrap test above.
+    // SAFETY: Same invariant as `wait_for_sigtrap_returns_true_after_intervening_signal`:
+    // child path uses only async-signal-safe libc and `libc::_exit` (no `int3` here),
+    // with no Rust-managed locks — safe under the default parallel test harness.
     let child_pid = unsafe { libc::fork() };
     assert!(child_pid >= 0, "fork failed: {}", std::io::Error::last_os_error());
 

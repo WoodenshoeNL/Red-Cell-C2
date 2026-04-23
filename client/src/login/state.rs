@@ -11,7 +11,6 @@ const MIN_PASSWORD_LENGTH: usize = 1;
 
 /// Tracks which field should receive initial focus on the next frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
 enum FocusRequest {
     ServerUrl,
     Username,
@@ -39,8 +38,13 @@ impl LoginState {
         let server_url = config.server_url.as_deref().unwrap_or(cli_server_url).to_owned();
         let username = config.username.clone().unwrap_or_default();
 
-        let focus_request =
-            if username.is_empty() { FocusRequest::Username } else { FocusRequest::Password };
+        let focus_request = if server_url.is_empty() {
+            FocusRequest::ServerUrl
+        } else if username.is_empty() {
+            FocusRequest::Username
+        } else {
+            FocusRequest::Password
+        };
 
         Self {
             server_url,
@@ -347,20 +351,6 @@ mod tests {
         }
     }
 
-    fn make_changed_certificate_failure(
-        msg: &str,
-        stored_fingerprint: &str,
-        new_fingerprint: Option<&str>,
-    ) -> TlsFailure {
-        TlsFailure {
-            message: msg.to_owned(),
-            cert_fingerprint: new_fingerprint.map(str::to_owned),
-            kind: TlsFailureKind::CertificateChanged {
-                stored_fingerprint: stored_fingerprint.to_owned(),
-            },
-        }
-    }
-
     #[test]
     fn set_tls_failure_stores_failure() {
         let mut state = default_login_state();
@@ -392,6 +382,12 @@ mod tests {
     fn new_focuses_username_when_no_saved_username() {
         let state = default_login_state();
         assert_eq!(state.focus_request, FocusRequest::Username);
+    }
+
+    #[test]
+    fn new_focuses_server_url_when_url_and_username_both_empty() {
+        let mut state = LoginState::new("", &LocalConfig::default());
+        assert!(state.take_server_url_focus());
     }
 
     #[test]

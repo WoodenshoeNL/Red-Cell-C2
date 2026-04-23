@@ -341,6 +341,14 @@ impl PivotState {
     }
 }
 
+#[cfg(test)]
+impl PivotState {
+    /// Inserts a synthetic pivot entry so [`Self::has_active_pivots`] is true.
+    pub(crate) fn test_insert_stub_pivot(&mut self, demon_id: u32) {
+        self.pivots.insert(demon_id, PivotEntry { demon_id, pipe_name: String::new(), handle: 0 });
+    }
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

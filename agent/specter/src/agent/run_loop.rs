@@ -1,5 +1,7 @@
 //! Legacy Demon-protocol run-loop and checkin flow.
 
+use std::sync::{Arc, Mutex};
+
 use red_cell_common::crypto::{ctr_blocks_for_len, decrypt_agent_data_at_offset};
 use red_cell_common::demon::{DemonCommand, DemonMessage};
 use tokio::task;
@@ -8,9 +10,20 @@ use tracing::{info, warn};
 use crate::dispatch::{self, DispatchResult, Response};
 use crate::error::SpecterError;
 use crate::metadata::current_unix_secs;
+use crate::pivot::PivotState;
 use crate::protocol::{build_callback_packet, parse_tasking_response};
 
 use super::SpecterAgent;
+
+/// Recover sole ownership after the blocking task has dropped its `Arc` clone.
+fn take_pivot_state_from_shared_arc(
+    state: Arc<Mutex<PivotState>>,
+) -> Result<PivotState, SpecterError> {
+    let mutex = Arc::try_unwrap(state).map_err(|_| {
+        SpecterError::Transport("pivot state: unexpected shared arc (internal error)".into())
+    })?;
+    Ok(mutex.into_inner().unwrap_or_else(|poisoned| poisoned.into_inner()))
+}
 
 impl SpecterAgent {
     /// Check whether the configured kill date has been reached.
@@ -355,32 +368,48 @@ impl SpecterAgent {
         base.saturating_sub(jitter_range).saturating_add(jitter)
     }
 
+    /// Run `f` on the blocking pool while keeping [`PivotState`] in an [`Arc`].
+    ///
+    /// If [`task::spawn_blocking`] returns a [`JoinError`](task::JoinError) (panic or
+    /// runtime shutdown), we still reattach the mutex-held state so active pivots and
+    /// queued responses are not replaced with [`PivotState::default`].
+    async fn with_pivot_state_blocking<F, R>(
+        &mut self,
+        op_label: &'static str,
+        run: F,
+    ) -> Result<R, SpecterError>
+    where
+        F: FnOnce(&mut PivotState) -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        let state = Arc::new(Mutex::new(std::mem::take(&mut self.pivot_state)));
+        let state_for_blocking = Arc::clone(&state);
+        let join_result = task::spawn_blocking(move || {
+            let mut ps = state_for_blocking.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            run(&mut ps)
+        })
+        .await;
+
+        self.pivot_state = take_pivot_state_from_shared_arc(state)?;
+
+        join_result.map_err(|e| SpecterError::Transport(format!("{op_label} task failed: {e}")))
+    }
+
     async fn handle_pivot_command(
         &mut self,
         payload: &[u8],
     ) -> Result<Option<Response>, SpecterError> {
         let payload = payload.to_vec();
-        let pivot_state = std::mem::take(&mut self.pivot_state);
-        let (pivot_state, response) = task::spawn_blocking(move || {
-            let mut pivot_state = pivot_state;
-            let response = pivot_state.handle_command(&payload);
-            (pivot_state, response)
-        })
-        .await
-        .map_err(|e| SpecterError::Transport(format!("pivot command task failed: {e}")))?;
-        self.pivot_state = pivot_state;
+        let response = self
+            .with_pivot_state_blocking("pivot command", move |pivot_state| {
+                pivot_state.handle_command(&payload)
+            })
+            .await?;
         Ok(response)
     }
 
     async fn poll_pivots(&mut self) -> Result<(), SpecterError> {
-        let pivot_state = std::mem::take(&mut self.pivot_state);
-        self.pivot_state = task::spawn_blocking(move || {
-            let mut pivot_state = pivot_state;
-            pivot_state.poll();
-            pivot_state
-        })
-        .await
-        .map_err(|e| SpecterError::Transport(format!("pivot poll task failed: {e}")))?;
+        self.with_pivot_state_blocking("pivot poll", |pivot_state| pivot_state.poll()).await?;
         Ok(())
     }
 
@@ -585,6 +614,26 @@ mod tests {
         let mut agent = SpecterAgent::new(SpecterConfig::default()).expect("agent");
         agent.poll_pivots().await.expect("pivot poll");
         assert!(!agent.pivot_state.has_active_pivots());
+    }
+
+    /// When `spawn_blocking` completes with a join error, pivot state must not
+    /// remain the default left behind by `mem::take`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pivot_state_restored_when_blocking_task_panics() {
+        let mut agent = SpecterAgent::new(SpecterConfig::default()).expect("agent");
+        agent.pivot_state.test_insert_stub_pivot(0x42);
+        assert!(agent.pivot_state.has_active_pivots());
+
+        let err = agent
+            .with_pivot_state_blocking("pivot test", |_| panic!("forced blocking panic"))
+            .await
+            .expect_err("blocking task should panic");
+
+        assert!(matches!(err, SpecterError::Transport(_)));
+        assert!(
+            agent.pivot_state.has_active_pivots(),
+            "pivot state must be restored after join error, not left at default"
+        );
     }
 
     // ── Kill-date tests ─────────────────────────────────────────────────────

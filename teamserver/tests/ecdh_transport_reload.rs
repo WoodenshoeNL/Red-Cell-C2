@@ -262,8 +262,9 @@ async fn queued_job_for_non_ecdh_agent_is_still_encrypted_after_reload()
     Ok(())
 }
 
-/// Unknown agent id must propagate as `AgentNotFound` — a sanity check that
-/// the reload helper method does not accidentally mask lookup failures.
+/// Unknown agent id must return `false` rather than panicking or defaulting to `true`,
+/// so `handle_get_job` falls through to the legacy AES-CTR path and the queue layer
+/// (not this transport probe) is what surfaces `AgentNotFound` to the caller.
 #[tokio::test]
 async fn is_ecdh_transport_returns_false_for_unknown_agent()
 -> Result<(), Box<dyn std::error::Error>> {

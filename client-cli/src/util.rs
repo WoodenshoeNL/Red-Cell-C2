@@ -10,9 +10,10 @@ pub(crate) fn percent_encode(s: &str) -> String {
                 out.push(byte as char)
             }
             b => {
+                const HEX: &[u8; 16] = b"0123456789ABCDEF";
                 out.push('%');
-                out.push(char::from_digit((b >> 4) as u32, 16).unwrap_or('0'));
-                out.push(char::from_digit((b & 0xf) as u32, 16).unwrap_or('0'));
+                out.push(HEX[(b >> 4) as usize] as char);
+                out.push(HEX[(b & 0xf) as usize] as char);
             }
         }
     }
@@ -35,7 +36,7 @@ mod tests {
 
     #[test]
     fn percent_encode_encodes_ampersand_and_equals() {
-        assert_eq!(percent_encode("a=b&c=d"), "a%3db%26c%3dd");
+        assert_eq!(percent_encode("a=b&c=d"), "a%3Db%26c%3Dd");
     }
 
     #[test]

@@ -2,6 +2,7 @@
 
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::ptr;
 
 /// Check whether ptrace is permitted on this system.
 ///
@@ -15,7 +16,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 ///
 /// We check our effective UID and capabilities to decide. If Yama is not
 /// present (file missing), we assume classic mode (allowed).
-pub(crate) fn check_ptrace_permission(target_pid: u32) -> bool {
+pub(super) fn check_ptrace_permission(target_pid: u32) -> bool {
     // Check Yama ptrace_scope.
     let scope = match fs::read_to_string("/proc/sys/kernel/yama/ptrace_scope") {
         Ok(s) => s.trim().parse::<u32>().unwrap_or(0),
@@ -84,13 +85,51 @@ pub(super) fn write_to_proc_mem(pid: u32, addr: u64, data: &[u8]) -> std::io::Re
 }
 
 /// Read data from a target process's memory via `/proc/<pid>/mem`.
-pub(crate) fn read_from_proc_mem(pid: u32, addr: u64, len: usize) -> std::io::Result<Vec<u8>> {
+pub(super) fn read_from_proc_mem(pid: u32, addr: u64, len: usize) -> std::io::Result<Vec<u8>> {
     let mem_path = format!("/proc/{pid}/mem");
     let mut file = fs::OpenOptions::new().read(true).open(mem_path)?;
     file.seek(SeekFrom::Start(addr))?;
     let mut buf = vec![0u8; len];
     file.read_exact(&mut buf)?;
     Ok(buf)
+}
+
+/// Wait for a tracee to stop with `SIGTRAP`, forwarding any intervening signals.
+///
+/// After `PTRACE_CONT`, the tracee may receive unrelated signals (e.g. `SIGALRM`,
+/// `SIGCHLD`) before reaching the `int3` instruction.  Those signals are re-delivered
+/// with another `PTRACE_CONT` so they are not silently dropped.
+///
+/// Returns `true` when the tracee stops with `SIGTRAP`; `false` if the process exits,
+/// is killed, or `waitpid` fails.
+pub(super) fn wait_for_sigtrap(pid: i32) -> bool {
+    loop {
+        let mut status: i32 = 0;
+        // SAFETY: valid pid, tracee is running under ptrace.
+        let ret = unsafe { libc::waitpid(pid, &mut status, 0) };
+        if ret < 0 {
+            return false;
+        }
+        if libc::WIFSTOPPED(status) {
+            let sig = libc::WSTOPSIG(status);
+            if sig == libc::SIGTRAP {
+                return true;
+            }
+            // Forward the pending signal and continue waiting.
+            // SAFETY: valid pid, tracee is stopped under ptrace.
+            unsafe {
+                libc::ptrace(
+                    libc::PTRACE_CONT,
+                    pid,
+                    ptr::null_mut::<libc::c_void>(),
+                    sig as usize as *mut libc::c_void,
+                )
+            };
+        } else {
+            // Process exited or was killed before reaching int3.
+            return false;
+        }
+    }
 }
 
 /// Allocate an anonymous RWX page in a stopped tracee by executing a
@@ -153,8 +192,11 @@ pub(super) fn ptrace_mmap_page(pid: u32, regs: &libc::user_regs_struct) -> Optio
     // Execute: PTRACE_CONT, wait for SIGTRAP from int3.
     // SAFETY: valid pid, tracee is stopped.
     unsafe { libc::ptrace(libc::PTRACE_CONT, pid_i32, 0, 0) };
-    let mut status: i32 = 0;
-    unsafe { libc::waitpid(pid_i32, &mut status, 0) };
+    if !wait_for_sigtrap(pid_i32) {
+        tracing::warn!(pid, "tracee did not reach SIGTRAP after mmap stub (exited or killed)");
+        let _ = write_to_proc_mem(pid, rip, &orig_bytes);
+        return None;
+    }
 
     // Read RAX — the mmap return value.
     let mut post_regs: libc::user_regs_struct = unsafe { std::mem::zeroed() };
@@ -241,8 +283,12 @@ pub(super) fn ptrace_munmap_page(pid: u32, regs: &libc::user_regs_struct, page_a
 
     // SAFETY: valid pid, tracee is stopped.
     unsafe { libc::ptrace(libc::PTRACE_CONT, pid_i32, 0, 0) };
-    let mut status: i32 = 0;
-    unsafe { libc::waitpid(pid_i32, &mut status, 0) };
+    if !wait_for_sigtrap(pid_i32) {
+        tracing::warn!(pid, "tracee did not reach SIGTRAP after munmap stub (exited or killed)");
+        // Best-effort: try to restore original bytes even though the stub may not have completed.
+        let _ = write_to_proc_mem(pid, rip, &orig_bytes);
+        return;
+    }
 
     // Restore original bytes and registers.
     let _ = write_to_proc_mem(pid, rip, &orig_bytes);

@@ -12,7 +12,8 @@ use crate::parser::TaskParser;
 
 use super::dlopen::{find_libc_base, resolve_dlopen_in_target};
 use super::ptrace::{
-    check_ptrace_permission, ptrace_mmap_page, ptrace_munmap_page, write_to_proc_mem,
+    check_ptrace_permission, ptrace_mmap_page, ptrace_munmap_page, wait_for_sigtrap,
+    write_to_proc_mem,
 };
 use super::{INJECT_ERROR_FAILED, INJECT_ERROR_SUCCESS};
 
@@ -246,9 +247,13 @@ async fn inject_so_via_ptrace(pid: u32, so_path: &str) -> u32 {
     // SAFETY: PTRACE_CONT with valid pid.
     unsafe { libc::ptrace(libc::PTRACE_CONT, pid_i32, 0, 0) };
 
-    let mut trap_status: i32 = 0;
-    // SAFETY: waitpid with valid pid.
-    unsafe { libc::waitpid(pid_i32, &mut trap_status, 0) };
+    if !wait_for_sigtrap(pid_i32) {
+        tracing::warn!(pid, "tracee did not reach SIGTRAP after dlopen stub (exited or killed)");
+        ptrace_munmap_page(pid, &orig_regs, page_addr);
+        // SAFETY: PTRACE_DETACH with valid pid.
+        unsafe { libc::ptrace(libc::PTRACE_DETACH, pid_i32, 0, 0) };
+        return INJECT_ERROR_FAILED;
+    }
 
     ptrace_munmap_page(pid, &orig_regs, page_addr);
 

@@ -79,7 +79,27 @@ def run(ctx):
             )
         print("  [session][agent.exec] passed")
     else:
+        # Two distinct error contracts:
+        #   1. Well-formed hex agent id that no agent owns → teamserver 404 →
+        #      session envelope with AGENT_NOT_FOUND (NOT_FOUND/UNKNOWN are
+        #      accepted as historical aliases).
+        #   2. Malformed agent id (non-hex characters) → CLI rejects locally
+        #      before forwarding → INVALID_ARGS envelope on stderr.
         print("  [session][agent.exec] no agents present — testing NOT_FOUND error path")
+        with Session(cli) as sess:
+            resp = sess.send(
+                {"cmd": "agent.exec", "id": "FFFFFFFF", "command": "echo x"},
+                raise_on_error=False,
+            )
+            assert resp.get("ok") is False, (
+                f"expected error envelope, got {resp!r}"
+            )
+            assert resp.get("error") in ("AGENT_NOT_FOUND", "NOT_FOUND", "UNKNOWN"), (
+                f"unexpected error code for absent agent: {resp.get('error')!r}"
+            )
+        print("  [session][agent.exec] NOT_FOUND error path passed")
+
+        print("  [session][agent.exec] testing INVALID_ARGS path with malformed id")
         with Session(cli) as sess:
             resp = sess.send(
                 {"cmd": "agent.exec", "id": "nonexistent-000", "command": "echo x"},
@@ -88,10 +108,10 @@ def run(ctx):
             assert resp.get("ok") is False, (
                 f"expected error envelope, got {resp!r}"
             )
-            assert resp.get("error") in ("NOT_FOUND", "UNKNOWN"), (
-                f"unexpected error code: {resp.get('error')!r}"
+            assert resp.get("error") == "INVALID_ARGS", (
+                f"expected INVALID_ARGS for malformed id, got: {resp.get('error')!r}"
             )
-        print("  [session][agent.exec] NOT_FOUND error path passed")
+        print("  [session][agent.exec] INVALID_ARGS path passed")
 
     # ── 4. Multi-command sequence ─────────────────────────────────────────────
     print("  [session][multi-cmd] three sequential commands on one connection")

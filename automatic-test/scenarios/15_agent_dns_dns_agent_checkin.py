@@ -1,28 +1,40 @@
 """
 Scenario 15_agent_dns: End-to-end agent checkin over DNS listener
 
-Deploy a Linux agent using DNS transport, wait for checkin, run command suite.
+Placeholder for future DNS-as-primary-transport agent support.  Currently
+unconditionally SKIPPED: no agent in the project implements DNS as a primary
+C2 transport.
 
-Demon does not support DNS C2 transport (no TransportDns implementation in the
-upstream agent source — only TransportHttp and TransportSmb exist).  The Demon
-pass is therefore skipped unconditionally; this scenario only runs the Phantom
-pass.  The scenario raises ScenarioSkipped when ``"phantom"`` is absent from
-``agents.available`` in env.toml; if it is listed and its build fails, the
-scenario fails so DNS transport regressions are visible.
+Transport matrix (as of 2026-04):
 
-Skip if ctx.linux is None or ``"phantom"`` is not in agents.available.
+  Demon    — HTTP, SMB                 (upstream Havoc: no TransportDns)
+  Phantom  — HTTP only                 (agent/phantom/src/agent/transport.rs)
+  Specter  — HTTP + DoH fallback       (agent/specter/src/doh_transport.rs,
+                                        via public cloudflare/google resolvers)
+  Archon   — HTTP + DoH fallback       (agent/archon/src/core/TransportDoH.c,
+                                        via public cloudflare/google resolvers)
 
-Steps (per agent pass):
-  1. Create + start DNS listener
-  2. Build agent payload configured to use DNS transport
-  3. Deploy via SSH/SCP to Ubuntu test machine
-  4. Execute payload in background on target
-  5. Wait for agent checkin
-  6. Run command suite: whoami, pwd, ls /, hostname
-  7. Kill agent, stop listener, clean up work_dir on target
+DoH is a fallback that tunnels through public DoH resolvers — it does not talk
+directly to our DNS listener.  The teamserver payload builder reflects this by
+rejecting DNS listeners for Rust agent builds
+(teamserver/src/payload_builder/rust_agent.rs: "{} listeners are not supported
+for Rust agent payload builds").
+
+DoH + DNS listener interop is covered by scenario 20
+(``20_agent_doh_dns_listener_interop.py``) via raw wire-format probes plus an
+optional Specter-with-DoH-fallback agent pass.
+
+When a Rust agent gains primary-DNS transport support:
+  1. Remove the ``ScenarioSkipped`` raise in :func:`run`.
+  2. Remove the DNS-listener exclusion in
+     ``teamserver/src/payload_builder/rust_agent.rs`` and wire the DNS build
+     flags through ``rust_agent_callback_url``.
+  3. The existing :func:`_run_for_agent` body below is the test template —
+     create + start DNS listener, build payload, deploy, checkin, command
+     suite, cleanup.
 """
 
-DESCRIPTION = "DNS agent checkin (Phantom over DNS)"
+DESCRIPTION = "DNS agent checkin (SKIPPED — no Rust agent has primary-DNS transport)"
 
 import uuid
 
@@ -167,49 +179,17 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
 
 def run(ctx):
     """
-    ctx.cli     — CliConfig (red-cell-cli wrapper)
-    ctx.linux   — TargetConfig | None
-    ctx.windows — TargetConfig | None
-    ctx.env     — raw env.toml dict
-    ctx.dry_run — bool
+    Always raises :class:`ScenarioSkipped`.
 
-    Raises AssertionError with a descriptive message on any failure.
-    Skips silently when ctx.linux is None.
-
-    DNS listener config is read from env.toml [listeners]:
-      dns_port   — UDP port the DNS listener binds on (default 15353)
-      dns_domain — C2 domain the agent beacons to (default "c2.test.local")
+    See the module docstring for why: no project agent implements DNS as a
+    primary C2 transport, and the teamserver's Rust-agent payload builder
+    explicitly rejects DNS listeners.  DoH fallback interop is covered by
+    scenario 20.
     """
-    if ctx.linux is None:
-        raise ScenarioSkipped("ctx.linux is None — no Linux target configured")
-    from urllib.parse import urlparse
-    from lib.deploy import DeployError, inject_hosts_entry, preflight_dns, preflight_ssh
-    try:
-        preflight_ssh(ctx.linux)
-    except DeployError as exc:
-        raise ScenarioSkipped(str(exc)) from exc
-
-    # Demon has no DNS transport (TransportHttp and TransportSmb only) — skip it.
-    available_agents = set(ctx.env.get("agents", {}).get("available", []))
-    if "phantom" not in available_agents:
-        raise ScenarioSkipped(
-            "No DNS-capable agent available — Demon lacks DNS transport support; "
-            "add 'phantom' to agents.available in env.toml to enable DNS checkin tests"
-        )
-
-    dns_cfg = ctx.env.get("listeners", {})
-    dns_domain = dns_cfg.get("dns_domain", "c2.test.local")
-    server_url = (
-        ctx.env.get("server", {}).get("rest_url")
-        or ctx.env.get("server", {}).get("url", "")
+    raise ScenarioSkipped(
+        "no agent implements DNS as a primary C2 transport — Phantom is "
+        "HTTP-only; Specter/Archon DoH is a public-resolver fallback, not "
+        "direct DNS-listener transport; teamserver rust_agent.rs rejects "
+        "DNS listeners for Rust builds. See scenario 20 for DoH+DNS "
+        "listener interop coverage."
     )
-    teamserver_ip = urlparse(server_url).hostname or "127.0.0.1"
-    try:
-        inject_hosts_entry(ctx.linux, dns_domain, teamserver_ip)
-    except DeployError as exc:
-        raise ScenarioSkipped(f"cannot inject /etc/hosts entry: {exc}") from exc
-    preflight_dns(ctx.linux, dns_domain, teamserver_ip)
-
-    # ── Phantom pass (Rust Linux agent — only DNS-capable agent) ────────────
-    print("\n  === DNS agent pass: phantom ===")
-    _run_for_agent(ctx, agent_type="phantom", fmt="exe", name_prefix="test-dns-phantom")

@@ -10,7 +10,8 @@ exit codes) so AI agents can run it unattended and file bugs for failures.
 automatic-test/
   test.py                     # main runner: --scenario all|01|02|...
   config/
-    env.toml                  # teamserver URL + operator credentials (commit safe)
+    env.toml                  # teamserver URL + operator credentials — GITIGNORED
+    env.toml.example          # template with placeholders (callback_host commented)
     targets.toml              # test-machine SSH details — GITIGNORED
     targets.toml.example      # template with placeholders
   scenarios/
@@ -58,6 +59,11 @@ python3 test.py --dry-run
 
 Connection details live in `automatic-test/config/targets.toml` (gitignored).
 See `automatic-test/config/targets.toml.example` for the required fields.
+
+Teamserver URL, operator credentials, and the host-specific `callback_host`
+live in `automatic-test/config/env.toml` (gitignored). `test.py` auto-seeds
+it from `env.toml.example` on first run, but `callback_host` must be set
+manually before scenarios that deploy agents to remote targets will pass.
 
 For Windows SSH setup, see `docs/win11-ssh-setup.md`.
 

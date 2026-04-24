@@ -13,7 +13,19 @@
    ```bash
    ./logrotate-setup.sh   # idempotent, prompts for sudo
    ```
-5. **Verify**: `br ready` should show available work.
+5. **Seed the autotest config** (only needed if you will run `automatic-test/test.py`):
+   ```bash
+   cp automatic-test/config/env.toml.example automatic-test/config/env.toml
+   cp automatic-test/config/targets.toml.example automatic-test/config/targets.toml
+   ```
+   Both files are gitignored (host-specific). Edit `env.toml` and set
+   `[server].callback_host` to this machine's IP as seen from the target VMs:
+   ```bash
+   ip route get <linux-target-ip> | grep -oP 'src \K[0-9.]+'
+   ```
+   The harness will auto-seed `env.toml` on first run if missing, but will
+   warn until `callback_host` is set.
+6. **Verify**: `br ready` should show available work.
 
 ## Stopping a Dev Loop
 

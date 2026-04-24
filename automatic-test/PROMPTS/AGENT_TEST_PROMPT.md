@@ -37,11 +37,12 @@ red-cell-cli --version
 ## Step 3 — Verify config
 
 ```bash
-# Check that env.toml exists and has the right structure
-cat automatic-test/config/env.toml
-
-# Check that targets.toml exists (it is gitignored — must be present locally)
+# Both env.toml and targets.toml are gitignored — must be present locally.
+# test.py auto-seeds env.toml from env.toml.example on first run, but
+# callback_host must be set manually for scenarios that deploy to remote targets.
+ls automatic-test/config/env.toml     || echo "MISSING: will auto-seed from env.toml.example"
 ls automatic-test/config/targets.toml || echo "MISSING: copy targets.toml.example"
+cat automatic-test/config/env.toml 2>/dev/null || true
 ```
 
 If `targets.toml` is missing, skip the deploy scenarios (04, 05) but run the

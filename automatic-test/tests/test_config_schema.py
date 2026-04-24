@@ -228,6 +228,60 @@ class TestLoadTargetsFile(unittest.TestCase):
 
 
 class TestLoadEnvFile(unittest.TestCase):
+    def test_load_env_seeds_from_example_when_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_dir = Path(tmpdir)
+            example = config_dir / "env.toml.example"
+            target = config_dir / "env.toml"
+            example.write_text(
+                """
+[server]
+url = "wss://127.0.0.1:40056"
+rest_url = "https://127.0.0.1:40056"
+
+[operator]
+username = "u"
+password = "p"
+api_key = "k"
+
+[timeouts]
+agent_checkin = 60
+command_output = 30
+agent_disconnect = 30
+screenshot_loot = 30
+loot_entry = 30
+max_cli_subprocess_secs = 120
+
+[listeners]
+dns_port = 15353
+dns_domain = "c2.test.local"
+linux_port = 19081
+windows_port = 19082
+payload_build_port = 19080
+protocol_probe_port = 19090
+interop_win_port = 19091
+interop_lin_port = 19092
+stress_port = 19093
+rbac_admin_port = 19098
+rbac_viewer_port = 19099
+smb_pipe = "redcell-c2"
+
+[agents]
+available = ["demon"]
+""",
+                encoding="utf-8",
+            )
+            self.assertFalse(target.exists())
+            loaded = load_env(target)
+            self.assertTrue(target.is_file())
+            self.assertEqual(loaded["operator"]["api_key"], "k")
+
+    def test_load_env_missing_with_no_example_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "env.toml"
+            with self.assertRaises(FileNotFoundError):
+                load_env(target)
+
     def test_load_env_validates(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".toml", delete=False, mode="wb") as tmp:
             path = Path(tmp.name)

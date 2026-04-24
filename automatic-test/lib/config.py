@@ -8,6 +8,7 @@ dataclass schemas below so typos and wrong types fail fast with a clear
 
 from __future__ import annotations
 
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 import tomllib
@@ -768,10 +769,36 @@ def validate_targets_dict(raw: dict[str, Any]) -> None:
 
 
 def load_env(path: Path) -> dict[str, Any]:
-    """Load ``env.toml`` from *path* and validate against the schema."""
+    """Load ``env.toml`` from *path* and validate against the schema.
+
+    If *path* does not exist but a sibling ``<name>.example`` template does,
+    seed *path* from the template and emit a clear message so the operator
+    can fill in host-specific values (notably ``[server].callback_host``).
+    Warns after load if ``callback_host`` is unset — agents on remote targets
+    cannot check in without it.
+    """
+    if not path.exists():
+        example = path.parent / (path.name + ".example")
+        if example.is_file():
+            shutil.copyfile(example, path)
+            print(f"[INFO] {path} not found — seeded from {example.name}.")
+            print(f"       Edit {path} and set [server].callback_host to this machine's IP")
+            print("       (derive with: ip route get <target-ip> | grep -oP 'src \\K[0-9.]+').")
+        else:
+            raise FileNotFoundError(
+                f"{path} not found and no {example.name} template to seed from"
+            )
     with open(path, "rb") as f:
         raw = tomllib.load(f)
     validate_env_dict(raw)
+    server = raw.get("server") if isinstance(raw.get("server"), dict) else {}
+    if not server.get("callback_host"):
+        print(
+            f"[WARN] {path}: [server].callback_host is unset — scenarios that deploy "
+            "agents to remote targets (04, 05, 06, 07, 08, 11, 14, 15, 17, 19, 21-24) "
+            "will time out at checkin. Set it to this machine's IP as seen from the "
+            "target VMs."
+        )
     return raw
 
 

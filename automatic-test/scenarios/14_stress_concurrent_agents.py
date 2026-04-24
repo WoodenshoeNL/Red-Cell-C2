@@ -205,6 +205,7 @@ def _run_stress_for_agent(
         payload_build_and_fetch,
     )
     from lib.deploy import ensure_work_dir, execute_background, run_remote, upload
+    from lib.listeners import http_listener_kwargs
 
     cli = ctx.cli
     co = int(ctx.timeouts.command_output)
@@ -214,7 +215,6 @@ def _run_stress_for_agent(
     uid = _short_id()
     listener_name = f"{name_prefix}-{uid}"
     listener_port = ctx.env.get("listeners", {}).get("stress_port", 19093)
-    callback_host = ctx.env.get("server", {}).get("callback_host")
 
     # Record pre-existing agent IDs.
     try:
@@ -227,9 +227,9 @@ def _run_stress_for_agent(
 
     # ── Step 1: Create + start listener ──────────────────────────────────────
     print(f"  [{agent_type}][listener] creating HTTP listener {listener_name!r} on port {listener_port}")
-    kw: dict = {"port": listener_port}
-    if callback_host:
-        kw["hosts"] = callback_host
+    kw = http_listener_kwargs(listener_port, ctx.env)
+    if "hosts" in kw:
+        # Demon HTTP profile in this stress run still uses legacy CTR framing.
         kw["legacy_mode"] = True
     listener_create(cli, listener_name, "http", **kw)
     listener_start(cli, listener_name)

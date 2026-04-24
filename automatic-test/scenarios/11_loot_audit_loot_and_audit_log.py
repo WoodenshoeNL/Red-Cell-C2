@@ -121,6 +121,7 @@ def run(ctx):
         payload_build_and_fetch,
     )
     from lib.deploy import ensure_work_dir, execute_background, run_remote, upload
+    from lib.listeners import http_listener_kwargs
     from lib.wait import TimeoutError as WaitTimeout
     from lib.wait import poll, wait_for_agent
 
@@ -166,7 +167,7 @@ def run(ctx):
 
     # ── Step 2: Create + start HTTP listener ─────────────────────────────────
     print(f"  [listener] creating HTTP listener {listener_name!r} on port {listener_port}")
-    listener_create(cli, listener_name, "http", port=listener_port)
+    listener_create(cli, listener_name, "http", **http_listener_kwargs(listener_port, ctx.env))
     listener_start(cli, listener_name)
     print("  [listener] started")
 

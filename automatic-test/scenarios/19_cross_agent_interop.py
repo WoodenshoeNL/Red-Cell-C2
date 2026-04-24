@@ -286,6 +286,7 @@ def run(ctx):
         listener_start,
         listener_stop,
     )
+    from lib.listeners import http_listener_kwargs
 
     cli = ctx.cli
     co = int(ctx.timeouts.command_output)
@@ -313,11 +314,11 @@ def run(ctx):
 
     # ── Step 1: Create + start both listeners ────────────────────────────────
     print(f"  [listener] creating HTTP listener {listener_win_name!r} on port {listener_win_port}")
-    listener_create(cli, listener_win_name, "http", port=listener_win_port)
+    listener_create(cli, listener_win_name, "http", **http_listener_kwargs(listener_win_port, ctx.env))
     listener_start(cli, listener_win_name)
 
     print(f"  [listener] creating HTTP listener {listener_lin_name!r} on port {listener_lin_port}")
-    listener_create(cli, listener_lin_name, "http", port=listener_lin_port)
+    listener_create(cli, listener_lin_name, "http", **http_listener_kwargs(listener_lin_port, ctx.env))
     listener_start(cli, listener_lin_name)
     print("  [listener] both listeners started")
 

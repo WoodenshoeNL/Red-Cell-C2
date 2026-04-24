@@ -133,6 +133,7 @@ def run(ctx):
         listener_stop,
     )
     from lib.deploy import run_remote
+    from lib.listeners import http_listener_kwargs
 
     cli = ctx.cli
     co = int(ctx.timeouts.command_output)
@@ -143,7 +144,7 @@ def run(ctx):
 
     # ── Step 1: Create + start HTTP listener ────────────────────────────────
     print(f"  [listener] creating HTTP listener {listener_name!r} on port {listener_port}")
-    listener_create(cli, listener_name, "http", port=listener_port)
+    listener_create(cli, listener_name, "http", **http_listener_kwargs(listener_port, ctx.env))
     listener_start(cli, listener_name)
     print("  [listener] started")
 

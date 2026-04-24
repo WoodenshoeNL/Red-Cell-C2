@@ -84,6 +84,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
     )
     from lib.deploy import run_remote
     from lib.deploy_agent import deploy_and_checkin
+    from lib.listeners import http_listener_kwargs
 
     cli = ctx.cli
     co = int(ctx.timeouts.command_output)
@@ -101,7 +102,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
 
     # ── Step 1: Create + start HTTP listener ────────────────────────────────
     print(f"  [{agent_type}][listener] creating HTTP listener {listener_name!r} on port {listener_port}")
-    listener_create(cli, listener_name, "http", port=listener_port)
+    listener_create(cli, listener_name, "http", **http_listener_kwargs(listener_port, ctx.env))
     listener_start(cli, listener_name)
     print(f"  [{agent_type}][listener] started")
 
@@ -274,6 +275,7 @@ def _run_for_agent_windows(ctx, agent_type: str, fmt: str, name_prefix: str) -> 
     )
     from lib.deploy import run_remote
     from lib.deploy_agent import deploy_and_checkin
+    from lib.listeners import http_listener_kwargs
 
     cli = ctx.cli
     co = int(ctx.timeouts.command_output)
@@ -291,7 +293,7 @@ def _run_for_agent_windows(ctx, agent_type: str, fmt: str, name_prefix: str) -> 
 
     # ── Step 1: Create + start HTTP listener ────────────────────────────────
     print(f"  [{agent_type}][listener] creating HTTP listener {listener_name!r} on port {listener_port}")
-    listener_create(cli, listener_name, "http", port=listener_port)
+    listener_create(cli, listener_name, "http", **http_listener_kwargs(listener_port, ctx.env))
     listener_start(cli, listener_name)
     print(f"  [{agent_type}][listener] started")
 

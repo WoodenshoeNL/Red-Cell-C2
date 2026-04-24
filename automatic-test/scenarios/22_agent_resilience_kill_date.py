@@ -81,7 +81,7 @@ def run(ctx):
             cli,
             target,
             agent_type="phantom",
-            fmt="elf",
+            fmt="exe",
             listener_name=listener_name,
             sleep_secs=sleep_interval,
             label="22",

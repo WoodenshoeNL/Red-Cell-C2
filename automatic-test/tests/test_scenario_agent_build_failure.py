@@ -99,7 +99,7 @@ class TestScenario04(unittest.TestCase):
         ctx = _linux_ctx()
         with _apply_patches(_LISTENER_PATCHES):
             with self.assertRaises(CliError) as cm:
-                self.mod._run_for_agent(ctx, "phantom", "elf", "test-linux-phantom")
+                self.mod._run_for_agent(ctx, "phantom", "exe", "test-linux-phantom")
         self.assertEqual(cm.exception.code, "BUILD_FAILED")
 
     def test_skipped_when_phantom_not_in_available(self) -> None:
@@ -115,7 +115,7 @@ class TestScenario04(unittest.TestCase):
                 self.mod.run(ctx)
 
     def test_phantom_pass_when_in_available(self) -> None:
-        """run() calls _run_for_agent with phantom+elf when phantom is available."""
+        """run() calls _run_for_agent with phantom+exe when phantom is available."""
         ctx = _linux_ctx()
         ctx.env["agents"]["available"] = ["demon", "phantom"]
         with patch("lib.deploy.preflight_ssh"), \
@@ -124,7 +124,7 @@ class TestScenario04(unittest.TestCase):
         mock_run.assert_called_once()
         call = mock_run.call_args_list[0]
         self.assertEqual(call.kwargs["agent_type"], "phantom")
-        self.assertEqual(call.kwargs["fmt"], "elf")
+        self.assertEqual(call.kwargs["fmt"], "exe")
 
 
 # ── Scenario 05: Windows agent (Demon + Specter) ─────────────────────────────

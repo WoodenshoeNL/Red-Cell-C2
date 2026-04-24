@@ -184,7 +184,7 @@ def _run_stress_for_agent(
         target:      TargetConfig for the machine to deploy agents to.
         agent_type:  Agent name passed to ``payload_build`` (e.g. ``"demon"``
                      or ``"phantom"``).
-        fmt:         Payload format (e.g. ``"bin"`` or ``"elf"``).
+        fmt:         Payload format (``"exe"`` is required for Rust agents like Phantom).
         name_prefix: Short prefix used to name the listener and remote files.
         agent_count: Number of concurrent agent instances to spawn.
         run_seconds: Duration of the load-run phase in seconds.
@@ -508,7 +508,7 @@ def run(ctx):
             ctx,
             target=ctx.linux,
             agent_type="phantom",
-            fmt="bin",
+            fmt="exe",
             name_prefix="test-stress-phantom",
             agent_count=PHANTOM_AGENT_COUNT,
             run_seconds=PHANTOM_RUN_SECONDS,

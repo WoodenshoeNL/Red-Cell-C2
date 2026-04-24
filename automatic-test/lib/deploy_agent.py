@@ -52,7 +52,8 @@ def deploy_and_checkin(
         target:           TargetConfig for the deployment target.
         agent_type:       Agent name passed to ``payload build`` (e.g.
                           ``"demon"``, ``"phantom"``, ``"archon"``).
-        fmt:              Payload format (e.g. ``"bin"``, ``"elf"``, ``"exe"``).
+        fmt:              Payload format (``"exe"``, ``"dll"``, or ``"bin"``;
+                          Rust agents like Phantom/Specter only accept ``"exe"``).
         listener_name:    Name of the pre-created, pre-started listener.
         checkin_timeout:  Fallback timeout in seconds; overridden by
                           ``timeouts.agent_checkin`` in env.toml when present.

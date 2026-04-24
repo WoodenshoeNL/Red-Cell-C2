@@ -50,7 +50,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
         ctx:         RunContext passed by the harness.
         agent_type:  Agent name passed to ``payload_build`` (e.g. ``"demon"``
                      or ``"phantom"``).
-        fmt:         Payload format (e.g. ``"bin"`` or ``"elf"``).
+        fmt:         Payload format (``"exe"`` is required for Rust agents like Phantom).
         name_prefix: Short prefix used to name the listener and remote files.
 
     Raises:
@@ -414,7 +414,7 @@ def run(ctx):
                 " (add 'phantom' to agents.available)"
             )
         else:
-            _run_for_agent(ctx, agent_type="phantom", fmt="elf", name_prefix="test-procops-phantom")
+            _run_for_agent(ctx, agent_type="phantom", fmt="exe", name_prefix="test-procops-phantom")
             ran_any = True
     else:
         print("  [skip] ctx.linux is None — skipping Linux agent passes")

@@ -135,7 +135,7 @@ def run(ctx):
 
     # Demon is Windows-only; use Phantom (ELF) for Linux targets.
     agent_name = "demon" if is_windows else "phantom"
-    actual_fmt = payload_fmt if is_windows else "elf"
+    actual_fmt = payload_fmt if is_windows else "exe"
 
     if is_windows:
         remote_payload = f"{target.work_dir}\\agent-{uid}.exe"

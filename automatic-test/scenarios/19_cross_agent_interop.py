@@ -95,10 +95,10 @@ def _build_and_deploy_linux(cli, target, listener_name, uid):
     _fd, local_payload = tempfile.mkstemp(suffix=".bin")
     os.close(_fd)
 
-    print(f"  [linux] building Phantom bin x64 for listener {listener_name!r}")
-    raw = payload_build_and_fetch(cli, listener=listener_name, arch="x64", fmt="bin", agent="phantom")
+    print(f"  [linux] building Phantom exe x64 for listener {listener_name!r}")
+    raw = payload_build_and_fetch(cli, listener=listener_name, arch="x64", fmt="exe", agent="phantom")
     assert len(raw) > 0, "Phantom payload is empty"
-    print(f"  [linux] Phantom bin built ({len(raw)} bytes)")
+    print(f"  [linux] Phantom exe built ({len(raw)} bytes)")
 
     with open(local_payload, "wb") as fh:
         fh.write(raw)

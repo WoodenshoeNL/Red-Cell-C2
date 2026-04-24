@@ -104,7 +104,7 @@ def _run_for_agent(
         target:      The concrete target (windows or linux) to deploy to.
         agent_type:  Agent name passed to ``payload_build``
                      (``"demon"``, ``"specter"`` or ``"phantom"``).
-        fmt:         Payload format (``"exe"`` for Windows, ``"elf"`` for Linux).
+        fmt:         Payload format — always ``"exe"`` (Phantom is a Rust agent with a single output class).
         is_windows:  True when running against the Windows target.
         name_prefix: Short prefix used to name the listener.
 
@@ -350,7 +350,7 @@ def run(ctx):
         print("\n  === Agent pass: phantom (Linux) ===")
         _run_for_agent(
             ctx, ctx.linux,
-            agent_type="phantom", fmt="elf", is_windows=False,
+            agent_type="phantom", fmt="exe", is_windows=False,
             name_prefix="test-screenshot-phantom",
         )
         return

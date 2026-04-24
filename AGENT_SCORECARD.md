@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1646 | 296 | 105 |
+| Tasks closed | 1657 | 296 | 105 |
 | Bugs filed against | 263 | 50 | 15 |
 | Bug rate (bugs/task) | 0.16 | 0.17 | 0.14 |
 | Quality score | 84% | 83% | 86% |
 
-*Bug rates: Claude 263/1646=0.1597→0.16, Codex 50/296=0.1689→0.17, Cursor 15/105=0.1429→0.14*
+*Bug rates: Claude 263/1657=0.1587→0.16, Codex 50/296=0.1689→0.17, Cursor 15/105=0.1429→0.14*
 
 ## Violation Breakdown
 
@@ -41,6 +41,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-24 14:24 — 362ffd0d..b1f739fc
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 11 | 0 | Closes: 3jlpo (preflight_ssh Windows compat), g5445 (bake PHANTOM_*/SPECTER_* env vars via `option_env!` in Rust agents + `rust_agent_env_vars()` in teamserver, 9 new unit tests), nsfhc (link `-lbcrypt` for Archon ECDH + surface compiler stderr_tail in build errors, 3 new integration tests), bnqwf (scenario 18 INVALID_ARGS path distinction), rm0y5 (rename `env.toml` → `.example` + gitignore host-specific copy), rp9to (autotest scenarios thread `callback_host` via new `lib/listeners.py::http_listener_kwargs`), mrtx3 (scenario 15 unconditional skip — no Rust agent has primary-DNS transport), axm4i (scenario 10 callback_host), mz1y8/217tf (resilience helper prefers `server.callback_host`), lv9by (scenarios 13/20 exercise `INIT_EXT_MONOTONIC_CTR` per hardened profiles). No regressions introduced. |
+| Codex | 0 | 0 | No activity in this review range. |
+| Cursor | 0 | 0 | No activity in this review range. |
+
+Build: passed (cargo check + clippy -D warnings clean; nextest 5789/5789 PASS in 181s).
 
 ### Arch Review — 2026-04-23 11:20
 

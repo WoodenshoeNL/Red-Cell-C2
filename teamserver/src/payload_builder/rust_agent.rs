@@ -15,7 +15,8 @@ use red_cell_common::operator::CompilerDiagnostic;
 
 use super::cache::CacheKey;
 use super::{
-    BuildProgress, PayloadArtifact, PayloadBuildError, PayloadBuilderService, workspace_root,
+    BuildProgress, MAX_STDERR_TAIL_LINES, PayloadArtifact, PayloadBuildError,
+    PayloadBuilderService, workspace_root,
 };
 
 impl PayloadBuilderService {
@@ -153,9 +154,17 @@ impl PayloadBuilderService {
                 });
             }
 
+            let stderr_tail: Vec<String> = stderr
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .take(MAX_STDERR_TAIL_LINES)
+                .map(str::to_owned)
+                .collect();
+
             return Err(PayloadBuildError::CommandFailed {
                 command: format!("cargo build --release --target {target_triple}"),
                 diagnostics,
+                stderr_tail,
             });
         }
 

@@ -73,12 +73,39 @@ pub enum PayloadBuildError {
     #[error("payload build I/O failed: {0}")]
     Io(#[from] std::io::Error),
     /// A compiler process exited unsuccessfully.
-    #[error("payload build command failed: {command}")]
+    #[error("payload build command failed: {command}{}", format_stderr_preview(stderr_tail))]
     CommandFailed {
         command: String,
         /// Structured diagnostics parsed from the compiler's stderr output.
         diagnostics: Vec<CompilerDiagnostic>,
+        /// First N lines of the compiler's raw stderr — captured so operators
+        /// can see fatal errors (missing headers, linker failures, etc.) that
+        /// do not match the `filename:line:col: severity: message` diagnostic
+        /// pattern and are therefore absent from `diagnostics`.
+        stderr_tail: Vec<String>,
     },
+}
+
+/// Maximum number of stderr lines captured in `PayloadBuildError::CommandFailed`.
+///
+/// Chosen so that the first fatal error is almost always included without
+/// flooding websocket clients or audit logs with an entire verbose build log.
+pub(crate) const MAX_STDERR_TAIL_LINES: usize = 50;
+
+/// Format a short preview of captured stderr lines for error display.
+///
+/// Returns an empty string when `stderr_tail` is empty so the base error
+/// message renders unchanged. Otherwise appends ` — stderr: <line 1> | <line 2> | ...`
+/// capped at the first 5 non-empty lines so a one-line `.to_string()` still
+/// fits in a log entry.
+fn format_stderr_preview(stderr_tail: &[String]) -> String {
+    let preview: Vec<&str> = stderr_tail
+        .iter()
+        .filter(|line| !line.trim().is_empty())
+        .take(5)
+        .map(String::as_str)
+        .collect();
+    if preview.is_empty() { String::new() } else { format!(" — stderr: {}", preview.join(" | ")) }
 }
 
 /// Teamserver service responsible for compiling Havoc-compatible Demon payloads.

@@ -10,7 +10,7 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 
 use super::formats::Architecture;
-use super::{BuildProgress, PayloadBuildError};
+use super::{BuildProgress, MAX_STDERR_TAIL_LINES, PayloadBuildError};
 
 /// Tag identifying which stream a line originated from.
 enum StreamTag {
@@ -94,7 +94,9 @@ where
     } else {
         let diagnostics =
             stderr_lines.iter().filter_map(|l| parse_compiler_diagnostic(l)).collect();
-        Err(PayloadBuildError::CommandFailed { command: command_line, diagnostics })
+        let stderr_tail: Vec<String> =
+            stderr_lines.into_iter().take(MAX_STDERR_TAIL_LINES).collect();
+        Err(PayloadBuildError::CommandFailed { command: command_line, diagnostics, stderr_tail })
     }
 }
 

@@ -126,23 +126,41 @@ pub(super) async fn handle_build_payload_request(
             Err(error) => {
                 events.broadcast(build_payload_message_event(&actor, "Error", &error.to_string()));
 
-                let diagnostic_params =
-                    if let PayloadBuildError::CommandFailed { ref diagnostics, .. } = error {
-                        for diag in diagnostics {
-                            events.broadcast(build_payload_message_event(
-                                &actor,
-                                match diag.severity.as_str() {
-                                    "error" | "fatal error" => "Error",
-                                    "warning" => "Warning",
-                                    _ => "Info",
-                                },
-                                &format_diagnostic(diag),
-                            ));
+                let (diagnostic_params, stderr_params) = if let PayloadBuildError::CommandFailed {
+                    ref diagnostics,
+                    ref stderr_tail,
+                    ..
+                } = error
+                {
+                    for diag in diagnostics {
+                        events.broadcast(build_payload_message_event(
+                            &actor,
+                            match diag.severity.as_str() {
+                                "error" | "fatal error" => "Error",
+                                "warning" => "Warning",
+                                _ => "Info",
+                            },
+                            &format_diagnostic(diag),
+                        ));
+                    }
+                    // Always surface the raw stderr tail so operators see
+                    // fatal errors (missing headers, linker failures) that
+                    // do not match the structured diagnostic pattern.
+                    if !stderr_tail.is_empty() {
+                        events.broadcast(build_payload_message_event(
+                            &actor,
+                            "Error",
+                            "compiler stderr (first lines):",
+                        ));
+                        for line in stderr_tail {
+                            events.broadcast(build_payload_message_event(&actor, "Error", line));
                         }
-                        serialize_for_audit(diagnostics, "payload.build.diagnostics")
-                    } else {
-                        None
-                    };
+                    }
+                    let stderr_value = serialize_for_audit(stderr_tail, "payload.build.stderr");
+                    (serialize_for_audit(diagnostics, "payload.build.diagnostics"), stderr_value)
+                } else {
+                    (None, None)
+                };
 
                 log_operator_action(
                     &database,
@@ -163,7 +181,8 @@ pub(super) async fn handle_build_payload_request(
                                 ("error", Value::String(error.to_string())),
                             ]
                             .into_iter()
-                            .chain(diagnostic_params.into_iter().map(|d| ("diagnostics", d))),
+                            .chain(diagnostic_params.into_iter().map(|d| ("diagnostics", d)))
+                            .chain(stderr_params.into_iter().map(|s| ("stderr", s))),
                         )),
                     ),
                 )

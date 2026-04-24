@@ -106,8 +106,23 @@ fn payload_build_error_display_messages() {
     let err = PayloadBuildError::InvalidRequest { message: "bad arch".to_owned() };
     assert!(err.to_string().contains("bad arch"));
 
-    let err = PayloadBuildError::CommandFailed { command: "gcc".to_owned(), diagnostics: vec![] };
+    let err = PayloadBuildError::CommandFailed {
+        command: "gcc".to_owned(),
+        diagnostics: vec![],
+        stderr_tail: vec![],
+    };
     assert!(err.to_string().contains("gcc"));
+
+    // With a non-empty stderr tail the Display impl appends a short preview so
+    // the single-line error message carries actionable compiler output.
+    let err = PayloadBuildError::CommandFailed {
+        command: "gcc".to_owned(),
+        diagnostics: vec![],
+        stderr_tail: vec!["fatal: windows.h not found".to_owned()],
+    };
+    let rendered = err.to_string();
+    assert!(rendered.contains("gcc"));
+    assert!(rendered.contains("fatal: windows.h not found"));
 }
 
 // Phantom / Specter callback URL tests live in `rust_agent::tests`.

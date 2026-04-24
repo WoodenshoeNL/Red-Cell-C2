@@ -180,6 +180,7 @@ impl PayloadBuilderService {
             format.file_extension()
         ));
         let mut defines = build_defines(listener, config_bytes.as_slice(), shellcode_define)?;
+        let mut extra_link_flags: Vec<&'static str> = Vec::new();
         let mut export_name: Option<String> = None;
         if agent.name == "archon" {
             let (magic_define, _magic_value) = generate_archon_magic()?;
@@ -193,6 +194,11 @@ impl PayloadBuilderService {
             }
             if let Some(pub_key) = ecdh_pub_key {
                 defines.extend(archon_ecdh_defines(&pub_key)?);
+                // ARCHON_ECDH_MODE pulls in BCryptGenRandom for the CSPRNG adapter
+                // (src/Demon.c::ArchonEcdhRng). bcrypt.dll is not part of the default
+                // MinGW link set under -nostdlib, so without this the link step fails
+                // with "undefined reference to `BCryptGenRandom`".
+                extra_link_flags.push("-lbcrypt");
             }
         }
         let object_files = self
@@ -223,6 +229,10 @@ impl PayloadBuilderService {
         args.extend(default_compiler_flags(format).into_iter().map(OsString::from));
         args.extend(defines.into_iter().map(|define| OsString::from(format!("-D{define}"))));
         args.extend(main_args(architecture, format).into_iter().map(OsString::from));
+        // Extra link flags (e.g. -lbcrypt for Archon ECDH) must appear after the
+        // source/object arguments so the linker can resolve symbols referenced
+        // from those inputs.
+        args.extend(extra_link_flags.into_iter().map(OsString::from));
         args.push(OsString::from("-o"));
         args.push(output_path.as_os_str().to_os_string());
 

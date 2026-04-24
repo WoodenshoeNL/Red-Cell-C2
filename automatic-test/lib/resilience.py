@@ -12,16 +12,20 @@ from lib.cli import CliConfig, CliError, agent_list
 
 
 def extract_http_callback_host(env: dict) -> str:
-    """Return the hostname from ``server.rest_url`` or ``server.url`` for listener ``hosts``.
+    """Return the host to bake into agent CONFIG_BYTES for listener ``hosts``.
 
-    The agent must reach the teamserver at this address; it matches the host used in
-    ``env.toml`` / ``targets.toml`` network layout.
+    Prefers ``[server].callback_host`` — the explicit, routable dev-box address set in
+    ``env.toml`` for scenarios that deploy agents to remote VMs. Falls back to deriving
+    the host from ``server.rest_url`` / ``server.url`` (loopback-only) when
+    ``callback_host`` is unset, matching the canonical ``lib.listeners.http_listener_kwargs``
+    resolution so resilience scenarios do not silently bake ``127.0.0.1`` into remote
+    agent configs.
     """
-    url = (
-        env.get("server", {}).get("rest_url")
-        or env.get("server", {}).get("url", "")
-        or ""
-    )
+    server = env.get("server", {})
+    callback_host = server.get("callback_host")
+    if callback_host:
+        return str(callback_host)
+    url = server.get("rest_url") or server.get("url", "") or ""
     if "://" in url:
         url = url.split("://", 1)[1]
     host = url.split(":")[0].split("/")[0]

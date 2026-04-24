@@ -29,6 +29,16 @@ def _mkstemp_bin(*args: object, **kwargs: object) -> tuple[int, str]:
 
 
 class TestResilienceHelpers(unittest.TestCase):
+    def test_extract_http_callback_host_prefers_callback_host(self) -> None:
+        env = {
+            "server": {
+                "rest_url": "https://127.0.0.1:40056",
+                "url": "wss://127.0.0.1:40056",
+                "callback_host": "192.168.213.157",
+            }
+        }
+        self.assertEqual(extract_http_callback_host(env), "192.168.213.157")
+
     def test_extract_http_callback_host_from_rest_url(self) -> None:
         env = {"server": {"rest_url": "https://192.168.1.5:40056"}}
         self.assertEqual(extract_http_callback_host(env), "192.168.1.5")
@@ -37,14 +47,28 @@ class TestResilienceHelpers(unittest.TestCase):
         env = {"server": {"url": "wss://127.0.0.1:40056"}}
         self.assertEqual(extract_http_callback_host(env), "127.0.0.1")
 
-    def test_http_listener_inner_config_includes_hosts_and_extras(self) -> None:
-        env = {"server": {"rest_url": "https://10.0.0.1:8443"}}
+    def test_extract_http_callback_host_empty_callback_host_falls_back(self) -> None:
+        env = {"server": {"callback_host": "", "rest_url": "https://10.2.2.2:40056"}}
+        self.assertEqual(extract_http_callback_host(env), "10.2.2.2")
+
+    def test_http_listener_inner_config_uses_callback_host_when_set(self) -> None:
+        env = {
+            "server": {
+                "rest_url": "https://127.0.0.1:40056",
+                "callback_host": "10.0.0.1",
+            }
+        }
         inner = http_listener_inner_config("ln", 19100, env, kill_date="1234567890", working_hours="02:00-03:00")
         self.assertEqual(inner["name"], "ln")
         self.assertEqual(inner["port_bind"], 19100)
         self.assertEqual(inner["hosts"], ["10.0.0.1:19100"])
         self.assertEqual(inner["kill_date"], "1234567890")
         self.assertEqual(inner["working_hours"], "02:00-03:00")
+
+    def test_http_listener_inner_config_falls_back_to_rest_url(self) -> None:
+        env = {"server": {"rest_url": "https://10.0.0.1:8443"}}
+        inner = http_listener_inner_config("ln", 19100, env)
+        self.assertEqual(inner["hosts"], ["10.0.0.1:19100"])
 
     def test_pick_inactive_working_hours(self) -> None:
         self.assertEqual(pick_inactive_working_hours(14), "02:00-03:00")

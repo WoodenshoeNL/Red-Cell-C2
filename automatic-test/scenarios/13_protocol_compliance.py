@@ -45,7 +45,7 @@ Every Demon packet consists of a 12-byte header followed by a payload:
     sleep_jitter            u32 BE  (percent)
     kill_date               u64 BE  (unix epoch, 0 = none)
     working_hours           i32 BE  (signed, 0 = no restriction)
-    [extension_flags        u32 BE  — omit for legacy CTR mode]
+    extension_flags         u32 BE  (INIT_EXT_MONOTONIC_CTR = 0x1)
 
   DEMON_INIT server response:
     4 bytes = AES-256-CTR(key, iv, offset=0, agent_id.to_le_bytes())
@@ -53,7 +53,7 @@ Every Demon packet consists of a 12-byte header followed by a payload:
   GET_JOB callback payload (command 1):
     [0:4]   command_id = 1
     [4:8]   request_id (any u32)
-    [8:]    AES-256-CTR(key, iv, offset=0,
+    [8:]    AES-256-CTR(key, iv, offset=post_init,
                 u32be(0))   # length-prefixed empty payload
 
   GET_JOB server response (no jobs queued):
@@ -61,15 +61,20 @@ Every Demon packet consists of a 12-byte header followed by a payload:
 
 AES note
 --------
-Legacy Demon agents (no extension flags in DEMON_INIT) use CTR block
-offset 0 for every packet — the offset never advances.  All tests below
-rely on this legacy behaviour so that the Python side never needs to track
-block counters.  New agents that set the INIT_EXT_MONOTONIC_CTR flag use
-monotonically advancing offsets and are tested separately (out of scope here).
+The teamserver rejects legacy CTR sessions by default (AllowLegacyCtr = false
+in shipped Demon profiles).  These probes therefore set the
+INIT_EXT_MONOTONIC_CTR extension flag in DEMON_INIT, which switches the agent
+into monotonic CTR mode: the shared block offset advances by
+`ctr_blocks_for_len(len)` after every encrypted send and after the init ACK.
+The probes intentionally omit INIT_EXT_SEQ_PROTECTED so callbacks do not need
+the 8-byte sequence prefix — this keeps the wire format minimal while still
+exercising the modern post-hardening protocol.
 
 AES-256-CTR is implemented by calling `openssl enc -aes-256-ctr` via
 subprocess — the only way to do AES in pure-Python without adding a third-
-party dependency.
+party dependency.  Block-offset support is layered on top by deriving a new
+starting counter as `(IV as big-endian u128) + block_offset`, mirroring the
+`encrypt_agent_data_at_offset` helper in `common/src/crypto`.
 """
 
 from __future__ import annotations
@@ -97,6 +102,14 @@ DEMON_GET_JOB_CMD = 1
 
 AES_KEY_LEN = 32
 AES_IV_LEN = 16
+AES_BLOCK_LEN = 16
+
+# Extension flag requesting monotonic CTR mode in DEMON_INIT.  Mirrors
+# `INIT_EXT_MONOTONIC_CTR` in `common/src/agent_protocol.rs`.  We deliberately
+# do not also set `INIT_EXT_SEQ_PROTECTED`: that would require every callback
+# plaintext to be prefixed with an 8-byte LE sequence number, which is not
+# needed to exercise the protocol-compliance checks below.
+INIT_EXT_MONOTONIC_CTR = 1 << 0
 
 
 # ── Crypto helpers (openssl subprocess, no third-party Python deps) ──────────
@@ -124,6 +137,31 @@ def _aes_256_ctr(key: bytes, iv: bytes, data: bytes) -> bytes:
             f"{result.stderr.decode(errors='replace')}"
         )
     return result.stdout
+
+
+def _aes_256_ctr_at_offset(key: bytes, iv: bytes, block_offset: int, data: bytes) -> bytes:
+    """AES-256-CTR starting `block_offset` 16-byte blocks past `iv`.
+
+    Mirrors `encrypt_agent_data_at_offset` in `common/src/crypto`: the IV is
+    treated as a big-endian u128 counter, `block_offset` is added (mod 2^128),
+    and the result is used as the starting AES-CTR counter.
+    """
+    if block_offset == 0:
+        return _aes_256_ctr(key, iv, data)
+    counter = (int.from_bytes(iv, "big") + block_offset) & ((1 << 128) - 1)
+    new_iv = counter.to_bytes(16, "big")
+    return _aes_256_ctr(key, new_iv, data)
+
+
+def _ctr_blocks_for_len(byte_len: int) -> int:
+    """Number of full AES-CTR blocks consumed by a `byte_len`-byte payload.
+
+    Matches the Rust helper `ctr_blocks_for_len` in `common/src/crypto`: a
+    1-byte payload still consumes one full 16-byte keystream block.
+    """
+    if byte_len == 0:
+        return 0
+    return (byte_len + AES_BLOCK_LEN - 1) // AES_BLOCK_LEN
 
 
 # ── Binary packing helpers ───────────────────────────────────────────────────
@@ -199,7 +237,9 @@ def _build_demon_init_metadata(agent_id: int) -> bytes:
     buf += _u32be(10)                                 # sleep_jitter (%)
     buf += _u64be(0)                                  # kill_date (0 = none)
     buf += _i32be(0)                                  # working_hours (no restriction)
-    # No extension flags → legacy CTR mode (offset resets to 0 per packet)
+    # Extension flags: opt in to monotonic CTR mode so the teamserver accepts
+    # the registration without `AllowLegacyCtr = true`.
+    buf += _u32be(INIT_EXT_MONOTONIC_CTR)
     return buf
 
 
@@ -233,6 +273,9 @@ def _build_demon_init_metadata_wrong_endian(agent_id: int) -> bytes:
     buf += _u32be(10)
     buf += _u64be(0)
     buf += _i32be(0)
+    # Same monotonic-CTR opt-in as the well-formed metadata; without it the
+    # teamserver rejects the packet before it ever inspects process_path.
+    buf += _u32be(INIT_EXT_MONOTONIC_CTR)
     return buf
 
 
@@ -263,14 +306,16 @@ def _build_demon_init_reconnect_packet(agent_id: int) -> bytes:
     return _build_envelope(agent_id, payload)
 
 
-def _build_get_job_packet(agent_id: int, key: bytes, iv: bytes) -> bytes:
+def _build_get_job_packet(agent_id: int, key: bytes, iv: bytes, block_offset: int = 0) -> bytes:
     """Build a GET_JOB callback packet.
 
     The callback body is: u32be(len=0) — an empty length-prefixed payload —
-    encrypted with AES-256-CTR at legacy block offset 0.
+    encrypted with AES-256-CTR starting at the agent's current monotonic CTR
+    block offset.  Callers are responsible for tracking that offset across
+    packets.
     """
     plaintext = _u32be(0)          # length-prefixed empty payload
-    encrypted = _aes_256_ctr(key, iv, plaintext)
+    encrypted = _aes_256_ctr_at_offset(key, iv, block_offset, plaintext)
     request_id = 3
     payload = (
         _u32be(DEMON_GET_JOB_CMD)
@@ -400,10 +445,13 @@ def _run_rejection_checks(base_url: str) -> None:
     _check("agent_id=0 rejected", status == 404, f"got HTTP {status}")
 
 
-def _run_init_handshake_check(base_url: str) -> tuple[int, bytes, bytes]:
+def _run_init_handshake_check(base_url: str) -> tuple[int, bytes, bytes, int]:
     """Send a valid DEMON_INIT and verify the server returns the correct ACK.
 
-    Returns (agent_id, key, iv) for use in subsequent checks.
+    Returns (agent_id, key, iv, post_init_offset) for use in subsequent
+    checks.  `post_init_offset` is the shared CTR block offset after the init
+    handshake completes (the server advances by `ctr_blocks_for_len(ack_len)`
+    when it encrypts the ACK in monotonic CTR mode).
     """
     agent_id = int.from_bytes(os.urandom(4), "big")
     # Ensure agent_id != 0 (reserved)
@@ -419,32 +467,40 @@ def _run_init_handshake_check(base_url: str) -> tuple[int, bytes, bytes]:
     _check("DEMON_INIT accepted (HTTP 200)", status == 200, f"got HTTP {status}")
     _check("DEMON_INIT response non-empty", len(body) > 0, f"empty response body")
 
-    # The ACK is AES-256-CTR(key, iv, offset=0, agent_id.to_le_bytes()).
-    # Decrypt and verify.
+    # The init ACK is AES-256-CTR(key, iv, offset=0, agent_id.to_le_bytes()).
+    # In monotonic CTR mode the server advances the shared offset by
+    # `ctr_blocks_for_len(len(body))` after sending the ACK; subsequent
+    # callbacks must use that advanced offset.
     expected_plaintext = _u32le(agent_id)
-    actual_plaintext = _aes_256_ctr(key, iv, body)
+    actual_plaintext = _aes_256_ctr_at_offset(key, iv, 0, body)
     _check(
         "DEMON_INIT ACK decrypts to agent_id (LE)",
         actual_plaintext == expected_plaintext,
         f"got {actual_plaintext.hex()!r}, expected {expected_plaintext.hex()!r}",
     )
 
-    return agent_id, key, iv
+    post_init_offset = _ctr_blocks_for_len(len(body))
+    return agent_id, key, iv, post_init_offset
 
 
-def _run_reconnect_check(base_url: str, agent_id: int, key: bytes, iv: bytes) -> None:
-    """Verify that a registered agent can send a reconnect probe."""
+def _run_reconnect_check(
+    base_url: str, agent_id: int, key: bytes, iv: bytes, block_offset: int
+) -> None:
+    """Verify that a registered agent can send a reconnect probe.
+
+    The reconnect ACK is encrypted at the current shared CTR offset *without*
+    advancing it (see `build_reconnect_ack` in `teamserver/src/demon/ack.rs`),
+    so we decrypt at `block_offset` and the agent's local offset is unchanged
+    after this check.
+    """
     print(f"  [check] DEMON_INIT reconnect probe → 200 + ACK")
     packet = _build_demon_init_reconnect_packet(agent_id)
     status, body = _post_raw(base_url, packet)
     _check("reconnect probe accepted (HTTP 200)", status == 200, f"got HTTP {status}")
     _check("reconnect ACK non-empty", len(body) > 0, "empty reconnect ACK")
 
-    # The reconnect ACK uses encrypt_for_agent_without_advancing, which also
-    # starts at the current stored CTR offset.  For a legacy-mode agent that
-    # offset remains at 0, so the decrypted value is again agent_id.to_le_bytes().
     expected_plaintext = _u32le(agent_id)
-    actual_plaintext = _aes_256_ctr(key, iv, body)
+    actual_plaintext = _aes_256_ctr_at_offset(key, iv, block_offset, body)
     _check(
         "reconnect ACK decrypts to agent_id (LE)",
         actual_plaintext == expected_plaintext,
@@ -452,10 +508,17 @@ def _run_reconnect_check(base_url: str, agent_id: int, key: bytes, iv: bytes) ->
     )
 
 
-def _run_get_job_check(base_url: str, agent_id: int, key: bytes, iv: bytes) -> None:
-    """Verify that a GET_JOB poll with no queued jobs returns an empty 200."""
+def _run_get_job_check(
+    base_url: str, agent_id: int, key: bytes, iv: bytes, block_offset: int
+) -> None:
+    """Verify that a GET_JOB poll with no queued jobs returns an empty 200.
+
+    The callback body is encrypted at the agent's current monotonic CTR
+    offset (`block_offset`).  An empty response body means the server has
+    nothing to send back, so no further offset bookkeeping is needed.
+    """
     print(f"  [check] GET_JOB poll (no jobs queued) → 200 + empty body")
-    packet = _build_get_job_packet(agent_id, key, iv)
+    packet = _build_get_job_packet(agent_id, key, iv, block_offset=block_offset)
     status, body = _post_raw(base_url, packet)
     _check("GET_JOB accepted (HTTP 200)", status == 200, f"got HTTP {status}")
     _check("GET_JOB response empty (no jobs)", len(body) == 0, f"body has {len(body)} bytes")
@@ -531,15 +594,17 @@ def run(ctx):
 
         # Phase 2: valid DEMON_INIT handshake
         print("  [phase 2] DEMON_INIT handshake")
-        agent_id, key, iv = _run_init_handshake_check(base_url)
+        agent_id, key, iv, post_init_offset = _run_init_handshake_check(base_url)
 
-        # Phase 3: reconnect probe (agent already registered)
+        # Phase 3: reconnect probe (agent already registered).  The reconnect
+        # ACK does not advance the shared CTR offset.
         print("  [phase 3] reconnect probe")
-        _run_reconnect_check(base_url, agent_id, key, iv)
+        _run_reconnect_check(base_url, agent_id, key, iv, post_init_offset)
 
-        # Phase 4: GET_JOB poll (no jobs queued)
+        # Phase 4: GET_JOB poll (no jobs queued).  Encrypted at the post-init
+        # offset; the empty response means no further offset advance.
         print("  [phase 4] GET_JOB poll")
-        _run_get_job_check(base_url, agent_id, key, iv)
+        _run_get_job_check(base_url, agent_id, key, iv, post_init_offset)
 
         # Phase 5: garbled-endian probe — server accepts (transport is valid),
         # process_path stored with garbled content.

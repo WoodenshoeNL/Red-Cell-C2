@@ -150,6 +150,22 @@ class TestScenario05(unittest.TestCase):
         self.assertIn("demon", agent_types)
         self.assertNotIn("specter", agent_types)
 
+    def test_archon_build_failure_propagates(self) -> None:
+        ctx = _windows_ctx()
+        with _apply_patches(_LISTENER_PATCHES):
+            with self.assertRaises(CliError) as cm:
+                self.mod._run_for_agent(ctx, "archon", "exe", "test-win-archon")
+        self.assertEqual(cm.exception.code, "BUILD_FAILED")
+
+    def test_archon_skipped_when_not_in_available(self) -> None:
+        ctx = _windows_ctx()  # env has only "demon" in available
+        with patch("lib.deploy.preflight_ssh"), \
+             patch.object(self.mod, "_run_for_agent") as mock_run:
+            self.mod.run(ctx)
+        agent_types = [c.kwargs["agent_type"] for c in mock_run.call_args_list]
+        self.assertIn("demon", agent_types)
+        self.assertNotIn("archon", agent_types)
+
 
 # ── Scenario 06: File transfer (Linux + Windows) ─────────────────────────────
 
@@ -210,6 +226,23 @@ class TestScenario06(unittest.TestCase):
         agent_types = [c.kwargs["agent_type"] for c in mock_run.call_args_list]
         self.assertNotIn("specter", agent_types)
 
+    def test_archon_windows_build_failure_propagates(self) -> None:
+        ctx = _windows_ctx()
+        with _apply_patches(_LISTENER_PATCHES):
+            with self.assertRaises(CliError) as cm:
+                self.mod._run_for_agent_windows(ctx, "archon", "exe", "test-ftransfer-archon")
+        self.assertEqual(cm.exception.code, "BUILD_FAILED")
+
+    def test_archon_skipped_when_not_in_available_windows(self) -> None:
+        ctx = _windows_ctx()  # env has only "demon" in available
+        ctx.linux = None
+        with patch("lib.deploy.preflight_ssh"), \
+             patch.object(self.mod, "_run_for_agent"), \
+             patch.object(self.mod, "_run_for_agent_windows") as mock_run:
+            self.mod.run(ctx)
+        agent_types = [c.kwargs["agent_type"] for c in mock_run.call_args_list]
+        self.assertNotIn("archon", agent_types)
+
 
 # ── Scenario 07: Process operations (Linux + Windows) ────────────────────────
 
@@ -268,6 +301,23 @@ class TestScenario07(unittest.TestCase):
             self.mod.run(ctx)
         agent_types = [c.kwargs["agent_type"] for c in mock_run.call_args_list]
         self.assertNotIn("specter", agent_types)
+
+    def test_archon_windows_build_failure_propagates(self) -> None:
+        ctx = _windows_ctx()
+        with _apply_patches(_LISTENER_PATCHES):
+            with self.assertRaises(CliError) as cm:
+                self.mod._run_for_agent_windows(ctx, "archon", "exe", "test-procops-archon")
+        self.assertEqual(cm.exception.code, "BUILD_FAILED")
+
+    def test_archon_skipped_when_not_in_available_windows(self) -> None:
+        ctx = _windows_ctx()  # env has only "demon" in available
+        ctx.linux = None
+        with patch("lib.deploy.preflight_ssh"), \
+             patch.object(self.mod, "_run_for_agent"), \
+             patch.object(self.mod, "_run_for_agent_windows") as mock_run:
+            self.mod.run(ctx)
+        agent_types = [c.kwargs["agent_type"] for c in mock_run.call_args_list]
+        self.assertNotIn("archon", agent_types)
 
 
 # ── Scenario 14: Stress concurrent agents ────────────────────────────────────

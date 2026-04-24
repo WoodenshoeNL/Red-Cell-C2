@@ -1,6 +1,6 @@
 Teamserver {
     Host = "127.0.0.1"
-    Port = 40099
+    Port = 40056
 
     Build {
         Compiler64 = "data/x86_64-w64-mingw32-cross/bin/x86_64-w64-mingw32-gcc"
@@ -10,8 +10,37 @@ Teamserver {
 }
 
 Operators {
-    user "testop" {
-        Password = "test-password-1234"
+    user "test-operator" {
+        Password = "changeme"
+    }
+
+    user "test-analyst" {
+        Password = "changeme-analyst"
+    }
+}
+
+Api {
+    RateLimitPerMinute = 120
+
+    key "test-operator" {
+        Value = "changeme-api-key"
+    }
+
+    key "test-analyst" {
+        Value = "changeme-analyst-key"
+        Role  = "Analyst"
+    }
+}
+
+Listeners {
+    Http {
+        Name         = "default"
+        Hosts        = ["127.0.0.1"]
+        HostBind     = "0.0.0.0"
+        HostRotation = "round-robin"
+        PortBind     = 19100
+        PortConn     = 19100
+        Secure       = false
     }
 }
 

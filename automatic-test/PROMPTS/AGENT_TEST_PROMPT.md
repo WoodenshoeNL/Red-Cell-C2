@@ -19,10 +19,18 @@ if [ -f .stop ]; then echo "STOP signal detected. Exiting."; exit 0; fi
 ```bash
 git pull --rebase
 cargo check --workspace
+cargo build --release --workspace
 ```
 
 If the build is broken, file a P1 bug and stop — do not run tests against
 broken code.
+
+The harness shells out to `red-cell-cli`, which must be on `PATH`:
+
+```bash
+export PATH="$(pwd)/target/release:$PATH"
+red-cell-cli --version
+```
 
 ---
 
@@ -43,10 +51,15 @@ rest.
 
 ## Step 4 — Start the teamserver (if not already running)
 
+Use `profiles/test.yaotl` — it is the canonical test profile and matches the
+credentials, port, and API keys declared in `automatic-test/config/env.toml`.
+Do **not** use `havoc.yaotl` for automated tests; it has different operator
+names and is intended for ad-hoc demo use.
+
 ```bash
 # Check if teamserver is already up
 red-cell-cli status 2>/dev/null && echo "already running" || \
-  (cd /path/to/red-cell-c2 && ./target/debug/red-cell --profile profiles/havoc.yaotl &)
+  (cd /path/to/red-cell-c2 && ./target/release/red-cell --profile profiles/test.yaotl &)
 sleep 3
 red-cell-cli status
 ```

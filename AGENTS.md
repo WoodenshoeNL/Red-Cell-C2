@@ -7,13 +7,13 @@ teamserver, operator GUI client (`red-cell-client`), and AI-agent CLI client
 (`red-cell-cli`). The original Demon agent (C/ASM) is kept as-is; Demon protocol
 compatibility is maintained.
 
-**Phase 2 — Active.** Two objectives running in parallel:
+**Phase 2 — Active.** Two objectives:
 1. **Testing** — manual operator test plan + automated end-to-end harness
    (`automatic-test/`) exercising the full `red-cell-cli → teamserver → agent`
    flow on real Ubuntu Desktop and Windows 11 targets.
-2. **Additional agents** — implement Archon, Phantom, and Specter in sequence
-   (see *Agent Variants* below). Archon first (C/ASM fork of Demon, compile +
-   test parity), then Phantom (Rust, Linux), then Specter (Rust, Windows).
+2. **Additional agents — Complete.** Archon (C/ASM fork of Demon, 9 enhancements,
+   wire-compatible), Phantom (Rust, Linux), and Specter (Rust, Windows) are all
+   feature-complete and in production. See *Agent Variants* below.
 
 **New VM setup?** See [docs/setup.md](docs/setup.md) for install steps.
 
@@ -208,8 +208,8 @@ Teamserver profiles live in `./profiles/` (`.yaotl` config files + TLS certs). T
 |-----------|------|----------|--------|--------|
 | `agent/demon/` | **Demon** | C/ASM | ✅ Production | **Frozen** — pristine Havoc Demon copy. Do not modify. Replace with upstream to update. |
 | `agent/archon/` | **Archon** | C/ASM | ✅ Production | **Fork of Demon with 9 enhancements (ARC-01 through ARC-09). Wire-compatible. Same toolchain (`mingw-w64` + `nasm`).** Parity milestone complete; all enhancements implemented and tested (191 tests pass). Teamserver integration complete. |
-| `agent/phantom/` | **Phantom** | Rust | 🔨 Phase 2b | **Linux Rust agent.** Demon-compatible transport. Linux-specific capabilities. Build: `cargo build --target x86_64-unknown-linux-musl`. |
-| `agent/specter/` | **Specter** | Rust | 🔨 Phase 2c | **Windows Rust agent.** Full Demon protocol/feature parity. Build: `cargo build --target x86_64-pc-windows-gnu`. |
+| `agent/phantom/` | **Phantom** | Rust | ✅ Production | **Linux Rust agent.** Demon-compatible transport (ECDH, INIT_EXT_SEQ_PROTECTED, monotonic CTR). Linux-specific capabilities: persist (cron/systemd), harvest (`/proc`), kerberos (ccache/keytab), screenshot, ptrace injection. Cargo lints enforce no `todo!`/`unimplemented!`. Build: `cargo build --target x86_64-unknown-linux-musl`. |
+| `agent/specter/` | **Specter** | Rust | ✅ Production | **Windows Rust agent.** Full Demon command parity (token ops, .NET assembly exec, BOF loader, DPAPI harvest, kerberos LSA) with ECDH transport, INIT_EXT_SEQ_PROTECTED, and monotonic CTR. Build: `cargo build --target x86_64-pc-windows-gnu`. |
 
 ### Agent build commands
 

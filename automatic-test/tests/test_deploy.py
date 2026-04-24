@@ -321,12 +321,16 @@ class TestPreflightSsh(unittest.TestCase):
         call_args = mock_run.call_args[0][0]
         self.assertIn("BatchMode=yes", call_args)
 
-    def test_runs_true_command(self) -> None:
-        """preflight_ssh must run 'true' on the remote host — no side-effects."""
+    def test_runs_noop_command(self) -> None:
+        """preflight_ssh must run a no-op on the remote host — no side-effects.
+
+        Uses ``exit 0`` rather than ``true`` so the probe works under Windows
+        OpenSSH (whose default shell is ``cmd.exe`` and does not know ``true``).
+        """
         with patch("subprocess.run", return_value=self._make_completed(0)) as mock_run:
             preflight_ssh(self.target)
         call_args = mock_run.call_args[0][0]
-        self.assertEqual(call_args[-1], "true")
+        self.assertEqual(call_args[-1], "exit 0")
 
     def test_custom_port(self) -> None:
         """preflight_ssh must pass the target's SSH port."""

@@ -189,7 +189,7 @@ def preflight_ssh(target: TargetConfig) -> None:
         "-o", f"ConnectTimeout={_SSH_CONNECT_SECS}",
         "-i", target.key,
         f"{target.user}@{target.host}",
-        "true",
+        "exit 0",
     ]
     result = _run_ssh_cli_with_retry(
         cmd, target.host, timeout=max(_SSH_CONNECT_SECS + 5, 10), tool="ssh"

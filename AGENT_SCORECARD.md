@@ -42,6 +42,19 @@ Each loop run updates the running totals and appends a review entry.
 
 <!-- QA and arch loops append entries below this line -->
 
+### Arch Review — 2026-04-24 18:30
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 0 | — | Clean review. All 4 findings from previous arch review (2026-04-23) verified fixed with regression tests: ECDH rate limiting (ej4up), ecdh_transport restore (qo8fd), restore_running continuation (4wq31), seq_protected persistence (pivna). |
+| Codex | 0 | — | No attributed findings in this review. |
+| Cursor | 0 | — | No attributed findings in this review. |
+
+Build: passed (cargo check clean; clippy -D warnings clean; nextest 5789/5789 PASS in 191s).
+
+Overall codebase health: on track
+Biggest blindspot: None identified. The ECDH transport lifecycle gap flagged in the 2026-04-23 review has been fully resolved. Crypto, auth, protocol, rate limiting, and bounded resource management are all solid. The only area without deep coverage is the Archon C agent (frozen upstream code, not reviewed for C-level issues like buffer overflows).
+
 ### QA Review — 2026-04-24 14:24 — 362ffd0d..b1f739fc
 
 | Agent | Tasks closed | Bugs filed | Notes |

@@ -305,6 +305,7 @@ impl PayloadBuilderService {
                         &self.inner.phantom_source_root,
                         "x86_64-unknown-linux-gnu",
                         "",
+                        ecdh_pub_key,
                         &mut progress,
                     )
                     .await;
@@ -317,6 +318,7 @@ impl PayloadBuilderService {
                         &self.inner.specter_source_root,
                         "x86_64-pc-windows-gnu",
                         ".exe",
+                        ecdh_pub_key,
                         &mut progress,
                     )
                     .await;

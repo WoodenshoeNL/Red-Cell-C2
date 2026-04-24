@@ -139,6 +139,7 @@ def _run_smb_pivot(ctx, parent_target, child_target):
         listener_stop,
     )
     from lib.deploy import run_remote
+    from lib.listeners import http_listener_kwargs
     from lib.wait import TimeoutError as WaitTimeout
     from lib.wait import poll
 
@@ -157,7 +158,7 @@ def _run_smb_pivot(ctx, parent_target, child_target):
     try:
         # ── Step 1: Create + start HTTP listener ────────────────────────────
         print(f"  [step 1] creating HTTP listener {listener_name!r} on port {listener_port}")
-        listener_create(cli, listener_name, "http", port=listener_port)
+        listener_create(cli, listener_name, "http", **http_listener_kwargs(listener_port, ctx.env))
         listener_start(cli, listener_name)
         print("  [step 1] HTTP listener started")
 

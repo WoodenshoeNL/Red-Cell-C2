@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1633 | 296 | 105 |
+| Tasks closed | 1646 | 296 | 105 |
 | Bugs filed against | 263 | 50 | 15 |
 | Bug rate (bugs/task) | 0.16 | 0.17 | 0.14 |
 | Quality score | 84% | 83% | 86% |
 
-*Bug rates: Claude 263/1633=0.1611→0.16, Codex 50/296=0.1689→0.17, Cursor 15/105=0.1429→0.14*
+*Bug rates: Claude 263/1646=0.1597→0.16, Codex 50/296=0.1689→0.17, Cursor 15/105=0.1429→0.14*
 
 ## Violation Breakdown
 
@@ -7316,3 +7316,17 @@ Build: **cargo check** — passed (clean). **cargo clippy -- -D warnings** — c
 **Issues filed this run:** 0 — no new bugs found. All three agents delivered clean work; zero production `unwrap`/`expect`, zero `todo!`/`unimplemented!`, zero clippy warnings. Test count grew from 5647 → 5750 (+103), reflecting the new regression tests added alongside security fixes.
 
 **Codebase health: excellent.** All three agents improved quality scores (Claude 83% → 84%, Codex 82% → 83%, Cursor 85% → 86%) by closing tasks without introducing new defects. The ECDH `touch_session` pre-auth vulnerability fix from Claude is the most security-relevant change — the fix correctly defers the liveness update until after decryption succeeds, and a regression test prevents re-introduction. Cursor landed a focused ptrace hardening sprint on Phantom. Codex completed the Specter socket refactor cleanly.
+
+### QA Review — 2026-04-24 08:10 — 0a94cbdf..362ffd0d
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 13 | 0 | Cleared all four 2026-04-23 arch-review findings with regression tests: ECDH per-IP registration rate limiter w/ per-IP sliding window + eviction and 5 scenario tests gating against unauth X25519+AES-GCM abuse (red-cell-c2-ej4up P1); `ecdh_transport` reconstructed on registry reload via `ts_ecdh_sessions` lookup so `handle_get_job` stops double-encrypting (red-cell-c2-qo8fd P2); `restore_running()` no longer short-circuits on first bind failure — every Running listener is attempted, first error propagated after the pass (red-cell-c2-4wq31 P2); `seq_protected` now persisted atomically via `insert_full`/`reregister_full`, old two-step `set_seq_protected` moved to `#[cfg(test)]` (red-cell-c2-pivna P3 + follow-up test red-cell-c2-9mxu5/z1ot9). Polish: `process_ecdh_packet` returns `EcdhOutcome` enum instead of `Result<Option, InvalidConfig>` — removes misleading "listener misconfiguration" log and collapses double-WARN on rate-limited packets (red-cell-c2-vatba). E2E harness: Archon/Phantom/Specter added to `agents.available` (red-cell-c2-zw9lu, tyemu, ckr6r) with fail-fast-if-listed/skip-if-absent semantics wired through scenarios 05/06/07/08 and paired unit tests (red-cell-c2-cbo65, y6ud4). Screenshot scenario (#08) refactored to per-agent pass loop (Windows: demon+archon+specter; Linux fallback: phantom). |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **cargo check --workspace** — passed (clean). **cargo clippy --workspace -- -D warnings** — clean (0 warnings). **cargo nextest** (targeted `ecdh_registration | seq_protected | restore_running | load_restores_ecdh`) — 27/27 passed, 0 failed, 3225 skipped.
+
+**Issues filed this run:** 0 — this run was a follow-up cleanup on the 2026-04-23 arch-review findings. Every fix ships with a named regression test (e.g. `ecdh_registration_persists_seq_protected_flag`, `reregister_full_persists_seq_protected_atomically`, `restore_running_continues_past_failed_listener`, `restore_running_transitions_all_failing_listeners_to_error`, `load_restores_ecdh_transport_from_persisted_session`, `process_ecdh_packet_rate_limits_invalid_registrations`, `process_ecdh_packet_short_body_does_not_consume_budget`, `process_ecdh_packet_session_does_not_consume_budget`). No production `unwrap`/`expect`, no `todo!`/`unimplemented!`, no clippy drift, no architecture drift. Write-queue `DeferredWrite` and `agents::AgentRepository::reregister_full` were threaded for the new `seq_protected` argument coherently end-to-end.
+
+**Codebase health: excellent.** All four P1–P3 arch-review findings from 2026-04-23 are closed with regression coverage. The ECDH transport surface is now the first in the codebase to have parity with the legacy Demon transport on per-IP rate limiting, atomic state persistence, and restart-safe reload. Autotest matrix expanded from `demon` only to `demon+archon+phantom+specter`, giving E2E coverage for every shipped agent variant.

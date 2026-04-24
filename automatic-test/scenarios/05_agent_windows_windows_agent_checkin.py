@@ -2,9 +2,10 @@
 Scenario 05_agent_windows: Windows agent checkin
 
 Deploy a Windows agent to Windows 11 via SSH, wait for checkin, run command suite.
-Runs once for Demon (always).  The Specter pass runs only when
-``"specter"`` is listed in ``agents.available`` in env.toml; if it is listed
-and the payload build fails, the scenario fails so the regression is caught.
+Runs once for Demon (always).  The Archon and Specter passes run only when
+``"archon"`` / ``"specter"`` is listed in ``agents.available`` in env.toml; if
+one is listed and its payload build fails, the scenario fails so the regression
+is caught.
 
 Skip if ctx.windows is None.
 
@@ -19,7 +20,7 @@ Steps (per agent pass):
   7. Kill agent, stop listener, clean up work_dir on target
 """
 
-DESCRIPTION = "Windows agent checkin (Demon + Specter)"
+DESCRIPTION = "Windows agent checkin (Demon + Archon + Specter)"
 
 import uuid
 
@@ -235,8 +236,16 @@ def run(ctx):
     print("\n  === Agent pass: demon ===")
     _run_for_agent(ctx, agent_type="demon", fmt="exe", name_prefix="test-windows-demon")
 
-    # ── Specter pass (Rust Windows agent) ───────────────────────────────────
     available_agents = set(ctx.env.get("agents", {}).get("available", ["demon"]))
+
+    # ── Archon pass (C/ASM fork of Demon, ECDH transport) ───────────────────
+    print("\n  === Agent pass: archon ===")
+    if "archon" not in available_agents:
+        print("  [archon] SKIPPED — 'archon' not listed in agents.available")
+    else:
+        _run_for_agent(ctx, agent_type="archon", fmt="exe", name_prefix="test-windows-archon")
+
+    # ── Specter pass (Rust Windows agent) ───────────────────────────────────
     print("\n  === Agent pass: specter ===")
     if "specter" not in available_agents:
         print("  [specter] SKIPPED — 'specter' not listed in agents.available")

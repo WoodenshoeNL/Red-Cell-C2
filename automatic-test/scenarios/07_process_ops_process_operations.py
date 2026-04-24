@@ -4,10 +4,10 @@ Scenario 07_process_ops: Process operations
 Linux passes (Demon bin + Phantom elf): process list, spawn, kill, and verify
 against Linux target via ``ps`` / ``kill``.
 
-Windows passes (Demon exe + Specter exe): same operations against Windows 11
-target via ``tasklist`` / ``taskkill``.
+Windows passes (Demon exe + Archon exe + Specter exe): same operations against
+Windows 11 target via ``tasklist`` / ``taskkill``.
 
-Phantom/Specter passes run only when listed in ``agents.available`` in env.toml;
+Phantom/Archon/Specter passes run only when listed in ``agents.available`` in env.toml;
 build failures for listed agents fail the scenario instead of silently skipping.
 
 Steps (per Linux agent pass):
@@ -30,7 +30,7 @@ Skip Linux passes if ctx.linux is None.
 Skip Windows passes if ctx.windows is None.
 """
 
-DESCRIPTION = "Process operations (Demon + Phantom + Specter)"
+DESCRIPTION = "Process operations (Demon + Archon + Phantom + Specter)"
 
 import time
 import uuid
@@ -428,6 +428,13 @@ def run(ctx):
         # ── Demon Windows pass ───────────────────────────────────────────────
         print("\n  === Agent pass: demon (Windows) ===")
         _run_for_agent_windows(ctx, agent_type="demon", fmt="exe", name_prefix="test-procops-win-demon")
+
+        # ── Archon pass (C/ASM fork of Demon, ECDH transport) ───────────────
+        print("\n  === Agent pass: archon (Windows) ===")
+        if "archon" not in available_agents:
+            print("  [archon] SKIPPED — 'archon' not listed in agents.available")
+        else:
+            _run_for_agent_windows(ctx, agent_type="archon", fmt="exe", name_prefix="test-procops-archon")
 
         # ── Specter pass (Rust Windows agent) ───────────────────────────────
         print("\n  === Agent pass: specter (Windows) ===")

@@ -5,7 +5,8 @@ Take a screenshot via agent and verify a loot entry of type 'screenshot' is
 created, then download the bytes and validate the image header.
 
 Runs once per agent per target:
-  • Windows target: Demon pass (always) + Specter pass (when ``"specter"``
+  • Windows target: Demon pass (always) + Archon pass (when ``"archon"``
+    is listed in ``agents.available``) + Specter pass (when ``"specter"``
     is listed in ``agents.available`` in env.toml).
   • Linux target (only used when ctx.windows is None): Phantom pass (when
     ``"phantom"`` is listed in ``agents.available`` and the target has a
@@ -33,7 +34,7 @@ empty screenshots that slip past validation.
 Skip if neither Windows nor a Linux-with-DISPLAY target is configured.
 """
 
-DESCRIPTION = "Screenshot capture (Demon + Specter + Phantom)"
+DESCRIPTION = "Screenshot capture (Demon + Archon + Specter + Phantom)"
 
 import os
 import shlex
@@ -303,6 +304,17 @@ def run(ctx):
             agent_type="demon", fmt="exe", is_windows=True,
             name_prefix="test-screenshot-demon",
         )
+
+        # ── Archon pass (C/ASM fork of Demon, ECDH transport) ───────────────
+        print("\n  === Agent pass: archon (Windows) ===")
+        if "archon" not in available_agents:
+            print("  [archon] SKIPPED — 'archon' not listed in agents.available")
+        else:
+            _run_for_agent(
+                ctx, ctx.windows,
+                agent_type="archon", fmt="exe", is_windows=True,
+                name_prefix="test-screenshot-archon",
+            )
 
         # ── Specter pass (Rust Windows agent) ───────────────────────────────
         print("\n  === Agent pass: specter (Windows) ===")

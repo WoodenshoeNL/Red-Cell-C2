@@ -1,17 +1,20 @@
 """
 Capture teamserver-oriented diagnostics when a scenario fails.
 
-Used by ``test.py`` to write ``test-results/YYYY-MM-DD/scenario_NN_failure.txt``
+Used by ``test.py`` to write
+``test-results/YYYY-MM-DD/run_<HHMMSS>_<uuid>/scenario_NN_failure.txt``
 and print the same sections to stdout.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import ssl
 import traceback
 import urllib.error
 import urllib.request
+import uuid
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -252,15 +255,38 @@ def build_failure_diagnostic_report(
     return "\n".join(parts) + "\n"
 
 
+def create_run_dir(automatic_test_root: Path) -> Path:
+    """Create and return a per-run subfolder under ``test-results/<date>/``.
+
+    The folder name is ``run_<HHMMSS>_<short-uuid>`` so multiple runs on the
+    same day never collide.  A ``test-results/latest`` symlink is updated to
+    point at the new directory.
+    """
+    now = datetime.now(timezone.utc)
+    day = now.strftime("%Y-%m-%d")
+    tag = now.strftime("%H%M%S") + "_" + uuid.uuid4().hex[:8]
+    run_dir = automatic_test_root / "test-results" / day / f"run_{tag}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    latest = automatic_test_root / "test-results" / "latest"
+    try:
+        tmp = latest.with_suffix(".tmp")
+        tmp.unlink(missing_ok=True)
+        os.symlink(run_dir.resolve(), tmp)
+        os.replace(tmp, latest)
+    except OSError:
+        pass
+
+    return run_dir
+
+
 def write_scenario_failure_file(
-    automatic_test_root: Path,
+    run_dir: Path,
     scenario_id: str,
     text: str,
 ) -> Path:
-    """Write *text* under ``test-results/<date>/scenario_<id>_failure.txt``."""
-    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    out_dir = automatic_test_root / "test-results" / day
-    out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"scenario_{scenario_id}_failure.txt"
+    """Write *text* under ``<run_dir>/scenario_<id>_failure.txt``."""
+    run_dir.mkdir(parents=True, exist_ok=True)
+    path = run_dir / f"scenario_{scenario_id}_failure.txt"
     path.write_text(text, encoding="utf-8")
     return path.resolve()

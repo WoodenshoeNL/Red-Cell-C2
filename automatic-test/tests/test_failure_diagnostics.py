@@ -17,6 +17,7 @@ from lib.failure_diagnostics import (
     _listener_request_summary,
     build_failure_diagnostic_report,
     capture_server_logs,
+    create_run_dir,
     tail_text_file,
     write_scenario_failure_file,
 )
@@ -266,17 +267,49 @@ class TestBuildFailureDiagnosticReport(unittest.TestCase):
         self.assertIn("Listener 'http1' (status=Running):", text)
 
 
-class TestWriteScenarioFailureFile(unittest.TestCase):
-    def test_creates_nested_path(self) -> None:
+class TestCreateRunDir(unittest.TestCase):
+    def test_creates_run_dir_with_expected_structure(self) -> None:
         import tempfile
 
         root = Path(tempfile.mkdtemp())
+        run_dir = create_run_dir(root)
+        self.assertTrue(run_dir.is_dir())
+        self.assertIn("test-results", run_dir.parts)
+        self.assertRegex(run_dir.name, r"^run_\d{6}_[0-9a-f]{8}$")
+
+    def test_latest_symlink_points_to_run_dir(self) -> None:
+        import tempfile
+
+        root = Path(tempfile.mkdtemp())
+        run_dir = create_run_dir(root)
+        latest = root / "test-results" / "latest"
+        self.assertTrue(latest.is_symlink())
+        self.assertEqual(latest.resolve(), run_dir.resolve())
+
+    def test_second_run_updates_latest(self) -> None:
+        import tempfile
+        import time
+
+        root = Path(tempfile.mkdtemp())
+        run1 = create_run_dir(root)
+        time.sleep(0.01)
+        run2 = create_run_dir(root)
+        self.assertNotEqual(run1, run2)
+        latest = root / "test-results" / "latest"
+        self.assertEqual(latest.resolve(), run2.resolve())
+
+
+class TestWriteScenarioFailureFile(unittest.TestCase):
+    def test_creates_file_in_run_dir(self) -> None:
+        import tempfile
+
+        run_dir = Path(tempfile.mkdtemp()) / "test-results" / "2026-04-25" / "run_120000_abcd1234"
         text = "hello\n"
-        p = write_scenario_failure_file(root, "04", text)
+        p = write_scenario_failure_file(run_dir, "04", text)
         self.assertTrue(p.is_file())
         self.assertEqual(p.read_text(encoding="utf-8"), text)
-        self.assertIn("test-results", p.parts)
         self.assertRegex(p.name, r"scenario_04_failure\.txt")
+        self.assertEqual(p.parent, run_dir)
 
 
 if __name__ == "__main__":

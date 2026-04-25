@@ -47,7 +47,7 @@ from lib.config import (
 from lib.deploy import TargetConfig, configure_deploy_timeouts
 from lib.teamserver_monitor import configure_teamserver_ssh_connect_timeout
 from lib.wait import configure_wait_defaults
-from lib.failure_diagnostics import build_failure_diagnostic_report, write_scenario_failure_file
+from lib.failure_diagnostics import build_failure_diagnostic_report, create_run_dir, write_scenario_failure_file
 
 
 # ── Config loading ───────────────────────────────────────────────────────────
@@ -242,7 +242,9 @@ class RunContext:
     dry_run: bool
 
 
-def run_scenario(scenario_id: str, path: Path, ctx: RunContext) -> tuple[str, Path | None]:
+def run_scenario(
+    scenario_id: str, path: Path, ctx: RunContext, run_dir: Path,
+) -> tuple[str, Path | None]:
     """Load and run a scenario module.
 
     Returns ``(status, report_path)`` where *status* is one of:
@@ -251,7 +253,7 @@ def run_scenario(scenario_id: str, path: Path, ctx: RunContext) -> tuple[str, Pa
         ``"skipped"`` — scenario raised :class:`lib.ScenarioSkipped` (not a failure)
         ``"failed"``  — scenario raised any other exception
 
-    *report_path* is set when a failed run wrote ``test-results/.../scenario_NN_failure.txt``.
+    *report_path* is set when a failed run wrote a failure file inside *run_dir*.
     """
     module_name = f"scenarios.{path.stem}"
     spec = importlib.util.spec_from_file_location(module_name, path)
@@ -266,7 +268,6 @@ def run_scenario(scenario_id: str, path: Path, ctx: RunContext) -> tuple[str, Pa
         print("  [DRY RUN] skipping execution")
         return "passed", None
 
-    automatic_test_root = Path(__file__).resolve().parent
     start = time.monotonic()
     try:
         mod.run(ctx)
@@ -286,7 +287,7 @@ def run_scenario(scenario_id: str, path: Path, ctx: RunContext) -> tuple[str, Pa
         )
         print(text, end="")
         report_path = write_scenario_failure_file(
-            automatic_test_root, scenario_id, text
+            run_dir, scenario_id, text
         )
         print(f"  Diagnostic report written to: {report_path}")
         return "failed", report_path
@@ -484,10 +485,14 @@ def main():
             selected_ids,
         )
 
+    automatic_test_root = Path(__file__).resolve().parent
+    run_dir = create_run_dir(automatic_test_root)
+    print(f"Run dir:  {run_dir}")
+
     passed = failed = skipped = 0
     failure_reports: list[Path] = []
     for sid, path in selected:
-        outcome, report_path = run_scenario(sid, path, ctx)
+        outcome, report_path = run_scenario(sid, path, ctx, run_dir)
         if outcome == "passed":
             passed += 1
         elif outcome == "skipped":

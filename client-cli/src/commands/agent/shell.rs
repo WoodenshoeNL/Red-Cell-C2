@@ -6,6 +6,10 @@ use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 use tokio::task;
 
+use serde::Serialize;
+
+use red_cell_common::demon::{COMMAND_SLEEP_ID, format_sleep_payload_base64};
+
 use crate::AgentId;
 use crate::client::ApiClient;
 use crate::defaults::AGENT_EXEC_WAIT_TIMEOUT_SECS;
@@ -15,6 +19,7 @@ use super::exec::exec_wait;
 use super::show::show;
 use super::transfer::{download, upload};
 use super::types::AgentDetail;
+use super::wire::TaskQueuedResponse;
 
 const HISTORY_FILE_NAME: &str = "shell_history";
 const DEFAULT_MAX_UPLOAD_MB: u64 = 100;
@@ -44,7 +49,7 @@ Built-in commands:
   !<cmd>                 Execute <cmd> on the local host
   upload <src> <dst>     Upload a local file to the agent
   download <src> <dst>   Download a file from the agent to local disk
-  sleep <secs>           Change the agent sleep interval
+  sleep <secs> [jitter%] Change the agent sleep interval (jitter default: 0)
 
 All other input is sent as a shell command to the agent."
     );
@@ -57,6 +62,7 @@ enum BuiltIn<'a> {
     LocalExec(&'a str),
     Upload { src: &'a str, dst: &'a str },
     Download { src: &'a str, dst: &'a str },
+    Sleep { delay: u32, jitter: u32 },
     AgentCmd(&'a str),
 }
 
@@ -81,6 +87,15 @@ fn parse_builtin(line: &str) -> BuiltIn<'_> {
         let rest = rest.trim();
         if let Some((src, dst)) = rest.split_once(' ') {
             return BuiltIn::Download { src: src.trim(), dst: dst.trim() };
+        }
+    }
+    if let Some(rest) = line.strip_prefix("sleep ") {
+        let mut parts = rest.split_whitespace();
+        if let Some(secs_str) = parts.next() {
+            if let Ok(delay) = secs_str.parse::<u32>() {
+                let jitter = parts.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+                return BuiltIn::Sleep { delay, jitter };
+            }
         }
     }
     BuiltIn::AgentCmd(line)
@@ -179,6 +194,15 @@ pub(crate) async fn run(client: &ApiClient, id: AgentId, timeout: Option<u64>) -
                 Err(e) => eprintln!("Download failed: {e}"),
             },
 
+            BuiltIn::Sleep { delay, jitter } => {
+                match sleep_submit(client, id, delay, jitter).await {
+                    Ok(_) => {
+                        eprintln!("Sleep set to {delay}s (jitter {jitter}%)");
+                    }
+                    Err(e) => eprintln!("Sleep failed: {e}"),
+                }
+            }
+
             BuiltIn::AgentCmd(cmd) => {
                 run_agent_command(client, id, cmd, timeout_secs).await;
             }
@@ -214,6 +238,43 @@ async fn run_agent_command(client: &ApiClient, id: AgentId, cmd: &str, timeout_s
             }
         }
     }
+}
+
+/// Submit a `CommandSleep` task to change the agent's check-in interval.
+async fn sleep_submit(
+    client: &ApiClient,
+    id: AgentId,
+    delay: u32,
+    jitter: u32,
+) -> Result<(), CliError> {
+    #[derive(Serialize)]
+    struct Body<'a> {
+        #[serde(rename = "CommandLine")]
+        command_line: String,
+        #[serde(rename = "CommandID")]
+        command_id: &'static str,
+        #[serde(rename = "DemonID")]
+        demon_id: &'a str,
+        #[serde(rename = "TaskID")]
+        task_id: &'static str,
+        #[serde(rename = "PayloadBase64")]
+        payload_base64: String,
+    }
+
+    let demon_id = id.to_string();
+    let _resp: TaskQueuedResponse = client
+        .post(
+            &format!("/agents/{id}/task"),
+            &Body {
+                command_line: format!("sleep {delay} {jitter}"),
+                command_id: COMMAND_SLEEP_ID,
+                demon_id: &demon_id,
+                task_id: "",
+                payload_base64: format_sleep_payload_base64(delay, jitter),
+            },
+        )
+        .await?;
+    Ok(())
 }
 
 /// Execute a command on the local host (operator machine).
@@ -315,11 +376,30 @@ mod tests {
     }
 
     #[test]
-    fn parse_sleep_is_agent_command() {
+    fn parse_sleep_delay_only() {
         match parse_builtin("sleep 30") {
-            BuiltIn::AgentCmd(cmd) => assert_eq!(cmd, "sleep 30"),
-            other => panic!("expected AgentCmd, got {}", builtin_name(&other)),
+            BuiltIn::Sleep { delay, jitter } => {
+                assert_eq!(delay, 30);
+                assert_eq!(jitter, 0);
+            }
+            other => panic!("expected Sleep, got {}", builtin_name(&other)),
         }
+    }
+
+    #[test]
+    fn parse_sleep_delay_and_jitter() {
+        match parse_builtin("sleep 60 15") {
+            BuiltIn::Sleep { delay, jitter } => {
+                assert_eq!(delay, 60);
+                assert_eq!(jitter, 15);
+            }
+            other => panic!("expected Sleep, got {}", builtin_name(&other)),
+        }
+    }
+
+    #[test]
+    fn parse_sleep_non_numeric_falls_through() {
+        assert!(matches!(parse_builtin("sleep abc"), BuiltIn::AgentCmd(_)));
     }
 
     #[test]
@@ -341,6 +421,7 @@ mod tests {
             BuiltIn::LocalExec(_) => "LocalExec",
             BuiltIn::Upload { .. } => "Upload",
             BuiltIn::Download { .. } => "Download",
+            BuiltIn::Sleep { .. } => "Sleep",
             BuiltIn::AgentCmd(_) => "AgentCmd",
         }
     }

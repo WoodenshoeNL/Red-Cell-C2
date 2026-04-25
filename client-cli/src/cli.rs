@@ -524,7 +524,7 @@ pub enum AgentCommands {
     /// Each input line is dispatched as `agent exec --wait`. Output is printed
     /// as plain text (no JSON envelope). Built-in commands: `help`, `exit`,
     /// `!<cmd>` (run on local host), `upload <src> <dst>`, `download <src> <dst>`,
-    /// `sleep <secs>`.
+    /// `sleep <secs> [jitter%]`.
     ///
     /// Examples:
     ///   red-cell-cli agent shell abc123

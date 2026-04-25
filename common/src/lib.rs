@@ -8,6 +8,7 @@ pub mod demon;
 pub mod domain;
 pub mod error;
 pub mod operator;
+pub mod payload_manifest;
 pub mod tls;
 
 pub use domain::{

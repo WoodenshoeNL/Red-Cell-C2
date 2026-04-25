@@ -204,8 +204,10 @@ def preflight_ssh(target: TargetConfig) -> None:
 def preflight_dns(target: TargetConfig, domain: str, expected_ip: str) -> None:
     """Check that ``domain`` resolves to ``expected_ip`` on the target machine.
 
-    Runs ``python3 -c '...' <domain>`` (domain shell-escaped) on the remote
-    target via SSH and compares the result to ``expected_ip``.
+    On Linux targets, runs a ``python3`` one-liner via SSH.  On Windows targets
+    (detected by ``work_dir`` containing backslashes), runs a PowerShell
+    ``[System.Net.Dns]::GetHostAddresses()`` probe instead — Windows does not
+    ship Python by default and the Microsoft Store stub causes misleading errors.
 
     DNS listener scenarios (15, 20) require the C2 domain to resolve to the
     teamserver IP on the target's resolver before the agent can check in.
@@ -219,31 +221,46 @@ def preflight_dns(target: TargetConfig, domain: str, expected_ip: str) -> None:
 
     Raises:
         ScenarioSkipped: if resolution fails or returns an unexpected address,
-            with an actionable message describing the required ``/etc/hosts``
+            with an actionable message describing the required hosts-file
             entry.
     """
-    probe = (
-        "python3 -c 'import socket,sys; print(socket.gethostbyname(sys.argv[1]))' "
-        + shlex.quote(domain)
-    )
+    is_windows = target.work_dir.startswith("C:\\") or "\\" in target.work_dir
+    if is_windows:
+        escaped = domain.replace("'", "''")
+        probe = (
+            "powershell -NoProfile -Command \""
+            f"([System.Net.Dns]::GetHostAddresses('{escaped}') "
+            "| Where-Object { $_.AddressFamily -eq 'InterNetwork' } "
+            "| Select-Object -First 1).IPAddressToString\""
+        )
+    else:
+        probe = (
+            "python3 -c 'import socket,sys; print(socket.gethostbyname(sys.argv[1]))' "
+            + shlex.quote(domain)
+        )
     result = _run_ssh_cli_with_retry(
         _ssh_args(target) + [probe],
         target.host,
         timeout=15,
         tool="ssh",
     )
+    hosts_hint = (
+        r"C:\Windows\System32\drivers\etc\hosts"
+        if is_windows
+        else "/etc/hosts"
+    )
     if result.returncode != 0:
         raise ScenarioSkipped(
             f"DNS for {domain!r} on {target.host} could not be resolved "
             f"(probe failed: {result.stderr.strip()}); "
-            f"add entry to /etc/hosts: '{expected_ip}  {domain}'"
+            f"add entry to {hosts_hint}: '{expected_ip}  {domain}'"
         )
     actual_ip = result.stdout.strip()
     if actual_ip != expected_ip:
         raise ScenarioSkipped(
             f"DNS for {domain!r} on {target.host} resolves to {actual_ip!r} "
             f"not {expected_ip!r}; "
-            f"add entry to /etc/hosts: '{expected_ip}  {domain}'"
+            f"add entry to {hosts_hint}: '{expected_ip}  {domain}'"
         )
 
 

@@ -388,6 +388,77 @@ class TestPreflightDns(unittest.TestCase):
         self.assertIn("10.0.0.99", str(ctx.exception))
         self.assertIn("192.168.1.1", str(ctx.exception))
 
+    def test_linux_error_mentions_etc_hosts(self) -> None:
+        from lib import ScenarioSkipped
+
+        with patch("subprocess.run", return_value=self._completed("", returncode=1)):
+            with self.assertRaises(ScenarioSkipped) as ctx:
+                preflight_dns(self.target, "dns.test", "192.168.1.1")
+        self.assertIn("/etc/hosts", str(ctx.exception))
+
+
+class TestPreflightDnsWindows(unittest.TestCase):
+    """Tests for preflight_dns on Windows targets — uses PowerShell instead of Python."""
+
+    def setUp(self) -> None:
+        self.key_path = _module_key_path()
+        self.target = _make_target(
+            host="192.168.213.160", work_dir="C:\\rc-test", key=self.key_path,
+        )
+
+    def _completed(self, stdout: str, returncode: int = 0) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(
+            args=[], returncode=returncode, stdout=stdout, stderr=""
+        )
+
+    def test_windows_uses_powershell_probe(self) -> None:
+        with patch("subprocess.run", return_value=self._completed("192.168.1.50\n")) as mock_run:
+            preflight_dns(self.target, "c2.example.test", "192.168.1.50")
+        remote_cmd = mock_run.call_args[0][0][-1]
+        self.assertIn("powershell", remote_cmd)
+        self.assertIn("GetHostAddresses", remote_cmd)
+        self.assertNotIn("python", remote_cmd)
+
+    def test_windows_probe_embeds_domain(self) -> None:
+        with patch("subprocess.run", return_value=self._completed("10.0.0.1\n")) as mock_run:
+            preflight_dns(self.target, "c2.test.local", "10.0.0.1")
+        remote_cmd = mock_run.call_args[0][0][-1]
+        self.assertIn("c2.test.local", remote_cmd)
+
+    def test_windows_domain_single_quote_escaped(self) -> None:
+        domain = "evil'domain.test"
+        with patch("subprocess.run", return_value=self._completed("10.0.0.1\n")) as mock_run:
+            preflight_dns(self.target, domain, "10.0.0.1")
+        remote_cmd = mock_run.call_args[0][0][-1]
+        self.assertIn("evil''domain.test", remote_cmd)
+
+    def test_windows_mismatch_raises_scenario_skipped(self) -> None:
+        from lib import ScenarioSkipped
+
+        with patch("subprocess.run", return_value=self._completed("10.0.0.99\n")):
+            with self.assertRaises(ScenarioSkipped) as ctx:
+                preflight_dns(self.target, "dns.test", "192.168.1.1")
+        self.assertIn("10.0.0.99", str(ctx.exception))
+
+    def test_windows_error_mentions_windows_hosts_path(self) -> None:
+        from lib import ScenarioSkipped
+
+        with patch("subprocess.run", return_value=self._completed("", returncode=1)):
+            with self.assertRaises(ScenarioSkipped) as ctx:
+                preflight_dns(self.target, "dns.test", "192.168.1.1")
+        msg = str(ctx.exception)
+        self.assertIn(r"C:\Windows\System32\drivers\etc\hosts", msg)
+        self.assertNotIn("/etc/hosts", msg)
+
+    def test_windows_mismatch_mentions_windows_hosts_path(self) -> None:
+        from lib import ScenarioSkipped
+
+        with patch("subprocess.run", return_value=self._completed("10.0.0.99\n")):
+            with self.assertRaises(ScenarioSkipped) as ctx:
+                preflight_dns(self.target, "dns.test", "192.168.1.1")
+        msg = str(ctx.exception)
+        self.assertIn(r"C:\Windows\System32\drivers\etc\hosts", msg)
+
 
 class TestDeployErrorPaths(unittest.TestCase):
     """Deployment error paths with mocked subprocess (no real SSH)."""

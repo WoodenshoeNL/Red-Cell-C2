@@ -2,6 +2,8 @@
 
 use std::time::{Duration, Instant};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use serde::Serialize;
 use tokio::time::sleep;
 use tracing::instrument;
@@ -18,23 +20,26 @@ use super::wire::TaskQueuedResponse;
 
 /// Map a user-supplied command name to a Demon `CommandID` decimal string.
 ///
-/// Built-in agent commands that do not go through the generic job/shell
-/// handler (command ID 21 = `DemonCommand::CommandJob`) are listed here so
+/// Built-in agent commands that do not go through the generic process-create
+/// handler (command ID 5 = `DemonCommand::CommandProc`) are listed here so
 /// the CLI can route them to the correct handler without the caller needing
 /// to know numeric IDs.
 ///
 /// | User command | CommandID | Demon constant |
 /// |---|---|---|
 /// | `screenshot` | `2510` | `CommandScreenshot` |
-/// | anything else | `21` | `CommandJob` |
+/// | anything else | `5` | `CommandProc` (Create) |
 pub(crate) fn command_id_for(cmd: &str) -> &'static str {
-    // Only the first word is checked so that future parameterised commands
-    // like `screenshot /path/to/save.png` route correctly.
     let verb = cmd.split_whitespace().next().unwrap_or(cmd).to_ascii_lowercase();
     match verb.as_str() {
         "screenshot" => "2510",
-        _ => "21",
+        _ => "5",
     }
+}
+
+/// Returns `true` when the command ID maps to `CommandProc` (process create).
+fn is_proc_create(command_id: &str) -> bool {
+    command_id == "5"
 }
 
 /// `agent exec <id> --cmd <cmd>` — submit a command task to an agent.
@@ -56,31 +61,43 @@ pub(crate) async fn exec_submit(
     id: AgentId,
     cmd: &str,
 ) -> Result<JobSubmitted, CliError> {
-    /// Minimal `AgentTaskInfo` projection — field names match the PascalCase
-    /// serde renames on the canonical `red_cell_common::operator::AgentTaskInfo`
-    /// struct so the server can deserialise them without modification.
     #[derive(Serialize)]
     struct Body<'a> {
         #[serde(rename = "CommandLine")]
         command_line: &'a str,
-        /// Numeric Demon command identifier as a decimal string.
         #[serde(rename = "CommandID")]
         command_id: &'a str,
-        /// Target agent identifier (upper-hex).  The server normalises this
-        /// value; an empty string is replaced with the path parameter.
         #[serde(rename = "DemonID")]
         demon_id: &'a str,
-        /// Leave blank so the server generates a unique task identifier.
         #[serde(rename = "TaskID")]
         task_id: &'static str,
+        #[serde(rename = "SubCommand", skip_serializing_if = "Option::is_none")]
+        sub_command: Option<&'a str>,
+        #[serde(rename = "Args", skip_serializing_if = "Option::is_none")]
+        args: Option<String>,
     }
 
     let cid = command_id_for(cmd);
     let demon_id = id.to_string();
+
+    let (sub_command, args) = if is_proc_create(cid) {
+        let encoded_args = BASE64_STANDARD.encode(cmd);
+        (Some("create"), Some(format!("0;TRUE;TRUE;;{encoded_args}")))
+    } else {
+        (None, None)
+    };
+
     let resp: TaskQueuedResponse = client
         .post(
             &format!("/agents/{id}/task"),
-            &Body { command_line: cmd, command_id: cid, demon_id: &demon_id, task_id: "" },
+            &Body {
+                command_line: cmd,
+                command_id: cid,
+                demon_id: &demon_id,
+                task_id: "",
+                sub_command,
+                args,
+            },
         )
         .await?;
     Ok(JobSubmitted { job_id: resp.task_id })

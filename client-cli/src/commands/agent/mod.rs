@@ -10,8 +10,10 @@
 //! | `agent exec --wait` | `POST /agents/{id}/task` then poll `/output` | block |
 //! | `agent shell <id>` | repeated `exec --wait` via rustyline REPL | interactive |
 //! | `agent output <id>` | `GET /agents/{id}/output` | persisted output |
-//! | `agent kill <id>` | `DELETE /agents/{id}` | terminate |
+//! | `agent kill <id>` | `DELETE /agents/{id}` | queue kill task |
 //! | `agent kill --wait` | kill then poll `GET /agents/{id}` until dead | block |
+//! | `agent kill --force` | `DELETE /agents/{id}?force=true` | kill + deregister |
+//! | `agent kill --deregister-only` | `DELETE /agents/{id}?deregister_only=true` | deregister only |
 //! | `agent upload <id>` | `POST /agents/{id}/upload` | queue upload task |
 //! | `agent download <id>` | `POST /agents/{id}/download` | queue download task |
 //! | `agent groups <id>` | `GET /agents/{id}/groups` | RBAC group tags on the agent |
@@ -43,7 +45,7 @@ use crate::output::{OutputFormat, print_cursor_reset_warning, print_error, print
 
 use self::exec::{exec_submit, exec_wait};
 use self::groups::{get_groups, set_groups};
-use self::kill::kill;
+use self::kill::{KillMode, kill};
 use self::list::list;
 use self::output_cmd::{fetch_output, take_cursor_reset_warning, watch_output};
 use self::show::show;
@@ -151,19 +153,30 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) 
             }
         }
 
-        AgentCommands::Kill { id, wait } => match kill(client, id, wait).await {
-            Ok(data) => match print_success(fmt, &data) {
-                Ok(()) => EXIT_SUCCESS,
+        AgentCommands::Kill { id, wait, force, deregister_only } => {
+            let mode = if deregister_only {
+                KillMode::DeregisterOnly
+            } else if force {
+                KillMode::Force
+            } else if wait {
+                KillMode::Wait
+            } else {
+                KillMode::Default
+            };
+            match kill(client, id, mode).await {
+                Ok(data) => match print_success(fmt, &data) {
+                    Ok(()) => EXIT_SUCCESS,
+                    Err(e) => {
+                        print_error(&e).ok();
+                        e.exit_code()
+                    }
+                },
                 Err(e) => {
                     print_error(&e).ok();
                     e.exit_code()
                 }
-            },
-            Err(e) => {
-                print_error(&e).ok();
-                e.exit_code()
             }
-        },
+        }
 
         AgentCommands::Upload { id, src, dst, max_upload_mb } => {
             match upload(client, id, &src, &dst, max_upload_mb).await {

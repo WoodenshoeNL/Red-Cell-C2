@@ -155,6 +155,14 @@ pub(crate) struct AgentTaskQueuedResponse {
     queued_jobs: usize,
 }
 
+/// Response body returned when an agent is deregistered via `?force` or
+/// `?deregister_only`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub(crate) struct AgentDeregisteredResponse {
+    agent_id: String,
+    deregistered: bool,
+}
+
 /// Single output entry returned by `GET /agents/{id}/output`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
 pub(super) struct AgentOutputEntry {
@@ -216,6 +224,19 @@ pub(crate) struct AgentDownloadRequest {
 pub(super) struct AgentOutputQuery {
     /// Cursor: only return rows with `id` strictly greater than this value.
     since: Option<i64>,
+}
+
+/// Query parameters for `DELETE /agents/{id}`.
+#[derive(Debug, Default, Deserialize, IntoParams)]
+pub(super) struct DeleteAgentQuery {
+    /// When `true`, queue the kill task **and** immediately remove the agent
+    /// from the registry without waiting for the agent to acknowledge.
+    #[serde(default)]
+    force: bool,
+    /// When `true`, skip the kill task entirely and only remove the agent
+    /// from the registry (server-side deregistration).
+    #[serde(default)]
+    deregister_only: bool,
 }
 
 /// Response body for agent group membership endpoints.
@@ -400,8 +421,12 @@ pub(super) async fn get_agent(
     context_path = "/api/v1",
     tag = "agents",
     security(("api_key" = [])),
-    params(("id" = String, Path, description = "Agent id in hex (with optional 0x prefix)")),
+    params(
+        ("id" = String, Path, description = "Agent id in hex (with optional 0x prefix)"),
+        DeleteAgentQuery,
+    ),
     responses(
+        (status = 200, description = "Agent deregistered (force / deregister_only)", body = AgentDeregisteredResponse),
         (status = 202, description = "Agent kill task queued", body = AgentTaskQueuedResponse),
         (status = 400, description = "Invalid agent id", body = ApiErrorBody),
         (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
@@ -413,12 +438,44 @@ pub(super) async fn kill_agent(
     State(state): State<TeamserverState>,
     identity: TaskAgentApiAccess,
     Path(id): Path<String>,
-) -> Result<(StatusCode, Json<AgentTaskQueuedResponse>), AgentApiError> {
+    Query(params): Query<DeleteAgentQuery>,
+) -> Result<Response, AgentApiError> {
     let agent_id = parse_api_agent_id(&id)?;
     authorize_agent_group_access(&state.database, &identity.key_id, agent_id).await?;
     if let Some(listener_name) = state.agent_registry.listener_name(agent_id).await {
         authorize_listener_access(&state.database, &identity.key_id, &listener_name).await?;
     }
+
+    if params.deregister_only {
+        return deregister_agent(&state, &identity.key_id, agent_id).await;
+    }
+
+    let (task_id, queued_jobs) = queue_kill_task(&state, &identity, agent_id).await?;
+
+    if params.force {
+        let _ = deregister_agent(&state, &identity.key_id, agent_id).await;
+        return Ok((
+            StatusCode::OK,
+            Json(AgentDeregisteredResponse {
+                agent_id: format!("{agent_id:08X}"),
+                deregistered: true,
+            }),
+        )
+            .into_response());
+    }
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(AgentTaskQueuedResponse { agent_id: format!("{agent_id:08X}"), task_id, queued_jobs }),
+    )
+        .into_response())
+}
+
+async fn queue_kill_task(
+    state: &TeamserverState,
+    identity: &TaskAgentApiAccess,
+    agent_id: u32,
+) -> Result<(String, usize), AgentApiError> {
     let task_id = next_task_id();
     let message = Message {
         head: MessageHead {
@@ -436,7 +493,7 @@ pub(super) async fn kill_agent(
             ..AgentTaskInfo::default()
         },
     };
-    let queued_jobs = match execute_agent_task(
+    match execute_agent_task(
         &state.agent_registry,
         &state.sockets,
         &state.events,
@@ -465,7 +522,7 @@ pub(super) async fn kill_agent(
                 ),
             )
             .await;
-            queued_jobs
+            Ok((task_id, queued_jobs))
         }
         Err(error) => {
             record_audit_entry(
@@ -487,14 +544,36 @@ pub(super) async fn kill_agent(
                 ),
             )
             .await;
-            return Err(error.into());
+            Err(error.into())
         }
-    };
+    }
+}
 
+async fn deregister_agent(
+    state: &TeamserverState,
+    operator: &str,
+    agent_id: u32,
+) -> Result<Response, AgentApiError> {
+    state.agent_registry.remove(agent_id).await?;
+    state.sockets.remove_agent(agent_id).await;
+    record_audit_entry(
+        &state.database,
+        &state.webhooks,
+        operator,
+        "agent.deregister",
+        "agent",
+        Some(format!("{agent_id:08X}")),
+        audit_details(AuditResultStatus::Success, Some(agent_id), Some("deregister"), None),
+    )
+    .await;
     Ok((
-        StatusCode::ACCEPTED,
-        Json(AgentTaskQueuedResponse { agent_id: format!("{agent_id:08X}"), task_id, queued_jobs }),
-    ))
+        StatusCode::OK,
+        Json(AgentDeregisteredResponse {
+            agent_id: format!("{agent_id:08X}"),
+            deregistered: true,
+        }),
+    )
+        .into_response())
 }
 
 #[utoipa::path(

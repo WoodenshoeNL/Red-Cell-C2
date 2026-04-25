@@ -306,18 +306,37 @@ pub enum AgentCommands {
         since: Option<i64>,
     },
 
-    /// Terminate an agent.
+    /// Send a kill task to an agent and optionally wait for acknowledgement.
+    ///
+    /// By default, queues a CommandExit task on the teamserver for the agent
+    /// to pick up on its next check-in, then returns immediately. Use --wait
+    /// to block until the agent reports status "dead".
+    ///
+    /// When the agent is unresponsive, --force sends the kill task and then
+    /// immediately deregisters the agent server-side without waiting.
+    /// --deregister-only skips the kill task entirely and only removes the
+    /// agent from the teamserver registry.
     ///
     /// Examples:
     ///   red-cell-cli agent kill abc123
     ///   red-cell-cli agent kill abc123 --wait
+    ///   red-cell-cli agent kill abc123 --force
+    ///   red-cell-cli agent kill abc123 --deregister-only
     #[command(verbatim_doc_comment)]
     Kill {
         /// Agent ID
         id: AgentId,
         /// Block until the agent's status becomes "dead"
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["force", "deregister_only"])]
         wait: bool,
+        /// Send kill task then immediately deregister the agent server-side
+        /// without waiting for acknowledgement
+        #[arg(long, conflicts_with_all = ["wait", "deregister_only"])]
+        force: bool,
+        /// Skip the kill task entirely — only remove the agent from the
+        /// teamserver registry (server-side deregistration)
+        #[arg(long, conflicts_with_all = ["wait", "force"])]
+        deregister_only: bool,
     },
 
     /// Upload a local file to an agent.

@@ -1,4 +1,4 @@
-//! `agent kill` — terminate an agent.
+//! `agent kill` — terminate or deregister an agent.
 
 use std::time::{Duration, Instant};
 
@@ -15,27 +15,47 @@ use super::RATE_LIMIT_DEFAULT_WAIT_SECS;
 use super::types::KillResult;
 use super::wire::RawAgent;
 
-/// `agent kill <id> [--wait]` — send terminate command to an agent.
+/// Controls how `agent kill` interacts with the teamserver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KillMode {
+    /// Queue a kill task; return immediately (default).
+    Default,
+    /// Queue a kill task; poll until status becomes `"dead"`.
+    Wait,
+    /// Queue a kill task **and** immediately deregister the agent server-side.
+    Force,
+    /// Skip the kill task; only remove the agent from the teamserver registry.
+    DeregisterOnly,
+}
+
+/// `agent kill <id>` — send terminate command and/or deregister an agent.
 ///
-/// Issues `DELETE /agents/{id}` which queues a [`DemonCommand::CommandExit`]
-/// job on the server side.  With `--wait`, polls `GET /agents/{id}` until
-/// `status == "dead"` or 60 s elapse.
-///
-/// # Examples
-/// ```text
-/// red-cell-cli agent kill abc123
-/// red-cell-cli agent kill abc123 --wait
-/// ```
+/// | Mode | API call | Behaviour |
+/// |------|----------|-----------|
+/// | `Default` | `DELETE /agents/{id}` | Queue kill task, return immediately |
+/// | `Wait` | `DELETE /agents/{id}` + poll | Block until `status == "dead"` |
+/// | `Force` | `DELETE /agents/{id}?force=true` | Kill + deregister, no wait |
+/// | `DeregisterOnly` | `DELETE /agents/{id}?deregister_only=true` | Deregister only |
 #[instrument(skip(client))]
 pub(crate) async fn kill(
     client: &ApiClient,
     id: AgentId,
-    wait: bool,
+    mode: KillMode,
 ) -> Result<KillResult, CliError> {
-    client.delete_no_body(&format!("/agents/{id}")).await?;
+    let path = match mode {
+        KillMode::Default | KillMode::Wait => format!("/agents/{id}"),
+        KillMode::Force => format!("/agents/{id}?force=true"),
+        KillMode::DeregisterOnly => format!("/agents/{id}?deregister_only=true"),
+    };
+    client.delete_no_body(&path).await?;
 
-    if !wait {
-        return Ok(KillResult { agent_id: id, status: "kill_sent".to_owned() });
+    let status = match mode {
+        KillMode::Force | KillMode::DeregisterOnly => "deregistered",
+        _ => "kill_sent",
+    };
+
+    if mode != KillMode::Wait {
+        return Ok(KillResult { agent_id: id, status: status.to_owned() });
     }
 
     let deadline = Instant::now() + Duration::from_secs(AGENT_EXEC_WAIT_TIMEOUT_SECS);

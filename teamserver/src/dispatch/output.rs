@@ -85,6 +85,8 @@ pub(super) async fn handle_command_output_callback(
 }
 
 pub(super) async fn handle_command_error_callback(
+    registry: &AgentRegistry,
+    database: &Database,
     events: &EventBus,
     agent_id: u32,
     request_id: u32,
@@ -109,6 +111,26 @@ pub(super) async fn handle_command_error_callback(
             }
         }
         Ok(DemonCallbackError::Coffee) => {
+            return Ok(None);
+        }
+        Ok(DemonCallbackError::Generic) => {
+            let text = parser.read_string("command error message")?;
+            let context = loot_context(registry, agent_id, request_id).await;
+            broadcast_and_persist_agent_response(
+                database,
+                events,
+                AgentResponseEntry {
+                    agent_id,
+                    command_id: u32::from(DemonCommand::CommandError),
+                    request_id,
+                    kind: "Error".to_owned(),
+                    message: "Agent Error".to_owned(),
+                    extra: BTreeMap::new(),
+                    output: text,
+                },
+                &context,
+            )
+            .await?;
             return Ok(None);
         }
         Err(unknown) => {

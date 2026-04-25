@@ -131,14 +131,25 @@ impl CommandDispatcher {
             },
         );
 
+        let error_registry = registry.clone();
         let error_events = events.clone();
+        let error_database = database.clone();
         self.register_handler(
             u32::from(DemonCommand::CommandError),
             move |agent_id, request_id, payload| {
+                let registry = error_registry.clone();
                 let events = error_events.clone();
+                let database = error_database.clone();
                 Box::pin(async move {
-                    output::handle_command_error_callback(&events, agent_id, request_id, &payload)
-                        .await
+                    output::handle_command_error_callback(
+                        &registry,
+                        &database,
+                        &events,
+                        agent_id,
+                        request_id,
+                        &payload,
+                    )
+                    .await
                 })
             },
         );

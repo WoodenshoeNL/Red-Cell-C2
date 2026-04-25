@@ -98,6 +98,7 @@ protocol_enum! {
         Win32 = 0x01,
         Coffee = 0x02,
         Token = 0x03,
+        Generic = 0x0d,
     }
 }
 

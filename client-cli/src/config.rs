@@ -122,6 +122,21 @@ pub enum ConfigError {
     },
 }
 
+/// Resolve only the server URL from env vars and config files.
+///
+/// Used by commands like `server cert` that need a server URL but no
+/// authentication token.  Returns `None` when no server is configured.
+pub fn resolve_server_only() -> Option<String> {
+    if let Ok(val) = std::env::var("RC_SERVER") {
+        if !val.is_empty() {
+            return Some(val);
+        }
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let path = find_config_file(&cwd).or_else(global_config_path);
+    path.and_then(|p| load_config_file(&p).ok()).and_then(|c| c.server)
+}
+
 /// Walk up the directory tree from `start`, returning the first
 /// `.red-cell-cli.toml` that exists.
 ///

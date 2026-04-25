@@ -3,7 +3,7 @@
 use std::io::Write as _;
 
 use crate::PayloadCommands;
-use crate::cli::{Cli, Commands, ProfileCommands};
+use crate::cli::{Cli, Commands, ProfileCommands, ServerCommands};
 use crate::client;
 use crate::commands;
 use crate::config;
@@ -91,6 +91,18 @@ pub async fn dispatch(cli: Cli) -> i32 {
     }
 
     // `profile show` requires a server connection — falls through to normal config resolution.
+
+    // `server cert` only needs --server (no token) — bypass normal config resolution.
+    if let Some(Commands::Server { action: ServerCommands::Cert { chain, pem } }) = cli.command {
+        let server = match cli.server.or_else(config::resolve_server_only) {
+            Some(s) => s,
+            None => {
+                print_setup_hint();
+                return EXIT_GENERAL;
+            }
+        };
+        return commands::server::run_cert(&server, chain, pem, &fmt).await;
+    }
 
     // `login` brings its own server/token — bypass normal config resolution.
     if let Some(Commands::Login { ref server, ref token, ref cert_fingerprint }) = cli.command {
@@ -182,6 +194,7 @@ pub async fn dispatch(cli: Cli) -> i32 {
 
         // Handled above before config resolution; these arms are for exhaustiveness.
         Commands::Login { .. } => EXIT_SUCCESS,
+        Commands::Server { .. } => EXIT_SUCCESS,
         Commands::Profile { action: ProfileCommands::Validate { .. } } => EXIT_SUCCESS,
 
         // Handled synchronously in main() before the runtime is started;
@@ -375,6 +388,30 @@ Demon {{
 
         let code = dispatch(cli).await;
         assert_eq!(code, EXIT_SUCCESS, "profile validate must succeed without server config");
+    }
+
+    /// `server cert` must work without a token — it only needs `--server`.
+    #[tokio::test]
+    async fn dispatch_server_cert_does_not_require_token() {
+        use crate::cli::ServerCommands;
+
+        let cli = Cli {
+            server: Some("https://127.0.0.1:1".into()),
+            token: None,
+            output: OutputFormat::Json,
+            timeout: None,
+            ca_cert: None,
+            cert_fingerprint: None,
+            pin_intermediate: false,
+            command: Some(Commands::Server {
+                action: ServerCommands::Cert { chain: false, pem: false },
+            }),
+        };
+
+        let code = dispatch(cli).await;
+        // Connection will fail (port 1 is unreachable), but the point is
+        // that it reaches the handler at all without a token.
+        assert_ne!(code, EXIT_SUCCESS);
     }
 
     /// `profile show` wires through to the profile endpoint on the running server.

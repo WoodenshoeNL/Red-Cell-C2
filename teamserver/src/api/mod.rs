@@ -14,6 +14,7 @@ mod docs;
 pub mod errors;
 mod health;
 pub mod listeners;
+mod login;
 pub mod loot;
 pub mod operators;
 pub mod payload;
@@ -119,6 +120,7 @@ pub fn api_routes(api: ApiRuntime) -> Router<TeamserverState> {
 
     Router::new()
         .route("/", get(docs::api_root))
+        .route("/auth/login", post(login::post_login))
         .merge(protected)
         .merge(SwaggerUi::new(DOCS_ROUTE).url(OPENAPI_ROUTE, docs::ApiDoc::openapi()))
         .fallback(errors::api_not_found)

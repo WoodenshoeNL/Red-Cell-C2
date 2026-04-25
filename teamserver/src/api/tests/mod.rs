@@ -5,6 +5,7 @@ mod audit;
 mod auth;
 mod jobs;
 mod listeners;
+mod login;
 mod loot;
 mod operators;
 mod payload;

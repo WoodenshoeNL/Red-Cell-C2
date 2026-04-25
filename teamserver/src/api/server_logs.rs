@@ -8,8 +8,9 @@ use utoipa::{IntoParams, ToSchema};
 use red_cell_common::operator::OperatorMessage;
 
 use crate::app::TeamserverState;
+use crate::{AuditDetails, AuditResultStatus};
 
-use super::auth::ReadApiAccess;
+use super::auth::AdminApiAccess;
 
 const DEFAULT_LINES: u32 = 200;
 const MAX_LINES: u32 = 10_000;
@@ -55,10 +56,26 @@ pub(super) struct ServerLogsResponse {
 )]
 pub(super) async fn get_server_logs(
     State(state): State<TeamserverState>,
-    _identity: ReadApiAccess,
+    identity: AdminApiAccess,
     Query(query): Query<ServerLogsQuery>,
 ) -> Json<ServerLogsResponse> {
     let limit = query.lines.unwrap_or(DEFAULT_LINES).min(MAX_LINES) as usize;
+
+    super::record_audit_entry(
+        &state.database,
+        &state.webhooks,
+        &identity.key_id,
+        "server.logs.show",
+        "debug",
+        None,
+        AuditDetails {
+            agent_id: None,
+            command: None,
+            parameters: Some(serde_json::json!({ "lines": limit })),
+            result_status: AuditResultStatus::Success,
+        },
+    )
+    .await;
 
     let all_logs = state.events.recent_teamserver_logs();
 

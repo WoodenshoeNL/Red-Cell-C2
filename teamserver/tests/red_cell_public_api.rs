@@ -90,6 +90,7 @@ async fn crate_root_reexports_support_minimal_teamserver_bootstrap() {
     let shutdown = ShutdownController::new();
     let state = TeamserverState {
         profile: profile.clone(),
+        profile_path: "test.yaotl".to_owned(),
         database: database.clone(),
         auth: AuthService::from_profile(&profile).expect("auth service should initialize"),
         api: ApiRuntime::from_profile(&profile).expect("rng should work in tests"),
@@ -160,6 +161,7 @@ async fn build_state(profile: Profile) -> TeamserverState {
     let sockets = SocketRelayManager::new(agent_registry.clone(), events.clone());
     TeamserverState {
         profile: profile.clone(),
+        profile_path: "test.yaotl".to_owned(),
         database: database.clone(),
         auth: AuthService::from_profile(&profile).expect("auth service should initialize"),
         api: ApiRuntime::from_profile(&profile).expect("rng should work in tests"),

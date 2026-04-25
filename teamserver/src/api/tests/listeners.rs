@@ -1346,6 +1346,7 @@ async fn analyst_key_can_get_individual_listener() {
     let auth = AuthService::from_profile_with_database(&profile, &database).await.expect("auth");
     let app = api_routes(api.clone()).with_state(TeamserverState {
         profile: profile.clone(),
+        profile_path: "test.yaotl".to_owned(),
         database,
         auth,
         api,

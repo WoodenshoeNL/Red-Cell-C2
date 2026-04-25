@@ -44,6 +44,7 @@ pub(super) async fn test_router_with_database(
     (
         api_routes(api.clone()).with_state(TeamserverState {
             profile: profile.clone(),
+            profile_path: "test.yaotl".to_owned(),
             database,
             auth: auth.clone(),
             api,
@@ -85,6 +86,7 @@ pub(super) async fn build_router_from_profile(profile: Profile, database: Databa
 
     api_routes(api.clone()).with_state(TeamserverState {
         profile: profile.clone(),
+        profile_path: "test.yaotl".to_owned(),
         database,
         auth,
         api,
@@ -137,6 +139,7 @@ pub(super) async fn test_router_with_connections(
 
     let router = api_routes(api.clone()).with_state(TeamserverState {
         profile: profile.clone(),
+        profile_path: "test.yaotl".to_owned(),
         database,
         auth: auth.clone(),
         api,

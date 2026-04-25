@@ -82,6 +82,7 @@ async fn two_operator_router() -> (Router, Database, AgentRegistry) {
 
     let state = TeamserverState {
         profile: profile.clone(),
+        profile_path: "test.yaotl".to_owned(),
         database: database.clone(),
         auth,
         api: api.clone(),

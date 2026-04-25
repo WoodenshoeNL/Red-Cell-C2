@@ -30,6 +30,7 @@ async fn test_state_with_bridge(bridge: ServiceBridge) -> crate::TeamserverState
     let sockets = crate::SocketRelayManager::new(agent_registry.clone(), events.clone());
     crate::TeamserverState {
         profile: profile.clone(),
+        profile_path: "test.yaotl".to_owned(),
         database: database.clone(),
         auth: crate::AuthService::from_profile(&profile).expect("auth service should initialize"),
         api: crate::ApiRuntime::from_profile(&profile).expect("rng should work in tests"),

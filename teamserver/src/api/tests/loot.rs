@@ -214,6 +214,7 @@ async fn get_loot_returns_stored_bytes_and_not_found_error() {
     let api = ApiRuntime::from_profile(&profile).expect("rng should work in tests");
     let app = api_routes(api.clone()).with_state(TeamserverState {
         profile: profile.clone(),
+        profile_path: "test.yaotl".to_owned(),
         database,
         auth: AuthService::from_profile(&profile).expect("auth service should initialize"),
         api,

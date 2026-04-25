@@ -70,6 +70,7 @@ async fn spawn_api_server(profile: Profile) -> String {
 
     let state = TeamserverState {
         profile: profile.clone(),
+        profile_path: "test.yaotl".to_owned(),
         database: database.clone(),
         auth: AuthService::from_profile(&profile).expect("auth"),
         api: ApiRuntime::from_profile(&profile).expect("api"),

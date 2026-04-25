@@ -51,6 +51,7 @@ async fn build_test_state() -> (TeamserverState, Database) {
     let sockets = SocketRelayManager::new(agent_registry.clone(), events.clone());
     let state = TeamserverState {
         profile: profile.clone(),
+        profile_path: "test.yaotl".to_owned(),
         database: database.clone(),
         auth: AuthService::from_profile(&profile).expect("auth service"),
         api: ApiRuntime::from_profile(&profile).expect("api runtime"),

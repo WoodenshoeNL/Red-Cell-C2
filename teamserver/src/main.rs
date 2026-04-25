@@ -249,6 +249,7 @@ async fn main() -> Result<()> {
         .map_err(|error| anyhow!("failed to install prometheus metrics: {error}"))?;
     let state = TeamserverState {
         profile: profile.clone(),
+        profile_path: cli.profile.display().to_string(),
         auth: AuthService::from_profile_with_database(&profile, &database).await?,
         database,
         api: ApiRuntime::from_profile(&profile).context("OS RNG unavailable")?,

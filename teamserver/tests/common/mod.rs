@@ -191,6 +191,7 @@ pub async fn spawn_test_server_custom(
     let rate_limiter = LoginRateLimiter::new();
     let state = TeamserverState {
         profile: profile.clone(),
+        profile_path: "test.yaotl".to_owned(),
         database: database.clone(),
         auth: AuthService::from_profile(&profile).expect("auth service should initialize"),
         api: ApiRuntime::from_profile(&profile).expect("rng should work in tests"),

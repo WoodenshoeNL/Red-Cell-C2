@@ -131,6 +131,7 @@ async fn get_webhook_stats_returns_discord_failures_when_configured() {
 
     let app = api_routes(api.clone()).with_state(crate::TeamserverState {
         profile: profile.clone(),
+        profile_path: "test.yaotl".to_owned(),
         database,
         auth,
         api,

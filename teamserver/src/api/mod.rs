@@ -17,6 +17,7 @@ pub mod listeners;
 pub mod loot;
 pub mod operators;
 pub mod payload;
+mod profile;
 mod server_logs;
 pub(crate) mod session;
 
@@ -111,6 +112,7 @@ pub fn api_routes(api: ApiRuntime) -> Router<TeamserverState> {
         .route("/ws", get(crate::session_ws::session_ws_handler))
         .route("/debug/server-logs", get(server_logs::get_server_logs))
         .route("/health", get(health::get_health))
+        .route("/profile", get(profile::get_profile))
         .route("/metrics", get(crate::metrics::get_metrics))
         .route_layer(middleware::from_fn_with_state(api, auth::api_auth_middleware))
         .layer(DefaultBodyLimit::max(MAX_AGENT_MESSAGE_LEN));

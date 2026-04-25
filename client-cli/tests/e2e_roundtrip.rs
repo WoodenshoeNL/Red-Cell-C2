@@ -329,6 +329,7 @@ async fn spawn_server() -> TestHarness {
 
     let state = TeamserverState {
         profile: profile.clone(),
+        profile_path: "test.yaotl".to_owned(),
         database: database.clone(),
         auth,
         api: ApiRuntime::from_profile(&profile).expect("api runtime"),

@@ -286,6 +286,16 @@ pub enum ProfileCommands {
         /// Path to the .yaotl profile file.
         path: PathBuf,
     },
+
+    /// Show the running teamserver's effective profile (secrets redacted).
+    ///
+    /// Queries the teamserver for its loaded profile and displays the
+    /// effective configuration with passwords and API key values redacted.
+    ///
+    /// Examples:
+    ///   red-cell-cli profile show
+    #[command(verbatim_doc_comment)]
+    Show,
 }
 
 // ── agent subcommands ─────────────────────────────────────────────────────────

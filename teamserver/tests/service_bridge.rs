@@ -45,6 +45,7 @@ async fn spawn_service_server(
 
     let state = TeamserverState {
         profile: profile.clone(),
+        profile_path: "test.yaotl".to_owned(),
         database,
         auth: AuthService::from_profile(&profile)?,
         api: ApiRuntime::from_profile(&profile)?,

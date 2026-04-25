@@ -26,6 +26,8 @@ use crate::{
 pub struct TeamserverState {
     /// Loaded Havoc-compatible profile.
     pub profile: Profile,
+    /// Filesystem path of the loaded profile (for diagnostic display).
+    pub profile_path: String,
     /// SQLite-backed persistence services.
     pub database: Database,
     /// Operator WebSocket/session authentication.
@@ -240,6 +242,7 @@ mod tests {
         let sockets = SocketRelayManager::new(agent_registry.clone(), events.clone());
         TeamserverState {
             profile: profile.clone(),
+            profile_path: "test.yaotl".to_owned(),
             database: database.clone(),
             auth: AuthService::from_profile(&profile).expect("auth service should initialize"),
             api: ApiRuntime::from_profile(&profile).expect("rng should work in tests"),

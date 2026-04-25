@@ -50,6 +50,7 @@ async fn build_test_state() -> TeamserverState {
         AuthService::from_profile_with_database(&profile, &database).await.expect("auth service");
     TeamserverState {
         profile: profile.clone(),
+        profile_path: "test.yaotl".to_owned(),
         database: database.clone(),
         auth,
         api: ApiRuntime::from_profile(&profile).expect("api runtime"),

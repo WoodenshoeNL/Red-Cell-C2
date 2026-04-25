@@ -90,6 +90,8 @@ pub async fn dispatch(cli: Cli) -> i32 {
         return commands::profile::validate_local(path, &fmt);
     }
 
+    // `profile show` requires a server connection — falls through to normal config resolution.
+
     // `login` brings its own server/token — bypass normal config resolution.
     if let Some(Commands::Login { ref server, ref token, ref cert_fingerprint }) = cli.command {
         return commands::login::run(server, token, cert_fingerprint.as_deref(), &fmt).await;
@@ -162,9 +164,25 @@ pub async fn dispatch(cli: Cli) -> i32 {
 
         Commands::Operator { action } => commands::operator::run(&api_client, &fmt, action).await,
 
+        Commands::Profile { action: ProfileCommands::Show } => {
+            match commands::profile::show_server(&api_client).await {
+                Ok(data) => match output::print_success(&fmt, &data) {
+                    Ok(()) => EXIT_SUCCESS,
+                    Err(e) => {
+                        output::print_error(&e).ok();
+                        e.exit_code()
+                    }
+                },
+                Err(e) => {
+                    output::print_error(&e).ok();
+                    e.exit_code()
+                }
+            }
+        }
+
         // Handled above before config resolution; these arms are for exhaustiveness.
         Commands::Login { .. } => EXIT_SUCCESS,
-        Commands::Profile { .. } => EXIT_SUCCESS,
+        Commands::Profile { action: ProfileCommands::Validate { .. } } => EXIT_SUCCESS,
 
         // Handled synchronously in main() before the runtime is started;
         // these arms exist only for exhaustiveness.
@@ -357,5 +375,44 @@ Demon {{
 
         let code = dispatch(cli).await;
         assert_eq!(code, EXIT_SUCCESS, "profile validate must succeed without server config");
+    }
+
+    /// `profile show` wires through to the profile endpoint on the running server.
+    #[tokio::test]
+    async fn dispatch_profile_show_wires_through() {
+        use crate::cli::ProfileCommands;
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/profile"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "path": "profiles/test.yaotl",
+                "host": "127.0.0.1",
+                "port": 40056,
+                "operators": [{"name": "admin", "role": "Admin", "has_password": true}],
+                "api_keys": [],
+                "api_rate_limit_per_minute": null,
+                "listeners": {"http": [], "smb": [], "dns": [], "external": []},
+                "demon": {"sleep": 5, "jitter": 20, "indirect_syscall": false, "stack_duplication": false, "sleep_technique": null},
+                "service_configured": false,
+                "webhook": null
+            })))
+            .mount(&server)
+            .await;
+
+        let cli = Cli {
+            server: Some(server.uri()),
+            token: Some("tok".into()),
+            output: OutputFormat::Json,
+            timeout: None,
+            ca_cert: None,
+            cert_fingerprint: None,
+            pin_intermediate: false,
+            command: Some(Commands::Profile { action: ProfileCommands::Show }),
+        };
+
+        let code = dispatch(cli).await;
+        assert_eq!(code, EXIT_SUCCESS);
     }
 }

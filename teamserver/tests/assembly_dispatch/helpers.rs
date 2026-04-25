@@ -167,6 +167,7 @@ pub(super) async fn start_server()
     .with_demon_allow_legacy_ctr(true);
     let state = TeamserverState {
         profile: profile.clone(),
+        profile_path: "test.yaotl".to_owned(),
         database: database.clone(),
         auth: AuthService::from_profile(&profile).expect("auth service should init"),
         api: ApiRuntime::from_profile(&profile).expect("rng should work in tests"),

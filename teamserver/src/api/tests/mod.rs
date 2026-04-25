@@ -8,5 +8,6 @@ mod listeners;
 mod loot;
 mod operators;
 mod payload;
+mod profile;
 mod rbac_scope;
 mod session;

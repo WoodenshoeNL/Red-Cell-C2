@@ -36,6 +36,7 @@ async fn spawn_server_with_fallback() -> Result<common::TestServer, Box<dyn std:
     let webhooks = AuditWebhookNotifier::from_profile(&profile);
     let state = TeamserverState {
         profile: profile.clone(),
+        profile_path: "test.yaotl".to_owned(),
         database: database.clone(),
         auth: AuthService::from_profile(&profile)?,
         api: ApiRuntime::from_profile(&profile)?,

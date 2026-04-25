@@ -367,6 +367,25 @@ pub enum AgentCommands {
         id: AgentId,
     },
 
+    /// Open an interactive shell against a connected agent.
+    ///
+    /// Each input line is dispatched as `agent exec --wait`. Output is printed
+    /// as plain text (no JSON envelope). Built-in commands: `help`, `exit`,
+    /// `!<cmd>` (run on local host), `upload <src> <dst>`, `download <src> <dst>`,
+    /// `sleep <secs>`.
+    ///
+    /// Examples:
+    ///   red-cell-cli agent shell abc123
+    ///   red-cell-cli agent shell abc123 --timeout 120
+    #[command(verbatim_doc_comment)]
+    Shell {
+        /// Agent ID
+        id: AgentId,
+        /// Per-command timeout in seconds (default: 60)
+        #[arg(long)]
+        timeout: Option<u64>,
+    },
+
     /// Replace the agent's RBAC group membership (`PUT /agents/{id}/groups`).
     ///
     /// Pass `--group` multiple times or omit it to clear all groups (unrestricted).

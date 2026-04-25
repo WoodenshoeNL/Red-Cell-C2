@@ -8,6 +8,7 @@
 //! | `agent show <id>` | `GET /agents/{id}` | full agent record |
 //! | `agent exec <id> --cmd <cmd>` | `POST /agents/{id}/task` | submit task |
 //! | `agent exec --wait` | `POST /agents/{id}/task` then poll `/output` | block |
+//! | `agent shell <id>` | repeated `exec --wait` via rustyline REPL | interactive |
 //! | `agent output <id>` | `GET /agents/{id}/output` | persisted output |
 //! | `agent kill <id>` | `DELETE /agents/{id}` | terminate |
 //! | `agent kill --wait` | kill then poll `GET /agents/{id}` until dead | block |
@@ -21,6 +22,7 @@ pub(crate) mod groups;
 pub(crate) mod kill;
 pub(crate) mod list;
 pub(crate) mod output_cmd;
+pub(crate) mod shell;
 pub(crate) mod show;
 pub(crate) mod transfer;
 pub(crate) mod types;
@@ -113,6 +115,8 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) 
                 }
             }
         }
+
+        AgentCommands::Shell { id, timeout } => shell::run(client, id, timeout).await,
 
         AgentCommands::Output { id, watch, since } => {
             if watch {

@@ -9,6 +9,40 @@ use crate::config;
 use crate::error::{CliError, EXIT_GENERAL, EXIT_SUCCESS};
 use crate::output;
 
+/// Print a human-readable setup guide to stderr when no configuration exists.
+fn print_setup_hint() {
+    write_setup_hint(&mut std::io::stderr()).ok();
+}
+
+fn write_setup_hint<W: std::io::Write>(out: &mut W) -> std::io::Result<()> {
+    let global_path = config::global_config_path()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "~/.config/red-cell-cli/config.toml".to_owned());
+
+    writeln!(
+        out,
+        "\
+red-cell-cli: no configuration found
+
+Set up the CLI with environment variables:
+
+  export RC_SERVER=\"https://<teamserver-host>:40056\"
+  export RC_TOKEN=\"<your-api-token>\"
+
+Or create a config file at {global_path}:
+
+  server = \"https://<teamserver-host>:40056\"
+  token  = \"<your-api-token>\"
+
+For self-signed teamservers, also set the certificate fingerprint:
+
+  export RC_CERT_FINGERPRINT=\"<sha256-hex>\"   # env var
+  cert_fingerprint = \"<sha256-hex>\"            # config file
+
+Run `red-cell-cli --help` for all options."
+    )
+}
+
 /// Print help for the given subcommand name, or top-level help if `None`.
 ///
 /// Returns the appropriate process exit code.
@@ -55,6 +89,12 @@ pub async fn dispatch(cli: Cli) -> i32 {
         cli.pin_intermediate,
     ) {
         Ok(cfg) => cfg,
+        Err(config::ConfigError::MissingServer | config::ConfigError::MissingToken)
+            if config::is_unconfigured() =>
+        {
+            print_setup_hint();
+            return EXIT_GENERAL;
+        }
         Err(e) => {
             let err: CliError = e.into();
             output::print_error(&err).ok();
@@ -162,5 +202,36 @@ mod tests {
 
         let code = dispatch(cli).await;
         assert_eq!(code, EXIT_SUCCESS);
+    }
+
+    #[test]
+    fn write_setup_hint_contains_key_instructions() {
+        let mut buf = Vec::new();
+        super::write_setup_hint(&mut buf).expect("write");
+        let output = String::from_utf8(buf).expect("utf-8");
+
+        assert!(output.contains("no configuration found"), "should state the problem");
+        assert!(output.contains("RC_SERVER"), "should mention RC_SERVER env var");
+        assert!(output.contains("RC_TOKEN"), "should mention RC_TOKEN env var");
+        assert!(output.contains("RC_CERT_FINGERPRINT"), "should mention cert fingerprint");
+        assert!(output.contains(".toml"), "should mention a config file path");
+        assert!(output.contains("red-cell-cli --help"), "should point to --help");
+    }
+
+    #[tokio::test]
+    async fn dispatch_returns_general_error_when_server_missing() {
+        let cli = Cli {
+            server: None,
+            token: Some("tok".into()),
+            output: OutputFormat::Json,
+            timeout: None,
+            ca_cert: None,
+            cert_fingerprint: None,
+            pin_intermediate: false,
+            command: Some(Commands::Status),
+        };
+
+        let code = dispatch(cli).await;
+        assert_eq!(code, crate::error::EXIT_GENERAL);
     }
 }

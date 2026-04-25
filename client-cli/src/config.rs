@@ -147,6 +147,25 @@ pub fn global_config_path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("red-cell-cli").join("config.toml"))
 }
 
+/// Returns `true` when the CLI has no configuration from any source:
+/// no `RC_SERVER`/`RC_TOKEN` env vars and no config file on disk.
+pub fn is_unconfigured() -> bool {
+    let has_env = std::env::var_os("RC_SERVER").is_some() || std::env::var_os("RC_TOKEN").is_some();
+    if has_env {
+        return false;
+    }
+
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    no_config_on_disk(&cwd)
+}
+
+/// Check whether any config file exists — local walk-up or global path.
+fn no_config_on_disk(cwd: &Path) -> bool {
+    let has_local = find_config_file(cwd).is_some();
+    let has_global = global_config_path().is_some_and(|p| p.is_file());
+    !has_local && !has_global
+}
+
 /// Load and parse a TOML config file from `path`.
 ///
 /// Missing files are silently treated as empty configs rather than errors;
@@ -834,5 +853,29 @@ token  = "file-tok"
         let cfg = result.expect("resolve should succeed with partial override");
         assert_eq!(cfg.server, "https://cli-ts:9999", "CLI server must win");
         assert_eq!(cfg.token, "file-tok", "token must come from file");
+    }
+
+    // ── no_config_on_disk (is_unconfigured helper) ────────────────────────
+
+    #[test]
+    fn no_config_on_disk_true_in_empty_dir() {
+        let tmp = TempDir::new().unwrap();
+        assert!(no_config_on_disk(tmp.path()));
+    }
+
+    #[test]
+    fn no_config_on_disk_false_when_local_config_exists() {
+        let tmp = TempDir::new().unwrap();
+        write_config(tmp.path(), "server = \"https://ts:40056\"\ntoken = \"t\"");
+        assert!(!no_config_on_disk(tmp.path()));
+    }
+
+    #[test]
+    fn no_config_on_disk_false_when_parent_config_exists() {
+        let tmp = TempDir::new().unwrap();
+        write_config(tmp.path(), "server = \"https://ts:40056\"");
+        let child = tmp.path().join("sub");
+        fs::create_dir_all(&child).unwrap();
+        assert!(!no_config_on_disk(&child));
     }
 }

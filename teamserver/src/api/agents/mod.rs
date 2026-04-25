@@ -568,10 +568,7 @@ async fn deregister_agent(
     .await;
     Ok((
         StatusCode::OK,
-        Json(AgentDeregisteredResponse {
-            agent_id: format!("{agent_id:08X}"),
-            deregistered: true,
-        }),
+        Json(AgentDeregisteredResponse { agent_id: format!("{agent_id:08X}"), deregistered: true }),
     )
         .into_response())
 }

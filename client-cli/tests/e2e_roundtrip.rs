@@ -528,6 +528,37 @@ async fn agent_kill_deserializes_through_real_tcp() {
     assert!(!queued.task_id.is_empty(), "kill must return a non-empty task_id");
 }
 
+/// `agent kill <id> --force` calls `DELETE /agents/{id}?force=true` and
+/// returns 200 with agent deregistered.
+#[tokio::test]
+async fn agent_kill_force_deregisters_through_real_tcp() {
+    let h = spawn_server().await;
+    h.registry.insert(sample_agent(AGENT_ID_U32)).await.expect("insert agent");
+
+    let resp = h.delete(&format!("/agents/{AGENT_ID_HEX}?force=true")).await;
+    assert_eq!(resp.status(), 200, "DELETE /agents/{{id}}?force=true must return 200");
+
+    let body: serde_json::Value = resp.json().await.expect("deserialize force-kill response");
+    assert_eq!(body["agent_id"], AGENT_ID_HEX);
+    assert_eq!(body["deregistered"], true);
+}
+
+/// `agent kill <id> --deregister-only` calls
+/// `DELETE /agents/{id}?deregister_only=true` and returns 200 with agent
+/// deregistered.
+#[tokio::test]
+async fn agent_kill_deregister_only_through_real_tcp() {
+    let h = spawn_server().await;
+    h.registry.insert(sample_agent(AGENT_ID_U32)).await.expect("insert agent");
+
+    let resp = h.delete(&format!("/agents/{AGENT_ID_HEX}?deregister_only=true")).await;
+    assert_eq!(resp.status(), 200, "DELETE /agents/{{id}}?deregister_only=true must return 200");
+
+    let body: serde_json::Value = resp.json().await.expect("deserialize deregister-only response");
+    assert_eq!(body["agent_id"], AGENT_ID_HEX);
+    assert_eq!(body["deregistered"], true);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Operator command group
 // ═══════════════════════════════════════════════════════════════════════════════

@@ -249,6 +249,22 @@ fn kill_result_render_text_contains_id_and_status() {
     assert!(rendered.contains("dead"));
 }
 
+#[test]
+fn kill_result_deregistered_render_text() {
+    let k = KillResult { agent_id: agent_id(0xBEEF), status: "deregistered".to_owned() };
+    let rendered = k.render_text();
+    assert!(rendered.contains("0000BEEF"));
+    assert!(rendered.contains("deregistered"));
+}
+
+#[test]
+fn kill_result_kill_sent_render_text() {
+    let k = KillResult { agent_id: agent_id(0x1234), status: "kill_sent".to_owned() };
+    let rendered = k.render_text();
+    assert!(rendered.contains("00001234"));
+    assert!(rendered.contains("kill_sent"));
+}
+
 // ── TransferResult ────────────────────────────────────────────────────────
 
 #[test]

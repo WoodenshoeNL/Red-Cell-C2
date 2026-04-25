@@ -466,6 +466,81 @@ async fn kill_agent_records_audit_entry_on_failure() {
     assert_eq!(entry["result_status"], "failure");
 }
 
+#[tokio::test]
+async fn delete_agent_force_deregisters_immediately() {
+    let (app, registry, _) =
+        test_router_with_registry(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin)))
+            .await;
+    registry.insert(sample_agent(0xDEAD_BEEF)).await.expect("agent should insert");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/agents/DEADBEEF?force=true")
+                .header(API_KEY_HEADER, "secret-admin")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["agent_id"], "DEADBEEF");
+    assert_eq!(body["deregistered"], true);
+    assert!(registry.get(0xDEAD_BEEF).await.is_none(), "agent must be removed from registry");
+}
+
+#[tokio::test]
+async fn delete_agent_deregister_only_skips_kill_task() {
+    let (app, registry, _) =
+        test_router_with_registry(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin)))
+            .await;
+    registry.insert(sample_agent(0xDEAD_BEEF)).await.expect("agent should insert");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/agents/DEADBEEF?deregister_only=true")
+                .header(API_KEY_HEADER, "secret-admin")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["agent_id"], "DEADBEEF");
+    assert_eq!(body["deregistered"], true);
+    assert!(registry.get(0xDEAD_BEEF).await.is_none(), "agent must be removed from registry");
+}
+
+#[tokio::test]
+async fn delete_agent_deregister_only_returns_not_found_for_unknown_agent() {
+    let (app, _, _) =
+        test_router_with_registry(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin)))
+            .await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/agents/DEADBEEF?deregister_only=true")
+                .header(API_KEY_HEADER, "secret-admin")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = read_json(response).await;
+    assert_eq!(body["error"]["code"], "agent_not_found");
+}
+
 /// Sends a GET request to `/agents/{id}` with the given malformed ID and asserts
 /// a 400 Bad Request with error code `"invalid_agent_task"`.
 async fn assert_get_agent_bad_request(malformed_id: &str) {

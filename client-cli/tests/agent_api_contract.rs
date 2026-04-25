@@ -260,6 +260,47 @@ async fn delete_agent_returns_202_and_queues_kill_task() {
     assert!(json["queued_jobs"].as_u64().unwrap_or(0) >= 1, "kill job must be queued");
 }
 
+/// `DELETE /api/v1/agents/{id}?force=true` queues a kill task AND immediately
+/// deregisters the agent, returning 200.
+#[tokio::test]
+async fn delete_agent_force_returns_200_and_deregisters() {
+    let (state, registry) = build_test_state().await;
+    registry.insert(sample_agent(AGENT_ID_U32)).await.expect("insert agent");
+
+    let response =
+        call(state, "DELETE", &format!("/api/v1/agents/{AGENT_ID_HEX}?force=true"), API_KEY, None)
+            .await;
+
+    assert_eq!(response.status(), StatusCode::OK, "force kill must return 200");
+    let json = read_json(response).await;
+    assert_eq!(json["agent_id"], AGENT_ID_HEX);
+    assert_eq!(json["deregistered"], true);
+    assert!(registry.get(AGENT_ID_U32).await.is_none(), "agent must be gone from registry");
+}
+
+/// `DELETE /api/v1/agents/{id}?deregister_only=true` removes the agent from
+/// the registry without queuing a kill task.
+#[tokio::test]
+async fn delete_agent_deregister_only_returns_200_and_deregisters() {
+    let (state, registry) = build_test_state().await;
+    registry.insert(sample_agent(AGENT_ID_U32)).await.expect("insert agent");
+
+    let response = call(
+        state,
+        "DELETE",
+        &format!("/api/v1/agents/{AGENT_ID_HEX}?deregister_only=true"),
+        API_KEY,
+        None,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK, "deregister-only must return 200");
+    let json = read_json(response).await;
+    assert_eq!(json["agent_id"], AGENT_ID_HEX);
+    assert_eq!(json["deregistered"], true);
+    assert!(registry.get(AGENT_ID_U32).await.is_none(), "agent must be gone from registry");
+}
+
 /// `DELETE /api/v1/agents/{id}` returns 404 for an unknown agent.
 ///
 /// The route must be registered (not 405 Method Not Allowed).

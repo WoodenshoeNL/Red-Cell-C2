@@ -15,7 +15,10 @@ async fn build_payload_returns_cached_artifact_on_second_request()
     let second = service
         .build_payload(&listener, &request, None, |m| hit_messages.push(m.message.clone()))
         .await?;
-    assert!(second.bytes.starts_with(b"payload"), "cached artifact must start with compiled payload");
+    assert!(
+        second.bytes.starts_with(b"payload"),
+        "cached artifact must start with compiled payload"
+    );
     assert!(
         hit_messages.iter().any(|m| m.contains("cache hit")),
         "expected a cache-hit progress message, got: {hit_messages:?}"

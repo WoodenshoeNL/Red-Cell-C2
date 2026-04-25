@@ -271,7 +271,10 @@ async fn build_payload_x86_uses_x86_compiler_and_win32_nasm_format()
 
     let artifact = service.build_payload(&listener, &request, None, |_| {}).await?;
 
-    assert!(artifact.bytes.starts_with(b"payload-x86"), "artifact must start with compiled payload");
+    assert!(
+        artifact.bytes.starts_with(b"payload-x86"),
+        "artifact must start with compiled payload"
+    );
     assert_eq!(artifact.file_name, "demon.x86.exe");
     assert!(std::fs::read_to_string(&gcc_x64_args).is_err());
     let gcc_x86_args = std::fs::read_to_string(&gcc_x86_args)?;

@@ -945,10 +945,7 @@ mod tests {
         let path = dir.path().join("test.exe");
         std::fs::write(&path, &payload).expect("write");
 
-        let code = inspect_local(
-            path.to_str().expect("path"),
-            &OutputFormat::Json,
-        );
+        let code = inspect_local(path.to_str().expect("path"), &OutputFormat::Json);
         assert_eq!(code, EXIT_SUCCESS);
     }
 
@@ -964,10 +961,7 @@ mod tests {
         let path = dir.path().join("bare.bin");
         std::fs::write(&path, b"no manifest here").expect("write");
 
-        let code = inspect_local(
-            path.to_str().expect("path"),
-            &OutputFormat::Json,
-        );
+        let code = inspect_local(path.to_str().expect("path"), &OutputFormat::Json);
         assert_ne!(code, EXIT_SUCCESS);
     }
 

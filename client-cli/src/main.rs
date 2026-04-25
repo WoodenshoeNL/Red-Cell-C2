@@ -741,9 +741,9 @@ mod tests {
         let cli = Cli::try_parse_from(["red-cell-cli", "payload", "inspect", "./agent.exe"])
             .expect("payload inspect must parse");
         match cli.command {
-            Some(Commands::Payload {
-                action: PayloadCommands::Inspect { file },
-            }) => assert_eq!(file, "./agent.exe"),
+            Some(Commands::Payload { action: PayloadCommands::Inspect { file } }) => {
+                assert_eq!(file, "./agent.exe")
+            }
             other => panic!("expected Payload::Inspect, got {other:?}"),
         }
     }

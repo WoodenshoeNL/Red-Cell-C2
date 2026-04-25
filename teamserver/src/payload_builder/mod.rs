@@ -622,9 +622,9 @@ fn append_manifest(
     bytes: &mut Vec<u8>,
     manifest: &PayloadManifest,
 ) -> Result<(), PayloadBuildError> {
-    let trailer = encode_manifest(manifest).map_err(|e| PayloadBuildError::Io(
-        std::io::Error::new(std::io::ErrorKind::Other, format!("manifest encode: {e}")),
-    ))?;
+    let trailer = encode_manifest(manifest).map_err(|e| {
+        PayloadBuildError::Io(std::io::Error::other(format!("manifest encode: {e}")))
+    })?;
     bytes.extend_from_slice(&trailer);
     Ok(())
 }

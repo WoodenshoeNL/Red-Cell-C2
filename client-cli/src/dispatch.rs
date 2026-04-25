@@ -80,10 +80,7 @@ pub async fn dispatch(cli: Cli) -> i32 {
     let fmt = cli.output.clone();
 
     // `payload inspect` reads a local file — no server config needed.
-    if let Some(Commands::Payload {
-        action: PayloadCommands::Inspect { ref file },
-    }) = cli.command
-    {
+    if let Some(Commands::Payload { action: PayloadCommands::Inspect { ref file } }) = cli.command {
         return commands::payload::inspect_local(file, &fmt);
     }
 
@@ -285,9 +282,7 @@ mod tests {
             cert_fingerprint: None,
             pin_intermediate: false,
             command: Some(Commands::Payload {
-                action: PayloadCommands::Inspect {
-                    file: path.to_str().expect("path").to_owned(),
-                },
+                action: PayloadCommands::Inspect { file: path.to_str().expect("path").to_owned() },
             }),
         };
 

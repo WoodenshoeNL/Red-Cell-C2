@@ -9,13 +9,13 @@ async fn build_payload_returns_cached_artifact_on_second_request()
     let (service, listener, request) = setup_build_fixture(&temp, nasm_ok, gcc_ok)?;
 
     let first = service.build_payload(&listener, &request, None, |_| {}).await?;
-    assert_eq!(first.bytes, b"payload");
+    assert!(first.bytes.starts_with(b"payload"), "artifact must start with compiled payload");
 
     let mut hit_messages = Vec::new();
     let second = service
         .build_payload(&listener, &request, None, |m| hit_messages.push(m.message.clone()))
         .await?;
-    assert_eq!(second.bytes, b"payload");
+    assert!(second.bytes.starts_with(b"payload"), "cached artifact must start with compiled payload");
     assert!(
         hit_messages.iter().any(|m| m.contains("cache hit")),
         "expected a cache-hit progress message, got: {hit_messages:?}"
@@ -33,7 +33,7 @@ async fn build_payload_cache_miss_on_different_architecture()
     let request_x86 = BuildPayloadRequestInfo { arch: "x86".to_owned(), ..request_x64.clone() };
 
     let first = service.build_payload(&listener, &request_x64, None, |_| {}).await?;
-    assert_eq!(first.bytes, b"payload");
+    assert!(first.bytes.starts_with(b"payload"), "artifact must start with compiled payload");
 
     let mut hit_messages = Vec::new();
     service
@@ -57,7 +57,10 @@ async fn build_payload_demon_and_archon_do_not_share_cache()
     let (service, listener, demon_request) = setup_build_fixture(&temp, nasm_ok, gcc_demon)?;
 
     let demon_artifact = service.build_payload(&listener, &demon_request, None, |_| {}).await?;
-    assert_eq!(demon_artifact.bytes, b"demon-bytes");
+    assert!(
+        demon_artifact.bytes.starts_with(b"demon-bytes"),
+        "artifact must start with compiled payload"
+    );
 
     let archon_root = temp.path().join("agent/archon");
     for dir in ["src/core", "src/crypt", "src/inject", "src/asm", "src/main", "include"] {

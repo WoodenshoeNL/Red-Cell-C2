@@ -124,7 +124,7 @@ async fn build_payload_uses_toolchain_and_returns_compiled_bytes()
     let artifact = service
         .build_payload(&listener, &request, None, |message| messages.push(message.message))
         .await?;
-    assert_eq!(artifact.bytes, b"payload");
+    assert!(artifact.bytes.starts_with(b"payload"), "artifact must start with compiled payload");
     assert_eq!(artifact.file_name, "demon.x64.exe");
     assert!(messages.iter().any(|line| line.contains("nasm-ok")));
     assert!(messages.iter().any(|line| line.contains("gcc-ok")));
@@ -271,7 +271,7 @@ async fn build_payload_x86_uses_x86_compiler_and_win32_nasm_format()
 
     let artifact = service.build_payload(&listener, &request, None, |_| {}).await?;
 
-    assert_eq!(artifact.bytes, b"payload-x86");
+    assert!(artifact.bytes.starts_with(b"payload-x86"), "artifact must start with compiled payload");
     assert_eq!(artifact.file_name, "demon.x86.exe");
     assert!(std::fs::read_to_string(&gcc_x64_args).is_err());
     let gcc_x86_args = std::fs::read_to_string(&gcc_x86_args)?;

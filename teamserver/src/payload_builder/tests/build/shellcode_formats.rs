@@ -129,7 +129,7 @@ async fn build_payload_raw_shellcode_prepends_dllldr_template()
     let artifact = service.build_payload(&listener, &request, None, |_| {}).await?;
 
     assert_eq!(&artifact.bytes[..2], &[0x55, 0x48], "DllLdr header not prepended");
-    assert_eq!(&artifact.bytes[2..], b"dll", "DLL bytes not appended after DllLdr header");
+    assert!(artifact.bytes[2..].starts_with(b"dll"), "DLL bytes not appended after DllLdr header");
     assert_eq!(artifact.file_name, "demon.x64.bin");
     assert_eq!(artifact.format, "Windows Raw Shellcode");
     Ok(())

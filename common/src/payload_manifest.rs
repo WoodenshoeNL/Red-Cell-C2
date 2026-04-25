@@ -104,9 +104,7 @@ fn find_last_occurrence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || needle.len() > haystack.len() {
         return None;
     }
-    (0..=(haystack.len() - needle.len()))
-        .rev()
-        .find(|&i| haystack[i..i + needle.len()] == *needle)
+    (0..=(haystack.len() - needle.len())).rev().find(|&i| haystack[i..i + needle.len()] == *needle)
 }
 
 #[cfg(test)]

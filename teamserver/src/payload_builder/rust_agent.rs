@@ -199,8 +199,7 @@ impl PayloadBuilderService {
             message: format!("{agent_name} binary [{} bytes]", bytes.len()),
         });
 
-        let agent_type_pascal =
-            agent_name[..1].to_ascii_uppercase() + &agent_name[1..];
+        let agent_type_pascal = agent_name[..1].to_ascii_uppercase() + &agent_name[1..];
         let format_label = if file_extension == ".exe" {
             "exe"
         } else if file_extension.is_empty() {

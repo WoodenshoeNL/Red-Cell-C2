@@ -18,12 +18,12 @@ pub const COMMAND_SLEEP_ID: &str = "11";
 
 /// Build a base64-encoded payload for a `CommandSleep` task.
 ///
-/// Wire format: two big-endian `u32` values — `[sleep_delay, sleep_jitter]`.
+/// Wire format: two little-endian `u32` values — `[sleep_delay, sleep_jitter]`.
 /// The result is suitable for the `PayloadBase64` extra field.
 pub fn format_sleep_payload_base64(delay_secs: u32, jitter_percent: u32) -> String {
     let mut buf = Vec::with_capacity(8);
-    buf.extend_from_slice(&delay_secs.to_be_bytes());
-    buf.extend_from_slice(&jitter_percent.to_be_bytes());
+    buf.extend_from_slice(&delay_secs.to_le_bytes());
+    buf.extend_from_slice(&jitter_percent.to_le_bytes());
     BASE64_STANDARD.encode(&buf)
 }
 
@@ -420,8 +420,8 @@ mod tests {
         let b64 = format_sleep_payload_base64(30, 50);
         let decoded = BASE64_STANDARD.decode(b64).unwrap();
         assert_eq!(decoded.len(), 8);
-        let delay = u32::from_be_bytes(decoded[0..4].try_into().unwrap());
-        let jitter = u32::from_be_bytes(decoded[4..8].try_into().unwrap());
+        let delay = u32::from_le_bytes(decoded[0..4].try_into().unwrap());
+        let jitter = u32::from_le_bytes(decoded[4..8].try_into().unwrap());
         assert_eq!(delay, 30);
         assert_eq!(jitter, 50);
     }

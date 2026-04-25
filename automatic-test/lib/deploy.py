@@ -265,18 +265,26 @@ def preflight_dns(target: TargetConfig, domain: str, expected_ip: str) -> None:
 
 
 def inject_hosts_entry(target: TargetConfig, domain: str, ip: str) -> None:
-    """Ensure ``/etc/hosts`` on *target* maps *domain* to *ip*.
+    """Ensure the hosts file on *target* maps *domain* to *ip*.
 
     Idempotent — a no-op if the exact ``"ip  domain"`` line is already
-    present.  Uses ``sudo tee -a`` so the SSH user does not need write
-    permission on ``/etc/hosts``; the account must have passwordless sudo.
+    present.
+
+    On Linux targets, uses ``sudo tee -a`` so the SSH user does not need
+    write permission on ``/etc/hosts``; the account must have passwordless
+    sudo.
+
+    On Windows targets (detected by ``work_dir`` containing backslashes),
+    uses PowerShell to idempotently append to
+    ``C:\\Windows\\System32\\drivers\\etc\\hosts``.  The SSH user must have
+    Administrator privileges.
 
     DNS scenarios (15, 20) call this before :func:`preflight_dns` so the
     harness injects the required entry automatically rather than requiring
     manual host configuration on the test VM.
 
     Args:
-        target: SSH target to modify (Linux only).
+        target: SSH target to modify (Linux or Windows).
         domain: Hostname to add (e.g. ``"c2.test.local"``).
         ip:     IP address to map it to (e.g. ``"192.168.213.157"``).
 
@@ -284,19 +292,33 @@ def inject_hosts_entry(target: TargetConfig, domain: str, ip: str) -> None:
         DeployError: if the SSH command exits non-zero.
     """
     entry = f"{ip}  {domain}"
-    cmd = (
-        f"grep -qF {shlex.quote(entry)} /etc/hosts || "
-        f"echo {shlex.quote(entry)} | sudo tee -a /etc/hosts > /dev/null"
-    )
+    is_windows = target.work_dir.startswith("C:\\") or "\\" in target.work_dir
+    if is_windows:
+        hosts_path = r"C:\Windows\System32\drivers\etc\hosts"
+        escaped_entry = entry.replace("'", "''")
+        escaped_path = hosts_path.replace("'", "''")
+        cmd = (
+            "powershell -NoProfile -Command \""
+            f"$h = '{escaped_path}'; "
+            f"$e = '{escaped_entry}'; "
+            "if (-not (Select-String -Path $h -SimpleMatch $e -Quiet)) "
+            "{ Add-Content -Path $h -Value $e }\""
+        )
+    else:
+        cmd = (
+            f"grep -qF {shlex.quote(entry)} /etc/hosts || "
+            f"echo {shlex.quote(entry)} | sudo tee -a /etc/hosts > /dev/null"
+        )
     result = _run_ssh_cli_with_retry(
         _ssh_args(target) + [cmd],
         target.host,
         timeout=15,
         tool="ssh",
     )
+    hosts_file = hosts_path if is_windows else "/etc/hosts"
     if result.returncode != 0:
         raise DeployError(
-            f"inject_hosts_entry: failed to add '{entry}' to /etc/hosts on "
+            f"inject_hosts_entry: failed to add '{entry}' to {hosts_file} on "
             f"{target.host} — exit {result.returncode}: {result.stderr.strip()}"
         )
     logger.debug("inject_hosts_entry: '%s' ensured on %s", entry, target.host)

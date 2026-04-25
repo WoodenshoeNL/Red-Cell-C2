@@ -614,5 +614,81 @@ class TestInjectHostsEntry(unittest.TestCase):
                     inject_hosts_entry(self.target, "c2.test.local", "192.168.1.50")
 
 
+class TestInjectHostsEntryWindows(unittest.TestCase):
+    """Tests for inject_hosts_entry on Windows targets."""
+
+    def setUp(self) -> None:
+        self.key_path = _module_key_path()
+        self.target = _make_target(
+            host="10.0.0.2",
+            key=self.key_path,
+            work_dir="C:\\Users\\testuser\\Desktop",
+        )
+
+    def _completed(
+        self, returncode: int, stderr: str = "", stdout: str = ""
+    ) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(
+            args=[], returncode=returncode, stdout=stdout, stderr=stderr
+        )
+
+    def test_success_does_not_raise(self) -> None:
+        """inject_hosts_entry must not raise when SSH exits 0 on a Windows target."""
+        with patch("subprocess.run", return_value=self._completed(0)):
+            inject_hosts_entry(self.target, "c2.test.local", "192.168.1.50")
+
+    def test_failure_raises_deploy_error(self) -> None:
+        """Non-zero exit on Windows must raise DeployError with host and entry."""
+        with patch("subprocess.run", return_value=self._completed(1, "Access denied")):
+            with self.assertRaises(DeployError) as ctx:
+                inject_hosts_entry(self.target, "c2.test.local", "192.168.1.50")
+        msg = str(ctx.exception)
+        self.assertIn("10.0.0.2", msg)
+        self.assertIn("c2.test.local", msg)
+        self.assertIn("drivers", msg)
+
+    def test_command_uses_powershell(self) -> None:
+        """Windows branch must use powershell, not grep/tee."""
+        with patch("subprocess.run", return_value=self._completed(0)) as mock_run:
+            inject_hosts_entry(self.target, "c2.test.local", "192.168.1.50")
+        remote_cmd = mock_run.call_args[0][0][-1]
+        self.assertIn("powershell", remote_cmd)
+        self.assertNotIn("grep", remote_cmd)
+        self.assertNotIn("sudo", remote_cmd)
+
+    def test_command_contains_idempotent_check(self) -> None:
+        """Windows command must check hosts file before appending (Select-String)."""
+        with patch("subprocess.run", return_value=self._completed(0)) as mock_run:
+            inject_hosts_entry(self.target, "c2.test.local", "192.168.1.50")
+        remote_cmd = mock_run.call_args[0][0][-1]
+        self.assertIn("Select-String", remote_cmd)
+        self.assertIn("Add-Content", remote_cmd)
+
+    def test_command_targets_windows_hosts_path(self) -> None:
+        """Windows command must target the Windows hosts file path."""
+        with patch("subprocess.run", return_value=self._completed(0)) as mock_run:
+            inject_hosts_entry(self.target, "c2.test.local", "192.168.1.50")
+        remote_cmd = mock_run.call_args[0][0][-1]
+        self.assertIn(r"C:\Windows\System32\drivers\etc\hosts", remote_cmd)
+
+    def test_command_contains_expected_entry(self) -> None:
+        """Windows SSH command must embed the ip and domain in the hosts entry."""
+        with patch("subprocess.run", return_value=self._completed(0)) as mock_run:
+            inject_hosts_entry(self.target, "c2.test.local", "10.99.0.1")
+        remote_cmd = mock_run.call_args[0][0][-1]
+        self.assertIn("10.99.0.1", remote_cmd)
+        self.assertIn("c2.test.local", remote_cmd)
+
+    def test_linux_target_still_uses_grep_tee(self) -> None:
+        """Linux target must still use the grep/tee path, not PowerShell."""
+        linux_target = _make_target(host="10.0.0.3", key=self.key_path)
+        with patch("subprocess.run", return_value=self._completed(0)) as mock_run:
+            inject_hosts_entry(linux_target, "c2.test.local", "192.168.1.50")
+        remote_cmd = mock_run.call_args[0][0][-1]
+        self.assertIn("grep", remote_cmd)
+        self.assertIn("sudo", remote_cmd)
+        self.assertNotIn("powershell", remote_cmd)
+
+
 if __name__ == "__main__":
     unittest.main()

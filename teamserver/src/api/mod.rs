@@ -17,6 +17,7 @@ pub mod listeners;
 pub mod loot;
 pub mod operators;
 pub mod payload;
+mod server_logs;
 pub(crate) mod session;
 
 use axum::Router;
@@ -107,6 +108,7 @@ pub fn api_routes(api: ApiRuntime) -> Router<TeamserverState> {
         .route("/payloads/{id}/download", get(payload::download_payload))
         .route("/payload-cache", post(payload::flush_payload_cache))
         .route("/ws", get(crate::session_ws::session_ws_handler))
+        .route("/debug/server-logs", get(server_logs::get_server_logs))
         .route("/health", get(health::get_health))
         .route("/metrics", get(crate::metrics::get_metrics))
         .route_layer(middleware::from_fn_with_state(api, auth::api_auth_middleware))

@@ -622,6 +622,21 @@ mod tests {
     }
 
     #[test]
+    fn log_server_tail_help_mentions_examples() {
+        let mut cmd = Cli::command();
+        let help = cmd
+            .find_subcommand_mut("log")
+            .expect("log subcommand")
+            .find_subcommand_mut("server-tail")
+            .expect("log server-tail subcommand")
+            .render_long_help()
+            .to_string();
+
+        assert!(help.contains("Examples:"), "log server-tail help missing Examples");
+        assert!(help.contains("--lines"), "log server-tail help must mention --lines");
+    }
+
+    #[test]
     fn rbac_agent_groups_subcommands_parse() {
         let g = Cli::try_parse_from(["red-cell-cli", "agent", "groups", "DEADBEEF"])
             .expect("agent groups");

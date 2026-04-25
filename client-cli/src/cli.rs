@@ -786,4 +786,20 @@ pub enum AuditCommands {
         )]
         max_failures: u32,
     },
+
+    /// Fetch recent teamserver log output.
+    ///
+    /// Retrieves log messages from the teamserver's in-memory ring buffer
+    /// via the /api/v1/debug/server-logs endpoint.
+    ///
+    /// Examples:
+    ///   red-cell-cli log server-tail
+    ///   red-cell-cli log server-tail --lines 200
+    ///   red-cell-cli log server-tail --lines 50
+    #[command(verbatim_doc_comment)]
+    ServerTail {
+        /// Maximum number of log lines to return (most-recent last).
+        #[arg(long, default_value_t = 200)]
+        lines: u32,
+    },
 }

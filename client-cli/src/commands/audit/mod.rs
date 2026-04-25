@@ -8,6 +8,7 @@
 //! | `log tail` | `GET /api/v1/audit?limit=20` | last 20 entries |
 //! | `log tail --follow` | poll `GET /api/v1/audit?since=<ts>` | stream JSON lines |
 //! | `log purge [--confirm]` | `DELETE /api/v1/audit/purge` | delete old entries |
+//! | `log server-tail` | `GET /api/v1/debug/server-logs?lines=N` | teamserver log ring buffer |
 
 mod follow;
 
@@ -65,6 +66,12 @@ struct RawAuditPage {
     items: Vec<RawAuditRecord>,
 }
 
+/// Mirrors `ServerLogsResponse` from the teamserver debug endpoint.
+#[derive(Debug, Deserialize)]
+struct RawServerLogsResponse {
+    logs: Vec<ServerLogEntry>,
+}
+
 // ── public output types ───────────────────────────────────────────────────────
 
 /// A single audit log entry returned by `log list` / `log tail`.
@@ -113,6 +120,25 @@ pub struct PurgeResult {
 impl TextRender for PurgeResult {
     fn render_text(&self) -> String {
         format!("Purged {} audit log entries (cutoff: {}).", self.deleted, self.cutoff)
+    }
+}
+
+/// A single teamserver log entry returned by `log server-tail`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerLogEntry {
+    /// Timestamp from the teamserver log message header.
+    pub timestamp: String,
+    /// Log message text.
+    pub text: String,
+}
+
+impl TextRow for ServerLogEntry {
+    fn headers() -> Vec<&'static str> {
+        vec!["Timestamp", "Message"]
+    }
+
+    fn row(&self) -> Vec<String> {
+        vec![self.timestamp.clone(), self.text.clone()]
     }
 }
 
@@ -189,6 +215,20 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AuditCommands) 
                 }
             }
         }
+
+        AuditCommands::ServerTail { lines } => match server_tail(client, lines).await {
+            Ok(data) => match print_success(fmt, &data) {
+                Ok(()) => EXIT_SUCCESS,
+                Err(e) => {
+                    print_error(&e).ok();
+                    e.exit_code()
+                }
+            },
+            Err(e) => {
+                print_error(&e).ok();
+                e.exit_code()
+            }
+        },
     }
 }
 
@@ -209,6 +249,20 @@ async fn purge(client: &ApiClient, older_than_days: Option<u32>) -> Result<Purge
     };
     let raw: RawPurgeResponse = client.delete_json(&path).await?;
     Ok(PurgeResult { deleted: raw.deleted, cutoff: raw.cutoff })
+}
+
+/// `log server-tail` — fetch recent teamserver log lines.
+///
+/// # Examples
+/// ```text
+/// red-cell-cli log server-tail
+/// red-cell-cli log server-tail --lines 50
+/// ```
+#[instrument(skip(client))]
+async fn server_tail(client: &ApiClient, lines: u32) -> Result<Vec<ServerLogEntry>, CliError> {
+    let raw: RawServerLogsResponse =
+        client.get(&format!("/debug/server-logs?lines={lines}")).await?;
+    Ok(raw.logs)
 }
 
 /// `log list` — fetch audit log entries with optional filters.
@@ -664,6 +718,133 @@ mod tests {
         let client = crate::client::ApiClient::new(&cfg).expect("client");
 
         let err = purge(&client, None).await.expect_err("must fail with 403");
+        assert!(matches!(err, CliError::AuthFailure(_)), "expected AuthFailure, got {err:?}");
+    }
+
+    // ── server-tail ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn server_log_entry_serializes_correctly() {
+        let entry = ServerLogEntry {
+            timestamp: "12:00:01".to_owned(),
+            text: "listener started".to_owned(),
+        };
+        let v = serde_json::to_value(&entry).expect("serialise");
+        assert_eq!(v["timestamp"], "12:00:01");
+        assert_eq!(v["text"], "listener started");
+    }
+
+    #[test]
+    fn server_log_entry_text_row_headers() {
+        let hdrs = ServerLogEntry::headers();
+        assert_eq!(hdrs, vec!["Timestamp", "Message"]);
+    }
+
+    #[test]
+    fn server_log_entry_text_row_values() {
+        let entry = ServerLogEntry { timestamp: "12:34:56".to_owned(), text: "hello".to_owned() };
+        let row = entry.row();
+        assert_eq!(row, vec!["12:34:56", "hello"]);
+    }
+
+    #[test]
+    fn vec_server_log_entry_renders_table() {
+        let entries = vec![
+            ServerLogEntry { timestamp: "12:00:01".to_owned(), text: "started".to_owned() },
+            ServerLogEntry { timestamp: "12:00:02".to_owned(), text: "listening".to_owned() },
+        ];
+        let rendered = entries.render_text();
+        assert!(rendered.contains("started"));
+        assert!(rendered.contains("listening"));
+        assert!(rendered.contains("12:00:01"));
+    }
+
+    #[test]
+    fn vec_server_log_entry_empty_renders_none() {
+        let entries: Vec<ServerLogEntry> = vec![];
+        assert_eq!(entries.render_text(), "(none)");
+    }
+
+    #[tokio::test]
+    async fn server_tail_calls_debug_server_logs_and_returns_entries() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/debug/server-logs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "logs": [
+                    {"timestamp": "12:00:01", "text": "teamserver started"},
+                    {"timestamp": "12:00:02", "text": "listener bound"}
+                ],
+                "count": 2
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let cfg = crate::config::ResolvedConfig {
+            server: server.uri(),
+            token: "tok".to_owned(),
+            timeout: 5,
+            tls_mode: crate::config::TlsMode::SystemRoots,
+        };
+        let client = crate::client::ApiClient::new(&cfg).expect("client");
+
+        let entries = server_tail(&client, 200).await.expect("server_tail must succeed");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].text, "teamserver started");
+        assert_eq!(entries[1].text, "listener bound");
+    }
+
+    #[tokio::test]
+    async fn server_tail_returns_not_found_on_404() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/debug/server-logs"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let cfg = crate::config::ResolvedConfig {
+            server: server.uri(),
+            token: "tok".to_owned(),
+            timeout: 5,
+            tls_mode: crate::config::TlsMode::SystemRoots,
+        };
+        let client = crate::client::ApiClient::new(&cfg).expect("client");
+
+        let err = server_tail(&client, 200).await.expect_err("must fail with 404");
+        assert!(matches!(err, CliError::NotFound(_)), "expected NotFound, got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn server_tail_returns_auth_failure_on_401() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/debug/server-logs"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let cfg = crate::config::ResolvedConfig {
+            server: server.uri(),
+            token: "bad-token".to_owned(),
+            timeout: 5,
+            tls_mode: crate::config::TlsMode::SystemRoots,
+        };
+        let client = crate::client::ApiClient::new(&cfg).expect("client");
+
+        let err = server_tail(&client, 200).await.expect_err("must fail with 401");
         assert!(matches!(err, CliError::AuthFailure(_)), "expected AuthFailure, got {err:?}");
     }
 }

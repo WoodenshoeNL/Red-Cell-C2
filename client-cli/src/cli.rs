@@ -564,6 +564,20 @@ pub enum PayloadCommands {
     ///   red-cell-cli payload cache-flush
     #[command(verbatim_doc_comment)]
     CacheFlush,
+
+    /// Inspect a built payload file and display its embedded build configuration.
+    ///
+    /// Reads the local file and extracts the build manifest embedded by the
+    /// teamserver at build time.  Does not require a server connection.
+    ///
+    /// Examples:
+    ///   red-cell-cli payload inspect ./demon.exe
+    ///   red-cell-cli payload inspect /tmp/phantom
+    #[command(verbatim_doc_comment)]
+    Inspect {
+        /// Path to the payload binary file
+        file: String,
+    },
 }
 
 // ── operator subcommands ──────────────────────────────────────────────────────

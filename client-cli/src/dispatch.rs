@@ -2,6 +2,7 @@
 
 use std::io::Write as _;
 
+use crate::PayloadCommands;
 use crate::cli::{Cli, Commands};
 use crate::client;
 use crate::commands;
@@ -77,6 +78,14 @@ pub(crate) fn handle_help(command: Option<&str>) -> i32 {
 pub async fn dispatch(cli: Cli) -> i32 {
     // Capture output format before partial moves.
     let fmt = cli.output.clone();
+
+    // `payload inspect` reads a local file — no server config needed.
+    if let Some(Commands::Payload {
+        action: PayloadCommands::Inspect { ref file },
+    }) = cli.command
+    {
+        return commands::payload::inspect_local(file, &fmt);
+    }
 
     // Resolve configuration (CLI flags + env vars were already absorbed by
     // clap; this step adds the file-based fallbacks).

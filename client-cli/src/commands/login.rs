@@ -13,6 +13,26 @@ use crate::config::{self, FileConfig, ResolvedConfig, TlsMode};
 use crate::error::{CliError, EXIT_AUTH_FAILURE, EXIT_GENERAL, EXIT_SUCCESS};
 use crate::output::{self, OutputFormat, TextRender};
 
+/// Read a single line from stdin and return it as the API token.
+///
+/// Returns an error if stdin is empty or an I/O error occurs.
+pub fn read_token_stdin() -> Result<String, CliError> {
+    let stdin = std::io::stdin();
+    read_token_stdin_from_reader(&mut stdin.lock())
+}
+
+fn read_token_stdin_from_reader(reader: &mut dyn std::io::BufRead) -> Result<String, CliError> {
+    let mut line = String::new();
+    reader
+        .read_line(&mut line)
+        .map_err(|e| CliError::General(format!("failed to read token from stdin: {e}")))?;
+    let trimmed = line.trim().to_owned();
+    if trimmed.is_empty() {
+        return Err(CliError::General("--token-stdin: no token provided on stdin".to_owned()));
+    }
+    Ok(trimmed)
+}
+
 /// Result payload returned on successful login.
 #[derive(Debug, Serialize)]
 pub struct LoginResult {
@@ -327,5 +347,35 @@ mod tests {
         assert!(text.contains("https://ts:40056"));
         assert!(text.contains("config.toml"));
         assert!(text.contains("fingerprint"));
+    }
+
+    #[test]
+    fn read_token_stdin_trims_whitespace() {
+        // Simulate stdin with a token followed by a newline.
+        let input = b"my-secret-token\n";
+        let mut cursor = std::io::Cursor::new(input);
+        let mut line = String::new();
+        std::io::BufRead::read_line(&mut cursor, &mut line).expect("read");
+        let trimmed = line.trim().to_owned();
+        assert_eq!(trimmed, "my-secret-token");
+    }
+
+    #[test]
+    fn read_token_stdin_rejects_empty() {
+        let result = super::read_token_stdin_from_reader(&mut std::io::Cursor::new(b""));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn read_token_stdin_rejects_whitespace_only() {
+        let result = super::read_token_stdin_from_reader(&mut std::io::Cursor::new(b"  \n"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn read_token_stdin_accepts_valid_token() {
+        let result =
+            super::read_token_stdin_from_reader(&mut std::io::Cursor::new(b"tok-abc123\n"));
+        assert_eq!(result.expect("should succeed"), "tok-abc123");
     }
 }

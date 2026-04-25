@@ -105,8 +105,29 @@ pub async fn dispatch(cli: Cli) -> i32 {
     }
 
     // `login` brings its own server/token — bypass normal config resolution.
-    if let Some(Commands::Login { ref server, ref token, ref cert_fingerprint }) = cli.command {
-        return commands::login::run(server, token, cert_fingerprint.as_deref(), &fmt).await;
+    if let Some(Commands::Login { ref server, ref token, token_stdin, ref cert_fingerprint }) =
+        cli.command
+    {
+        let resolved_token = if token_stdin {
+            match commands::login::read_token_stdin() {
+                Ok(t) => t,
+                Err(e) => {
+                    output::print_error(&e).ok();
+                    return e.exit_code();
+                }
+            }
+        } else if let Some(t) = token {
+            t.clone()
+        } else {
+            // clap enforces required_unless_present, so this is unreachable.
+            output::print_error(&CliError::General(
+                "either --token or --token-stdin is required".to_owned(),
+            ))
+            .ok();
+            return EXIT_GENERAL;
+        };
+        return commands::login::run(server, &resolved_token, cert_fingerprint.as_deref(), &fmt)
+            .await;
     }
 
     // Resolve configuration (CLI flags + env vars were already absorbed by

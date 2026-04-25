@@ -235,7 +235,8 @@ pub enum Commands {
     /// Token expiry / refresh is not implemented in v1.
     ///
     /// Examples:
-    ///   red-cell-cli login --server https://ts:40056 --token myapikey
+    ///   RC_TOKEN=myapikey red-cell-cli login --server https://ts:40056
+    ///   cat /path/to/keyfile | red-cell-cli login --server https://ts:40056 --token-stdin
     ///   red-cell-cli login --server https://ts:40056 --token myapikey --cert-fingerprint ab12...
     #[command(verbatim_doc_comment)]
     Login {
@@ -244,9 +245,16 @@ pub enum Commands {
         #[arg(long, required = true)]
         server: String,
 
-        /// API token (the api_key value from the teamserver profile)
-        #[arg(long, required = true)]
-        token: String,
+        /// API token (the api_key value from the teamserver profile).
+        /// Prefer RC_TOKEN env var or --token-stdin over this flag to avoid
+        /// leaking the token in shell history and process listings.
+        #[arg(long, env = "RC_TOKEN", required_unless_present = "token_stdin")]
+        token: Option<String>,
+
+        /// Read the API token from stdin (one line). Avoids process-list and
+        /// shell-history exposure entirely.
+        #[arg(long, conflicts_with = "token")]
+        token_stdin: bool,
 
         /// SHA-256 certificate fingerprint for TLS pinning (lowercase hex, 64 chars).
         /// Stored alongside server and token in the config file.

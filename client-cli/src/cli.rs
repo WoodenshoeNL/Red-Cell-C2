@@ -930,6 +930,51 @@ pub enum LootCommands {
         #[arg(long)]
         out: String,
     },
+
+    /// Export loot entries as CSV or JSONL.
+    ///
+    /// Uses the same query path as `loot list` but writes rows in a
+    /// flat export format suitable for downstream tooling. Writes to
+    /// stdout by default; use --file to redirect to a file.
+    ///
+    /// Examples:
+    ///   red-cell-cli loot export --format csv
+    ///   red-cell-cli loot export --format jsonl
+    ///   red-cell-cli loot export --format csv --file loot.csv
+    ///   red-cell-cli loot export --format csv --kind screenshot --since 2026-04-01
+    #[command(verbatim_doc_comment)]
+    Export {
+        /// Export format: csv or jsonl
+        #[arg(long)]
+        format: ExportFormat,
+        /// Write export to a file instead of stdout
+        #[arg(long)]
+        file: Option<String>,
+        /// Filter by loot type (e.g. screenshot, credential, file)
+        #[arg(long)]
+        kind: Option<String>,
+        /// Filter by agent ID
+        #[arg(long)]
+        agent: Option<AgentId>,
+        /// Filter by operator username
+        #[arg(long)]
+        operator: Option<String>,
+        /// Only return entries captured at or after this ISO 8601 UTC timestamp
+        #[arg(long)]
+        since: Option<String>,
+        /// Maximum entries to return
+        #[arg(long)]
+        limit: Option<u32>,
+    },
+}
+
+/// Export format for `loot export`.
+#[derive(Debug, Clone, clap::ValueEnum)]
+pub enum ExportFormat {
+    /// Comma-separated values with a header row.
+    Csv,
+    /// One JSON object per line (JSON Lines).
+    Jsonl,
 }
 
 // ── audit/log subcommands ─────────────────────────────────────────────────────

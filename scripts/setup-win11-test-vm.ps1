@@ -132,7 +132,7 @@ if (Test-Path $authKeysPath) {
 }
 if ($needsWrite) {
     Write-Warn "Writing public key to administrators_authorized_keys..."
-    Set-Content -Path $authKeysPath -Value $PubKey -Encoding UTF8
+    Add-Content -Path $authKeysPath -Value $PubKey -Encoding UTF8
     $Changed = $true
     Write-Ok "Public key written"
 }

@@ -133,7 +133,7 @@ impl PhantomAgent {
             os_service_pack: 0,
             os_build,
             os_arch: if cfg!(target_arch = "x86_64") { 9 } else { 0 },
-            sleep_delay: self.config.sleep_delay_ms,
+            sleep_delay: self.config.sleep_delay_ms / 1000,
             sleep_jitter: self.config.sleep_jitter,
             kill_date: self.config.kill_date.unwrap_or_default().max(0) as u64,
             working_hours: self.config.working_hours.unwrap_or(0),
@@ -364,6 +364,34 @@ mod tests {
     fn working_hours_allows_callback_during_window() {
         let now = local_time(9, 30);
         assert!(is_within_working_hours_at(encode_working_hours(9, 0, 17, 0), now));
+    }
+
+    #[test]
+    fn collect_metadata_converts_sleep_delay_ms_to_seconds() -> Result<(), Box<dyn Error>> {
+        let config = PhantomConfig { sleep_delay_ms: 10_000, ..PhantomConfig::default() };
+        let agent = PhantomAgent::new(config)?;
+        let metadata = agent.collect_metadata();
+        assert_eq!(metadata.sleep_delay, 10, "10000 ms should be reported as 10 seconds");
+        Ok(())
+    }
+
+    #[test]
+    fn collect_metadata_includes_kill_date_from_config() -> Result<(), Box<dyn Error>> {
+        let config = PhantomConfig { kill_date: Some(1_893_456_000), ..PhantomConfig::default() };
+        let agent = PhantomAgent::new(config)?;
+        let metadata = agent.collect_metadata();
+        assert_eq!(metadata.kill_date, 1_893_456_000);
+        Ok(())
+    }
+
+    #[test]
+    fn collect_metadata_includes_working_hours_from_config() -> Result<(), Box<dyn Error>> {
+        let wh = encode_working_hours(9, 0, 17, 0);
+        let config = PhantomConfig { working_hours: Some(wh), ..PhantomConfig::default() };
+        let agent = PhantomAgent::new(config)?;
+        let metadata = agent.collect_metadata();
+        assert_eq!(metadata.working_hours, wh);
+        Ok(())
     }
 
     #[tokio::test]

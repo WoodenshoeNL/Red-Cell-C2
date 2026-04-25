@@ -16,6 +16,7 @@ use red_cell_common::config::DemonConfig;
 use red_cell_common::operator::CompilerDiagnostic;
 
 use super::cache::CacheKey;
+use super::config_values::{parse_kill_date, parse_working_hours};
 use super::{
     BuildProgress, MAX_STDERR_TAIL_LINES, PayloadArtifact, PayloadBuildError,
     PayloadBuilderService, workspace_root,
@@ -258,6 +259,29 @@ fn rust_agent_env_vars(
         }
     } else if let Some(secret) = demon.init_secret.as_deref() {
         env_vars.push((format!("{env_prefix}_INIT_SECRET"), secret.to_owned()));
+    }
+
+    if let Some(sleep_s) = demon.sleep {
+        let ms = sleep_s.saturating_mul(1000);
+        env_vars.push((format!("{env_prefix}_SLEEP_DELAY_MS"), ms.to_string()));
+    }
+    if let Some(jitter) = demon.jitter {
+        env_vars.push((format!("{env_prefix}_SLEEP_JITTER"), jitter.to_string()));
+    }
+
+    let (kill_date_str, working_hours_str) = match listener {
+        ListenerConfig::Http(http) => (http.kill_date.as_deref(), http.working_hours.as_deref()),
+        ListenerConfig::Dns(dns) => (dns.kill_date.as_deref(), dns.working_hours.as_deref()),
+        ListenerConfig::Smb(smb) => (smb.kill_date.as_deref(), smb.working_hours.as_deref()),
+        ListenerConfig::External(_) => (None, None),
+    };
+    let kill_date_epoch = parse_kill_date(kill_date_str)?;
+    if kill_date_epoch > 0 {
+        env_vars.push((format!("{env_prefix}_KILL_DATE"), kill_date_epoch.to_string()));
+    }
+    let working_hours_packed = parse_working_hours(working_hours_str)?;
+    if working_hours_packed != 0 {
+        env_vars.push((format!("{env_prefix}_WORKING_HOURS"), working_hours_packed.to_string()));
     }
 
     Ok(env_vars)
@@ -593,6 +617,103 @@ mod tests {
         let env = rust_agent_env_vars(&listener, "SPECTER", &demon, None, Some(pem.to_owned()))?;
 
         assert_eq!(find(&env, "SPECTER_PINNED_CERT_PEM"), Some(pem.to_owned()));
+        Ok(())
+    }
+
+    #[test]
+    fn rust_agent_env_vars_bakes_sleep_and_jitter() -> Result<(), Box<dyn std::error::Error>> {
+        let listener = http_listener(None);
+        let mut demon = default_demon_config();
+        demon.sleep = Some(10);
+        demon.jitter = Some(25);
+
+        let env = rust_agent_env_vars(&listener, "PHANTOM", &demon, None, None)?;
+
+        assert_eq!(find(&env, "PHANTOM_SLEEP_DELAY_MS"), Some("10000".to_owned()));
+        assert_eq!(find(&env, "PHANTOM_SLEEP_JITTER"), Some("25".to_owned()));
+        Ok(())
+    }
+
+    #[test]
+    fn rust_agent_env_vars_omits_sleep_when_unset() -> Result<(), Box<dyn std::error::Error>> {
+        let listener = http_listener(None);
+        let demon = default_demon_config();
+
+        let env = rust_agent_env_vars(&listener, "PHANTOM", &demon, None, None)?;
+
+        assert_eq!(find(&env, "PHANTOM_SLEEP_DELAY_MS"), None);
+        assert_eq!(find(&env, "PHANTOM_SLEEP_JITTER"), None);
+        Ok(())
+    }
+
+    fn http_listener_with_kill_date_and_working_hours(
+        kill_date: Option<&str>,
+        working_hours: Option<&str>,
+    ) -> ListenerConfig {
+        ListenerConfig::Http(Box::new(HttpListenerConfig {
+            name: "timed".to_owned(),
+            kill_date: kill_date.map(str::to_owned),
+            working_hours: working_hours.map(str::to_owned),
+            hosts: vec!["c2.example.com".to_owned()],
+            host_bind: "0.0.0.0".to_owned(),
+            host_rotation: "round-robin".to_owned(),
+            port_bind: 443,
+            port_conn: Some(443),
+            method: None,
+            behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
+            user_agent: None,
+            headers: Vec::new(),
+            uris: Vec::new(),
+            host_header: None,
+            secure: true,
+            cert: None,
+            response: None,
+            proxy: None,
+            ja3_randomize: None,
+            doh_domain: None,
+            doh_provider: None,
+            legacy_mode: false,
+            suppress_opsec_warnings: true,
+        }))
+    }
+
+    #[test]
+    fn rust_agent_env_vars_bakes_kill_date() -> Result<(), Box<dyn std::error::Error>> {
+        let listener = http_listener_with_kill_date_and_working_hours(Some("1893456000"), None);
+        let demon = default_demon_config();
+
+        let env = rust_agent_env_vars(&listener, "PHANTOM", &demon, None, None)?;
+
+        assert_eq!(find(&env, "PHANTOM_KILL_DATE"), Some("1893456000".to_owned()));
+        Ok(())
+    }
+
+    #[test]
+    fn rust_agent_env_vars_bakes_working_hours() -> Result<(), Box<dyn std::error::Error>> {
+        let listener = http_listener_with_kill_date_and_working_hours(None, Some("09:00-17:00"));
+        let demon = default_demon_config();
+
+        let env = rust_agent_env_vars(&listener, "PHANTOM", &demon, None, None)?;
+
+        let packed = find(&env, "PHANTOM_WORKING_HOURS");
+        assert!(packed.is_some(), "PHANTOM_WORKING_HOURS should be set");
+        let packed: i32 = packed.as_deref().map(str::parse).transpose()?.unwrap_or(0);
+        assert_ne!(packed, 0);
+        assert_eq!((packed >> 22) & 1, 1, "enable bit should be set");
+        Ok(())
+    }
+
+    #[test]
+    fn rust_agent_env_vars_omits_kill_date_and_working_hours_when_unset()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let listener = http_listener(None);
+        let demon = default_demon_config();
+
+        let env = rust_agent_env_vars(&listener, "PHANTOM", &demon, None, None)?;
+
+        assert_eq!(find(&env, "PHANTOM_KILL_DATE"), None);
+        assert_eq!(find(&env, "PHANTOM_WORKING_HOURS"), None);
         Ok(())
     }
 }

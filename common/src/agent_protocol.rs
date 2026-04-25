@@ -85,7 +85,7 @@ pub struct AgentMetadata {
     pub os_build: u32,
     /// OS architecture (0=x86, 9=x64, 5=ARM, 12=ARM64, 6=Itanium).
     pub os_arch: u32,
-    /// Sleep delay in milliseconds.
+    /// Sleep delay in seconds.
     pub sleep_delay: u32,
     /// Sleep jitter percentage.
     pub sleep_jitter: u32,

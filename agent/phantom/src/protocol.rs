@@ -219,7 +219,7 @@ mod tests {
             os_service_pack: 0,
             os_build: 0,
             os_arch: 9,
-            sleep_delay: 5_000,
+            sleep_delay: 5,
             sleep_jitter: 0,
             kill_date: 0,
             working_hours: 0,

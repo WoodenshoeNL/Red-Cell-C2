@@ -142,7 +142,7 @@ impl SpecterAgent {
             os_service_pack: u32::from(os_service_pack()),
             os_build: os_build(),
             os_arch: if cfg!(target_arch = "x86_64") { 9 } else { 0 },
-            sleep_delay: self.config.sleep_delay_ms,
+            sleep_delay: self.config.sleep_delay_ms / 1000,
             sleep_jitter: self.config.sleep_jitter,
             kill_date: self.config.kill_date.map_or(0, |kd| kd as u64),
             working_hours: self.config.working_hours.unwrap_or(0),

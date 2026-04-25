@@ -240,6 +240,8 @@ class RunContext:
     env: dict
     timeouts: TimeoutsConfig
     dry_run: bool
+    #: When false, payload matrix scenarios use serial ``--wait`` builds (``--no-parallel``).
+    payload_parallel: bool = True
 
 
 def run_scenario(
@@ -361,6 +363,12 @@ def main():
         help="Skip the unit-test pre-flight and go straight to scenarios",
     )
     parser.add_argument(
+        "--no-parallel",
+        action="store_true",
+        help="Build payload matrix serially (payload build --wait) instead of "
+        "detach+build-wait in parallel (for debugging hot spots)",
+    )
+    parser.add_argument(
         "--config-dir", type=Path, default=Path(__file__).parent / "config",
         help="Path to config directory",
     )
@@ -423,6 +431,7 @@ def main():
         env=env,
         timeouts=tmo,
         dry_run=args.dry_run,
+        payload_parallel=not args.no_parallel,
     )
 
     all_scenarios = discover_scenarios()

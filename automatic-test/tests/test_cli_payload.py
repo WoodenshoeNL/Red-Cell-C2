@@ -12,12 +12,14 @@ from unittest.mock import mock_open, patch
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from lib.cli import (
+    PAYLOAD_BUILD_WAIT_TIMEOUT_SECS,
     CliConfig,
     CliError,
     agent_output,
     operator_set_role,
     payload_build,
     payload_build_and_fetch,
+    payload_build_wait,
 )
 
 
@@ -71,6 +73,26 @@ class TestPayloadBuild(unittest.TestCase):
             payload_build(_CFG, listener="listener-1", agent="demon")
         args = mock_run.call_args[0]
         self.assertNotIn("--wait", args)
+        self.assertNotIn("--detach", args)
+
+    def test_detach_passes_detach_flag(self) -> None:
+        with patch("lib.cli._run", return_value={"job_id": "job-detach"}) as mock_run:
+            r = payload_build(
+                _CFG, listener="listener-1", agent="demon", detach=True
+            )
+        self.assertEqual(r["job_id"], "job-detach")
+        args = mock_run.call_args[0]
+        self.assertIn("--detach", args)
+        self.assertNotIn("--wait", args)
+
+    def test_wait_ignored_when_detach(self) -> None:
+        with patch("lib.cli._run", return_value={"job_id": "j"}) as mock_run:
+            payload_build(
+                _CFG, listener="listener-1", wait=True, detach=True
+            )
+        args = mock_run.call_args[0]
+        self.assertIn("--detach", args)
+        self.assertNotIn("--wait", args)
 
     def test_sleep_secs_passed_to_cli(self) -> None:
         with patch("lib.cli._run", return_value={"job_id": "job-4"}) as mock_run:
@@ -79,6 +101,21 @@ class TestPayloadBuild(unittest.TestCase):
         self.assertIn("--sleep", args)
         idx = args.index("--sleep")
         self.assertEqual(args[idx + 1], "60")
+
+
+class TestPayloadBuildWait(unittest.TestCase):
+    def test_invokes_build_wait(self) -> None:
+        with patch("lib.cli._run", return_value={"payload_id": "p-1", "size_bytes": 3}) as mock_run:
+            r = payload_build_wait(_CFG, "job-abc")
+        self.assertEqual(r["payload_id"], "p-1")
+        mock_run.assert_called_once_with(
+            _CFG.with_timeout(PAYLOAD_BUILD_WAIT_TIMEOUT_SECS),
+            "payload",
+            "build-wait",
+            "job-abc",
+            "--wait-timeout",
+            str(PAYLOAD_BUILD_WAIT_TIMEOUT_SECS),
+        )
 
 
 class TestOperatorSetRole(unittest.TestCase):
@@ -129,6 +166,7 @@ class TestPayloadBuildAndFetch(unittest.TestCase):
             agent="demon",
             sleep_secs=None,
             wait=True,
+            detach=False,
         )
         mock_mkstemp.assert_called_once_with(suffix=".exe")
         mock_close.assert_called_once_with(17)

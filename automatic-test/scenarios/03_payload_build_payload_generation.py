@@ -44,8 +44,10 @@ def run(ctx):
     Raises AssertionError with a descriptive message on any failure.
     """
     from lib.cli import CliError, listener_create, listener_delete, payload_build, payload_build_and_fetch, payload_cache_flush
+    from lib.payload import MatrixCell, build_parallel
 
     cli = ctx.cli
+    use_parallel = ctx.payload_parallel
     uid = _short_id()
     listener_name = f"test-payload-{uid}"
 
@@ -55,45 +57,55 @@ def run(ctx):
     listener_create(cli, listener_name, "http", port=listener_port)
 
     try:
-        # ── Test 1: EXE x64 → valid PE ───────────────────────────────────────
-        print("  [exe-x64] building EXE x64")
-        raw = payload_build_and_fetch(cli, listener=listener_name,
-                                      arch="x64", fmt="exe")
-        assert len(raw) > 0, "EXE x64 payload is empty"
-        assert _is_valid_pe(raw), (
+        # ── Tests 1–4: format × arch matrix (parallel builds when possible) ─
+        mode = "parallel" if use_parallel else "serial"
+        print(
+            f"  [matrix] building EXE x64, EXE x86, BIN x64, DLL x64 ({mode})"
+        )
+        matrix = [
+            MatrixCell(arch="x64", fmt="exe"),
+            MatrixCell(arch="x86", fmt="exe"),
+            MatrixCell(arch="x64", fmt="bin"),
+            MatrixCell(arch="x64", fmt="dll"),
+        ]
+        raws = build_parallel(
+            cli, listener_name, matrix, parallel=use_parallel
+        )
+        assert len(raws) == 4, f"expected 4 matrix artifacts, got {len(raws)}"
+        (
+            raw_exe64,
+            raw_exe86,
+            raw_bin64,
+            raw_dll64,
+        ) = raws
+
+        # 1) EXE x64
+        assert len(raw_exe64) > 0, "EXE x64 payload is empty"
+        assert _is_valid_pe(raw_exe64), (
             f"EXE x64 payload does not start with MZ magic: "
-            f"first 4 bytes = {raw[:4]!r}"
+            f"first 4 bytes = {raw_exe64[:4]!r}"
         )
-        print(f"  [exe-x64] passed ({len(raw)} bytes)")
+        print(f"  [exe-x64] passed ({len(raw_exe64)} bytes)")
 
-        # ── Test 2: EXE x86 → valid PE ───────────────────────────────────────
-        print("  [exe-x86] building EXE x86")
-        raw = payload_build_and_fetch(cli, listener=listener_name,
-                                      arch="x86", fmt="exe")
-        assert len(raw) > 0, "EXE x86 payload is empty"
-        assert _is_valid_pe(raw), (
+        # 2) EXE x86
+        assert len(raw_exe86) > 0, "EXE x86 payload is empty"
+        assert _is_valid_pe(raw_exe86), (
             f"EXE x86 payload does not start with MZ magic: "
-            f"first 4 bytes = {raw[:4]!r}"
+            f"first 4 bytes = {raw_exe86[:4]!r}"
         )
-        print(f"  [exe-x86] passed ({len(raw)} bytes)")
+        print(f"  [exe-x86] passed ({len(raw_exe86)} bytes)")
 
-        # ── Test 3: BIN (raw shellcode) x64 → non-empty bytes ────────────────
-        print("  [bin-x64] building raw shellcode (bin) x64")
-        raw = payload_build_and_fetch(cli, listener=listener_name,
-                                      arch="x64", fmt="bin")
-        assert len(raw) > 0, "BIN x64 payload is empty"
-        print(f"  [bin-x64] passed ({len(raw)} bytes)")
+        # 3) BIN x64
+        assert len(raw_bin64) > 0, "BIN x64 payload is empty"
+        print(f"  [bin-x64] passed ({len(raw_bin64)} bytes)")
 
-        # ── Test 4: DLL x64 → valid PE ───────────────────────────────────────
-        print("  [dll-x64] building DLL x64")
-        raw = payload_build_and_fetch(cli, listener=listener_name,
-                                      arch="x64", fmt="dll")
-        assert len(raw) > 0, "DLL x64 payload is empty"
-        assert _is_valid_pe(raw), (
+        # 4) DLL x64
+        assert len(raw_dll64) > 0, "DLL x64 payload is empty"
+        assert _is_valid_pe(raw_dll64), (
             f"DLL x64 payload does not start with MZ magic: "
-            f"first 4 bytes = {raw[:4]!r}"
+            f"first 4 bytes = {raw_dll64[:4]!r}"
         )
-        print(f"  [dll-x64] passed ({len(raw)} bytes)")
+        print(f"  [dll-x64] passed ({len(raw_dll64)} bytes)")
 
         # ── Test 5: No listener → meaningful error ───────────────────────────
         print("  [no-listener] testing build with no listener")

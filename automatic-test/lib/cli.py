@@ -189,16 +189,28 @@ def listener_delete(cfg: CliConfig, name: str) -> dict:
 
 # ── Payloads ────────────────────────────────────────────────────────────────
 
+# Matches client-cli PAYLOAD_BUILD_WAIT_TIMEOUT_SECS / ``--wait-timeout`` default.
+PAYLOAD_BUILD_WAIT_TIMEOUT_SECS = 300
+
+
 def payload_build(cfg: CliConfig, listener: str,
                   arch: str = "x64", fmt: str = "exe",
                   agent: str = "demon",
                   sleep_secs: int | None = None,
-                  wait: bool = False) -> dict:
+                  wait: bool = False,
+                  detach: bool = False) -> dict:
     """Submit a payload build job.
 
-    Without ``wait``: returns ``{"job_id": ...}`` immediately.
-    With ``wait=True``: blocks until build completes via the CLI's
-    ``--wait`` flag, returns ``{"id": <payload_id>, "size_bytes": N}``.
+    ``detach=True`` returns immediately with ``{"job_id": ...}`` (``payload build
+    --detach``).  If both ``wait`` and ``detach`` are true, the CLI treats the
+    build as detached (``detach`` wins).
+
+    Without ``wait``/``detach``: returns ``{"job_id": ...}`` after the HTTP
+    response (same as ``--detach`` for job submission, but the CLI's default
+    no-wait path may differ — prefer ``detach=True`` for parallel build pools).
+
+    With ``wait=True`` and ``detach=False``: blocks until the build finishes,
+    returns ``{"id": <payload_id>, "size_bytes": N}``.
 
     """
     args = ["payload", "build",
@@ -208,13 +220,40 @@ def payload_build(cfg: CliConfig, listener: str,
             "--agent", agent]
     if sleep_secs is not None:
         args += ["--sleep", str(sleep_secs)]
-    if wait:
+    if detach:
+        args.append("--detach")
+    if wait and not detach:
         args.append("--wait")
-        # Payload compilation can take several minutes; extend the subprocess
-        # lifetime to match the CLI's built-in --wait-timeout default (300s).
-        run_cfg = cfg.with_timeout(300)
+    # Payload compilation can take several minutes when waiting; extend the
+    # subprocess lifetime to match the CLI's built-in --wait-timeout default.
+    if wait and not detach:
+        run_cfg = cfg.with_timeout(PAYLOAD_BUILD_WAIT_TIMEOUT_SECS)
     else:
         run_cfg = cfg
+    return _run(run_cfg, *args)
+
+
+def payload_build_wait(
+    cfg: CliConfig,
+    job_id: str,
+    *,
+    output: str | None = None,
+    wait_timeout_secs: int | None = None,
+) -> dict[str, Any]:
+    """Block until a detached payload build job completes (``payload build-wait``).
+
+    On success, returns a dict with ``payload_id`` and ``size_bytes`` (and
+    optionally ``output`` when a download path was passed).
+
+    """
+    t = wait_timeout_secs if wait_timeout_secs is not None else PAYLOAD_BUILD_WAIT_TIMEOUT_SECS
+    run_cfg = cfg.with_timeout(t)
+    args: list[str] = [
+        "payload", "build-wait", str(job_id),
+        "--wait-timeout", str(t),
+    ]
+    if output is not None:
+        args += ["--output", output]
     return _run(run_cfg, *args)
 
 
@@ -239,8 +278,10 @@ def payload_build_and_fetch(cfg: CliConfig, listener: str,
     is deleted before returning.
 
     """
-    result = payload_build(cfg, listener=listener, arch=arch, fmt=fmt,
-                           agent=agent, sleep_secs=sleep_secs, wait=True)
+    result = payload_build(
+        cfg, listener=listener, arch=arch, fmt=fmt,
+        agent=agent, sleep_secs=sleep_secs, wait=True, detach=False,
+    )
     payload_id = result["id"]
 
     fd, tmp_path = tempfile.mkstemp(suffix=f".{fmt}")

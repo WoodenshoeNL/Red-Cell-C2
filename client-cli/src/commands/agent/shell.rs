@@ -219,13 +219,9 @@ async fn run_agent_command(client: &ApiClient, id: AgentId, cmd: &str, timeout_s
 /// Execute a command on the local host (operator machine).
 async fn handle_local_exec(cmd: &str) {
     let cmd = cmd.to_owned();
-    let result = task::spawn_blocking(move || {
-        std::process::Command::new("sh")
-            .arg("-c")
-            .arg(&cmd)
-            .status()
-    })
-    .await;
+    let result =
+        task::spawn_blocking(move || std::process::Command::new("sh").arg("-c").arg(&cmd).status())
+            .await;
 
     match result {
         Ok(Ok(status)) => {

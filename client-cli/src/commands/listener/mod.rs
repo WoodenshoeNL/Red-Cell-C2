@@ -171,6 +171,10 @@ impl TextRender for ListenerAccessInfo {
     }
 }
 
+fn resolve_name(positional: Option<String>, flag: Option<String>) -> String {
+    positional.or(flag).unwrap_or_default()
+}
+
 // ── top-level dispatcher ──────────────────────────────────────────────────────
 
 /// Dispatch a [`ListenerCommands`] variant and return a process exit code.
@@ -247,47 +251,56 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: ListenerCommand
             }
         }
 
-        ListenerCommands::Start { name } => match lifecycle::start(client, &name).await {
-            Ok(data) => match print_success(fmt, &data) {
-                Ok(()) => EXIT_SUCCESS,
+        ListenerCommands::Start { name, name_flag } => {
+            let name = resolve_name(name, name_flag);
+            match lifecycle::start(client, &name).await {
+                Ok(data) => match print_success(fmt, &data) {
+                    Ok(()) => EXIT_SUCCESS,
+                    Err(e) => {
+                        print_error(&e).ok();
+                        e.exit_code()
+                    }
+                },
                 Err(e) => {
                     print_error(&e).ok();
                     e.exit_code()
                 }
-            },
-            Err(e) => {
-                print_error(&e).ok();
-                e.exit_code()
             }
-        },
+        }
 
-        ListenerCommands::Stop { name } => match lifecycle::stop(client, &name).await {
-            Ok(data) => match print_success(fmt, &data) {
-                Ok(()) => EXIT_SUCCESS,
+        ListenerCommands::Stop { name, name_flag } => {
+            let name = resolve_name(name, name_flag);
+            match lifecycle::stop(client, &name).await {
+                Ok(data) => match print_success(fmt, &data) {
+                    Ok(()) => EXIT_SUCCESS,
+                    Err(e) => {
+                        print_error(&e).ok();
+                        e.exit_code()
+                    }
+                },
                 Err(e) => {
                     print_error(&e).ok();
                     e.exit_code()
                 }
-            },
-            Err(e) => {
-                print_error(&e).ok();
-                e.exit_code()
             }
-        },
+        }
 
-        ListenerCommands::Delete { name } => match lifecycle::delete(client, &name).await {
-            Ok(data) => match print_success(fmt, &data) {
-                Ok(()) => EXIT_SUCCESS,
+        ListenerCommands::Delete { name, name_flag } => {
+            let name = resolve_name(name, name_flag);
+            match lifecycle::delete(client, &name).await {
+                Ok(data) => match print_success(fmt, &data) {
+                    Ok(()) => EXIT_SUCCESS,
+                    Err(e) => {
+                        print_error(&e).ok();
+                        e.exit_code()
+                    }
+                },
                 Err(e) => {
                     print_error(&e).ok();
                     e.exit_code()
                 }
-            },
-            Err(e) => {
-                print_error(&e).ok();
-                e.exit_code()
             }
-        },
+        }
 
         ListenerCommands::Access { name } => match lifecycle::get_access(client, &name).await {
             Ok(data) => match print_success(fmt, &data) {
@@ -474,5 +487,22 @@ mod tests {
     fn listener_access_info_empty_allows_all_text() {
         let info = ListenerAccessInfo { listener_name: "l2".to_owned(), allowed_operators: vec![] };
         assert!(info.render_text().contains("no operator restrictions"));
+    }
+
+    // ── resolve_name ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn resolve_name_prefers_positional() {
+        assert_eq!(super::resolve_name(Some("pos".to_owned()), Some("flag".to_owned())), "pos");
+    }
+
+    #[test]
+    fn resolve_name_falls_back_to_flag() {
+        assert_eq!(super::resolve_name(None, Some("flag".to_owned())), "flag");
+    }
+
+    #[test]
+    fn resolve_name_uses_positional_alone() {
+        assert_eq!(super::resolve_name(Some("pos".to_owned()), None), "pos");
     }
 }

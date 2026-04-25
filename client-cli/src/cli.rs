@@ -495,30 +495,45 @@ pub enum ListenerCommands {
     ///
     /// Examples:
     ///   red-cell-cli listener start http1
+    ///   red-cell-cli listener start --name http1
     #[command(verbatim_doc_comment)]
     Start {
-        /// Listener name
-        name: String,
+        /// Listener name (positional)
+        #[arg(conflicts_with = "name_flag", required_unless_present = "name_flag")]
+        name: Option<String>,
+        /// Listener name (flag, alias for positional)
+        #[arg(long = "name", id = "name_flag", required_unless_present = "name")]
+        name_flag: Option<String>,
     },
 
     /// Stop a running listener (idempotent: already-stopped returns ok).
     ///
     /// Examples:
     ///   red-cell-cli listener stop http1
+    ///   red-cell-cli listener stop --name http1
     #[command(verbatim_doc_comment)]
     Stop {
-        /// Listener name
-        name: String,
+        /// Listener name (positional)
+        #[arg(conflicts_with = "name_flag", required_unless_present = "name_flag")]
+        name: Option<String>,
+        /// Listener name (flag, alias for positional)
+        #[arg(long = "name", id = "name_flag", required_unless_present = "name")]
+        name_flag: Option<String>,
     },
 
     /// Delete a listener.
     ///
     /// Examples:
     ///   red-cell-cli listener delete http1
+    ///   red-cell-cli listener delete --name http1
     #[command(verbatim_doc_comment)]
     Delete {
-        /// Listener name
-        name: String,
+        /// Listener name (positional)
+        #[arg(conflicts_with = "name_flag", required_unless_present = "name_flag")]
+        name: Option<String>,
+        /// Listener name (flag, alias for positional)
+        #[arg(long = "name", id = "name_flag", required_unless_present = "name")]
+        name_flag: Option<String>,
     },
 
     /// Show the operator allow-list for a listener (`GET /listeners/{name}/access`).

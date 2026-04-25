@@ -6,7 +6,7 @@
 //! |---|---|---|
 //! | `loot list [filters]` | `GET /api/v1/loot?...` | paginated, filterable |
 //! | `loot download <id> --out <path>` | `GET /api/v1/loot/{id}` | save bytes to disk |
-//! | `loot export --format csv\|jsonl` | `GET /api/v1/loot?...` | flat export for tooling |
+//! | `loot export --format csv\|jsonl` | `GET /api/v1/loot?...` | flat export; without `--file`, payload → stdout, metadata JSON → stderr |
 
 use std::collections::HashSet;
 use std::io::Write as _;
@@ -25,6 +25,7 @@ use crate::defaults::{LOOT_LIST_WATCH_POLL_INTERVAL_SECS, RATE_LIMIT_DEFAULT_WAI
 use crate::error::{CliError, EXIT_SUCCESS};
 use crate::output::{
     OutputFormat, TextRender, TextRow, print_error, print_stream_entry, print_success,
+    print_success_metadata_stderr,
 };
 use crate::util::percent_encode;
 
@@ -183,13 +184,21 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: LootCommands) -
         )
         .await
         {
-            Ok(result) => match print_success(fmt, &result) {
-                Ok(()) => EXIT_SUCCESS,
-                Err(e) => {
-                    print_error(&e).ok();
-                    e.exit_code()
+            Ok(result) => {
+                // Raw CSV/JSONL is already on stdout; keep the JSON envelope off stdout (stderr only).
+                let print = if result.destination == "stdout" {
+                    print_success_metadata_stderr(fmt, &result)
+                } else {
+                    print_success(fmt, &result)
+                };
+                match print {
+                    Ok(()) => EXIT_SUCCESS,
+                    Err(e) => {
+                        print_error(&e).ok();
+                        e.exit_code()
+                    }
                 }
-            },
+            }
             Err(e) => {
                 print_error(&e).ok();
                 e.exit_code()

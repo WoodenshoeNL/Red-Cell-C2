@@ -998,7 +998,9 @@ pub enum LootCommands {
     ///
     /// Uses the same query path as `loot list` but writes rows in a
     /// flat export format suitable for downstream tooling. Writes to
-    /// stdout by default; use --file to redirect to a file.
+    /// stdout by default; use --file to redirect to a file. With default
+    /// `--output json`, the success metadata line is on stderr so stdout is
+    /// only the raw CSV/JSONL (safe to pipe to other tools).
     ///
     /// Examples:
     ///   red-cell-cli loot export --format csv

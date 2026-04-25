@@ -47,7 +47,14 @@
 //! {"warning": "cursor_reset", "missed_from": 42}
 //! ```
 //!
-//! stdout and stderr are never mixed.
+//! For commands that stream their primary payload to **stdout** (for example
+//! `loot export` without `--file`), the JSON success envelope is written to
+//! **stderr** via [`print_success_metadata_stderr`], not [`print_success`], so
+//! machine consumers can still parse a single line of JSON (on stderr) while
+//! piping the raw payload from stdout.
+//!
+//! In all other cases, [`print_success`] is used and stdout and stderr are not
+//! mixed in this way.
 
 use comfy_table::{Cell, ContentArrangement, Table};
 use serde::Serialize;
@@ -119,6 +126,19 @@ pub fn print_success<T: Serialize + TextRender>(
     payload: &T,
 ) -> Result<(), CliError> {
     write_success(&mut std::io::stdout(), format, payload)
+}
+
+/// Write a successful response to **stderr** when the main command output
+/// already consumed **stdout** (for example `loot export` without `--file`, where
+/// CSV or JSONL is written to stdout for piping).
+///
+/// * **JSON mode** — same envelope as [`print_success`], but on stderr.
+/// * **Text mode** — same as [`print_success`]: [`TextRender::render_text`].
+pub fn print_success_metadata_stderr<T: Serialize + TextRender>(
+    format: &OutputFormat,
+    payload: &T,
+) -> Result<(), CliError> {
+    write_success(&mut std::io::stderr(), format, payload)
 }
 
 /// Write an error envelope to **stderr**.
@@ -455,6 +475,18 @@ mod tests {
             serde_json::from_str(output.trim()).expect("output is valid JSON");
         assert_eq!(v["ok"], true);
         assert_eq!(v["data"]["value"], "hello");
+    }
+
+    /// `print_success` and [`print_success_metadata_stderr`] use the same [`write_success`]
+    /// path; only the writer (stdout vs stderr) differs, so the JSON / text bytes must match.
+    #[test]
+    fn write_success_json_bytes_match_for_stdout_and_stderr_consumers() {
+        let payload = FakePayload { value: "meta-parity".to_owned() };
+        let mut to_stdout = Vec::new();
+        let mut to_stderr = Vec::new();
+        write_success(&mut to_stdout, &OutputFormat::Json, &payload).expect("stdout");
+        write_success(&mut to_stderr, &OutputFormat::Json, &payload).expect("stderr");
+        assert_eq!(to_stdout, to_stderr, "print_success vs print_success_metadata_stderr");
     }
 
     #[test]

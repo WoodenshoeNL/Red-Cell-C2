@@ -48,6 +48,7 @@ struct BuildJobStatus {
     job_id: String,
     /// `"pending"` | `"running"` | `"done"` | `"error"`
     status: String,
+    agent_type: Option<String>,
     payload_id: Option<String>,
     size_bytes: Option<u64>,
     error: Option<String>,
@@ -114,6 +115,63 @@ impl TextRender for BuildCompleted {
     }
 }
 
+/// Result returned by `payload build-status`.
+#[derive(Debug, Clone, Serialize)]
+pub struct BuildJobStatusResult {
+    /// Build job identifier.
+    pub job_id: String,
+    /// Current status: `"pending"`, `"running"`, `"done"`, or `"error"`.
+    pub status: String,
+    /// Agent type that was requested.
+    pub agent_type: Option<String>,
+    /// Payload identifier (set when status is `"done"`).
+    pub payload_id: Option<String>,
+    /// Artifact size in bytes (set when status is `"done"`).
+    pub size_bytes: Option<u64>,
+    /// Error message (set when status is `"error"`).
+    pub error: Option<String>,
+}
+
+impl TextRender for BuildJobStatusResult {
+    fn render_text(&self) -> String {
+        let mut parts = vec![format!("Job {} — {}", self.job_id, self.status)];
+        if let Some(ref agent) = self.agent_type {
+            parts.push(format!("  agent: {agent}"));
+        }
+        if let Some(ref pid) = self.payload_id {
+            parts.push(format!("  payload_id: {pid}"));
+        }
+        if let Some(bytes) = self.size_bytes {
+            parts.push(format!("  size: {bytes} bytes"));
+        }
+        if let Some(ref err) = self.error {
+            parts.push(format!("  error: {err}"));
+        }
+        parts.join("\n")
+    }
+}
+
+/// Result returned by `payload build-wait` on success.
+#[derive(Debug, Clone, Serialize)]
+pub struct BuildWaitCompleted {
+    /// Unique identifier of the finished payload.
+    pub payload_id: String,
+    /// Size of the finished payload in bytes.
+    pub size_bytes: u64,
+    /// Local path where the payload was saved (if `--output` was used).
+    pub output: Option<String>,
+}
+
+impl TextRender for BuildWaitCompleted {
+    fn render_text(&self) -> String {
+        let base = format!("Payload {} built ({} bytes)", self.payload_id, self.size_bytes);
+        match self.output {
+            Some(ref path) => format!("{base} → {path}"),
+            None => base,
+        }
+    }
+}
+
 /// Result returned by `payload download`.
 #[derive(Debug, Clone, Serialize)]
 pub struct DownloadResult {
@@ -171,7 +229,9 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: PayloadCommands
             sleep: sleep_secs,
             wait,
             wait_timeout,
+            detach,
         } => {
+            let effective_wait = wait && !detach;
             let build_timeout_secs = wait_timeout.unwrap_or(PAYLOAD_BUILD_WAIT_TIMEOUT_SECS);
             match build(
                 client,
@@ -180,7 +240,7 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: PayloadCommands
                 &format,
                 &agent,
                 sleep_secs,
-                wait,
+                effective_wait,
                 build_timeout_secs,
             )
             .await
@@ -200,6 +260,39 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: PayloadCommands
                             e.exit_code()
                         }
                     },
+                },
+                Err(e) => {
+                    print_error(&e).ok();
+                    e.exit_code()
+                }
+            }
+        }
+
+        PayloadCommands::BuildStatus { job_id } => {
+            match build_status(client, &job_id).await {
+                Ok(result) => match print_success(fmt, &result) {
+                    Ok(()) => EXIT_SUCCESS,
+                    Err(e) => {
+                        print_error(&e).ok();
+                        e.exit_code()
+                    }
+                },
+                Err(e) => {
+                    print_error(&e).ok();
+                    e.exit_code()
+                }
+            }
+        }
+
+        PayloadCommands::BuildWait { job_id, output, wait_timeout } => {
+            let timeout_secs = wait_timeout.unwrap_or(PAYLOAD_BUILD_WAIT_TIMEOUT_SECS);
+            match build_wait(client, &job_id, output.as_deref(), timeout_secs).await {
+                Ok(result) => match print_success(fmt, &result) {
+                    Ok(()) => EXIT_SUCCESS,
+                    Err(e) => {
+                        print_error(&e).ok();
+                        e.exit_code()
+                    }
                 },
                 Err(e) => {
                     print_error(&e).ok();
@@ -369,6 +462,112 @@ async fn build(
             }
         }
     }
+}
+
+/// `payload build-status <job-id>` — check the status of a build job.
+///
+/// # Examples
+/// ```text
+/// red-cell-cli payload build-status abc123
+/// ```
+#[instrument(skip(client))]
+async fn build_status(
+    client: &ApiClient,
+    job_id: &str,
+) -> Result<BuildJobStatusResult, CliError> {
+    let job_path = format!("/payloads/jobs/{job_id}");
+    let status: BuildJobStatus = client.get(&job_path).await?;
+    Ok(BuildJobStatusResult {
+        job_id: status.job_id,
+        status: status.status,
+        agent_type: status.agent_type,
+        payload_id: status.payload_id,
+        size_bytes: status.size_bytes,
+        error: status.error,
+    })
+}
+
+/// `payload build-wait <job-id>` — poll until a build job finishes, optionally
+/// downloading the artifact.
+///
+/// # Examples
+/// ```text
+/// red-cell-cli payload build-wait abc123
+/// red-cell-cli payload build-wait abc123 --output ./payload.exe
+/// ```
+#[instrument(skip(client))]
+async fn build_wait(
+    client: &ApiClient,
+    job_id: &str,
+    output: Option<&str>,
+    timeout_secs: u64,
+) -> Result<BuildWaitCompleted, CliError> {
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let job_path = format!("/payloads/jobs/{job_id}");
+    let mut backoff = Backoff::new();
+
+    let (payload_id, size_bytes) = loop {
+        if Instant::now() > deadline {
+            return Err(CliError::Timeout(format!(
+                "build job {job_id} did not complete within {timeout_secs} seconds"
+            )));
+        }
+
+        match client.get::<BuildJobStatus>(&job_path).await {
+            Err(CliError::RateLimited { retry_after_secs }) => {
+                let wait =
+                    Duration::from_secs(retry_after_secs.unwrap_or(RATE_LIMIT_DEFAULT_WAIT_SECS));
+                sleep(wait).await;
+            }
+            Err(e) => return Err(e),
+            Ok(status) => match status.status.as_str() {
+                "done" => {
+                    let pid = status.payload_id.ok_or_else(|| {
+                        CliError::General(format!(
+                            "build job {job_id} reported done but returned no payload_id"
+                        ))
+                    })?;
+                    break (pid, status.size_bytes.unwrap_or(0));
+                }
+                "error" => {
+                    let msg = status.error.unwrap_or_else(|| "unknown build error".to_owned());
+                    return Err(CliError::General(format!(
+                        "build job {job_id} failed: {msg}"
+                    )));
+                }
+                _ => {
+                    backoff.record_empty();
+                    sleep(backoff.delay()).await;
+                }
+            },
+        }
+    };
+
+    if let Some(dst) = output {
+        let bytes = client
+            .get_raw_bytes(&format!("/payloads/{payload_id}/download"))
+            .await?;
+        let dst_path = Path::new(dst);
+        if let Some(parent) = dst_path.parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                    CliError::General(format!(
+                        "failed to create directory {}: {e}",
+                        parent.display()
+                    ))
+                })?;
+            }
+        }
+        tokio::fs::write(dst_path, &bytes)
+            .await
+            .map_err(|e| CliError::General(format!("failed to write payload to {dst}: {e}")))?;
+    }
+
+    Ok(BuildWaitCompleted {
+        payload_id,
+        size_bytes,
+        output: output.map(|s| s.to_owned()),
+    })
 }
 
 /// `payload download <id> --dst <path>` — download a payload binary to disk.

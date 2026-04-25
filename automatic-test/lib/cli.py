@@ -175,6 +175,10 @@ def listener_start(cfg: CliConfig, name: str) -> dict:
     return _run(cfg, "listener", "start", name)
 
 
+def listener_show(cfg: CliConfig, name: str) -> dict:
+    return _run(cfg, "listener", "show", name)
+
+
 def listener_stop(cfg: CliConfig, name: str) -> dict:
     return _run(cfg, "listener", "stop", name)
 

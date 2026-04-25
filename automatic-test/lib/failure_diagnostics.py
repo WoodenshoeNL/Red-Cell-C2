@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from .cli import CliConfig, CliError, agent_list, listener_list, log_list
+from .cli import CliConfig, CliError, agent_list, listener_list, listener_show, log_list
 
 
 @runtime_checkable
@@ -142,17 +142,61 @@ def _safe_json_dump(data: Any) -> str:
         return f"(could not serialize: {exc})\n{data!r}"
 
 
-def _gather_cli_snapshot(cli: CliConfig) -> tuple[str, str, str]:
-    """Return formatted agents, listeners, and audit log blocks."""
+def _listener_request_summary(
+    cli: CliConfig, listeners: list[dict],
+) -> str:
+    """Build a diagnostic block with per-listener errors and agent registration counts.
+
+    This answers the single most important triage question: did the listener
+    receive ANY incoming requests during the scenario?
+    """
+    lines: list[str] = []
+
+    for listener in listeners:
+        name = listener.get("name", "?")
+        status = listener.get("status", "?")
+        lines.append(f"Listener '{name}' (status={status}):")
+        try:
+            detail = listener_show(cli, name)
+            last_error = detail.get("last_error")
+            if last_error:
+                lines.append(f"  last_error: {last_error}")
+            else:
+                lines.append("  last_error: (none)")
+        except CliError as exc:
+            lines.append(f"  last_error: (query failed: [{exc.code}] {exc.message})")
+
+    try:
+        registrations = log_list(cli, action="agent.registered", limit=200)
+        lines.append(f"\nAgent registrations (total): {len(registrations)}")
+        if registrations:
+            last = registrations[0]
+            lines.append(f"  Most recent: ts={last.get('ts', '?')}  agent={last.get('agent_id', '?')}")
+    except CliError as exc:
+        lines.append(f"\nAgent registrations: (query failed: [{exc.code}] {exc.message})")
+
+    try:
+        reregistrations = log_list(cli, action="agent.reregistered", limit=200)
+        if reregistrations:
+            lines.append(f"Agent re-registrations (total): {len(reregistrations)}")
+    except CliError:
+        pass
+
+    return "\n".join(lines)
+
+
+def _gather_cli_snapshot(cli: CliConfig) -> tuple[str, list[dict], str, str]:
+    """Return formatted agents, raw listeners, formatted listeners, and audit log."""
     try:
         agents = agent_list(cli)
         agents_txt = _safe_json_dump(agents)
     except CliError as exc:
         agents_txt = f"(agent list failed: [{exc.code}] {exc.message})"
 
+    raw_listeners: list[dict] = []
     try:
-        listeners = listener_list(cli)
-        listeners_txt = _safe_json_dump(listeners)
+        raw_listeners = listener_list(cli)
+        listeners_txt = _safe_json_dump(raw_listeners)
     except CliError as exc:
         listeners_txt = f"(listener list failed: [{exc.code}] {exc.message})"
 
@@ -162,7 +206,7 @@ def _gather_cli_snapshot(cli: CliConfig) -> tuple[str, str, str]:
     except CliError as exc:
         audit_txt = f"(audit log list failed: [{exc.code}] {exc.message})"
 
-    return agents_txt, listeners_txt, audit_txt
+    return agents_txt, raw_listeners, listeners_txt, audit_txt
 
 
 def build_failure_diagnostic_report(
@@ -178,7 +222,8 @@ def build_failure_diagnostic_report(
     err_txt = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
 
     log_tail = capture_server_logs(ctx, lines=log_lines)
-    agents_txt, listeners_txt, audit_txt = _gather_cli_snapshot(ctx.cli)
+    agents_txt, raw_listeners, listeners_txt, audit_txt = _gather_cli_snapshot(ctx.cli)
+    request_diag = _listener_request_summary(ctx.cli, raw_listeners)
 
     parts = [
         "Red Cell C2 — scenario failure diagnostic",
@@ -196,6 +241,9 @@ def build_failure_diagnostic_report(
         "",
         "=== ACTIVE LISTENERS ===",
         listeners_txt,
+        "",
+        "=== LISTENER REQUEST DIAGNOSTICS ===",
+        request_diag,
         "",
         "=== RECENT AUDIT LOG (last 20) ===",
         audit_txt,

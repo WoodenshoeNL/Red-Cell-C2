@@ -476,15 +476,15 @@ fn command_id_for_screenshot_is_case_insensitive() {
 }
 
 #[test]
-fn command_id_for_shell_cmd_returns_21() {
-    assert_eq!(command_id_for("whoami"), "21");
-    assert_eq!(command_id_for("dir C:\\"), "21");
-    assert_eq!(command_id_for("ps aux"), "21");
+fn command_id_for_shell_cmd_returns_proc_create() {
+    assert_eq!(command_id_for("whoami"), "4112");
+    assert_eq!(command_id_for("dir C:\\"), "4112");
+    assert_eq!(command_id_for("ps aux"), "4112");
 }
 
 #[test]
-fn command_id_for_empty_returns_21() {
-    assert_eq!(command_id_for(""), "21");
+fn command_id_for_empty_returns_proc_create() {
+    assert_eq!(command_id_for(""), "4112");
 }
 
 // ── output cursor stale warning ─────────────────────────────────────────────

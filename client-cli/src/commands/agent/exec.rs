@@ -28,18 +28,18 @@ use super::wire::TaskQueuedResponse;
 /// | User command | CommandID | Demon constant |
 /// |---|---|---|
 /// | `screenshot` | `2510` | `CommandScreenshot` |
-/// | anything else | `5` | `CommandProc` (Create) |
+/// | anything else | `4112` | `CommandProc` (0x1010, Create) |
 pub(crate) fn command_id_for(cmd: &str) -> &'static str {
     let verb = cmd.split_whitespace().next().unwrap_or(cmd).to_ascii_lowercase();
     match verb.as_str() {
         "screenshot" => "2510",
-        _ => "5",
+        _ => "4112",
     }
 }
 
 /// Returns `true` when the command ID maps to `CommandProc` (process create).
 fn is_proc_create(command_id: &str) -> bool {
-    command_id == "5"
+    command_id == "4112"
 }
 
 /// `agent exec <id> --cmd <cmd>` — submit a command task to an agent.

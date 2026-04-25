@@ -117,14 +117,14 @@ pub(super) fn build_session_rest_request(
                 .get("command")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| SessionBuildError::missing(cmd, "command"))?;
-            let command_id = val.get("command_id").and_then(|v| v.as_str()).unwrap_or("5");
+            let command_id = val.get("command_id").and_then(|v| v.as_str()).unwrap_or("4112");
             let mut body = serde_json::json!({
                 "CommandLine": command_line,
                 "CommandID": command_id,
                 "DemonID": id,
                 "TaskID": "",
             });
-            if command_id == "5" {
+            if command_id == "4112" {
                 let encoded_args = BASE64_STANDARD.encode(command_line);
                 body["SubCommand"] = serde_json::Value::String("create".to_owned());
                 body["Args"] =

@@ -243,4 +243,55 @@ mod tests {
         let code = dispatch(cli).await;
         assert_eq!(code, crate::error::EXIT_GENERAL);
     }
+
+    /// `payload inspect` must work without server/token config — it operates
+    /// on a local file and should be intercepted before config resolution.
+    #[tokio::test]
+    async fn dispatch_payload_inspect_does_not_require_server_config() {
+        use crate::PayloadCommands;
+        use red_cell_common::payload_manifest::{PayloadManifest, encode_manifest};
+
+        let manifest = PayloadManifest {
+            agent_type: "Demon".to_owned(),
+            arch: "x64".to_owned(),
+            format: "exe".to_owned(),
+            hosts: vec!["10.0.0.1".to_owned()],
+            port: Some(443),
+            secure: true,
+            callback_url: Some("https://10.0.0.1:443/".to_owned()),
+            sleep_ms: Some(5000),
+            jitter: Some(20),
+            init_secret_hash: None,
+            kill_date: None,
+            working_hours_mask: None,
+            listener_name: "http1".to_owned(),
+            export_name: None,
+            built_at: "2026-04-25T00:00:00Z".to_owned(),
+        };
+
+        let mut payload = vec![0u8; 64];
+        payload.extend_from_slice(&encode_manifest(&manifest).expect("encode"));
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("agent.exe");
+        std::fs::write(&path, &payload).expect("write");
+
+        let cli = Cli {
+            server: None,
+            token: None,
+            output: OutputFormat::Json,
+            timeout: None,
+            ca_cert: None,
+            cert_fingerprint: None,
+            pin_intermediate: false,
+            command: Some(Commands::Payload {
+                action: PayloadCommands::Inspect {
+                    file: path.to_str().expect("path").to_owned(),
+                },
+            }),
+        };
+
+        let code = dispatch(cli).await;
+        assert_eq!(code, EXIT_SUCCESS, "payload inspect must succeed without server config");
+    }
 }

@@ -733,4 +733,24 @@ mod tests {
             other => panic!("expected Listener::SetAccess, got {other:?}"),
         }
     }
+
+    // ── payload inspect ─────────────────────────────────────────────────────
+
+    #[test]
+    fn payload_inspect_parses_file_argument() {
+        let cli = Cli::try_parse_from(["red-cell-cli", "payload", "inspect", "./agent.exe"])
+            .expect("payload inspect must parse");
+        match cli.command {
+            Some(Commands::Payload {
+                action: PayloadCommands::Inspect { file },
+            }) => assert_eq!(file, "./agent.exe"),
+            other => panic!("expected Payload::Inspect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn payload_inspect_rejects_missing_file_argument() {
+        let result = Cli::try_parse_from(["red-cell-cli", "payload", "inspect"]);
+        assert!(result.is_err(), "payload inspect without file arg must fail");
+    }
 }

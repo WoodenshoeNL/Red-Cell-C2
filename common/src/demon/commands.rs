@@ -1,6 +1,29 @@
 //! Havoc Demon protocol enum definitions.
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+
 use super::DemonProtocolError;
+
+/// Decimal string representation of `DemonCommand::CommandProc` (0x1010 = 4112).
+///
+/// Used as the `CommandID` field in the agent task JSON wire format.
+pub const COMMAND_PROC_CREATE_ID: &str = "4112";
+
+/// Decimal string representation of `DemonCommand::CommandScreenshot` (2510).
+pub const COMMAND_SCREENSHOT_ID: &str = "2510";
+
+/// Build the semicolon-delimited `Args` value for a `CommandProc` create task.
+///
+/// Wire format: `{state};{verbose};{piped};{program};{base64_args}`
+///
+/// The current Havoc protocol always sends `state=0`, `verbose=TRUE`,
+/// `piped=TRUE`, and an empty program field, with the command line
+/// base64-encoded in the final position.
+pub fn format_proc_create_args(command_line: &str) -> String {
+    let encoded = BASE64_STANDARD.encode(command_line);
+    format!("0;TRUE;TRUE;;{encoded}")
+}
 
 macro_rules! protocol_enum {
     (
@@ -339,5 +362,36 @@ protocol_enum! {
     pub enum PhantomPersistOp {
         Install = 0,
         Remove = 1,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn command_proc_create_id_matches_enum() {
+        let expected = u32::from(DemonCommand::CommandProc).to_string();
+        assert_eq!(COMMAND_PROC_CREATE_ID, expected);
+    }
+
+    #[test]
+    fn command_screenshot_id_matches_enum() {
+        let expected = u32::from(DemonCommand::CommandScreenshot).to_string();
+        assert_eq!(COMMAND_SCREENSHOT_ID, expected);
+    }
+
+    #[test]
+    fn format_proc_create_args_encodes_correctly() {
+        let args = format_proc_create_args("whoami");
+        let encoded = BASE64_STANDARD.encode("whoami");
+        assert_eq!(args, format!("0;TRUE;TRUE;;{encoded}"));
+    }
+
+    #[test]
+    fn format_proc_create_args_empty_command() {
+        let args = format_proc_create_args("");
+        let encoded = BASE64_STANDARD.encode("");
+        assert_eq!(args, format!("0;TRUE;TRUE;;{encoded}"));
     }
 }

@@ -2,11 +2,13 @@
 
 use std::time::{Duration, Instant};
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use serde::Serialize;
 use tokio::time::sleep;
 use tracing::instrument;
+
+use red_cell_common::demon::{
+    COMMAND_PROC_CREATE_ID, COMMAND_SCREENSHOT_ID, format_proc_create_args,
+};
 
 use crate::AgentId;
 use crate::backoff::Backoff;
@@ -32,14 +34,14 @@ use super::wire::TaskQueuedResponse;
 pub(crate) fn command_id_for(cmd: &str) -> &'static str {
     let verb = cmd.split_whitespace().next().unwrap_or(cmd).to_ascii_lowercase();
     match verb.as_str() {
-        "screenshot" => "2510",
-        _ => "4112",
+        "screenshot" => COMMAND_SCREENSHOT_ID,
+        _ => COMMAND_PROC_CREATE_ID,
     }
 }
 
 /// Returns `true` when the command ID maps to `CommandProc` (process create).
 fn is_proc_create(command_id: &str) -> bool {
-    command_id == "4112"
+    command_id == COMMAND_PROC_CREATE_ID
 }
 
 /// `agent exec <id> --cmd <cmd>` — submit a command task to an agent.
@@ -81,8 +83,7 @@ pub(crate) async fn exec_submit(
     let demon_id = id.to_string();
 
     let (sub_command, args) = if is_proc_create(cid) {
-        let encoded_args = BASE64_STANDARD.encode(cmd);
-        (Some("create"), Some(format!("0;TRUE;TRUE;;{encoded_args}")))
+        (Some("create"), Some(format_proc_create_args(cmd)))
     } else {
         (None, None)
     };

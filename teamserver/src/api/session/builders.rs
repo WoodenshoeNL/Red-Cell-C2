@@ -1,12 +1,10 @@
 //! Per-command HTTP request builders for session WebSocket dispatch.
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-
 use axum::body::Body;
 use axum::http::Request as HttpRequest;
 use axum::http::header::CONTENT_TYPE;
 use red_cell_common::ListenerConfig;
+use red_cell_common::demon::{COMMAND_PROC_CREATE_ID, format_proc_create_args};
 use serde_json::Value;
 
 /// Errors while mapping a session `cmd` to an internal REST request.
@@ -117,17 +115,17 @@ pub(super) fn build_session_rest_request(
                 .get("command")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| SessionBuildError::missing(cmd, "command"))?;
-            let command_id = val.get("command_id").and_then(|v| v.as_str()).unwrap_or("4112");
+            let command_id =
+                val.get("command_id").and_then(|v| v.as_str()).unwrap_or(COMMAND_PROC_CREATE_ID);
             let mut body = serde_json::json!({
                 "CommandLine": command_line,
                 "CommandID": command_id,
                 "DemonID": id,
                 "TaskID": "",
             });
-            if command_id == "4112" {
-                let encoded_args = BASE64_STANDARD.encode(command_line);
+            if command_id == COMMAND_PROC_CREATE_ID {
                 body["SubCommand"] = serde_json::Value::String("create".to_owned());
-                body["Args"] = serde_json::Value::String(format!("0;TRUE;TRUE;;{encoded_args}"));
+                body["Args"] = serde_json::Value::String(format_proc_create_args(command_line));
             }
             let bytes = serde_json::to_vec(&body)
                 .map_err(|e| SessionBuildError::InvalidBody(e.to_string()))?;

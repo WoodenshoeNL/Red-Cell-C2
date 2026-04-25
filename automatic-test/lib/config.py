@@ -128,7 +128,6 @@ class TeamserverSectionConfig:
     cpu_limit_pct: float | None = None
     rss_limit_mb: float | None = None
     log_file: str | None = None
-    log_tail_url: str | None = None
 
 
 @dataclass
@@ -255,7 +254,6 @@ _ALLOWED_TEAMSERVER_KEYS = frozenset({
     "cpu_limit_pct",
     "rss_limit_mb",
     "log_file",
-    "log_tail_url",
 })
 _ALLOWED_ANALYST_KEYS = frozenset({"username", "api_key"})
 _ALLOWED_ARCHON_KEYS = frozenset({"extensions"})
@@ -524,7 +522,6 @@ def parse_env_config(raw: dict[str, Any]) -> EnvConfig:
                 if rss_raw is not None and rss_raw != ""
                 else None,
                 log_file=_optional_str(ts.get("log_file"), "[teamserver].log_file", errors),
-                log_tail_url=_optional_str(ts.get("log_tail_url"), "[teamserver].log_tail_url", errors),
             )
         else:
             errors.append(f"[teamserver] must be a table or empty, got {type(ts).__name__}")

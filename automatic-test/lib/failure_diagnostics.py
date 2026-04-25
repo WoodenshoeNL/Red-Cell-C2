@@ -10,17 +10,22 @@ from __future__ import annotations
 
 import json
 import os
-import ssl
 import traceback
-import urllib.error
-import urllib.request
 import uuid
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from .cli import CliConfig, CliError, agent_list, listener_list, listener_show, log_list
+from .cli import (
+    CliConfig,
+    CliError,
+    agent_list,
+    listener_list,
+    listener_show,
+    log_list,
+    log_server_tail,
+)
 
 
 @runtime_checkable
@@ -56,10 +61,11 @@ def capture_server_logs(ctx: DiagnosticContext, lines: int = 100) -> str:
 
     1. ``env["teamserver"]["log_file"]`` — path on the machine running ``test.py``
        (typical when teamserver runs on the same host and logs to a file).
-    2. ``env["teamserver"]["log_tail_url"]`` — HTTP GET returning plain text; sends
-       ``x-api-key`` from ``env["operator"]["api_key"]`` when present.
+    2. CLI ``red-cell-cli log server-tail --lines N`` — fetches from the
+       teamserver's debug endpoint using the operator credentials already
+       configured in ``ctx.cli``.
 
-    If neither is set, returns guidance to configure one of the above.
+    If neither is available, returns guidance to configure ``log_file``.
     """
     teamserver = ctx.env.get("teamserver") or {}
     if not isinstance(teamserver, dict):
@@ -72,70 +78,21 @@ def capture_server_logs(ctx: DiagnosticContext, lines: int = 100) -> str:
             return tail_text_file(p, lines)
         return f"(log_file path does not exist or is not a file: {p})"
 
-    log_url = teamserver.get("log_tail_url")
-    if log_url:
-        return _fetch_log_tail_url(str(log_url), ctx.env, lines)
-
-    return (
-        "(no teamserver log source configured — set [teamserver].log_file to a path on "
-        "this machine, or [teamserver].log_tail_url to an HTTP endpoint that returns log text)"
-    )
+    return _fetch_log_tail_cli(ctx.cli, lines)
 
 
-def _looks_like_tls_verify_failure(exc: urllib.error.URLError) -> bool:
-    reason = getattr(exc, "reason", None)
-    if isinstance(reason, ssl.SSLError):
-        return True
-    return "CERTIFICATE_VERIFY_FAILED" in str(exc) or "certificate verify failed" in str(
-        exc
-    ).lower()
-
-
-def _http_get_body(req: urllib.request.Request, *, timeout: float) -> bytes:
-    """GET *req*; return response body. Retries once without TLS verification on cert errors."""
+def _fetch_log_tail_cli(cli: CliConfig, lines: int) -> str:
+    """Fetch teamserver log tail via ``red-cell-cli log server-tail``."""
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.read()
-    except urllib.error.HTTPError:
-        raise
-    except urllib.error.URLError as exc:
-        if not _looks_like_tls_verify_failure(exc):
-            raise
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
-            return resp.read()
+        entries = log_server_tail(cli, lines)
+    except CliError as exc:
+        return f"(log server-tail failed: [{exc.code}] {exc.message})"
 
+    if not entries:
+        return "(no log entries returned by server-tail)\n"
 
-def _fetch_log_tail_url(url: str, env: dict[str, Any], lines: int) -> str:
-    """GET *url* with optional API key; keep the last *lines* of the response body."""
-    operator = env.get("operator") or {}
-    api_key = ""
-    if isinstance(operator, dict):
-        api_key = str(operator.get("api_key") or "")
-
-    headers = {"Accept": "text/plain, */*"}
-    if api_key:
-        headers["x-api-key"] = api_key
-
-    req = urllib.request.Request(url, headers=headers, method="GET")
-    try:
-        raw = _http_get_body(req, timeout=15.0)
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
-        return f"(HTTP {exc.code} from log_tail_url: {body[:2000]})"
-    except urllib.error.URLError as exc:
-        return f"(could not fetch log_tail_url: {exc})"
-    except OSError as exc:
-        return f"(could not fetch log_tail_url: {exc})"
-
-    text = raw.decode("utf-8", errors="replace")
-    all_lines = text.splitlines()
-    if len(all_lines) <= lines:
-        return text if text.endswith("\n") or not text else text + "\n"
-    chunk = "\n".join(all_lines[-lines:]) + "\n"
-    return chunk
+    text_lines = [f"{e.get('timestamp', '?')}  {e.get('text', '')}" for e in entries]
+    return "\n".join(text_lines) + "\n"
 
 
 def _safe_json_dump(data: Any) -> str:

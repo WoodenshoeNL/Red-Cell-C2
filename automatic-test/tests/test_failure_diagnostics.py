@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from lib.cli import CliConfig, CliError
 from lib.failure_diagnostics import (
+    _fetch_log_tail_cli,
     _listener_request_summary,
     build_failure_diagnostic_report,
     capture_server_logs,
@@ -33,11 +34,13 @@ def _patch_snapshot(
     log_entries=None,
     listener_detail=None,
     log_side_effect=None,
+    server_tail_entries=None,
 ):
     """Return a combined context manager that patches all CLI calls used by diagnostics.
 
     *log_side_effect* — if set, replaces the ``log_list`` mock's ``side_effect``
     so callers can vary the return value per invocation.
+    *server_tail_entries* — entries returned by ``log_server_tail`` (defaults to empty).
     """
     import contextlib
 
@@ -58,6 +61,9 @@ def _patch_snapshot(
         ), patch(
             "lib.failure_diagnostics.listener_show",
             return_value=listener_detail or {},
+        ), patch(
+            "lib.failure_diagnostics.log_server_tail",
+            return_value=server_tail_entries or [],
         ):
             yield
 
@@ -88,7 +94,7 @@ class TestTailTextFile(unittest.TestCase):
 
 
 class TestCaptureServerLogs(unittest.TestCase):
-    def test_log_file_takes_precedence_over_url(self) -> None:
+    def test_log_file_takes_precedence_over_cli(self) -> None:
         import tempfile
 
         d = tempfile.mkdtemp()
@@ -96,21 +102,58 @@ class TestCaptureServerLogs(unittest.TestCase):
         lf.write_text("line1\nline2\n", encoding="utf-8")
         ctx = SimpleNamespace(
             cli=_cli(),
-            env={
-                "teamserver": {
-                    "log_file": str(lf),
-                    "log_tail_url": "https://example.invalid/should-not-fetch",
-                }
-            },
+            env={"teamserver": {"log_file": str(lf)}},
         )
-        out = capture_server_logs(ctx, lines=10)
+        with patch("lib.failure_diagnostics.log_server_tail") as mock_tail:
+            out = capture_server_logs(ctx, lines=10)
+            mock_tail.assert_not_called()
         self.assertIn("line2", out)
-        self.assertNotIn("should-not-fetch", out)
 
-    def test_guidance_when_unconfigured(self) -> None:
+    def test_falls_back_to_cli_when_no_log_file(self) -> None:
+        entries = [
+            {"timestamp": "12:00:01", "text": "listener started"},
+            {"timestamp": "12:00:02", "text": "ready"},
+        ]
         ctx = SimpleNamespace(cli=_cli(), env={})
-        out = capture_server_logs(ctx)
-        self.assertIn("log_file", out)
+        with patch("lib.failure_diagnostics.log_server_tail", return_value=entries):
+            out = capture_server_logs(ctx, lines=100)
+        self.assertIn("12:00:01", out)
+        self.assertIn("listener started", out)
+        self.assertIn("ready", out)
+
+    def test_cli_error_is_reported_gracefully(self) -> None:
+        ctx = SimpleNamespace(cli=_cli(), env={})
+        with patch(
+            "lib.failure_diagnostics.log_server_tail",
+            side_effect=CliError("NOT_FOUND", "endpoint not found", 1),
+        ):
+            out = capture_server_logs(ctx)
+        self.assertIn("log server-tail failed", out)
+        self.assertIn("NOT_FOUND", out)
+
+    def test_empty_entries_returns_message(self) -> None:
+        ctx = SimpleNamespace(cli=_cli(), env={})
+        with patch("lib.failure_diagnostics.log_server_tail", return_value=[]):
+            out = capture_server_logs(ctx)
+        self.assertIn("no log entries", out)
+
+
+class TestFetchLogTailCli(unittest.TestCase):
+    def test_formats_entries_as_text(self) -> None:
+        entries = [
+            {"timestamp": "09:30:00", "text": "hello world"},
+            {"timestamp": "09:30:01", "text": "goodbye"},
+        ]
+        with patch("lib.failure_diagnostics.log_server_tail", return_value=entries):
+            out = _fetch_log_tail_cli(_cli(), 100)
+        self.assertEqual(out, "09:30:00  hello world\n09:30:01  goodbye\n")
+
+    def test_handles_missing_fields(self) -> None:
+        entries = [{"text": "no timestamp"}, {"timestamp": "10:00:00"}]
+        with patch("lib.failure_diagnostics.log_server_tail", return_value=entries):
+            out = _fetch_log_tail_cli(_cli(), 100)
+        self.assertIn("?  no timestamp", out)
+        self.assertIn("10:00:00  ", out)
 
 
 class TestListenerRequestSummary(unittest.TestCase):
@@ -238,6 +281,8 @@ class TestBuildFailureDiagnosticReport(unittest.TestCase):
             "lib.failure_diagnostics.log_list", return_value=[],
         ), patch(
             "lib.failure_diagnostics.listener_show", return_value={},
+        ), patch(
+            "lib.failure_diagnostics.log_server_tail", return_value=[],
         ):
             text = build_failure_diagnostic_report(
                 ctx, "01", "t", RuntimeError("x"),

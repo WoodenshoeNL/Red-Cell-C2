@@ -411,3 +411,11 @@ def log_list(
     if limit is not None:
         args += ["--limit", str(limit)]
     return _run(cfg, *args)
+
+
+def log_server_tail(cfg: CliConfig, lines: int = 100) -> list[dict]:
+    """Return recent teamserver process log lines via ``log server-tail``.
+
+    Each entry has keys: ``timestamp``, ``text``.
+    """
+    return _run(cfg, "log", "server-tail", "--lines", str(lines))

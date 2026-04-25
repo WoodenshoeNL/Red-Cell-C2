@@ -376,17 +376,16 @@ class TestScenario15(unittest.TestCase):
                 self.mod.run(ctx)
 
     def test_demon_never_run_for_dns(self) -> None:
-        # Demon must never be invoked for DNS transport — it has no TransportDns.
+        # Scenario 15 was rewritten in commit 61b8d7e4 to unconditionally skip:
+        # no Rust agent currently implements primary-DNS transport, and Demon
+        # has no TransportDns either, so there is nothing to test end-to-end.
+        # The test now asserts the skip itself (which prevents Demon from ever
+        # being invoked for DNS — the original property this test guarded).
+        from lib import ScenarioSkipped
         ctx = _linux_ctx()
         ctx.env["agents"]["available"] = ["demon", "phantom"]
-        with patch("lib.deploy.preflight_ssh"), \
-             patch("lib.deploy.inject_hosts_entry"), \
-             patch("lib.deploy.preflight_dns"), \
-             patch.object(self.mod, "_run_for_agent") as mock_run:
+        with self.assertRaises(ScenarioSkipped):
             self.mod.run(ctx)
-        agent_types = [c.kwargs.get("agent_type") or c.args[1] for c in mock_run.call_args_list]
-        self.assertNotIn("demon", agent_types)
-        self.assertIn("phantom", agent_types)
 
 
 # ── Scenario 20: DoH DNS listener interop ────────────────────────────────────
@@ -406,9 +405,13 @@ class TestScenario20(unittest.TestCase):
         m = MagicMock()
         m.AES_KEY_LEN = 32
         m.AES_IV_LEN = 16
-        # _aes_256_ctr and _u32le must agree so the init-ACK assertion passes.
-        m._aes_256_ctr.return_value = b"ACK"
+        # _aes_256_ctr_at_offset and _u32le must agree so the init-ACK assertion passes.
+        # Scenario 20 was migrated to monotonic-CTR helpers in commit b1f739fc; the
+        # mock was previously set up for the legacy _aes_256_ctr name.
+        m._aes_256_ctr_at_offset.return_value = b"ACK"
         m._u32le.return_value = b"ACK"
+        m._ctr_blocks_for_len.return_value = 0
+        m._build_get_job_packet.return_value = b"\x00" * 32
         return m
 
     def test_inject_hosts_entry_called_with_correct_args(self) -> None:

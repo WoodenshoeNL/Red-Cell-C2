@@ -63,6 +63,7 @@ enum BuiltIn<'a> {
     Upload { src: &'a str, dst: &'a str },
     Download { src: &'a str, dst: &'a str },
     Sleep { delay: u32, jitter: u32 },
+    UsageError(&'static str),
     AgentCmd(&'a str),
 }
 
@@ -77,17 +78,20 @@ fn parse_builtin(line: &str) -> BuiltIn<'_> {
     if let Some(local_cmd) = line.strip_prefix('!') {
         return BuiltIn::LocalExec(local_cmd.trim());
     }
-    if let Some(rest) = line.strip_prefix("upload ") {
+    if let Some(rest) = line.strip_prefix("upload").filter(|r| r.is_empty() || r.starts_with(' ')) {
         let rest = rest.trim();
         if let Some((src, dst)) = rest.split_once(' ') {
             return BuiltIn::Upload { src: src.trim(), dst: dst.trim() };
         }
+        return BuiltIn::UsageError("Usage: upload <local-src> <remote-dst>");
     }
-    if let Some(rest) = line.strip_prefix("download ") {
+    if let Some(rest) = line.strip_prefix("download").filter(|r| r.is_empty() || r.starts_with(' '))
+    {
         let rest = rest.trim();
         if let Some((src, dst)) = rest.split_once(' ') {
             return BuiltIn::Download { src: src.trim(), dst: dst.trim() };
         }
+        return BuiltIn::UsageError("Usage: download <remote-src> <local-dst>");
     }
     if let Some(rest) = line.strip_prefix("sleep ") {
         let mut parts = rest.split_whitespace();
@@ -202,6 +206,8 @@ pub(crate) async fn run(client: &ApiClient, id: AgentId, timeout: Option<u64>) -
                     Err(e) => eprintln!("Sleep failed: {e}"),
                 }
             }
+
+            BuiltIn::UsageError(msg) => eprintln!("{msg}"),
 
             BuiltIn::AgentCmd(cmd) => {
                 run_agent_command(client, id, cmd, timeout_secs).await;
@@ -352,8 +358,25 @@ mod tests {
     }
 
     #[test]
-    fn parse_upload_missing_dst_falls_through() {
-        assert!(matches!(parse_builtin("upload /tmp/payload.exe"), BuiltIn::AgentCmd(_)));
+    fn parse_upload_missing_dst_returns_usage_error() {
+        assert!(matches!(parse_builtin("upload /tmp/payload.exe"), BuiltIn::UsageError(_)));
+    }
+
+    #[test]
+    fn parse_upload_no_args_returns_usage_error() {
+        assert!(matches!(parse_builtin("upload"), BuiltIn::UsageError(_)));
+        assert!(matches!(parse_builtin("upload  "), BuiltIn::UsageError(_)));
+    }
+
+    #[test]
+    fn parse_download_missing_dst_returns_usage_error() {
+        assert!(matches!(parse_builtin("download C:\\secret.txt"), BuiltIn::UsageError(_)));
+    }
+
+    #[test]
+    fn parse_download_no_args_returns_usage_error() {
+        assert!(matches!(parse_builtin("download"), BuiltIn::UsageError(_)));
+        assert!(matches!(parse_builtin("download  "), BuiltIn::UsageError(_)));
     }
 
     #[test]
@@ -422,6 +445,7 @@ mod tests {
             BuiltIn::Upload { .. } => "Upload",
             BuiltIn::Download { .. } => "Download",
             BuiltIn::Sleep { .. } => "Sleep",
+            BuiltIn::UsageError(_) => "UsageError",
             BuiltIn::AgentCmd(_) => "AgentCmd",
         }
     }

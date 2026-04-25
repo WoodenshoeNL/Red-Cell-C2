@@ -19,7 +19,7 @@ use super::cache::CacheKey;
 use super::config_values::{parse_kill_date, parse_working_hours};
 use super::{
     BuildProgress, MAX_STDERR_TAIL_LINES, PayloadArtifact, PayloadBuildError,
-    PayloadBuilderService, workspace_root,
+    PayloadBuilderService, append_manifest, build_manifest, workspace_root,
 };
 
 impl PayloadBuilderService {
@@ -183,7 +183,7 @@ impl PayloadBuilderService {
         let artifact_path =
             ws_root.join("target").join(target_triple).join("release").join(&binary_name);
 
-        let bytes = tokio::fs::read(&artifact_path).await.map_err(|err| {
+        let mut bytes = tokio::fs::read(&artifact_path).await.map_err(|err| {
             PayloadBuildError::Io(std::io::Error::new(
                 err.kind(),
                 format!(
@@ -198,6 +198,26 @@ impl PayloadBuilderService {
             level: "Info".to_owned(),
             message: format!("{agent_name} binary [{} bytes]", bytes.len()),
         });
+
+        let agent_type_pascal =
+            agent_name[..1].to_ascii_uppercase() + &agent_name[1..];
+        let format_label = if file_extension == ".exe" {
+            "exe"
+        } else if file_extension.is_empty() {
+            "elf"
+        } else {
+            file_extension.trim_start_matches('.')
+        };
+        let manifest = build_manifest(
+            listener,
+            &agent_type_pascal,
+            "x64",
+            format_label,
+            &self.inner.default_demon,
+            None,
+        );
+        append_manifest(&mut bytes, &manifest)?;
+
         progress(BuildProgress {
             level: "Good".to_owned(),
             message: "payload generated".to_owned(),

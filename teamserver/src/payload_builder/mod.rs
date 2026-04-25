@@ -29,6 +29,7 @@ use std::sync::Arc;
 use red_cell_common::ListenerConfig;
 use red_cell_common::config::{BinaryConfig, DemonConfig, JobExecutionMode, Profile};
 use red_cell_common::operator::{BuildPayloadRequestInfo, CompilerDiagnostic};
+use red_cell_common::payload_manifest::{PayloadManifest, encode_manifest, hash_init_secret};
 use tempfile::TempDir;
 use thiserror::Error;
 
@@ -406,7 +407,7 @@ impl PayloadBuilderService {
 
         let temp_dir = TempDir::new()?;
         let agent_ctx = AgentBuildContext { name: agent_name, source_root };
-        let (compiled, export_name) = self
+        let (mut compiled, export_name) = self
             .build_impl(
                 listener,
                 architecture,
@@ -419,6 +420,16 @@ impl PayloadBuilderService {
             )
             .await?;
         let file_name = format!("{agent_name}{}{}", architecture.suffix(), format.file_extension());
+
+        let manifest = build_manifest(
+            listener,
+            agent_type,
+            &request.arch,
+            &request.format,
+            &self.inner.default_demon,
+            export_name.as_deref(),
+        );
+        append_manifest(&mut compiled, &manifest)?;
 
         if let Some(ref key) = cache_key {
             self.inner.cache.put(key, &compiled).await;
@@ -517,6 +528,105 @@ impl PayloadBuilderService {
             }),
         }
     }
+}
+
+/// Build a [`PayloadManifest`] from the listener config and build parameters.
+///
+/// The manifest is appended to every compiled payload so that
+/// `red-cell-cli payload inspect` can extract build metadata offline.
+fn build_manifest(
+    listener: &ListenerConfig,
+    agent_type: &str,
+    arch: &str,
+    format: &str,
+    demon: &DemonConfig,
+    export_name: Option<&str>,
+) -> PayloadManifest {
+    let (hosts, port, secure, kill_date_str, working_hours_str) = match listener {
+        ListenerConfig::Http(http) => (
+            http.hosts.clone(),
+            Some(http.port_conn.unwrap_or(http.port_bind)),
+            http.secure,
+            http.kill_date.clone(),
+            http.working_hours.clone(),
+        ),
+        ListenerConfig::Smb(smb) => {
+            (vec![smb.name.clone()], None, false, smb.kill_date.clone(), smb.working_hours.clone())
+        }
+        ListenerConfig::Dns(dns) => {
+            (vec![dns.name.clone()], None, false, dns.kill_date.clone(), dns.working_hours.clone())
+        }
+        ListenerConfig::External(ext) => (vec![ext.name.clone()], None, false, None, None),
+    };
+
+    let callback_url = match listener {
+        ListenerConfig::Http(http) => {
+            let scheme = if http.secure { "https" } else { "http" };
+            let p = http.port_conn.unwrap_or(http.port_bind);
+            let host = http.hosts.first().map(|h| h.as_str()).unwrap_or("127.0.0.1");
+            let host_name = host
+                .rsplit_once(':')
+                .and_then(|(name, p)| p.parse::<u16>().ok().map(|_| name))
+                .unwrap_or(host);
+            Some(format!("{scheme}://{host_name}:{p}/"))
+        }
+        _ => None,
+    };
+
+    let init_secret_hash = if !demon.init_secrets.is_empty() {
+        demon
+            .init_secrets
+            .iter()
+            .max_by_key(|v| v.version)
+            .map(|entry| hash_init_secret(&entry.secret))
+    } else {
+        demon.init_secret.as_deref().map(|s| hash_init_secret(s))
+    };
+
+    let sleep_ms = demon.sleep.map(|s| s.saturating_mul(1000));
+    let jitter = demon.jitter.map(u32::from);
+
+    let kill_date_epoch = config_values::parse_kill_date(kill_date_str.as_deref()).unwrap_or(0);
+    let kill_date = if kill_date_epoch > 0 { kill_date_str } else { None };
+
+    let working_hours_packed =
+        config_values::parse_working_hours(working_hours_str.as_deref()).unwrap_or(0);
+    let working_hours_mask =
+        if working_hours_packed != 0 { Some(working_hours_packed as u32) } else { None };
+
+    let built_at = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "unknown".to_owned());
+
+    PayloadManifest {
+        agent_type: agent_type.to_owned(),
+        arch: arch.to_owned(),
+        format: format.to_owned(),
+        hosts,
+        port,
+        secure,
+        callback_url,
+        sleep_ms,
+        jitter,
+        init_secret_hash,
+        kill_date,
+        working_hours_mask,
+        listener_name: listener.name().to_owned(),
+        export_name: export_name.map(str::to_owned),
+        built_at,
+    }
+}
+
+/// Append a build manifest to payload bytes.
+fn append_manifest(
+    bytes: &mut Vec<u8>,
+    manifest: &PayloadManifest,
+) -> Result<(), PayloadBuildError> {
+    let trailer = encode_manifest(manifest).map_err(|e| PayloadBuildError::Io(
+        std::io::Error::new(std::io::ErrorKind::Other, format!("manifest encode: {e}")),
+    ))?;
+    bytes.extend_from_slice(&trailer);
+    Ok(())
 }
 
 pub(crate) fn workspace_root() -> Result<PathBuf, PayloadBuildError> {

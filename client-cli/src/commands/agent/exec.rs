@@ -10,15 +10,14 @@ use red_cell_common::demon::{
     COMMAND_PROC_CREATE_ID, COMMAND_SCREENSHOT_ID, format_proc_create_args,
 };
 
-use crate::AgentId;
-use crate::backoff::Backoff;
-use crate::client::ApiClient;
-use crate::error::CliError;
-
-use super::RATE_LIMIT_DEFAULT_WAIT_SECS;
 use super::output_cmd::fetch_output;
 use super::types::{ExecResult, JobSubmitted};
 use super::wire::TaskQueuedResponse;
+use crate::AgentId;
+use crate::backoff::Backoff;
+use crate::client::ApiClient;
+use crate::defaults::RATE_LIMIT_DEFAULT_WAIT_SECS;
+use crate::error::CliError;
 
 /// Map a user-supplied command name to a Demon `CommandID` decimal string.
 ///

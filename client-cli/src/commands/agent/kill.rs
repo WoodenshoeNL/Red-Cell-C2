@@ -5,15 +5,13 @@ use std::time::{Duration, Instant};
 use tokio::time::sleep;
 use tracing::instrument;
 
+use super::types::KillResult;
+use super::wire::RawAgent;
 use crate::AgentId;
 use crate::backoff::Backoff;
 use crate::client::ApiClient;
-use crate::defaults::AGENT_EXEC_WAIT_TIMEOUT_SECS;
+use crate::defaults::{AGENT_EXEC_WAIT_TIMEOUT_SECS, RATE_LIMIT_DEFAULT_WAIT_SECS};
 use crate::error::CliError;
-
-use super::RATE_LIMIT_DEFAULT_WAIT_SECS;
-use super::types::KillResult;
-use super::wire::RawAgent;
 
 /// Controls how `agent kill` interacts with the teamserver.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

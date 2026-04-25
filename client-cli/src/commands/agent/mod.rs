@@ -33,10 +33,6 @@ pub(crate) mod wire;
 #[cfg(test)]
 mod tests;
 
-/// Default sleep duration (seconds) when the server returns HTTP 429 without
-/// a `Retry-After` header.
-pub(crate) const RATE_LIMIT_DEFAULT_WAIT_SECS: u64 = 10;
-
 use crate::AgentCommands;
 use crate::client::ApiClient;
 use crate::defaults::AGENT_EXEC_WAIT_TIMEOUT_SECS;

@@ -5,15 +5,14 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tracing::instrument;
 
+use super::types::OutputEntry;
 use crate::AgentId;
 use crate::backoff::Backoff;
 use crate::client::ApiClient;
+use crate::commands::types::{OutputPage, output_url};
+use crate::defaults::RATE_LIMIT_DEFAULT_WAIT_SECS;
 use crate::error::{CliError, EXIT_GENERAL, EXIT_SUCCESS};
 use crate::output::{OutputFormat, print_cursor_reset_warning, print_error, print_stream_entry};
-
-use super::RATE_LIMIT_DEFAULT_WAIT_SECS;
-use super::types::OutputEntry;
-use crate::commands::types::{OutputPage, output_url};
 
 /// If the polling cursor is `Some(n)` with `n > 0` and the server returns no
 /// rows, the cursor may be **stale** (output log pruned or reset).  Callers

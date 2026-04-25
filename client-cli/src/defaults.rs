@@ -19,6 +19,10 @@ pub const AUDIT_TAIL_FOLLOW_MAX_FAILURES_DEFAULT: u32 = 5;
 /// list commands (`agent list`, `loot list`, `log list`).
 pub const WATCH_MAX_FAILURES_DEFAULT: u32 = 5;
 
+/// Default sleep duration (seconds) when the server returns HTTP 429 without
+/// a `Retry-After` header.
+pub const RATE_LIMIT_DEFAULT_WAIT_SECS: u64 = 10;
+
 /// Default initial polling interval for `agent list --watch`, in seconds.
 pub const AGENT_LIST_WATCH_POLL_INTERVAL_SECS: u64 = 2;
 
@@ -127,5 +131,10 @@ mod tests {
     #[test]
     fn audit_list_follow_help_mentions_default_poll_interval() {
         assert!(audit_list_follow_help().contains("default: 1"));
+    }
+
+    #[test]
+    fn rate_limit_default_wait_is_stable() {
+        assert_eq!(RATE_LIMIT_DEFAULT_WAIT_SECS, 10);
     }
 }

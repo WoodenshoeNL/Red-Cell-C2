@@ -22,7 +22,10 @@ use crate::AgentId;
 use crate::AuditCommands;
 use crate::backoff::Backoff;
 use crate::client::ApiClient;
-use crate::defaults::{AUDIT_LIST_FOLLOW_POLL_INTERVAL_SECS, AUDIT_TAIL_FOLLOW_POLL_INTERVAL_SECS};
+use crate::defaults::{
+    AUDIT_LIST_FOLLOW_POLL_INTERVAL_SECS, AUDIT_TAIL_FOLLOW_POLL_INTERVAL_SECS,
+    RATE_LIMIT_DEFAULT_WAIT_SECS,
+};
 use crate::error::{CliError, EXIT_GENERAL, EXIT_SUCCESS};
 use crate::output::{OutputFormat, TextRender, TextRow, print_error, print_success};
 use crate::util::percent_encode;
@@ -30,9 +33,6 @@ use follow::{FollowCursor, follow_consecutive_timeouts_exhausted, print_entry_li
 
 /// Number of entries fetched by `log tail` (without --follow).
 const TAIL_LIMIT: u32 = 20;
-/// Default sleep duration (seconds) when the server returns HTTP 429 without
-/// a `Retry-After` header.
-const RATE_LIMIT_DEFAULT_WAIT_SECS: u64 = 10;
 
 // ── raw API response shapes ───────────────────────────────────────────────────
 

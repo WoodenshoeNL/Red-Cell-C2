@@ -7,16 +7,14 @@ use serde::Serialize;
 use tokio::time::sleep;
 use tracing::{instrument, warn};
 
+use super::types::AgentSummary;
+use super::wire::RawAgent;
 use crate::AgentId;
 use crate::backoff::Backoff;
 use crate::client::ApiClient;
-use crate::defaults::AGENT_LIST_WATCH_POLL_INTERVAL_SECS;
+use crate::defaults::{AGENT_LIST_WATCH_POLL_INTERVAL_SECS, RATE_LIMIT_DEFAULT_WAIT_SECS};
 use crate::error::{CliError, EXIT_SUCCESS};
 use crate::output::{OutputFormat, print_error, print_stream_entry, print_success};
-
-use super::RATE_LIMIT_DEFAULT_WAIT_SECS;
-use super::types::AgentSummary;
-use super::wire::RawAgent;
 
 /// Map a [`RawAgent`] to a table row for `agent list`.
 pub(crate) fn agent_summary_from_raw(r: RawAgent) -> AgentSummary {

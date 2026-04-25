@@ -19,12 +19,9 @@ use tracing::instrument;
 use crate::PayloadCommands;
 use crate::backoff::Backoff;
 use crate::client::ApiClient;
-use crate::defaults::PAYLOAD_BUILD_WAIT_TIMEOUT_SECS;
+use crate::defaults::{PAYLOAD_BUILD_WAIT_TIMEOUT_SECS, RATE_LIMIT_DEFAULT_WAIT_SECS};
 use crate::error::{CliError, EXIT_SUCCESS};
 use crate::output::{OutputFormat, TextRender, TextRow, print_error, print_success};
-/// Default sleep duration (seconds) when the server returns HTTP 429 without
-/// a `Retry-After` header.
-const RATE_LIMIT_DEFAULT_WAIT_SECS: u64 = 10;
 
 // ── raw API response shapes ───────────────────────────────────────────────────
 

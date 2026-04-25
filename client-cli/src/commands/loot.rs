@@ -21,7 +21,7 @@ use crate::ExportFormat;
 use crate::LootCommands;
 use crate::backoff::Backoff;
 use crate::client::ApiClient;
-use crate::defaults::LOOT_LIST_WATCH_POLL_INTERVAL_SECS;
+use crate::defaults::{LOOT_LIST_WATCH_POLL_INTERVAL_SECS, RATE_LIMIT_DEFAULT_WAIT_SECS};
 use crate::error::{CliError, EXIT_SUCCESS};
 use crate::output::{
     OutputFormat, TextRender, TextRow, print_error, print_stream_entry, print_success,
@@ -384,10 +384,6 @@ fn write_jsonl(entries: &[LootEntry], mut writer: impl std::io::Write) -> Result
 }
 
 // ── watch helpers ────────────────────────────────────────────────────────────
-
-/// Default sleep duration (seconds) when the server returns HTTP 429 without
-/// a `Retry-After` header.
-const RATE_LIMIT_DEFAULT_WAIT_SECS: u64 = 10;
 
 fn watch_timeout_exhausted(max_failures: u32, last_detail: &str) -> CliError {
     CliError::Timeout(format!(

@@ -22,7 +22,7 @@ use crate::AgentId;
 use crate::AuditCommands;
 use crate::backoff::Backoff;
 use crate::client::ApiClient;
-use crate::defaults::AUDIT_TAIL_FOLLOW_POLL_INTERVAL_SECS;
+use crate::defaults::{AUDIT_LIST_FOLLOW_POLL_INTERVAL_SECS, AUDIT_TAIL_FOLLOW_POLL_INTERVAL_SECS};
 use crate::error::{CliError, EXIT_GENERAL, EXIT_SUCCESS};
 use crate::output::{OutputFormat, TextRender, TextRow, print_error, print_success};
 use crate::util::percent_encode;
@@ -147,28 +147,42 @@ impl TextRow for ServerLogEntry {
 /// Dispatch an [`AuditCommands`] variant and return a process exit code.
 pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AuditCommands) -> i32 {
     match action {
-        AuditCommands::List { operator, action, agent, since, until, limit } => {
-            match list(
-                client,
-                limit,
-                since.as_deref(),
-                until.as_deref(),
-                operator.as_deref(),
-                agent,
-                action.as_deref(),
-            )
-            .await
-            {
-                Ok(data) => match print_success(fmt, &data) {
-                    Ok(()) => EXIT_SUCCESS,
+        AuditCommands::List { operator, action, agent, since, until, limit, follow, max_failures } => {
+            if follow {
+                list_follow(
+                    client,
+                    fmt,
+                    limit,
+                    since.as_deref(),
+                    operator.as_deref(),
+                    agent,
+                    action.as_deref(),
+                    max_failures,
+                )
+                .await
+            } else {
+                match list(
+                    client,
+                    limit,
+                    since.as_deref(),
+                    until.as_deref(),
+                    operator.as_deref(),
+                    agent,
+                    action.as_deref(),
+                )
+                .await
+                {
+                    Ok(data) => match print_success(fmt, &data) {
+                        Ok(()) => EXIT_SUCCESS,
+                        Err(e) => {
+                            print_error(&e).ok();
+                            e.exit_code()
+                        }
+                    },
                     Err(e) => {
                         print_error(&e).ok();
                         e.exit_code()
                     }
-                },
-                Err(e) => {
-                    print_error(&e).ok();
-                    e.exit_code()
                 }
             }
         }
@@ -391,6 +405,127 @@ async fn tail_follow(client: &ApiClient, fmt: &OutputFormat, max_failures: u32) 
                     max_failures,
                     error = %msg,
                     "audit log tail --follow: HTTP request timed out; retrying after backoff"
+                );
+                if consecutive_timeouts >= max_failures {
+                    let err = follow_consecutive_timeouts_exhausted(max_failures, &msg);
+                    print_error(&err).ok();
+                    return err.exit_code();
+                }
+                backoff.record_empty();
+                backoff.delay()
+            }
+            Err(e) => {
+                print_error(&e).ok();
+                return e.exit_code();
+            }
+            Ok(entries) => {
+                consecutive_timeouts = 0;
+                let fresh = cursor.drain_new_entries(&entries);
+                if fresh.is_empty() {
+                    backoff.record_empty();
+                } else {
+                    backoff.record_non_empty();
+                    for entry in fresh {
+                        if let Err(e) = print_entry_line(fmt, entry) {
+                            print_error(&e).ok();
+                            return e.exit_code();
+                        }
+                    }
+                }
+                backoff.delay()
+            }
+        };
+
+        tokio::select! {
+            _ = sleep(sleep_duration) => {}
+            _ = tokio::signal::ctrl_c() => return EXIT_SUCCESS,
+        }
+    }
+}
+
+/// `log list --follow` — print initial filtered entries then stream new ones.
+///
+/// Like `tail_follow` but applies the caller's filters (operator, action,
+/// agent) on each poll and uses the initial `--since` / `--limit` for the
+/// first fetch.
+#[instrument(
+    skip(client, fmt, since, operator, agent_id, action),
+    fields(max_failures = max_failures)
+)]
+async fn list_follow(
+    client: &ApiClient,
+    fmt: &OutputFormat,
+    limit: u32,
+    since: Option<&str>,
+    operator: Option<&str>,
+    agent_id: Option<AgentId>,
+    action: Option<&str>,
+    max_failures: u32,
+) -> i32 {
+    let mut backoff = Backoff::with_initial_delay(AUDIT_LIST_FOLLOW_POLL_INTERVAL_SECS);
+    let mut consecutive_timeouts = 0u32;
+
+    let initial = loop {
+        let result = tokio::select! {
+            r = list(client, limit, since, None, operator, agent_id, action) => r,
+            _ = tokio::signal::ctrl_c() => return EXIT_SUCCESS,
+        };
+        match result {
+            Ok(entries) => break entries,
+            Err(CliError::Timeout(msg)) => {
+                consecutive_timeouts = consecutive_timeouts.saturating_add(1);
+                warn!(
+                    attempt = consecutive_timeouts,
+                    max_failures,
+                    error = %msg,
+                    "log list --follow: timed out fetching initial snapshot; retrying"
+                );
+                if consecutive_timeouts >= max_failures {
+                    let err = follow_consecutive_timeouts_exhausted(max_failures, &msg);
+                    print_error(&err).ok();
+                    return err.exit_code();
+                }
+                backoff.record_empty();
+                tokio::select! {
+                    _ = sleep(backoff.delay()) => {}
+                    _ = tokio::signal::ctrl_c() => return EXIT_SUCCESS,
+                }
+            }
+            Err(e) => {
+                print_error(&e).ok();
+                return e.exit_code();
+            }
+        }
+    };
+
+    consecutive_timeouts = 0;
+
+    for entry in &initial {
+        if let Err(e) = print_entry_line(fmt, entry) {
+            print_error(&e).ok();
+            return e.exit_code();
+        }
+    }
+    let mut cursor = FollowCursor::from_printed_entries(&initial);
+
+    loop {
+        let poll_result = tokio::select! {
+            r = list(client, 100, cursor.since(), None, operator, agent_id, action) => r,
+            _ = tokio::signal::ctrl_c() => return EXIT_SUCCESS,
+        };
+
+        let sleep_duration = match poll_result {
+            Err(CliError::RateLimited { retry_after_secs }) => {
+                consecutive_timeouts = 0;
+                Duration::from_secs(retry_after_secs.unwrap_or(RATE_LIMIT_DEFAULT_WAIT_SECS))
+            }
+            Err(CliError::Timeout(msg)) => {
+                consecutive_timeouts = consecutive_timeouts.saturating_add(1);
+                warn!(
+                    attempt = consecutive_timeouts,
+                    max_failures,
+                    error = %msg,
+                    "log list --follow: timed out; retrying"
                 );
                 if consecutive_timeouts >= max_failures {
                     let err = follow_consecutive_timeouts_exhausted(max_failures, &msg);

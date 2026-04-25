@@ -46,7 +46,7 @@ use crate::output::{OutputFormat, print_cursor_reset_warning, print_error, print
 use self::exec::{exec_submit, exec_wait};
 use self::groups::{get_groups, set_groups};
 use self::kill::{KillMode, kill};
-use self::list::list;
+use self::list::{list, watch_agents};
 use self::output_cmd::{fetch_output, take_cursor_reset_warning, watch_output};
 use self::show::show;
 use self::transfer::{download, upload};
@@ -57,19 +57,25 @@ use self::transfer::{download, upload};
 /// caller in `main.rs` only needs to propagate the exit code.
 pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) -> i32 {
     match action {
-        AgentCommands::List => match list(client).await {
-            Ok(data) => match print_success(fmt, &data) {
-                Ok(()) => EXIT_SUCCESS,
-                Err(e) => {
-                    print_error(&e).ok();
-                    e.exit_code()
+        AgentCommands::List { watch, max_failures } => {
+            if watch {
+                watch_agents(client, fmt, max_failures).await
+            } else {
+                match list(client).await {
+                    Ok(data) => match print_success(fmt, &data) {
+                        Ok(()) => EXIT_SUCCESS,
+                        Err(e) => {
+                            print_error(&e).ok();
+                            e.exit_code()
+                        }
+                    },
+                    Err(e) => {
+                        print_error(&e).ok();
+                        e.exit_code()
+                    }
                 }
-            },
-            Err(e) => {
-                print_error(&e).ok();
-                e.exit_code()
             }
-        },
+        }
 
         AgentCommands::Show { id } => match show(client, id).await {
             Ok(data) => match print_success(fmt, &data) {

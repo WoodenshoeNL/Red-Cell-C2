@@ -243,10 +243,28 @@ pub enum Commands {
 pub enum AgentCommands {
     /// List all registered agents.
     ///
+    /// With --watch, prints the initial list then streams JSON-Lines events
+    /// (checkin, disconnect, status_change) as the agent roster changes,
+    /// until Ctrl-C.
+    ///
     /// Examples:
     ///   red-cell-cli agent list
+    ///   red-cell-cli agent list --watch
+    ///   red-cell-cli agent list --watch --max-failures 10
     #[command(verbatim_doc_comment)]
-    List,
+    List {
+        /// Stream agent roster changes as JSON-Lines events until Ctrl-C.
+        #[arg(long, help = crate::defaults::agent_list_watch_help())]
+        watch: bool,
+        /// Exit with timeout (code 5) after this many consecutive HTTP request
+        /// timeouts while polling (only applies with `--watch`).
+        #[arg(
+            long,
+            default_value_t = crate::defaults::WATCH_MAX_FAILURES_DEFAULT,
+            value_parser = clap::value_parser!(u32).range(1..=1024)
+        )]
+        max_failures: u32,
+    },
 
     /// Show full details of a single agent.
     ///
@@ -807,11 +825,16 @@ pub enum OperatorCommands {
 pub enum LootCommands {
     /// List captured loot entries.
     ///
+    /// With --watch, prints the initial list then streams new loot entries
+    /// as JSON-Lines until Ctrl-C.
+    ///
     /// Examples:
     ///   red-cell-cli loot list
     ///   red-cell-cli loot list --kind screenshot
     ///   red-cell-cli loot list --agent DEADBEEF --limit 20
     ///   red-cell-cli loot list --since 2026-01-01T00:00:00Z
+    ///   red-cell-cli loot list --watch
+    ///   red-cell-cli loot list --watch --kind credential
     #[command(verbatim_doc_comment)]
     List {
         /// Filter by loot type (e.g. screenshot, credential, file)
@@ -826,9 +849,20 @@ pub enum LootCommands {
         /// Only return entries captured at or after this ISO 8601 UTC timestamp
         #[arg(long)]
         since: Option<String>,
-        /// Maximum entries to return
+        /// Maximum entries to return (initial fetch only when combined with --watch)
         #[arg(long)]
         limit: Option<u32>,
+        /// Stream new loot entries as JSON-Lines until Ctrl-C.
+        #[arg(long, help = crate::defaults::loot_list_watch_help())]
+        watch: bool,
+        /// Exit with timeout (code 5) after this many consecutive HTTP request
+        /// timeouts while polling (only applies with `--watch`).
+        #[arg(
+            long,
+            default_value_t = crate::defaults::WATCH_MAX_FAILURES_DEFAULT,
+            value_parser = clap::value_parser!(u32).range(1..=1024)
+        )]
+        max_failures: u32,
     },
 
     /// Download the raw bytes for a loot item to a local file.
@@ -853,12 +887,17 @@ pub enum LootCommands {
 pub enum AuditCommands {
     /// List audit log entries (newest first).
     ///
+    /// With --follow, prints the initial list then streams new entries
+    /// matching the given filters as JSON-Lines until Ctrl-C.
+    ///
     /// Examples:
     ///   red-cell-cli log list
     ///   red-cell-cli log list --operator alice --limit 50
     ///   red-cell-cli log list --action exec
     ///   red-cell-cli log list --since 2026-03-21T00:00:00Z --agent abc123
     ///   red-cell-cli log list --since 2026-03-21T00:00:00Z --until 2026-03-22T00:00:00Z
+    ///   red-cell-cli log list --follow --action exec
+    ///   red-cell-cli log list --follow --operator alice
     #[command(verbatim_doc_comment)]
     List {
         /// Filter by operator username
@@ -876,9 +915,20 @@ pub enum AuditCommands {
         /// Only return entries at or before this ISO 8601 UTC timestamp
         #[arg(long)]
         until: Option<String>,
-        /// Maximum entries to return
+        /// Maximum entries to return (initial fetch only when combined with --follow)
         #[arg(long, default_value = "100")]
         limit: u32,
+        /// Stream new entries as JSON-Lines until Ctrl-C (filters still apply).
+        #[arg(long, help = crate::defaults::audit_list_follow_help())]
+        follow: bool,
+        /// Exit with timeout (code 5) after this many consecutive HTTP request
+        /// timeouts while polling (only applies with `--follow`).
+        #[arg(
+            long,
+            default_value_t = crate::defaults::WATCH_MAX_FAILURES_DEFAULT,
+            value_parser = clap::value_parser!(u32).range(1..=1024)
+        )]
+        max_failures: u32,
     },
 
     /// Delete audit log entries older than the configured retention period.

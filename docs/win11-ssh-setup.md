@@ -5,7 +5,28 @@ test harness can deploy payloads and run commands over SSH.
 
 ---
 
-## 1. Install OpenSSH Server
+## Automated setup (recommended)
+
+Run the idempotent setup script from an **elevated PowerShell** on the Windows VM:
+
+```powershell
+.\scripts\setup-win11-test-vm.ps1 "ssh-ed25519 AAAA... red-cell-test"
+# or pass a path to a .pub file:
+.\scripts\setup-win11-test-vm.ps1 C:\Users\admin\Desktop\red_cell_test.pub
+```
+
+The script handles all steps below (OpenSSH install, firewall, test user, key
+deployment, Defender exclusion, Windows Update pause) and is safe to re-run.
+It prints the SSH verification command and `targets.toml` snippet at the end.
+
+If you need to understand what the script does, or if it fails on a specific
+step, the manual instructions below are the fallback reference.
+
+---
+
+## Manual setup (fallback)
+
+### 1. Install OpenSSH Server
 
 Open **PowerShell as Administrator** and run:
 
@@ -19,7 +40,7 @@ Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
 
 ---
 
-## 2. Start and enable the SSH service
+### 2. Start and enable the SSH service
 
 ```powershell
 # Start the service
@@ -31,7 +52,7 @@ Set-Service -Name sshd -StartupType Automatic
 
 ---
 
-## 3. Allow SSH through Windows Firewall
+### 3. Allow SSH through Windows Firewall
 
 This is usually created automatically, but verify it exists:
 
@@ -48,7 +69,7 @@ New-NetFirewallRule -Name sshd -DisplayName 'OpenSSH Server (sshd)' `
 
 ---
 
-## 4. Create a dedicated test user
+### 4. Create a dedicated test user
 
 ```powershell
 # Create the user
@@ -62,7 +83,7 @@ Add-LocalGroupMember -Group "Administrators" -Member "rctest"
 
 ---
 
-## 5. Set up SSH key authentication (recommended)
+### 5. Set up SSH key authentication (recommended)
 
 On your **development machine**, generate a key pair if you don't have one:
 
@@ -86,7 +107,7 @@ icacls $path /inheritance:r /grant "SYSTEM:(F)" /grant "Administrators:(F)"
 
 ---
 
-## 6. Configure the SSH server (optional hardening)
+### 6. Configure the SSH server (optional hardening)
 
 Edit `C:\ProgramData\ssh\sshd_config`:
 
@@ -104,7 +125,7 @@ Restart-Service sshd
 
 ---
 
-## 7. Verify from your dev machine
+### 7. Verify from your dev machine
 
 ```bash
 ssh -i ~/.ssh/red_cell_test -p 22 rctest@<windows-ip> "whoami"
@@ -113,7 +134,7 @@ ssh -i ~/.ssh/red_cell_test -p 22 rctest@<windows-ip> "whoami"
 
 ---
 
-## 8. Update targets.toml
+### 8. Update targets.toml
 
 ```toml
 [windows]
@@ -126,7 +147,7 @@ work_dir = "C:\\Temp\\rc-test"
 
 ---
 
-## Troubleshooting
+### Troubleshooting
 
 | Problem | Fix |
 |---------|-----|
@@ -137,7 +158,7 @@ work_dir = "C:\\Temp\\rc-test"
 
 ---
 
-## Windows Defender exclusion for test directory
+### Windows Defender exclusion for test directory
 
 To prevent Defender from quarantining test payloads:
 

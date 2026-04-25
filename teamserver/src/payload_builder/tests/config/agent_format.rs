@@ -23,7 +23,8 @@ fn pack_config_heap_enc_false_is_packed_as_zero() -> Result<(), Box<dyn std::err
         working_hours: None,
     });
 
-    let bytes = pack_config(&listener, &config, "demon")?;
+    // HeapEnc is Archon-only — use "archon" to verify the explicit-false case.
+    let bytes = pack_config(&listener, &config, "archon")?;
     let mut cursor = bytes.as_slice();
     assert_eq!(read_u32(&mut cursor)?, 5);
     assert_eq!(read_u32(&mut cursor)?, 0);
@@ -38,7 +39,8 @@ fn pack_config_heap_enc_false_is_packed_as_zero() -> Result<(), Box<dyn std::err
     assert_eq!(read_u32(&mut cursor)?, 0);
     assert_eq!(read_u32(&mut cursor)?, 0);
     assert_eq!(read_u32(&mut cursor)?, 0); // HeapEnc (explicit false)
-    // JobExecution and StompDll are Archon-only — absent for demon builds
+    read_u32(&mut cursor)?; // JobExecution (Archon-only)
+    read_wstring(&mut cursor)?; // StompDll (Archon-only)
     assert_eq!(read_wstring(&mut cursor)?, r"\\.\pipe\pivot");
     assert_eq!(read_u64(&mut cursor)?, 0);
     assert_eq!(read_u32(&mut cursor)?, 0);
@@ -131,13 +133,15 @@ fn pack_config_stomp_dll_is_packed_as_wstring() -> Result<(), Box<dyn std::error
 
 #[test]
 fn pack_config_demon_excludes_archon_only_fields() -> Result<(), Box<dyn std::error::Error>> {
-    // Demon blobs must NOT include JobExecution or StompDll, even when those
-    // keys are present in the config map.  After HeapEnc, the next bytes must
-    // be the SMB pipe wstring, not a u32 JobExecution value.
+    // Demon blobs must NOT include HeapEnc, JobExecution, or StompDll, even
+    // when those keys are present in the config map.  After AmsiEtwPatch, the
+    // next bytes must be the SMB pipe wstring — the frozen Demon agent does
+    // not read any Archon-only fields.
     let config = serde_json::from_value::<Map<String, Value>>(json!({
         "Sleep": "5",
         "Jitter": "0",
         "Sleep Technique": "WaitForSingleObjectEx",
+        "HeapEnc": true,
         "JobExecution": "threadpool",
         "StompDll": "WINMM.DLL",
         "Injection": {
@@ -167,8 +171,7 @@ fn pack_config_demon_excludes_archon_only_fields() -> Result<(), Box<dyn std::er
     read_u32(&mut cursor)?; // ProxyLoading
     read_u32(&mut cursor)?; // SysIndirect
     read_u32(&mut cursor)?; // AmsiEtwPatch
-    read_u32(&mut cursor)?; // HeapEnc
-    // Next field must be the pipe path — JobExecution/StompDll must not be present
+    // Next field must be the pipe path — HeapEnc/JobExecution/StompDll must not be present
     assert_eq!(read_wstring(&mut cursor)?, r"\\.\pipe\pivot");
     read_u64(&mut cursor)?; // KillDate
     read_u32(&mut cursor)?; // WorkingHours

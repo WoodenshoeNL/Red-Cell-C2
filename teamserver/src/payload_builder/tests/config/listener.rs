@@ -68,8 +68,7 @@ fn pack_config_matches_expected_http_layout() -> Result<(), Box<dyn std::error::
     assert_eq!(read_u32(&mut cursor)?, 2);
     assert_eq!(read_u32(&mut cursor)?, 1);
     assert_eq!(read_u32(&mut cursor)?, 1);
-    assert_eq!(read_u32(&mut cursor)?, 1); // HeapEnc (default true)
-    // JobExecution and StompDll are Archon-only — absent for demon builds
+    // HeapEnc, JobExecution, StompDll are Archon-only — absent for demon builds
     assert_eq!(read_u64(&mut cursor)?, 1234);
     assert_eq!(read_u32(&mut cursor)?, 5_243_968);
     assert_eq!(read_wstring(&mut cursor)?, "POST");
@@ -129,8 +128,7 @@ fn pack_config_ends_after_listener_specific_fields() -> Result<(), Box<dyn std::
     assert_eq!(read_u32(&mut cursor)?, 0);
     assert_eq!(read_u32(&mut cursor)?, 0);
     assert_eq!(read_u32(&mut cursor)?, 0);
-    assert_eq!(read_u32(&mut cursor)?, 1); // HeapEnc (default true)
-    // JobExecution and StompDll are Archon-only — absent for demon builds
+    // HeapEnc, JobExecution, StompDll are Archon-only — absent for demon builds
     assert_eq!(read_wstring(&mut cursor)?, r"\\.\pipe\pivot");
     assert_eq!(read_u64(&mut cursor)?, 0);
     assert_eq!(read_u32(&mut cursor)?, 0);
@@ -193,8 +191,7 @@ fn pack_config_http_without_proxy_ends_after_disabled_proxy_flag()
     assert_eq!(read_u32(&mut cursor)?, 0);
     assert_eq!(read_u32(&mut cursor)?, 0);
     assert_eq!(read_u32(&mut cursor)?, 0);
-    assert_eq!(read_u32(&mut cursor)?, 1); // HeapEnc (default true)
-    // JobExecution and StompDll are Archon-only — absent for demon builds
+    // HeapEnc, JobExecution, StompDll are Archon-only — absent for demon builds
     assert_eq!(read_u64(&mut cursor)?, 0);
     assert_eq!(read_u32(&mut cursor)?, 0);
     assert_eq!(read_wstring(&mut cursor)?, "POST");
@@ -410,7 +407,7 @@ fn pack_http_listener_packs_doh_domain_and_provider_cloudflare()
     let mut cursor = bytes.as_slice();
     // Skip to the DoH fields: consume all preceding fields.
     // Sleep, Jitter, Alloc, Execute, Spawn64, Spawn32, SleepTech, SleepJmp,
-    // StackSpoof, ProxyLoading, SysIndirect, AmsiEtwPatch, HeapEnc
+    // StackSpoof, ProxyLoading, SysIndirect, AmsiEtwPatch
     read_u32(&mut cursor)?; // Sleep
     read_u32(&mut cursor)?; // Jitter
     read_u32(&mut cursor)?; // Alloc
@@ -423,8 +420,7 @@ fn pack_http_listener_packs_doh_domain_and_provider_cloudflare()
     read_u32(&mut cursor)?; // ProxyLoading
     read_u32(&mut cursor)?; // SysIndirect
     read_u32(&mut cursor)?; // AmsiEtwPatch
-    read_u32(&mut cursor)?; // HeapEnc
-    // JobExecution and StompDll are Archon-only — absent for demon builds
+    // HeapEnc, JobExecution, StompDll are Archon-only — absent for demon builds
     // HTTP-transport fields
     read_u64(&mut cursor)?; // KillDate
     read_u32(&mut cursor)?; // WorkingHours

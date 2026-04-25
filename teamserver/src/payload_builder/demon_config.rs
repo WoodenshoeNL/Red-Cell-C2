@@ -158,11 +158,12 @@ pub(crate) fn pack_config(
     );
     add_u32(&mut out, amsi_patch_value(optional_string(config, "Amsi/Etw Patch")));
 
-    // ARC-04: heap encryption during sleep — default ON.
-    add_u32(&mut out, if optional_bool(config, "HeapEnc").unwrap_or(true) { 1 } else { 0 });
-
-    // ARC-09 / ARC-05: Archon-only fields — never written for standard Demon blobs.
+    // ARC-04 / ARC-09 / ARC-05: Archon-only fields — never written for standard Demon blobs.
+    // The frozen Demon agent does not read these; inserting them shifts every subsequent
+    // field by 4+ bytes and corrupts the transport config (hosts, port, etc.).
     if agent_name == "archon" {
+        // ARC-04: heap encryption during sleep — default ON.
+        add_u32(&mut out, if optional_bool(config, "HeapEnc").unwrap_or(true) { 1 } else { 0 });
         // ARC-09: job execution mode — 0 = dedicated thread (default), 1 = NT thread pool.
         add_u32(
             &mut out,

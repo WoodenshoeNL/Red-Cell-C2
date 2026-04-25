@@ -45,6 +45,14 @@ pub(super) struct RawLogoutResponse {
     pub revoked_sessions: usize,
 }
 
+/// Wire body for `GET /operators/whoami`.
+#[derive(Debug, Deserialize)]
+pub(super) struct RawWhoamiResponse {
+    pub name: String,
+    pub role: String,
+    pub auth_method: String,
+}
+
 // ── public output types ───────────────────────────────────────────────────────
 
 /// Summary row returned by `operator list`.
@@ -154,6 +162,23 @@ impl TextRender for LogoutResult {
             "Revoked {} active session(s) for operator '{}'.",
             self.revoked_sessions, self.username
         )
+    }
+}
+
+/// Result returned by `operator whoami`.
+#[derive(Debug, Clone, Serialize)]
+pub struct WhoamiResult {
+    /// Operator name (API key identifier).
+    pub name: String,
+    /// RBAC role assigned to this API key.
+    pub role: String,
+    /// Authentication method used for this request.
+    pub auth_method: String,
+}
+
+impl TextRender for WhoamiResult {
+    fn render_text(&self) -> String {
+        format!("{} (role: {}, auth: {})", self.name, self.role, self.auth_method)
     }
 }
 

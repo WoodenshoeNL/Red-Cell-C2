@@ -1016,3 +1016,71 @@ async fn logout_operator_audit_records_failure_for_unknown_user() {
     assert_eq!(record.result_status, crate::AuditResultStatus::Failure);
     assert_eq!(record.target_id.as_deref(), Some("ghost"));
 }
+
+// ── whoami ───────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn whoami_returns_authenticated_key_identity() {
+    let (app, _, _auth) =
+        test_router_with_registry(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin)))
+            .await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/operators/whoami")
+                .header(API_KEY_HEADER, "secret-admin")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["name"], "rest-admin");
+    assert_eq!(body["role"], "Admin");
+    assert_eq!(body["auth_method"], "api_key");
+}
+
+#[tokio::test]
+async fn whoami_works_for_analyst_role() {
+    let (app, _, _auth) = test_router_with_registry(Some((
+        60,
+        "analyst-key",
+        "secret-analyst",
+        OperatorRole::Analyst,
+    )))
+    .await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/operators/whoami")
+                .header(API_KEY_HEADER, "secret-analyst")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["name"], "analyst-key");
+    assert_eq!(body["role"], "Analyst");
+    assert_eq!(body["auth_method"], "api_key");
+}
+
+#[tokio::test]
+async fn whoami_rejects_unauthenticated_request() {
+    let (app, _, _auth) =
+        test_router_with_registry(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin)))
+            .await;
+
+    let response = app
+        .oneshot(Request::builder().uri("/operators/whoami").body(Body::empty()).expect("request"))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}

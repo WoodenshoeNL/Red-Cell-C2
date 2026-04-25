@@ -614,6 +614,13 @@ pub enum PayloadCommands {
 /// Operator subcommands.
 #[derive(Debug, Subcommand)]
 pub enum OperatorCommands {
+    /// Print the currently authenticated operator's name and role.
+    ///
+    /// Examples:
+    ///   red-cell-cli operator whoami
+    #[command(verbatim_doc_comment)]
+    Whoami,
+
     /// List all operators.
     ///
     /// Examples:

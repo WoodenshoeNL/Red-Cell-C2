@@ -317,3 +317,40 @@ fn operator_group_access_info_serialises() {
     assert_eq!(v["username"], "dave");
     assert_eq!(v["allowed_groups"], serde_json::json!(["a"]));
 }
+
+// ── WhoamiResult ─────────────────────────────────────────────────────────
+
+#[test]
+fn whoami_result_serialises_all_fields() {
+    let result = WhoamiResult {
+        name: "test-operator".to_owned(),
+        role: "operator".to_owned(),
+        auth_method: "api_key".to_owned(),
+    };
+    let v = serde_json::to_value(&result).expect("serialise");
+    assert_eq!(v["name"], "test-operator");
+    assert_eq!(v["role"], "operator");
+    assert_eq!(v["auth_method"], "api_key");
+}
+
+#[test]
+fn whoami_result_renders_text() {
+    let result = WhoamiResult {
+        name: "alice".to_owned(),
+        role: "admin".to_owned(),
+        auth_method: "api_key".to_owned(),
+    };
+    let text = result.render_text();
+    assert!(text.contains("alice"));
+    assert!(text.contains("admin"));
+    assert!(text.contains("api_key"));
+}
+
+#[test]
+fn raw_whoami_response_deserialises_server_shape() {
+    let json = r#"{"name":"ops","role":"Analyst","auth_method":"api_key"}"#;
+    let raw: RawWhoamiResponse = serde_json::from_str(json).expect("parse");
+    assert_eq!(raw.name, "ops");
+    assert_eq!(raw.role, "Analyst");
+    assert_eq!(raw.auth_method, "api_key");
+}

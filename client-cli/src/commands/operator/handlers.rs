@@ -8,9 +8,22 @@ use crate::error::CliError;
 use super::types::{
     ActiveOperatorRow, CreateResult, DeleteResult, LogoutResult, OperatorGroupAccessInfo,
     OperatorRow, RawActiveOperatorEntry, RawCreateResponse, RawLogoutResponse,
-    RawOperatorGroupAccessResponse, RawOperatorSummary, SetRoleResult,
+    RawOperatorGroupAccessResponse, RawOperatorSummary, RawWhoamiResponse, SetRoleResult,
+    WhoamiResult,
 };
 use super::validate_role;
+
+/// `operator whoami` — print the authenticated operator's identity.
+///
+/// # Examples
+/// ```text
+/// red-cell-cli operator whoami
+/// ```
+#[instrument(skip(client))]
+pub(super) async fn whoami(client: &ApiClient) -> Result<WhoamiResult, CliError> {
+    let raw: RawWhoamiResponse = client.get("/operators/whoami").await?;
+    Ok(WhoamiResult { name: raw.name, role: raw.role.to_lowercase(), auth_method: raw.auth_method })
+}
 
 /// `operator list` — fetch all registered operators.
 ///

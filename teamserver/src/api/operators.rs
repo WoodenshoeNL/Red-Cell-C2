@@ -97,6 +97,17 @@ pub struct OperatorLogoutResponse {
     pub revoked_sessions: usize,
 }
 
+/// Response body for `GET /operators/whoami`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub(super) struct WhoamiResponse {
+    /// Operator name (the API key identifier).
+    pub(super) name: String,
+    /// RBAC role assigned to this API key.
+    pub(super) role: OperatorRole,
+    /// Authentication method used for this request.
+    pub(super) auth_method: String,
+}
+
 // ── Error type ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Error)]
@@ -401,6 +412,25 @@ pub(super) async fn update_operator_role(
             Err(error.into())
         }
     }
+}
+
+// ── Whoami handler ───────────────────────────────────────────────────────────
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/operators/whoami",
+    responses(
+        (status = 200, description = "Authenticated operator identity", body = WhoamiResponse),
+    ),
+    security(("api_key" = []))
+)]
+/// Return the identity behind the current API key.
+pub(super) async fn whoami(identity: ReadApiAccess) -> Json<WhoamiResponse> {
+    Json(WhoamiResponse {
+        name: identity.key_id.clone(),
+        role: identity.role,
+        auth_method: "api_key".to_owned(),
+    })
 }
 
 // ── Active operators handler ─────────────────────────────────────────────────

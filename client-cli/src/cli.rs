@@ -161,6 +161,21 @@ pub enum Commands {
         action: LootCommands,
     },
 
+    /// Validate a YAOTL profile without starting the teamserver.
+    ///
+    /// Parses and validates the profile at <path>, reporting parse errors and
+    /// semantic validation failures as structured JSON.  No server connection
+    /// is required — this is a purely local operation.
+    ///
+    /// Examples:
+    ///   red-cell-cli profile validate profiles/havoc.yaotl
+    ///   red-cell-cli profile validate /tmp/test.yaotl --output text
+    #[command(verbatim_doc_comment)]
+    Profile {
+        #[command(subcommand)]
+        action: ProfileCommands,
+    },
+
     /// View and stream the audit log.
     ///
     /// Examples:
@@ -250,6 +265,26 @@ pub enum Commands {
     Help {
         /// Subcommand to show help for (omit for top-level help)
         command: Option<String>,
+    },
+}
+
+// ── profile subcommands ──────────────────────────────────────────────────────
+
+/// Profile subcommands.
+#[derive(Debug, Subcommand)]
+pub enum ProfileCommands {
+    /// Validate a YAOTL profile file for parse and semantic errors.
+    ///
+    /// Exits 0 with {"ok":true} when the profile is valid.
+    /// Exits 1 with {"ok":false,"errors":[...]} when validation fails.
+    ///
+    /// Examples:
+    ///   red-cell-cli profile validate profiles/havoc.yaotl
+    ///   red-cell-cli profile validate /tmp/test.yaotl
+    #[command(verbatim_doc_comment)]
+    Validate {
+        /// Path to the .yaotl profile file.
+        path: PathBuf,
     },
 }
 

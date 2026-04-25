@@ -3,7 +3,7 @@
 use std::io::Write as _;
 
 use crate::PayloadCommands;
-use crate::cli::{Cli, Commands};
+use crate::cli::{Cli, Commands, ProfileCommands};
 use crate::client;
 use crate::commands;
 use crate::config;
@@ -84,6 +84,12 @@ pub async fn dispatch(cli: Cli) -> i32 {
         return commands::payload::inspect_local(file, &fmt);
     }
 
+    // `profile validate` reads a local file — no server config needed.
+    if let Some(Commands::Profile { action: ProfileCommands::Validate { ref path } }) = cli.command
+    {
+        return commands::profile::validate_local(path, &fmt);
+    }
+
     // `login` brings its own server/token — bypass normal config resolution.
     if let Some(Commands::Login { ref server, ref token, ref cert_fingerprint }) = cli.command {
         return commands::login::run(server, token, cert_fingerprint.as_deref(), &fmt).await;
@@ -156,8 +162,9 @@ pub async fn dispatch(cli: Cli) -> i32 {
 
         Commands::Operator { action } => commands::operator::run(&api_client, &fmt, action).await,
 
-        // Handled above before config resolution; this arm is for exhaustiveness.
+        // Handled above before config resolution; these arms are for exhaustiveness.
         Commands::Login { .. } => EXIT_SUCCESS,
+        Commands::Profile { .. } => EXIT_SUCCESS,
 
         // Handled synchronously in main() before the runtime is started;
         // these arms exist only for exhaustiveness.
@@ -297,5 +304,58 @@ mod tests {
 
         let code = dispatch(cli).await;
         assert_eq!(code, EXIT_SUCCESS, "payload inspect must succeed without server config");
+    }
+
+    /// `profile validate` must work without server/token config — it operates
+    /// on a local file and should be intercepted before config resolution.
+    #[tokio::test]
+    async fn dispatch_profile_validate_does_not_require_server_config() {
+        use std::io::Write as _;
+
+        use crate::cli::ProfileCommands;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("good.yaotl");
+        let mut f = std::fs::File::create(&path).expect("create");
+        write!(
+            f,
+            r#"
+Teamserver {{
+    Host = "0.0.0.0"
+    Port = 40056
+}}
+
+Operators {{
+    user "admin" {{
+        Password = "secret123"
+    }}
+}}
+
+Listeners {{}}
+
+Demon {{
+    Sleep  = 2
+    Jitter = 10
+}}
+"#
+        )
+        .expect("write");
+        drop(f);
+
+        let cli = Cli {
+            server: None,
+            token: None,
+            output: OutputFormat::Json,
+            timeout: None,
+            ca_cert: None,
+            cert_fingerprint: None,
+            pin_intermediate: false,
+            command: Some(Commands::Profile {
+                action: ProfileCommands::Validate { path: path.clone() },
+            }),
+        };
+
+        let code = dispatch(cli).await;
+        assert_eq!(code, EXIT_SUCCESS, "profile validate must succeed without server config");
     }
 }

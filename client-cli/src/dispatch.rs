@@ -84,6 +84,11 @@ pub async fn dispatch(cli: Cli) -> i32 {
         return commands::payload::inspect_local(file, &fmt);
     }
 
+    // `login` brings its own server/token — bypass normal config resolution.
+    if let Some(Commands::Login { ref server, ref token, ref cert_fingerprint }) = cli.command {
+        return commands::login::run(server, token, cert_fingerprint.as_deref(), &fmt).await;
+    }
+
     // Resolve configuration (CLI flags + env vars were already absorbed by
     // clap; this step adds the file-based fallbacks).
     let resolved = match config::resolve(
@@ -150,6 +155,9 @@ pub async fn dispatch(cli: Cli) -> i32 {
         Commands::Session { agent } => commands::session::run(&resolved, agent).await,
 
         Commands::Operator { action } => commands::operator::run(&api_client, &fmt, action).await,
+
+        // Handled above before config resolution; this arm is for exhaustiveness.
+        Commands::Login { .. } => EXIT_SUCCESS,
 
         // Handled synchronously in main() before the runtime is started;
         // this arm exists only for exhaustiveness.

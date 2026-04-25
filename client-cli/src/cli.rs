@@ -194,6 +194,35 @@ pub enum Commands {
         agent: Option<AgentId>,
     },
 
+    /// Authenticate and persist credentials to the CLI config file.
+    ///
+    /// Validates the provided token against the teamserver health endpoint,
+    /// then writes server URL, token, and (optionally) certificate fingerprint
+    /// to ~/.config/red-cell-cli/config.toml.
+    ///
+    /// The --token value is the API key from the teamserver profile.
+    /// Token expiry / refresh is not implemented in v1.
+    ///
+    /// Examples:
+    ///   red-cell-cli login --server https://ts:40056 --token myapikey
+    ///   red-cell-cli login --server https://ts:40056 --token myapikey --cert-fingerprint ab12...
+    #[command(verbatim_doc_comment)]
+    Login {
+        /// Teamserver base URL (e.g. https://teamserver:40056).
+        /// Required — the global --server flag is ignored for login.
+        #[arg(long, required = true)]
+        server: String,
+
+        /// API token (the api_key value from the teamserver profile)
+        #[arg(long, required = true)]
+        token: String,
+
+        /// SHA-256 certificate fingerprint for TLS pinning (lowercase hex, 64 chars).
+        /// Stored alongside server and token in the config file.
+        #[arg(long)]
+        cert_fingerprint: Option<String>,
+    },
+
     /// Show help for a subcommand (alias: `<command> --help`).
     ///
     /// Examples:

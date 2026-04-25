@@ -6,6 +6,7 @@
 pub mod agent;
 pub mod audit;
 pub mod listener;
+pub mod login;
 pub mod loot;
 pub mod operator;
 pub mod payload;

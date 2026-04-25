@@ -142,12 +142,7 @@ impl CommandDispatcher {
                 let database = error_database.clone();
                 Box::pin(async move {
                     output::handle_command_error_callback(
-                        &registry,
-                        &database,
-                        &events,
-                        agent_id,
-                        request_id,
-                        &payload,
+                        &registry, &database, &events, agent_id, request_id, &payload,
                     )
                     .await
                 })

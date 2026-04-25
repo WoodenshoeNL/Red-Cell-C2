@@ -127,8 +127,7 @@ pub(super) fn build_session_rest_request(
             if command_id == "4112" {
                 let encoded_args = BASE64_STANDARD.encode(command_line);
                 body["SubCommand"] = serde_json::Value::String("create".to_owned());
-                body["Args"] =
-                    serde_json::Value::String(format!("0;TRUE;TRUE;;{encoded_args}"));
+                body["Args"] = serde_json::Value::String(format!("0;TRUE;TRUE;;{encoded_args}"));
             }
             let bytes = serde_json::to_vec(&body)
                 .map_err(|e| SessionBuildError::InvalidBody(e.to_string()))?;

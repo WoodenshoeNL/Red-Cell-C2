@@ -68,9 +68,10 @@ async fn command_error_win32_truncated_second_field_returns_error() {
     let mut payload = Vec::new();
     push_u32(&mut payload, u32::from(DemonCallbackError::Win32));
 
-    let result =
-        handle_command_error_callback(&registry, &database, &events, AGENT_ID, REQUEST_ID, &payload)
-            .await;
+    let result = handle_command_error_callback(
+        &registry, &database, &events, AGENT_ID, REQUEST_ID, &payload,
+    )
+    .await;
     let err = result.expect_err("truncated Win32 payload must fail");
     assert!(
         matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
@@ -84,9 +85,10 @@ async fn command_error_token_truncated_second_field_returns_error() {
     let mut payload = Vec::new();
     push_u32(&mut payload, u32::from(DemonCallbackError::Token));
 
-    let result =
-        handle_command_error_callback(&registry, &database, &events, AGENT_ID, REQUEST_ID, &payload)
-            .await;
+    let result = handle_command_error_callback(
+        &registry, &database, &events, AGENT_ID, REQUEST_ID, &payload,
+    )
+    .await;
     let err = result.expect_err("truncated Token payload must fail");
     assert!(
         matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
@@ -99,9 +101,10 @@ async fn command_error_truncated_before_error_class_returns_error() {
     let (registry, database, events) = setup_error_handler().await;
     let payload = vec![0x01, 0x00];
 
-    let result =
-        handle_command_error_callback(&registry, &database, &events, AGENT_ID, REQUEST_ID, &payload)
-            .await;
+    let result = handle_command_error_callback(
+        &registry, &database, &events, AGENT_ID, REQUEST_ID, &payload,
+    )
+    .await;
     let err = result.expect_err("payload too short for error class must fail");
     assert!(
         matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
@@ -118,16 +121,14 @@ async fn command_error_generic_persists_to_agent_responses() {
     payload.extend_from_slice(&(error_text.len() as u32).to_le_bytes());
     payload.extend_from_slice(error_text);
 
-    let result =
-        handle_command_error_callback(&registry, &database, &events, AGENT_ID, REQUEST_ID, &payload)
-            .await;
+    let result = handle_command_error_callback(
+        &registry, &database, &events, AGENT_ID, REQUEST_ID, &payload,
+    )
+    .await;
     assert!(result.is_ok(), "generic error should succeed: {result:?}");
 
-    let records = database
-        .agent_responses()
-        .list_for_agent(AGENT_ID)
-        .await
-        .expect("list agent responses");
+    let records =
+        database.agent_responses().list_for_agent(AGENT_ID).await.expect("list agent responses");
     assert_eq!(records.len(), 1, "expected one persisted response");
     assert_eq!(records[0].response_type, "Error");
     assert!(records[0].output.contains("not supported on Linux"));

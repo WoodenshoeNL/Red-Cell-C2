@@ -49,6 +49,15 @@ mod tests {
     }
 
     #[test]
+    fn top_level_help_contains_rc_cert_fingerprint() {
+        let help = Cli::command().render_long_help().to_string();
+        assert!(
+            help.contains("RC_CERT_FINGERPRINT"),
+            "top-level help must mention RC_CERT_FINGERPRINT"
+        );
+    }
+
+    #[test]
     fn top_level_help_contains_examples_section() {
         let help = Cli::command().render_long_help().to_string();
         assert!(help.contains("Examples:"), "top-level help must have an Examples section");

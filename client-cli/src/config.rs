@@ -1,8 +1,8 @@
 //! Auth and configuration resolution for `red-cell-cli`.
 //!
 //! Resolution order (first wins):
-//! 1. `--server` / `--token` CLI flags
-//! 2. `RC_SERVER` / `RC_TOKEN` environment variables (handled by clap)
+//! 1. `--server` / `--token` / `--cert-fingerprint` CLI flags
+//! 2. `RC_SERVER` / `RC_TOKEN` / `RC_CERT_FINGERPRINT` environment variables (handled by clap)
 //! 3. `.red-cell-cli.toml` walked up from the current working directory
 //! 4. `~/.config/red-cell-cli/config.toml`
 
@@ -62,6 +62,8 @@ pub struct FileConfig {
     pub token: Option<String>,
     /// Request timeout in seconds.
     pub timeout: Option<u64>,
+    /// SHA-256 certificate fingerprint for TLS pinning (lowercase hex, 64 chars).
+    pub cert_fingerprint: Option<String>,
 }
 
 /// Final resolved configuration ready for use by command handlers.
@@ -260,9 +262,11 @@ fn tighten_permissions(path: &Path) {
 /// config file; when absent the config file's `timeout` is used, falling back
 /// to the built-in default of 30 seconds.
 ///
-/// `ca_cert` and `cert_fingerprint` come from `--ca-cert` / `--cert-fingerprint`.
-/// When both are supplied `cert_fingerprint` wins.  Neither is read from config
-/// files — they are CLI-only for security-sensitive TLS decisions.
+/// `ca_cert` comes from `--ca-cert` (CLI-only).
+/// `cert_fingerprint` comes from `--cert-fingerprint` / `RC_CERT_FINGERPRINT`
+/// env var (handled by clap) and falls back to the config file's
+/// `cert_fingerprint` field.  When both `ca_cert` and `cert_fingerprint` are
+/// supplied, `cert_fingerprint` wins.
 ///
 /// `pin_intermediate` maps to [`FingerprintPinMode::Chain`] when
 /// `cert_fingerprint` is set; it is an error without a fingerprint.
@@ -275,10 +279,14 @@ pub fn resolve(
     pin_intermediate: bool,
 ) -> Result<ResolvedConfig, ConfigError> {
     // Pay the I/O cost of loading files when any value that can come from the
-    // config file is absent from the CLI/env.  Timeout is included so that
-    // `--server X --token Y` (no `--timeout`) still picks up `timeout` from
-    // the config file instead of silently falling back to the 30 s default.
-    let need_file = cli_server.is_none() || cli_token.is_none() || cli_timeout.is_none();
+    // config file is absent from the CLI/env.  Timeout and cert_fingerprint are
+    // included so that `--server X --token Y` (no `--timeout`) still picks up
+    // `timeout` / `cert_fingerprint` from the config file instead of silently
+    // falling back to defaults.
+    let need_file = cli_server.is_none()
+        || cli_token.is_none()
+        || cli_timeout.is_none()
+        || cert_fingerprint.is_none();
 
     let file_config: Option<FileConfig> = if need_file {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -304,11 +312,14 @@ pub fn resolve(
     let timeout =
         cli_timeout.or_else(|| file_config.as_ref().and_then(|c| c.timeout)).unwrap_or(30);
 
+    let cert_fingerprint =
+        cert_fingerprint.or_else(|| file_config.as_ref().and_then(|c| c.cert_fingerprint.clone()));
+
     if pin_intermediate && cert_fingerprint.is_none() {
         return Err(ConfigError::PinIntermediateWithoutFingerprint);
     }
 
-    // TLS mode: fingerprint wins over CA cert; both are CLI-only (not in file configs).
+    // TLS mode: fingerprint wins over CA cert.
     let tls_mode = match (ca_cert, cert_fingerprint) {
         (_, Some(fp)) => TlsMode::Fingerprint(FingerprintTls {
             sha256_hex: fp,
@@ -377,16 +388,21 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let path = write_config(
             tmp.path(),
-            r#"
-server  = "https://ts:40056"
-token   = "tok123"
-timeout = 60
+            &format!(
+                r#"
+server           = "https://ts:40056"
+token            = "tok123"
+timeout          = 60
+cert_fingerprint = "{}"
 "#,
+                "ab".repeat(32)
+            ),
         );
         let cfg = load_config_file(&path).unwrap();
         assert_eq!(cfg.server.as_deref(), Some("https://ts:40056"));
         assert_eq!(cfg.token.as_deref(), Some("tok123"));
         assert_eq!(cfg.timeout, Some(60));
+        assert_eq!(cfg.cert_fingerprint.as_deref(), Some("ab".repeat(32).as_str()));
     }
 
     #[test]
@@ -525,6 +541,70 @@ timeout = 60
         .unwrap();
         match &cfg.tls_mode {
             TlsMode::Fingerprint(fp) => assert_eq!(fp.pin_mode, FingerprintPinMode::Leaf),
+            _ => panic!("expected Fingerprint tls mode"),
+        }
+    }
+
+    // ── resolve: cert_fingerprint from config file ───────────────────────────
+
+    #[test]
+    fn resolve_cert_fingerprint_falls_back_to_config_file() {
+        let fp = "ab".repeat(32);
+        let tmp = TempDir::new().unwrap();
+        write_config(
+            tmp.path(),
+            &format!(
+                r#"
+server           = "https://ts:40056"
+token            = "tok"
+cert_fingerprint = "{fp}"
+"#,
+            ),
+        );
+
+        let _guard = CWD_LOCK.lock().unwrap();
+        let original = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+        let result = resolve(None, None, Some(30), None, None, false);
+        std::env::set_current_dir(&original).unwrap();
+
+        let cfg = result.expect("resolve should succeed");
+        match &cfg.tls_mode {
+            TlsMode::Fingerprint(f) => {
+                assert_eq!(f.sha256_hex, fp);
+                assert_eq!(f.pin_mode, FingerprintPinMode::Leaf);
+            }
+            _ => panic!("expected Fingerprint tls mode from config file fallback"),
+        }
+    }
+
+    #[test]
+    fn resolve_cli_cert_fingerprint_wins_over_config_file() {
+        let cli_fp = "cd".repeat(32);
+        let file_fp = "ab".repeat(32);
+        let tmp = TempDir::new().unwrap();
+        write_config(
+            tmp.path(),
+            &format!(
+                r#"
+server           = "https://ts:40056"
+token            = "tok"
+cert_fingerprint = "{file_fp}"
+"#,
+            ),
+        );
+
+        let _guard = CWD_LOCK.lock().unwrap();
+        let original = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+        let result = resolve(None, None, Some(30), None, Some(cli_fp.clone()), false);
+        std::env::set_current_dir(&original).unwrap();
+
+        let cfg = result.expect("resolve should succeed");
+        match &cfg.tls_mode {
+            TlsMode::Fingerprint(f) => {
+                assert_eq!(f.sha256_hex, cli_fp, "CLI fingerprint must win over file");
+            }
             _ => panic!("expected Fingerprint tls mode"),
         }
     }
@@ -674,6 +754,7 @@ timeout = 120
             server: Some("https://ts:40056".to_owned()),
             token: Some("secret-tok".to_owned()),
             timeout: None,
+            cert_fingerprint: None,
         };
         write_config_file(&path, &config).unwrap();
 
@@ -698,8 +779,12 @@ timeout = 120
         fs::write(&path, "server = \"old\"").unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
 
-        let config =
-            FileConfig { server: Some("https://new:40056".to_owned()), token: None, timeout: None };
+        let config = FileConfig {
+            server: Some("https://new:40056".to_owned()),
+            token: None,
+            timeout: None,
+            cert_fingerprint: None,
+        };
         write_config_file(&path, &config).unwrap();
 
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;

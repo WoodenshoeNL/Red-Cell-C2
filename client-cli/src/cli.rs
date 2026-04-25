@@ -15,10 +15,10 @@ use crate::output::OutputFormat;
 /// All output is JSON by default — machine-parseable on stdout, structured
 /// errors on stderr.
 ///
-/// Authentication is resolved in this order (first wins):
+/// Authentication and TLS pinning are resolved in this order (first wins):
 ///
-///   1. --server / --token flags
-///   2. RC_SERVER / RC_TOKEN environment variables
+///   1. --server / --token / --cert-fingerprint flags
+///   2. RC_SERVER / RC_TOKEN / RC_CERT_FINGERPRINT environment variables
 ///   3. .red-cell-cli.toml in the current or any parent directory
 ///   4. ~/.config/red-cell-cli/config.toml
 ///
@@ -35,7 +35,7 @@ use crate::output::OutputFormat;
 #[command(propagate_version = true)]
 #[command(disable_help_subcommand = true)]
 #[command(
-    after_help = "Environment:\n  RC_SERVER   Teamserver URL  (e.g. https://ts.example.com:40056)\n  RC_TOKEN    API token\n\nExamples:\n  red-cell-cli status\n  red-cell-cli agent list\n  red-cell-cli agent exec abc123 --cmd whoami --wait"
+    after_help = "Environment:\n  RC_SERVER             Teamserver URL  (e.g. https://ts.example.com:40056)\n  RC_TOKEN              API token\n  RC_CERT_FINGERPRINT   SHA-256 cert fingerprint (64 hex chars) for TLS pinning\n\nExamples:\n  red-cell-cli status\n  red-cell-cli agent list\n  red-cell-cli agent exec abc123 --cmd whoami --wait"
 )]
 pub struct Cli {
     /// Teamserver base URL (e.g. https://teamserver:40056)
@@ -65,7 +65,7 @@ pub struct Cli {
     /// end-entity (leaf) certificate is compared; use --pin-intermediate to
     /// require a match anywhere in the server-presented chain (e.g. pin an
     /// intermediate CA so leaf renewal does not require updating the pin).
-    #[arg(long, global = true)]
+    #[arg(long, global = true, env = "RC_CERT_FINGERPRINT")]
     pub cert_fingerprint: Option<String>,
 
     /// With --cert-fingerprint, match the fingerprint against any certificate

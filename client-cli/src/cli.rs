@@ -223,6 +223,23 @@ pub enum Commands {
         cert_fingerprint: Option<String>,
     },
 
+    /// Generate shell tab-completion scripts.
+    ///
+    /// Install completions by redirecting stdout to the appropriate file:
+    ///   bash: red-cell-cli completion bash > ~/.local/share/bash-completion/completions/red-cell-cli
+    ///   zsh:  red-cell-cli completion zsh  > ~/.zfunc/_red-cell-cli
+    ///   fish: red-cell-cli completion fish > ~/.config/fish/completions/red-cell-cli.fish
+    ///
+    /// Examples:
+    ///   red-cell-cli completion bash
+    ///   red-cell-cli completion zsh
+    ///   red-cell-cli completion fish
+    #[command(verbatim_doc_comment)]
+    Completion {
+        /// Target shell
+        shell: clap_complete::Shell,
+    },
+
     /// Show help for a subcommand (alias: `<command> --help`).
     ///
     /// Examples:

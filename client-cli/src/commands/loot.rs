@@ -21,7 +21,9 @@ use crate::backoff::Backoff;
 use crate::client::ApiClient;
 use crate::defaults::LOOT_LIST_WATCH_POLL_INTERVAL_SECS;
 use crate::error::{CliError, EXIT_SUCCESS};
-use crate::output::{OutputFormat, TextRender, TextRow, print_error, print_stream_entry, print_success};
+use crate::output::{
+    OutputFormat, TextRender, TextRow, print_error, print_stream_entry, print_success,
+};
 use crate::util::percent_encode;
 
 // ── raw API response shapes ───────────────────────────────────────────────────
@@ -263,11 +265,7 @@ impl LootFollowCursor {
         if entries.is_empty() {
             return Self::default();
         }
-        let latest_ts = entries
-            .iter()
-            .map(|e| e.captured_at.as_str())
-            .max()
-            .map(str::to_owned);
+        let latest_ts = entries.iter().map(|e| e.captured_at.as_str()).max().map(str::to_owned);
         let seen_ids = entries
             .iter()
             .filter(|e| Some(e.captured_at.as_str()) == latest_ts.as_deref())
@@ -283,15 +281,11 @@ impl LootFollowCursor {
     fn drain_new_entries<'a>(&mut self, entries: &'a [LootEntry]) -> Vec<&'a LootEntry> {
         let fresh: Vec<&LootEntry> = entries
             .iter()
-            .filter(|e| {
-                match self.since.as_deref() {
-                    None => true,
-                    Some(cursor) if e.captured_at.as_str() > cursor => true,
-                    Some(cursor) if e.captured_at.as_str() == cursor => {
-                        !self.seen_ids.contains(&e.id)
-                    }
-                    _ => false,
-                }
+            .filter(|e| match self.since.as_deref() {
+                None => true,
+                Some(cursor) if e.captured_at.as_str() > cursor => true,
+                Some(cursor) if e.captured_at.as_str() == cursor => !self.seen_ids.contains(&e.id),
+                _ => false,
             })
             .collect();
 

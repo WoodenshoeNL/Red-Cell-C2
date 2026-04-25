@@ -160,7 +160,8 @@ pub async fn dispatch(cli: Cli) -> i32 {
         Commands::Login { .. } => EXIT_SUCCESS,
 
         // Handled synchronously in main() before the runtime is started;
-        // this arm exists only for exhaustiveness.
+        // these arms exist only for exhaustiveness.
+        Commands::Completion { .. } => EXIT_SUCCESS,
         Commands::Help { .. } => EXIT_SUCCESS,
     }
 }

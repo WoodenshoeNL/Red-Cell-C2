@@ -59,12 +59,8 @@ fn build_snapshot(agents: &[AgentSummary]) -> HashMap<AgentId, AgentSummary> {
     agents.iter().map(|a| (a.id, a.clone())).collect()
 }
 
-fn diff_agents(
-    prev: &HashMap<AgentId, AgentSummary>,
-    current: &[AgentSummary],
-) -> Vec<AgentEvent> {
-    let current_map: HashMap<AgentId, &AgentSummary> =
-        current.iter().map(|a| (a.id, a)).collect();
+fn diff_agents(prev: &HashMap<AgentId, AgentSummary>, current: &[AgentSummary]) -> Vec<AgentEvent> {
+    let current_map: HashMap<AgentId, &AgentSummary> = current.iter().map(|a| (a.id, a)).collect();
     let mut events = Vec::new();
 
     for agent in current {
@@ -94,11 +90,7 @@ fn watch_timeout_exhausted(max_failures: u32, last_detail: &str) -> CliError {
 
 /// `agent list --watch` — print the initial roster then stream change events.
 #[instrument(skip(client, fmt), fields(max_failures = max_failures))]
-pub(crate) async fn watch_agents(
-    client: &ApiClient,
-    fmt: &OutputFormat,
-    max_failures: u32,
-) -> i32 {
+pub(crate) async fn watch_agents(client: &ApiClient, fmt: &OutputFormat, max_failures: u32) -> i32 {
     let mut backoff = Backoff::with_initial_delay(AGENT_LIST_WATCH_POLL_INTERVAL_SECS);
     let mut consecutive_timeouts = 0u32;
 
@@ -183,9 +175,7 @@ pub(crate) async fn watch_agents(
                 } else {
                     backoff.record_non_empty();
                     for ev in &events {
-                        if let Err(e) =
-                            print_stream_entry(fmt, ev, &render_agent_event_text(ev))
-                        {
+                        if let Err(e) = print_stream_entry(fmt, ev, &render_agent_event_text(ev)) {
                             print_error(&e).ok();
                             return e.exit_code();
                         }

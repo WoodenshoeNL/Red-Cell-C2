@@ -45,6 +45,14 @@ pub fn run() {
         std::process::exit(if ok { EXIT_SUCCESS } else { EXIT_GENERAL });
     }
 
+    // `completion <shell>` emits a shell completion script to stdout — no
+    // server, token, or async runtime needed.
+    if let Some(Commands::Completion { shell }) = cli.command {
+        use clap::CommandFactory;
+        clap_complete::generate(shell, &mut Cli::command(), "red-cell-cli", &mut std::io::stdout());
+        std::process::exit(EXIT_SUCCESS);
+    }
+
     // `help [command]` doesn't need a server or token — handle it before the
     // async runtime is started.
     if let Some(Commands::Help { ref command }) = cli.command {

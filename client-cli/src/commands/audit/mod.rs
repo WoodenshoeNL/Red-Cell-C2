@@ -147,7 +147,16 @@ impl TextRow for ServerLogEntry {
 /// Dispatch an [`AuditCommands`] variant and return a process exit code.
 pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AuditCommands) -> i32 {
     match action {
-        AuditCommands::List { operator, action, agent, since, until, limit, follow, max_failures } => {
+        AuditCommands::List {
+            operator,
+            action,
+            agent,
+            since,
+            until,
+            limit,
+            follow,
+            max_failures,
+        } => {
             if follow {
                 list_follow(
                     client,

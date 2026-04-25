@@ -9,30 +9,30 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1657 | 296 | 105 |
-| Bugs filed against | 263 | 50 | 15 |
+| Tasks closed | 1662 | 296 | 105 |
+| Bugs filed against | 272 | 50 | 15 |
 | Bug rate (bugs/task) | 0.16 | 0.17 | 0.14 |
 | Quality score | 84% | 83% | 86% |
 
-*Bug rates: Claude 263/1657=0.1587→0.16, Codex 50/296=0.1689→0.17, Cursor 15/105=0.1429→0.14*
+*Bug rates: Claude 272/1662=0.1636→0.16, Codex 50/296=0.1689→0.17, Cursor 15/105=0.1429→0.14*
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
-| unwrap / expect in production | 16 | 0 | 0 |
+| unwrap / expect in production | 17 | 0 | 0 |
 | Missing tests / stale tests | 83 | 22 | 7 |
 | Clippy warnings | 16 | 0 | 2 |
 | Protocol errors | 32 | 32 | 4 |
-| Security issues | 71 | 40 | 0 |
-| Architecture drift | 66 | 25 | 9 |
+| Security issues | 74 | 40 | 0 |
+| Architecture drift | 67 | 25 | 9 |
 | Memory / resource leaks | 16 | 11 | 1 |
 | Startup / lifecycle regressions | 5 | 10 | 0 |
 | Test infrastructure / flakiness | 66 | 6 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 5 | 5 | 0 |
-| Correctness / pagination | 68 | 9 | 1 |
-| Workflow / close-hygiene | 39 | 1 | 2 |
+| Correctness / pagination | 71 | 9 | 1 |
+| Workflow / close-hygiene | 40 | 1 | 2 |
 | Code reuse / duplication | 14 | 0 | 0 |
 | Incomplete commits (stranded work) | 7 | 3 | 0 |
 
@@ -41,6 +41,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-25 21:14 — b1f739fc..22d8979c
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 5 | 9 | Closes: wjbjy, ms0j9, qrciq, noq9i, yde2a (phantom exec timeout). Bugs filed: 4rzn9 (P1 server-logs ReadApiAccess + no audit), i8esu (P2 /profile leaks operator+API-key roster to non-admins), 8s0fz (P2 profile validate emits {ok:true,data:{ok:false}} contradiction), t4132 (P2 agent shell interactive REPL with raw stdout — violates JSON envelope), iu0si (P3 rust_agent.rs PascalCase panic on empty/non-ASCII agent_name), q8ntc (P3 phantom+specter sleep_delay=0 for sub-second sleep_delay_ms), vqw4w (P3 whoami hardcodes auth_method="api_key"), mzcbd (P3 agent shell !cmd no audit trail, blocked by t4132), por96 (P4 CertCaptureVerifier missing safety doc). |
+| Codex | 0 | 0 | No activity in this review range. |
+| Cursor | 0 | 0 | No activity in this review range. |
+
+Build: passed (cargo check workspace clean in 4m55s; clippy + nextest skipped — dev agent held cargo lock during review).
 
 ### Arch Review — 2026-04-24 18:30
 

@@ -453,15 +453,7 @@ pub(super) async fn kill_agent(
     let (task_id, queued_jobs) = queue_kill_task(&state, &identity, agent_id).await?;
 
     if params.force {
-        let _ = deregister_agent(&state, &identity.key_id, agent_id).await;
-        return Ok((
-            StatusCode::OK,
-            Json(AgentDeregisteredResponse {
-                agent_id: format!("{agent_id:08X}"),
-                deregistered: true,
-            }),
-        )
-            .into_response());
+        return deregister_agent(&state, &identity.key_id, agent_id).await;
     }
 
     Ok((

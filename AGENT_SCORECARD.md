@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1703 | 296 | 115 |
+| Tasks closed | 1705 | 296 | 115 |
 | Bugs filed against | 274 | 50 | 15 |
 | Bug rate (bugs/task) | 0.16 | 0.17 | 0.13 |
 | Quality score | 84% | 83% | 87% |
 
-*Bug rates: Claude 274/1703=0.1609→0.16, Codex 50/296=0.1689→0.17, Cursor 15/115=0.1304→0.13*
+*Bug rates: Claude 274/1705=0.1607→0.16, Codex 50/296=0.1689→0.17, Cursor 15/115=0.1304→0.13*
 
 ## Violation Breakdown
 
@@ -42,7 +42,19 @@ Each loop run updates the running totals and appends a review entry.
 
 <!-- QA and arch loops append entries below this line -->
 
-### QA Review — 2026-04-26 14:25 — 91693236..4fe6e547
+### QA Review — 2026-04-26 15:30 — 4fe6e547..914d380f
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 0 | Real autotest-shakedown cycle. 311d6253 stops/deletes leftover listeners pre-flight (port reuse fix) and bumps autotest profile RateLimitPerMinute 120→600; same commit filed two bugs (red-cell-c2-2edsr P1 zone:client for the BuildWait clap panic, red-cell-c2-dsvk9 P3 zone:autotest for missing Retry-After backoff). 71d115df closes 2edsr by renaming `BuildWait --output` (Option<String>) to `--dst` to avoid TypeId collision with global `--output` (OutputFormat enum); doc comments + autotest cli.py updated to match. 914d380f closes dsvk9 with proper rate-limit handling: parses `retry after Some(N)` from CliError, sleeps and retries (up to 3 times pre-scenario, once mid-scenario), backed by 8 unit tests (tests/test_rate_limit_backoff.py — all pass). 6fe8e8db is a process improvement (KNOWN_FAILURES.md + autotest prompt updates) so the autotest agent grep-Fs prior failures before re-investigating; pre-populated with the 6 active patterns from 2026-04-24/26 runs. |
+| Codex | 0 | 0 | No activity in this review range. |
+| Cursor | 0 | 0 | No activity in this review range. |
+
+Build: passed (cargo check + clippy -D warnings clean on red-cell-cli; only Rust change in range was the BuildWait flag rename). Python autotest unit tests 8/8 PASS.
+
+Notes: All work in range was Claude responding to the first real `--loop autotest` run on 2026-04-26. The end-to-end pattern (autotest exposes failure → file bead → fix in next session) is working: the BuildWait panic was caught, scoped, and fixed cleanly within one session, and the rate-limit cascade was addressed with both an inline profile bump (immediate unblock) and a proper Retry-After backoff (durable fix) — exactly the right mix of expedient + correct. The retry-after regex `r"retry after Some\((\d+)\)"` is brittle to upstream CLI message changes but degrades gracefully to a 60s default; not bug-worthy. No real bugs to file this cycle.
+
+
 
 | Agent | Tasks closed | Bugs filed | Notes |
 |-------|-------------|------------|-------|

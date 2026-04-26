@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1715 | 296 | 115 |
+| Tasks closed | 1717 | 296 | 116 |
 | Bugs filed against | 275 | 50 | 15 |
 | Bug rate (bugs/task) | 0.16 | 0.17 | 0.13 |
 | Quality score | 84% | 83% | 87% |
 
-*Bug rates: Claude 275/1715=0.1603→0.16, Codex 50/296=0.1689→0.17, Cursor 15/115=0.1304→0.13*
+*Bug rates: Claude 275/1717=0.1602→0.16, Codex 50/296=0.1689→0.17, Cursor 15/116=0.1293→0.13*
 
 ## Violation Breakdown
 
@@ -41,6 +41,18 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-26 23:45 — 74ae1cf0..4cad70f2
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 0 | Closed both client-cli test-isolation bugs filed in the previous QA cycle. e53e0216 (red-cell-c2-a2obd, Opus 4.6): refactored `config::resolve` into `resolve_with_global(...)` with explicit `global_path: Option<PathBuf>` argument and made `no_config_on_disk` accept the same override; the old `resolve` is now `#[cfg(test)]` and just delegates to `resolve_with_global(.., global_config_path())`. Three test sites that previously relied on host purity now pass `None`. Added one new positive test (`no_config_on_disk_false_when_global_config_exists`). 7810cf9e (red-cell-c2-cus0x, Opus 4.6): same pattern propagated to `dispatch::dispatch_with_global` so `dispatch_returns_general_error_when_server_missing` no longer leaks `~/.config/red-cell-cli/config.toml` into the test. Production behaviour preserved — `pub async fn dispatch(cli)` now wraps `dispatch_with_global(cli, config::global_config_path())`. |
+| Codex | 0 | 0 | No activity in this review range. |
+| Cursor | 1 | 0 | Closed red-cell-c2-epgr1 (scenario 17 Archon Windows ECDH check-in failure investigation) with 4cad70f2 — added `automatic-test/lib/archon_triage.py` (117 lines) plus 3 unit tests in `tests/test_archon_triage.py`. The triage helper logs callback_host / payload routing context as a one-time prelude when the listener starts, and on `WaitTimeoutError` from `deploy_and_checkin` it prints harness UTC, Windows-side `[DateTimeOffset]::UtcNow` over SSH, and `Test-NetConnection -ComputerName <callback_host> -Port <listener_port>`. Companion teamserver change in `listeners/http/ecdh_dispatch/classify.rs` upgrades replay-window failures from `debug!` to a single `warn!` matching only `EcdhError::ReplayDetected` (other ECDH open errors stay at debug — correctly avoids log noise from probe traffic). The new `EcdhError` import is the only new dependency; the discriminator is `matches!(&e, EcdhError::ReplayDetected)`, which preserves the original error in the fall-through arm. Triage helper appropriately swallows exceptions with a one-line `# noqa: BLE001 — triage must never raise` comment so a diagnostic failure cannot mask the real check-in failure. |
+
+Build: passed (cargo check workspace clean in 1m14s; cargo clippy -D warnings clean in 10m47s; nextest 6061/6061 PASS in 3m41s; `python3 -m unittest tests.test_archon_triage` 3/3 PASS).
+
+Notes: Quiet, well-contained cycle. Both agents executed exactly what the previous QA cycle asked for. The Claude work is the textbook fix for the test-isolation class — instead of fighting `~/.config` lookups with `HOME` env hacks, the resolver now takes the global path as an explicit argument; production constructs it via `global_config_path()` and tests pass `None`. The choice to keep `resolve()` alive only behind `#[cfg(test)]` is mildly unusual (a stricter cleanup would have deleted it and forced every test to call `resolve_with_global(.., None)` for consistency) but every remaining `resolve(...)` call site either (a) sets cwd to a TempDir that contains a local config file so `find_config_file` short-circuits the global lookup or (b) supplies enough explicit values that `need_file = false`. Both paths are safe regardless of host state. The Cursor archon triage work is the right design for an intermittent network/clock failure — front-load the diagnosable evidence at the moment of timeout so the next test run does not require manual SSH into the Windows VM. The teamserver replay-window WARN is precisely scoped (only fires for `EcdhError::ReplayDetected`, not for arbitrary ECDH open failures, which would create false-positive alerts on probe traffic). No new bugs filed; nothing surfaced in build or test runs.
 
 ### QA Review — 2026-04-26 20:55 — 914d380f..74ae1cf0
 

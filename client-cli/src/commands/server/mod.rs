@@ -113,9 +113,12 @@ async fn fetch_certs(
         CliError::ServerUnreachable(format!("cannot connect to {host}:{port}: {e}"))
     })?;
 
+    // SECURITY: stream is dropped immediately — CertCaptureVerifier does not
+    // validate the peer, so this connection must never carry traffic.
     let _tls_stream = connector.connect(server_name, tcp).await.map_err(|e| {
         CliError::ServerUnreachable(format!("TLS handshake with {host}:{port} failed: {e}"))
     })?;
+    drop(_tls_stream);
 
     let certs_der = captured
         .lock()
@@ -230,6 +233,16 @@ fn parse_https_url(url: &str) -> Result<(String, u16), CliError> {
 
 // ── Certificate-capturing TLS verifier ──────────────────────────────────────
 
+/// SECURITY: This verifier accepts ANY server certificate without validation.
+///
+/// It exists solely to capture the raw DER bytes of the certificate chain
+/// during the TLS handshake.  The resulting TLS stream **must be dropped
+/// immediately** after the handshake completes — it must never be used to
+/// send or receive application data, because the peer's identity has not
+/// been verified.
+///
+/// This struct is intentionally `pub(self)` (file-private) to prevent use
+/// outside `fetch_certs`.
 #[derive(Debug)]
 struct CertCaptureVerifier {
     captured: Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
@@ -494,5 +507,33 @@ mod tests {
             tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
         let result = rt.block_on(fetch_certs("not a url", false, false));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn cert_capture_verifier_accepts_any_cert() {
+        let captured = Arc::new(std::sync::Mutex::new(Vec::<Vec<u8>>::new()));
+        let provider = rustls::crypto::ring::default_provider();
+        let verifier = CertCaptureVerifier { captured: Arc::clone(&captured), provider };
+
+        // Fabricate DER bytes that are NOT a valid certificate — the verifier
+        // must still store them and return Ok, proving it does no validation.
+        let fake_leaf = CertificateDer::from(vec![0xDE, 0xAD, 0x01]);
+        let fake_intermediate = CertificateDer::from(vec![0xBE, 0xEF, 0x02]);
+        let server_name = ServerName::try_from("example.com").unwrap();
+
+        let result = verifier.verify_server_cert(
+            &fake_leaf,
+            &[fake_intermediate],
+            &server_name,
+            &[],
+            UnixTime::now(),
+        );
+
+        assert!(result.is_ok(), "verifier must accept any certificate");
+
+        let certs = captured.lock().unwrap();
+        assert_eq!(certs.len(), 2, "should capture leaf + 1 intermediate");
+        assert_eq!(certs[0], vec![0xDE, 0xAD, 0x01]);
+        assert_eq!(certs[1], vec![0xBE, 0xEF, 0x02]);
     }
 }

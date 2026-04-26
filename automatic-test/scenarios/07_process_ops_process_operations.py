@@ -1,7 +1,7 @@
 """
 Scenario 07_process_ops: Process operations
 
-Linux passes (Demon bin + Phantom elf): process list, spawn, kill, and verify
+Linux passes (Phantom elf): process list, spawn, kill, and verify
 against Linux target via ``ps`` / ``kill``.
 
 Windows passes (Demon exe + Archon exe + Specter exe): same operations against
@@ -10,24 +10,25 @@ Windows 11 target via ``tasklist`` / ``taskkill``.
 Phantom/Archon/Specter passes run only when listed in ``agents.available`` in env.toml;
 build failures for listed agents fail the scenario instead of silently skipping.
 
-Steps (per Linux agent pass):
-  1. Create + start HTTP listener
-  2. Build agent payload for Linux target
-  3. Deploy via SSH/SCP to Linux test machine
-  4. Execute payload in background on target
-  5. Wait for agent checkin
-  6. List processes via agent → verify known system process (sshd) is present
-  7. Spawn a long-running test process on target via SSH → record its PID
-  8. Kill the test process via agent exec
-  9. Verify the killed PID no longer appears in the process list
- 10. Kill agent, stop listener, clean up
+All payloads are pre-built in parallel (when ``--no-parallel`` is not set) via
+:func:`~lib.payload.build_parallel` against shared per-platform listeners, then each
+agent pass deploys + runs the process-operations suite sequentially.
 
-Steps (per Windows agent pass):
+Steps:
+  0. Create shared HTTP listener(s); pre-build all needed payloads in parallel
+  Per agent pass (Linux):
+  1. Deploy pre-built payload via SSH/SCP to Linux test machine
+  2. Execute payload in background on target
+  3. Wait for agent checkin
+  4. List processes via agent → verify known system process (sshd) is present
+  5. Spawn a long-running test process on target via SSH → record its PID
+  6. Kill the test process via agent exec
+  7. Verify the killed PID no longer appears in the process list
+  8. Kill agent, clean up
+  Per agent pass (Windows):
   Same as above, using tasklist / taskkill and svchost.exe as the known
   system process.
-
-Skip Linux passes if ctx.linux is None.
-Skip Windows passes if ctx.windows is None.
+  Final: stop + delete shared listener(s)
 """
 
 DESCRIPTION = "Process operations (Demon + Archon + Phantom + Specter)"
@@ -43,58 +44,42 @@ def _short_id() -> str:
     return uuid.uuid4().hex[:8]
 
 
-def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
-    """Run the full process-operations suite for one agent type.
+def _run_for_agent(ctx, agent_type: str, fmt: str,
+                   *, listener_name: str, pre_built_payload: bytes) -> None:
+    """Run the full process-operations suite for one Linux agent type.
 
     Args:
-        ctx:         RunContext passed by the harness.
-        agent_type:  Agent name passed to ``payload_build`` (e.g. ``"demon"``
-                     or ``"phantom"``).
-        fmt:         Payload format (``"exe"`` is required for Rust agents like Phantom).
-        name_prefix: Short prefix used to name the listener and remote files.
+        ctx:               RunContext passed by the harness.
+        agent_type:        Agent name (e.g. ``"phantom"``).
+        fmt:               Payload format (``"exe"``).
+        listener_name:     Name of the pre-created, pre-started listener.
+        pre_built_payload: Raw payload bytes from :func:`~lib.payload.build_parallel`.
 
     Raises:
         AssertionError on test failure.
-        CliError if the payload build fails (propagates as a scenario failure).
     """
-    from lib.cli import (
-        agent_exec,
-        agent_kill,
-        listener_create,
-        listener_delete,
-        listener_start,
-        listener_stop,
-    )
+    from lib.cli import agent_exec, agent_kill
     from lib.deploy import run_remote
     from lib.deploy_agent import deploy_and_checkin
-    from lib.listeners import http_listener_kwargs
 
     cli = ctx.cli
     co = int(ctx.timeouts.command_output)
     ssh = int(ctx.timeouts.ssh_connect)
     target = ctx.linux
-    uid = _short_id()
-    listener_name = f"{name_prefix}-{uid}"
-    listener_port = ctx.env.get("listeners", {}).get("linux_port", 19081)
-
-    # ── Step 1: Create + start HTTP listener ────────────────────────────────
-    print(f"  [{agent_type}][listener] creating HTTP listener {listener_name!r} on port {listener_port}")
-    listener_create(cli, listener_name, "http", **http_listener_kwargs(listener_port, ctx.env))
-    listener_start(cli, listener_name)
-    print(f"  [{agent_type}][listener] started")
 
     agent_id = None
     try:
-        # ── Steps 2-5: Build, deploy, exec, wait for checkin ─────────────────
+        # ── Deploy, exec, wait for checkin ───────────────────────────────────
         agent = deploy_and_checkin(
             ctx, cli, target,
             agent_type=agent_type, fmt=fmt,
             listener_name=listener_name,
             label=agent_type,
+            pre_built_payload=pre_built_payload,
         )
         agent_id = agent["id"]
 
-        # ── Step 6: List processes via agent ─────────────────────────────────
+        # ── List processes via agent ─────────────────────────────────────────
         print(f"  [{agent_type}][ps] listing processes via agent exec")
         ps_result = agent_exec(cli, agent_id, "ps aux", wait=True, timeout=co)
         ps_output = ps_result.get("output", "")
@@ -118,8 +103,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
         )
         print(f"  [{agent_type}][net] ss table non-empty ({len(ss_out)} chars)")
 
-        # ── Step 7: Spawn a test process on target via SSH ───────────────────
-        # Start a long sleep in the background and capture its PID.
+        # ── Spawn a test process on target via SSH ───────────────────────────
         print(f"  [{agent_type}][spawn] starting sleep process on target via SSH")
         pid_str = run_remote(
             target,
@@ -139,7 +123,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
         )
         print(f"  [{agent_type}][spawn] confirmed PID {sleep_pid} is running on target")
 
-        # ── Step 8: Kill the test process via agent ──────────────────────────
+        # ── Kill the test process via agent ──────────────────────────────────
         print(f"  [{agent_type}][kill] sending 'kill {sleep_pid}' via agent exec")
         kill_result = agent_exec(cli, agent_id, f"kill {sleep_pid}", wait=True, timeout=15)
         print(f"  [{agent_type}][kill] kill command dispatched, output: {kill_result.get('output', '(none)')!r}")
@@ -147,9 +131,8 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
         # Give the process a moment to die.
         time.sleep(1)
 
-        # ── Step 9: Verify the killed PID is gone ────────────────────────────
+        # ── Verify the killed PID is gone ────────────────────────────────────
         print(f"  [{agent_type}][verify] checking that PID {sleep_pid} is no longer running")
-        # ps -p <pid> exits non-zero when the process doesn't exist; capture via || true.
         pid_check = run_remote(
             target,
             f"ps -p {sleep_pid} -o pid= 2>/dev/null || true",
@@ -173,23 +156,13 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
         print(f"  [{agent_type}][suite] all process-operations checks passed")
 
     finally:
-        # ── Step 10: Kill agent, stop listener, clean up ─────────────────────
+        # ── Kill agent, clean up ─────────────────────────────────────────────
         if agent_id:
             print(f"  [{agent_type}][cleanup] killing agent {agent_id}")
             try:
                 agent_kill(cli, agent_id)
             except Exception as exc:
                 print(f"  [{agent_type}][cleanup] agent kill failed (non-fatal): {exc}")
-
-        print(f"  [{agent_type}][cleanup] stopping/deleting listener {listener_name!r}")
-        try:
-            listener_stop(cli, listener_name)
-        except Exception:
-            pass
-        try:
-            listener_delete(cli, listener_name)
-        except Exception:
-            pass
 
         print(f"  [{agent_type}][cleanup] removing work_dir on target")
         try:
@@ -200,58 +173,42 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
         print(f"  [{agent_type}][cleanup] done")
 
 
-def _run_for_agent_windows(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
+def _run_for_agent_windows(ctx, agent_type: str, fmt: str,
+                           *, listener_name: str, pre_built_payload: bytes) -> None:
     """Run the full process-operations suite for one Windows agent type.
 
     Args:
-        ctx:         RunContext passed by the harness.
-        agent_type:  Agent name passed to ``payload_build`` (e.g. ``"demon"``
-                     or ``"specter"``).
-        fmt:         Payload format (``"exe"``).
-        name_prefix: Short prefix used to name the listener and remote files.
+        ctx:               RunContext passed by the harness.
+        agent_type:        Agent name (e.g. ``"demon"``, ``"specter"``).
+        fmt:               Payload format (``"exe"``).
+        listener_name:     Name of the pre-created, pre-started listener.
+        pre_built_payload: Raw payload bytes from :func:`~lib.payload.build_parallel`.
 
     Raises:
         AssertionError on test failure.
-        CliError if the payload build fails (propagates as a scenario failure).
     """
-    from lib.cli import (
-        agent_exec,
-        agent_kill,
-        listener_create,
-        listener_delete,
-        listener_start,
-        listener_stop,
-    )
+    from lib.cli import agent_exec, agent_kill
     from lib.deploy import run_remote
     from lib.deploy_agent import deploy_and_checkin
-    from lib.listeners import http_listener_kwargs
 
     cli = ctx.cli
     co = int(ctx.timeouts.command_output)
     ssh = int(ctx.timeouts.ssh_connect)
     target = ctx.windows
-    uid = _short_id()
-    listener_name = f"{name_prefix}-{uid}"
-    listener_port = ctx.env.get("listeners", {}).get("windows_port", 19082)
-
-    # ── Step 1: Create + start HTTP listener ────────────────────────────────
-    print(f"  [{agent_type}][listener] creating HTTP listener {listener_name!r} on port {listener_port}")
-    listener_create(cli, listener_name, "http", **http_listener_kwargs(listener_port, ctx.env))
-    listener_start(cli, listener_name)
-    print(f"  [{agent_type}][listener] started")
 
     agent_id = None
     try:
-        # ── Steps 2-5: Build, deploy, exec, wait for checkin ─────────────────
+        # ── Deploy, exec, wait for checkin ───────────────────────────────────
         agent = deploy_and_checkin(
             ctx, cli, target,
             agent_type=agent_type, fmt=fmt,
             listener_name=listener_name,
             label=agent_type,
+            pre_built_payload=pre_built_payload,
         )
         agent_id = agent["id"]
 
-        # ── Step 6: List processes via agent ─────────────────────────────────
+        # ── List processes via agent ─────────────────────────────────────────
         print(f"  [{agent_type}][ps] listing processes via agent exec (tasklist)")
         ps_result = agent_exec(cli, agent_id, "tasklist", wait=True, timeout=co)
         ps_output = ps_result.get("output", "")
@@ -282,9 +239,7 @@ def _run_for_agent_windows(ctx, agent_type: str, fmt: str, name_prefix: str) -> 
         )
         print(f"  [{agent_type}][net] netstat ok ({len(ns)} chars)")
 
-        # ── Step 7: Spawn a test process on target via SSH ───────────────────
-        # Use PowerShell Start-Process -PassThru to start a background process
-        # and capture its PID in one SSH round-trip.
+        # ── Spawn a test process on target via SSH ───────────────────────────
         print(f"  [{agent_type}][spawn] starting sleep process on target via SSH")
         pid_str = run_remote(
             target,
@@ -314,7 +269,7 @@ def _run_for_agent_windows(ctx, agent_type: str, fmt: str, name_prefix: str) -> 
         )
         print(f"  [{agent_type}][spawn] confirmed PID {sleep_pid} is running on target")
 
-        # ── Step 8: Kill the test process via agent ──────────────────────────
+        # ── Kill the test process via agent ──────────────────────────────────
         print(f"  [{agent_type}][kill] sending 'taskkill /PID {sleep_pid} /F' via agent exec")
         kill_result = agent_exec(
             cli, agent_id, f"taskkill /PID {sleep_pid} /F", wait=True, timeout=15
@@ -324,7 +279,7 @@ def _run_for_agent_windows(ctx, agent_type: str, fmt: str, name_prefix: str) -> 
         # Give the process a moment to die.
         time.sleep(1)
 
-        # ── Step 9: Verify the killed PID is gone ────────────────────────────
+        # ── Verify the killed PID is gone ────────────────────────────────────
         print(f"  [{agent_type}][verify] checking that PID {sleep_pid} is no longer running")
         pid_check = run_remote(
             target,
@@ -351,23 +306,13 @@ def _run_for_agent_windows(ctx, agent_type: str, fmt: str, name_prefix: str) -> 
         print(f"  [{agent_type}][suite] all process-operations checks passed")
 
     finally:
-        # ── Step 10: Kill agent, stop listener, clean up ─────────────────────
+        # ── Kill agent, clean up ─────────────────────────────────────────────
         if agent_id:
             print(f"  [{agent_type}][cleanup] killing agent {agent_id}")
             try:
                 agent_kill(cli, agent_id)
             except Exception as exc:
                 print(f"  [{agent_type}][cleanup] agent kill failed (non-fatal): {exc}")
-
-        print(f"  [{agent_type}][cleanup] stopping/deleting listener {listener_name!r}")
-        try:
-            listener_stop(cli, listener_name)
-        except Exception:
-            pass
-        try:
-            listener_delete(cli, listener_name)
-        except Exception:
-            pass
 
         print(f"  [{agent_type}][cleanup] removing work_dir on target")
         try:
@@ -398,56 +343,139 @@ def run(ctx):
     skipped_reasons: list[str] = []
     available_agents = set(ctx.env.get("agents", {}).get("available", ["demon"]))
     from lib.deploy import DeployError, preflight_ssh
+    from lib.cli import listener_create, listener_delete, listener_start, listener_stop
+    from lib.listeners import http_listener_kwargs
+    from lib.payload import MatrixCell, build_parallel
 
+    cli = ctx.cli
+    uid = _short_id()
+    listeners_to_cleanup: list[str] = []
+
+    # ── Determine which agents and platforms will run ────────────────────────
+    linux_ok = False
     if ctx.linux is not None:
         try:
             preflight_ssh(ctx.linux)
+            linux_ok = True
         except DeployError as exc:
             raise ScenarioSkipped(str(exc)) from exc
-        # ── Phantom pass (Linux) — Demon is Windows-only (PE/Win32) ─────────
-        print("\n  === Agent pass: phantom (Linux) ===")
-        if "phantom" not in available_agents:
-            print(
-                "  [phantom] SKIPPED — Demon is Windows-only; "
-                "add 'phantom' to agents.available in env.toml"
-            )
-            skipped_reasons.append(
-                "Linux target configured but no available Linux agent"
-                " (add 'phantom' to agents.available)"
-            )
-        else:
-            _run_for_agent(ctx, agent_type="phantom", fmt="exe", name_prefix="test-procops-phantom")
-            ran_any = True
     else:
         print("  [skip] ctx.linux is None — skipping Linux agent passes")
 
+    windows_ok = False
     if ctx.windows is not None:
         try:
             preflight_ssh(ctx.windows)
+            windows_ok = True
         except DeployError as exc:
             raise ScenarioSkipped(str(exc)) from exc
-        ran_any = True
-        # ── Demon Windows pass ───────────────────────────────────────────────
-        print("\n  === Agent pass: demon (Windows) ===")
-        _run_for_agent_windows(ctx, agent_type="demon", fmt="exe", name_prefix="test-procops-win-demon")
-
-        # ── Archon pass (C/ASM fork of Demon, ECDH transport) ───────────────
-        print("\n  === Agent pass: archon (Windows) ===")
-        if "archon" not in available_agents:
-            print("  [archon] SKIPPED — 'archon' not listed in agents.available")
-        else:
-            _run_for_agent_windows(ctx, agent_type="archon", fmt="exe", name_prefix="test-procops-archon")
-
-        # ── Specter pass (Rust Windows agent) ───────────────────────────────
-        print("\n  === Agent pass: specter (Windows) ===")
-        if "specter" not in available_agents:
-            print("  [specter] SKIPPED — 'specter' not listed in agents.available")
-        else:
-            _run_for_agent_windows(ctx, agent_type="specter", fmt="exe", name_prefix="test-procops-specter")
     else:
         print("  [skip] ctx.windows is None — skipping Windows agent passes")
 
-    if not ran_any:
+    linux_listener_name = None
+    windows_listener_name = None
+    linux_has_phantom = linux_ok and "phantom" in available_agents
+
+    # ── Build the cell list for all agents across both platforms ─────────────
+    cells: list[MatrixCell] = []
+    cell_keys: list[str] = []
+
+    if linux_has_phantom:
+        linux_listener_name = f"test-procops-lin-{uid}"
+        linux_port = ctx.env.get("listeners", {}).get("linux_port", 19081)
+        print(f"\n  [shared] creating Linux HTTP listener {linux_listener_name!r} on port {linux_port}")
+        listener_create(cli, linux_listener_name, "http", **http_listener_kwargs(linux_port, ctx.env))
+        listener_start(cli, linux_listener_name)
+        listeners_to_cleanup.append(linux_listener_name)
+        cells.append(MatrixCell(arch="x64", fmt="exe", agent="phantom",
+                                listener=linux_listener_name))
+        cell_keys.append("phantom")
+
+    win_agents: list[tuple[str, str]] = []
+    if windows_ok:
+        win_agents.append(("demon", "exe"))
+        if "archon" in available_agents:
+            win_agents.append(("archon", "exe"))
+        if "specter" in available_agents:
+            win_agents.append(("specter", "exe"))
+        windows_listener_name = f"test-procops-win-{uid}"
+        win_port = ctx.env.get("listeners", {}).get("windows_port", 19082)
+        print(f"  [shared] creating Windows HTTP listener {windows_listener_name!r} on port {win_port}")
+        listener_create(cli, windows_listener_name, "http", **http_listener_kwargs(win_port, ctx.env))
+        listener_start(cli, windows_listener_name)
+        listeners_to_cleanup.append(windows_listener_name)
+        for at, fmt in win_agents:
+            cells.append(MatrixCell(arch="x64", fmt=fmt, agent=at,
+                                    listener=windows_listener_name))
+            cell_keys.append(at)
+
+    if not cells:
         if skipped_reasons:
             raise ScenarioSkipped("; ".join(skipped_reasons))
         raise ScenarioSkipped("neither ctx.linux nor ctx.windows is configured")
+
+    try:
+        # ── Pre-build all payloads in parallel ───────────────────────────────
+        mode = "parallel" if ctx.payload_parallel else "serial"
+        print(f"  [shared] building {len(cells)} payload(s) ({mode})")
+        raws = build_parallel(cli, "", cells, parallel=ctx.payload_parallel)
+        payloads = dict(zip(cell_keys, raws))
+
+        # ── Linux passes ─────────────────────────────────────────────────────
+        if linux_ok:
+            print("\n  === Agent pass: phantom (Linux) ===")
+            if not linux_has_phantom:
+                print(
+                    "  [phantom] SKIPPED — Demon is Windows-only; "
+                    "add 'phantom' to agents.available in env.toml"
+                )
+                skipped_reasons.append(
+                    "Linux target configured but no available Linux agent"
+                    " (add 'phantom' to agents.available)"
+                )
+            else:
+                _run_for_agent(ctx, agent_type="phantom", fmt="exe",
+                               listener_name=linux_listener_name,
+                               pre_built_payload=payloads["phantom"])
+                ran_any = True
+
+        # ── Windows passes ───────────────────────────────────────────────────
+        if windows_ok:
+            ran_any = True
+            print("\n  === Agent pass: demon (Windows) ===")
+            _run_for_agent_windows(ctx, agent_type="demon", fmt="exe",
+                                   listener_name=windows_listener_name,
+                                   pre_built_payload=payloads["demon"])
+
+            print("\n  === Agent pass: archon (Windows) ===")
+            if "archon" not in available_agents:
+                print("  [archon] SKIPPED — 'archon' not listed in agents.available")
+            else:
+                _run_for_agent_windows(ctx, agent_type="archon", fmt="exe",
+                                       listener_name=windows_listener_name,
+                                       pre_built_payload=payloads["archon"])
+
+            print("\n  === Agent pass: specter (Windows) ===")
+            if "specter" not in available_agents:
+                print("  [specter] SKIPPED — 'specter' not listed in agents.available")
+            else:
+                _run_for_agent_windows(ctx, agent_type="specter", fmt="exe",
+                                       listener_name=windows_listener_name,
+                                       pre_built_payload=payloads["specter"])
+
+        if not ran_any:
+            if skipped_reasons:
+                raise ScenarioSkipped("; ".join(skipped_reasons))
+            raise ScenarioSkipped("neither ctx.linux nor ctx.windows is configured")
+
+    finally:
+        for name in listeners_to_cleanup:
+            print(f"  [shared] stopping/deleting listener {name!r}")
+            try:
+                listener_stop(cli, name)
+            except Exception:
+                pass
+            try:
+                listener_delete(cli, name)
+            except Exception:
+                pass

@@ -1,0 +1,72 @@
+# profiles/autotest.yaotl — dedicated profile for the `--loop autotest` mode.
+#
+# Distinct from test.yaotl so the autotest loop can run without colliding with
+# any other teamserver instance (operator console, dev loop, manual testing on
+# test.yaotl :40056).  The autotest loop kills + restarts the teamserver each
+# iteration and overwrites profiles/autotest.sqlite — never run it on a host
+# with active operator sessions on this profile.
+#
+# Database path defaults to profiles/autotest.sqlite (resolve_database_path in
+# teamserver/src/main.rs derives it from the profile path).
+#
+# Operator and Api blocks intentionally mirror test.yaotl so the harness in
+# automatic-test/config-autotest/env.toml can reuse the same operator
+# names and api keys; only the ports differ.
+
+Teamserver {
+    Host = "127.0.0.1"
+    Port = 40156
+
+    Build {
+        Compiler64 = "data/x86_64-w64-mingw32-cross/bin/x86_64-w64-mingw32-gcc"
+        Compiler86 = "data/i686-w64-mingw32-cross/bin/i686-w64-mingw32-gcc"
+        Nasm = "/usr/bin/nasm"
+    }
+}
+
+Operators {
+    user "test-operator" {
+        Password = "changeme"
+    }
+
+    user "test-analyst" {
+        Password = "changeme-analyst"
+    }
+}
+
+Api {
+    RateLimitPerMinute = 120
+
+    key "test-operator" {
+        Value = "changeme-api-key"
+    }
+
+    key "test-analyst" {
+        Value = "changeme-analyst-key"
+        Role  = "Analyst"
+    }
+}
+
+Listeners {
+    Http {
+        Name         = "default"
+        Hosts        = ["127.0.0.1"]
+        HostBind     = "0.0.0.0"
+        HostRotation = "round-robin"
+        PortBind     = 19200
+        PortConn     = 19200
+        Secure       = false
+    }
+}
+
+Demon {
+    Sleep = 1
+    Jitter = 0
+
+    TrustXForwardedFor = false
+
+    Injection {
+        Spawn64 = "C:\\Windows\\System32\\notepad.exe"
+        Spawn32 = "C:\\Windows\\SysWOW64\\notepad.exe"
+    }
+}

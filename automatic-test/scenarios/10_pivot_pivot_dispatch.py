@@ -158,7 +158,7 @@ def _run_smb_pivot(ctx, parent_target, child_target):
     try:
         # ── Step 1: Create + start HTTP listener ────────────────────────────
         print(f"  [step 1] creating HTTP listener {listener_name!r} on port {listener_port}")
-        listener_create(cli, listener_name, "http", **http_listener_kwargs(listener_port, ctx.env))
+        listener_create(cli, listener_name, "http", **http_listener_kwargs(listener_port, ctx.env, agent_type="demon"))
         listener_start(cli, listener_name)
         print("  [step 1] HTTP listener started")
 

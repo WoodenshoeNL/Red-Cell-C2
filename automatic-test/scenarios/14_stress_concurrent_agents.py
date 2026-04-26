@@ -485,9 +485,7 @@ def run(ctx):
         demon_port = listeners_cfg.get("stress_demon_port", 19093)
         demon_listener_name = f"test-stress-demon-{uid}"
         print(f"\n  [shared] creating Demon HTTP listener {demon_listener_name!r} on port {demon_port}")
-        kw = http_listener_kwargs(demon_port, ctx.env)
-        if "hosts" in kw:
-            kw["legacy_mode"] = True
+        kw = http_listener_kwargs(demon_port, ctx.env, agent_type="demon")
         listener_create(cli, demon_listener_name, "http", **kw)
         listener_start(cli, demon_listener_name)
         listeners_to_cleanup.append(demon_listener_name)

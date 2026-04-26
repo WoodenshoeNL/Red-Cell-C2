@@ -309,7 +309,8 @@ def run(ctx):
 
     # ── Step 1: Create + start both listeners ────────────────────────────────
     print(f"  [listener] creating HTTP listener {listener_win_name!r} on port {listener_win_port}")
-    listener_create(cli, listener_win_name, "http", **http_listener_kwargs(listener_win_port, ctx.env))
+    listener_create(cli, listener_win_name, "http",
+                    **http_listener_kwargs(listener_win_port, ctx.env, agent_type="demon"))
     listener_start(cli, listener_win_name)
 
     print(f"  [listener] creating HTTP listener {listener_lin_name!r} on port {listener_lin_port}")

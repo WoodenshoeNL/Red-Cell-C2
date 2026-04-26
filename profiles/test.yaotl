@@ -50,6 +50,11 @@ Demon {
 
     TrustXForwardedFor = false
 
+    # The frozen Demon agent does not negotiate INIT_EXT_MONOTONIC_CTR,
+    # so it falls into legacy CTR mode.  Without this flag the teamserver
+    # silently rejects every Demon DEMON_INIT.
+    AllowLegacyCtr = true
+
     Injection {
         Spawn64 = "C:\\Windows\\System32\\notepad.exe"
         Spawn32 = "C:\\Windows\\SysWOW64\\notepad.exe"

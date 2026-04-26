@@ -227,6 +227,36 @@ async fn create_audit_rejects_forged_action_label() {
 }
 
 #[tokio::test]
+async fn create_audit_rejects_forged_target_kind() {
+    let (app, _registry, _) =
+        test_router_with_registry(Some((60, "rest-op", "secret-op", OperatorRole::Operator))).await;
+
+    for forged_kind in ["listener", "operator", "config", "server"] {
+        let body =
+            format!(r#"{{"action": "operator.local_exec", "target_kind": "{forged_kind}"}}"#);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/audit")
+                    .method("POST")
+                    .header(API_KEY_HEADER, "secret-op")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "forged target_kind {forged_kind:?} should be rejected with 400"
+        );
+    }
+}
+
+#[tokio::test]
 async fn create_audit_defaults_result_status_to_success() {
     let (app, _registry, _) =
         test_router_with_registry(Some((60, "rest-op", "secret-op", OperatorRole::Operator))).await;

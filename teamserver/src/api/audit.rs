@@ -27,10 +27,15 @@ pub(super) enum AuditApiError {
     TimestampFormat,
     #[error("action {0:?} is not in the client-submittable allowlist")]
     InvalidAction(String),
+    #[error("target_kind {0:?} is not in the client-submittable allowlist")]
+    InvalidTargetKind(String),
 }
 
 /// Actions that the REST client is allowed to submit via `POST /audit`.
 const ALLOWED_CLIENT_ACTIONS: &[&str] = &["operator.local_exec"];
+
+/// Target kinds that the REST client is allowed to submit via `POST /audit`.
+const ALLOWED_CLIENT_TARGET_KINDS: &[&str] = &["agent"];
 
 impl IntoResponse for AuditApiError {
     fn into_response(self) -> Response {
@@ -38,6 +43,11 @@ impl IntoResponse for AuditApiError {
             Self::InvalidAction(_) => {
                 json_error_response(StatusCode::BAD_REQUEST, "invalid_action", self.to_string())
             }
+            Self::InvalidTargetKind(_) => json_error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_target_kind",
+                self.to_string(),
+            ),
             _ => json_error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "audit_api_error",
@@ -234,6 +244,9 @@ pub(super) async fn create_audit(
 ) -> Result<(StatusCode, Json<CreateAuditResponse>), AuditApiError> {
     if !ALLOWED_CLIENT_ACTIONS.contains(&body.action.as_str()) {
         return Err(AuditApiError::InvalidAction(body.action));
+    }
+    if !ALLOWED_CLIENT_TARGET_KINDS.contains(&body.target_kind.as_str()) {
+        return Err(AuditApiError::InvalidTargetKind(body.target_kind));
     }
 
     let details =

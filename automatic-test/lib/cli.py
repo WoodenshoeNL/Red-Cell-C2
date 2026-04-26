@@ -253,7 +253,7 @@ def payload_build_wait(
         "--wait-timeout", str(t),
     ]
     if output is not None:
-        args += ["--output", output]
+        args += ["--dst", output]
     return _run(run_cfg, *args)
 
 

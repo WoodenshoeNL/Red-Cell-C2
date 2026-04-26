@@ -54,18 +54,18 @@ pub enum PayloadCommands {
     /// Wait for a payload build job to finish, optionally saving the artifact.
     ///
     /// Polls until the build completes or fails, then returns the result.
-    /// With --output: downloads the built payload to the given path on success.
+    /// With --dst: downloads the built payload to the given path on success.
     ///
     /// Examples:
     ///   red-cell-cli payload build-wait <job-id>
-    ///   red-cell-cli payload build-wait <job-id> --output ./payload.exe
+    ///   red-cell-cli payload build-wait <job-id> --dst ./payload.exe
     #[command(verbatim_doc_comment)]
     BuildWait {
         /// Build job ID returned by `payload build`
         job_id: String,
         /// Local path to write the built payload on success
         #[arg(long)]
-        output: Option<String>,
+        dst: Option<String>,
         #[arg(long, help = crate::defaults::payload_build_wait_timeout_help())]
         wait_timeout: Option<u64>,
     },

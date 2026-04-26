@@ -106,9 +106,9 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: PayloadCommands
             }
         }
 
-        PayloadCommands::BuildWait { job_id, output, wait_timeout } => {
+        PayloadCommands::BuildWait { job_id, dst, wait_timeout } => {
             let timeout_secs = wait_timeout.unwrap_or(PAYLOAD_BUILD_WAIT_TIMEOUT_SECS);
-            match build::build_wait(client, &job_id, output.as_deref(), timeout_secs).await {
+            match build::build_wait(client, &job_id, dst.as_deref(), timeout_secs).await {
                 Ok(result) => match print_success(fmt, &result) {
                     Ok(()) => EXIT_SUCCESS,
                     Err(e) => {

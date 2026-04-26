@@ -34,6 +34,29 @@ pub fn resolve(
     cert_fingerprint: Option<String>,
     pin_intermediate: bool,
 ) -> Result<ResolvedConfig, ConfigError> {
+    resolve_with_global(
+        cli_server,
+        cli_token,
+        cli_timeout,
+        ca_cert,
+        cert_fingerprint,
+        pin_intermediate,
+        global_config_path(),
+    )
+}
+
+/// Same as [`resolve`] but accepts an explicit global config path override.
+///
+/// Tests use this to avoid reading `~/.config/red-cell-cli/config.toml`.
+pub(crate) fn resolve_with_global(
+    cli_server: Option<String>,
+    cli_token: Option<String>,
+    cli_timeout: Option<u64>,
+    ca_cert: Option<PathBuf>,
+    cert_fingerprint: Option<String>,
+    pin_intermediate: bool,
+    global_path: Option<PathBuf>,
+) -> Result<ResolvedConfig, ConfigError> {
     // Pay the I/O cost of loading files when any value that can come from the
     // config file is absent from the CLI/env.  Timeout and cert_fingerprint are
     // included so that `--server X --token Y` (no `--timeout`) still picks up
@@ -46,7 +69,7 @@ pub fn resolve(
 
     let file_config: Option<FileConfig> = if need_file {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let path = find_config_file(&cwd).or_else(global_config_path);
+        let path = find_config_file(&cwd).or(global_path);
         match path {
             Some(p) => Some(load_config_file(&p)?),
             None => None,

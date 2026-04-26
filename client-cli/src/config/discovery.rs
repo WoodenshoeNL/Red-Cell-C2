@@ -66,12 +66,15 @@ pub fn is_unconfigured() -> bool {
     }
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    no_config_on_disk(&cwd)
+    no_config_on_disk(&cwd, global_config_path().as_deref())
 }
 
 /// Check whether any config file exists — local walk-up or global path.
-pub(crate) fn no_config_on_disk(cwd: &Path) -> bool {
+///
+/// `global_override` lets callers (mainly tests) supply an isolated global
+/// config path instead of hitting the real `~/.config` directory.
+pub(crate) fn no_config_on_disk(cwd: &Path, global_override: Option<&Path>) -> bool {
     let has_local = find_config_file(cwd).is_some();
-    let has_global = global_config_path().is_some_and(|p| p.is_file());
+    let has_global = global_override.is_some_and(|p| p.is_file());
     !has_local && !has_global
 }

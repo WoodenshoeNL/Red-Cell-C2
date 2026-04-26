@@ -9,7 +9,7 @@ use super::file::{load_config_file, write_config_file};
 use super::find_config_file;
 #[cfg(unix)]
 use super::permissions::config_permission_tightening_warning;
-use super::resolve::resolve;
+use super::resolve::{resolve, resolve_with_global};
 use super::types::{ConfigError, FileConfig, FingerprintPinMode, TlsMode};
 
 /// Serialises tests that mutate the process-wide CWD.
@@ -131,7 +131,7 @@ fn resolve_returns_missing_server_error() {
     let _guard = CWD_LOCK.lock().unwrap();
     let original = std::env::current_dir().unwrap();
     std::env::set_current_dir(tmp.path()).unwrap();
-    let err = resolve(None, Some("tok".to_owned()), None, None, None, false);
+    let err = resolve_with_global(None, Some("tok".to_owned()), None, None, None, false, None);
     std::env::set_current_dir(&original).unwrap();
     assert!(matches!(err, Err(ConfigError::MissingServer)));
 }
@@ -142,7 +142,15 @@ fn resolve_returns_missing_token_error() {
     let _guard = CWD_LOCK.lock().unwrap();
     let original = std::env::current_dir().unwrap();
     std::env::set_current_dir(tmp.path()).unwrap();
-    let err = resolve(Some("https://ts:40056".to_owned()), None, None, None, None, false);
+    let err = resolve_with_global(
+        Some("https://ts:40056".to_owned()),
+        None,
+        None,
+        None,
+        None,
+        false,
+        None,
+    );
     std::env::set_current_dir(&original).unwrap();
     assert!(matches!(err, Err(ConfigError::MissingToken)));
 }
@@ -163,13 +171,14 @@ fn resolve_uses_explicit_timeout_over_file() {
 
 #[test]
 fn resolve_pin_intermediate_without_fingerprint_errors() {
-    let err = resolve(
+    let err = resolve_with_global(
         Some("https://ts:40056".to_owned()),
         Some("tok".to_owned()),
         Some(30),
         None,
         None,
         true,
+        None,
     )
     .unwrap_err();
     assert!(matches!(err, ConfigError::PinIntermediateWithoutFingerprint));
@@ -510,14 +519,14 @@ token  = "file-tok"
 #[test]
 fn no_config_on_disk_true_in_empty_dir() {
     let tmp = TempDir::new().unwrap();
-    assert!(no_config_on_disk(tmp.path()));
+    assert!(no_config_on_disk(tmp.path(), None));
 }
 
 #[test]
 fn no_config_on_disk_false_when_local_config_exists() {
     let tmp = TempDir::new().unwrap();
     write_config(tmp.path(), "server = \"https://ts:40056\"\ntoken = \"t\"");
-    assert!(!no_config_on_disk(tmp.path()));
+    assert!(!no_config_on_disk(tmp.path(), None));
 }
 
 #[test]
@@ -526,7 +535,16 @@ fn no_config_on_disk_false_when_parent_config_exists() {
     write_config(tmp.path(), "server = \"https://ts:40056\"");
     let child = tmp.path().join("sub");
     fs::create_dir_all(&child).unwrap();
-    assert!(!no_config_on_disk(&child));
+    assert!(!no_config_on_disk(&child, None));
+}
+
+#[test]
+fn no_config_on_disk_false_when_global_config_exists() {
+    let tmp = TempDir::new().unwrap();
+    let global = tmp.path().join("global-config.toml");
+    fs::write(&global, "server = \"https://ts:40056\"").unwrap();
+    let empty = TempDir::new().unwrap();
+    assert!(!no_config_on_disk(empty.path(), Some(global.as_path())));
 }
 
 #[test]

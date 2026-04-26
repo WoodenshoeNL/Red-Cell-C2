@@ -17,6 +17,9 @@ use uuid::Uuid;
 
 use crate::app::TeamserverState;
 use crate::auth::{AuthenticationFailure, AuthenticationResult};
+use crate::{
+    AuditResultStatus, audit_details, login_parameters, record_operator_action_with_notifications,
+};
 
 use super::errors::json_error_response;
 
@@ -119,12 +122,48 @@ pub(super) async fn post_login(State(state): State<TeamserverState>, request: Re
                 state.login_rate_limiter.record_success(ip).await;
             }
             debug!(user = %success.username, "REST login succeeded");
+            if let Err(error) = record_operator_action_with_notifications(
+                &state.database,
+                &state.webhooks,
+                &success.username,
+                "operator.login",
+                "operator",
+                Some(success.username.clone()),
+                audit_details(
+                    AuditResultStatus::Success,
+                    None,
+                    Some("login"),
+                    Some(login_parameters(&success.username, &connection_id)),
+                ),
+            )
+            .await
+            {
+                warn!(user = %success.username, %error, "failed to persist audit log entry");
+            }
             (StatusCode::OK, Json(LoginResponse { token: success.token, user: success.username }))
                 .into_response()
         }
         AuthenticationResult::Failure(failure) => {
             if let Some(ip) = ip {
                 warn!(%ip, user = %login_req.user, "REST login failed");
+            }
+            if let Err(error) = record_operator_action_with_notifications(
+                &state.database,
+                &state.webhooks,
+                &login_req.user,
+                "operator.login",
+                "operator",
+                (!login_req.user.is_empty()).then_some(login_req.user.clone()),
+                audit_details(
+                    AuditResultStatus::Failure,
+                    None,
+                    Some("login"),
+                    Some(login_parameters(&login_req.user, &connection_id)),
+                ),
+            )
+            .await
+            {
+                warn!(user = %login_req.user, %error, "failed to persist audit log entry");
             }
             tokio::time::sleep(FAILED_LOGIN_DELAY).await;
             let status = match failure {

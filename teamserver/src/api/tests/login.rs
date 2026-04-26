@@ -9,6 +9,7 @@ use red_cell_common::config::OperatorRole;
 use red_cell_common::crypto::hash_password_sha3;
 
 use super::helpers::*;
+use crate::{AuditQuery, AuditResultStatus, Database};
 
 fn login_request(user: &str, password_sha3: &str) -> Request<Body> {
     Request::builder()
@@ -205,4 +206,72 @@ async fn login_returns_different_tokens_per_call() {
     let token2 = body2["token"].as_str().expect("token2");
 
     assert_ne!(token1, token2, "each login must produce a unique session token");
+}
+
+#[tokio::test]
+async fn login_success_creates_audit_record() {
+    let database = Database::connect_in_memory().await.expect("database");
+    let (app, _, _) = test_router_with_database(
+        database.clone(),
+        Some((60, "k", "test-key", OperatorRole::Admin)),
+    )
+    .await;
+    let password_hash = hash_password_sha3("password1234");
+
+    let response = app.oneshot(login_request("Neo", &password_hash)).await.expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let page = crate::query_audit_log(
+        &database,
+        &AuditQuery {
+            action: Some("operator.login".to_owned()),
+            actor: Some("Neo".to_owned()),
+            ..AuditQuery::default()
+        },
+    )
+    .await
+    .expect("audit query should succeed");
+
+    assert_eq!(page.total, 1, "one operator.login record expected after successful login");
+    let record = &page.items[0];
+    assert_eq!(record.action, "operator.login");
+    assert_eq!(record.actor, "Neo");
+    assert_eq!(record.result_status, AuditResultStatus::Success);
+    let username =
+        record.parameters.as_ref().and_then(|p| p.get("username")).and_then(|v| v.as_str());
+    assert_eq!(username, Some("Neo"), "audit parameters should include username");
+}
+
+#[tokio::test]
+async fn login_failure_creates_audit_record() {
+    let database = Database::connect_in_memory().await.expect("database");
+    let (app, _, _) = test_router_with_database(
+        database.clone(),
+        Some((60, "k", "test-key", OperatorRole::Admin)),
+    )
+    .await;
+    let wrong_hash = hash_password_sha3("wrong-password");
+
+    let response = app.oneshot(login_request("Neo", &wrong_hash)).await.expect("response");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let page = crate::query_audit_log(
+        &database,
+        &AuditQuery {
+            action: Some("operator.login".to_owned()),
+            actor: Some("Neo".to_owned()),
+            ..AuditQuery::default()
+        },
+    )
+    .await
+    .expect("audit query should succeed");
+
+    assert_eq!(page.total, 1, "one operator.login record expected after failed login");
+    let record = &page.items[0];
+    assert_eq!(record.action, "operator.login");
+    assert_eq!(record.actor, "Neo");
+    assert_eq!(record.result_status, AuditResultStatus::Failure);
+    let username =
+        record.parameters.as_ref().and_then(|p| p.get("username")).and_then(|v| v.as_str());
+    assert_eq!(username, Some("Neo"), "audit parameters should include username");
 }

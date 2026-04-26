@@ -198,6 +198,19 @@ impl EcdhRepository {
         Ok(())
     }
 
+    /// Delete a single session by its `connection_id`.
+    pub async fn delete_session(
+        &self,
+        connection_id: &ConnectionId,
+    ) -> Result<(), TeamserverError> {
+        sqlx::query("DELETE FROM ts_ecdh_sessions WHERE connection_id = ?")
+            .bind(connection_id.0.as_slice())
+            .execute(&self.pool)
+            .await
+            .map_err(TeamserverError::Sqlx)?;
+        Ok(())
+    }
+
     /// Delete all sessions for an agent (used when an agent is deregistered).
     pub async fn delete_sessions_for_agent(&self, agent_id: u32) -> Result<(), TeamserverError> {
         sqlx::query("DELETE FROM ts_ecdh_sessions WHERE agent_id = ?")

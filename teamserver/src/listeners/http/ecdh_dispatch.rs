@@ -194,32 +194,42 @@ async fn process_ecdh_registration(
 
     let agent_id = agent.agent_id;
 
-    // Register in registry + DB.  The ECDH agent has no AES key — use zeros
-    // (the session key is stored separately in ts_ecdh_sessions).
-    registry
-        .insert_full(agent.clone(), listener_name, 0, legacy_ctr, true, seq_protected)
-        .await
-        .map_err(|e| ListenerManagerError::InvalidConfig {
-            message: format!("ECDH agent registry insert failed: {e}"),
-        })?;
-
-    // Persist ECDH session: connection_id → (agent_id, session_key).
+    // Prepare all failable data before committing any state, so a failure
+    // cannot leave a ghost agent row in the registry/database.
     let connection_id =
         ConnectionId::generate().map_err(|e| ListenerManagerError::InvalidConfig {
             message: format!("ECDH connection_id generation: {e}"),
         })?;
 
-    database.ecdh().store_session(&connection_id, agent_id, &session_key).await.map_err(|e| {
-        ListenerManagerError::InvalidConfig { message: format!("ECDH session store failed: {e}") }
-    })?;
-
-    // Build the registration response.
     let response =
         build_registration_response(&connection_id, &session_key, agent_id).map_err(|e| {
             ListenerManagerError::InvalidConfig {
                 message: format!("ECDH build_registration_response failed: {e}"),
             }
         })?;
+
+    // Persist ECDH session first — no FK on agent_id, so this is safe before
+    // the agent row exists.  If the agent insert below fails we roll back.
+    database.ecdh().store_session(&connection_id, agent_id, &session_key).await.map_err(|e| {
+        ListenerManagerError::InvalidConfig { message: format!("ECDH session store failed: {e}") }
+    })?;
+
+    // Register in registry + DB.  The ECDH agent has no AES key — use zeros
+    // (the session key is stored separately in ts_ecdh_sessions).
+    if let Err(e) =
+        registry.insert_full(agent.clone(), listener_name, 0, legacy_ctr, true, seq_protected).await
+    {
+        if let Err(cleanup_err) = database.ecdh().delete_session(&connection_id).await {
+            warn!(
+                agent_id = format_args!("{agent_id:08X}"),
+                %cleanup_err,
+                "failed to roll back ECDH session after agent insert failure"
+            );
+        }
+        return Err(ListenerManagerError::InvalidConfig {
+            message: format!("ECDH agent registry insert failed: {e}"),
+        });
+    }
 
     // Emit events and audit.
     let pivots = registry.pivots(agent_id).await;
@@ -900,5 +910,105 @@ mod tests {
         let persisted =
             db.agents().get_persisted(agent_id).await.expect("db query").expect("agent row");
         assert!(!persisted.seq_protected);
+    }
+
+    // ── Ghost-agent rollback tests ────────────────────────────────────────
+
+    async fn count_ecdh_sessions_for_agent(db: &Database, agent_id: u32) -> i64 {
+        sqlx::query("SELECT COUNT(*) FROM ts_ecdh_sessions WHERE agent_id = ?")
+            .bind(i64::from(agent_id))
+            .fetch_one(db.pool())
+            .await
+            .expect("count query")
+            .get(0)
+    }
+
+    /// A duplicate registration (same agent_id) must not leave an orphaned
+    /// ECDH session row.  Before the fix, `insert_full` was called first —
+    /// if it succeeded the first time and a later step failed, a ghost agent
+    /// row was left behind.  After the reorder, `insert_full` is last, and
+    /// its failure triggers cleanup of the session row it cannot own.
+    #[tokio::test]
+    async fn duplicate_registration_does_not_leak_session_row() {
+        use crate::demon::INIT_EXT_MONOTONIC_CTR;
+
+        let (db, registry, events, _dispatcher, _keypair, _limiter) = ecdh_test_fixture().await;
+        let agent_id: u32 = 0xDEAD_0001;
+        let session_key = [0x42u8; 32];
+        let metadata = build_ecdh_init_metadata(agent_id, INIT_EXT_MONOTONIC_CTR);
+        let ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 200));
+
+        // First registration must succeed.
+        let result = process_ecdh_registration(
+            "test-listener",
+            session_key,
+            &metadata,
+            &registry,
+            &db,
+            &events,
+            ip,
+        )
+        .await;
+        assert!(result.is_ok(), "first registration must succeed; got: {result:?}");
+        assert_eq!(count_ecdh_sessions_for_agent(&db, agent_id).await, 1);
+        assert!(registry.get(agent_id).await.is_some(), "agent must be in registry");
+
+        // Second registration with the same agent_id must fail (DuplicateAgent)
+        // and must NOT leave an extra session row behind.
+        let dup_result = process_ecdh_registration(
+            "test-listener",
+            session_key,
+            &metadata,
+            &registry,
+            &db,
+            &events,
+            ip,
+        )
+        .await;
+        assert!(dup_result.is_err(), "duplicate registration must fail");
+        assert_eq!(
+            count_ecdh_sessions_for_agent(&db, agent_id).await,
+            1,
+            "failed duplicate must not leave an extra session row"
+        );
+    }
+
+    /// A successful registration must commit both the agent row and the ECDH
+    /// session row — verify the happy path end-to-end via the internal
+    /// `process_ecdh_registration` helper.
+    #[tokio::test]
+    async fn successful_registration_commits_agent_and_session() {
+        use crate::demon::INIT_EXT_MONOTONIC_CTR;
+
+        let (db, registry, events, _dispatcher, _keypair, _limiter) = ecdh_test_fixture().await;
+        let agent_id: u32 = 0xDEAD_0002;
+        let session_key = [0x43u8; 32];
+        let metadata = build_ecdh_init_metadata(agent_id, INIT_EXT_MONOTONIC_CTR);
+        let ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 201));
+
+        let result = process_ecdh_registration(
+            "test-listener",
+            session_key,
+            &metadata,
+            &registry,
+            &db,
+            &events,
+            ip,
+        )
+        .await;
+        assert!(result.is_ok(), "registration must succeed; got: {result:?}");
+
+        assert!(
+            registry.get(agent_id).await.is_some(),
+            "agent must be registered in the in-memory registry"
+        );
+        assert_eq!(
+            count_ecdh_sessions_for_agent(&db, agent_id).await,
+            1,
+            "exactly one ECDH session row must exist"
+        );
+        let persisted =
+            db.agents().get_persisted(agent_id).await.expect("db query").expect("agent row");
+        assert_eq!(persisted.info.agent_id, agent_id);
     }
 }

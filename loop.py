@@ -2432,7 +2432,11 @@ def autotest_kill_target_vm_orphans(log: Logger):
                 "| Stop-Process -Force -ErrorAction SilentlyContinue\""
             )
         else:
-            remote_cmd = "pkill -f /tmp/rc-test/agent- || true"
+            # Bracket-trick: the regex [a]gent- matches the literal text "agent-"
+            # but the pattern as written ('[a]gent-') does NOT appear in the
+            # ssh-spawned shell's own command line, so pkill cannot accidentally
+            # match itself and kill the connection (which would exit 255).
+            remote_cmd = "pkill -f '/tmp/rc-test/[a]gent-' || true"
         try:
             result = subprocess.run(
                 ["ssh", "-i", key_path,

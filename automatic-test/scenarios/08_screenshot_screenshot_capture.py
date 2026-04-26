@@ -5,8 +5,10 @@ Take a screenshot via agent and verify a loot entry of type 'screenshot' is
 created, then download the bytes and validate the image header.
 
 All payloads are pre-built in parallel (when ``--no-parallel`` is not set) via
-:func:`~lib.payload.build_parallel` against a shared listener, then each agent
-pass deploys + captures sequentially.
+:func:`~lib.payload.build_parallel`.  On Windows, two separate HTTP listeners
+are created: a Demon listener (legacy mode, DemonEnvelope header) and an
+Archon/Specter listener (non-legacy, ArchonEnvelope + ECDH).  On Linux, a
+single listener is used.  Each agent pass deploys + captures sequentially.
 
 Runs once per agent per target:
   - Windows target: Demon pass (always) + Archon pass (when ``"archon"``
@@ -17,7 +19,9 @@ Runs once per agent per target:
     usable DISPLAY/Xvfb).
 
 Steps:
-  0. Create shared HTTP listener; pre-build all needed payloads in parallel
+  0. Create Demon (legacy) and Archon/Specter (non-legacy) HTTP listeners
+     (Windows) or a single listener (Linux); pre-build all needed payloads
+     in parallel
   Per agent pass:
   1. Snapshot existing screenshot-loot IDs
   2. Deploy pre-built payload via SSH/SCP to the target
@@ -27,7 +31,7 @@ Steps:
   6. Wait for a new loot entry of type 'screenshot' to appear
   7. Download screenshot bytes → verify PNG or BMP header
   8. Kill agent, clean up
-  Final: stop + delete shared listener
+  Final: stop + delete all listeners
 
 Note: screenshot capture requires an active display session.  This scenario
 targets the Windows test machine which runs an interactive user session.

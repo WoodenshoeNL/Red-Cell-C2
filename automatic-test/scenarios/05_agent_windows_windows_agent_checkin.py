@@ -8,13 +8,16 @@ one is listed and its payload build fails, the scenario fails so the regression
 is caught.
 
 All payloads are pre-built in parallel (when ``--no-parallel`` is not set) via
-:func:`~lib.payload.build_parallel` against a single shared listener, then each
-agent pass deploys + runs the command suite sequentially.
+:func:`~lib.payload.build_parallel`.  Two separate HTTP listeners are created:
+a Demon listener (legacy mode, DemonEnvelope header) and an Archon/Specter
+listener (non-legacy, ArchonEnvelope + ECDH).  Each agent pass deploys + runs
+the command suite sequentially.
 
 Skip if ctx.windows is None.
 
 Steps:
-  0. Create shared HTTP listener; pre-build all needed payloads in parallel
+  0. Create Demon (legacy) and Archon/Specter (non-legacy) HTTP listeners;
+     pre-build all needed payloads in parallel
   Per agent pass:
   1. Deploy pre-built payload via SSH/SCP to Windows 11 test machine
   2. Execute payload in background on target
@@ -22,7 +25,7 @@ Steps:
   4. Run command suite: whoami, dir C:\\, ipconfig, PowerShell, reg query,
      sc query, tasklist /m, netstat -ano, arp -a
   5. Kill agent, clean up work_dir on target
-  Final: stop + delete shared listener
+  Final: stop + delete both listeners
 """
 
 DESCRIPTION = "Windows agent checkin (Demon + Archon + Specter)"

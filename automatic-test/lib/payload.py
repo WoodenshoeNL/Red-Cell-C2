@@ -31,6 +31,7 @@ class MatrixCell:
     fmt: str = "exe"
     agent: str = "demon"
     sleep_secs: int | None = None
+    listener: str | None = None
 
 
 def _normalize_cell(c: MatrixCell | tuple[Any, ...] | list[Any]) -> MatrixCell:
@@ -58,9 +59,10 @@ def _one_cell_bytes(
     cell: MatrixCell,
 ) -> bytes:
     """Detach-submit, wait, and download a single build (caller threads this)."""
+    effective_listener = cell.listener if cell.listener is not None else listener
     sub = payload_build(
         cfg,
-        listener=listener,
+        listener=effective_listener,
         arch=cell.arch,
         fmt=cell.fmt,
         agent=cell.agent,
@@ -112,10 +114,11 @@ def build_parallel(
 
         out: list[bytes] = []
         for cell in row:
+            effective_listener = cell.listener if cell.listener is not None else listener
             out.append(
                 payload_build_and_fetch(
                     cfg,
-                    listener=listener,
+                    listener=effective_listener,
                     arch=cell.arch,
                     fmt=cell.fmt,
                     agent=cell.agent,

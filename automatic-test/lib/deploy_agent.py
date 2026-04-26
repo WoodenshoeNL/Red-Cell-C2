@@ -30,6 +30,7 @@ def deploy_and_checkin(
     sleep_secs: int | None = None,
     expect_checkin: bool = True,
     no_checkin_timeout: int | None = None,
+    pre_built_payload: bytes | None = None,
 ) -> dict | None:
     """Build, deploy, execute, and wait for a single agent checkin.
 
@@ -68,6 +69,9 @@ def deploy_and_checkin(
         no_checkin_timeout: Seconds to wait for absence of checkin when *expect_checkin*
                           is ``False``.  Defaults to ``timeouts.working_hours_probe``
                           from env or ``45``.
+        pre_built_payload: When provided, skip the build step and use these raw
+                          bytes directly.  Useful when payloads have already been
+                          compiled in parallel via :func:`~lib.payload.build_parallel`.
 
     Returns:
         The agent dict from :func:`~lib.wait.wait_for_agent`, or ``None`` when
@@ -101,18 +105,22 @@ def deploy_and_checkin(
     _fd, local_payload = tempfile.mkstemp(suffix=f".{fmt}")
     os.close(_fd)
     try:
-        # Step 2 — build payload.
-        print(f"  [{tag}][payload] building {agent_type} {fmt} {arch}")
-        raw = payload_build_and_fetch(
-            cli,
-            listener=listener_name,
-            arch=arch,
-            fmt=fmt,
-            agent=agent_type,
-            sleep_secs=sleep_secs,
-        )
+        # Step 2 — build payload (or use pre-built bytes).
+        if pre_built_payload is not None:
+            raw = pre_built_payload
+            print(f"  [{tag}][payload] using pre-built {agent_type} {fmt} {arch} ({len(raw)} bytes)")
+        else:
+            print(f"  [{tag}][payload] building {agent_type} {fmt} {arch}")
+            raw = payload_build_and_fetch(
+                cli,
+                listener=listener_name,
+                arch=arch,
+                fmt=fmt,
+                agent=agent_type,
+                sleep_secs=sleep_secs,
+            )
+            print(f"  [{tag}][payload] built ({len(raw)} bytes)")
         assert len(raw) > 0, f"{agent_type} payload is empty"
-        print(f"  [{tag}][payload] built ({len(raw)} bytes)")
 
         with open(local_payload, "wb") as fh:
             fh.write(raw)

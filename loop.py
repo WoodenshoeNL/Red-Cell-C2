@@ -35,6 +35,7 @@ DEFAULT_SLEEP = {
     "coverage":    30 * 60,    # 30 minutes
     "maintenance": 60 * 60,    # 60 minutes
     "feature":     0,          # default iterations=1, so sleep is irrelevant
+    "autotest":    240 * 60,   # 4 hours — full suite is ~20 min, want time for dev loop
 }
 
 # Loop types that default to 1 iteration instead of running forever.
@@ -80,10 +81,16 @@ REVIEW_PROMPTS = {
     "quality":  "prompts/CLAUDE_TEST_PROMPT.md",   # quality-focused test review
     "coverage": "prompts/CODEX_TEST_PROMPT.md",    # breadth-focused coverage scan
     "feature":  "prompts/CLAUDE_FEATURE_PROMPT.md", # feature completeness + integration gaps
+    "autotest": "prompts/CLAUDE_AUTOTEST_PROMPT.md", # run autotest suite, classify failures, file beads
 }
 
 # Review loop types that write a per-run timestamped log in addition to the rolling log
-PER_RUN_LOG_LOOPS = {"arch", "quality", "coverage", "feature"}
+PER_RUN_LOG_LOOPS = {"arch", "quality", "coverage", "feature", "autotest"}
+
+# Loops that run against the live working tree (need real teamserver, gitignored
+# config files like env.toml/targets.toml, the actual target/release binary).
+# Skip the worktree isolation that the regular review_loop applies.
+LIVE_WORKTREE_LOOPS = {"autotest"}
 
 
 # ── Logging ────────────────────────────────────────────────────────────────────
@@ -2294,10 +2301,20 @@ def review_loop(args, log: Logger):
         # changes). Use a stable per-loop-type Cargo target dir for incremental builds.
         # QA gets its own dir so a worktree tear-down cannot delete binaries a concurrent
         # arch/quality run is executing (was causing nextest double-spawn failures).
-        worktree_path = create_review_worktree(loop_type, log)
-        run_cwd = worktree_path or SCRIPT_DIR
-        cargo_target = QA_CARGO_TARGET if loop_type == "qa" else REVIEW_CARGO_TARGET
-        run_env: dict = {"CARGO_TARGET_DIR": str(cargo_target)}
+        #
+        # Live-tree loops (autotest) bypass this — they need the real working tree
+        # because they talk to the running teamserver, use the actual target/release
+        # binaries, and read host-specific gitignored config files (env.toml,
+        # targets.toml) that don't exist in a worktree.
+        if loop_type in LIVE_WORKTREE_LOOPS:
+            worktree_path = None
+            run_cwd = SCRIPT_DIR
+            run_env = {}
+        else:
+            worktree_path = create_review_worktree(loop_type, log)
+            run_cwd = worktree_path or SCRIPT_DIR
+            cargo_target = QA_CARGO_TARGET if loop_type == "qa" else REVIEW_CARGO_TARGET
+            run_env = {"CARGO_TARGET_DIR": str(cargo_target)}
 
         extra_log = None
         if per_run:
@@ -2357,6 +2374,7 @@ loop types:
   coverage     Test coverage scan  — finds untested public functions    (default sleep: 30m)
   maintenance  Infrastructure health — disk, git, process checks       (default sleep: 60m)
   feature      Feature completeness — what's planned vs built, integration gaps (default: 1 run)
+  autotest     Run automatic-test E2E suite — classify failures, file beads     (default sleep: 240m)
 
 examples:
   ./loop.py --agent claude --loop dev
@@ -2375,6 +2393,9 @@ examples:
   ./loop.py --agent claude --loop feature --zone teamserver client-cli
   ./loop.py --agent claude --loop feature --zone teamserver phantom
   ./loop.py --agent claude --loop feature --zone teamserver  # single zone
+  ./loop.py --agent claude --loop autotest                   # full E2E suite, 4h cadence
+  ./loop.py --agent claude --loop autotest --iterations 1    # one-shot run + report
+  ./loop.py --agent claude --loop autotest --sleep 60        # hourly cadence (heavy)
 """,
     )
     parser.add_argument(
@@ -2385,7 +2406,7 @@ examples:
     )
     parser.add_argument(
         "--loop",
-        choices=["dev", "qa", "arch", "quality", "coverage", "maintenance", "feature"],
+        choices=["dev", "qa", "arch", "quality", "coverage", "maintenance", "feature", "autotest"],
         default="dev",
         help="Loop type to run (default: dev)",
     )
@@ -2399,7 +2420,8 @@ examples:
         type=float, default=None, metavar="MINUTES",
         help=(
             "Sleep N minutes after each iteration. "
-            "If omitted, uses per-loop defaults: dev=0, qa=20, arch=120, quality/coverage=30"
+            "If omitted, uses per-loop defaults: dev=0, qa=20, arch=120, "
+            "quality/coverage=30, maintenance=60, autotest=240"
         ),
     )
     parser.add_argument(

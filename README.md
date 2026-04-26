@@ -361,6 +361,7 @@ All prompts live in `prompts/`:
 | `prompts/CLAUDE_TEST_PROMPT.md` | `quality` loop |
 | `prompts/CODEX_TEST_PROMPT.md` | `coverage` loop |
 | `prompts/CLAUDE_FEATURE_PROMPT.md` | `feature` loop |
+| `prompts/CLAUDE_AUTOTEST_PROMPT.md` | `autotest` loop |
 
 ---
 

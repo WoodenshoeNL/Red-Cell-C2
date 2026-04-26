@@ -1,0 +1,12 @@
+mod agent;
+mod bare_invocation;
+mod completion;
+mod global_flags;
+mod help_contract;
+mod listener;
+mod log_command;
+mod loot;
+mod payload;
+mod profile;
+mod rbac;
+mod server;

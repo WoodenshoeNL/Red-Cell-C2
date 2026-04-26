@@ -128,6 +128,7 @@ pub(crate) async fn run(
     id: AgentId,
     timeout: Option<u64>,
     enable_local_shell: bool,
+    operator: &str,
 ) -> i32 {
     let timeout_secs = timeout.unwrap_or(AGENT_EXEC_WAIT_TIMEOUT_SECS);
 
@@ -209,6 +210,7 @@ pub(crate) async fn run(
                     audit_event = "local_exec",
                     command = cmd,
                     agent_id = %id,
+                    operator = operator,
                     "operator executing local shell command"
                 );
                 handle_local_exec(cmd).await;

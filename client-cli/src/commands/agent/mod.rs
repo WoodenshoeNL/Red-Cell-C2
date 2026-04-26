@@ -132,7 +132,14 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) 
                 return err.exit_code();
             }
             let local_shell = enable_local_shell || crate::config::resolve_enable_local_shell();
-            shell::run(client, id, timeout, local_shell).await
+            let operator = match resolve_operator_name(client).await {
+                Ok(name) => name,
+                Err(e) => {
+                    print_error(&e).ok();
+                    return e.exit_code();
+                }
+            };
+            shell::run(client, id, timeout, local_shell, &operator).await
         }
 
         AgentCommands::Output { id, watch, since } => {
@@ -251,4 +258,18 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) 
             }
         },
     }
+}
+
+// ── helpers ──────────────────────────────────────────────────────────────────
+
+/// Minimal wire type for `GET /operators/whoami` — only the `name` field.
+#[derive(serde::Deserialize)]
+struct WhoamiName {
+    name: String,
+}
+
+/// Resolve the operator name for the current API token via the whoami endpoint.
+async fn resolve_operator_name(client: &ApiClient) -> Result<String, CliError> {
+    let resp: WhoamiName = client.get("/operators/whoami").await?;
+    Ok(resp.name)
 }

@@ -892,3 +892,38 @@ fn agent_groups_info_empty_groups_renders_text() {
     let info = AgentGroupsInfo { agent_id: "BADF00D".to_owned(), groups: vec![] };
     assert!(info.render_text().contains("no RBAC groups"));
 }
+
+// ── resolve_operator_name ────────────────────────────────────────────────
+
+#[tokio::test]
+async fn resolve_operator_name_returns_name_from_whoami() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/operators/whoami"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "name": "alice",
+            "role": "admin",
+            "auth_method": "api_key"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = crate::client::ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
+    let name = super::resolve_operator_name(&client).await.expect("whoami succeeds");
+    assert_eq!(name, "alice");
+}
+
+#[tokio::test]
+async fn resolve_operator_name_returns_error_when_server_unreachable() {
+    let cfg = mock_cfg("http://127.0.0.1:1");
+    let client = crate::client::ApiClient::new(&cfg).expect("build client");
+    let result = super::resolve_operator_name(&client).await;
+    assert!(
+        result.is_err(),
+        "resolve_operator_name against unreachable server must return error; got: {result:?}"
+    );
+}

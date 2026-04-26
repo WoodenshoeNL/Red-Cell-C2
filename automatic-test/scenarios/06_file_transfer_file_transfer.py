@@ -3,30 +3,31 @@ Scenario 06_file_transfer: File transfer
 
 Upload and download files through an active agent.
 
-Linux passes (Demon bin + Phantom elf): upload/download/SHA-256 against Linux target.
+Linux passes (Phantom elf): upload/download/SHA-256 against Linux target.
 Windows passes (Demon exe + Archon exe + Specter exe): same operations against
 Windows 11 target.
 
 Phantom/Archon/Specter passes run only when listed in ``agents.available`` in env.toml;
 build failures for listed agents fail the scenario instead of silently skipping.
 
-Steps (per Linux agent pass):
-  1. Create + start HTTP listener
-  2. Build agent payload for Linux target
-  3. Deploy via SSH/SCP to Linux test machine
-  4. Execute payload in background on target
-  5. Wait for agent checkin
-  6. Upload a known file → verify it appears on target filesystem via SHA-256
-  7. Download the uploaded file back → verify contents match original (SHA-256)
-  8. Download a system file (/etc/hostname) → verify non-empty bytes
-  9. Kill agent, stop listener, clean up
+All payloads are pre-built in parallel (when ``--no-parallel`` is not set) via
+:func:`~lib.payload.build_parallel` against shared per-platform listeners, then each
+agent pass deploys + runs the file-transfer suite sequentially.
 
-Steps (per Windows agent pass):
+Steps:
+  0. Create shared HTTP listener(s); pre-build all needed payloads in parallel
+  Per agent pass (Linux):
+  1. Deploy pre-built payload via SSH/SCP to Linux test machine
+  2. Execute payload in background on target
+  3. Wait for agent checkin
+  4. Upload a known file → verify it appears on target filesystem via SHA-256
+  5. Download the uploaded file back → verify contents match original (SHA-256)
+  6. Download a system file (/etc/hostname) → verify non-empty bytes
+  7. Kill agent, clean up
+  Per agent pass (Windows):
   Same as above, adapted for Windows paths, certutil SHA-256, and
   C:\\Windows\\win.ini as the system file.
-
-Skip Linux passes if ctx.linux is None.
-Skip Windows passes if ctx.windows is None.
+  Final: stop + delete shared listener(s)
 """
 
 DESCRIPTION = "File transfer (Demon + Archon + Phantom + Specter)"
@@ -58,40 +59,33 @@ def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
-    """Run the full file-transfer suite for one agent type.
+def _run_for_agent(ctx, agent_type: str, fmt: str,
+                   *, listener_name: str, pre_built_payload: bytes) -> None:
+    """Run the full file-transfer suite for one Linux agent type.
 
     Args:
-        ctx:         RunContext passed by the harness.
-        agent_type:  Agent name passed to ``payload_build`` (e.g. ``"demon"``
-                     or ``"phantom"``).
-        fmt:         Payload format (``"exe"`` is required for Rust agents like Phantom).
-        name_prefix: Short prefix used to name the listener and remote files.
+        ctx:               RunContext passed by the harness.
+        agent_type:        Agent name (e.g. ``"phantom"``).
+        fmt:               Payload format (``"exe"``).
+        listener_name:     Name of the pre-created, pre-started listener.
+        pre_built_payload: Raw payload bytes from :func:`~lib.payload.build_parallel`.
 
     Raises:
         AssertionError on test failure.
-        CliError if the payload build fails (propagates as a scenario failure).
     """
     from lib.cli import (
         agent_download,
         agent_exec,
         agent_kill,
-        listener_create,
-        listener_delete,
-        listener_start,
-        listener_stop,
         agent_upload,
     )
     from lib.deploy import run_remote
     from lib.deploy_agent import deploy_and_checkin
-    from lib.listeners import http_listener_kwargs
 
     cli = ctx.cli
     co = int(ctx.timeouts.command_output)
     target = ctx.linux
     uid = _short_id()
-    listener_name = f"{name_prefix}-{uid}"
-    listener_port = ctx.env.get("listeners", {}).get("linux_port", 19081)
 
     _fd, local_upload_src = tempfile.mkstemp(suffix=".dat")
     os.close(_fd)
@@ -100,25 +94,19 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
     _fd, local_sysfile_dst = tempfile.mkstemp(suffix=".txt")
     os.close(_fd)
 
-    # ── Step 1: Create + start HTTP listener ────────────────────────────────
-    print(f"  [{agent_type}][listener] creating HTTP listener {listener_name!r} on port {listener_port}")
-    listener_create(cli, listener_name, "http", **http_listener_kwargs(listener_port, ctx.env))
-    listener_start(cli, listener_name)
-    print(f"  [{agent_type}][listener] started")
-
     agent_id = None
     try:
-        # ── Steps 2-5: Build, deploy, exec, wait for checkin ─────────────────
+        # ── Deploy, exec, wait for checkin ───────────────────────────────────
         agent = deploy_and_checkin(
             ctx, cli, target,
             agent_type=agent_type, fmt=fmt,
             listener_name=listener_name,
             label=agent_type,
+            pre_built_payload=pre_built_payload,
         )
         agent_id = agent["id"]
 
-        # ── Step 6: Upload a known file ──────────────────────────────────────
-        # Create a local file with known content and a stable SHA-256.
+        # ── Upload a known file ──────────────────────────────────────────────
         upload_content = (
             b"Red Cell C2 file-transfer test\n"
             + uid.encode() + b"\n"
@@ -144,7 +132,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
         )
         print(f"  [{agent_type}][upload] SHA-256 verified: {remote_sha}")
 
-        # ── Step 7: Download the uploaded file back ──────────────────────────
+        # ── Download the uploaded file back ──────────────────────────────────
         print(f"  [{agent_type}][download] downloading {remote_upload_dst} → local")
         agent_download(cli, agent_id, src=remote_upload_dst, dst=local_download_dst)
 
@@ -162,7 +150,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
             f"SHA-256 {downloaded_sha256}"
         )
 
-        # ── Step 8: Download a system file (/etc/hostname) ───────────────────
+        # ── Download a system file (/etc/hostname) ───────────────────────────
         print(f"  [{agent_type}][sysfile] downloading /etc/hostname via agent")
         agent_download(cli, agent_id, src="/etc/hostname", dst=local_sysfile_dst)
 
@@ -201,23 +189,13 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
         print(f"  [{agent_type}][suite] all file-transfer checks passed")
 
     finally:
-        # ── Step 9: Kill agent, stop listener, clean up ──────────────────────
+        # ── Kill agent, clean up ─────────────────────────────────────────────
         if agent_id:
             print(f"  [{agent_type}][cleanup] killing agent {agent_id}")
             try:
                 agent_kill(cli, agent_id)
             except Exception as exc:
                 print(f"  [{agent_type}][cleanup] agent kill failed (non-fatal): {exc}")
-
-        print(f"  [{agent_type}][cleanup] stopping/deleting listener {listener_name!r}")
-        try:
-            listener_stop(cli, listener_name)
-        except Exception:
-            pass
-        try:
-            listener_delete(cli, listener_name)
-        except Exception:
-            pass
 
         print(f"  [{agent_type}][cleanup] removing work_dir on target")
         try:
@@ -249,40 +227,33 @@ def _parse_certutil_hash(output: str) -> str:
     raise ValueError(f"Could not extract SHA-256 from certutil output:\n{output!r}")
 
 
-def _run_for_agent_windows(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
+def _run_for_agent_windows(ctx, agent_type: str, fmt: str,
+                           *, listener_name: str, pre_built_payload: bytes) -> None:
     """Run the full file-transfer suite for one Windows agent type.
 
     Args:
-        ctx:         RunContext passed by the harness.
-        agent_type:  Agent name passed to ``payload_build`` (e.g. ``"demon"``
-                     or ``"specter"``).
-        fmt:         Payload format (``"exe"``).
-        name_prefix: Short prefix used to name the listener and remote files.
+        ctx:               RunContext passed by the harness.
+        agent_type:        Agent name (e.g. ``"demon"``, ``"specter"``).
+        fmt:               Payload format (``"exe"``).
+        listener_name:     Name of the pre-created, pre-started listener.
+        pre_built_payload: Raw payload bytes from :func:`~lib.payload.build_parallel`.
 
     Raises:
         AssertionError on test failure.
-        CliError if the payload build fails (propagates as a scenario failure).
     """
     from lib.cli import (
         agent_download,
         agent_exec,
         agent_kill,
         agent_upload,
-        listener_create,
-        listener_delete,
-        listener_start,
-        listener_stop,
     )
     from lib.deploy import run_remote
     from lib.deploy_agent import deploy_and_checkin
-    from lib.listeners import http_listener_kwargs
 
     cli = ctx.cli
     co = int(ctx.timeouts.command_output)
     target = ctx.windows
     uid = _short_id()
-    listener_name = f"{name_prefix}-{uid}"
-    listener_port = ctx.env.get("listeners", {}).get("windows_port", 19082)
 
     _fd, local_upload_src = tempfile.mkstemp(suffix=".dat")
     os.close(_fd)
@@ -291,24 +262,19 @@ def _run_for_agent_windows(ctx, agent_type: str, fmt: str, name_prefix: str) -> 
     _fd, local_sysfile_dst = tempfile.mkstemp(suffix=".txt")
     os.close(_fd)
 
-    # ── Step 1: Create + start HTTP listener ────────────────────────────────
-    print(f"  [{agent_type}][listener] creating HTTP listener {listener_name!r} on port {listener_port}")
-    listener_create(cli, listener_name, "http", **http_listener_kwargs(listener_port, ctx.env))
-    listener_start(cli, listener_name)
-    print(f"  [{agent_type}][listener] started")
-
     agent_id = None
     try:
-        # ── Steps 2-5: Build, deploy, exec, wait for checkin ─────────────────
+        # ── Deploy, exec, wait for checkin ───────────────────────────────────
         agent = deploy_and_checkin(
             ctx, cli, target,
             agent_type=agent_type, fmt=fmt,
             listener_name=listener_name,
             label=agent_type,
+            pre_built_payload=pre_built_payload,
         )
         agent_id = agent["id"]
 
-        # ── Step 6: Upload a known file ──────────────────────────────────────
+        # ── Upload a known file ──────────────────────────────────────────────
         upload_content = (
             b"Red Cell C2 file-transfer test\n"
             + uid.encode() + b"\n"
@@ -337,7 +303,7 @@ def _run_for_agent_windows(ctx, agent_type: str, fmt: str, name_prefix: str) -> 
         )
         print(f"  [{agent_type}][upload] SHA-256 verified: {remote_sha}")
 
-        # ── Step 7: Download the uploaded file back ──────────────────────────
+        # ── Download the uploaded file back ──────────────────────────────────
         print(f"  [{agent_type}][download] downloading {remote_upload_dst} → local")
         agent_download(cli, agent_id, src=remote_upload_dst, dst=local_download_dst)
 
@@ -355,7 +321,7 @@ def _run_for_agent_windows(ctx, agent_type: str, fmt: str, name_prefix: str) -> 
             f"SHA-256 {downloaded_sha256}"
         )
 
-        # ── Step 8: Download a system file (C:\Windows\win.ini) ──────────────
+        # ── Download a system file (C:\Windows\win.ini) ──────────────────────
         win_ini = r"C:\Windows\win.ini"
         print(f"  [{agent_type}][sysfile] downloading {win_ini} via agent")
         agent_download(cli, agent_id, src=win_ini, dst=local_sysfile_dst)
@@ -385,23 +351,13 @@ def _run_for_agent_windows(ctx, agent_type: str, fmt: str, name_prefix: str) -> 
         print(f"  [{agent_type}][suite] all file-transfer checks passed")
 
     finally:
-        # ── Step 9: Kill agent, stop listener, clean up ──────────────────────
+        # ── Kill agent, clean up ─────────────────────────────────────────────
         if agent_id:
             print(f"  [{agent_type}][cleanup] killing agent {agent_id}")
             try:
                 agent_kill(cli, agent_id)
             except Exception as exc:
                 print(f"  [{agent_type}][cleanup] agent kill failed (non-fatal): {exc}")
-
-        print(f"  [{agent_type}][cleanup] stopping/deleting listener {listener_name!r}")
-        try:
-            listener_stop(cli, listener_name)
-        except Exception:
-            pass
-        try:
-            listener_delete(cli, listener_name)
-        except Exception:
-            pass
 
         print(f"  [{agent_type}][cleanup] removing work_dir on target")
         try:
@@ -438,56 +394,139 @@ def run(ctx):
     skipped_reasons: list[str] = []
     available_agents = set(ctx.env.get("agents", {}).get("available", ["demon"]))
     from lib.deploy import DeployError, preflight_ssh
+    from lib.cli import listener_create, listener_delete, listener_start, listener_stop
+    from lib.listeners import http_listener_kwargs
+    from lib.payload import MatrixCell, build_parallel
 
+    cli = ctx.cli
+    uid = _short_id()
+    listeners_to_cleanup: list[str] = []
+
+    # ── Determine which agents and platforms will run ────────────────────────
+    linux_ok = False
     if ctx.linux is not None:
         try:
             preflight_ssh(ctx.linux)
+            linux_ok = True
         except DeployError as exc:
             raise ScenarioSkipped(str(exc)) from exc
-        # ── Phantom pass (Linux) — Demon is Windows-only (PE/Win32) ─────────
-        print("\n  === Agent pass: phantom (Linux) ===")
-        if "phantom" not in available_agents:
-            print(
-                "  [phantom] SKIPPED — Demon is Windows-only; "
-                "add 'phantom' to agents.available in env.toml"
-            )
-            skipped_reasons.append(
-                "Linux target configured but no available Linux agent"
-                " (add 'phantom' to agents.available)"
-            )
-        else:
-            _run_for_agent(ctx, agent_type="phantom", fmt="exe", name_prefix="test-ftransfer-phantom")
-            ran_any = True
     else:
         print("  [skip] ctx.linux is None — skipping Linux agent passes")
 
+    windows_ok = False
     if ctx.windows is not None:
         try:
             preflight_ssh(ctx.windows)
+            windows_ok = True
         except DeployError as exc:
             raise ScenarioSkipped(str(exc)) from exc
-        ran_any = True
-        # ── Demon Windows pass ───────────────────────────────────────────────
-        print("\n  === Agent pass: demon (Windows) ===")
-        _run_for_agent_windows(ctx, agent_type="demon", fmt="exe", name_prefix="test-ftransfer-win-demon")
-
-        # ── Archon pass (C/ASM fork of Demon, ECDH transport) ───────────────
-        print("\n  === Agent pass: archon (Windows) ===")
-        if "archon" not in available_agents:
-            print("  [archon] SKIPPED — 'archon' not listed in agents.available")
-        else:
-            _run_for_agent_windows(ctx, agent_type="archon", fmt="exe", name_prefix="test-ftransfer-archon")
-
-        # ── Specter pass (Rust Windows agent) ───────────────────────────────
-        print("\n  === Agent pass: specter (Windows) ===")
-        if "specter" not in available_agents:
-            print("  [specter] SKIPPED — 'specter' not listed in agents.available")
-        else:
-            _run_for_agent_windows(ctx, agent_type="specter", fmt="exe", name_prefix="test-ftransfer-specter")
     else:
         print("  [skip] ctx.windows is None — skipping Windows agent passes")
 
-    if not ran_any:
+    linux_listener_name = None
+    windows_listener_name = None
+    linux_has_phantom = linux_ok and "phantom" in available_agents
+
+    # ── Build the cell list for all agents across both platforms ─────────────
+    cells: list[MatrixCell] = []
+    cell_keys: list[str] = []
+
+    if linux_has_phantom:
+        linux_listener_name = f"test-ftransfer-lin-{uid}"
+        linux_port = ctx.env.get("listeners", {}).get("linux_port", 19081)
+        print(f"\n  [shared] creating Linux HTTP listener {linux_listener_name!r} on port {linux_port}")
+        listener_create(cli, linux_listener_name, "http", **http_listener_kwargs(linux_port, ctx.env))
+        listener_start(cli, linux_listener_name)
+        listeners_to_cleanup.append(linux_listener_name)
+        cells.append(MatrixCell(arch="x64", fmt="exe", agent="phantom",
+                                listener=linux_listener_name))
+        cell_keys.append("phantom")
+
+    win_agents: list[tuple[str, str]] = []
+    if windows_ok:
+        win_agents.append(("demon", "exe"))
+        if "archon" in available_agents:
+            win_agents.append(("archon", "exe"))
+        if "specter" in available_agents:
+            win_agents.append(("specter", "exe"))
+        windows_listener_name = f"test-ftransfer-win-{uid}"
+        win_port = ctx.env.get("listeners", {}).get("windows_port", 19082)
+        print(f"  [shared] creating Windows HTTP listener {windows_listener_name!r} on port {win_port}")
+        listener_create(cli, windows_listener_name, "http", **http_listener_kwargs(win_port, ctx.env))
+        listener_start(cli, windows_listener_name)
+        listeners_to_cleanup.append(windows_listener_name)
+        for at, fmt in win_agents:
+            cells.append(MatrixCell(arch="x64", fmt=fmt, agent=at,
+                                    listener=windows_listener_name))
+            cell_keys.append(at)
+
+    if not cells:
         if skipped_reasons:
             raise ScenarioSkipped("; ".join(skipped_reasons))
         raise ScenarioSkipped("neither ctx.linux nor ctx.windows is configured")
+
+    try:
+        # ── Pre-build all payloads in parallel ───────────────────────────────
+        mode = "parallel" if ctx.payload_parallel else "serial"
+        print(f"  [shared] building {len(cells)} payload(s) ({mode})")
+        raws = build_parallel(cli, "", cells, parallel=ctx.payload_parallel)
+        payloads = dict(zip(cell_keys, raws))
+
+        # ── Linux passes ─────────────────────────────────────────────────────
+        if linux_ok:
+            print("\n  === Agent pass: phantom (Linux) ===")
+            if not linux_has_phantom:
+                print(
+                    "  [phantom] SKIPPED — Demon is Windows-only; "
+                    "add 'phantom' to agents.available in env.toml"
+                )
+                skipped_reasons.append(
+                    "Linux target configured but no available Linux agent"
+                    " (add 'phantom' to agents.available)"
+                )
+            else:
+                _run_for_agent(ctx, agent_type="phantom", fmt="exe",
+                               listener_name=linux_listener_name,
+                               pre_built_payload=payloads["phantom"])
+                ran_any = True
+
+        # ── Windows passes ───────────────────────────────────────────────────
+        if windows_ok:
+            ran_any = True
+            print("\n  === Agent pass: demon (Windows) ===")
+            _run_for_agent_windows(ctx, agent_type="demon", fmt="exe",
+                                   listener_name=windows_listener_name,
+                                   pre_built_payload=payloads["demon"])
+
+            print("\n  === Agent pass: archon (Windows) ===")
+            if "archon" not in available_agents:
+                print("  [archon] SKIPPED — 'archon' not listed in agents.available")
+            else:
+                _run_for_agent_windows(ctx, agent_type="archon", fmt="exe",
+                                       listener_name=windows_listener_name,
+                                       pre_built_payload=payloads["archon"])
+
+            print("\n  === Agent pass: specter (Windows) ===")
+            if "specter" not in available_agents:
+                print("  [specter] SKIPPED — 'specter' not listed in agents.available")
+            else:
+                _run_for_agent_windows(ctx, agent_type="specter", fmt="exe",
+                                       listener_name=windows_listener_name,
+                                       pre_built_payload=payloads["specter"])
+
+        if not ran_any:
+            if skipped_reasons:
+                raise ScenarioSkipped("; ".join(skipped_reasons))
+            raise ScenarioSkipped("neither ctx.linux nor ctx.windows is configured")
+
+    finally:
+        for name in listeners_to_cleanup:
+            print(f"  [shared] stopping/deleting listener {name!r}")
+            try:
+                listener_stop(cli, name)
+            except Exception:
+                pass
+            try:
+                listener_delete(cli, name)
+            except Exception:
+                pass

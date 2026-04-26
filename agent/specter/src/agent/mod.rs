@@ -142,7 +142,7 @@ impl SpecterAgent {
             os_service_pack: u32::from(os_service_pack()),
             os_build: os_build(),
             os_arch: if cfg!(target_arch = "x86_64") { 9 } else { 0 },
-            sleep_delay: self.config.sleep_delay_ms / 1000,
+            sleep_delay: (self.config.sleep_delay_ms + 500) / 1000,
             sleep_jitter: self.config.sleep_jitter,
             kill_date: self.config.kill_date.map_or(0, |kd| kd as u64),
             working_hours: self.config.working_hours.unwrap_or(0),
@@ -296,6 +296,25 @@ mod tests {
         let agent = SpecterAgent::new(config).expect("agent creation");
         let metadata = agent.collect_metadata();
         assert_eq!(metadata.sleep_delay, 10, "10000 ms should be reported as 10 seconds");
+    }
+
+    #[test]
+    fn collect_metadata_rounds_sub_second_sleep_delay_to_nearest() {
+        let config_500 = SpecterConfig { sleep_delay_ms: 500, ..Default::default() };
+        let agent_500 = SpecterAgent::new(config_500).expect("agent creation");
+        assert_eq!(agent_500.collect_metadata().sleep_delay, 1, "500 ms should round to 1 s");
+
+        let config_499 = SpecterConfig { sleep_delay_ms: 499, ..Default::default() };
+        let agent_499 = SpecterAgent::new(config_499).expect("agent creation");
+        assert_eq!(agent_499.collect_metadata().sleep_delay, 0, "499 ms should round to 0 s");
+
+        let config_1499 = SpecterConfig { sleep_delay_ms: 1_499, ..Default::default() };
+        let agent_1499 = SpecterAgent::new(config_1499).expect("agent creation");
+        assert_eq!(agent_1499.collect_metadata().sleep_delay, 1, "1499 ms should round to 1 s");
+
+        let config_1500 = SpecterConfig { sleep_delay_ms: 1_500, ..Default::default() };
+        let agent_1500 = SpecterAgent::new(config_1500).expect("agent creation");
+        assert_eq!(agent_1500.collect_metadata().sleep_delay, 2, "1500 ms should round to 2 s");
     }
 
     #[test]

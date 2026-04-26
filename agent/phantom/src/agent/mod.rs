@@ -133,7 +133,7 @@ impl PhantomAgent {
             os_service_pack: 0,
             os_build,
             os_arch: if cfg!(target_arch = "x86_64") { 9 } else { 0 },
-            sleep_delay: self.config.sleep_delay_ms / 1000,
+            sleep_delay: (self.config.sleep_delay_ms + 500) / 1000,
             sleep_jitter: self.config.sleep_jitter,
             kill_date: self.config.kill_date.unwrap_or_default().max(0) as u64,
             working_hours: self.config.working_hours.unwrap_or(0),
@@ -372,6 +372,26 @@ mod tests {
         let agent = PhantomAgent::new(config)?;
         let metadata = agent.collect_metadata();
         assert_eq!(metadata.sleep_delay, 10, "10000 ms should be reported as 10 seconds");
+        Ok(())
+    }
+
+    #[test]
+    fn collect_metadata_rounds_sub_second_sleep_delay_to_nearest() -> Result<(), Box<dyn Error>> {
+        let config_500 = PhantomConfig { sleep_delay_ms: 500, ..PhantomConfig::default() };
+        let agent_500 = PhantomAgent::new(config_500)?;
+        assert_eq!(agent_500.collect_metadata().sleep_delay, 1, "500 ms should round to 1 s");
+
+        let config_499 = PhantomConfig { sleep_delay_ms: 499, ..PhantomConfig::default() };
+        let agent_499 = PhantomAgent::new(config_499)?;
+        assert_eq!(agent_499.collect_metadata().sleep_delay, 0, "499 ms should round to 0 s");
+
+        let config_1499 = PhantomConfig { sleep_delay_ms: 1_499, ..PhantomConfig::default() };
+        let agent_1499 = PhantomAgent::new(config_1499)?;
+        assert_eq!(agent_1499.collect_metadata().sleep_delay, 1, "1499 ms should round to 1 s");
+
+        let config_1500 = PhantomConfig { sleep_delay_ms: 1_500, ..PhantomConfig::default() };
+        let agent_1500 = PhantomAgent::new(config_1500)?;
+        assert_eq!(agent_1500.collect_metadata().sleep_delay, 2, "1500 ms should round to 2 s");
         Ok(())
     }
 

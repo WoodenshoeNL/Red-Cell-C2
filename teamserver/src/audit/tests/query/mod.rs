@@ -140,18 +140,19 @@ fn login_parameters_only_include_username_and_connection_id() {
     let connection_id = uuid::Uuid::parse_str("12345678-1234-5678-9abc-1234567890ab")
         .expect("connection id should parse");
 
-    let payload = login_parameters("operator", &connection_id);
+    let payload = login_parameters("operator", &connection_id, "rest");
 
     assert_eq!(
         payload,
         json!({
             "username": "operator",
             "connection_id": "12345678-1234-5678-9abc-1234567890ab",
+            "auth_vector": "rest",
         })
     );
 
     let object = payload.as_object().expect("payload should be a JSON object");
-    assert_eq!(object.len(), 2);
+    assert_eq!(object.len(), 3);
     assert!(!object.contains_key("password"));
     assert!(!object.contains_key("Password"));
     assert!(!object.contains_key("password_hash"));
@@ -164,12 +165,26 @@ fn login_parameters_preserve_mixed_case_and_unusual_usernames_without_password_m
         .expect("connection id should parse");
     let username = "Op-Erator_42@example.local";
 
-    let payload = login_parameters(username, &connection_id);
+    let payload = login_parameters(username, &connection_id, "websocket");
 
     assert_eq!(payload["username"], json!(username));
     assert_eq!(payload["connection_id"], json!(connection_id.to_string()));
+    assert_eq!(payload["auth_vector"], json!("websocket"));
     assert!(payload.get("password").is_none());
     assert!(payload.get("password_hash").is_none());
+}
+
+#[test]
+fn login_parameters_auth_vector_distinguishes_rest_from_websocket() {
+    let connection_id = uuid::Uuid::parse_str("12345678-1234-5678-9abc-1234567890ab")
+        .expect("connection id should parse");
+
+    let rest = login_parameters("operator", &connection_id, "rest");
+    let ws = login_parameters("operator", &connection_id, "websocket");
+
+    assert_eq!(rest["auth_vector"], json!("rest"));
+    assert_eq!(ws["auth_vector"], json!("websocket"));
+    assert_ne!(rest, ws);
 }
 
 #[test]

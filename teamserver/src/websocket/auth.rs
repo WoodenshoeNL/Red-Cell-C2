@@ -122,7 +122,7 @@ pub(super) async fn handle_authentication(
                     AuditResultStatus::Success,
                     None,
                     Some("login"),
-                    Some(login_parameters(&success.username, &connection_id)),
+                    Some(login_parameters(&success.username, &connection_id, "websocket")),
                 ),
             )
             .await;
@@ -141,7 +141,7 @@ pub(super) async fn handle_authentication(
                     AuditResultStatus::Failure,
                     None,
                     Some("login"),
-                    Some(login_parameters(&login_user, &connection_id)),
+                    Some(login_parameters(&login_user, &connection_id, "websocket")),
                 ),
             )
             .await;
@@ -161,7 +161,7 @@ pub(super) async fn handle_authentication(
                     AuditResultStatus::Failure,
                     None,
                     Some("login"),
-                    Some(login_parameters(&login_user, &connection_id)),
+                    Some(login_parameters(&login_user, &connection_id, "websocket")),
                 ),
             )
             .await;

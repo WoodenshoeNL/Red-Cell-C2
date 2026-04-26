@@ -308,10 +308,11 @@ pub fn parameter_object(pairs: impl IntoIterator<Item = (&'static str, Value)>) 
 
 /// Build an audit payload for a login attempt without persisting sensitive fields.
 #[must_use]
-pub fn login_parameters(username: &str, connection_id: &uuid::Uuid) -> Value {
+pub fn login_parameters(username: &str, connection_id: &uuid::Uuid, auth_vector: &str) -> Value {
     json!({
         "username": username,
         "connection_id": connection_id.to_string(),
+        "auth_vector": auth_vector,
     })
 }
 

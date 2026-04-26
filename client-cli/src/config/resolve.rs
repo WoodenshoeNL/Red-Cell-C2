@@ -2,7 +2,9 @@
 
 use std::path::PathBuf;
 
-use super::discovery::{find_config_file, global_config_path};
+use super::discovery::find_config_file;
+#[cfg(test)]
+use super::discovery::global_config_path;
 use super::file::load_config_file;
 use super::types::{
     ConfigError, FileConfig, FingerprintPinMode, FingerprintTls, ResolvedConfig, TlsMode,
@@ -26,6 +28,7 @@ use super::types::{
 ///
 /// `pin_intermediate` maps to [`FingerprintPinMode::Chain`] when
 /// `cert_fingerprint` is set; it is an error without a fingerprint.
+#[cfg(test)]
 pub fn resolve(
     cli_server: Option<String>,
     cli_token: Option<String>,

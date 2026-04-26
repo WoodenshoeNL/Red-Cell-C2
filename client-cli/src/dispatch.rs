@@ -76,6 +76,13 @@ pub(crate) fn handle_help(command: Option<&str>) -> i32 {
 
 /// Run the parsed CLI command and return a process exit code.
 pub async fn dispatch(cli: Cli) -> i32 {
+    dispatch_with_global(cli, config::global_config_path()).await
+}
+
+/// Same as [`dispatch`] but accepts an explicit global config path override.
+///
+/// Tests use this to avoid reading `~/.config/red-cell-cli/config.toml`.
+pub(crate) async fn dispatch_with_global(cli: Cli, global_path: Option<std::path::PathBuf>) -> i32 {
     // Capture output format before partial moves.
     let fmt = cli.output.clone();
 
@@ -132,13 +139,14 @@ pub async fn dispatch(cli: Cli) -> i32 {
 
     // Resolve configuration (CLI flags + env vars were already absorbed by
     // clap; this step adds the file-based fallbacks).
-    let resolved = match config::resolve(
+    let resolved = match config::resolve_with_global(
         cli.server,
         cli.token,
         cli.timeout,
         cli.ca_cert,
         cli.cert_fingerprint,
         cli.pin_intermediate,
+        global_path,
     ) {
         Ok(cfg) => cfg,
         Err(config::ConfigError::MissingServer | config::ConfigError::MissingToken)
@@ -230,7 +238,7 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    use super::dispatch;
+    use super::{dispatch, dispatch_with_global};
     use crate::cli::{Cli, Commands};
     use crate::error::EXIT_SUCCESS;
     use crate::output::OutputFormat;
@@ -305,7 +313,7 @@ mod tests {
             command: Some(Commands::Status),
         };
 
-        let code = dispatch(cli).await;
+        let code = dispatch_with_global(cli, None).await;
         assert_eq!(code, crate::error::EXIT_GENERAL);
     }
 

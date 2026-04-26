@@ -25,7 +25,7 @@ pub use discovery::find_config_file;
 #[allow(unused_imports)]
 pub use file::load_config_file;
 pub use file::write_config_file;
-pub use resolve::resolve;
+pub(crate) use resolve::resolve_with_global;
 pub use types::{
     ConfigError, FileConfig, FingerprintPinMode, FingerprintTls, ResolvedConfig, TlsMode,
 };

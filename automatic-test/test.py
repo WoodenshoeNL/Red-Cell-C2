@@ -494,6 +494,35 @@ def main():
             selected_ids,
         )
 
+    # Pre-flight: clean up leftover listeners from prior runs.  Listeners
+    # persisted in the teamserver's SQLite DB may still be bound to ports
+    # that new scenarios need, causing cascading "Address already in use"
+    # failures.  Stop and delete everything except the profile's default
+    # listener.
+    if not ctx.dry_run:
+        from lib.cli import CliError, listener_list, listener_stop, listener_delete
+        print(f"\n{'─' * 60}")
+        print("  Listener cleanup (leftover from prior runs)")
+        print(f"{'─' * 60}")
+        try:
+            existing = listener_list(cli_cfg)
+            for lsnr in existing:
+                name = lsnr.get("name", "")
+                if name == "default":
+                    continue
+                status = lsnr.get("status", "").lower()
+                try:
+                    if status in ("running", "error"):
+                        listener_stop(cli_cfg, name)
+                    listener_delete(cli_cfg, name)
+                    print(f"  ✓ cleaned up: {name}")
+                except CliError as exc:
+                    print(f"  ✗ failed to clean up {name}: {exc}")
+        except CliError as exc:
+            print(f"  ✗ listener list failed: {exc}")
+        except Exception as exc:
+            print(f"  ✗ unexpected error during cleanup: {exc}")
+
     automatic_test_root = Path(__file__).resolve().parent
     run_dir = create_run_dir(automatic_test_root)
     print(f"Run dir:  {run_dir}")

@@ -8,7 +8,7 @@
 //! | `agent show <id>` | `GET /agents/{id}` | full agent record |
 //! | `agent exec <id> --cmd <cmd>` | `POST /agents/{id}/task` | submit task |
 //! | `agent exec --wait` | `POST /agents/{id}/task` then poll `/output` | block |
-//! | `agent shell <id>` | repeated `exec --wait` via rustyline REPL | interactive |
+//! | `agent shell <id> --unsafe-tty` | repeated `exec --wait` via rustyline REPL | interactive, raw stdout |
 //! | `agent output <id>` | `GET /agents/{id}/output` | persisted output |
 //! | `agent kill <id>` | `DELETE /agents/{id}` | queue kill task |
 //! | `agent kill --wait` | kill then poll `GET /agents/{id}` until dead | block |
@@ -120,7 +120,19 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) 
             }
         }
 
-        AgentCommands::Shell { id, timeout } => shell::run(client, id, timeout).await,
+        AgentCommands::Shell { id, timeout, unsafe_tty } => {
+            if !unsafe_tty {
+                let err = CliError::InvalidArgs(
+                    "agent shell requires --unsafe-tty because it uses interactive I/O \
+                     and raw stdout (not the JSON envelope). For machine-consumable \
+                     interaction, use `session --agent <id>` instead."
+                        .to_owned(),
+                );
+                print_error(&err).ok();
+                return err.exit_code();
+            }
+            shell::run(client, id, timeout).await
+        }
 
         AgentCommands::Output { id, watch, since } => {
             if watch {

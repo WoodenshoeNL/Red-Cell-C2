@@ -1,4 +1,8 @@
-//! `agent shell <id>` — interactive REPL against a connected agent.
+//! `agent shell <id> --unsafe-tty` — interactive REPL against a connected agent.
+//!
+//! Gated behind `--unsafe-tty` because it uses interactive readline I/O and
+//! writes raw command output to stdout, violating the JSON envelope contract.
+//! For machine-consumable agent interaction, use `session --agent <id>`.
 
 use std::io::Write as _;
 

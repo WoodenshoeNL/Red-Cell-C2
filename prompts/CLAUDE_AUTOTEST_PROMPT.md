@@ -86,8 +86,14 @@ specifying only the file you intend to keep aside:
 cat AGENTS.md
 cat automatic-test/README.md
 cat automatic-test/PROMPTS/AGENT_TEST_PROMPT.md   # canonical workflow doc
+cat automatic-test/KNOWN_FAILURES.md              # diagnostic shortcuts
 br ready                                           # what is the dev loop working on?
 ```
+
+**Internalize `KNOWN_FAILURES.md` before classifying anything in Step 5.**
+Each row maps an error-message substring to either an open bead or a
+resolved fix. Matching a row lets you skip an investigation cycle entirely
+— file the bead reference instead of re-deriving the same conclusion.
 
 ---
 
@@ -221,7 +227,26 @@ tail -5 "$LOG"
 Read the run log and per-scenario diagnostics in
 `automatic-test/test-results/<YYYY-MM-DD>/scenario_NN_failure.txt`.
 
-For each ✗ FAILED scenario decide:
+### 5a — Match against KNOWN_FAILURES.md FIRST
+
+Before any investigation, scan each scenario's error message against the
+*Active* and *Resolved* tables in `automatic-test/KNOWN_FAILURES.md`:
+
+- **Active match** — a bead is already filed (and likely in progress).
+  Bump that row's `Last seen` to today, reference the bead ID in your run
+  report, and **move on** without re-investigating. Do not file a duplicate.
+- **Resolved match** — the prior fix should have addressed this. The fix
+  did not stick: file a *new* bead describing the regression (do **not**
+  reopen the resolved one) and add it to the *Active* table. Cite the
+  prior commit / bead in the new bead's description.
+- **No match** — proceed to 5b.
+
+Skipping investigation on a known pattern is the whole point of this file
+— don't burn turns reproducing a conclusion that's already documented.
+
+### 5b — Investigate novel failures
+
+For each unmatched failure, decide:
 
 - **product bug** — agent / teamserver / CLI is genuinely wrong.
   Use the matching `zone:*` label: `zone:phantom`, `zone:demon`, `zone:archon`,
@@ -334,6 +359,27 @@ Sample beads from prior runs to imitate in style/depth:
 ## Step 8 — Land the plane
 
 Per CLAUDE.md "Landing the Plane" — work is NOT done until `git push` succeeds.
+
+### 8a — Maintain KNOWN_FAILURES.md
+
+Before staging anything, update `automatic-test/KNOWN_FAILURES.md`:
+
+- For every *Active* row whose signature matched a failure this run, bump
+  `Last seen` to today (YYYY-MM-DD).
+- For every new bead you filed in Step 7, append a row to the *Active*
+  table with the literal substring you'd use to recognize the failure
+  again.
+- For every *Active* bead that was closed during this run (verify with
+  `br show <id>`), move that row to the *Resolved* table — populate
+  `Resolved at` and a one-line `Notes` field referencing the closing
+  commit or fix.
+- Prune *Resolved* rows whose `Resolved at` is older than 14 days **and**
+  whose signature did not match anything this run.
+
+Commit the file in the same commit as the new beads / inline fixes — keeping
+the bead state and the shortcut index moving together avoids drift.
+
+### 8b — Stage, commit, push
 
 ```bash
 git status                    # see what changed

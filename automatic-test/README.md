@@ -33,6 +33,8 @@ automatic-test/
     wait.py                   # poll helpers: wait_for_agent, wait_for_output
   PROMPTS/
     AGENT_TEST_PROMPT.md      # prompt for AI-agent-driven test runs
+  KNOWN_FAILURES.md           # diagnostic shortcuts for the autotest agent
+                              # — match new failures here before investigating
 ```
 
 ## Running

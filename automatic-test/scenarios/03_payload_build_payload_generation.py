@@ -11,6 +11,8 @@ Tests:
 - Build with no listener selected → meaningful error returned
 - Build request with invalid format → error code returned
 - Cache hit: build same config twice, second is faster (timestamp comparison)
+
+Wall-clock baseline: ~243s serial (2026-04-26). See docs/autotest-baselines.md.
 """
 
 DESCRIPTION = "Payload generation"

@@ -163,13 +163,13 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: PayloadCommands
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::build::validate_format;
     use super::inspect::InspectResult;
     use super::types::{
-        BuildCompleted, BuildJobSubmitted, BuildJobStatusResult, BuildWaitCompleted,
+        BuildCompleted, BuildJobStatusResult, BuildJobSubmitted, BuildWaitCompleted,
         CacheFlushResult, DownloadResult, PayloadRow,
     };
+    use super::*;
     use crate::defaults::PAYLOAD_BUILD_WAIT_TIMEOUT_SECS;
     use crate::error::CliError;
     use crate::output::{OutputFormat, TextRender, TextRow};

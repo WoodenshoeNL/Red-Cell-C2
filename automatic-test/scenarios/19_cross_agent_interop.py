@@ -9,17 +9,20 @@ Skip if Phantom is not enabled in ``agents.available`` — this scenario
 specifically tests Demon-vs-Phantom isolation and must not silently degrade
 to Demon-vs-Demon.
 
+Both payloads are pre-built in parallel (when ``--no-parallel`` is not set) via
+:func:`~lib.payload.build_parallel` with per-cell listeners, then deployed
+concurrently via ThreadPoolExecutor.
+
 Steps:
   1.  Create + start two HTTP listeners (one per agent)
-  2.  Build Demon EXE (x64) for Windows target
-  3.  Build Phantom ELF (x64) for Linux target
-  4.  Deploy Demon to Windows, Phantom to Linux
-  5.  Execute both payloads in background
-  6.  Wait for both agents to check in
-  7.  Run identical command set on both agents concurrently
-  8.  Verify output isolation — agent A's unique marker absent from agent B
-  9.  Verify process list isolation — each agent returns its own data
- 10.  Kill both agents; verify teamserver reports both as disconnected
+  2.  Pre-build Demon EXE + Phantom EXE in parallel via build_parallel
+  3.  Deploy Demon to Windows, Phantom to Linux (concurrent)
+  4.  Execute both payloads in background
+  5.  Wait for both agents to check in
+  6.  Run identical command set on both agents concurrently
+  7.  Verify output isolation — agent A's unique marker absent from agent B
+  8.  Verify process list isolation — each agent returns its own data
+  9.  Kill both agents; verify teamserver reports both as disconnected
 
 Why this matters:
   Validates that the teamserver's per-agent key derivation and job dispatch
@@ -52,19 +55,16 @@ def _unique_marker() -> str:
 
 # ── Deployment helpers ───────────────────────────────────────────────────────
 
-def _build_and_deploy_windows(cli, target, listener_name, uid):
-    """Build Demon EXE and deploy to Windows target.  Returns remote_payload path."""
-    from lib.cli import payload_build_and_fetch
+def _deploy_windows(target, listener_name, uid, raw: bytes):
+    """Deploy pre-built Demon EXE to Windows target.  Returns remote_payload path."""
     from lib.deploy import ensure_work_dir, execute_background, upload
 
     remote_payload = f"{target.work_dir}\\agent-{uid}.exe"
     _fd, local_payload = tempfile.mkstemp(suffix=".exe")
     os.close(_fd)
 
-    print(f"  [windows] building Demon EXE x64 for listener {listener_name!r}")
-    raw = payload_build_and_fetch(cli, listener=listener_name, arch="x64", fmt="exe", agent="demon")
     assert len(raw) > 0, "Windows payload is empty"
-    print(f"  [windows] built ({len(raw)} bytes)")
+    print(f"  [windows] deploying pre-built Demon EXE ({len(raw)} bytes)")
 
     with open(local_payload, "wb") as fh:
         fh.write(raw)
@@ -83,22 +83,16 @@ def _build_and_deploy_windows(cli, target, listener_name, uid):
     return remote_payload
 
 
-def _build_and_deploy_linux(cli, target, listener_name, uid):
-    """Build Phantom payload and deploy to Linux target.
-
-    Returns remote_payload path.
-    """
-    from lib.cli import payload_build_and_fetch
+def _deploy_linux(target, listener_name, uid, raw: bytes):
+    """Deploy pre-built Phantom payload to Linux target.  Returns remote_payload path."""
     from lib.deploy import ensure_work_dir, execute_background, run_remote, upload
 
     remote_payload = f"{target.work_dir}/agent-{uid}.bin"
     _fd, local_payload = tempfile.mkstemp(suffix=".bin")
     os.close(_fd)
 
-    print(f"  [linux] building Phantom exe x64 for listener {listener_name!r}")
-    raw = payload_build_and_fetch(cli, listener=listener_name, arch="x64", fmt="exe", agent="phantom")
     assert len(raw) > 0, "Phantom payload is empty"
-    print(f"  [linux] Phantom exe built ({len(raw)} bytes)")
+    print(f"  [linux] deploying pre-built Phantom EXE ({len(raw)} bytes)")
 
     with open(local_payload, "wb") as fh:
         fh.write(raw)
@@ -287,6 +281,7 @@ def run(ctx):
         listener_stop,
     )
     from lib.listeners import http_listener_kwargs
+    from lib.payload import MatrixCell, build_parallel
 
     cli = ctx.cli
     co = int(ctx.timeouts.command_output)
@@ -323,19 +318,28 @@ def run(ctx):
     print("  [listener] both listeners started")
 
     try:
-        # ── Steps 2-5: Build and deploy both agents concurrently ─────────────
-        # Deploy in parallel to reduce total setup time.
-        win_remote_payload = None
-        lin_remote_payload = None
+        # ── Step 2: Pre-build both payloads in parallel ──────────────────────
+        cells = [
+            MatrixCell(arch="x64", fmt="exe", agent="demon",
+                       listener=listener_win_name),
+            MatrixCell(arch="x64", fmt="exe", agent="phantom",
+                       listener=listener_lin_name),
+        ]
+        mode = "parallel" if ctx.payload_parallel else "serial"
+        print(f"  [build] building 2 payloads ({mode})")
+        raws = build_parallel(cli, "", cells, parallel=ctx.payload_parallel)
+        raw_demon, raw_phantom = raws
+        print(f"  [build] Demon: {len(raw_demon)} bytes, Phantom: {len(raw_phantom)} bytes")
 
+        # ── Steps 3-4: Deploy both agents concurrently ───────────────────────
         with ThreadPoolExecutor(max_workers=2) as pool:
             win_future = pool.submit(
-                _build_and_deploy_windows,
-                cli, ctx.windows, listener_win_name, uid,
+                _deploy_windows,
+                ctx.windows, listener_win_name, uid, raw_demon,
             )
             lin_future = pool.submit(
-                _build_and_deploy_linux,
-                cli, ctx.linux, listener_lin_name, uid,
+                _deploy_linux,
+                ctx.linux, listener_lin_name, uid, raw_phantom,
             )
 
             for future in as_completed([win_future, lin_future]):
@@ -346,7 +350,7 @@ def run(ctx):
 
         print("  [deploy] both payloads deployed (Windows: Demon, Linux: Phantom)")
 
-        # ── Step 6: Wait for both agents to check in ─────────────────────────
+        # ── Step 5: Wait for both agents to check in ─────────────────────────
         checkin_timeout = int(ctx.timeouts.agent_checkin)
         print(f"  [wait] waiting up to {checkin_timeout}s for both agents to check in")
         new_agents = _wait_for_two_agents(cli, pre_existing_ids, timeout=checkin_timeout)
@@ -376,7 +380,7 @@ def run(ctx):
         print(f"  [wait] Windows agent: {win_agent_id} (listener: {listener_win_name!r})")
         print(f"  [wait] Linux agent:   {lin_agent_id} (listener: {listener_lin_name!r})")
 
-        # ── Step 7: Run command suite on both agents concurrently ─────────────
+        # ── Step 6: Run command suite on both agents concurrently ─────────────
         print("  [suite] running command suite on both agents concurrently")
         win_outputs = {}
         lin_outputs = {}
@@ -406,13 +410,13 @@ def run(ctx):
                 + "\n".join(suite_errors)
             )
 
-        # ── Step 8: Verify output isolation ──────────────────────────────────
+        # ── Step 7: Verify output isolation ──────────────────────────────────
         print("  [isolation] verifying cross-agent session isolation")
         _assert_isolation(win_outputs, lin_outputs, win_marker, lin_marker)
 
         print("  [suite] all commands passed on both agents — sessions fully isolated")
 
-        # ── Step 9: Kill both agents ──────────────────────────────────────────
+        # ── Step 8: Kill both agents ──────────────────────────────────────────
         print(f"  [kill] sending kill to Windows agent {win_agent_id}")
         try:
             agent_kill(cli, win_agent_id)
@@ -425,7 +429,7 @@ def run(ctx):
         except Exception as exc:
             print(f"  [kill] Linux agent kill failed (non-fatal): {exc}")
 
-        # ── Step 10: Verify both agents show as disconnected ──────────────────
+        # ── Step 9: Verify both agents show as disconnected ──────────────────
         disconnect_timeout = int(ctx.timeouts.agent_disconnect)
         print(f"  [disconnect] waiting up to {disconnect_timeout}s for both agents to disconnect")
         _wait_for_agents_disconnected(

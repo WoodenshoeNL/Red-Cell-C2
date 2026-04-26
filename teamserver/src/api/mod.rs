@@ -66,7 +66,7 @@ pub fn api_routes(api: ApiRuntime) -> Router<TeamserverState> {
         .route("/agents/{id}/output", get(agents::get_agent_output))
         .route("/agents/{id}/upload", post(agents::transfer::agent_upload))
         .route("/agents/{id}/download", post(agents::transfer::agent_download))
-        .route("/audit", get(audit::list_audit))
+        .route("/audit", get(audit::list_audit).post(audit::create_audit))
         .route("/audit/purge", delete(audit::purge_audit))
         .route("/session-activity", get(audit::list_session_activity))
         .route("/credentials", get(loot::list_credentials))

@@ -12,8 +12,8 @@ use utoipa::{IntoParams, ToSchema};
 
 use crate::app::TeamserverState;
 use crate::{
-    AuditPage, AuditQuery, DEFAULT_AUDIT_RETENTION_DAYS, SessionActivityPage, SessionActivityQuery,
-    TeamserverError, audit_details, query_audit_log, query_session_activity,
+    AuditPage, AuditQuery, AuditResultStatus, DEFAULT_AUDIT_RETENTION_DAYS, SessionActivityPage,
+    SessionActivityQuery, TeamserverError, audit_details, query_audit_log, query_session_activity,
     record_operator_action_with_notifications,
 };
 
@@ -161,4 +161,72 @@ pub(super) async fn purge_audit(
     }
 
     Ok(Json(AuditPurgeResponse { deleted, cutoff }))
+}
+
+/// Request body for `POST /audit`.
+#[derive(Debug, Deserialize, ToSchema)]
+pub(super) struct CreateAuditBody {
+    /// Stable action label (e.g. `"operator.local_exec"`).
+    pub action: String,
+    /// Entity category acted upon (e.g. `"agent"`).
+    pub target_kind: String,
+    /// Optional target identifier.
+    #[serde(default)]
+    pub target_id: Option<String>,
+    /// Optional related agent identifier (decimal `u32`).
+    #[serde(default)]
+    pub agent_id: Option<u32>,
+    /// Optional command or sub-action label.
+    #[serde(default)]
+    pub command: Option<String>,
+    /// Optional structured parameters.
+    #[serde(default)]
+    pub parameters: Option<serde_json::Value>,
+}
+
+/// Response for a successfully created audit entry.
+#[derive(Debug, Serialize, ToSchema)]
+pub(super) struct CreateAuditResponse {
+    /// Database-assigned row id.
+    pub id: i64,
+}
+
+#[utoipa::path(
+    post,
+    path = "/audit",
+    context_path = "/api/v1",
+    tag = "audit",
+    security(("api_key" = [])),
+    request_body = CreateAuditBody,
+    responses(
+        (status = 201, description = "Audit entry created", body = CreateAuditResponse),
+        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
+        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
+        (status = 429, description = "Rate limit exceeded", body = ApiErrorBody)
+    )
+)]
+pub(super) async fn create_audit(
+    State(state): State<TeamserverState>,
+    identity: ReadApiAccess,
+    Json(body): Json<CreateAuditBody>,
+) -> Result<(StatusCode, Json<CreateAuditResponse>), AuditApiError> {
+    let details = audit_details(
+        AuditResultStatus::Success,
+        body.agent_id,
+        body.command.as_deref(),
+        body.parameters,
+    );
+
+    let id = record_operator_action_with_notifications(
+        &state.database,
+        &state.webhooks,
+        &identity.key_id,
+        &body.action,
+        &body.target_kind,
+        body.target_id,
+        details,
+    )
+    .await?;
+
+    Ok((StatusCode::CREATED, Json(CreateAuditResponse { id })))
 }

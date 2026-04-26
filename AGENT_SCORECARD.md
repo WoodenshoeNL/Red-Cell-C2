@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1691 | 296 | 110 |
+| Tasks closed | 1703 | 296 | 115 |
 | Bugs filed against | 274 | 50 | 15 |
-| Bug rate (bugs/task) | 0.16 | 0.17 | 0.14 |
-| Quality score | 84% | 83% | 86% |
+| Bug rate (bugs/task) | 0.16 | 0.17 | 0.13 |
+| Quality score | 84% | 83% | 87% |
 
-*Bug rates: Claude 274/1691=0.1620→0.16, Codex 50/296=0.1689→0.17, Cursor 15/110=0.1364→0.14*
+*Bug rates: Claude 274/1703=0.1609→0.16, Codex 50/296=0.1689→0.17, Cursor 15/115=0.1304→0.13*
 
 ## Violation Breakdown
 
@@ -41,6 +41,18 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-26 14:25 — 91693236..4fe6e547
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 12 | 0 | Productive session. Substantive closes: de044782 (restrict POST /audit to Operator+ role + allowlist actions/target_kinds — closes dezi5 from prior QA), 7405acbe (pass result_status through POST /audit — closes vs71a from prior QA), f7c321cd (validate target_kind allowlist — additional defense for dezi5), f2b8a2d8 (pass real cmd to dispatch_one error envelopes — fixes hardcoded `agent.exec` mislabel for listener.list/operator.list/log.list/status), 1d9e97ba (reorder ECDH registration: store session before agent insert + delete on rollback — prevents ghost agent rows on registration failure), client-cli refactor splits 03e63876/6de5bc09/ffe2aaf5/958f8570/f09bd06b (cli.rs/audit/mod.rs/main tests/loot.rs/payload.rs split into focused submodules with tests), e0ed76e8 (loop autotest VM orphan cleanup), 862fbd1c (--loop autotest mode). Self-corrected the two regressions Claude introduced last QA cycle (dezi5 + vs71a). Two lite-qa quality passes also landed (3bf842ac, 5281d13b). |
+| Codex | 0 | 0 | No activity in this review range. |
+| Cursor | 5 | 0 | Substantive closes: c16a011a (split teamserver/listeners/http/ecdh_dispatch.rs from 904 LOC → 5-file submodule: classify/parse/registration/session/types, all logic preserved + tests still in single tests file), 4fe6e547 (move tests inline → ecdh_dispatch/tests.rs, 636 LOC), 4ca651ad (extract phantom host metadata helpers from agent/mod.rs into agent/metadata.rs, 194 LOC with full test coverage of read_trimmed/domain_name/local_ip/thread_id/parent_pid/is_elevated/kernel_version/base_address), 3c146e84 (split client-cli/src/config.rs from 932 LOC into mod/discovery/file/permissions/resolve/types/tests submodule), be9c3d74 (loop fix — defer tmp cargo clean while nextest holds review target). Clean refactors only, no regressions. |
+
+Build: passed (cargo check workspace clean in 1m16s; cargo clippy -D warnings clean in 32s; nextest 6060/6060 PASS in 206s).
+
+Notes: All three agents delivered clean work this cycle. No bugs to file. Claude finished closing out the audit-endpoint regressions it introduced last cycle (dezi5 + vs71a) and added a related allowlist on target_kind. The big architectural improvements were Cursor's two large file splits (ecdh_dispatch and client-cli/config), which moved ~2k LOC into focused submodules without changing behavior. Phantom metadata extraction (4ca651ad) ships with comprehensive unit tests for each helper, an upgrade over the original embedded versions. ECDH ghost-agent fix (1d9e97ba) reorders state mutations so a registry insert failure cannot leave an authenticated session with no agent record — proper rollback via delete_session.
 
 ### QA Review — 2026-04-26 09:42 — 22d8979c..91693236
 

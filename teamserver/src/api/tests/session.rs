@@ -575,3 +575,32 @@ async fn session_agent_exec_wait_false_behaves_like_no_wait() {
     assert_eq!(parsed["data"]["agent_id"], "DEAD0012");
     assert!(parsed["data"]["queued_jobs"].is_number());
 }
+
+#[tokio::test]
+async fn session_dispatch_error_envelope_preserves_cmd_for_non_exec_commands() {
+    let (app, _, _) =
+        test_router_with_registry(Some((60, "op", "secret", OperatorRole::Admin))).await;
+
+    // Use an API key with a newline — invalid for HTTP headers — to trigger
+    // the INVALID_API_KEY_HEADER error path inside dispatch_one.
+    let bad_api_key = "bad\nkey";
+
+    for cmd in &["listener.list", "operator.list", "log.list", "status"] {
+        let value = serde_json::json!({"cmd": cmd});
+        let line = session_api_dispatch_line(
+            &app,
+            cmd,
+            &value,
+            std::net::SocketAddr::from(([127, 0, 0, 1], 12345)),
+            bad_api_key,
+        )
+        .await;
+        let parsed: Value = serde_json::from_str(&line).expect("session line json");
+        assert_eq!(parsed["ok"], false, "cmd={cmd}: expected ok=false");
+        assert_eq!(
+            parsed["cmd"], *cmd,
+            "cmd={cmd}: error envelope must preserve the original command, not hardcode agent.exec"
+        );
+        assert_eq!(parsed["error"], "INVALID_API_KEY_HEADER");
+    }
+}

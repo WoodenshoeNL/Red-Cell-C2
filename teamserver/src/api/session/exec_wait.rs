@@ -41,7 +41,7 @@ pub(super) async fn session_exec_wait(
         Err(e) => return session_build_error_envelope(cmd, &e),
     };
 
-    let submit_resp = match dispatch_one(app, submit_req, api_key, client_ip).await {
+    let submit_resp = match dispatch_one(app, submit_req, cmd, api_key, client_ip).await {
         Ok(r) => r,
         Err(envelope) => return envelope,
     };
@@ -123,7 +123,7 @@ pub(super) async fn session_exec_wait(
             Err(_) => continue,
         };
 
-        let poll_resp = match dispatch_one(app, poll_req, api_key, client_ip).await {
+        let poll_resp = match dispatch_one(app, poll_req, cmd, api_key, client_ip).await {
             Ok(r) => r,
             Err(_) => continue,
         };

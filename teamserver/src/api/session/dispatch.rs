@@ -20,6 +20,7 @@ use crate::api::auth::API_KEY_HEADER;
 pub(super) async fn dispatch_one(
     app: &Router,
     req: HttpRequest<Body>,
+    cmd: &str,
     api_key: &str,
     client_ip: SocketAddr,
 ) -> Result<axum::response::Response, String> {
@@ -31,7 +32,7 @@ pub(super) async fn dispatch_one(
         Err(_) => {
             return Err(serde_json::json!({
                 "ok": false,
-                "cmd": "agent.exec",
+                "cmd": cmd,
                 "error": "INVALID_API_KEY_HEADER",
                 "message": "API key header value is not valid HTTP"
             })
@@ -43,7 +44,7 @@ pub(super) async fn dispatch_one(
     app.clone().oneshot(req).await.map_err(|_| {
         serde_json::json!({
             "ok": false,
-            "cmd": "agent.exec",
+            "cmd": cmd,
             "error": "DISPATCH_FAILED",
             "message": "failed to dispatch session request"
         })
@@ -69,7 +70,7 @@ pub(crate) async fn session_api_dispatch_line(
         Err(e) => return session_build_error_envelope(cmd, &e),
     };
 
-    let response = match dispatch_one(app, inner, api_key, client_ip).await {
+    let response = match dispatch_one(app, inner, cmd, api_key, client_ip).await {
         Ok(r) => r,
         Err(envelope) => return envelope,
     };

@@ -70,6 +70,8 @@ class TimeoutsConfig:
     scp_transfer: float
     #: Scenario 14: deadline for *all* concurrent agents to check in.
     stress_concurrent_checkin: float
+    #: Default timeout for :meth:`Session.send` / :meth:`Session.send_batch` readline waits.
+    session_send: float = 30.0
     resilience_reconnect: float | None = None
     resilience_kill_date: float | None = None
     working_hours_probe: float | None = None
@@ -90,6 +92,7 @@ def timeouts_for_unit_tests() -> TimeoutsConfig:
         ssh_connect=10.0,
         scp_transfer=60.0,
         stress_concurrent_checkin=30.0,
+        session_send=30.0,
         resilience_reconnect=None,
         resilience_kill_date=None,
         working_hours_probe=None,
@@ -228,6 +231,7 @@ _ALLOWED_TIMEOUTS_KEYS = frozenset({
     "ssh_connect_secs",
     "scp_transfer_secs",
     "stress_concurrent_checkin_secs",
+    "session_send_secs",
     "resilience_reconnect",
     "resilience_kill_date",
     "working_hours_probe",
@@ -449,6 +453,9 @@ def parse_env_config(raw: dict[str, Any]) -> EnvConfig:
         tr["stress_concurrent_checkin"] = _optional_timeout_default(
             to_t, "stress_concurrent_checkin_secs", 30.0, "[timeouts]", errors
         )
+        tr["session_send"] = _optional_timeout_default(
+            to_t, "session_send_secs", 30.0, "[timeouts]", errors
+        )
         for opt in ("resilience_reconnect", "resilience_kill_date", "working_hours_probe"):
             if opt in to_t and to_t[opt] is not None:
                 tr[opt] = _require_positive_number(to_t[opt], f"[timeouts].{opt}", errors)
@@ -664,6 +671,7 @@ def parse_env_config(raw: dict[str, Any]) -> EnvConfig:
             ssh_connect=tr["ssh_connect"],  # type: ignore[arg-type]
             scp_transfer=tr["scp_transfer"],  # type: ignore[arg-type]
             stress_concurrent_checkin=tr["stress_concurrent_checkin"],  # type: ignore[arg-type]
+            session_send=tr["session_send"],  # type: ignore[arg-type]
             resilience_reconnect=tr.get("resilience_reconnect"),
             resilience_kill_date=tr.get("resilience_kill_date"),
             working_hours_probe=tr.get("working_hours_probe"),
@@ -872,6 +880,7 @@ def timeouts_to_env_dict(t: TimeoutsConfig) -> dict[str, Any]:
         "ssh_connect_secs": t.ssh_connect,
         "scp_transfer_secs": t.scp_transfer,
         "stress_concurrent_checkin_secs": t.stress_concurrent_checkin,
+        "session_send_secs": t.session_send,
     }
     if t.resilience_reconnect is not None:
         out["resilience_reconnect"] = t.resilience_reconnect

@@ -38,10 +38,11 @@ def run(ctx):
     from lib.session import Session, SessionError
 
     cli = ctx.cli
+    send_timeout = getattr(ctx.timeouts, "session_send", Session.DEFAULT_TIMEOUT)
 
     # ── 1. Ping ───────────────────────────────────────────────────────────────
     print("  [session][ping] starting session, sending ping")
-    with Session(cli) as sess:
+    with Session(cli, timeout=send_timeout) as sess:
         pong = sess.send({"cmd": "ping"})
         assert pong.get("pong") is True, (
             f"expected {{\"pong\": true}}, got {pong!r}"
@@ -50,7 +51,7 @@ def run(ctx):
 
     # ── 2. agent.list ─────────────────────────────────────────────────────────
     print("  [session][agent.list] verifying agent list returns a JSON array")
-    with Session(cli) as sess:
+    with Session(cli, timeout=send_timeout) as sess:
         agents = sess.send({"cmd": "agent.list"})
         assert isinstance(agents, list), (
             f"agent.list must return a list, got {type(agents).__name__}: {agents!r}"
@@ -61,7 +62,7 @@ def run(ctx):
     if agents:
         agent_id = f"{agents[0]['AgentID']:08X}"
         print(f"  [session][agent.exec] running 'echo hello' on agent {agent_id!r}")
-        with Session(cli) as sess:
+        with Session(cli, timeout=send_timeout) as sess:
             # Use raise_on_error=False: the agent may be dead (EXEC_TIMEOUT or
             # NOT_FOUND). We only verify the session delivers a valid dict envelope.
             result = sess.send(
@@ -86,7 +87,7 @@ def run(ctx):
         #   2. Malformed agent id (non-hex characters) → CLI rejects locally
         #      before forwarding → INVALID_ARGS envelope on stderr.
         print("  [session][agent.exec] no agents present — testing NOT_FOUND error path")
-        with Session(cli) as sess:
+        with Session(cli, timeout=send_timeout) as sess:
             resp = sess.send(
                 {"cmd": "agent.exec", "id": "FFFFFFFF", "command": "echo x"},
                 raise_on_error=False,
@@ -100,7 +101,7 @@ def run(ctx):
         print("  [session][agent.exec] NOT_FOUND error path passed")
 
         print("  [session][agent.exec] testing INVALID_ARGS path with malformed id")
-        with Session(cli) as sess:
+        with Session(cli, timeout=send_timeout) as sess:
             resp = sess.send(
                 {"cmd": "agent.exec", "id": "nonexistent-000", "command": "echo x"},
                 raise_on_error=False,
@@ -115,7 +116,7 @@ def run(ctx):
 
     # ── 4. Multi-command sequence ─────────────────────────────────────────────
     print("  [session][multi-cmd] three sequential commands on one connection")
-    with Session(cli) as sess:
+    with Session(cli, timeout=send_timeout) as sess:
         r1 = sess.send({"cmd": "ping"})
         assert r1.get("pong") is True, f"ping 1 failed: {r1!r}"
 
@@ -131,7 +132,7 @@ def run(ctx):
     # submission order.  Mixing local commands (e.g. ping) with server commands
     # breaks ordering because ping is answered by the CLI without a round-trip.
     print("  [session][batch] sending 3 agent.list commands without waiting between them")
-    with Session(cli) as sess:
+    with Session(cli, timeout=send_timeout) as sess:
         cmds = [
             {"cmd": "agent.list"},
             {"cmd": "agent.list"},
@@ -156,7 +157,7 @@ def run(ctx):
 
     # ── 6. Graceful exit via {"cmd":"exit"} ───────────────────────────────────
     print('  [session][exit-cmd] sending {"cmd":"exit"} and checking process exit code')
-    sess = Session(cli)
+    sess = Session(cli, timeout=send_timeout)
     sess.__enter__()
     # Verify ping works before exit
     pong = sess.send({"cmd": "ping"})
@@ -172,7 +173,7 @@ def run(ctx):
 
     # ── 7. Graceful exit via EOF ───────────────────────────────────────────────
     print("  [session][eof-exit] closing stdin (EOF) and checking process exit code")
-    sess2 = Session(cli)
+    sess2 = Session(cli, timeout=send_timeout)
     sess2.__enter__()
     pong2 = sess2.send({"cmd": "ping"})
     assert pong2.get("pong") is True, f"pre-EOF ping failed: {pong2!r}"

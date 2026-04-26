@@ -28,6 +28,8 @@ from typing import Any
 
 from .cli import CliConfig
 
+_SENTINEL = object()
+
 
 class SessionError(Exception):
     """Raised when the session process returns an error envelope or fails.
@@ -56,14 +58,20 @@ class Session:
     it is killed.
 
     Args:
-        cfg:   CLI configuration (server URL, token, binary path).
-        agent: Default agent ID injected as ``--agent`` so commands that
-               operate on an agent don't need to carry an ``"id"`` field.
+        cfg:     CLI configuration (server URL, token, binary path).
+        agent:   Default agent ID injected as ``--agent`` so commands that
+                 operate on an agent don't need to carry an ``"id"`` field.
+        timeout: Default timeout in seconds for :meth:`send` and
+                 :meth:`send_batch` readline waits.  ``None`` means block
+                 forever (legacy behaviour).  Individual calls can override.
     """
 
-    def __init__(self, cfg: CliConfig, agent: str | None = None):
+    DEFAULT_TIMEOUT: float = 30.0
+
+    def __init__(self, cfg: CliConfig, agent: str | None = None, timeout: float | None = DEFAULT_TIMEOUT):
         self._cfg = cfg
         self._agent = agent
+        self._timeout = timeout
         self._proc: subprocess.Popen[str] | None = None
         self._lines: queue.Queue[str | None] = queue.Queue()
         self._eofs_seen: int = 0
@@ -151,7 +159,12 @@ class Session:
 
     # ── public API ────────────────────────────────────────────────────────────
 
-    def send(self, cmd: dict[str, Any], raise_on_error: bool = True) -> dict[str, Any]:
+    def send(
+        self,
+        cmd: dict[str, Any],
+        raise_on_error: bool = True,
+        timeout: float | None = _SENTINEL,
+    ) -> dict[str, Any]:
         """Send one JSON command and return the response data.
 
         Writes *cmd* as a single JSON line to the subprocess stdin, then reads
@@ -162,6 +175,9 @@ class Session:
             cmd:            Command dict (must include at least ``"cmd"``).
             raise_on_error: When True (default), raise :class:`SessionError` if
                             the server returns ``{"ok": false, ...}``.
+            timeout:        Seconds to wait for a response.  Defaults to the
+                            instance-level timeout (30 s).  Pass ``None`` to
+                            block indefinitely.
 
         Returns:
             The ``"data"`` field of the response envelope on success, or the
@@ -169,17 +185,19 @@ class Session:
 
         Raises:
             SessionError: On server-side error (when *raise_on_error* is True),
-                          unexpected EOF, or JSON parse failure.
+                          unexpected EOF, JSON parse failure, or timeout.
             AssertionError: If called outside a ``with`` block.
         """
         assert self._proc is not None, "Session not started — use as context manager"
         assert self._proc.stdin is not None
         assert self._proc.stdout is not None
 
+        effective_timeout = self._timeout if timeout is _SENTINEL else timeout
+
         self._proc.stdin.write(json.dumps(cmd) + "\n")
         self._proc.stdin.flush()
 
-        response_line = self._readline()
+        response_line = self._readline(timeout=effective_timeout)
 
         try:
             envelope = json.loads(response_line)
@@ -196,6 +214,7 @@ class Session:
     def send_batch(
         self,
         cmds: list[dict[str, Any]],
+        timeout: float | None = _SENTINEL,
     ) -> list[dict[str, Any]]:
         """Pipeline multiple commands without waiting between sends.
 
@@ -204,13 +223,20 @@ class Session:
 
         Returns raw response envelopes (does not raise on individual errors).
 
+        Args:
+            timeout: Per-response readline timeout.  Defaults to the
+                     instance-level timeout.  Pass ``None`` to block forever.
+
         Raises:
-            SessionError: On unexpected EOF before all responses are received.
+            SessionError: On unexpected EOF or timeout before all responses are
+                          received.
             AssertionError: If called outside a ``with`` block.
         """
         assert self._proc is not None, "Session not started — use as context manager"
         assert self._proc.stdin is not None
         assert self._proc.stdout is not None
+
+        effective_timeout = self._timeout if timeout is _SENTINEL else timeout
 
         for cmd in cmds:
             self._proc.stdin.write(json.dumps(cmd) + "\n")
@@ -218,7 +244,7 @@ class Session:
 
         responses: list[dict[str, Any]] = []
         for _ in cmds:
-            line = self._readline()
+            line = self._readline(timeout=effective_timeout)
             responses.append(json.loads(line))
         return responses
 

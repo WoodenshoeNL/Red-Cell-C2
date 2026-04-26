@@ -291,6 +291,90 @@ class TestSessionSend(unittest.TestCase):
             sess.send({"cmd": "ping"})
 
 
+# ── Session timeout ──────────────────────────────────────────────────────────
+
+class TestSessionTimeout(unittest.TestCase):
+    def _blocking_proc(self) -> tuple[MagicMock, threading.Event]:
+        """Return a mock proc whose reader threads block until *done* is set."""
+        done = threading.Event()
+        proc = MagicMock()
+        proc.poll.return_value = None
+        proc.wait.return_value = 0
+        proc.stdin = MagicMock()
+        proc.stdin.__enter__ = lambda s: s
+        proc.stdin.__exit__ = MagicMock(return_value=False)
+        proc.stdout = MagicMock()
+        proc.stdout.readline.side_effect = lambda: (done.wait(), "")[1]
+        proc.stderr = MagicMock()
+        proc.stderr.readline.side_effect = lambda: (done.wait(), "")[1]
+        return proc, done
+
+    def test_send_raises_timeout(self) -> None:
+        """send() must raise SessionError('TIMEOUT') when no response arrives."""
+        proc, done = self._blocking_proc()
+
+        with patch("subprocess.Popen", return_value=proc):
+            with Session(_cfg(), timeout=0.1) as sess:
+                with self.assertRaises(SessionError) as cm:
+                    sess.send({"cmd": "ping"})
+            done.set()
+
+        self.assertEqual(cm.exception.code, "TIMEOUT")
+
+    def test_send_per_call_timeout_override(self) -> None:
+        """A per-call timeout= on send() must override the instance default."""
+        proc, done = self._blocking_proc()
+
+        with patch("subprocess.Popen", return_value=proc):
+            with Session(_cfg(), timeout=300) as sess:
+                with self.assertRaises(SessionError) as cm:
+                    sess.send({"cmd": "ping"}, timeout=0.1)
+            done.set()
+
+        self.assertEqual(cm.exception.code, "TIMEOUT")
+
+    def test_send_timeout_none_blocks(self) -> None:
+        """send(timeout=None) must block until a response arrives (no timeout)."""
+        proc, done = self._blocking_proc()
+
+        with patch("subprocess.Popen", return_value=proc):
+            with Session(_cfg(), timeout=0.1) as sess:
+                # Queue a response so _readline succeeds without hitting timeout
+                sess._lines.put(_ok_envelope("ping", {"pong": True}))
+                result = sess.send({"cmd": "ping"}, timeout=None)
+            done.set()
+
+        self.assertEqual(result, {"pong": True})
+
+    def test_send_batch_raises_timeout(self) -> None:
+        """send_batch() must raise SessionError('TIMEOUT') on slow response."""
+        proc, done = self._blocking_proc()
+
+        with patch("subprocess.Popen", return_value=proc):
+            with Session(_cfg(), timeout=0.1) as sess:
+                with self.assertRaises(SessionError) as cm:
+                    sess.send_batch([{"cmd": "ping"}])
+            done.set()
+
+        self.assertEqual(cm.exception.code, "TIMEOUT")
+
+    def test_default_timeout_is_30(self) -> None:
+        """Session default timeout must be 30 seconds."""
+        self.assertEqual(Session.DEFAULT_TIMEOUT, 30.0)
+        sess = Session(_cfg())
+        self.assertEqual(sess._timeout, 30.0)
+
+    def test_instance_timeout_none_disables(self) -> None:
+        """Session(timeout=None) must pass None to _readline (no timeout)."""
+        proc = _make_mock_proc([_ok_envelope("ping", {"pong": True})])
+
+        with patch("subprocess.Popen", return_value=proc):
+            with Session(_cfg(), timeout=None) as sess:
+                result = sess.send({"cmd": "ping"})
+
+        self.assertEqual(result, {"pong": True})
+
+
 # ── Session.send_batch ────────────────────────────────────────────────────────
 
 class TestSessionSendBatch(unittest.TestCase):

@@ -120,7 +120,7 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) 
             }
         }
 
-        AgentCommands::Shell { id, timeout, unsafe_tty } => {
+        AgentCommands::Shell { id, timeout, unsafe_tty, enable_local_shell } => {
             if !unsafe_tty {
                 let err = CliError::InvalidArgs(
                     "agent shell requires --unsafe-tty because it uses interactive I/O \
@@ -131,7 +131,8 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) 
                 print_error(&err).ok();
                 return err.exit_code();
             }
-            shell::run(client, id, timeout).await
+            let local_shell = enable_local_shell || crate::config::resolve_enable_local_shell();
+            shell::run(client, id, timeout, local_shell).await
         }
 
         AgentCommands::Output { id, watch, since } => {

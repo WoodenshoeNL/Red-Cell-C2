@@ -9,6 +9,7 @@ use std::io::Write as _;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 use tokio::task;
+use tracing::warn;
 
 use serde::Serialize;
 
@@ -44,18 +45,23 @@ fn print_banner(detail: &AgentDetail) {
 }
 
 /// Print the built-in command help to stderr.
-fn print_help() {
+fn print_help(local_shell_enabled: bool) {
+    let local_shell_line = if local_shell_enabled {
+        "  !<cmd>                 Run <cmd> on the OPERATOR HOST (not the agent) [enabled]"
+    } else {
+        "  !<cmd>                 (disabled — pass --enable-local-shell to allow)"
+    };
     eprintln!(
         "\
 Built-in commands:
   help                   Show this message
   exit / quit            Leave the shell
-  !<cmd>                 Execute <cmd> on the local host
+{local_shell_line}
   upload <src> <dst>     Upload a local file to the agent
   download <src> <dst>   Download a file from the agent to local disk
   sleep <secs> [jitter%] Change the agent sleep interval (jitter default: 0)
 
-All other input is sent as a shell command to the agent."
+All other input is sent as a shell command to the remote agent."
     );
 }
 
@@ -115,7 +121,12 @@ fn parse_builtin(line: &str) -> BuiltIn<'_> {
 /// Each non-builtin line is dispatched via `exec_wait`. Ctrl+C during a
 /// running command cancels the wait; Ctrl+C at the prompt is a no-op.
 /// Ctrl+D (EOF) exits cleanly.
-pub(crate) async fn run(client: &ApiClient, id: AgentId, timeout: Option<u64>) -> i32 {
+pub(crate) async fn run(
+    client: &ApiClient,
+    id: AgentId,
+    timeout: Option<u64>,
+    enable_local_shell: bool,
+) -> i32 {
     let timeout_secs = timeout.unwrap_or(AGENT_EXEC_WAIT_TIMEOUT_SECS);
 
     let detail = match show(client, id).await {
@@ -177,13 +188,27 @@ pub(crate) async fn run(client: &ApiClient, id: AgentId, timeout: Option<u64>) -
 
         match parse_builtin(trimmed) {
             BuiltIn::Exit => break,
-            BuiltIn::Help => print_help(),
+            BuiltIn::Help => print_help(enable_local_shell),
 
             BuiltIn::LocalExec(cmd) => {
+                if !enable_local_shell {
+                    eprintln!(
+                        "Local shell execution is disabled. \
+                         Pass --enable-local-shell or set enable_local_shell = true \
+                         in the config file to allow !<cmd>."
+                    );
+                    continue;
+                }
                 if cmd.is_empty() {
                     eprintln!("Usage: !<command>");
                     continue;
                 }
+                warn!(
+                    audit_event = "local_exec",
+                    command = cmd,
+                    agent_id = %id,
+                    "operator executing local shell command"
+                );
                 handle_local_exec(cmd).await;
             }
 
@@ -439,6 +464,16 @@ mod tests {
                 "path should end with {HISTORY_FILE_NAME}: {s}"
             );
         }
+    }
+
+    #[test]
+    fn help_with_local_shell_enabled_does_not_panic() {
+        print_help(true);
+    }
+
+    #[test]
+    fn help_with_local_shell_disabled_does_not_panic() {
+        print_help(false);
     }
 
     fn builtin_name(b: &BuiltIn<'_>) -> &'static str {

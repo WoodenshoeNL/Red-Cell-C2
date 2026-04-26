@@ -638,6 +638,58 @@ mod tests {
     }
 
     #[test]
+    fn agent_shell_enable_local_shell_defaults_to_false() {
+        let cli = Cli::try_parse_from(["red-cell-cli", "agent", "shell", "abc123", "--unsafe-tty"])
+            .expect("must parse");
+        match cli.command {
+            Some(Commands::Agent { action: AgentCommands::Shell { enable_local_shell, .. } }) => {
+                assert!(!enable_local_shell, "--enable-local-shell must default to false");
+            }
+            other => panic!("expected Agent::Shell, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_shell_enable_local_shell_flag_parses() {
+        let cli = Cli::try_parse_from([
+            "red-cell-cli",
+            "agent",
+            "shell",
+            "abc123",
+            "--unsafe-tty",
+            "--enable-local-shell",
+        ])
+        .expect("must parse");
+        match cli.command {
+            Some(Commands::Agent { action: AgentCommands::Shell { enable_local_shell, .. } }) => {
+                assert!(enable_local_shell, "--enable-local-shell must be true when passed");
+            }
+            other => panic!("expected Agent::Shell, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_shell_help_mentions_operator_host() {
+        let mut cmd = Cli::command();
+        let help = cmd
+            .find_subcommand_mut("agent")
+            .expect("agent subcommand")
+            .find_subcommand_mut("shell")
+            .expect("agent shell subcommand")
+            .render_long_help()
+            .to_string();
+
+        assert!(
+            help.contains("OPERATOR HOST"),
+            "agent shell help must warn that ! runs on the operator host"
+        );
+        assert!(
+            help.contains("--enable-local-shell"),
+            "agent shell help must mention --enable-local-shell"
+        );
+    }
+
+    #[test]
     fn payload_build_wait_timeout_is_captured() {
         let cli = Cli::try_parse_from([
             "red-cell-cli",

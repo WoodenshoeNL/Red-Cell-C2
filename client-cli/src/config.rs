@@ -64,6 +64,8 @@ pub struct FileConfig {
     pub timeout: Option<u64>,
     /// SHA-256 certificate fingerprint for TLS pinning (lowercase hex, 64 chars).
     pub cert_fingerprint: Option<String>,
+    /// Allow `!` local shell execution inside `agent shell`. Defaults to `false`.
+    pub enable_local_shell: Option<bool>,
 }
 
 /// Final resolved configuration ready for use by command handlers.
@@ -160,6 +162,19 @@ pub fn find_config_file(start: &Path) -> Option<PathBuf> {
 /// Returns `None` if the home/config directory cannot be determined.
 pub fn global_config_path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("red-cell-cli").join("config.toml"))
+}
+
+/// Check whether `enable_local_shell` is set in any config file.
+///
+/// Resolution: env var `RC_ENABLE_LOCAL_SHELL` (truthy = `1`/`true`/`yes`)
+/// → config file → `false`.
+pub fn resolve_enable_local_shell() -> bool {
+    if let Ok(val) = std::env::var("RC_ENABLE_LOCAL_SHELL") {
+        return matches!(val.as_str(), "1" | "true" | "yes");
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let path = find_config_file(&cwd).or_else(global_config_path);
+    path.and_then(|p| load_config_file(&p).ok()).and_then(|c| c.enable_local_shell).unwrap_or(false)
 }
 
 /// Returns `true` when the CLI has no configuration from any source:
@@ -789,6 +804,7 @@ timeout = 120
             token: Some("secret-tok".to_owned()),
             timeout: None,
             cert_fingerprint: None,
+            enable_local_shell: None,
         };
         write_config_file(&path, &config).unwrap();
 
@@ -818,6 +834,7 @@ timeout = 120
             token: None,
             timeout: None,
             cert_fingerprint: None,
+            enable_local_shell: None,
         };
         write_config_file(&path, &config).unwrap();
 
@@ -892,5 +909,24 @@ token  = "file-tok"
         let child = tmp.path().join("sub");
         fs::create_dir_all(&child).unwrap();
         assert!(!no_config_on_disk(&child));
+    }
+
+    #[test]
+    fn load_config_parses_enable_local_shell() {
+        let tmp = TempDir::new().unwrap();
+        let path = write_config(
+            tmp.path(),
+            "server = \"https://ts:40056\"\ntoken = \"t\"\nenable_local_shell = true",
+        );
+        let cfg = load_config_file(&path).unwrap();
+        assert_eq!(cfg.enable_local_shell, Some(true));
+    }
+
+    #[test]
+    fn load_config_enable_local_shell_defaults_to_none() {
+        let tmp = TempDir::new().unwrap();
+        let path = write_config(tmp.path(), "server = \"https://ts:40056\"\ntoken = \"t\"");
+        let cfg = load_config_file(&path).unwrap();
+        assert_eq!(cfg.enable_local_shell, None);
     }
 }

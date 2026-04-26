@@ -170,3 +170,58 @@ async fn create_audit_rejects_unauthenticated_request() {
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn create_audit_rejects_analyst_role() {
+    let (app, _registry, _) = test_router_with_registry(Some((
+        60,
+        "analyst-key",
+        "secret-analyst",
+        OperatorRole::Analyst,
+    )))
+    .await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/audit")
+                .method("POST")
+                .header(API_KEY_HEADER, "secret-analyst")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"action": "operator.local_exec", "target_kind": "agent"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn create_audit_rejects_forged_action_label() {
+    let (app, _registry, _) =
+        test_router_with_registry(Some((60, "rest-op", "secret-op", OperatorRole::Operator))).await;
+
+    for forged_action in ["audit.purge", "agent.kill", "operator.delete", "admin.nuke"] {
+        let body = format!(r#"{{"action": "{forged_action}", "target_kind": "agent"}}"#);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/audit")
+                    .method("POST")
+                    .header(API_KEY_HEADER, "secret-op")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "forged action {forged_action:?} should be rejected with 400"
+        );
+    }
+}

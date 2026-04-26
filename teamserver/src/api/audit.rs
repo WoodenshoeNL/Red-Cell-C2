@@ -17,7 +17,7 @@ use crate::{
     record_operator_action_with_notifications,
 };
 
-use super::{AdminApiAccess, ApiErrorBody, ReadApiAccess, json_error_response};
+use super::{AdminApiAccess, ApiErrorBody, ReadApiAccess, TaskAgentApiAccess, json_error_response};
 
 #[derive(Debug, Error)]
 pub(super) enum AuditApiError {
@@ -25,11 +25,25 @@ pub(super) enum AuditApiError {
     Teamserver(#[from] TeamserverError),
     #[error("failed to compute cutoff timestamp")]
     TimestampFormat,
+    #[error("action {0:?} is not in the client-submittable allowlist")]
+    InvalidAction(String),
 }
+
+/// Actions that the REST client is allowed to submit via `POST /audit`.
+const ALLOWED_CLIENT_ACTIONS: &[&str] = &["operator.local_exec"];
 
 impl IntoResponse for AuditApiError {
     fn into_response(self) -> Response {
-        json_error_response(StatusCode::INTERNAL_SERVER_ERROR, "audit_api_error", self.to_string())
+        match &self {
+            Self::InvalidAction(_) => {
+                json_error_response(StatusCode::BAD_REQUEST, "invalid_action", self.to_string())
+            }
+            _ => json_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "audit_api_error",
+                self.to_string(),
+            ),
+        }
     }
 }
 
@@ -200,6 +214,7 @@ pub(super) struct CreateAuditResponse {
     request_body = CreateAuditBody,
     responses(
         (status = 201, description = "Audit entry created", body = CreateAuditResponse),
+        (status = 400, description = "Action not in client-submittable allowlist", body = ApiErrorBody),
         (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
         (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
         (status = 429, description = "Rate limit exceeded", body = ApiErrorBody)
@@ -207,9 +222,13 @@ pub(super) struct CreateAuditResponse {
 )]
 pub(super) async fn create_audit(
     State(state): State<TeamserverState>,
-    identity: ReadApiAccess,
+    identity: TaskAgentApiAccess,
     Json(body): Json<CreateAuditBody>,
 ) -> Result<(StatusCode, Json<CreateAuditResponse>), AuditApiError> {
+    if !ALLOWED_CLIENT_ACTIONS.contains(&body.action.as_str()) {
+        return Err(AuditApiError::InvalidAction(body.action));
+    }
+
     let details = audit_details(
         AuditResultStatus::Success,
         body.agent_id,

@@ -50,14 +50,17 @@ class TestBuildParallel(unittest.TestCase):
         self.assertEqual(c2[1]["fmt"], "bin")
 
     def test_parallel_path_preserves_order(self) -> None:
-        with patch("lib.payload._one_cell_bytes", side_effect=[b"one", b"two"]) as m_one:
+        def _by_cell(_cfg: object, _listener: str, cell: MatrixCell) -> bytes:
+            return f"{cell.arch}-{cell.fmt}".encode()
+
+        with patch("lib.payload._one_cell_bytes", side_effect=_by_cell) as m_one:
             out = build_parallel(
                 _CFG,
                 "L",
                 [MatrixCell(), MatrixCell(arch="x86", fmt="bin")],
                 parallel=True,
             )
-        self.assertEqual(out, [b"one", b"two"])
+        self.assertEqual(out, [b"x64-exe", b"x86-bin"])
         self.assertEqual(m_one.call_count, 2)
 
 

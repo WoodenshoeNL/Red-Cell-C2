@@ -45,6 +45,7 @@ def _linux_ctx():
     ctx.linux.user = "testuser"
     ctx.windows = None
     ctx.dry_run = False
+    ctx.payload_parallel = False
     return ctx
 
 
@@ -57,11 +58,12 @@ def _windows_ctx():
     ctx.windows.work_dir = "C:\\Temp\\rc-test"
     ctx.linux = None
     ctx.dry_run = False
+    ctx.payload_parallel = False
     return ctx
 
 
-# Shared patch set for _run_for_agent / _run_stress_for_agent: listener calls
-# succeed, payload build raises CliError.
+# Shared patch set for legacy scenarios that still do builds inside _run_for_agent:
+# listener calls succeed, payload build raises CliError.
 _BUILD_FAIL = CliError("BUILD_FAILED", "toolchain error", 1)
 _LISTENER_PATCHES = [
     patch("lib.cli.listener_create", return_value={}),
@@ -71,6 +73,20 @@ _LISTENER_PATCHES = [
     patch("lib.deploy_agent.payload_build_and_fetch", side_effect=_BUILD_FAIL),
     patch("lib.cli.payload_build_and_fetch", side_effect=_BUILD_FAIL),
 ]
+
+# Patches for scenarios that use build_parallel in run() — listener + build_parallel
+# succeed, returning dummy payloads.
+_RUN_PATCHES = [
+    patch("lib.cli.listener_create", return_value={}),
+    patch("lib.cli.listener_start", return_value={}),
+    patch("lib.cli.listener_stop", return_value={}),
+    patch("lib.cli.listener_delete", return_value={}),
+]
+
+# Build failure via build_parallel for scenarios that pre-build in run().
+_BUILD_PARALLEL_FAIL = patch(
+    "lib.payload.build_parallel", side_effect=_BUILD_FAIL,
+)
 
 
 def _apply_patches(patches):
@@ -135,15 +151,21 @@ class TestScenario05(unittest.TestCase):
         cls.mod = _load("05_agent_windows_windows_agent_checkin.py")
 
     def test_specter_build_failure_propagates(self) -> None:
+        """build_parallel failure in run() propagates as CliError."""
         ctx = _windows_ctx()
-        with _apply_patches(_LISTENER_PATCHES):
+        ctx.env["agents"]["available"] = ["demon", "specter"]
+        with patch("lib.deploy.preflight_ssh"), \
+             _apply_patches(_RUN_PATCHES), \
+             patch("lib.payload.build_parallel", side_effect=_BUILD_FAIL):
             with self.assertRaises(CliError) as cm:
-                self.mod._run_for_agent(ctx, "specter", "exe", "test-win-specter")
+                self.mod.run(ctx)
         self.assertEqual(cm.exception.code, "BUILD_FAILED")
 
     def test_specter_skipped_when_not_in_available(self) -> None:
         ctx = _windows_ctx()
         with patch("lib.deploy.preflight_ssh"), \
+             _apply_patches(_RUN_PATCHES), \
+             patch("lib.payload.build_parallel", return_value=[b"fake"]), \
              patch.object(self.mod, "_run_for_agent") as mock_run:
             self.mod.run(ctx)
         agent_types = [c.kwargs["agent_type"] for c in mock_run.call_args_list]
@@ -151,15 +173,21 @@ class TestScenario05(unittest.TestCase):
         self.assertNotIn("specter", agent_types)
 
     def test_archon_build_failure_propagates(self) -> None:
+        """build_parallel failure in run() propagates as CliError."""
         ctx = _windows_ctx()
-        with _apply_patches(_LISTENER_PATCHES):
+        ctx.env["agents"]["available"] = ["demon", "archon"]
+        with patch("lib.deploy.preflight_ssh"), \
+             _apply_patches(_RUN_PATCHES), \
+             patch("lib.payload.build_parallel", side_effect=_BUILD_FAIL):
             with self.assertRaises(CliError) as cm:
-                self.mod._run_for_agent(ctx, "archon", "exe", "test-win-archon")
+                self.mod.run(ctx)
         self.assertEqual(cm.exception.code, "BUILD_FAILED")
 
     def test_archon_skipped_when_not_in_available(self) -> None:
         ctx = _windows_ctx()  # env has only "demon" in available
         with patch("lib.deploy.preflight_ssh"), \
+             _apply_patches(_RUN_PATCHES), \
+             patch("lib.payload.build_parallel", return_value=[b"fake"]), \
              patch.object(self.mod, "_run_for_agent") as mock_run:
             self.mod.run(ctx)
         agent_types = [c.kwargs["agent_type"] for c in mock_run.call_args_list]
@@ -175,17 +203,25 @@ class TestScenario06(unittest.TestCase):
         cls.mod = _load("06_file_transfer_file_transfer.py")
 
     def test_phantom_linux_build_failure_propagates(self) -> None:
+        """build_parallel failure propagates when building phantom on Linux."""
         ctx = _linux_ctx()
-        with _apply_patches(_LISTENER_PATCHES):
+        ctx.env["agents"]["available"] = ["demon", "phantom"]
+        with patch("lib.deploy.preflight_ssh"), \
+             _apply_patches(_RUN_PATCHES), \
+             patch("lib.payload.build_parallel", side_effect=_BUILD_FAIL):
             with self.assertRaises(CliError) as cm:
-                self.mod._run_for_agent(ctx, "phantom", "bin", "test-ftransfer-phantom")
+                self.mod.run(ctx)
         self.assertEqual(cm.exception.code, "BUILD_FAILED")
 
     def test_specter_windows_build_failure_propagates(self) -> None:
+        """build_parallel failure propagates when building specter on Windows."""
         ctx = _windows_ctx()
-        with _apply_patches(_LISTENER_PATCHES):
+        ctx.env["agents"]["available"] = ["demon", "specter"]
+        with patch("lib.deploy.preflight_ssh"), \
+             _apply_patches(_RUN_PATCHES), \
+             patch("lib.payload.build_parallel", side_effect=_BUILD_FAIL):
             with self.assertRaises(CliError) as cm:
-                self.mod._run_for_agent_windows(ctx, "specter", "exe", "test-ftransfer-specter")
+                self.mod.run(ctx)
         self.assertEqual(cm.exception.code, "BUILD_FAILED")
 
     def test_phantom_skipped_when_not_in_available_linux_only(self) -> None:
@@ -194,6 +230,7 @@ class TestScenario06(unittest.TestCase):
         ctx = _linux_ctx()
         ctx.windows = None
         with patch("lib.deploy.preflight_ssh"), \
+             _apply_patches(_RUN_PATCHES), \
              patch.object(self.mod, "_run_for_agent") as mock_run, \
              patch.object(self.mod, "_run_for_agent_windows"):
             with self.assertRaises(ScenarioSkipped):
@@ -207,6 +244,8 @@ class TestScenario06(unittest.TestCase):
         ctx.windows = MagicMock()
         ctx.windows.work_dir = "C:\\Temp\\rc-test"
         with patch("lib.deploy.preflight_ssh"), \
+             _apply_patches(_RUN_PATCHES), \
+             patch("lib.payload.build_parallel", return_value=[b"fake"]), \
              patch.object(self.mod, "_run_for_agent") as mock_linux, \
              patch.object(self.mod, "_run_for_agent_windows") as mock_win:
             self.mod.run(ctx)
@@ -220,6 +259,8 @@ class TestScenario06(unittest.TestCase):
         ctx = _windows_ctx()
         ctx.linux = None
         with patch("lib.deploy.preflight_ssh"), \
+             _apply_patches(_RUN_PATCHES), \
+             patch("lib.payload.build_parallel", return_value=[b"fake"]), \
              patch.object(self.mod, "_run_for_agent"), \
              patch.object(self.mod, "_run_for_agent_windows") as mock_run:
             self.mod.run(ctx)
@@ -227,16 +268,22 @@ class TestScenario06(unittest.TestCase):
         self.assertNotIn("specter", agent_types)
 
     def test_archon_windows_build_failure_propagates(self) -> None:
+        """build_parallel failure propagates when building archon on Windows."""
         ctx = _windows_ctx()
-        with _apply_patches(_LISTENER_PATCHES):
+        ctx.env["agents"]["available"] = ["demon", "archon"]
+        with patch("lib.deploy.preflight_ssh"), \
+             _apply_patches(_RUN_PATCHES), \
+             patch("lib.payload.build_parallel", side_effect=_BUILD_FAIL):
             with self.assertRaises(CliError) as cm:
-                self.mod._run_for_agent_windows(ctx, "archon", "exe", "test-ftransfer-archon")
+                self.mod.run(ctx)
         self.assertEqual(cm.exception.code, "BUILD_FAILED")
 
     def test_archon_skipped_when_not_in_available_windows(self) -> None:
         ctx = _windows_ctx()  # env has only "demon" in available
         ctx.linux = None
         with patch("lib.deploy.preflight_ssh"), \
+             _apply_patches(_RUN_PATCHES), \
+             patch("lib.payload.build_parallel", return_value=[b"fake"]), \
              patch.object(self.mod, "_run_for_agent"), \
              patch.object(self.mod, "_run_for_agent_windows") as mock_run:
             self.mod.run(ctx)
@@ -252,17 +299,25 @@ class TestScenario07(unittest.TestCase):
         cls.mod = _load("07_process_ops_process_operations.py")
 
     def test_phantom_linux_build_failure_propagates(self) -> None:
+        """build_parallel failure propagates when building phantom on Linux."""
         ctx = _linux_ctx()
-        with _apply_patches(_LISTENER_PATCHES):
+        ctx.env["agents"]["available"] = ["demon", "phantom"]
+        with patch("lib.deploy.preflight_ssh"), \
+             _apply_patches(_RUN_PATCHES), \
+             patch("lib.payload.build_parallel", side_effect=_BUILD_FAIL):
             with self.assertRaises(CliError) as cm:
-                self.mod._run_for_agent(ctx, "phantom", "bin", "test-procops-phantom")
+                self.mod.run(ctx)
         self.assertEqual(cm.exception.code, "BUILD_FAILED")
 
     def test_specter_windows_build_failure_propagates(self) -> None:
+        """build_parallel failure propagates when building specter on Windows."""
         ctx = _windows_ctx()
-        with _apply_patches(_LISTENER_PATCHES):
+        ctx.env["agents"]["available"] = ["demon", "specter"]
+        with patch("lib.deploy.preflight_ssh"), \
+             _apply_patches(_RUN_PATCHES), \
+             patch("lib.payload.build_parallel", side_effect=_BUILD_FAIL):
             with self.assertRaises(CliError) as cm:
-                self.mod._run_for_agent_windows(ctx, "specter", "exe", "test-procops-specter")
+                self.mod.run(ctx)
         self.assertEqual(cm.exception.code, "BUILD_FAILED")
 
     def test_phantom_skipped_when_not_in_available_linux_only(self) -> None:
@@ -271,6 +326,7 @@ class TestScenario07(unittest.TestCase):
         ctx = _linux_ctx()
         ctx.windows = None
         with patch("lib.deploy.preflight_ssh"), \
+             _apply_patches(_RUN_PATCHES), \
              patch.object(self.mod, "_run_for_agent") as mock_run, \
              patch.object(self.mod, "_run_for_agent_windows"):
             with self.assertRaises(ScenarioSkipped):
@@ -284,6 +340,8 @@ class TestScenario07(unittest.TestCase):
         ctx.windows = MagicMock()
         ctx.windows.work_dir = "C:\\Temp\\rc-test"
         with patch("lib.deploy.preflight_ssh"), \
+             _apply_patches(_RUN_PATCHES), \
+             patch("lib.payload.build_parallel", return_value=[b"fake"]), \
              patch.object(self.mod, "_run_for_agent") as mock_linux, \
              patch.object(self.mod, "_run_for_agent_windows") as mock_win:
             self.mod.run(ctx)
@@ -296,6 +354,8 @@ class TestScenario07(unittest.TestCase):
         ctx = _windows_ctx()
         ctx.linux = None
         with patch("lib.deploy.preflight_ssh"), \
+             _apply_patches(_RUN_PATCHES), \
+             patch("lib.payload.build_parallel", return_value=[b"fake"]), \
              patch.object(self.mod, "_run_for_agent"), \
              patch.object(self.mod, "_run_for_agent_windows") as mock_run:
             self.mod.run(ctx)
@@ -303,16 +363,22 @@ class TestScenario07(unittest.TestCase):
         self.assertNotIn("specter", agent_types)
 
     def test_archon_windows_build_failure_propagates(self) -> None:
+        """build_parallel failure propagates when building archon on Windows."""
         ctx = _windows_ctx()
-        with _apply_patches(_LISTENER_PATCHES):
+        ctx.env["agents"]["available"] = ["demon", "archon"]
+        with patch("lib.deploy.preflight_ssh"), \
+             _apply_patches(_RUN_PATCHES), \
+             patch("lib.payload.build_parallel", side_effect=_BUILD_FAIL):
             with self.assertRaises(CliError) as cm:
-                self.mod._run_for_agent_windows(ctx, "archon", "exe", "test-procops-archon")
+                self.mod.run(ctx)
         self.assertEqual(cm.exception.code, "BUILD_FAILED")
 
     def test_archon_skipped_when_not_in_available_windows(self) -> None:
         ctx = _windows_ctx()  # env has only "demon" in available
         ctx.linux = None
         with patch("lib.deploy.preflight_ssh"), \
+             _apply_patches(_RUN_PATCHES), \
+             patch("lib.payload.build_parallel", return_value=[b"fake"]), \
              patch.object(self.mod, "_run_for_agent"), \
              patch.object(self.mod, "_run_for_agent_windows") as mock_run:
             self.mod.run(ctx)

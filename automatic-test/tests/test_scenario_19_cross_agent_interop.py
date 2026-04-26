@@ -42,11 +42,11 @@ class TestScenario19Gates(unittest.TestCase):
             _mod.run(ctx)
         self.assertIn("'phantom' not listed", str(cm.exception))
 
-    def test_linux_build_failure_propagates(self) -> None:
-        with patch("lib.cli.payload_build_and_fetch", side_effect=CliError("BUILD_FAILED", "boom", 1)):
-            with self.assertRaises(CliError) as cm:
-                _mod._build_and_deploy_linux(MagicMock(), MagicMock(work_dir="/tmp"), "listener-1", "uid")
-        self.assertEqual(cm.exception.code, "BUILD_FAILED")
+    def test_deploy_linux_rejects_empty_payload(self) -> None:
+        target = MagicMock(work_dir="/tmp")
+        with self.assertRaises(AssertionError) as cm:
+            _mod._deploy_linux(target, "listener-1", "uid", b"")
+        self.assertIn("empty", str(cm.exception).lower())
 
 
 if __name__ == "__main__":

@@ -5,7 +5,8 @@ use std::net::IpAddr;
 use tracing::{debug, warn};
 
 use red_cell_common::crypto::ecdh::{
-    ECDH_REG_MIN_LEN, ListenerKeypair, extract_connection_id_candidate, open_registration_packet,
+    ECDH_REG_MIN_LEN, EcdhError, ListenerKeypair, extract_connection_id_candidate,
+    open_registration_packet,
 };
 
 use crate::listeners::{
@@ -110,7 +111,18 @@ pub(crate) async fn process_ecdh_packet(
     let parsed = match open_registration_packet(kp, ECDH_REPLAY_WINDOW_SECS, body) {
         Ok(parsed) => parsed,
         Err(e) => {
-            debug!(listener = listener_name, error = %e, "ECDH registration packet failed to decrypt");
+            if matches!(&e, EcdhError::ReplayDetected) {
+                warn!(
+                    listener = listener_name,
+                    client_ip = %external_ip,
+                    window_secs = ECDH_REPLAY_WINDOW_SECS,
+                    "ECDH registration rejected: agent timestamp outside replay window \
+                     (synchronize system time on the agent and teamserver; max skew {}s)",
+                    ECDH_REPLAY_WINDOW_SECS
+                );
+            } else {
+                debug!(listener = listener_name, error = %e, "ECDH registration packet open failed");
+            }
             return Ok(EcdhOutcome::NotEcdh);
         }
     };

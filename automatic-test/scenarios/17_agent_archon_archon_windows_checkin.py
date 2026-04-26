@@ -20,6 +20,9 @@ Steps:
   3. Deploy via SSH/SCP to Windows 11 test machine
   4. Execute payload in background on target
   5. Wait for agent checkin
+     On timeout, prints ECDH/clock/network triage (harness + Windows UTC,
+     ``Test-NetConnection`` to callback_host:port) and the teamserver logs WARN
+     on >300s clock skew.
   6. Run baseline command suite: whoami, dir C:\\\\, ipconfig
   7. Run Archon-specific command extensions (if any are defined in env.toml)
   8. Kill agent, stop listener, clean up work_dir on target
@@ -30,7 +33,12 @@ DESCRIPTION = "Archon agent Windows checkin (Makefile build + Archon extensions)
 import uuid
 
 from lib import ScenarioSkipped
+from lib.archon_triage import (
+    format_archon_checkin_timeout_diagnostics,
+    log_archon_ecdh_prelude,
+)
 from lib.deploy_agent import deploy_and_checkin
+from lib.wait import TimeoutError as WaitTimeoutError
 
 
 def _short_id() -> str:
@@ -136,16 +144,25 @@ def run(ctx) -> None:
     listener_create(cli, listener_name, "http", **http_listener_kwargs(listener_port, ctx.env))
     listener_start(cli, listener_name)
     print("  [archon][listener] started")
+    log_archon_ecdh_prelude(ctx, listener_name, listener_port)
 
     agent_id = None
     try:
         # ── Steps 2-5: Build, deploy, exec, wait for checkin ─────────────────
-        agent = deploy_and_checkin(
-            ctx, cli, target,
-            agent_type="archon", fmt="exe",
-            listener_name=listener_name,
-            label="archon",
-        )
+        try:
+            agent = deploy_and_checkin(
+                ctx, cli, target,
+                agent_type="archon", fmt="exe",
+                listener_name=listener_name,
+                label="archon",
+            )
+        except WaitTimeoutError as exc:
+            print(
+                format_archon_checkin_timeout_diagnostics(
+                    ctx, target, listener_port, exc,
+                )
+            )
+            raise
         agent_id = agent["id"]
 
         # ── Step 6: Baseline command suite ───────────────────────────────────

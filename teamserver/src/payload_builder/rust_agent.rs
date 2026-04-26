@@ -199,7 +199,13 @@ impl PayloadBuilderService {
             message: format!("{agent_name} binary [{} bytes]", bytes.len()),
         });
 
-        let agent_type_pascal = agent_name[..1].to_ascii_uppercase() + &agent_name[1..];
+        let agent_type_pascal = {
+            let mut chars = agent_name.chars();
+            match chars.next() {
+                Some(c) => c.to_ascii_uppercase().to_string() + chars.as_str(),
+                None => String::new(),
+            }
+        };
         let format_label = if file_extension == ".exe" {
             "exe"
         } else if file_extension.is_empty() {
@@ -734,5 +740,35 @@ mod tests {
         assert_eq!(find(&env, "PHANTOM_KILL_DATE"), None);
         assert_eq!(find(&env, "PHANTOM_WORKING_HOURS"), None);
         Ok(())
+    }
+
+    fn to_pascal(name: &str) -> String {
+        let mut chars = name.chars();
+        match chars.next() {
+            Some(c) => c.to_ascii_uppercase().to_string() + chars.as_str(),
+            None => String::new(),
+        }
+    }
+
+    #[test]
+    fn pascal_case_known_agents() {
+        assert_eq!(to_pascal("phantom"), "Phantom");
+        assert_eq!(to_pascal("specter"), "Specter");
+        assert_eq!(to_pascal("archon"), "Archon");
+    }
+
+    #[test]
+    fn pascal_case_empty_string() {
+        assert_eq!(to_pascal(""), "");
+    }
+
+    #[test]
+    fn pascal_case_single_char() {
+        assert_eq!(to_pascal("a"), "A");
+    }
+
+    #[test]
+    fn pascal_case_multibyte_first_char() {
+        assert_eq!(to_pascal("\u{00e9}agent"), "\u{00e9}agent");
     }
 }

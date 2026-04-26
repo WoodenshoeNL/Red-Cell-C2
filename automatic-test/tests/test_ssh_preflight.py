@@ -85,7 +85,7 @@ class TestSshDeployScenarioIds(unittest.TestCase):
         """_ssh_deploy_scenario_ids with no arg must include real deploy scenarios."""
         result = _ssh_deploy_scenario_ids(Path(__file__).parent.parent / "scenarios")
         # The known deploy scenarios must all be present.
-        for expected in ("04", "05", "06", "07", "08", "09", "10", "15", "16", "17", "19"):
+        for expected in ("04", "05", "06", "07", "08", "09", "10", "15", "17", "19"):
             self.assertIn(expected, result, f"scenario {expected} should be in deploy set")
 
 

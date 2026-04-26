@@ -32,13 +32,14 @@ row to *Resolved* and add the closing commit / fix description.
 
 | Signature (substring of error / stderr) | Scenario | Bead | First seen | Last seen | Status |
 |----------------------------------------|----------|------|------------|-----------|--------|
-| `[TIMEOUT] timed out waiting for output from task` | 04, 11, 14 | red-cell-c2-3ecje | 2026-04-24 | 2026-04-26 | P1, regression of red-cell-c2-yde2a |
-| `Timed out after 60s waiting for agent checkin` (Windows Demon/Archon) | 16, 17, 19 | red-cell-c2-jtsiv | 2026-04-24 | 2026-04-26 | P1, regression of red-cell-c2-2it9u |
-| `cargo build --release --target x86_64-pc-windows-gnu` + `error[E0433]` in `common/src/tls.rs` | 05, 06, 07, 08 | red-cell-c2-f33x9 | 2026-04-26 | 2026-04-26 | P1, specter cross-compile |
-| `agent ... still present in agent list after 120s — expected implant to stop after kill-date` | 22 | red-cell-c2-btwo0 | 2026-04-24 | 2026-04-24 | P2, kill-date / working-hours / sleep |
-| `agent ... checked in unexpectedly — outside working hours` | 23 | red-cell-c2-btwo0 | 2026-04-24 | 2026-04-24 | (same bead as above) |
-| `agent show sleep_interval: expected ..., got ...` | 24 | red-cell-c2-btwo0 | 2026-04-24 | 2026-04-24 | (same bead as above) |
+| `[TIMEOUT] timed out waiting for output from task` | 04, 11, 21 | red-cell-c2-pa1wi | 2026-04-24 | 2026-04-27 | P1, regression of red-cell-c2-3ecje |
+| `Timed out after 60s waiting for agent checkin` (Windows Demon/Archon) | 14, 17, 19 | red-cell-c2-dvd3p | 2026-04-24 | 2026-04-27 | P1, regression of red-cell-c2-jtsiv |
+| `error: extern blocks must be unsafe` in `agent/specter/src/token/enumerate_windows.rs` | 05, 06, 07, 08 | red-cell-c2-5k8ed | 2026-04-27 | 2026-04-27 | P1, specter cross-compile (new error after E0433 fix) |
+| `still present in agent list after 120s — expected implant to stop after kill-date` | 22 | red-cell-c2-0h0et | 2026-04-24 | 2026-04-27 | P2, regression of red-cell-c2-btwo0 |
+| `checked in unexpectedly — outside working hours` | 23 | red-cell-c2-0h0et | 2026-04-24 | 2026-04-27 | (same bead as above) |
+| `agent show sleep_interval: expected ..., got ...` | 24 | red-cell-c2-0h0et | 2026-04-24 | 2026-04-27 | (same bead as above) |
 | `Python was not found` (DoH probe on Windows VM) | 20 | red-cell-c2-2gg26 | 2026-04-24 | 2026-04-24 | P3, switch probe to PowerShell |
+| `Address already in use (os error 98)` on port 19181/19182 from prior-run listeners | 04, 06, 07, 11, 17, 21–24 | red-cell-c2-hyhgf | 2026-04-27 | 2026-04-27 | P2, listener cleanup cross-run persistence |
 
 ---
 
@@ -57,6 +58,10 @@ than a new bug.
 | `not reachable via SSH` against the Windows VM despite `whoami` working | every scenario with `[windows]` configured | red-cell-c2-3jlpo | 2026-04-24 | `preflight_ssh` sent `true`, which `cmd.exe` does not know — switched to `exit 0` (commit c6fb4086) |
 | `[TIMEOUT] timed out waiting for output from task` (original) | 04, 07, 11, 21 | red-cell-c2-yde2a | 2026-04-25 | CommandProc(0x1010) + DemonCallbackError::Generic fix. **REGRESSED** — see red-cell-c2-3ecje |
 | `Timed out after 60s waiting for agent checkin` (original Windows Demon) | 05, 08, 14, 16, 17, 19 | red-cell-c2-2it9u | 2026-04-25 | HeapEnc packing fix for Demon transport config. **REGRESSED** — see red-cell-c2-jtsiv |
+| `[TIMEOUT] timed out waiting for output from task` (seq_num fix) | 04, 11, 14 | red-cell-c2-3ecje | 2026-04-26 | ecdh_send_packages seq_num prefix fix. **REGRESSED** — see red-cell-c2-pa1wi |
+| `Timed out after 60s waiting for agent checkin` (AllowLegacyCtr fix) | 16, 17, 19 | red-cell-c2-jtsiv | 2026-04-26 | AllowLegacyCtr + legacy_mode fix. **REGRESSED** — see red-cell-c2-dvd3p |
+| `cargo build --release --target x86_64-pc-windows-gnu` + `error[E0433]` in `common/src/tls.rs` | 05, 06, 07, 08 | red-cell-c2-f33x9 | 2026-04-26 | Gated unix imports behind cfg(unix). **NEW ERROR** — see red-cell-c2-5k8ed |
+| `agent ... still present / checked in / sleep_interval` (env var bake fix) | 22, 23, 24 | red-cell-c2-btwo0 | 2026-04-25 | rust_agent_env_vars baking fix. **REGRESSED** — see red-cell-c2-0h0et |
 
 ---
 

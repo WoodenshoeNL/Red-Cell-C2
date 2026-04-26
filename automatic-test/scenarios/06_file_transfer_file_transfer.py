@@ -424,8 +424,12 @@ def run(ctx):
         print("  [skip] ctx.windows is None — skipping Windows agent passes")
 
     linux_listener_name = None
-    windows_listener_name = None
+    demon_listener_name: str | None = None
+    archon_listener_name: str | None = None
     linux_has_phantom = linux_ok and "phantom" in available_agents
+    has_archon = "archon" in available_agents
+    has_specter = "specter" in available_agents
+    listeners_cfg = ctx.env.get("listeners", {})
 
     # ── Build the cell list for all agents across both platforms ─────────────
     cells: list[MatrixCell] = []
@@ -433,7 +437,7 @@ def run(ctx):
 
     if linux_has_phantom:
         linux_listener_name = f"test-ftransfer-lin-{uid}"
-        linux_port = ctx.env.get("listeners", {}).get("linux_port", 19081)
+        linux_port = listeners_cfg.get("linux_port", 19081)
         print(f"\n  [shared] creating Linux HTTP listener {linux_listener_name!r} on port {linux_port}")
         listener_create(cli, linux_listener_name, "http", **http_listener_kwargs(linux_port, ctx.env))
         listener_start(cli, linux_listener_name)
@@ -442,23 +446,36 @@ def run(ctx):
                                 listener=linux_listener_name))
         cell_keys.append("phantom")
 
-    win_agents: list[tuple[str, str]] = []
     if windows_ok:
-        win_agents.append(("demon", "exe"))
-        if "archon" in available_agents:
-            win_agents.append(("archon", "exe"))
-        if "specter" in available_agents:
-            win_agents.append(("specter", "exe"))
-        windows_listener_name = f"test-ftransfer-win-{uid}"
-        win_port = ctx.env.get("listeners", {}).get("windows_port", 19082)
-        print(f"  [shared] creating Windows HTTP listener {windows_listener_name!r} on port {win_port}")
-        listener_create(cli, windows_listener_name, "http", **http_listener_kwargs(win_port, ctx.env))
-        listener_start(cli, windows_listener_name)
-        listeners_to_cleanup.append(windows_listener_name)
-        for at, fmt in win_agents:
-            cells.append(MatrixCell(arch="x64", fmt=fmt, agent=at,
-                                    listener=windows_listener_name))
-            cell_keys.append(at)
+        # Demon listener (legacy_mode — DemonEnvelope header)
+        demon_listener_name = f"test-ftransfer-demon-{uid}"
+        demon_port = listeners_cfg.get("windows_demon_port", 19083)
+        print(f"\n  [demon] creating HTTP listener {demon_listener_name!r} on port {demon_port}")
+        listener_create(cli, demon_listener_name, "http",
+                        **http_listener_kwargs(demon_port, ctx.env, agent_type="demon"))
+        listener_start(cli, demon_listener_name)
+        listeners_to_cleanup.append(demon_listener_name)
+        cells.append(MatrixCell(arch="x64", fmt="exe", agent="demon",
+                                listener=demon_listener_name))
+        cell_keys.append("demon")
+
+        # Archon/Specter listener (non-legacy — ArchonEnvelope + ECDH)
+        if has_archon or has_specter:
+            archon_listener_name = f"test-ftransfer-archon-{uid}"
+            archon_port = listeners_cfg.get("windows_port", 19082)
+            print(f"  [archon] creating HTTP listener {archon_listener_name!r} on port {archon_port}")
+            listener_create(cli, archon_listener_name, "http",
+                            **http_listener_kwargs(archon_port, ctx.env))
+            listener_start(cli, archon_listener_name)
+            listeners_to_cleanup.append(archon_listener_name)
+            if has_archon:
+                cells.append(MatrixCell(arch="x64", fmt="exe", agent="archon",
+                                        listener=archon_listener_name))
+                cell_keys.append("archon")
+            if has_specter:
+                cells.append(MatrixCell(arch="x64", fmt="exe", agent="specter",
+                                        listener=archon_listener_name))
+                cell_keys.append("specter")
 
     if not cells:
         if skipped_reasons:
@@ -495,23 +512,23 @@ def run(ctx):
             ran_any = True
             print("\n  === Agent pass: demon (Windows) ===")
             _run_for_agent_windows(ctx, agent_type="demon", fmt="exe",
-                                   listener_name=windows_listener_name,
+                                   listener_name=demon_listener_name,
                                    pre_built_payload=payloads["demon"])
 
             print("\n  === Agent pass: archon (Windows) ===")
-            if "archon" not in available_agents:
+            if not has_archon:
                 print("  [archon] SKIPPED — 'archon' not listed in agents.available")
             else:
                 _run_for_agent_windows(ctx, agent_type="archon", fmt="exe",
-                                       listener_name=windows_listener_name,
+                                       listener_name=archon_listener_name,
                                        pre_built_payload=payloads["archon"])
 
             print("\n  === Agent pass: specter (Windows) ===")
-            if "specter" not in available_agents:
+            if not has_specter:
                 print("  [specter] SKIPPED — 'specter' not listed in agents.available")
             else:
                 _run_for_agent_windows(ctx, agent_type="specter", fmt="exe",
-                                       listener_name=windows_listener_name,
+                                       listener_name=archon_listener_name,
                                        pre_built_payload=payloads["specter"])
 
         if not ran_any:

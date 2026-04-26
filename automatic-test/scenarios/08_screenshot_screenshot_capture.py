@@ -276,73 +276,96 @@ def run(ctx):
         except DeployError as exc:
             raise ScenarioSkipped(str(exc)) from exc
 
-        # Determine which Windows agents to test
-        to_build: list[tuple[str, str]] = [("demon", "exe")]
-        if "archon" in available_agents:
-            to_build.append(("archon", "exe"))
-        if "specter" in available_agents:
-            to_build.append(("specter", "exe"))
+        has_archon = "archon" in available_agents
+        has_specter = "specter" in available_agents
+        listeners_cfg = ctx.env.get("listeners", {})
+        listeners_to_cleanup: list[str] = []
 
-        listener_name = f"test-screenshot-win-{uid}"
-        listener_port = ctx.env.get("listeners", {}).get("windows_port", 19082)
+        # Demon listener (legacy_mode — DemonEnvelope header)
+        demon_listener_name = f"test-screenshot-demon-{uid}"
+        demon_port = listeners_cfg.get("windows_demon_port", 19083)
+        print(f"\n  [demon] creating HTTP listener {demon_listener_name!r} on port {demon_port}")
+        listener_create(cli, demon_listener_name, "http",
+                        **http_listener_kwargs(demon_port, ctx.env, agent_type="demon"))
+        listener_start(cli, demon_listener_name)
+        listeners_to_cleanup.append(demon_listener_name)
 
-        # ── Shared listener for all Windows agent passes ─────────────────────
-        print(f"\n  [shared] creating HTTP listener {listener_name!r} on port {listener_port}")
-        listener_create(cli, listener_name, "http", **http_listener_kwargs(listener_port, ctx.env))
-        listener_start(cli, listener_name)
-        print(f"  [shared] listener started")
+        # Archon/Specter listener (non-legacy — ArchonEnvelope + ECDH)
+        archon_listener_name: str | None = None
+        if has_archon or has_specter:
+            archon_listener_name = f"test-screenshot-archon-{uid}"
+            archon_port = listeners_cfg.get("windows_port", 19082)
+            print(f"  [archon] creating HTTP listener {archon_listener_name!r} on port {archon_port}")
+            listener_create(cli, archon_listener_name, "http",
+                            **http_listener_kwargs(archon_port, ctx.env))
+            listener_start(cli, archon_listener_name)
+            listeners_to_cleanup.append(archon_listener_name)
 
         try:
             # ── Pre-build all payloads in parallel ───────────────────────────
-            cells = [MatrixCell(arch="x64", fmt=fmt, agent=at) for at, fmt in to_build]
+            cells: list[MatrixCell] = [
+                MatrixCell(arch="x64", fmt="exe", agent="demon",
+                           listener=demon_listener_name),
+            ]
+            cell_keys: list[str] = ["demon"]
+            if has_archon:
+                cells.append(MatrixCell(arch="x64", fmt="exe", agent="archon",
+                                        listener=archon_listener_name))
+                cell_keys.append("archon")
+            if has_specter:
+                cells.append(MatrixCell(arch="x64", fmt="exe", agent="specter",
+                                        listener=archon_listener_name))
+                cell_keys.append("specter")
+
             mode = "parallel" if ctx.payload_parallel else "serial"
             print(f"  [shared] building {len(cells)} payload(s) ({mode})")
-            raws = build_parallel(cli, listener_name, cells, parallel=ctx.payload_parallel)
-            payloads = {at: raw for (at, _), raw in zip(to_build, raws)}
+            raws = build_parallel(cli, "", cells, parallel=ctx.payload_parallel)
+            payloads = dict(zip(cell_keys, raws))
 
             # ── Demon pass (primary Windows baseline) ────────────────────────
             print("\n  === Agent pass: demon (Windows) ===")
             _run_for_agent(
                 ctx, ctx.windows,
                 agent_type="demon", fmt="exe", is_windows=True,
-                listener_name=listener_name,
+                listener_name=demon_listener_name,
                 pre_built_payload=payloads["demon"],
             )
 
             # ── Archon pass ──────────────────────────────────────────────────
             print("\n  === Agent pass: archon (Windows) ===")
-            if "archon" not in available_agents:
+            if not has_archon:
                 print("  [archon] SKIPPED — 'archon' not listed in agents.available")
             else:
                 _run_for_agent(
                     ctx, ctx.windows,
                     agent_type="archon", fmt="exe", is_windows=True,
-                    listener_name=listener_name,
+                    listener_name=archon_listener_name,
                     pre_built_payload=payloads["archon"],
                 )
 
             # ── Specter pass ─────────────────────────────────────────────────
             print("\n  === Agent pass: specter (Windows) ===")
-            if "specter" not in available_agents:
+            if not has_specter:
                 print("  [specter] SKIPPED — 'specter' not listed in agents.available")
             else:
                 _run_for_agent(
                     ctx, ctx.windows,
                     agent_type="specter", fmt="exe", is_windows=True,
-                    listener_name=listener_name,
+                    listener_name=archon_listener_name,
                     pre_built_payload=payloads["specter"],
                 )
 
         finally:
-            print(f"\n  [shared] stopping/deleting listener {listener_name!r}")
-            try:
-                listener_stop(cli, listener_name)
-            except Exception:
-                pass
-            try:
-                listener_delete(cli, listener_name)
-            except Exception:
-                pass
+            for name in listeners_to_cleanup:
+                print(f"\n  [shared] stopping/deleting listener {name!r}")
+                try:
+                    listener_stop(cli, name)
+                except Exception:
+                    pass
+                try:
+                    listener_delete(cli, name)
+                except Exception:
+                    pass
         return
 
     # Linux fallback — only attempt with a configured DISPLAY.

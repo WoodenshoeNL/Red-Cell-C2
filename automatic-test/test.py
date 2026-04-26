@@ -22,6 +22,7 @@ import argparse
 import importlib
 import importlib.util
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -34,7 +35,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from lib import ScenarioSkipped
-from lib.cli import CliConfig
+from lib.cli import CliConfig, CliError, status as cli_status
 from lib.config import (
     ConfigError,
     load_env,
@@ -244,6 +245,36 @@ class RunContext:
     payload_parallel: bool = True
 
 
+_RATE_LIMIT_EXIT_CODE = 6
+_RATE_LIMIT_DEFAULT_WAIT_SECS = 60
+_RATE_LIMIT_MAX_WAITS = 3
+
+
+def _parse_retry_after(exc: CliError) -> int:
+    """Extract Retry-After seconds from a rate-limit CliError message."""
+    m = re.search(r"retry after Some\((\d+)\)", str(exc))
+    if m:
+        return int(m.group(1))
+    return _RATE_LIMIT_DEFAULT_WAIT_SECS
+
+
+def _wait_out_rate_limit(cli_cfg: CliConfig) -> None:
+    """If the server is rate-limiting us, sleep until the window resets."""
+    for attempt in range(_RATE_LIMIT_MAX_WAITS):
+        try:
+            cli_status(cli_cfg)
+            return
+        except CliError as exc:
+            if exc.exit_code != _RATE_LIMIT_EXIT_CODE:
+                return
+            wait = _parse_retry_after(exc)
+            print(
+                f"  [RATE LIMIT] waiting {wait}s before next scenario "
+                f"(attempt {attempt + 1}/{_RATE_LIMIT_MAX_WAITS})..."
+            )
+            time.sleep(wait)
+
+
 def run_scenario(
     scenario_id: str, path: Path, ctx: RunContext, run_dir: Path,
 ) -> tuple[str, Path | None]:
@@ -270,6 +301,8 @@ def run_scenario(
         print("  [DRY RUN] skipping execution")
         return "passed", None
 
+    _wait_out_rate_limit(ctx.cli)
+
     start = time.monotonic()
     try:
         mod.run(ctx)
@@ -280,6 +313,40 @@ def run_scenario(
         elapsed = time.monotonic() - start
         print(f"  ~ SKIPPED ({elapsed:.1f}s): {exc}")
         return "skipped", None
+    except CliError as exc:
+        if exc.exit_code != _RATE_LIMIT_EXIT_CODE:
+            raise
+        wait = _parse_retry_after(exc)
+        elapsed = time.monotonic() - start
+        print(
+            f"  [RATE LIMIT] hit during scenario ({elapsed:.1f}s), "
+            f"waiting {wait}s and retrying once..."
+        )
+        time.sleep(wait)
+        _wait_out_rate_limit(ctx.cli)
+        start = time.monotonic()
+        try:
+            mod.run(ctx)
+            elapsed = time.monotonic() - start
+            print(f"  ✓ PASSED on retry ({elapsed:.1f}s)")
+            return "passed", None
+        except ScenarioSkipped as exc2:
+            elapsed = time.monotonic() - start
+            print(f"  ~ SKIPPED on retry ({elapsed:.1f}s): {exc2}")
+            return "skipped", None
+        except Exception as exc2:
+            elapsed = time.monotonic() - start
+            print(f"  ✗ FAILED on retry ({elapsed:.1f}s): {exc2}")
+            title = getattr(mod, "DESCRIPTION", path.stem)
+            text = build_failure_diagnostic_report(
+                ctx, scenario_id, title, exc2, log_lines=100
+            )
+            print(text, end="")
+            report_path = write_scenario_failure_file(
+                run_dir, scenario_id, text
+            )
+            print(f"  Diagnostic report written to: {report_path}")
+            return "failed", report_path
     except Exception as exc:
         elapsed = time.monotonic() - start
         print(f"  ✗ FAILED ({elapsed:.1f}s): {exc}")

@@ -43,7 +43,7 @@ use crate::{
 pub(crate) use auth::extract_api_key;
 pub use auth::{
     AdminApiAccess, ApiAuthError, ApiIdentity, ApiPermissionGuard, ApiRateLimit, ApiRuntime,
-    ListenerManagementApiAccess, ReadApiAccess, TaskAgentApiAccess,
+    AuthMethod, ListenerManagementApiAccess, ReadApiAccess, TaskAgentApiAccess,
 };
 pub use errors::{ApiErrorBody, ApiErrorDetail, json_error_response};
 pub(crate) use session::session_api_dispatch_line;

@@ -29,7 +29,7 @@ pub use agent_liveness::{AgentLivenessMonitor, spawn_agent_liveness_monitor};
 pub use agents::{AgentRegistry, DEFAULT_MAX_REGISTERED_AGENTS, Job, PivotInfo};
 pub use api::{
     AdminApiAccess, ApiAuthError, ApiErrorBody, ApiErrorDetail, ApiIdentity, ApiPermissionGuard,
-    ApiRateLimit, ApiRuntime, ListenerManagementApiAccess, ReadApiAccess, api_routes,
+    ApiRateLimit, ApiRuntime, AuthMethod, ListenerManagementApiAccess, ReadApiAccess, api_routes,
     json_error_response,
 };
 pub use app::{TeamserverState, build_router};

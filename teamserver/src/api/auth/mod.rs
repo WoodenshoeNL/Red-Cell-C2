@@ -18,9 +18,11 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use red_cell_common::config::{OperatorRole, Profile};
+use serde::Serialize;
 use thiserror::Error;
 use tokio::sync::Mutex;
 use tracing::{debug, instrument};
+use utoipa::ToSchema;
 
 use super::errors::json_error_response;
 
@@ -41,13 +43,23 @@ pub use rate_limit::ApiRateLimit;
 #[cfg(test)]
 pub(crate) const MAX_FAILED_API_AUTH_ATTEMPTS: u32 = auth_failure::MAX_FAILED_API_AUTH_ATTEMPTS;
 
-/// Authenticated REST API identity derived from an API key.
+/// How the caller authenticated to the REST API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthMethod {
+    /// Authenticated via a static API key in the `X-API-Key` header.
+    ApiKey,
+}
+
+/// Authenticated REST API identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiIdentity {
     /// Stable key identifier from the profile.
     pub key_id: String,
     /// RBAC role granted to the key.
     pub role: OperatorRole,
+    /// How this identity was authenticated.
+    pub auth_method: AuthMethod,
 }
 
 /// Shared REST API authentication and rate-limiting runtime state.
@@ -81,7 +93,11 @@ impl ApiRuntime {
                     .map(|(name, key)| {
                         (
                             hash_api_key(&key_hash_secret, &key.value),
-                            ApiIdentity { key_id: name.clone(), role: key.role },
+                            ApiIdentity {
+                                key_id: name.clone(),
+                                role: key.role,
+                                auth_method: AuthMethod::ApiKey,
+                            },
                         )
                     })
                     .collect::<Vec<_>>();
@@ -318,7 +334,11 @@ mod tests {
     }
 
     fn make_identity(key_id: &str) -> ApiIdentity {
-        ApiIdentity { key_id: key_id.to_owned(), role: OperatorRole::Analyst }
+        ApiIdentity {
+            key_id: key_id.to_owned(),
+            role: OperatorRole::Analyst,
+            auth_method: AuthMethod::ApiKey,
+        }
     }
 
     fn test_api_runtime(requests_per_minute: u32) -> ApiRuntime {

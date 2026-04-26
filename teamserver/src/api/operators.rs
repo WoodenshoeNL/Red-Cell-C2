@@ -15,7 +15,10 @@ use crate::app::TeamserverState;
 use crate::listeners::ListenerManagerError;
 use crate::{AuditResultStatus, AuthError, TeamserverError, audit_details, parameter_object};
 
-use super::{AdminApiAccess, ApiErrorBody, ReadApiAccess, json_error_response, record_audit_entry};
+use super::{
+    AdminApiAccess, ApiErrorBody, AuthMethod, ReadApiAccess, json_error_response,
+    record_audit_entry,
+};
 
 // ── Request / response DTOs ───────────────────────────────────────────────────
 
@@ -105,7 +108,7 @@ pub(super) struct WhoamiResponse {
     /// RBAC role assigned to this API key.
     pub(super) role: OperatorRole,
     /// Authentication method used for this request.
-    pub(super) auth_method: String,
+    pub(super) auth_method: AuthMethod,
 }
 
 // ── Error type ────────────────────────────────────────────────────────────────
@@ -429,7 +432,7 @@ pub(super) async fn whoami(identity: ReadApiAccess) -> Json<WhoamiResponse> {
     Json(WhoamiResponse {
         name: identity.key_id.clone(),
         role: identity.role,
-        auth_method: "api_key".to_owned(),
+        auth_method: identity.auth_method,
     })
 }
 

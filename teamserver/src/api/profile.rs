@@ -8,7 +8,7 @@ use utoipa::ToSchema;
 use crate::app::TeamserverState;
 use crate::{AuditDetails, AuditResultStatus};
 
-use super::auth::ReadApiAccess;
+use super::auth::AdminApiAccess;
 
 /// Redacted operator entry (password omitted, role shown).
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -118,7 +118,7 @@ pub(super) struct ProfileResponse {
 )]
 pub(super) async fn get_profile(
     State(state): State<TeamserverState>,
-    identity: ReadApiAccess,
+    identity: AdminApiAccess,
 ) -> Json<ProfileResponse> {
     let profile = &state.profile;
 

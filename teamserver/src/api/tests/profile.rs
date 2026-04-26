@@ -10,7 +10,7 @@ use super::helpers::{read_json, test_router};
 
 #[tokio::test]
 async fn get_profile_returns_redacted_profile() {
-    let app = test_router(Some((60, "key", "secret", OperatorRole::Operator))).await;
+    let app = test_router(Some((60, "key", "secret", OperatorRole::Admin))).await;
 
     let response = app
         .oneshot(
@@ -44,7 +44,7 @@ async fn get_profile_returns_redacted_profile() {
 
 #[tokio::test]
 async fn get_profile_requires_auth() {
-    let app = test_router(Some((60, "key", "secret", OperatorRole::Operator))).await;
+    let app = test_router(Some((60, "key", "secret", OperatorRole::Admin))).await;
 
     let response = app
         .oneshot(Request::builder().uri("/profile").body(Body::empty()).expect("request"))
@@ -52,6 +52,24 @@ async fn get_profile_requires_auth() {
         .expect("response");
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn get_profile_rejects_non_admin() {
+    let app = test_router(Some((60, "key", "secret", OperatorRole::Operator))).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/profile")
+                .header(API_KEY_HEADER, "secret")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
@@ -83,7 +101,7 @@ async fn get_profile_includes_listener_summaries() {
           RateLimitPerMinute = 60
           key "rest" {
             Value = "tok"
-            Role = "Operator"
+            Role = "Admin"
           }
         }
 

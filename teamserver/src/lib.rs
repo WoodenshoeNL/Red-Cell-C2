@@ -34,10 +34,10 @@ pub use api::{
 };
 pub use app::{TeamserverState, build_router};
 pub use audit::{
-    AuditDetails, AuditPage, AuditQuery, AuditRecord, AuditResultStatus, SessionActivityPage,
-    SessionActivityQuery, SessionActivityRecord, audit_details, login_parameters, parameter_object,
-    query_audit_log, query_session_activity, record_operator_action,
-    record_operator_action_with_notifications,
+    AuditDetails, AuditPage, AuditQuery, AuditRecord, AuditResultStatus, AuthVector,
+    SessionActivityPage, SessionActivityQuery, SessionActivityRecord, audit_details,
+    login_parameters, parameter_object, query_audit_log, query_session_activity,
+    record_operator_action, record_operator_action_with_notifications,
 };
 pub use auth::{
     AuthError, AuthService, AuthenticationFailure, AuthenticationResult, AuthenticationSuccess,

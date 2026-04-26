@@ -18,7 +18,8 @@ use uuid::Uuid;
 use crate::app::TeamserverState;
 use crate::auth::{AuthenticationFailure, AuthenticationResult};
 use crate::{
-    AuditResultStatus, audit_details, login_parameters, record_operator_action_with_notifications,
+    AuditResultStatus, AuthVector, audit_details, login_parameters,
+    record_operator_action_with_notifications,
 };
 
 use super::errors::json_error_response;
@@ -133,7 +134,7 @@ pub(super) async fn post_login(State(state): State<TeamserverState>, request: Re
                     AuditResultStatus::Success,
                     None,
                     Some("login"),
-                    Some(login_parameters(&success.username, &connection_id, "rest")),
+                    Some(login_parameters(&success.username, &connection_id, AuthVector::Rest)),
                 ),
             )
             .await
@@ -158,7 +159,7 @@ pub(super) async fn post_login(State(state): State<TeamserverState>, request: Re
                     AuditResultStatus::Failure,
                     None,
                     Some("login"),
-                    Some(login_parameters(&login_req.user, &connection_id, "rest")),
+                    Some(login_parameters(&login_req.user, &connection_id, AuthVector::Rest)),
                 ),
             )
             .await

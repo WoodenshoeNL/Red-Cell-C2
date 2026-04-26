@@ -12,9 +12,9 @@ use super::connection::{
 };
 use super::lifecycle::log_operator_action;
 use crate::{
-    AuditResultStatus, AuditWebhookNotifier, AuthError, AuthService, AuthenticationFailure,
-    AuthenticationResult, Database, audit_details, login_failure_message, login_parameters,
-    login_success_message, parameter_object,
+    AuditResultStatus, AuditWebhookNotifier, AuthError, AuthService, AuthVector,
+    AuthenticationFailure, AuthenticationResult, Database, audit_details, login_failure_message,
+    login_parameters, login_success_message, parameter_object,
 };
 
 pub(super) async fn handle_authentication(
@@ -122,7 +122,11 @@ pub(super) async fn handle_authentication(
                     AuditResultStatus::Success,
                     None,
                     Some("login"),
-                    Some(login_parameters(&success.username, &connection_id, "websocket")),
+                    Some(login_parameters(
+                        &success.username,
+                        &connection_id,
+                        AuthVector::Websocket,
+                    )),
                 ),
             )
             .await;
@@ -141,7 +145,7 @@ pub(super) async fn handle_authentication(
                     AuditResultStatus::Failure,
                     None,
                     Some("login"),
-                    Some(login_parameters(&login_user, &connection_id, "websocket")),
+                    Some(login_parameters(&login_user, &connection_id, AuthVector::Websocket)),
                 ),
             )
             .await;
@@ -161,7 +165,7 @@ pub(super) async fn handle_authentication(
                     AuditResultStatus::Failure,
                     None,
                     Some("login"),
-                    Some(login_parameters(&login_user, &connection_id, "websocket")),
+                    Some(login_parameters(&login_user, &connection_id, AuthVector::Websocket)),
                 ),
             )
             .await;

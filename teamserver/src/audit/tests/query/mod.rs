@@ -7,8 +7,9 @@ use serde_json::json;
 
 use super::super::types::parse_agent_id_filter;
 use super::super::{
-    AuditQuery, AuditRecord, AuditResultStatus, SessionActivityQuery, SessionActivityRecord,
-    audit_details, login_parameters, parameter_object, query_audit_log, query_session_activity,
+    AuditQuery, AuditRecord, AuditResultStatus, AuthVector, SessionActivityQuery,
+    SessionActivityRecord, audit_details, login_parameters, parameter_object, query_audit_log,
+    query_session_activity,
 };
 use crate::{AuditLogEntry, Database, TeamserverError};
 
@@ -140,7 +141,7 @@ fn login_parameters_only_include_username_and_connection_id() {
     let connection_id = uuid::Uuid::parse_str("12345678-1234-5678-9abc-1234567890ab")
         .expect("connection id should parse");
 
-    let payload = login_parameters("operator", &connection_id, "rest");
+    let payload = login_parameters("operator", &connection_id, AuthVector::Rest);
 
     assert_eq!(
         payload,
@@ -165,7 +166,7 @@ fn login_parameters_preserve_mixed_case_and_unusual_usernames_without_password_m
         .expect("connection id should parse");
     let username = "Op-Erator_42@example.local";
 
-    let payload = login_parameters(username, &connection_id, "websocket");
+    let payload = login_parameters(username, &connection_id, AuthVector::Websocket);
 
     assert_eq!(payload["username"], json!(username));
     assert_eq!(payload["connection_id"], json!(connection_id.to_string()));
@@ -179,8 +180,8 @@ fn login_parameters_auth_vector_distinguishes_rest_from_websocket() {
     let connection_id = uuid::Uuid::parse_str("12345678-1234-5678-9abc-1234567890ab")
         .expect("connection id should parse");
 
-    let rest = login_parameters("operator", &connection_id, "rest");
-    let ws = login_parameters("operator", &connection_id, "websocket");
+    let rest = login_parameters("operator", &connection_id, AuthVector::Rest);
+    let ws = login_parameters("operator", &connection_id, AuthVector::Websocket);
 
     assert_eq!(rest["auth_vector"], json!("rest"));
     assert_eq!(ws["auth_vector"], json!("websocket"));

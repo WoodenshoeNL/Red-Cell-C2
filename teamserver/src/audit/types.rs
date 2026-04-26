@@ -8,6 +8,25 @@ use utoipa::{IntoParams, ToSchema};
 
 use crate::{AuditLogEntry, TeamserverError};
 
+/// Authentication vector used for a login attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthVector {
+    /// Login via the REST API.
+    Rest,
+    /// Login via WebSocket.
+    Websocket,
+}
+
+impl std::fmt::Display for AuthVector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rest => f.write_str("rest"),
+            Self::Websocket => f.write_str("websocket"),
+        }
+    }
+}
+
 /// Result status recorded for an audited action.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -308,11 +327,15 @@ pub fn parameter_object(pairs: impl IntoIterator<Item = (&'static str, Value)>) 
 
 /// Build an audit payload for a login attempt without persisting sensitive fields.
 #[must_use]
-pub fn login_parameters(username: &str, connection_id: &uuid::Uuid, auth_vector: &str) -> Value {
+pub fn login_parameters(
+    username: &str,
+    connection_id: &uuid::Uuid,
+    auth_vector: AuthVector,
+) -> Value {
     json!({
         "username": username,
         "connection_id": connection_id.to_string(),
-        "auth_vector": auth_vector,
+        "auth_vector": auth_vector.to_string(),
     })
 }
 

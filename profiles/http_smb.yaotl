@@ -80,6 +80,8 @@ Demon {
 
     TrustXForwardedFor = false
 
+    AllowLegacyCtr = true
+
     Injection {
         Spawn64 = "C:\\Windows\\System32\\Werfault.exe"
         Spawn32 = "C:\\Windows\\SysWOW64\\Werfault.exe"

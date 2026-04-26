@@ -394,13 +394,13 @@ class TestScenario14(unittest.TestCase):
         cls.mod = _load("14_stress_concurrent_agents.py")
 
     def test_phantom_build_failure_propagates(self) -> None:
+        """build_parallel failure in run() propagates as CliError."""
         ctx = _linux_ctx()
-        with _apply_patches(_LISTENER_PATCHES):
+        ctx.env["agents"]["available"] = ["demon", "phantom"]
+        with _apply_patches(_RUN_PATCHES), \
+             patch("lib.payload.build_parallel", side_effect=_BUILD_FAIL):
             with self.assertRaises(CliError) as cm:
-                self.mod._run_stress_for_agent(
-                    ctx, ctx.linux, "phantom", "bin", "test-stress-phantom",
-                    agent_count=1, run_seconds=5,
-                )
+                self.mod.run(ctx)
         self.assertEqual(cm.exception.code, "BUILD_FAILED")
 
     def test_phantom_skipped_when_not_in_available(self) -> None:
@@ -409,7 +409,9 @@ class TestScenario14(unittest.TestCase):
         ctx = _linux_ctx()
         ctx.windows = MagicMock()
         ctx.windows.work_dir = "C:\\Temp\\rc-test"
-        with patch.object(self.mod, "_run_stress_for_agent") as mock_run:
+        with _apply_patches(_RUN_PATCHES), \
+             patch("lib.payload.build_parallel", return_value=[b"fake"]), \
+             patch.object(self.mod, "_run_stress_for_agent") as mock_run:
             self.mod.run(ctx)
         agent_types = [c.kwargs["agent_type"] for c in mock_run.call_args_list]
         self.assertIn("demon", agent_types)

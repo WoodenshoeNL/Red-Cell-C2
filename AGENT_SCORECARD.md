@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1662 | 296 | 105 |
-| Bugs filed against | 272 | 50 | 15 |
+| Tasks closed | 1691 | 296 | 110 |
+| Bugs filed against | 274 | 50 | 15 |
 | Bug rate (bugs/task) | 0.16 | 0.17 | 0.14 |
 | Quality score | 84% | 83% | 86% |
 
-*Bug rates: Claude 272/1662=0.1636→0.16, Codex 50/296=0.1689→0.17, Cursor 15/105=0.1429→0.14*
+*Bug rates: Claude 274/1691=0.1620→0.16, Codex 50/296=0.1689→0.17, Cursor 15/110=0.1364→0.14*
 
 ## Violation Breakdown
 
@@ -24,14 +24,14 @@ Each loop run updates the running totals and appends a review entry.
 | Missing tests / stale tests | 83 | 22 | 7 |
 | Clippy warnings | 16 | 0 | 2 |
 | Protocol errors | 32 | 32 | 4 |
-| Security issues | 74 | 40 | 0 |
+| Security issues | 75 | 40 | 0 |
 | Architecture drift | 67 | 25 | 9 |
 | Memory / resource leaks | 16 | 11 | 1 |
 | Startup / lifecycle regressions | 5 | 10 | 0 |
 | Test infrastructure / flakiness | 66 | 6 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 5 | 5 | 0 |
-| Correctness / pagination | 71 | 9 | 1 |
+| Correctness / pagination | 72 | 9 | 1 |
 | Workflow / close-hygiene | 40 | 1 | 2 |
 | Code reuse / duplication | 14 | 0 | 0 |
 | Incomplete commits (stranded work) | 7 | 3 | 0 |
@@ -41,6 +41,18 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-26 09:42 — 22d8979c..91693236
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 29 | 2 | Big productive session. Closes include: vb9uc (new POST /api/v1/auth/login REST endpoint, 137 LOC + 208 LOC tests), d2j4r (login --token-stdin, no leak in process list), 37z65 (sleep built-in in agent shell), lao22 (P1 format_sleep_payload_base64 BE→LE — sleep was off by 16 years), 5l6tb (upload/download usage error), gzpij (parse_https_url IPv6 brackets), i8esu (P2 /profile leaked operator+API-key roster — fixed via AdminApiAccess), 8s0fz (profile validation routing), t4132 (P2 agent shell now requires --unsafe-tty), iu0si (PascalCase panic), q8ntc (sub-second sleep_delay rounding), vqw4w (auth_method derived from ApiIdentity), djnca (audit logging on REST login), mzcbd (P2 agent shell !cmd gated behind --enable-local-shell + audit), por96 (CertCaptureVerifier safety doc), k1ei6 (sleep usage hint), aam9y (parallel matrix test determinism), upzbw (autotest scenarios 05-08/19 use build_parallel), 9wrax (post-st563 baselines), phuxx (auth_vector in login audit params), 5uvsc (forward local_exec audit POST), o94gk (refactor auth_vector → AuthVector enum), xbk89 (autotest baseline doc cleanup), uw2h4 (TestScenario14 build_parallel), 1wz08 (P2 fire-and-forget audit POST — fixed self-introduced blocking bug). Bugs filed: dezi5 (P2 POST /api/v1/audit lets any operator forge action labels — Read role too permissive, no namespace enforcement), vs71a (P3 POST /api/v1/audit hardcodes result_status=Success). Both regressions are in commit 7a7843a6 (the new audit endpoint). |
+| Codex | 0 | 0 | No activity in this review range. |
+| Cursor | 5 | 0 | Closes: tj4tw (loot export JSON metadata to stderr when piping stdout), pktvx (centralize RATE_LIMIT_DEFAULT_WAIT_SECS), rvy00 (reject log list --follow with --until), st563 (parallel payload matrix via detach + build-wait, 346 LOC + 65 LOC tests), p5jqx (deregister_agent error propagation on force delete). Clean work, no regressions filed. |
+
+Build: passed (cargo check workspace clean in 1m13s; cargo clippy -D warnings clean in 1m; nextest 6041/6041 PASS in 217s).
+
+Notes: Claude did one self-introduced regression and self-corrected it (1wz08 — the audit POST was awaited synchronously, blocking local exec by up to 30s when teamserver unreachable; fixed via tokio::spawn). The two new bugs filed are both against the new POST /api/v1/audit endpoint Claude introduced in 7a7843a6: trust-boundary issue (action label is forgeable by any Read-role operator) and a feature gap (cannot record failures). Cursor's parallel-matrix work (st563) is well-tested.
 
 ### QA Review — 2026-04-25 21:14 — b1f739fc..22d8979c
 

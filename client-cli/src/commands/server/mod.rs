@@ -109,7 +109,7 @@ async fn fetch_certs(
     let server_name = ServerName::try_from(host.clone())
         .map_err(|e| CliError::InvalidArgs(format!("invalid server name '{host}': {e}")))?;
 
-    let tcp = TcpStream::connect(format!("{host}:{port}")).await.map_err(|e| {
+    let tcp = TcpStream::connect((host.as_str(), port)).await.map_err(|e| {
         CliError::ServerUnreachable(format!("cannot connect to {host}:{port}: {e}"))
     })?;
 
@@ -196,7 +196,22 @@ fn parse_https_url(url: &str) -> Result<(String, u16), CliError> {
         return Err(CliError::InvalidArgs("server URL has no host".to_owned()));
     }
 
-    let (host, port) = if let Some(colon_pos) = authority.rfind(':') {
+    let (host, port) = if authority.starts_with('[') {
+        // IPv6 literal: [host]:port or [host]
+        let bracket_end = authority.find(']').ok_or_else(|| {
+            CliError::InvalidArgs(format!("unclosed bracket in IPv6 URL: {authority}"))
+        })?;
+        let h = &authority[1..bracket_end];
+        let rest = &authority[bracket_end + 1..];
+        let p = if let Some(port_str) = rest.strip_prefix(':') {
+            port_str
+                .parse::<u16>()
+                .map_err(|_| CliError::InvalidArgs(format!("invalid port in URL: {authority}")))?
+        } else {
+            443
+        };
+        (h.to_owned(), p)
+    } else if let Some(colon_pos) = authority.rfind(':') {
         let h = &authority[..colon_pos];
         let p: u16 = authority[colon_pos + 1..]
             .parse()
@@ -411,6 +426,56 @@ mod tests {
         assert!(json["certificates"].is_array());
         assert_eq!(json["certificates"][0]["fingerprint"], "cc".repeat(32));
         assert_eq!(json["certificates"][0]["subject"], "CN=test");
+    }
+
+    #[test]
+    fn parse_ipv6_with_port() {
+        let (host, port) = parse_https_url("https://[::1]:40056").unwrap();
+        assert_eq!(host, "::1");
+        assert_eq!(port, 40056);
+    }
+
+    #[test]
+    fn parse_ipv6_default_port() {
+        let (host, port) = parse_https_url("https://[::1]").unwrap();
+        assert_eq!(host, "::1");
+        assert_eq!(port, 443);
+    }
+
+    #[test]
+    fn parse_ipv6_full_address_with_port() {
+        let (host, port) = parse_https_url("https://[2001:db8::1]:8443").unwrap();
+        assert_eq!(host, "2001:db8::1");
+        assert_eq!(port, 8443);
+    }
+
+    #[test]
+    fn parse_ipv6_with_path() {
+        let (host, port) = parse_https_url("https://[::1]:9090/api").unwrap();
+        assert_eq!(host, "::1");
+        assert_eq!(port, 9090);
+    }
+
+    #[test]
+    fn parse_ipv6_unclosed_bracket() {
+        let result = parse_https_url("https://[::1:40056");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("unclosed bracket"), "got: {msg}");
+    }
+
+    #[test]
+    fn parse_ipv4_with_port_unchanged() {
+        let (host, port) = parse_https_url("https://10.0.0.1:40056").unwrap();
+        assert_eq!(host, "10.0.0.1");
+        assert_eq!(port, 40056);
+    }
+
+    #[test]
+    fn parse_hostname_default_port() {
+        let (host, port) = parse_https_url("https://ts.example.com").unwrap();
+        assert_eq!(host, "ts.example.com");
+        assert_eq!(port, 443);
     }
 
     #[test]

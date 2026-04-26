@@ -3,7 +3,9 @@
 use std::fs;
 use std::io::BufReader;
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
@@ -287,6 +289,7 @@ pub enum PersistTlsError {
         source: std::io::Error,
     },
     /// Tightening permissions on an existing key file to 0600 failed.
+    #[cfg(unix)]
     #[error("failed to harden permissions on {path}: {source}")]
     HardenPermissions {
         /// Path whose permissions could not be updated.
@@ -322,8 +325,7 @@ pub fn resolve_or_persist_tls_identity(
     }
 
     if cert_path.exists() && key_path.exists() {
-        // Re-apply 0600 so keys written by older builds with a permissive umask
-        // are hardened on every subsequent boot, not just on first generation.
+        #[cfg(unix)]
         harden_private_key_permissions(key_path)?;
         return load_tls_identity_from_files(cert_path, key_path).map_err(PersistTlsError::Tls);
     }
@@ -334,27 +336,26 @@ pub fn resolve_or_persist_tls_identity(
         PersistTlsError::WriteFile { path: cert_path.display().to_string(), source }
     })?;
 
-    // Private key must be owner-only readable (0600) to prevent exposure.
-    fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(key_path)
-        .and_then(|mut f| f.write_all(identity.private_key_pem()))
-        .map_err(|source| PersistTlsError::WriteFile {
-            path: key_path.display().to_string(),
-            source,
-        })?;
+    write_private_key(key_path, identity.private_key_pem())?;
 
-    // `OpenOptions::mode` applies only when the file is created; truncation of an
-    // existing permissive key (partial state: cert missing) leaves stale mode bits.
+    #[cfg(unix)]
     harden_private_key_permissions(key_path)?;
 
     Ok(identity)
 }
 
-// Ensure PEM private key material on disk is not group/world readable (Unix mode 0600).
+/// Write private key PEM to disk. On Unix, the file is created with mode 0600.
+fn write_private_key(key_path: &Path, pem: &[u8]) -> Result<(), PersistTlsError> {
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    opts.mode(0o600);
+    opts.open(key_path).and_then(|mut f| f.write_all(pem)).map_err(|source| {
+        PersistTlsError::WriteFile { path: key_path.display().to_string(), source }
+    })
+}
+
+#[cfg(unix)]
 fn harden_private_key_permissions(key_path: &Path) -> Result<(), PersistTlsError> {
     fs::set_permissions(key_path, fs::Permissions::from_mode(0o600)).map_err(|source| {
         PersistTlsError::HardenPermissions { path: key_path.display().to_string(), source }

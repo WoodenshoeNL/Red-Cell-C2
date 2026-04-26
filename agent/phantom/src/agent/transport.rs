@@ -94,14 +94,24 @@ impl PhantomAgent {
             .as_ref()
             .ok_or_else(|| PhantomError::Transport("ECDH session not initialized".into()))
             .map(|s| (s.connection_id, s.session_key, s.agent_id))?;
-        let payload = DemonMessage::new(packages)
+        let msg_bytes = DemonMessage::new(packages)
             .to_bytes()
             .map_err(|e| PhantomError::Transport(format!("ECDH message encode: {e}")))?;
-        send_session_packet(
+
+        // seq_num(8 LE) | DemonMessage — server rejects packets with seq ≤ last seen.
+        let seq = self.callback_seq;
+        let mut payload = Vec::with_capacity(8 + msg_bytes.len());
+        payload.extend_from_slice(&seq.to_le_bytes());
+        payload.extend_from_slice(&msg_bytes);
+
+        let result = send_session_packet(
             &self.transport,
             &crate::ecdh::EcdhSession { connection_id, session_key, agent_id },
             &payload,
         )
-        .await
+        .await?;
+
+        self.callback_seq += 1;
+        Ok(result)
     }
 }

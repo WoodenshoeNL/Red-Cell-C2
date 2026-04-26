@@ -12,6 +12,8 @@ import fcntl
 import json
 import os
 import random
+import re
+import signal
 import socket
 import subprocess
 import sys
@@ -2244,6 +2246,212 @@ def remove_review_worktree(worktree_path: Path, log: Logger):
     log.log(f"Removed review worktree: {worktree_path.name}")
 
 
+# ── Autotest loop helpers ─────────────────────────────────────────────────────
+
+AUTOTEST_PROFILE = "profiles/autotest.yaotl"
+AUTOTEST_PORT = 40156
+AUTOTEST_CONFIG_DIR = "automatic-test/config-autotest"
+AUTOTEST_BUILD_TIMEOUT = 30 * 60     # 30 min — covers cold full release build
+AUTOTEST_TEAMSERVER_READY_TIMEOUT = 30
+
+
+def autotest_safety_banner(log: Logger, no_confirm: bool):
+    """Print destructive-action banner; 10s countdown unless --no-confirm."""
+    log.banner([
+        "AUTOTEST LOOP — DESTRUCTIVE TO TEAMSERVER STATE",
+        f"Will kill + restart teamserver on :{AUTOTEST_PORT}, deploy agents",
+        "to test VMs, overwrite profiles/autotest.sqlite.",
+        "DO NOT run on a host with active operator sessions.",
+    ])
+    if no_confirm or os.environ.get("RC_AUTOTEST_NO_CONFIRM") == "1":
+        log.log("--no-confirm / RC_AUTOTEST_NO_CONFIRM set, skipping countdown")
+        return
+    log.log("Press Ctrl-C within 10 seconds to abort.")
+    try:
+        for i in range(10, 0, -1):
+            sys.stderr.write(f"\rstarting in {i:2d}s ...")
+            sys.stderr.flush()
+            time.sleep(1)
+        sys.stderr.write("\r" + " " * 40 + "\r")
+        sys.stderr.flush()
+    except KeyboardInterrupt:
+        log.log("Aborted by operator.")
+        sys.exit(0)
+
+
+def autotest_compile_release(log: Logger) -> tuple[bool, Path]:
+    """Run cargo build --release --workspace, capturing stdout+stderr.
+
+    Returns ``(success, build_log_path)``.  The log is always written so the
+    agent can read it for context regardless of build outcome.
+    """
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_path = LOG_DIR / f"autotest_build_{ts}.log"
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log.log(f"compiling: cargo build --release --workspace -> {log_path.name}")
+    try:
+        with open(log_path, "w") as fh:
+            proc = subprocess.run(
+                ["cargo", "build", "--release", "--workspace"],
+                cwd=str(SCRIPT_DIR),
+                stdout=fh,
+                stderr=subprocess.STDOUT,
+                timeout=AUTOTEST_BUILD_TIMEOUT,
+            )
+        ok = proc.returncode == 0
+        log.log(f"compile {'OK' if ok else 'FAILED'} (exit {proc.returncode})")
+        return ok, log_path
+    except subprocess.TimeoutExpired:
+        log.log(f"compile TIMED OUT after {AUTOTEST_BUILD_TIMEOUT}s")
+        return False, log_path
+
+
+def autotest_teamserver_pid() -> "int | None":
+    """Return PID of any process bound to AUTOTEST_PORT, else None."""
+    try:
+        result = subprocess.run(
+            ["ss", "-ltnp", f"sport = :{AUTOTEST_PORT}"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+    for line in result.stdout.splitlines():
+        m = re.search(r"pid=(\d+)", line)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def autotest_port_listening() -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", AUTOTEST_PORT), timeout=1):
+            return True
+    except OSError:
+        return False
+
+
+def autotest_start_or_restart_teamserver(log: Logger) -> bool:
+    """Kill any teamserver on AUTOTEST_PORT, start a fresh one, poll until ready.
+
+    Returns True iff the teamserver becomes ready within the timeout window.
+    """
+    pid = autotest_teamserver_pid()
+    if pid:
+        log.log(f"killing existing autotest teamserver (PID {pid})")
+        try:
+            os.kill(pid, signal.SIGTERM)
+            for _ in range(20):
+                if not autotest_port_listening():
+                    break
+                time.sleep(0.5)
+            if autotest_port_listening():
+                log.log("teamserver did not exit on SIGTERM, sending SIGKILL")
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                time.sleep(1)
+        except ProcessLookupError:
+            pass
+
+    binary = SCRIPT_DIR / "target/release/red-cell"
+    profile = SCRIPT_DIR / AUTOTEST_PROFILE
+    if not binary.exists():
+        log.log(f"ERROR: {binary} missing — compile must run first")
+        return False
+    if not profile.exists():
+        log.log(f"ERROR: {profile} missing")
+        return False
+
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    ts_log = LOG_DIR / "teamserver-autotest.log"
+    log.log(f"starting teamserver: {binary.name} --profile {profile.name}")
+    with open(ts_log, "a") as fh:
+        fh.write(f"\n=== {datetime.now().isoformat()} starting autotest teamserver ===\n")
+
+    proc = subprocess.Popen(
+        [str(binary), "--profile", str(profile)],
+        cwd=str(SCRIPT_DIR),
+        stdout=open(ts_log, "a"),
+        stderr=subprocess.STDOUT,
+    )
+    log.log(f"teamserver PID {proc.pid}, polling :{AUTOTEST_PORT}")
+
+    deadline = time.monotonic() + AUTOTEST_TEAMSERVER_READY_TIMEOUT
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            log.log(f"teamserver exited prematurely (code {proc.returncode}); see {ts_log.name}")
+            return False
+        if autotest_port_listening():
+            log.log(f"teamserver ready on :{AUTOTEST_PORT}")
+            return True
+        time.sleep(0.5)
+
+    log.log(f"teamserver did not become ready within {AUTOTEST_TEAMSERVER_READY_TIMEOUT}s")
+    return False
+
+
+def autotest_kill_target_vm_orphans(log: Logger):
+    """SSH to each test VM and pkill leftover agent-* payloads from prior runs.
+
+    Best-effort: SSH/auth failures are logged but do not abort the iteration.
+    Reads ``automatic-test/config-autotest/targets.toml`` (or the symlinked
+    target file).  Skipped silently when targets.toml is absent.
+    """
+    targets_path = SCRIPT_DIR / AUTOTEST_CONFIG_DIR / "targets.toml"
+    if not targets_path.exists():
+        log.log("no targets.toml in config-autotest, skipping orphan cleanup")
+        return
+
+    try:
+        try:
+            import tomllib
+        except ImportError:  # py3.10
+            import tomli as tomllib
+        with open(targets_path, "rb") as f:
+            targets = tomllib.load(f)
+    except Exception as exc:
+        log.log(f"could not parse targets.toml: {exc}")
+        return
+
+    for name, cfg in targets.items():
+        if not isinstance(cfg, dict):
+            continue
+        host = cfg.get("host")
+        user = cfg.get("user")
+        key = cfg.get("key")
+        if not (host and user and key):
+            continue
+        key_path = os.path.expanduser(str(key))
+        work_dir = str(cfg.get("work_dir", ""))
+        is_windows = "\\" in work_dir or work_dir.startswith("C:")
+        if is_windows:
+            remote_cmd = (
+                "powershell -NoProfile -Command "
+                "\"Get-Process | Where-Object { $_.Path -like 'C:\\Temp\\rc-test\\agent-*' } "
+                "| Stop-Process -Force -ErrorAction SilentlyContinue\""
+            )
+        else:
+            remote_cmd = "pkill -f /tmp/rc-test/agent- || true"
+        try:
+            result = subprocess.run(
+                ["ssh", "-i", key_path,
+                 "-o", "BatchMode=yes",
+                 "-o", "ConnectTimeout=5",
+                 "-o", "StrictHostKeyChecking=no",
+                 f"{user}@{host}", remote_cmd],
+                capture_output=True, text=True, timeout=15,
+            )
+            if result.returncode == 0:
+                log.log(f"orphan cleanup on {name} ({host}): done")
+            else:
+                log.log(f"orphan cleanup on {name} ({host}): exit {result.returncode}")
+        except subprocess.TimeoutExpired:
+            log.log(f"orphan cleanup on {name} ({host}): SSH timeout (skipped)")
+        except Exception as exc:
+            log.log(f"orphan cleanup on {name} ({host}): {exc}")
+
+
 # ── Review loops (qa, arch, quality, coverage) ─────────────────────────────────
 
 def review_loop(args, log: Logger):
@@ -2282,6 +2490,12 @@ def review_loop(args, log: Logger):
         f"Zones:    {zone_desc}",
     ])
 
+    # Autotest is destructive (kills + restarts teamserver, deploys to test VMs).
+    # Show a banner + 10s countdown so an operator who started this on the wrong
+    # host can abort. --no-confirm / RC_AUTOTEST_NO_CONFIRM=1 skips the wait.
+    if loop_type == "autotest":
+        autotest_safety_banner(log, getattr(args, "no_confirm", False))
+
     while True:
         if stop_requested():
             log.log("STOP signal detected (.stop file exists). Exiting.")
@@ -2315,6 +2529,33 @@ def review_loop(args, log: Logger):
             run_cwd = worktree_path or SCRIPT_DIR
             cargo_target = QA_CARGO_TARGET if loop_type == "qa" else REVIEW_CARGO_TARGET
             run_env = {"CARGO_TARGET_DIR": str(cargo_target)}
+
+        # Autotest loop: compile, start teamserver, kill VM orphans, and pass the
+        # build status to the agent via env vars. Agent's prompt branches on
+        # RC_AUTOTEST_BUILD_OK to decide whether to run scenarios or troubleshoot
+        # the build failure.
+        if loop_type == "autotest":
+            build_ok, build_log = autotest_compile_release(log)
+            ts_ok = False
+            if build_ok:
+                ts_ok = autotest_start_or_restart_teamserver(log)
+                if not ts_ok:
+                    log.log(
+                        "WARNING: teamserver did not become ready; agent will see "
+                        "RC_AUTOTEST_TEAMSERVER_OK=0 and switch to troubleshooting mode"
+                    )
+            else:
+                log.log("compile failed; skipping teamserver start")
+            autotest_kill_target_vm_orphans(log)
+
+            run_env.update({
+                "RC_AUTOTEST_BUILD_OK":      "1" if build_ok else "0",
+                "RC_AUTOTEST_BUILD_LOG":     str(build_log),
+                "RC_AUTOTEST_TEAMSERVER_OK": "1" if ts_ok else "0",
+                "RC_AUTOTEST_CONFIG_DIR":    AUTOTEST_CONFIG_DIR,
+                "RC_AUTOTEST_PROFILE":       AUTOTEST_PROFILE,
+                "RC_AUTOTEST_PORT":          str(AUTOTEST_PORT),
+            })
 
         extra_log = None
         if per_run:
@@ -2484,6 +2725,15 @@ examples:
         help=(
             "Dev loop only: skip the lite QA pass after each task. "
             "Use this to get the original single-agent-call behaviour."
+        ),
+    )
+    parser.add_argument(
+        "--no-confirm",
+        action="store_true",
+        default=False,
+        help=(
+            "Autotest loop only: skip the 10-second 'destructive action' "
+            "countdown banner. Equivalent to RC_AUTOTEST_NO_CONFIRM=1."
         ),
     )
     return parser.parse_args()

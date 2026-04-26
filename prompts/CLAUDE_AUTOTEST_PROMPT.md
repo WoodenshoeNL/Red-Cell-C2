@@ -11,6 +11,58 @@ issue. See "Inline fixes vs beads" below for the boundary.
 
 ---
 
+## Step 0 — Dual-mode setup (loop vs manual)
+
+`loop.py --loop autotest` does the compile, teamserver start, and orphan-payload
+cleanup before invoking you, then signals the result via env vars. Manual
+invocations (`claude --prompt prompts/CLAUDE_AUTOTEST_PROMPT.md`) have none of
+those set, so you do the preflight yourself.
+
+```bash
+if [ -f .stop ]; then echo "STOP signal detected. Exiting."; exit 0; fi
+
+if [ -n "$RC_AUTOTEST_BUILD_OK" ]; then
+    # Loop mode — trust loop's compile + teamserver start.
+    echo "[loop mode] build_ok=$RC_AUTOTEST_BUILD_OK ts_ok=$RC_AUTOTEST_TEAMSERVER_OK"
+    echo "[loop mode] config_dir=$RC_AUTOTEST_CONFIG_DIR profile=$RC_AUTOTEST_PROFILE"
+
+    if [ "$RC_AUTOTEST_BUILD_OK" != "1" ]; then
+        # Compile failed. Do NOT run scenarios. Read the build log, identify
+        # the root cause, file ONE P1 bead with the gcc/rustc error excerpt,
+        # commit, push, exit.
+        echo "[loop mode] compile failed — switching to troubleshooting"
+        echo "[loop mode] build log: $RC_AUTOTEST_BUILD_LOG"
+        # Read tail of $RC_AUTOTEST_BUILD_LOG, extract the first 'error[' or
+        # 'error:' line + 30 lines of context, file the bead, exit clean.
+        # Skip directly to Step 8 (Land the plane).
+        AUTOTEST_MODE=build_failed
+    elif [ "$RC_AUTOTEST_TEAMSERVER_OK" != "1" ]; then
+        # Build OK but teamserver did not start. Diagnose: port already taken
+        # by another process? profiles/autotest.yaotl missing or invalid?
+        # File a bead, do not run scenarios.
+        echo "[loop mode] teamserver did not start — switching to troubleshooting"
+        AUTOTEST_MODE=teamserver_failed
+    else
+        echo "[loop mode] proceeding to scenario run"
+        AUTOTEST_MODE=run
+    fi
+else
+    # Manual mode — do the full self-contained preflight in Step 3.
+    echo "[manual mode] no RC_AUTOTEST_BUILD_OK set; doing full preflight"
+    AUTOTEST_MODE=run
+    # Use the regular test profile + config when invoked outside the loop.
+    export RC_AUTOTEST_CONFIG_DIR="${RC_AUTOTEST_CONFIG_DIR:-automatic-test/config}"
+    export RC_AUTOTEST_PROFILE="${RC_AUTOTEST_PROFILE:-profiles/test.yaotl}"
+    export RC_AUTOTEST_PORT="${RC_AUTOTEST_PORT:-40056}"
+fi
+```
+
+If `AUTOTEST_MODE=build_failed` or `teamserver_failed`, **skip Steps 3–5 and
+go straight to Step 7 (file the bead) and Step 8 (commit + push)**. Do not
+attempt scenarios; the test infrastructure isn't in a runnable state.
+
+---
+
 ## CRITICAL: Concurrent dev agent
 
 A dev agent may be running in this same repository with uncommitted changes.
@@ -25,14 +77,6 @@ If `git pull --rebase` fails because of unstaged changes, stash with `--`
 specifying only the file you intend to keep aside:
 `git stash push -m "wip" -- automatic-test/config/env.toml`. Pull, push,
 `git stash pop`. Never blanket-stash.
-
----
-
-## Step 0 — Stop signal
-
-```bash
-if [ -f .stop ]; then echo "STOP signal detected. Exiting."; exit 0; fi
-```
 
 ---
 
@@ -55,86 +99,101 @@ Hard-coded values for this VM. Verify they still apply before relying on them.
 - Windows target: `192.168.213.160` (user `rctest`)
 - Dev-box callback IP: `192.168.213.157`
 - SSH key: `~/.ssh/red_cell_test`
-- Teamserver profile: `profiles/test.yaotl` (canonical test profile;
-  do **not** use `havoc.yaotl` — operator names and ports differ from `env.toml`)
-- Teamserver port: `127.0.0.1:40056`
+- Teamserver: `$RC_AUTOTEST_PROFILE` on `127.0.0.1:$RC_AUTOTEST_PORT`
+  (loop mode: `profiles/autotest.yaotl` on `:40156`;
+   manual mode: `profiles/test.yaotl` on `:40056`)
+- Harness config dir: `$RC_AUTOTEST_CONFIG_DIR`
+  (loop mode: `automatic-test/config-autotest`;
+   manual mode: `automatic-test/config`)
 - Test operator: `test-operator` / api_key `changeme-api-key`
 
-`automatic-test/config/env.toml` and `targets.toml` are **both gitignored** —
-host-specific. If either is missing, the harness auto-seeds `env.toml` from
-`env.toml.example` on first run, but `[server].callback_host` must be set
-manually to the dev-box IP above; otherwise Demon/Archon `CONFIG_BYTES` bake
-`127.0.0.1` and agents on the VMs call their own loopback.
+`$RC_AUTOTEST_CONFIG_DIR/env.toml` and `targets.toml` are **gitignored** —
+host-specific. `[server].callback_host` must be set to the dev-box IP above;
+otherwise Demon/Archon `CONFIG_BYTES` bake `127.0.0.1` and agents on the VMs
+call their own loopback.
 
 ---
 
 ## Step 3 — Preflight (fail loud, do not paper over)
 
+In **loop mode** the loop already compiled, started the teamserver, and ran
+orphan-payload cleanup; you only need to verify SSH reachability and put the
+CLI on PATH. In **manual mode** you do everything.
+
 ```bash
 git pull --rebase
 
-# Rebuild only when source has changed since target/release/red-cell was built.
-if [ -f target/release/red-cell ] && [ -f target/release/red-cell-cli ]; then
-  CHANGED=$(git log --since="$(stat -c %y target/release/red-cell)" --oneline \
-              -- teamserver agent client-cli common 2>/dev/null | wc -l)
-else
-  CHANGED=999
+if [ "$AUTOTEST_MODE" != "build_failed" ] && [ "$AUTOTEST_MODE" != "teamserver_failed" ]; then
+
+  if [ -z "$RC_AUTOTEST_BUILD_OK" ]; then
+    # Manual mode: rebuild only when source changed; (re)start teamserver if stale.
+    if [ -f target/release/red-cell ] && [ -f target/release/red-cell-cli ]; then
+      CHANGED=$(git log --since="$(stat -c %y target/release/red-cell)" --oneline \
+                  -- teamserver agent client-cli common 2>/dev/null | wc -l)
+    else
+      CHANGED=999
+    fi
+    if [ "$CHANGED" != "0" ]; then
+      echo "Rebuilding (source changed since last release build)"
+      cargo build --release --workspace
+    fi
+
+    TS_PID=$(pgrep -af "target/release/red-cell --profile $RC_AUTOTEST_PROFILE" \
+              | grep -v grep | awk '{print $1}' | head -1)
+    if [ -z "$TS_PID" ]; then
+      pkill -f "target/release/red-cell --profile $RC_AUTOTEST_PROFILE" || true
+      sleep 2
+      ./target/release/red-cell --profile "$RC_AUTOTEST_PROFILE" \
+          > logs/teamserver.log 2>&1 &
+      sleep 5
+      tail -3 logs/teamserver.log
+    fi
+  fi
+
+  # Verify teamserver is listening (both modes — fast sanity check)
+  ss -ltn "sport = :$RC_AUTOTEST_PORT" | tail -n +2 | grep -q LISTEN \
+    || { echo "ERROR: teamserver not listening on $RC_AUTOTEST_PORT"; exit 1; }
+
+  # Verify env.toml callback_host is set in the active config dir
+  grep -q '^callback_host = "192.168.213.157"' "$RC_AUTOTEST_CONFIG_DIR/env.toml" \
+    || { echo "ERROR: callback_host missing in $RC_AUTOTEST_CONFIG_DIR/env.toml"; exit 1; }
+
+  # Verify SSH to both targets (5s timeout each — fast fail)
+  ssh -i ~/.ssh/red_cell_test -o BatchMode=yes -o ConnectTimeout=5 \
+      rctest@192.168.213.159 "uname -a" \
+    || { echo "ERROR: Linux VM 192.168.213.159 unreachable"; exit 1; }
+  ssh -i ~/.ssh/red_cell_test -o BatchMode=yes -o ConnectTimeout=5 \
+      rctest@192.168.213.160 'powershell -Command "ver"' \
+    || { echo "ERROR: Windows VM 192.168.213.160 unreachable"; exit 1; }
+
+  # Put CLI on PATH for the rest of this run
+  export PATH="$(pwd)/target/release:$PATH"
+  red-cell-cli --version
 fi
-if [ "$CHANGED" != "0" ]; then
-  echo "Rebuilding (source changed since last release build)"
-  cargo build --release --workspace
-fi
-
-# Teamserver: restart if not running, or if running an older binary.
-TS_PID=$(pgrep -af 'target/release/red-cell --profile' | grep -v grep | awk '{print $1}' | head -1)
-RESTART=0
-if [ -z "$TS_PID" ]; then
-  RESTART=1
-elif [ "$(stat -c %Y target/release/red-cell)" -gt "$(ps -o lstart= -p $TS_PID | xargs -I{} date -d "{}" +%s)" ]; then
-  RESTART=1
-fi
-if [ "$RESTART" = "1" ]; then
-  pkill -f 'target/release/red-cell' || true
-  sleep 2
-  ./target/release/red-cell --profile profiles/test.yaotl > logs/teamserver.log 2>&1 &
-  sleep 5
-  tail -3 logs/teamserver.log
-fi
-
-# Verify teamserver is listening
-ss -ltn 'sport = :40056' | tail -n +2 | grep -q LISTEN \
-  || { echo "ERROR: teamserver not listening on 40056"; exit 1; }
-
-# Verify env.toml callback_host is set
-grep -q '^callback_host = "192.168.213.157"' automatic-test/config/env.toml \
-  || { echo "ERROR: callback_host missing in env.toml"; exit 1; }
-
-# Verify SSH to both targets (5s timeout each — fast fail)
-ssh -i ~/.ssh/red_cell_test -o BatchMode=yes -o ConnectTimeout=5 \
-    rctest@192.168.213.159 "uname -a" \
-  || { echo "ERROR: Linux VM 192.168.213.159 unreachable"; exit 1; }
-ssh -i ~/.ssh/red_cell_test -o BatchMode=yes -o ConnectTimeout=5 \
-    rctest@192.168.213.160 'powershell -Command "ver"' \
-  || { echo "ERROR: Windows VM 192.168.213.160 unreachable"; exit 1; }
-
-# Put CLI on PATH for the rest of this run
-export PATH="$(pwd)/target/release:$PATH"
-red-cell-cli --version
 ```
 
-If any preflight step fails: investigate, do not skip. Common failure modes
-are documented in `docs/win11-ssh-setup.md`, `docs/ubuntu-test-setup.md`, and
-the prior beads (`br search "preflight"`).
+If any preflight step fails in manual mode: investigate, do not skip. Common
+failure modes are documented in `docs/win11-ssh-setup.md`,
+`docs/ubuntu-test-setup.md`, and the prior beads (`br search "preflight"`).
+
+In loop mode, a preflight failure that is the loop's fault (build_failed,
+teamserver_failed) means you skip Steps 3–5 entirely — go to Step 7.
 
 ---
 
 ## Step 4 — Run the suite
 
+Skip this step entirely when `AUTOTEST_MODE` is `build_failed` or
+`teamserver_failed` — go to Step 7 to file the bead.
+
 ```bash
 TS=$(date +%Y%m%d_%H%M%S)
 LOG=/tmp/rc-autotest-$TS.log
+# --config-dir picks up the right env.toml/targets.toml for the active mode
+# (config-autotest in loop mode, config in manual mode)
+CONFIG_REL=$(realpath --relative-to=automatic-test "$RC_AUTOTEST_CONFIG_DIR")
 cd automatic-test
-python3 test.py --scenario all > "$LOG" 2>&1 &
+python3 test.py --config-dir "$CONFIG_REL" --scenario all > "$LOG" 2>&1 &
 TEST_PID=$!
 cd ..
 echo "test PID: $TEST_PID, log: $LOG"
@@ -208,6 +267,32 @@ NOT inline (file a bead instead):
 ---
 
 ## Step 7 — File beads (proactively, not just bugs)
+
+### Loop-mode special cases
+
+If `AUTOTEST_MODE=build_failed`, file **one** P1 bead with the gcc/rustc error
+excerpt from `$RC_AUTOTEST_BUILD_LOG`. Title pattern:
+*"build: cargo build --release fails — \<short error excerpt\>"*. Description:
+the last 30 lines of the build log around the first `error[` or `error:` line,
+plus the failing command. `zone:` label matches the failing crate (look at the
+file path in the error: `teamserver/src/...` → `zone:teamserver`,
+`agent/phantom/src/...` → `zone:phantom`, etc.). Then go to Step 8.
+
+If `AUTOTEST_MODE=teamserver_failed`, the build was fine but the teamserver did
+not become ready on `:$RC_AUTOTEST_PORT`. Diagnose:
+
+```bash
+ss -ltnp "sport = :$RC_AUTOTEST_PORT" | head    # is the port held by something else?
+tail -30 logs/teamserver-autotest.log           # what did the teamserver say on exit?
+ls -l "$RC_AUTOTEST_PROFILE"                    # does the profile exist + parse?
+```
+
+File one P2 bead with `zone:autotest` (the loop's start logic) or
+`zone:teamserver` (if the teamserver itself crashed on a valid profile),
+including the `ss -ltnp` output and the last 30 lines of the teamserver log.
+Then go to Step 8.
+
+### Normal-run beads
 
 Beyond bug-fix beads, **always** file improvement beads for:
 

@@ -315,7 +315,18 @@ def run_scenario(
         return "skipped", None
     except CliError as exc:
         if exc.exit_code != _RATE_LIMIT_EXIT_CODE:
-            raise
+            elapsed = time.monotonic() - start
+            print(f"  ✗ FAILED ({elapsed:.1f}s): {exc}")
+            title = getattr(mod, "DESCRIPTION", path.stem)
+            text = build_failure_diagnostic_report(
+                ctx, scenario_id, title, exc, log_lines=100
+            )
+            print(text, end="")
+            report_path = write_scenario_failure_file(
+                run_dir, scenario_id, text
+            )
+            print(f"  Diagnostic report written to: {report_path}")
+            return "failed", report_path
         wait = _parse_retry_after(exc)
         elapsed = time.monotonic() - start
         print(

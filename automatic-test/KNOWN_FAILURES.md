@@ -32,8 +32,9 @@ row to *Resolved* and add the closing commit / fix description.
 
 | Signature (substring of error / stderr) | Scenario | Bead | First seen | Last seen | Status |
 |----------------------------------------|----------|------|------------|-----------|--------|
-| `[TIMEOUT] timed out waiting for output from task` | 04, 07, 11, 21 | red-cell-c2-yde2a | 2026-04-24 | 2026-04-24 | P1, in progress |
-| `Timed out after 60s waiting for agent checkin` (Windows Demon) | 05, 08, 14, 16, 17, 19 | red-cell-c2-2it9u | 2026-04-24 | 2026-04-24 | P1, in progress |
+| `[TIMEOUT] timed out waiting for output from task` | 04, 11, 14 | red-cell-c2-3ecje | 2026-04-24 | 2026-04-26 | P1, regression of red-cell-c2-yde2a |
+| `Timed out after 60s waiting for agent checkin` (Windows Demon/Archon) | 16, 17, 19 | red-cell-c2-jtsiv | 2026-04-24 | 2026-04-26 | P1, regression of red-cell-c2-2it9u |
+| `cargo build --release --target x86_64-pc-windows-gnu` + `error[E0433]` in `common/src/tls.rs` | 05, 06, 07, 08 | red-cell-c2-f33x9 | 2026-04-26 | 2026-04-26 | P1, specter cross-compile |
 | `agent ... still present in agent list after 120s — expected implant to stop after kill-date` | 22 | red-cell-c2-btwo0 | 2026-04-24 | 2026-04-24 | P2, kill-date / working-hours / sleep |
 | `agent ... checked in unexpectedly — outside working hours` | 23 | red-cell-c2-btwo0 | 2026-04-24 | 2026-04-24 | (same bead as above) |
 | `agent show sleep_interval: expected ..., got ...` | 24 | red-cell-c2-btwo0 | 2026-04-24 | 2026-04-24 | (same bead as above) |
@@ -54,6 +55,8 @@ than a new bug.
 | HTTP 429 / rate-limit cascade after scenarios 01–11 | 12–24 | *(no bead — fixed inline)* | 2026-04-26 | `profiles/autotest.yaotl` `RateLimitPerMinute` raised 120 → 600 (commit 311d6253) |
 | `[INVALID_ARGS] unknown format 'elf': expected exe, dll, or bin` | 04, 06, 07, 11, 15, 21–24 | *(no bead — fixed inline)* | 2026-04-24 | Replaced `fmt='elf'` with `fmt='exe'` for Phantom (commit 9cddb9a5) |
 | `not reachable via SSH` against the Windows VM despite `whoami` working | every scenario with `[windows]` configured | red-cell-c2-3jlpo | 2026-04-24 | `preflight_ssh` sent `true`, which `cmd.exe` does not know — switched to `exit 0` (commit c6fb4086) |
+| `[TIMEOUT] timed out waiting for output from task` (original) | 04, 07, 11, 21 | red-cell-c2-yde2a | 2026-04-25 | CommandProc(0x1010) + DemonCallbackError::Generic fix. **REGRESSED** — see red-cell-c2-3ecje |
+| `Timed out after 60s waiting for agent checkin` (original Windows Demon) | 05, 08, 14, 16, 17, 19 | red-cell-c2-2it9u | 2026-04-25 | HeapEnc packing fix for Demon transport config. **REGRESSED** — see red-cell-c2-jtsiv |
 
 ---
 

@@ -6,6 +6,8 @@
 # groups with `max-threads = 1` avoid concurrent exec of that binary.
 #
 # Add binaries here if they show the same intermittent ENOENT (see red-cell-c2-b6i4g).
+# If ENOENT persists on red_cell lib tests, check loop.py: clean_tmp_cargo_targets
+# must not remove debug/deps while nextest runs (no .cargo-lock during test exec).
 # client-cli `*_contract` integration tests: red-cell-c2-0h7q9 (same double-spawn as b6i4g).
 #
 # NOTE: use `package(name) & binary(rust_name)` (underscores), NOT `binary_id(name)` (hyphens).

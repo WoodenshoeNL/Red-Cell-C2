@@ -845,6 +845,76 @@ def _cargo_target_locked(target_dir: Path) -> bool:
     return False
 
 
+def _path_within_tree(path: Path, root: Path) -> bool:
+    """
+    Return True if path resolves to root or to a directory/file under root.
+
+    Used to detect processes whose cwd lives inside a Cargo target directory.
+    """
+    try:
+        p = path.resolve()
+        r = root.resolve()
+    except OSError:
+        return False
+    try:
+        p.relative_to(r)
+        return True
+    except ValueError:
+        return False
+
+
+def _stable_cargo_target_in_use(target_dir: Path) -> bool:
+    """
+    Return True if any live process is likely executing against target_dir.
+
+    Cargo holds .cargo-lock only while compiling; ``cargo nextest`` releases it
+    before running tests.  ``clean_tmp_cargo_targets`` must not delete
+    ``debug/deps`` during that window or nextest's [double-spawn] exec hits
+    ENOENT (see red-cell-c2-sl2cm / red-cell-c2-5jieq).
+    """
+    try:
+        resolved_root = target_dir.resolve()
+    except OSError:
+        return True
+
+    proc = Path("/proc")
+    try:
+        pid_dirs = [e for e in proc.iterdir() if e.name.isdigit()]
+    except OSError:
+        return False
+
+    for pid_dir in pid_dirs:
+        cwd_link = pid_dir / "cwd"
+        try:
+            cwd = cwd_link.readlink()
+        except OSError:
+            cwd = None
+        if cwd is not None and _path_within_tree(cwd, resolved_root):
+            return True
+
+        env_path = pid_dir / "environ"
+        try:
+            raw = env_path.read_bytes()
+        except OSError:
+            continue
+        for chunk in raw.split(b"\0"):
+            if not chunk.startswith(b"CARGO_TARGET_DIR="):
+                continue
+            rest = chunk[len(b"CARGO_TARGET_DIR="):]
+            try:
+                val = rest.decode("utf-8")
+            except UnicodeDecodeError:
+                val = rest.decode("utf-8", errors="replace")
+            env_path_val = Path(val).expanduser()
+            if _path_within_tree(env_path_val, resolved_root):
+                return True
+            if val.rstrip("/") == str(resolved_root).rstrip("/"):
+                return True
+            break
+
+    return False
+
+
 def _active_worktree_paths() -> set:
     """
     Return the set of /tmp/red-cell* root paths that are, or contain, the
@@ -996,6 +1066,12 @@ def _clean_cargo_target_inplace(target_dir: Path, label: str, size_limit_gb: flo
     size_gb = _dir_size_gb(target_dir)
     if size_gb < size_limit_gb:
         return
+    if _stable_cargo_target_in_use(target_dir):
+        log.log(
+            f"tmp cargo: {label} — in use (cwd or CARGO_TARGET_DIR), "
+            "deferring heavyweight clean"
+        )
+        return
     log.log(f"tmp cargo: {label} is {size_gb:.1f} GB — cleaning heavyweight subdirs")
     heavyweight_dirs = ["incremental", "deps", "build", ".fingerprint"]
     cleaned = []
@@ -1028,6 +1104,9 @@ def clean_tmp_cargo_targets(log: Logger, force: bool = False):
     - Stable dirs (review + dev zone): clean heavyweight subdirs in-place when they
       exceed TMP_CARGO_SIZE_LIMIT_GB.  Never delete — preserves incremental cache.
       Skip entirely if a cargo build is actively holding the lock.
+      Defer cleaning if processes reference the dir via cwd or CARGO_TARGET_DIR
+      (nextest releases .cargo-lock before executing tests; see
+      _stable_cargo_target_in_use).
     - Transient dirs (everything else): remove entirely if older than
       TMP_CARGO_MAX_AGE_SECS and no process has its CWD inside them.
 

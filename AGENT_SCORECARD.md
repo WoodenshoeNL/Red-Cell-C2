@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1705 | 296 | 115 |
-| Bugs filed against | 274 | 50 | 15 |
+| Tasks closed | 1715 | 296 | 115 |
+| Bugs filed against | 275 | 50 | 15 |
 | Bug rate (bugs/task) | 0.16 | 0.17 | 0.13 |
 | Quality score | 84% | 83% | 87% |
 
-*Bug rates: Claude 274/1705=0.1607→0.16, Codex 50/296=0.1689→0.17, Cursor 15/115=0.1304→0.13*
+*Bug rates: Claude 275/1715=0.1603→0.16, Codex 50/296=0.1689→0.17, Cursor 15/115=0.1304→0.13*
 
 ## Violation Breakdown
 
@@ -28,7 +28,7 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 67 | 25 | 9 |
 | Memory / resource leaks | 16 | 11 | 1 |
 | Startup / lifecycle regressions | 5 | 10 | 0 |
-| Test infrastructure / flakiness | 66 | 6 | 1 |
+| Test infrastructure / flakiness | 67 | 6 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 5 | 5 | 0 |
 | Correctness / pagination | 72 | 9 | 1 |
@@ -41,6 +41,18 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-26 20:55 — 914d380f..74ae1cf0
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 10 | 1 | Productive autotest-shakedown cycle. Substantive closes: 6922ca97 (test.py CliError now logs+continues instead of crashing the suite; ports moved 190xx→191xx to avoid teamserver collision; filed 4 self-discovered regression beads — f33x9/3ecje/jtsiv/s8j6z), c32afb74 (gate \`std::os::unix\` permission code in \`common/src/tls.rs\` behind \`#[cfg(unix)]\` — unblocks specter \`x86_64-pc-windows-gnu\` cross-compile), dcb8b700 (phantom: prepend \`callback_seq\` 8 LE bytes before DemonMessage in \`ecdh_send_packages\` — matches server wire format added in 3574269a; increment only on confirmed send), 6416bc12 (specter: identical seq_num fix for \`ecdh_send_packages\` — closes the parallel bug filed during phantom investigation), 9bbadc1d (\`Session.send/send_batch\` accept default 30s timeout + per-call override + None=block; 6 unit tests covering all permutations), fb8bd344 (set \`AllowLegacyCtr=true\` in autotest/test profiles + \`agent_type=\"demon\"\` kwarg in \`http_listener_kwargs\` → \`legacy_mode\`; scenarios 09/10/11/14/19 updated), e514c7a2 (split shared windows listeners in scenarios 05-08 into Demon legacy + Archon/Specter ECDH listeners), e65b3a0e+74ae1cf0 (scenario 16 — direct SMB as primary C2 was never a supported design, so the scenario is removed entirely), 815ad1f4 (apply same AllowLegacyCtr profile fix to http_smb.yaotl + webhook_example.yaotl), e35916c4 (refresh stale module docstrings in scenarios 05/08). Two lite-qa quality passes also landed (074c5099, 31a2bbce). Bug filed: red-cell-c2-a2obd (P2 zone:client-cli — \`config::tests::no_config_on_disk_true_in_empty_dir\` is non-hermetic; \`no_config_on_disk\` reads \`~/.config/red-cell-cli/config.toml\` and the test fails on hosts that have a global config. Originally written by Claude in afb540a8; preserved through Cursor's 3c146e84 split. Latent until the global config landed on this VM at 15:49 today, after the previous QA cycle ran). |
+| Codex | 0 | 0 | No activity in this review range. |
+| Cursor | 0 | 0 | No activity in this review range. |
+
+Build: failed (cargo check workspace clean in 1m48s; cargo clippy -D warnings clean in 31s; **nextest 1 FAIL** — \`red-cell-cli config::tests::no_config_on_disk_true_in_empty_dir\` — fail-fast halted at 1432/6060 tests run, 4628 skipped. Failure is environmental (global config file present on QA host); filed as red-cell-c2-a2obd.
+
+Notes: Three legitimately interesting fixes this cycle. The phantom/specter seq_num bug was a real protocol regression — commit 3574269a (2026-04-19) added monotonic anti-replay to ECDH session dispatch but only updated the Archon C agent; the Rust agents continued sending raw DemonMessage bytes, so the server (correctly) misparsed every post-registration packet and \`exec --wait\` always timed out. The fix prepends \`callback_seq\` as 8 LE bytes inside the GCM plaintext exactly matching the documented wire format (\`seq_num(8 LE) | DemonMessage\`) and increments only after a confirmed send (right ordering — a failed send shouldn't burn a seq number). The cfg(unix) gate on common/src/tls.rs is correct: \`std::os::unix::fs::OpenOptionsExt\` and \`PermissionsExt\` are unavailable on Windows; on Windows the key file falls back to default ACLs, which is acceptable since the only Rust target needing windows-gnu compile is the Specter agent (it doesn't write the teamserver's TLS identity). Session timeout work has the strongest test coverage of the bunch — 6 cases covering instance default, per-call override, None=block, send_batch, and the \`DEFAULT_TIMEOUT\` constant. The autotest pattern continues to work cleanly: autotest discovers regressions → files beads → next session fixes them → all four bugs filed in 6922ca97 were closed within the same review range. No new bugs filed against Codex or Cursor (no activity from either).
 
 ### QA Review — 2026-04-26 15:30 — 4fe6e547..914d380f
 

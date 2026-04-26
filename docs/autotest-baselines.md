@@ -1,7 +1,7 @@
 # Autotest Wall-Clock Baselines
 
 Measured on `Ubuntu-C2-dev01-tnpl` (16 GB RAM, release build).
-Serial mode (`--no-parallel`) — the parallel path requires `--detach` (not yet in CLI).
+Serial mode (`--no-parallel`) — the parallel path requires `--detach`.
 
 | Date       | Scenario 03 (s) | Full Suite (s) | Notes                          |
 |------------|------------------|----------------|--------------------------------|

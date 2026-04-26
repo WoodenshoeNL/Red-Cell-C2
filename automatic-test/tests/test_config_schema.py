@@ -51,7 +51,8 @@ def _minimal_valid_env() -> dict:
             "protocol_probe_port": 19090,
             "interop_win_port": 19091,
             "interop_lin_port": 19092,
-            "stress_port": 19093,
+            "stress_demon_port": 19093,
+            "stress_phantom_port": 19094,
             "rbac_admin_port": 19098,
             "rbac_viewer_port": 19099,
             "smb_pipe": "redcell-c2",
@@ -261,7 +262,8 @@ payload_build_port = 19080
 protocol_probe_port = 19090
 interop_win_port = 19091
 interop_lin_port = 19092
-stress_port = 19093
+stress_demon_port = 19093
+stress_phantom_port = 19094
 rbac_admin_port = 19098
 rbac_viewer_port = 19099
 smb_pipe = "redcell-c2"
@@ -313,7 +315,8 @@ payload_build_port = 19080
 protocol_probe_port = 19090
 interop_win_port = 19091
 interop_lin_port = 19092
-stress_port = 19093
+stress_demon_port = 19093
+stress_phantom_port = 19094
 rbac_admin_port = 19098
 rbac_viewer_port = 19099
 smb_pipe = "redcell-c2"

@@ -2,28 +2,34 @@
 Scenario 14_stress_concurrent_agents: Concurrent agent stress test
 
 Runs two passes:
-  - Demon: 10 concurrent agents (full stress baseline)
-  - Phantom: 5 concurrent agents (Rust Linux agent stability check)
+  - Demon: 10 concurrent agents on Windows (full stress baseline)
+  - Phantom: 5 concurrent agents on Linux (Rust agent stability check)
 
 The Phantom pass runs only when ``"phantom"`` is listed in
 ``agents.available`` in env.toml; if it is listed and the payload build
 fails, the scenario fails so the regression is caught.
 
-Skip if ctx.linux is None.
+Listeners are created upfront in :func:`run` (one per active agent type)
+and both payloads are pre-built via
+:func:`~lib.payload.build_parallel` so builds overlap.
 
-Steps (per agent pass):
-  1.  Create + start a single HTTP listener (all agents share it)
-  2.  Build one payload for the Linux target
-  3.  Upload N copies with distinct names; execute each in background
-  4.  Wait for all N agents to check in (deadline: 30 s)
-  5.  Start CPU monitoring in a background thread
-  6.  For RUN_SECONDS: issue shell exec to all agents in parallel every
-      EXEC_INTERVAL s, checking for cross-agent marker bleed after each round
-  7.  Assert teamserver CPU (and optional RSS) stayed below configured limits
-      throughout the run — localhost ``ps`` or remote SSH per ``[teamserver]``
-      in env.toml
-  8.  Assert teamserver produced no ERROR-level log entries
-  9.  Kill all agents; verify disconnected; stop listener; clean up
+Steps:
+  1.  Create + start per-agent-type HTTP listeners (shared across all agents
+      of that type)
+  2.  Pre-build all payloads in parallel via ``build_parallel``
+  3.  For each agent pass:
+
+      a.  Upload N copies of the pre-built payload; execute each in background
+      b.  Wait for all N agents to check in (deadline: 30 s)
+      c.  Start CPU monitoring in a background thread
+      d.  For RUN_SECONDS: issue shell exec to all agents in parallel every
+          EXEC_INTERVAL s, checking for cross-agent marker bleed each round
+      e.  Assert teamserver CPU (and optional RSS) stayed below configured
+          limits throughout the run
+      f.  Assert teamserver produced no ERROR-level log entries
+      g.  Kill all agents; verify disconnected; clean up remote payloads
+
+  4.  Stop + delete all listeners
 
 Pass criteria:
   - All N agents check in within 30 s
@@ -173,39 +179,31 @@ def _run_stress_for_agent(
     target,
     agent_type: str,
     fmt: str,
-    name_prefix: str,
+    pre_built_payload: bytes,
     agent_count: int,
     run_seconds: int,
 ) -> None:
-    """Run the full concurrent stress test for one agent type.
+    """Run the concurrent stress test for one agent type using a pre-built payload.
 
     Args:
-        ctx:         RunContext passed by the harness.
-        target:      TargetConfig for the machine to deploy agents to.
-        agent_type:  Agent name passed to ``payload_build`` (e.g. ``"demon"``
-                     or ``"phantom"``).
-        fmt:         Payload format (``"exe"`` is required for Rust agents like Phantom).
-        name_prefix: Short prefix used to name the listener and remote files.
-        agent_count: Number of concurrent agent instances to spawn.
-        run_seconds: Duration of the load-run phase in seconds.
+        ctx:               RunContext passed by the harness.
+        target:            TargetConfig for the machine to deploy agents to.
+        agent_type:        Agent name (e.g. ``"demon"`` or ``"phantom"``).
+        fmt:               Payload format (``"exe"``).
+        pre_built_payload: Raw payload bytes from :func:`~lib.payload.build_parallel`.
+        agent_count:       Number of concurrent agent instances to spawn.
+        run_seconds:       Duration of the load-run phase in seconds.
 
     Raises:
         AssertionError on test failure.
-        CliError if the payload build fails (propagates as a scenario failure).
     """
     from lib.cli import (
         CliError,
         agent_kill,
         agent_list,
-        listener_create,
-        listener_delete,
-        listener_start,
-        listener_stop,
         log_list,
-        payload_build_and_fetch,
     )
     from lib.deploy import ensure_work_dir, execute_background, run_remote, upload
-    from lib.listeners import http_listener_kwargs
 
     cli = ctx.cli
     co = int(ctx.timeouts.command_output)
@@ -213,8 +211,6 @@ def _run_stress_for_agent(
     poll_iv = float(ctx.timeouts.poll_interval)
     ssh = int(ctx.timeouts.ssh_connect)
     uid = _short_id()
-    listener_name = f"{name_prefix}-{uid}"
-    listener_port = ctx.env.get("listeners", {}).get("stress_port", 19093)
 
     # Record pre-existing agent IDs.
     try:
@@ -225,53 +221,28 @@ def _run_stress_for_agent(
     remote_payloads: list[str] = []
     agent_ids: list[str] = []
 
-    # ── Step 1: Create + start listener ──────────────────────────────────────
-    print(f"  [{agent_type}][listener] creating HTTP listener {listener_name!r} on port {listener_port}")
-    kw = http_listener_kwargs(listener_port, ctx.env)
-    if "hosts" in kw:
-        # Demon HTTP profile in this stress run still uses legacy CTR framing.
-        kw["legacy_mode"] = True
-    listener_create(cli, listener_name, "http", **kw)
-    listener_start(cli, listener_name)
-    print(f"  [{agent_type}][listener] started")
+    _fd, local_payload = tempfile.mkstemp(suffix=f".{fmt}")
+    os.close(_fd)
+    with open(local_payload, "wb") as fh:
+        fh.write(pre_built_payload)
 
     try:
-        # ── Step 2: Build one payload ─────────────────────────────────────────
-        print(f"  [{agent_type}][payload] building {agent_type} {fmt} x64 for listener {listener_name!r}")
-        raw = payload_build_and_fetch(
-            cli, listener=listener_name, arch="x64", fmt=fmt, agent=agent_type
-        )
-        assert len(raw) > 0, "payload is empty"
-        print(f"  [{agent_type}][payload] built ({len(raw)} bytes)")
+        # ── Step 1: Upload agent_count copies and launch each ─────────────
+        print(f"  [{agent_type}][deploy] ensuring work dir on target")
+        ensure_work_dir(target)
 
-        _fd, local_payload = tempfile.mkstemp(suffix=f".{fmt}")
-        os.close(_fd)
-        with open(local_payload, "wb") as fh:
-            fh.write(raw)
+        _win = target.work_dir.startswith("C:\\") or "\\" in target.work_dir
+        _sep = "\\" if _win else "/"
+        for i in range(agent_count):
+            remote_path = f"{target.work_dir}{_sep}stress-agent-{uid}-{i:02d}.{fmt}"
+            remote_payloads.append(remote_path)
+            upload(target, local_payload, remote_path)
+            if not _win:
+                run_remote(target, f"chmod +x {remote_path}")
+            execute_background(target, remote_path)
+            print(f"  [{agent_type}][deploy] launched agent {i+1}/{agent_count}: {remote_path}")
 
-        try:
-            # ── Step 3: Upload agent_count copies and launch each ─────────────
-            print(f"  [{agent_type}][deploy] ensuring work dir on target")
-            ensure_work_dir(target)
-
-            _win = target.work_dir.startswith("C:\\") or "\\" in target.work_dir
-            _sep = "\\" if _win else "/"
-            for i in range(agent_count):
-                remote_path = f"{target.work_dir}{_sep}stress-agent-{uid}-{i:02d}.{fmt}"
-                remote_payloads.append(remote_path)
-                upload(target, local_payload, remote_path)
-                if not _win:
-                    run_remote(target, f"chmod +x {remote_path}")
-                execute_background(target, remote_path)
-                print(f"  [{agent_type}][deploy] launched agent {i+1}/{agent_count}: {remote_path}")
-
-        finally:
-            try:
-                os.unlink(local_payload)
-            except OSError:
-                pass
-
-        # ── Step 4: Wait for all agents to check in ───────────────────────────
+        # ── Step 2: Wait for all agents to check in ──────────────────────────
         print(
             f"  [{agent_type}][wait] waiting up to {checkin_deadline}s for "
             f"{agent_count} agents to check in"
@@ -297,7 +268,7 @@ def _run_stress_for_agent(
         # Assign one unique marker per agent for the entire run.
         markers: dict[str, str] = {aid: _unique_marker() for aid in agent_ids}
 
-        # ── Step 5: Teamserver CPU/RSS monitoring (local ps or remote SSH) ─────
+        # ── Step 3: Teamserver CPU/RSS monitoring (local ps or remote SSH) ────
         ts_settings = load_teamserver_monitor_settings(
             ctx.env, default_cpu_limit_pct=CPU_LIMIT_PCT
         )
@@ -312,7 +283,7 @@ def _run_stress_for_agent(
         round_num = 0
         exec_errors: list[str] = []
 
-        # ── Step 6: Run for run_seconds, issuing exec rounds every EXEC_INTERVAL
+        # ── Step 4: Run for run_seconds, issuing exec rounds every EXEC_INTERVAL
         print(
             f"  [{agent_type}][run] starting {run_seconds}s load run "
             f"(exec rounds every {EXEC_INTERVAL}s)"
@@ -362,7 +333,7 @@ def _run_stress_for_agent(
         run_elapsed = time.monotonic() - run_start
         print(f"  [{agent_type}][run] completed {run_elapsed:.1f}s run, {round_num} exec rounds")
 
-        # ── Step 7: Stop monitor, edge sample, assert CPU/RSS limits ──────────
+        # ── Step 5: Stop monitor, edge sample, assert CPU/RSS limits ─────────
         cpu_monitor.stop()
         edge_end = cpu_monitor.take_edge_sample("stress_end")
         had_samples = bool(cpu_monitor.samples)
@@ -391,7 +362,7 @@ def _run_stress_for_agent(
         )
         exec_errors.extend(limit_errs)
 
-        # ── Step 8: Check for ERROR log entries ───────────────────────────────
+        # ── Step 6: Check for ERROR log entries ──────────────────────────────
         print(f"  [{agent_type}][log] checking for ERROR-level log entries")
         try:
             log_entries = log_list(cli, limit=200)
@@ -426,22 +397,17 @@ def _run_stress_for_agent(
         )
 
     finally:
-        # ── Cleanup ───────────────────────────────────────────────────────────
+        # ── Cleanup (agents + remote payloads; listeners are managed by run()) ─
+        try:
+            os.unlink(local_payload)
+        except OSError:
+            pass
+
         for aid in agent_ids:
             try:
                 agent_kill(cli, aid)
             except Exception as exc:
                 print(f"  [{agent_type}][cleanup] kill agent {aid} failed (non-fatal): {exc}")
-
-        print(f"  [{agent_type}][cleanup] stopping/deleting listener {listener_name!r}")
-        try:
-            listener_stop(cli, listener_name)
-        except Exception:
-            pass
-        try:
-            listener_delete(cli, listener_name)
-        except Exception:
-            pass
 
         # Remove remote payloads.
         _win_cleanup = target.work_dir.startswith("C:\\") or "\\" in target.work_dir
@@ -468,57 +434,122 @@ def run(ctx):
     ctx.dry_run — bool
 
     Raises AssertionError with a descriptive message on any failure.
-    Skips silently when ctx.linux is None.
+    Skips silently when no agent passes can run.
     """
     available_agents = set(ctx.env.get("agents", {}).get("available", ["demon"]))
-    ran_any = False
+    from lib.cli import listener_create, listener_delete, listener_start, listener_stop
+    from lib.listeners import http_listener_kwargs
+    from lib.payload import MatrixCell, build_parallel
+
+    cli = ctx.cli
+    uid = _short_id()
+    listeners_to_cleanup: list[str] = []
     skipped_reasons: list[str] = []
 
-    # ── Demon pass (full 10-agent baseline, Windows target) ───────────────────
-    # Demon is a Windows-only agent (PE/shellcode via mingw-w64).
-    print("\n  === Agent pass: demon ===")
-    if ctx.windows is None:
-        print("  [demon] SKIPPED — ctx.windows is None (Windows target required for Demon)")
-    elif "demon" not in available_agents:
-        print("  [demon] SKIPPED — 'demon' not listed in agents.available")
-    else:
-        _run_stress_for_agent(
-            ctx,
-            target=ctx.windows,
-            agent_type="demon",
-            fmt="exe",
-            name_prefix="test-stress-demon",
-            agent_count=DEMON_AGENT_COUNT,
-            run_seconds=DEMON_RUN_SECONDS,
-        )
-        ran_any = True
+    # ── Determine which agent passes will run ────────────────────────────────
+    run_demon = ctx.windows is not None and "demon" in available_agents
+    run_phantom = ctx.linux is not None and "phantom" in available_agents
 
-    # ── Phantom pass (5-agent Rust stability check, Linux target) ─────────────
-    print("\n  === Agent pass: phantom ===")
-    if ctx.linux is None:
+    if not run_demon and ctx.windows is None:
+        print("  [demon] SKIPPED — ctx.windows is None (Windows target required for Demon)")
+    elif not run_demon:
+        print("  [demon] SKIPPED — 'demon' not listed in agents.available")
+
+    if not run_phantom and ctx.linux is None:
         print("  [phantom] SKIPPED — ctx.linux is None (Linux target required for Phantom)")
-    elif "phantom" not in available_agents:
+    elif not run_phantom:
         print("  [phantom] SKIPPED — 'phantom' not listed in agents.available")
         skipped_reasons.append(
             "Linux target configured but no available Linux agent"
             " (add 'phantom' to agents.available)"
         )
-    else:
-        _run_stress_for_agent(
-            ctx,
-            target=ctx.linux,
-            agent_type="phantom",
-            fmt="exe",
-            name_prefix="test-stress-phantom",
-            agent_count=PHANTOM_AGENT_COUNT,
-            run_seconds=PHANTOM_RUN_SECONDS,
-        )
-        ran_any = True
 
-    if not ran_any:
+    if not run_demon and not run_phantom:
         if skipped_reasons:
             raise ScenarioSkipped("; ".join(skipped_reasons))
         raise ScenarioSkipped(
             "no agent passes could run: Windows target needed for Demon, "
             "Linux target + phantom in agents.available needed for Phantom"
         )
+
+    # ── Step 1: Create + start per-agent-type listeners ──────────────────────
+    cells: list[MatrixCell] = []
+    cell_keys: list[str] = []
+
+    demon_listener_name: str | None = None
+    phantom_listener_name: str | None = None
+
+    listeners_cfg = ctx.env.get("listeners", {})
+
+    if run_demon:
+        demon_port = listeners_cfg.get("stress_demon_port", 19093)
+        demon_listener_name = f"test-stress-demon-{uid}"
+        print(f"\n  [shared] creating Demon HTTP listener {demon_listener_name!r} on port {demon_port}")
+        kw = http_listener_kwargs(demon_port, ctx.env)
+        if "hosts" in kw:
+            kw["legacy_mode"] = True
+        listener_create(cli, demon_listener_name, "http", **kw)
+        listener_start(cli, demon_listener_name)
+        listeners_to_cleanup.append(demon_listener_name)
+        cells.append(MatrixCell(arch="x64", fmt="exe", agent="demon",
+                                listener=demon_listener_name))
+        cell_keys.append("demon")
+
+    if run_phantom:
+        phantom_port = listeners_cfg.get("stress_phantom_port", 19094)
+        phantom_listener_name = f"test-stress-phantom-{uid}"
+        print(f"  [shared] creating Phantom HTTP listener {phantom_listener_name!r} on port {phantom_port}")
+        listener_create(cli, phantom_listener_name, "http",
+                        **http_listener_kwargs(phantom_port, ctx.env))
+        listener_start(cli, phantom_listener_name)
+        listeners_to_cleanup.append(phantom_listener_name)
+        cells.append(MatrixCell(arch="x64", fmt="exe", agent="phantom",
+                                listener=phantom_listener_name))
+        cell_keys.append("phantom")
+
+    try:
+        # ── Step 2: Pre-build all payloads in parallel ───────────────────────
+        mode = "parallel" if ctx.payload_parallel else "serial"
+        print(f"  [shared] building {len(cells)} payload(s) ({mode})")
+        raws = build_parallel(cli, "", cells, parallel=ctx.payload_parallel)
+        payloads = dict(zip(cell_keys, raws))
+        for key, raw in payloads.items():
+            assert len(raw) > 0, f"{key} payload is empty"
+            print(f"  [shared] {key}: {len(raw)} bytes")
+
+        # ── Step 3: Run each stress pass sequentially ────────────────────────
+        if run_demon:
+            print("\n  === Agent pass: demon ===")
+            _run_stress_for_agent(
+                ctx,
+                target=ctx.windows,
+                agent_type="demon",
+                fmt="exe",
+                pre_built_payload=payloads["demon"],
+                agent_count=DEMON_AGENT_COUNT,
+                run_seconds=DEMON_RUN_SECONDS,
+            )
+
+        if run_phantom:
+            print("\n  === Agent pass: phantom ===")
+            _run_stress_for_agent(
+                ctx,
+                target=ctx.linux,
+                agent_type="phantom",
+                fmt="exe",
+                pre_built_payload=payloads["phantom"],
+                agent_count=PHANTOM_AGENT_COUNT,
+                run_seconds=PHANTOM_RUN_SECONDS,
+            )
+
+    finally:
+        for name in listeners_to_cleanup:
+            print(f"  [shared] stopping/deleting listener {name!r}")
+            try:
+                listener_stop(cli, name)
+            except Exception:
+                pass
+            try:
+                listener_delete(cli, name)
+            except Exception:
+                pass

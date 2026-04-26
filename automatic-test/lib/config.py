@@ -106,7 +106,8 @@ class ListenersConfig:
     protocol_probe_port: int
     interop_win_port: int
     interop_lin_port: int
-    stress_port: int
+    stress_demon_port: int
+    stress_phantom_port: int
     rbac_admin_port: int
     rbac_viewer_port: int
     smb_pipe: str
@@ -240,7 +241,8 @@ _ALLOWED_LISTENERS_KEYS = frozenset({
     "protocol_probe_port",
     "interop_win_port",
     "interop_lin_port",
-    "stress_port",
+    "stress_demon_port",
+    "stress_phantom_port",
     "rbac_admin_port",
     "rbac_viewer_port",
     "smb_pipe",
@@ -474,7 +476,12 @@ def parse_env_config(raw: dict[str, Any]) -> EnvConfig:
         interop_lin_port = _require_int(
             li_t.get("interop_lin_port"), "[listeners].interop_lin_port", errors
         )
-        stress_port = _require_int(li_t.get("stress_port"), "[listeners].stress_port", errors)
+        stress_demon_port = _require_int(
+            li_t.get("stress_demon_port"), "[listeners].stress_demon_port", errors
+        )
+        stress_phantom_port = _require_int(
+            li_t.get("stress_phantom_port"), "[listeners].stress_phantom_port", errors
+        )
         rbac_admin_port = _require_int(
             li_t.get("rbac_admin_port"), "[listeners].rbac_admin_port", errors
         )
@@ -485,7 +492,7 @@ def parse_env_config(raw: dict[str, Any]) -> EnvConfig:
     else:
         dns_port = dns_domain = linux_port = windows_port = None  # type: ignore[assignment]
         payload_build_port = protocol_probe_port = interop_win_port = None  # type: ignore[assignment]
-        interop_lin_port = stress_port = rbac_admin_port = rbac_viewer_port = smb_pipe = None  # type: ignore[assignment]
+        interop_lin_port = stress_demon_port = stress_phantom_port = rbac_admin_port = rbac_viewer_port = smb_pipe = None  # type: ignore[assignment]
 
     ag_t = _require_table(raw, "agents", errors)
     if ag_t is not None:
@@ -670,7 +677,8 @@ def parse_env_config(raw: dict[str, Any]) -> EnvConfig:
             protocol_probe_port=protocol_probe_port,  # type: ignore[arg-type]
             interop_win_port=interop_win_port,  # type: ignore[arg-type]
             interop_lin_port=interop_lin_port,  # type: ignore[arg-type]
-            stress_port=stress_port,  # type: ignore[arg-type]
+            stress_demon_port=stress_demon_port,  # type: ignore[arg-type]
+            stress_phantom_port=stress_phantom_port,  # type: ignore[arg-type]
             rbac_admin_port=rbac_admin_port,  # type: ignore[arg-type]
             rbac_viewer_port=rbac_viewer_port,  # type: ignore[arg-type]
             smb_pipe=smb_pipe,  # type: ignore[arg-type]

@@ -4,25 +4,30 @@ Scenario 08_screenshot: Screenshot capture
 Take a screenshot via agent and verify a loot entry of type 'screenshot' is
 created, then download the bytes and validate the image header.
 
+All payloads are pre-built in parallel (when ``--no-parallel`` is not set) via
+:func:`~lib.payload.build_parallel` against a shared listener, then each agent
+pass deploys + captures sequentially.
+
 Runs once per agent per target:
-  • Windows target: Demon pass (always) + Archon pass (when ``"archon"``
+  - Windows target: Demon pass (always) + Archon pass (when ``"archon"``
     is listed in ``agents.available``) + Specter pass (when ``"specter"``
     is listed in ``agents.available`` in env.toml).
-  • Linux target (only used when ctx.windows is None): Phantom pass (when
+  - Linux target (only used when ctx.windows is None): Phantom pass (when
     ``"phantom"`` is listed in ``agents.available`` and the target has a
     usable DISPLAY/Xvfb).
 
-Steps (per agent pass):
+Steps:
+  0. Create shared HTTP listener; pre-build all needed payloads in parallel
+  Per agent pass:
   1. Snapshot existing screenshot-loot IDs
-  2. Create + start HTTP listener
-  3. Build agent payload for the target
-  4. Deploy via SSH/SCP to the target
-  5. Execute payload in background on target
-  6. Wait for agent checkin
-  7. Send screenshot command via agent exec
-  8. Wait for a new loot entry of type 'screenshot' to appear
-  9. Download screenshot bytes → verify PNG or BMP header
- 10. Kill agent, stop listener, clean up
+  2. Deploy pre-built payload via SSH/SCP to the target
+  3. Execute payload in background on target
+  4. Wait for agent checkin
+  5. Send screenshot command via agent exec
+  6. Wait for a new loot entry of type 'screenshot' to appear
+  7. Download screenshot bytes → verify PNG or BMP header
+  8. Kill agent, clean up
+  Final: stop + delete shared listener
 
 Note: screenshot capture requires an active display session.  This scenario
 targets the Windows test machine which runs an interactive user session.
@@ -95,45 +100,35 @@ def _run_for_agent(
     agent_type: str,
     fmt: str,
     is_windows: bool,
-    name_prefix: str,
+    *,
+    listener_name: str,
+    pre_built_payload: bytes,
 ) -> None:
     """Run the full screenshot-capture suite for one agent type.
 
     Args:
-        ctx:         RunContext passed by the harness.
-        target:      The concrete target (windows or linux) to deploy to.
-        agent_type:  Agent name passed to ``payload_build``
-                     (``"demon"``, ``"specter"`` or ``"phantom"``).
-        fmt:         Payload format — always ``"exe"`` (Phantom is a Rust agent with a single output class).
-        is_windows:  True when running against the Windows target.
-        name_prefix: Short prefix used to name the listener.
+        ctx:               RunContext passed by the harness.
+        target:            The concrete target (windows or linux) to deploy to.
+        agent_type:        Agent name (``"demon"``, ``"specter"`` or ``"phantom"``).
+        fmt:               Payload format — always ``"exe"``.
+        is_windows:        True when running against the Windows target.
+        listener_name:     Name of the pre-created, pre-started listener.
+        pre_built_payload: Raw payload bytes from :func:`~lib.payload.build_parallel`.
 
     Raises:
         AssertionError on test failure.
-        CliError if the payload build fails (propagates as a scenario failure).
     """
     from lib.cli import (
         agent_exec,
         agent_kill,
-        listener_create,
-        listener_delete,
-        listener_start,
-        listener_stop,
         loot_download,
         loot_list,
     )
     from lib.deploy import run_remote
     from lib.deploy_agent import deploy_and_checkin
-    from lib.listeners import http_listener_kwargs
     from lib.wait import poll
 
     cli = ctx.cli
-    uid = _short_id()
-    listener_name = f"{name_prefix}-{uid}"
-    listener_port = ctx.env.get("listeners", {}).get(
-        "windows_port" if is_windows else "linux_port",
-        19082 if is_windows else 19081,
-    )
 
     # Snapshot pre-existing screenshot loot IDs so this pass only picks up
     # entries it produced (prior passes in the same run will add to the set).
@@ -145,37 +140,25 @@ def _run_for_agent(
     _fd, local_screenshot = tempfile.mkstemp(suffix=".png")
     os.close(_fd)
 
-    # ── Step 2: Create + start HTTP listener ────────────────────────────────
-    print(
-        f"  [{agent_type}][listener] creating HTTP listener {listener_name!r} "
-        f"on port {listener_port}"
-    )
-    listener_create(cli, listener_name, "http", **http_listener_kwargs(listener_port, ctx.env))
-    listener_start(cli, listener_name)
-    print(f"  [{agent_type}][listener] started")
-
     agent_id = None
     try:
-        # ── Steps 3-6: Build, deploy, exec, wait for checkin ────────────────
+        # ── Deploy, exec, wait for checkin ───────────────────────────────────
         agent = deploy_and_checkin(
             ctx, cli, target,
             agent_type=agent_type, fmt=fmt,
             listener_name=listener_name,
             label=agent_type,
+            pre_built_payload=pre_built_payload,
         )
         agent_id = agent["id"]
 
-        # ── Step 7: Send screenshot command ─────────────────────────────────
+        # ── Send screenshot command ──────────────────────────────────────────
         print(f"  [{agent_type}][screenshot] sending screenshot command via agent exec")
-        # 'screenshot' is routed to DemonCommand::CommandScreenshot (id 2510) by
-        # the CLI's command_id_for() helper — not run as a shell command.
-        # We do NOT use --wait because the screenshot response arrives as a loot
-        # event stored in the database, not as agent stdout output.
         screenshot_result = agent_exec(cli, agent_id, "screenshot", wait=False)
         job_id = screenshot_result.get("job_id", "(unknown)")
         print(f"  [{agent_type}][screenshot] screenshot command queued, job_id={job_id!r}")
 
-        # ── Step 8: Wait for new loot entry of type screenshot ──────────────
+        # ── Wait for new loot entry of type screenshot ───────────────────────
         loot_timeout = int(ctx.timeouts.screenshot_loot)
         print(f"  [{agent_type}][wait] waiting up to {loot_timeout}s for screenshot loot entry")
 
@@ -210,7 +193,7 @@ def _run_for_agent(
             f"loot entry {loot_id} has no binary data available for download"
         )
 
-        # ── Step 9: Download screenshot bytes and verify image header ───────
+        # ── Download screenshot bytes and verify image header ────────────────
         print(f"  [{agent_type}][download] downloading loot #{loot_id} → {local_screenshot}")
         loot_download(cli, loot_id, local_screenshot)
 
@@ -237,23 +220,13 @@ def _run_for_agent(
         print(f"  [{agent_type}][suite] all screenshot checks passed")
 
     finally:
-        # ── Step 10: Kill agent, stop listener, clean up ─────────────────────
+        # ── Kill agent, clean up ─────────────────────────────────────────────
         if agent_id:
             print(f"  [{agent_type}][cleanup] killing agent {agent_id}")
             try:
                 agent_kill(cli, agent_id)
             except Exception as exc:
                 print(f"  [{agent_type}][cleanup] agent kill failed (non-fatal): {exc}")
-
-        print(f"  [{agent_type}][cleanup] stopping/deleting listener {listener_name!r}")
-        try:
-            listener_stop(cli, listener_name)
-        except Exception:
-            pass
-        try:
-            listener_delete(cli, listener_name)
-        except Exception:
-            pass
 
         print(f"  [{agent_type}][cleanup] removing work_dir on target")
         try:
@@ -288,8 +261,13 @@ def run(ctx):
     Skips silently when no suitable target is configured.
     """
     from lib.deploy import DeployError, preflight_ssh
+    from lib.cli import listener_create, listener_delete, listener_start, listener_stop
+    from lib.listeners import http_listener_kwargs
+    from lib.payload import MatrixCell, build_parallel
 
+    cli = ctx.cli
     available_agents = set(ctx.env.get("agents", {}).get("available", ["demon"]))
+    uid = _short_id()
 
     # Prefer Windows — it has an interactive display session by default.
     if ctx.windows is not None:
@@ -298,35 +276,73 @@ def run(ctx):
         except DeployError as exc:
             raise ScenarioSkipped(str(exc)) from exc
 
-        # ── Demon pass (primary Windows baseline) ───────────────────────────
-        print("\n  === Agent pass: demon (Windows) ===")
-        _run_for_agent(
-            ctx, ctx.windows,
-            agent_type="demon", fmt="exe", is_windows=True,
-            name_prefix="test-screenshot-demon",
-        )
+        # Determine which Windows agents to test
+        to_build: list[tuple[str, str]] = [("demon", "exe")]
+        if "archon" in available_agents:
+            to_build.append(("archon", "exe"))
+        if "specter" in available_agents:
+            to_build.append(("specter", "exe"))
 
-        # ── Archon pass (C/ASM fork of Demon, ECDH transport) ───────────────
-        print("\n  === Agent pass: archon (Windows) ===")
-        if "archon" not in available_agents:
-            print("  [archon] SKIPPED — 'archon' not listed in agents.available")
-        else:
+        listener_name = f"test-screenshot-win-{uid}"
+        listener_port = ctx.env.get("listeners", {}).get("windows_port", 19082)
+
+        # ── Shared listener for all Windows agent passes ─────────────────────
+        print(f"\n  [shared] creating HTTP listener {listener_name!r} on port {listener_port}")
+        listener_create(cli, listener_name, "http", **http_listener_kwargs(listener_port, ctx.env))
+        listener_start(cli, listener_name)
+        print(f"  [shared] listener started")
+
+        try:
+            # ── Pre-build all payloads in parallel ───────────────────────────
+            cells = [MatrixCell(arch="x64", fmt=fmt, agent=at) for at, fmt in to_build]
+            mode = "parallel" if ctx.payload_parallel else "serial"
+            print(f"  [shared] building {len(cells)} payload(s) ({mode})")
+            raws = build_parallel(cli, listener_name, cells, parallel=ctx.payload_parallel)
+            payloads = {at: raw for (at, _), raw in zip(to_build, raws)}
+
+            # ── Demon pass (primary Windows baseline) ────────────────────────
+            print("\n  === Agent pass: demon (Windows) ===")
             _run_for_agent(
                 ctx, ctx.windows,
-                agent_type="archon", fmt="exe", is_windows=True,
-                name_prefix="test-screenshot-archon",
+                agent_type="demon", fmt="exe", is_windows=True,
+                listener_name=listener_name,
+                pre_built_payload=payloads["demon"],
             )
 
-        # ── Specter pass (Rust Windows agent) ───────────────────────────────
-        print("\n  === Agent pass: specter (Windows) ===")
-        if "specter" not in available_agents:
-            print("  [specter] SKIPPED — 'specter' not listed in agents.available")
-        else:
-            _run_for_agent(
-                ctx, ctx.windows,
-                agent_type="specter", fmt="exe", is_windows=True,
-                name_prefix="test-screenshot-specter",
-            )
+            # ── Archon pass ──────────────────────────────────────────────────
+            print("\n  === Agent pass: archon (Windows) ===")
+            if "archon" not in available_agents:
+                print("  [archon] SKIPPED — 'archon' not listed in agents.available")
+            else:
+                _run_for_agent(
+                    ctx, ctx.windows,
+                    agent_type="archon", fmt="exe", is_windows=True,
+                    listener_name=listener_name,
+                    pre_built_payload=payloads["archon"],
+                )
+
+            # ── Specter pass ─────────────────────────────────────────────────
+            print("\n  === Agent pass: specter (Windows) ===")
+            if "specter" not in available_agents:
+                print("  [specter] SKIPPED — 'specter' not listed in agents.available")
+            else:
+                _run_for_agent(
+                    ctx, ctx.windows,
+                    agent_type="specter", fmt="exe", is_windows=True,
+                    listener_name=listener_name,
+                    pre_built_payload=payloads["specter"],
+                )
+
+        finally:
+            print(f"\n  [shared] stopping/deleting listener {listener_name!r}")
+            try:
+                listener_stop(cli, listener_name)
+            except Exception:
+                pass
+            try:
+                listener_delete(cli, listener_name)
+            except Exception:
+                pass
         return
 
     # Linux fallback — only attempt with a configured DISPLAY.
@@ -348,12 +364,37 @@ def run(ctx):
             raise ScenarioSkipped(str(exc)) from exc
         _preflight_linux_x11_display(ctx.linux, display)
 
-        print("\n  === Agent pass: phantom (Linux) ===")
-        _run_for_agent(
-            ctx, ctx.linux,
-            agent_type="phantom", fmt="exe", is_windows=False,
-            name_prefix="test-screenshot-phantom",
-        )
+        listener_name = f"test-screenshot-lin-{uid}"
+        linux_port = ctx.env.get("listeners", {}).get("linux_port", 19081)
+
+        print(f"\n  [shared] creating HTTP listener {listener_name!r} on port {linux_port}")
+        listener_create(cli, listener_name, "http", **http_listener_kwargs(linux_port, ctx.env))
+        listener_start(cli, listener_name)
+        print(f"  [shared] listener started")
+
+        try:
+            cells = [MatrixCell(arch="x64", fmt="exe", agent="phantom")]
+            mode = "parallel" if ctx.payload_parallel else "serial"
+            print(f"  [shared] building 1 payload ({mode})")
+            raws = build_parallel(cli, listener_name, cells, parallel=ctx.payload_parallel)
+
+            print("\n  === Agent pass: phantom (Linux) ===")
+            _run_for_agent(
+                ctx, ctx.linux,
+                agent_type="phantom", fmt="exe", is_windows=False,
+                listener_name=listener_name,
+                pre_built_payload=raws[0],
+            )
+        finally:
+            print(f"\n  [shared] stopping/deleting listener {listener_name!r}")
+            try:
+                listener_stop(cli, listener_name)
+            except Exception:
+                pass
+            try:
+                listener_delete(cli, listener_name)
+            except Exception:
+                pass
         return
 
     raise ScenarioSkipped(

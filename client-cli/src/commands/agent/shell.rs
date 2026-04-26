@@ -213,7 +213,12 @@ pub(crate) async fn run(
                     operator = operator,
                     "operator executing local shell command"
                 );
-                forward_local_exec_audit(client, operator, cmd, id).await;
+                let audit_client = client.clone();
+                let audit_operator = operator.to_owned();
+                let audit_cmd = cmd.to_owned();
+                tokio::spawn(async move {
+                    forward_local_exec_audit(&audit_client, &audit_operator, &audit_cmd, id).await;
+                });
                 handle_local_exec(cmd).await;
             }
 

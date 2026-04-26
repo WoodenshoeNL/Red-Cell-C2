@@ -7,17 +7,22 @@ Runs once for Demon (always).  The Archon and Specter passes run only when
 one is listed and its payload build fails, the scenario fails so the regression
 is caught.
 
+All payloads are pre-built in parallel (when ``--no-parallel`` is not set) via
+:func:`~lib.payload.build_parallel` against a single shared listener, then each
+agent pass deploys + runs the command suite sequentially.
+
 Skip if ctx.windows is None.
 
-Steps (per agent pass):
-  1. Create + start HTTP listener
-  2. Build agent payload (EXE x64) for Windows target
-  3. Deploy via SSH/SCP to Windows 11 test machine
-  4. Execute payload in background on target
-  5. Wait for agent checkin
-  6. Run command suite: whoami, dir C:\\, ipconfig, PowerShell, reg query,
+Steps:
+  0. Create shared HTTP listener; pre-build all needed payloads in parallel
+  Per agent pass:
+  1. Deploy pre-built payload via SSH/SCP to Windows 11 test machine
+  2. Execute payload in background on target
+  3. Wait for agent checkin
+  4. Run command suite: whoami, dir C:\\, ipconfig, PowerShell, reg query,
      sc query, tasklist /m, netstat -ano, arp -a
-  7. Kill agent, stop listener, clean up work_dir on target
+  5. Kill agent, clean up work_dir on target
+  Final: stop + delete shared listener
 """
 
 DESCRIPTION = "Windows agent checkin (Demon + Archon + Specter)"
@@ -32,57 +37,41 @@ def _short_id() -> str:
     return uuid.uuid4().hex[:8]
 
 
-def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
+def _run_for_agent(ctx, agent_type: str, fmt: str,
+                   *, listener_name: str, pre_built_payload: bytes) -> None:
     """Run the full Windows checkin suite for one agent type.
 
     Args:
-        ctx:         RunContext passed by the harness.
-        agent_type:  Agent name passed to ``payload_build`` (e.g. ``"demon"``
-                     or ``"specter"``).
-        fmt:         Payload format (e.g. ``"exe"``).
-        name_prefix: Short prefix used to name the listener and remote files.
+        ctx:               RunContext passed by the harness.
+        agent_type:        Agent name (e.g. ``"demon"``, ``"specter"``).
+        fmt:               Payload format (e.g. ``"exe"``).
+        listener_name:     Name of the pre-created, pre-started listener.
+        pre_built_payload: Raw payload bytes from :func:`~lib.payload.build_parallel`.
 
     Raises:
         AssertionError on test failure.
-        CliError if the payload build fails (propagates as a scenario failure).
     """
-    from lib.cli import (
-        agent_exec,
-        agent_kill,
-        listener_create,
-        listener_delete,
-        listener_start,
-        listener_stop,
-    )
+    from lib.cli import agent_exec, agent_kill
     from lib.deploy import run_remote
     from lib.deploy_agent import deploy_and_checkin
-    from lib.listeners import http_listener_kwargs
 
     cli = ctx.cli
     co = int(ctx.timeouts.command_output)
     target = ctx.windows
-    uid = _short_id()
-    listener_name = f"{name_prefix}-{uid}"
-    listener_port = ctx.env.get("listeners", {}).get("windows_port", 19082)
-
-    # ── Step 1: Create + start HTTP listener ────────────────────────────────
-    print(f"  [{agent_type}][listener] creating HTTP listener {listener_name!r} on port {listener_port}")
-    listener_create(cli, listener_name, "http", **http_listener_kwargs(listener_port, ctx.env))
-    listener_start(cli, listener_name)
-    print(f"  [{agent_type}][listener] started")
 
     agent_id = None
     try:
-        # ── Steps 2-5: Build, deploy, exec, wait for checkin ─────────────────
+        # ── Deploy, exec, wait for checkin ───────────────────────────────────
         agent = deploy_and_checkin(
             ctx, cli, target,
             agent_type=agent_type, fmt=fmt,
             listener_name=listener_name,
             label=agent_type,
+            pre_built_payload=pre_built_payload,
         )
         agent_id = agent["id"]
 
-        # ── Step 6: Command suite ────────────────────────────────────────────
+        # ── Command suite ────────────────────────────────────────────────────
 
         # whoami → DOMAIN\username format
         print(f"  [{agent_type}][cmd] whoami")
@@ -183,23 +172,13 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
         print(f"  [{agent_type}][suite] all commands passed")
 
     finally:
-        # ── Step 7: Kill agent, stop listener, clean up ──────────────────────
+        # ── Kill agent, clean up ─────────────────────────────────────────────
         if agent_id:
             print(f"  [{agent_type}][cleanup] killing agent {agent_id}")
             try:
                 agent_kill(cli, agent_id)
             except Exception as exc:
                 print(f"  [{agent_type}][cleanup] agent kill failed (non-fatal): {exc}")
-
-        print(f"  [{agent_type}][cleanup] stopping/deleting listener {listener_name!r}")
-        try:
-            listener_stop(cli, listener_name)
-        except Exception:
-            pass
-        try:
-            listener_delete(cli, listener_name)
-        except Exception:
-            pass
 
         print(f"  [{agent_type}][cleanup] removing work_dir on target")
         try:
@@ -233,22 +212,69 @@ def run(ctx):
     except DeployError as exc:
         raise ScenarioSkipped(str(exc)) from exc
 
-    # ── Demon pass (primary baseline) ───────────────────────────────────────
-    print("\n  === Agent pass: demon ===")
-    _run_for_agent(ctx, agent_type="demon", fmt="exe", name_prefix="test-windows-demon")
+    from lib.cli import listener_create, listener_delete, listener_start, listener_stop
+    from lib.listeners import http_listener_kwargs
+    from lib.payload import MatrixCell, build_parallel
 
+    cli = ctx.cli
     available_agents = set(ctx.env.get("agents", {}).get("available", ["demon"]))
 
-    # ── Archon pass (C/ASM fork of Demon, ECDH transport) ───────────────────
-    print("\n  === Agent pass: archon ===")
-    if "archon" not in available_agents:
-        print("  [archon] SKIPPED — 'archon' not listed in agents.available")
-    else:
-        _run_for_agent(ctx, agent_type="archon", fmt="exe", name_prefix="test-windows-archon")
+    # Determine which agents will run and need payloads.
+    to_build: list[tuple[str, str]] = [("demon", "exe")]
+    if "archon" in available_agents:
+        to_build.append(("archon", "exe"))
+    if "specter" in available_agents:
+        to_build.append(("specter", "exe"))
 
-    # ── Specter pass (Rust Windows agent) ───────────────────────────────────
-    print("\n  === Agent pass: specter ===")
-    if "specter" not in available_agents:
-        print("  [specter] SKIPPED — 'specter' not listed in agents.available")
-    else:
-        _run_for_agent(ctx, agent_type="specter", fmt="exe", name_prefix="test-windows-specter")
+    uid = _short_id()
+    listener_name = f"test-windows-{uid}"
+    listener_port = ctx.env.get("listeners", {}).get("windows_port", 19082)
+
+    # ── Shared listener for all agent passes ─────────────────────────────────
+    print(f"\n  [shared] creating HTTP listener {listener_name!r} on port {listener_port}")
+    listener_create(cli, listener_name, "http", **http_listener_kwargs(listener_port, ctx.env))
+    listener_start(cli, listener_name)
+    print(f"  [shared] listener started")
+
+    try:
+        # ── Pre-build all payloads in parallel ───────────────────────────────
+        cells = [MatrixCell(arch="x64", fmt=fmt, agent=at) for at, fmt in to_build]
+        mode = "parallel" if ctx.payload_parallel else "serial"
+        print(f"  [shared] building {len(cells)} payload(s) ({mode})")
+        raws = build_parallel(cli, listener_name, cells, parallel=ctx.payload_parallel)
+        payloads = {at: raw for (at, _), raw in zip(to_build, raws)}
+
+        # ── Demon pass (primary baseline) ────────────────────────────────────
+        print("\n  === Agent pass: demon ===")
+        _run_for_agent(ctx, agent_type="demon", fmt="exe",
+                       listener_name=listener_name,
+                       pre_built_payload=payloads["demon"])
+
+        # ── Archon pass (C/ASM fork of Demon, ECDH transport) ────────────────
+        print("\n  === Agent pass: archon ===")
+        if "archon" not in available_agents:
+            print("  [archon] SKIPPED — 'archon' not listed in agents.available")
+        else:
+            _run_for_agent(ctx, agent_type="archon", fmt="exe",
+                           listener_name=listener_name,
+                           pre_built_payload=payloads["archon"])
+
+        # ── Specter pass (Rust Windows agent) ────────────────────────────────
+        print("\n  === Agent pass: specter ===")
+        if "specter" not in available_agents:
+            print("  [specter] SKIPPED — 'specter' not listed in agents.available")
+        else:
+            _run_for_agent(ctx, agent_type="specter", fmt="exe",
+                           listener_name=listener_name,
+                           pre_built_payload=payloads["specter"])
+
+    finally:
+        print(f"\n  [shared] stopping/deleting listener {listener_name!r}")
+        try:
+            listener_stop(cli, listener_name)
+        except Exception:
+            pass
+        try:
+            listener_delete(cli, listener_name)
+        except Exception:
+            pass

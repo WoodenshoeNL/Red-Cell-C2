@@ -8,12 +8,6 @@ use crate::client::ApiClient;
 use crate::error::{CliError, EXIT_GENERAL, EXIT_SUCCESS};
 use crate::output::{OutputFormat, TextRender, print_error, print_success};
 
-/// Individual validation error with an optional line reference.
-#[derive(Debug, Serialize)]
-struct ValidationEntry {
-    message: String,
-}
-
 /// Output for a valid profile.
 #[derive(Debug, Serialize)]
 struct ValidResult {
@@ -26,39 +20,15 @@ impl TextRender for ValidResult {
     }
 }
 
-/// Output for a profile with errors.
-#[derive(Debug, Serialize)]
-struct InvalidResult {
-    ok: bool,
-    errors: Vec<ValidationEntry>,
-}
-
-impl TextRender for InvalidResult {
-    fn render_text(&self) -> String {
-        let mut out = String::from("profile validation failed:\n");
-        for entry in &self.errors {
-            out.push_str("  - ");
-            out.push_str(&entry.message);
-            out.push('\n');
-        }
-        out
-    }
-}
-
 /// Validate a YAOTL profile file locally (no server connection needed).
 pub fn validate_local(path: &Path, fmt: &OutputFormat) -> i32 {
     let profile = match red_cell_common::config::Profile::from_file(path) {
         Ok(p) => p,
         Err(e) => {
-            let errors = vec![ValidationEntry { message: e.to_string() }];
-            let result = InvalidResult { ok: false, errors };
-            match print_success(fmt, &result) {
-                Ok(()) => return EXIT_GENERAL,
-                Err(e) => {
-                    print_error(&e).ok();
-                    return e.exit_code();
-                }
-            }
+            let msg = e.to_string();
+            let err = CliError::ProfileInvalid { message: msg.clone(), errors: vec![msg] };
+            print_error(&err).ok();
+            return EXIT_GENERAL;
         }
     };
 
@@ -71,19 +41,11 @@ pub fn validate_local(path: &Path, fmt: &OutputFormat) -> i32 {
             }
         },
         Err(validation_err) => {
-            let errors = validation_err
-                .errors
-                .into_iter()
-                .map(|message| ValidationEntry { message })
-                .collect();
-            let result = InvalidResult { ok: false, errors };
-            match print_success(fmt, &result) {
-                Ok(()) => EXIT_GENERAL,
-                Err(e) => {
-                    print_error(&e).ok();
-                    e.exit_code()
-                }
-            }
+            let errors = validation_err.errors;
+            let message = errors.join("; ");
+            let err = CliError::ProfileInvalid { message, errors };
+            print_error(&err).ok();
+            EXIT_GENERAL
         }
     }
 }
@@ -355,20 +317,6 @@ Demon {{
     fn valid_result_text_render() {
         let result = ValidResult { ok: true };
         assert_eq!(result.render_text(), "profile is valid");
-    }
-
-    #[test]
-    fn invalid_result_text_render() {
-        let result = InvalidResult {
-            ok: false,
-            errors: vec![
-                ValidationEntry { message: "Host must not be empty".to_owned() },
-                ValidationEntry { message: "Port must be > 0".to_owned() },
-            ],
-        };
-        let text = result.render_text();
-        assert!(text.contains("Host must not be empty"));
-        assert!(text.contains("Port must be > 0"));
     }
 
     fn sample_profile_data() -> ProfileShowData {

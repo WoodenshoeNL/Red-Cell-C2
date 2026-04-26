@@ -53,6 +53,8 @@ pub const ERROR_CODE_IO_WRITE_FAILED: &str = "IO_WRITE_FAILED";
 pub const ERROR_CODE_RATE_LIMITED: &str = "RATE_LIMITED";
 /// Machine-readable error code for an unknown session-mode `cmd` (local validation).
 pub const ERROR_CODE_UNKNOWN_COMMAND: &str = "UNKNOWN_COMMAND";
+/// Machine-readable error code for a profile that fails local validation.
+pub const ERROR_CODE_PROFILE_INVALID: &str = "PROFILE_INVALID";
 
 /// All errors that a CLI command can produce.
 #[derive(Debug, Error)]
@@ -114,6 +116,15 @@ pub enum CliError {
         retry_after_secs: Option<u64>,
     },
 
+    /// A YAOTL profile failed local validation.
+    #[error("profile validation failed: {message}")]
+    ProfileInvalid {
+        /// Human-readable summary.
+        message: String,
+        /// Individual validation error messages.
+        errors: Vec<String>,
+    },
+
     /// Any other error not covered above.
     #[error("{0}")]
     General(String),
@@ -157,6 +168,7 @@ impl CliError {
             CliError::Unsupported(_) => EXIT_GENERAL,
             CliError::SerializeFailed(_) => EXIT_GENERAL,
             CliError::Io(_) => EXIT_GENERAL,
+            CliError::ProfileInvalid { .. } => EXIT_GENERAL,
             CliError::Config(crate::config::ConfigError::MissingToken) => EXIT_AUTH_FAILURE,
             CliError::Config(_) => EXIT_GENERAL,
             CliError::General(_) => EXIT_GENERAL,
@@ -178,6 +190,7 @@ impl CliError {
             CliError::Unsupported(_) => ERROR_CODE_UNSUPPORTED,
             CliError::SerializeFailed(_) => ERROR_CODE_SERIALIZE_FAILED,
             CliError::Io(_) => ERROR_CODE_IO_WRITE_FAILED,
+            CliError::ProfileInvalid { .. } => ERROR_CODE_PROFILE_INVALID,
             CliError::Config(crate::config::ConfigError::MissingToken) => ERROR_CODE_AUTH_FAILURE,
             CliError::Config(_) => ERROR_CODE_GENERAL,
             CliError::General(_) => ERROR_CODE_GENERAL,
@@ -280,6 +293,17 @@ mod tests {
         assert_ne!(rl.exit_code(), EXIT_TIMEOUT);
         assert_ne!(rl.exit_code(), EXIT_SERVER_UNREACHABLE);
         assert_eq!(rl.exit_code(), EXIT_RATE_LIMITED);
+    }
+
+    #[test]
+    fn profile_invalid_exits_general_with_profile_invalid_code() {
+        let err = CliError::ProfileInvalid {
+            message: "Host must not be empty".to_owned(),
+            errors: vec!["Host must not be empty".to_owned()],
+        };
+        assert_eq!(err.exit_code(), EXIT_GENERAL);
+        assert_eq!(err.error_code(), ERROR_CODE_PROFILE_INVALID);
+        assert!(err.to_string().contains("Host must not be empty"));
     }
 
     #[test]

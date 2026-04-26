@@ -224,11 +224,14 @@ fn write_success<T: Serialize + TextRender, W: std::io::Write>(
 }
 
 fn write_error<W: std::io::Write>(out: &mut W, err: &CliError) -> std::io::Result<()> {
-    let envelope = serde_json::json!({
+    let mut envelope = serde_json::json!({
         "ok": false,
         "error": err.error_code(),
         "message": err.to_string(),
     });
+    if let CliError::ProfileInvalid { errors, .. } = err {
+        envelope["errors"] = serde_json::json!(errors);
+    }
     match serde_json::to_string_pretty(&envelope) {
         Ok(s) => writeln!(out, "{s}"),
         Err(_) => writeln!(out, r#"{{"ok":false,"error":"ERROR","message":"unknown error"}}"#),
@@ -540,6 +543,38 @@ mod tests {
         assert_eq!(v["error"], "NOT_FOUND");
         let msg = v["message"].as_str().unwrap_or("");
         assert!(msg.contains("agent-abc"), "message should include entity name");
+    }
+
+    #[test]
+    fn write_error_profile_invalid_includes_errors_array() {
+        let err = CliError::ProfileInvalid {
+            message: "Host must not be empty; Port must be > 0".to_owned(),
+            errors: vec!["Host must not be empty".to_owned(), "Port must be > 0".to_owned()],
+        };
+        let mut buf = Vec::new();
+        write_error(&mut buf, &err).expect("write_error must succeed");
+
+        let output = String::from_utf8(buf).expect("utf-8");
+        let v: serde_json::Value =
+            serde_json::from_str(output.trim()).expect("output is valid JSON");
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["error"], "PROFILE_INVALID");
+        let errors = v["errors"].as_array().expect("errors must be an array");
+        assert_eq!(errors.len(), 2);
+        assert_eq!(errors[0], "Host must not be empty");
+        assert_eq!(errors[1], "Port must be > 0");
+    }
+
+    #[test]
+    fn write_error_non_profile_invalid_has_no_errors_array() {
+        let err = CliError::NotFound("agent-abc".to_owned());
+        let mut buf = Vec::new();
+        write_error(&mut buf, &err).expect("write_error must succeed");
+
+        let output = String::from_utf8(buf).expect("utf-8");
+        let v: serde_json::Value =
+            serde_json::from_str(output.trim()).expect("output is valid JSON");
+        assert!(v.get("errors").is_none(), "non-ProfileInvalid errors must not have errors field");
     }
 
     // ── write_stream_entry ────────────────────────────────────────────────────

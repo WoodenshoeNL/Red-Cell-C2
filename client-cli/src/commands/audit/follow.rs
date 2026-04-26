@@ -1,15 +1,30 @@
-//! Follow-mode state and rendering helpers for `log tail --follow`.
+//! Follow-mode state, rendering helpers, and streaming loops for
+//! `log tail --follow` and `log list --follow`.
 
 use std::collections::HashSet;
+use std::time::Duration;
 
-use crate::error::CliError;
-use crate::output::{OutputFormat, print_stream_entry};
+use tokio::time::sleep;
+use tracing::{instrument, warn};
 
-/// Error returned when [`super::tail_follow`] has seen `max_failures` consecutive HTTP timeouts.
-pub(super) fn follow_consecutive_timeouts_exhausted(
-    max_failures: u32,
-    last_detail: &str,
-) -> CliError {
+use crate::AgentId;
+use crate::backoff::Backoff;
+use crate::client::ApiClient;
+use crate::defaults::{
+    AUDIT_LIST_FOLLOW_POLL_INTERVAL_SECS, AUDIT_TAIL_FOLLOW_POLL_INTERVAL_SECS,
+    RATE_LIMIT_DEFAULT_WAIT_SECS,
+};
+use crate::error::{CliError, EXIT_SUCCESS};
+use crate::output::{OutputFormat, print_error, print_stream_entry};
+
+use super::list::list;
+use super::types::AuditEntry;
+
+/// Number of entries fetched by `log tail` (without --follow).
+pub(super) const TAIL_LIMIT: u32 = 20;
+
+/// Error returned when a follow loop has seen `max_failures` consecutive HTTP timeouts.
+fn follow_consecutive_timeouts_exhausted(max_failures: u32, last_detail: &str) -> CliError {
     CliError::Timeout(format!(
         "audit log poll: reached {max_failures} consecutive request timeouts (last: {last_detail})"
     ))
@@ -20,10 +35,7 @@ pub(super) fn follow_consecutive_timeouts_exhausted(
 /// In JSON mode emits `{"ok": true, "data": <entry>}` — the same envelope as
 /// every other command — so that streaming output is consistent with bulk
 /// responses.  In text mode emits a human-readable one-line summary.
-pub(super) fn print_entry_line(
-    fmt: &OutputFormat,
-    entry: &super::AuditEntry,
-) -> Result<(), CliError> {
+pub(super) fn print_entry_line(fmt: &OutputFormat, entry: &AuditEntry) -> Result<(), CliError> {
     let text_line = format!(
         "[{}]  {:20}  {:16}  agent={}  {}  [{}]",
         entry.ts,
@@ -49,7 +61,7 @@ pub(super) struct FollowCursor {
 }
 
 impl FollowCursor {
-    pub(super) fn from_printed_entries(entries: &[super::AuditEntry]) -> Self {
+    pub(super) fn from_printed_entries(entries: &[AuditEntry]) -> Self {
         let Some(latest_ts) = entries.first().map(|entry| entry.ts.clone()) else {
             return Self::default();
         };
@@ -69,8 +81,8 @@ impl FollowCursor {
 
     pub(super) fn drain_new_entries<'a>(
         &mut self,
-        entries: &'a [super::AuditEntry],
-    ) -> Vec<&'a super::AuditEntry> {
+        entries: &'a [AuditEntry],
+    ) -> Vec<&'a AuditEntry> {
         let mut fresh = Vec::new();
 
         for entry in entries {
@@ -83,7 +95,7 @@ impl FollowCursor {
         fresh
     }
 
-    fn is_new_entry(&self, entry: &super::AuditEntry) -> bool {
+    fn is_new_entry(&self, entry: &AuditEntry) -> bool {
         match self.since.as_deref() {
             None => true,
             Some(cursor) if entry.ts.as_str() > cursor => true,
@@ -94,7 +106,7 @@ impl FollowCursor {
         }
     }
 
-    fn observe_emitted_entries(&mut self, entries: &[&super::AuditEntry]) {
+    fn observe_emitted_entries(&mut self, entries: &[&AuditEntry]) {
         let Some(latest_ts) = entries.first().map(|entry| entry.ts.clone()) else {
             return;
         };
@@ -110,7 +122,7 @@ impl FollowCursor {
     }
 }
 
-fn follow_entry_key(entry: &super::AuditEntry) -> String {
+fn follow_entry_key(entry: &AuditEntry) -> String {
     let agent_id = entry.agent_id.map_or_else(String::new, |id| id.to_string());
     format!(
         "{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}",
@@ -123,13 +135,252 @@ fn follow_entry_key(entry: &super::AuditEntry) -> String {
     )
 }
 
+// ── follow loops ─────────────────────────────────────────────────────────────
+
+/// `log tail --follow` — print the last 20 entries then stream new ones as
+/// JSON lines until Ctrl-C.
+///
+/// Uses the `occurred_at` timestamp of the most recent entry as a cursor for
+/// incremental polling so that each entry is emitted exactly once.
+///
+/// # Examples
+/// ```text
+/// red-cell-cli log tail --follow
+/// red-cell-cli log tail --follow --max-failures 10
+/// ```
+#[instrument(skip(client, fmt), fields(max_failures = max_failures))]
+pub(super) async fn tail_follow(client: &ApiClient, fmt: &OutputFormat, max_failures: u32) -> i32 {
+    let mut backoff = Backoff::with_initial_delay(AUDIT_TAIL_FOLLOW_POLL_INTERVAL_SECS);
+    let mut consecutive_timeouts = 0u32;
+
+    let initial_entries = loop {
+        let initial_result = tokio::select! {
+            result = list(client, TAIL_LIMIT, None, None, None, None, None) => result,
+            _ = tokio::signal::ctrl_c() => return EXIT_SUCCESS,
+        };
+
+        match initial_result {
+            Ok(entries) => break entries,
+            Err(CliError::Timeout(msg)) => {
+                consecutive_timeouts = consecutive_timeouts.saturating_add(1);
+                warn!(
+                    attempt = consecutive_timeouts,
+                    max_failures,
+                    error = %msg,
+                    "audit log tail --follow: HTTP request timed out while fetching initial snapshot; retrying after backoff"
+                );
+                if consecutive_timeouts >= max_failures {
+                    let err = follow_consecutive_timeouts_exhausted(max_failures, &msg);
+                    print_error(&err).ok();
+                    return err.exit_code();
+                }
+                backoff.record_empty();
+                tokio::select! {
+                    _ = sleep(backoff.delay()) => {}
+                    _ = tokio::signal::ctrl_c() => return EXIT_SUCCESS,
+                }
+            }
+            Err(e) => {
+                print_error(&e).ok();
+                return e.exit_code();
+            }
+        }
+    };
+
+    consecutive_timeouts = 0;
+
+    for entry in &initial_entries {
+        if let Err(e) = print_entry_line(fmt, entry) {
+            print_error(&e).ok();
+            return e.exit_code();
+        }
+    }
+    let mut cursor = FollowCursor::from_printed_entries(&initial_entries);
+
+    loop {
+        let poll_result = tokio::select! {
+            result = list(client, 100, cursor.since(), None, None, None, None) => result,
+            _ = tokio::signal::ctrl_c() => return EXIT_SUCCESS,
+        };
+
+        let sleep_duration = match poll_result {
+            Err(CliError::RateLimited { retry_after_secs }) => {
+                consecutive_timeouts = 0;
+                Duration::from_secs(retry_after_secs.unwrap_or(RATE_LIMIT_DEFAULT_WAIT_SECS))
+            }
+            Err(CliError::Timeout(msg)) => {
+                consecutive_timeouts = consecutive_timeouts.saturating_add(1);
+                warn!(
+                    attempt = consecutive_timeouts,
+                    max_failures,
+                    error = %msg,
+                    "audit log tail --follow: HTTP request timed out; retrying after backoff"
+                );
+                if consecutive_timeouts >= max_failures {
+                    let err = follow_consecutive_timeouts_exhausted(max_failures, &msg);
+                    print_error(&err).ok();
+                    return err.exit_code();
+                }
+                backoff.record_empty();
+                backoff.delay()
+            }
+            Err(e) => {
+                print_error(&e).ok();
+                return e.exit_code();
+            }
+            Ok(entries) => {
+                consecutive_timeouts = 0;
+                let fresh = cursor.drain_new_entries(&entries);
+                if fresh.is_empty() {
+                    backoff.record_empty();
+                } else {
+                    backoff.record_non_empty();
+                    for entry in fresh {
+                        if let Err(e) = print_entry_line(fmt, entry) {
+                            print_error(&e).ok();
+                            return e.exit_code();
+                        }
+                    }
+                }
+                backoff.delay()
+            }
+        };
+
+        tokio::select! {
+            _ = sleep(sleep_duration) => {}
+            _ = tokio::signal::ctrl_c() => return EXIT_SUCCESS,
+        }
+    }
+}
+
+/// `log list --follow` — print initial filtered entries then stream new ones.
+///
+/// Like `tail_follow` but applies the caller's filters (operator, action,
+/// agent) on each poll and uses the initial `--since` / `--limit` for the
+/// first fetch.
+#[instrument(
+    skip(client, fmt, since, operator, agent_id, action),
+    fields(max_failures = max_failures)
+)]
+pub(super) async fn list_follow(
+    client: &ApiClient,
+    fmt: &OutputFormat,
+    limit: u32,
+    since: Option<&str>,
+    operator: Option<&str>,
+    agent_id: Option<AgentId>,
+    action: Option<&str>,
+    max_failures: u32,
+) -> i32 {
+    let mut backoff = Backoff::with_initial_delay(AUDIT_LIST_FOLLOW_POLL_INTERVAL_SECS);
+    let mut consecutive_timeouts = 0u32;
+
+    let initial = loop {
+        let result = tokio::select! {
+            r = list(client, limit, since, None, operator, agent_id, action) => r,
+            _ = tokio::signal::ctrl_c() => return EXIT_SUCCESS,
+        };
+        match result {
+            Ok(entries) => break entries,
+            Err(CliError::Timeout(msg)) => {
+                consecutive_timeouts = consecutive_timeouts.saturating_add(1);
+                warn!(
+                    attempt = consecutive_timeouts,
+                    max_failures,
+                    error = %msg,
+                    "log list --follow: timed out fetching initial snapshot; retrying"
+                );
+                if consecutive_timeouts >= max_failures {
+                    let err = follow_consecutive_timeouts_exhausted(max_failures, &msg);
+                    print_error(&err).ok();
+                    return err.exit_code();
+                }
+                backoff.record_empty();
+                tokio::select! {
+                    _ = sleep(backoff.delay()) => {}
+                    _ = tokio::signal::ctrl_c() => return EXIT_SUCCESS,
+                }
+            }
+            Err(e) => {
+                print_error(&e).ok();
+                return e.exit_code();
+            }
+        }
+    };
+
+    consecutive_timeouts = 0;
+
+    for entry in &initial {
+        if let Err(e) = print_entry_line(fmt, entry) {
+            print_error(&e).ok();
+            return e.exit_code();
+        }
+    }
+    let mut cursor = FollowCursor::from_printed_entries(&initial);
+
+    loop {
+        let poll_result = tokio::select! {
+            r = list(client, 100, cursor.since(), None, operator, agent_id, action) => r,
+            _ = tokio::signal::ctrl_c() => return EXIT_SUCCESS,
+        };
+
+        let sleep_duration = match poll_result {
+            Err(CliError::RateLimited { retry_after_secs }) => {
+                consecutive_timeouts = 0;
+                Duration::from_secs(retry_after_secs.unwrap_or(RATE_LIMIT_DEFAULT_WAIT_SECS))
+            }
+            Err(CliError::Timeout(msg)) => {
+                consecutive_timeouts = consecutive_timeouts.saturating_add(1);
+                warn!(
+                    attempt = consecutive_timeouts,
+                    max_failures,
+                    error = %msg,
+                    "log list --follow: timed out; retrying"
+                );
+                if consecutive_timeouts >= max_failures {
+                    let err = follow_consecutive_timeouts_exhausted(max_failures, &msg);
+                    print_error(&err).ok();
+                    return err.exit_code();
+                }
+                backoff.record_empty();
+                backoff.delay()
+            }
+            Err(e) => {
+                print_error(&e).ok();
+                return e.exit_code();
+            }
+            Ok(entries) => {
+                consecutive_timeouts = 0;
+                let fresh = cursor.drain_new_entries(&entries);
+                if fresh.is_empty() {
+                    backoff.record_empty();
+                } else {
+                    backoff.record_non_empty();
+                    for entry in fresh {
+                        if let Err(e) = print_entry_line(fmt, entry) {
+                            print_error(&e).ok();
+                            return e.exit_code();
+                        }
+                    }
+                }
+                backoff.delay()
+            }
+        };
+
+        tokio::select! {
+            _ = sleep(sleep_duration) => {}
+            _ = tokio::signal::ctrl_c() => return EXIT_SUCCESS,
+        }
+    }
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::AgentId;
-    use crate::commands::audit::AuditEntry;
+    use crate::commands::audit::types::AuditEntry;
     use crate::output::OutputFormat;
 
     fn agent_id(value: u32) -> AgentId {
@@ -159,11 +410,6 @@ mod tests {
     }
 
     // ── print_entry_line JSON envelope contract ───────────────────────────────
-    //
-    // `print_entry_line` delegates to `output::print_stream_entry` which writes
-    // to real stdout.  We test the envelope contract via the internal
-    // `write_stream_entry` helper (which accepts any `io::Write`) to avoid
-    // stdout-capture gymnastics.
 
     #[test]
     fn entry_line_json_mode_emits_ok_true_envelope() {
@@ -194,7 +440,6 @@ mod tests {
 
     #[test]
     fn entry_line_json_mode_data_has_no_bare_fields_at_root() {
-        // Verify no audit fields leak into the root of the envelope.
         let entry = sample_entry();
         let mut out = Vec::new();
         let mut err_out = Vec::new();
@@ -209,7 +454,6 @@ mod tests {
 
         let line = String::from_utf8(out).expect("utf-8");
         let v: serde_json::Value = serde_json::from_str(line.trim()).expect("valid JSON");
-        // Root must only have "ok" and "data".
         let obj = v.as_object().expect("root is object");
         let keys: Vec<&str> = obj.keys().map(String::as_str).collect();
         assert!(keys.contains(&"ok"), "root must have 'ok'");

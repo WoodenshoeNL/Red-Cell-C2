@@ -67,6 +67,8 @@ stdout (success): {"ok": true, "data": <payload>}
 stderr (failure): {"ok": false, "error": "ERROR_CODE", "message": "human text"}
 ```
 
+**Stderr success envelope:** When a command writes raw data (CSV, JSONL) to stdout for piping, the `{"ok": true, ...}` success envelope is emitted on **stderr** instead, so it does not corrupt the data stream. `loot export` without `--file` is the reference example. Integrators should check stderr for the success envelope when consuming raw stdout output.
+
 **Exit codes:**
 
 | Code | Meaning |

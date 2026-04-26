@@ -103,14 +103,16 @@ fn parse_builtin(line: &str) -> BuiltIn<'_> {
         }
         return BuiltIn::UsageError("Usage: download <remote-src> <local-dst>");
     }
-    if let Some(rest) = line.strip_prefix("sleep ") {
-        let mut parts = rest.split_whitespace();
-        if let Some(secs_str) = parts.next() {
-            if let Ok(delay) = secs_str.parse::<u32>() {
+    if let Some(rest) = line.strip_prefix("sleep").filter(|r| r.is_empty() || r.starts_with(' ')) {
+        let rest = rest.trim();
+        if !rest.is_empty() {
+            let mut parts = rest.split_whitespace();
+            if let Some(Ok(delay)) = parts.next().map(|s| s.parse::<u32>()) {
                 let jitter = parts.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
                 return BuiltIn::Sleep { delay, jitter };
             }
         }
+        return BuiltIn::UsageError("Usage: sleep <secs> [jitter%]");
     }
     BuiltIn::AgentCmd(line)
 }
@@ -450,8 +452,18 @@ mod tests {
     }
 
     #[test]
-    fn parse_sleep_non_numeric_falls_through() {
-        assert!(matches!(parse_builtin("sleep abc"), BuiltIn::AgentCmd(_)));
+    fn parse_sleep_non_numeric_shows_usage() {
+        assert!(matches!(parse_builtin("sleep abc"), BuiltIn::UsageError(_)));
+    }
+
+    #[test]
+    fn parse_sleep_bare_shows_usage() {
+        assert!(matches!(parse_builtin("sleep"), BuiltIn::UsageError(_)));
+    }
+
+    #[test]
+    fn parse_sleep_whitespace_only_shows_usage() {
+        assert!(matches!(parse_builtin("sleep   "), BuiltIn::UsageError(_)));
     }
 
     #[test]

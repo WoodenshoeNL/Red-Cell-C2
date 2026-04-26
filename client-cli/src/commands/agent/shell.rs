@@ -213,6 +213,7 @@ pub(crate) async fn run(
                     operator = operator,
                     "operator executing local shell command"
                 );
+                forward_local_exec_audit(client, operator, cmd, id).await;
                 handle_local_exec(cmd).await;
             }
 
@@ -314,6 +315,52 @@ async fn sleep_submit(
         )
         .await?;
     Ok(())
+}
+
+/// POST a `local_exec` audit event to the teamserver.
+///
+/// Fails open: a warning is logged if the request fails but execution is not
+/// blocked.
+async fn forward_local_exec_audit(
+    client: &ApiClient,
+    operator: &str,
+    cmd: &str,
+    agent_id: AgentId,
+) {
+    #[derive(Serialize)]
+    struct AuditBody<'a> {
+        action: &'a str,
+        target_kind: &'a str,
+        target_id: Option<&'a str>,
+        agent_id: Option<u32>,
+        command: Option<&'a str>,
+        parameters: Option<serde_json::Value>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct AuditResponse {
+        #[allow(dead_code)]
+        id: i64,
+    }
+
+    let body = AuditBody {
+        action: "operator.local_exec",
+        target_kind: "agent",
+        target_id: None,
+        agent_id: Some(agent_id.as_u32()),
+        command: Some(cmd),
+        parameters: Some(serde_json::json!({
+            "operator": operator,
+            "raw_command": cmd,
+        })),
+    };
+
+    if let Err(e) = client.post::<AuditBody<'_>, AuditResponse>("/audit", &body).await {
+        warn!(
+            %e,
+            "failed to forward local_exec audit event to teamserver"
+        );
+    }
 }
 
 /// Execute a command on the local host (operator machine).
@@ -501,5 +548,71 @@ mod tests {
             BuiltIn::UsageError(_) => "UsageError",
             BuiltIn::AgentCmd(_) => "AgentCmd",
         }
+    }
+
+    fn test_client(uri: &str) -> ApiClient {
+        let cfg = crate::config::ResolvedConfig {
+            server: uri.to_owned(),
+            token: "tok".to_owned(),
+            timeout: 5,
+            tls_mode: crate::config::TlsMode::SystemRoots,
+        };
+        ApiClient::new(&cfg).expect("test client")
+    }
+
+    #[tokio::test]
+    async fn forward_local_exec_audit_posts_to_teamserver() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/audit"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 42
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = test_client(&server.uri());
+        let agent_id = AgentId::new(0xDEAD);
+
+        forward_local_exec_audit(&client, "alice", "whoami", agent_id).await;
+    }
+
+    #[tokio::test]
+    async fn forward_local_exec_audit_fails_open_on_server_error() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/audit"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = test_client(&server.uri());
+        let agent_id = AgentId::new(0xBEEF);
+
+        // Must not panic — fails open.
+        forward_local_exec_audit(&client, "bob", "id", agent_id).await;
+    }
+
+    #[tokio::test]
+    async fn forward_local_exec_audit_fails_open_on_unreachable() {
+        let cfg = crate::config::ResolvedConfig {
+            server: "http://127.0.0.1:1".to_owned(),
+            token: "tok".to_owned(),
+            timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
+        };
+        let client = ApiClient::new(&cfg).expect("test client");
+        let agent_id = AgentId::new(0xCAFE);
+
+        // Must not panic — fails open.
+        forward_local_exec_audit(&client, "charlie", "ls", agent_id).await;
     }
 }

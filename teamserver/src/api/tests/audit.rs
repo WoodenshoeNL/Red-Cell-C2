@@ -225,3 +225,85 @@ async fn create_audit_rejects_forged_action_label() {
         );
     }
 }
+
+#[tokio::test]
+async fn create_audit_defaults_result_status_to_success() {
+    let (app, _registry, _) =
+        test_router_with_registry(Some((60, "rest-op", "secret-op", OperatorRole::Operator))).await;
+
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/audit")
+                .method("POST")
+                .header(API_KEY_HEADER, "secret-op")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"action": "operator.local_exec", "target_kind": "agent"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+
+    let list_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/audit?action=operator.local_exec&limit=1")
+                .header(API_KEY_HEADER, "secret-op")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let list_body = read_json(list_response).await;
+    assert_eq!(list_body["items"][0]["result_status"], "success");
+}
+
+#[tokio::test]
+async fn create_audit_persists_failure_status() {
+    let (app, _registry, _) =
+        test_router_with_registry(Some((60, "rest-op", "secret-op", OperatorRole::Operator))).await;
+
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/audit")
+                .method("POST")
+                .header(API_KEY_HEADER, "secret-op")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "action": "operator.local_exec",
+                        "target_kind": "agent",
+                        "command": "false",
+                        "result_status": "failure"
+                    }"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+
+    let list_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/audit?action=operator.local_exec&limit=1")
+                .header(API_KEY_HEADER, "secret-op")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let list_body = read_json(list_response).await;
+    assert_eq!(list_body["items"][0]["result_status"], "failure");
+    assert_eq!(list_body["items"][0]["command"], "false");
+}

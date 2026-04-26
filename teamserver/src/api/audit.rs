@@ -196,6 +196,13 @@ pub(super) struct CreateAuditBody {
     /// Optional structured parameters.
     #[serde(default)]
     pub parameters: Option<serde_json::Value>,
+    /// Outcome of the action (`success` or `failure`). Defaults to `success`.
+    #[serde(default = "default_result_status")]
+    pub result_status: AuditResultStatus,
+}
+
+fn default_result_status() -> AuditResultStatus {
+    AuditResultStatus::Success
 }
 
 /// Response for a successfully created audit entry.
@@ -229,12 +236,8 @@ pub(super) async fn create_audit(
         return Err(AuditApiError::InvalidAction(body.action));
     }
 
-    let details = audit_details(
-        AuditResultStatus::Success,
-        body.agent_id,
-        body.command.as_deref(),
-        body.parameters,
-    );
+    let details =
+        audit_details(body.result_status, body.agent_id, body.command.as_deref(), body.parameters);
 
     let id = record_operator_action_with_notifications(
         &state.database,

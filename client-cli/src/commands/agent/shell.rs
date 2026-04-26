@@ -213,13 +213,20 @@ pub(crate) async fn run(
                     operator = operator,
                     "operator executing local shell command"
                 );
+                let success = handle_local_exec(cmd).await;
                 let audit_client = client.clone();
                 let audit_operator = operator.to_owned();
                 let audit_cmd = cmd.to_owned();
                 tokio::spawn(async move {
-                    forward_local_exec_audit(&audit_client, &audit_operator, &audit_cmd, id).await;
+                    forward_local_exec_audit(
+                        &audit_client,
+                        &audit_operator,
+                        &audit_cmd,
+                        id,
+                        success,
+                    )
+                    .await;
                 });
-                handle_local_exec(cmd).await;
             }
 
             BuiltIn::Upload { src, dst } => {
@@ -331,6 +338,7 @@ async fn forward_local_exec_audit(
     operator: &str,
     cmd: &str,
     agent_id: AgentId,
+    success: bool,
 ) {
     #[derive(Serialize)]
     struct AuditBody<'a> {
@@ -340,6 +348,7 @@ async fn forward_local_exec_audit(
         agent_id: Option<u32>,
         command: Option<&'a str>,
         parameters: Option<serde_json::Value>,
+        result_status: &'a str,
     }
 
     #[derive(serde::Deserialize)]
@@ -358,6 +367,7 @@ async fn forward_local_exec_audit(
             "operator": operator,
             "raw_command": cmd,
         })),
+        result_status: if success { "success" } else { "failure" },
     };
 
     if let Err(e) = client.post::<AuditBody<'_>, AuditResponse>("/audit", &body).await {
@@ -369,7 +379,7 @@ async fn forward_local_exec_audit(
 }
 
 /// Execute a command on the local host (operator machine).
-async fn handle_local_exec(cmd: &str) {
+async fn handle_local_exec(cmd: &str) -> bool {
     let cmd = cmd.to_owned();
     let result =
         task::spawn_blocking(move || std::process::Command::new("sh").arg("-c").arg(&cmd).status())
@@ -384,9 +394,16 @@ async fn handle_local_exec(cmd: &str) {
                     eprintln!("[local process terminated by signal]");
                 }
             }
+            status.success()
         }
-        Ok(Err(e)) => eprintln!("local exec failed: {e}"),
-        Err(e) => eprintln!("local exec task failed: {e}"),
+        Ok(Err(e)) => {
+            eprintln!("local exec failed: {e}");
+            false
+        }
+        Err(e) => {
+            eprintln!("local exec task failed: {e}");
+            false
+        }
     }
 }
 
@@ -583,7 +600,29 @@ mod tests {
         let client = test_client(&server.uri());
         let agent_id = AgentId::new(0xDEAD);
 
-        forward_local_exec_audit(&client, "alice", "whoami", agent_id).await;
+        forward_local_exec_audit(&client, "alice", "whoami", agent_id, true).await;
+    }
+
+    #[tokio::test]
+    async fn forward_local_exec_audit_sends_failure_status() {
+        use wiremock::matchers::{body_string_contains, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/audit"))
+            .and(body_string_contains(r#""result_status":"failure""#))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 43
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = test_client(&server.uri());
+        let agent_id = AgentId::new(0xDEAD);
+
+        forward_local_exec_audit(&client, "alice", "false", agent_id, false).await;
     }
 
     #[tokio::test]
@@ -603,7 +642,7 @@ mod tests {
         let agent_id = AgentId::new(0xBEEF);
 
         // Must not panic — fails open.
-        forward_local_exec_audit(&client, "bob", "id", agent_id).await;
+        forward_local_exec_audit(&client, "bob", "id", agent_id, true).await;
     }
 
     #[tokio::test]
@@ -618,6 +657,6 @@ mod tests {
         let agent_id = AgentId::new(0xCAFE);
 
         // Must not panic — fails open.
-        forward_local_exec_audit(&client, "charlie", "ls", agent_id).await;
+        forward_local_exec_audit(&client, "charlie", "ls", agent_id, true).await;
     }
 }

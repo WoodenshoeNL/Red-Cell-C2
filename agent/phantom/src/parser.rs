@@ -68,7 +68,7 @@ impl<'a> TaskParser<'a> {
             .map_err(|_| PhantomError::TaskParse("invalid utf-8 string in task payload"))
     }
 
-    /// Read a length-prefixed UTF-16LE string.
+    /// Read a length-prefixed UTF-16LE string, stripping the wire-format null terminator.
     pub fn wstring(&mut self) -> Result<String, PhantomError> {
         let bytes = self.bytes()?;
         if bytes.len() % 2 != 0 {
@@ -79,8 +79,9 @@ impl<'a> TaskParser<'a> {
             .chunks_exact(2)
             .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
             .collect::<Vec<_>>();
-        String::from_utf16(&utf16)
-            .map_err(|_| PhantomError::TaskParse("invalid UTF-16LE string in task payload"))
+        let raw = String::from_utf16(&utf16)
+            .map_err(|_| PhantomError::TaskParse("invalid UTF-16LE string in task payload"))?;
+        Ok(raw.trim_end_matches('\0').to_string())
     }
 
     fn read_exact(&mut self, len: usize) -> Result<&'a [u8], PhantomError> {
@@ -124,6 +125,22 @@ mod tests {
 
         assert_eq!(parser.string().expect("utf8"), "foo");
         assert_eq!(parser.wstring().expect("utf16"), "ba");
+    }
+
+    #[test]
+    fn wstring_strips_trailing_null_terminator() {
+        // "ba\0" as UTF-16LE: [b'b', 0, b'a', 0, 0, 0]
+        let data = [6_u8, 0, 0, 0, b'b', 0, b'a', 0, 0, 0];
+        let mut parser = TaskParser::new(&data);
+        assert_eq!(parser.wstring().expect("utf16"), "ba");
+    }
+
+    #[test]
+    fn wstring_empty_with_null_only_returns_empty_string() {
+        // Null-only payload from encode_utf16(""): [0, 0]
+        let data = [2_u8, 0, 0, 0, 0, 0];
+        let mut parser = TaskParser::new(&data);
+        assert_eq!(parser.wstring().expect("utf16"), "");
     }
 
     #[test]

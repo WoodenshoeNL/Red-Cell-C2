@@ -9,19 +9,19 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1717 | 296 | 116 |
-| Bugs filed against | 275 | 50 | 15 |
+| Tasks closed | 1718 | 296 | 122 |
+| Bugs filed against | 275 | 50 | 16 |
 | Bug rate (bugs/task) | 0.16 | 0.17 | 0.13 |
 | Quality score | 84% | 83% | 87% |
 
-*Bug rates: Claude 275/1717=0.1602→0.16, Codex 50/296=0.1689→0.17, Cursor 15/116=0.1293→0.13*
+*Bug rates: Claude 275/1718=0.1601→0.16, Codex 50/296=0.1689→0.17, Cursor 16/122=0.1311→0.13*
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 17 | 0 | 0 |
-| Missing tests / stale tests | 83 | 22 | 7 |
+| Missing tests / stale tests | 83 | 22 | 8 |
 | Clippy warnings | 16 | 0 | 2 |
 | Protocol errors | 32 | 32 | 4 |
 | Security issues | 75 | 40 | 0 |
@@ -41,6 +41,18 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-27 11:00 — 4cad70f2..46de956f
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 0 | Closed red-cell-c2-urhkg via 827a0dbd (Opus 4.7): added `commit_beads_if_dirty` helper in `loop.py` that flushes the beads DB to JSONL, stages only `.beads/issues.jsonl`, commits with a `chore(beads):` reason, and pushes — wired into the post-agent, post-lite-qa, maintenance, and review-loop tails. Eliminates the recurring stall where agent-side `br update`/`close`/`create` left JSONL dirty and blocked the next iteration's `git pull --rebase`. The helper is correctly defensive: bails out with `False` (no-op) when nothing is staged, only stages `.beads/issues.jsonl` (not `-A`), and uses `git restore --staged` (read-only on staging) on commit failure. |
+| Codex | 0 | 0 | No activity in this review range. |
+| Cursor | 6 | 1 | Closed six regression beads: red-cell-c2-0h0et (PHANTOM_/SPECTER_ env leak via 46de956f), red-cell-c2-hyhgf (preflight listener cleanup via d2d3b1b2), red-cell-c2-orjcn (.maintenance-progress.json gitignore via bc861751), red-cell-c2-dvd3p (callback host port authority + DEMON_INIT NAT limit via 3df3db37), red-cell-c2-pa1wi (phantom ECDH callback batching via 40e2dce8), red-cell-c2-5k8ed (specter unsafe extern Rust 2024 via 4e890a06). The 46de956f rust_agent.rs fix is the standout: a real cross-build-leak bug — teamserver inherited `PHANTOM_*`/`SPECTER_*` env would bake into rustc via `option_env!`/`parse_compile_env` for builds that did not explicitly set those keys, producing wrong sleep / kill_date / working_hours. The fix introduces a tracked `RUST_AGENT_BAKE_ENV_SUFFIXES` constant and `clear_inherited_rust_agent_bake_env()` invoked before `cmd.env(...)`. Cross-checked against `agent/{phantom,specter}/src/config.rs option_env!` call sites — every bake-time key is covered (CALLBACK_URL, DOH_DOMAIN, DOH_PROVIDER, INIT_SECRET, INIT_SECRET_VERSION, KILL_DATE, LISTENER_PUB_KEY, PINNED_CERT_PEM, SLEEP_DELAY_MS, SLEEP_JITTER, USER_AGENT, WORKING_HOURS); `PHANTOM_SLEEP_MODE` is correctly absent because it is read in `apply_env` (runtime) only, not `Default::default`. The companion `demon_config_for_rust_agent_build` in `payload_builder/demon_config.rs` plumbs merged API `Sleep`/`Jitter` into Phantom/Specter env baking (regression test added: `demon_config_for_rust_agent_build_applies_numeric_sleep_from_api`). Phantom job_queue.rs callback batching (one ECDH session packet for all callbacks from one task) has a unit test verifying CommandProc + CommandOutput stay in order. Specter `unsafe extern "system"` is the trivial Rust 2024 edition fix. **Bug filed (red-cell-c2-gbvum, P1):** the rate-limit bump in `teamserver/src/listeners/rate_limiters.rs` (`MAX_DEMON_INIT_ATTEMPTS_PER_IP: 5 → 32`) was not propagated to the integration test `teamserver/tests/external_listener_pipeline.rs::external_listener_pipeline_rejects_sixth_demon_init_from_same_ip` (line 864 hard-codes `MAX_INITS = 5`). `cargo nextest run --workspace` now fails — 6th attempt returns 200, test asserts 404. In-crate unit tests use the `pub(crate)` constant directly and stayed correct; only the integration test in `teamserver/tests/` is broken. |
+
+Build: cargo check passed (1m16s); cargo clippy -D warnings passed (34s); **cargo nextest FAILED** — 1/6064 (`external_listener_pipeline_rejects_sixth_demon_init_from_same_ip`); `python3 -m unittest discover -s automatic-test/tests` 365/365 PASS.
+
+Notes: Cursor was the dominant author this cycle (6 substantive code commits, 6 regression closes). Quality is high overall — the env-leak fix and the host-port normalisation are both well-scoped, well-commented, and test-covered. The single docked bug is a missed test update after a security-sensitive constant change (rate-limit cap from 5 to 32 per IP per 60s for NAT fan-in support); the change itself is reasonable and justified in code, but the integration test was left in lock-step with the old value. Claude's loop infrastructure work is the right tool for the JSONL-stall problem the dev loops have hit repeatedly. Codex was idle this period.
 
 ### QA Review — 2026-04-26 23:45 — 74ae1cf0..4cad70f2
 

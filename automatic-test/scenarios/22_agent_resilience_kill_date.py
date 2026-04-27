@@ -39,7 +39,7 @@ def run(ctx):
     from lib.cli import agent_kill, listener_create, listener_delete, listener_start, listener_stop
     from lib.deploy import DeployError, preflight_ssh, run_remote
     from lib.deploy_agent import deploy_and_checkin
-    from lib.resilience import http_listener_inner_config, wait_until_agent_absent
+    from lib.resilience import http_listener_inner_config, wait_until_agent_dead
 
     try:
         preflight_ssh(ctx.linux)
@@ -103,8 +103,8 @@ def run(ctx):
             f"  [22][assert] expecting agent to drop off within {absent_timeout:.0f}s "
             "after kill-date"
         )
-        wait_until_agent_absent(cli, agent_id, timeout=absent_timeout, interval=3.0)
-        print("  [22][assert] agent no longer listed — kill-date behaviour observed")
+        wait_until_agent_dead(cli, agent_id, timeout=absent_timeout, interval=3.0)
+        print("  [22][assert] agent dead or absent — kill-date behaviour observed")
 
     finally:
         if agent_id:

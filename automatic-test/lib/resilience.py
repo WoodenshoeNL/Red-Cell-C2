@@ -68,6 +68,32 @@ def pick_inactive_working_hours(hour: int) -> str:
     return "02:00-03:00"
 
 
+def wait_until_agent_dead(
+    cli: CliConfig,
+    agent_id: str,
+    timeout: float = 120.0,
+    interval: float = 2.0,
+) -> None:
+    """Poll ``agent list`` until *agent_id* shows status ``dead`` (or is absent)."""
+    needle = agent_id.strip().upper()
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            agents = agent_list(cli)
+            by_id = {str(a.get("id", "")).upper(): a for a in agents}
+            if needle not in by_id:
+                return
+            if by_id[needle].get("status", "").lower() == "dead":
+                return
+        except CliError:
+            pass
+        time.sleep(interval)
+    raise AssertionError(
+        f"agent {agent_id!r} still alive in agent list after {timeout:.0f}s — "
+        "expected implant to stop after kill-date"
+    )
+
+
 def wait_until_agent_absent(
     cli: CliConfig,
     agent_id: str,

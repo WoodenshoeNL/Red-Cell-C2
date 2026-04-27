@@ -540,6 +540,19 @@ class TestDeployErrorPaths(unittest.TestCase):
         self.assertIn("nohup", remote_cmd)
         self.assertIn("&", remote_cmd)
 
+    def test_execute_background_windows_uses_wmi(self) -> None:
+        """Windows deploy must use WMI Win32_Process.Create to escape SSH job objects."""
+        ok = self._completed(0)
+        t = _make_target(work_dir="C:\\Temp\\rc-test", key=self.key_path)
+        with patch("subprocess.run", return_value=ok) as m:
+            execute_background(t, "C:\\Temp\\rc-test\\agent.exe")
+        self.assertEqual(m.call_count, 1)
+        remote_cmd = m.call_args[0][0][-1]
+        self.assertIn("Invoke-WmiMethod", remote_cmd)
+        self.assertIn("Win32_Process", remote_cmd)
+        self.assertIn("C:\\Temp\\rc-test\\agent.exe", remote_cmd)
+        self.assertNotIn("Start-Process", remote_cmd)
+
 
 class TestInjectHostsEntry(unittest.TestCase):
     """Tests for inject_hosts_entry — idempotent /etc/hosts injection via SSH."""

@@ -441,14 +441,20 @@ def _quote_powershell(path: str) -> str:
 def execute_background(target: TargetConfig, command: str) -> None:
     """Run a command on the target in the background (fire-and-forget).
 
-    The command path is quoted before interpolation so that paths containing
-    spaces or other shell-significant characters are handled correctly on both
-    Linux (POSIX sh quoting via :func:`shlex.quote`) and Windows (PowerShell
-    single-quote escaping).
+    On Windows, uses WMI ``Win32_Process.Create`` so the child process is
+    outside the SSH session's job object and survives session close.
+    ``Start-Process`` children are killed when OpenSSH tears down the session.
+
+    On Linux, the standard ``nohup … &`` detach works because POSIX SSH does
+    not use job objects.
     """
     if target.work_dir.startswith("C:\\") or "\\" in target.work_dir:
-        quoted = _quote_powershell(command)
-        bg_cmd = f'powershell -Command "Start-Process -FilePath {quoted} -WindowStyle Hidden"'
+        escaped = command.replace("'", "''")
+        bg_cmd = (
+            f"powershell -Command \""
+            f"Invoke-WmiMethod -Class Win32_Process -Name Create "
+            f"-ArgumentList '{escaped}'\""
+        )
     else:
         quoted = _quote_posix(command)
         bg_cmd = f"nohup {quoted} </dev/null >/dev/null 2>&1 &"

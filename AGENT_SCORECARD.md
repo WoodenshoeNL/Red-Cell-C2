@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1718 | 296 | 122 |
+| Tasks closed | 1718 | 296 | 124 |
 | Bugs filed against | 275 | 50 | 16 |
 | Bug rate (bugs/task) | 0.16 | 0.17 | 0.13 |
 | Quality score | 84% | 83% | 87% |
 
-*Bug rates: Claude 275/1718=0.1601→0.16, Codex 50/296=0.1689→0.17, Cursor 16/122=0.1311→0.13*
+*Bug rates: Claude 275/1718=0.1601→0.16, Codex 50/296=0.1689→0.17, Cursor 16/124=0.1290→0.13*
 
 ## Violation Breakdown
 
@@ -41,6 +41,18 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-27 11:45 — 46de956f..e89ad950
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | No code activity in this review range. The two QA-loop commits in range (c2439de6 scorecard, 9496f6d0 beads sweep) were Claude's own from the prior cycle. |
+| Codex | 0 | 0 | No activity in this review range. |
+| Cursor | 2 | 0 | Closed both bugs filed in the previous QA cycle. 13739a8b (red-cell-c2-gbvum, P1): re-exports `MAX_DEMON_INIT_ATTEMPTS_PER_IP` from `teamserver/src/lib.rs` (changed visibility `pub(crate) → pub` in `listeners/rate_limiters.rs` with a doc-comment naming the integration test as the consumer), rewrites `external_listener_pipeline.rs` to loop `0..MAX_DEMON_INIT_ATTEMPTS_PER_IP` instead of the stale `MAX_INITS = 5`, renames the test from `_rejects_sixth_demon_init_from_same_ip` to `_rejects_demon_init_after_per_ip_cap`, and refreshes the SMB unit test assertion message that still said "sixth DEMON_INIT". The choice to re-export rather than hardcode 32 is the right call — the integration test now tracks the constant automatically across future cap changes. e89ad950 (red-cell-c2-7jgs0, P2): adds `MIN_RUST_AGENT_BUILD_CONFIG: &str = r#"{"Sleep":"5","Jitter":"0"}"#` with a doc-comment explaining why `disabled_for_tests`' empty `DemonConfig` defaults are insufficient (`demon_config_for_rust_agent_build` runs *before* the source-tree check and fails with `InvalidRequest` on missing `Sleep`/`Jitter`), and threads it into both Phantom and Specter source-tree rejection tests so they actually assert `ToolchainUnavailable` as intended. Test-only change. The lite-qa pass on red-cell-c2-gbvum (692674e1) added precise location info before Cursor picked it up. No new bugs — both fixes are clean, well-commented, and verified passing. |
+
+Build: passed (cargo check workspace 1m15s; cargo clippy -D warnings 32s; targeted nextest of all 5 affected tests — `external_listener_pipeline_rejects_demon_init_after_per_ip_cap`, `smb_listener_rate_limits_demon_init_per_named_pipe_connection`, `build_payload_{archon,phantom,specter}_rejects_missing_source_tree` — 5/5 PASS in 0.483s after a 9m33s `--no-run` test-binary build).
+
+Notes: Quiet, well-targeted cycle. Cursor closed exactly the two regressions QA filed last cycle and chose the more durable fix in both cases (re-export the constant rather than hardcode; introduce a named const rather than inline literals). The MAX_DEMON_INIT_ATTEMPTS_PER_IP re-export is a small public-surface widening but justified — the constant is genuinely a system invariant that integration tests need to track. No regressions, no new bugs to file. Codex idle.
 
 ### QA Review — 2026-04-27 11:00 — 4cad70f2..46de956f
 

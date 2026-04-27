@@ -21,7 +21,11 @@ def parse_last_seen(ts: str) -> datetime:
     Raises:
         ValueError: if *ts* does not match any known format.
     """
-    s = ts.strip()
+    s = ts.strip().rstrip("Z")
+    # Truncate sub-microsecond precision (%f handles up to 6 digits).
+    if "." in s:
+        head, frac = s.rsplit(".", 1)
+        s = f"{head}.{frac[:6]}"
     for fmt in (
         "%m/%d/%Y %H:%M:%S",
         "%m/%d/%Y %I:%M:%S %p",

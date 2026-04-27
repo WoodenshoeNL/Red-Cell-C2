@@ -485,6 +485,13 @@ def main():
 
     cli_cfg = make_cli_config_from_parsed(env_cfg, env)
 
+    # Auto-discover CLI binary in target/release/ when not already on PATH.
+    if not shutil.which(cli_cfg.binary):
+        repo_root = Path(__file__).resolve().parent.parent
+        candidate = repo_root / "target" / "release" / cli_cfg.binary
+        if candidate.is_file():
+            cli_cfg.binary = str(candidate)
+
     # When no cert_fingerprint is configured, auto-derive it from the server's
     # TLS certificate so self-signed certs work without hardcoding machine-
     # specific values in env.toml.

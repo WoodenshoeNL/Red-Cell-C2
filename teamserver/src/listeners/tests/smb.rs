@@ -109,7 +109,7 @@ async fn smb_listener_rate_limits_demon_init_per_named_pipe_connection()
         tokio::time::timeout(Duration::from_millis(250), read_test_smb_frame(&mut stream)).await;
     assert!(
         blocked.is_err(),
-        "sixth DEMON_INIT on the same SMB connection must be rate-limited even with a new agent_id"
+        "DEMON_INIT on the same SMB connection after the per-IP cap must be rate-limited even with a new agent_id"
     );
     assert!(
         registry.get(rotated_id).await.is_none(),

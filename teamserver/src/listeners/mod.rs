@@ -43,11 +43,12 @@ pub(crate) use http::{
     collect_body_with_magic_precheck, is_valid_demon_callback_request, process_demon_transport,
 };
 pub(crate) use manager::ListenerRuntimeFuture;
+pub use rate_limiters::MAX_DEMON_INIT_ATTEMPTS_PER_IP;
 pub(crate) use rate_limiters::{
     DEMON_INIT_WINDOW_DURATION, DemonInitRateLimiter, DnsReconBlockLimiter,
-    ECDH_REGISTRATION_WINDOW_DURATION, EcdhRegistrationRateLimiter, MAX_DEMON_INIT_ATTEMPTS_PER_IP,
-    MAX_ECDH_REGISTRATIONS_PER_IP, MAX_RECONNECT_PROBES_PER_AGENT, RECONNECT_PROBE_WINDOW_DURATION,
-    ReconnectProbeRateLimiter, UnknownCallbackProbeAuditLimiter,
+    ECDH_REGISTRATION_WINDOW_DURATION, EcdhRegistrationRateLimiter, MAX_ECDH_REGISTRATIONS_PER_IP,
+    MAX_RECONNECT_PROBES_PER_AGENT, RECONNECT_PROBE_WINDOW_DURATION, ReconnectProbeRateLimiter,
+    UnknownCallbackProbeAuditLimiter,
 };
 
 // Test-only re-exports: tests in `listeners::tests::*` reach these through

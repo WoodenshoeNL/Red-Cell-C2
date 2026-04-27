@@ -21,7 +21,11 @@ use crate::rate_limiter::{AttemptWindow, evict_oldest_windows, prune_expired_win
 /// Must comfortably exceed NAT fan-in for lab stress tests (e.g. ~10 Windows
 /// agents from one host in `14_stress_concurrent_agents`) while still bounding
 /// blind registration spam.
-pub(crate) const MAX_DEMON_INIT_ATTEMPTS_PER_IP: u32 = 32;
+///
+/// This value is re-exported from the crate root for integration tests and
+/// external consistency checks; keep it the single source of truth for
+/// per-transport DEMON_INIT limits.
+pub const MAX_DEMON_INIT_ATTEMPTS_PER_IP: u32 = 32;
 pub(crate) const DEMON_INIT_WINDOW_DURATION: Duration = Duration::from_secs(60);
 pub(crate) const MAX_DEMON_INIT_ATTEMPT_WINDOWS: usize = 10_000;
 /// Per-IP budget of ECDH registration attempts allowed within

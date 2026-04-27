@@ -4,8 +4,9 @@ use std::time::Duration;
 
 use red_cell::{
     AgentRegistry, ApiRuntime, AuditWebhookNotifier, AuthService, Database, EventBus,
-    ListenerManager, LoginRateLimiter, MAX_AGENT_MESSAGE_LEN, OperatorConnectionManager,
-    PayloadBuilderService, ShutdownController, SocketRelayManager, TeamserverState, build_router,
+    ListenerManager, LoginRateLimiter, MAX_AGENT_MESSAGE_LEN, MAX_DEMON_INIT_ATTEMPTS_PER_IP,
+    OperatorConnectionManager, PayloadBuilderService, ShutdownController, SocketRelayManager,
+    TeamserverState, build_router,
 };
 use red_cell_common::ExternalListenerConfig;
 use red_cell_common::ListenerConfig;
@@ -855,14 +856,11 @@ async fn external_listener_pipeline_rejects_duplicate_endpoint_path()
     Ok(())
 }
 
-/// The sixth `DEMON_INIT` from the same source IP must be rejected (rate limited),
+/// A `DEMON_INIT` that exceeds the per-IP cap must be rejected (rate limited),
 /// matching the behaviour enforced by HTTP, SMB, and DNS listeners.
 #[tokio::test]
-async fn external_listener_pipeline_rejects_sixth_demon_init_from_same_ip()
+async fn external_listener_pipeline_rejects_demon_init_after_per_ip_cap()
 -> Result<(), Box<dyn std::error::Error>> {
-    // The per-IP limit is 5 inits per 60-second window (same as other transports).
-    const MAX_INITS: u32 = 5;
-
     let server = spawn_server_with_fallback().await?;
 
     server.listeners.create(external_listener("ext-rate-limit", "/rate-limit")).await?;
@@ -883,8 +881,8 @@ async fn external_listener_pipeline_rejects_sixth_demon_init_from_same_ip()
         0xE0,
     ];
 
-    // Send MAX_INITS successful DEMON_INIT requests (each with a unique agent_id).
-    for attempt in 0..MAX_INITS {
+    // Send up to the cap of successful DEMON_INIT requests (each with a unique agent_id).
+    for attempt in 0..MAX_DEMON_INIT_ATTEMPTS_PER_IP {
         let agent_id = 0xAA00_0000 + attempt;
         let response = client
             .post(&bridge_url)
@@ -902,7 +900,7 @@ async fn external_listener_pipeline_rejects_sixth_demon_init_from_same_ip()
         );
     }
 
-    // The sixth DEMON_INIT from the same IP must be rejected.
+    // The next DEMON_INIT from the same IP must be rejected.
     let blocked_agent_id = 0xAA00_00FF_u32;
     let blocked = client
         .post(&bridge_url)
@@ -912,7 +910,7 @@ async fn external_listener_pipeline_rejects_sixth_demon_init_from_same_ip()
     assert_eq!(
         blocked.status(),
         reqwest::StatusCode::NOT_FOUND,
-        "sixth DEMON_INIT from same IP must be rate-limited"
+        "DEMON_INIT from same IP after per-IP cap must be rate-limited"
     );
     assert!(
         server.agent_registry.get(blocked_agent_id).await.is_none(),

@@ -74,9 +74,9 @@ pub use dispatch::{CommandDispatchError, CommandDispatcher};
 pub use events::{EventBus, EventReceiver};
 pub use listeners::{
     ExternalListenerState, ListenerEventAction, ListenerManager, ListenerManagerError,
-    ListenerMarkRequest, ListenerSummary, action_from_mark, handle_external_request,
-    listener_config_from_operator, listener_error_event, listener_event_for_action,
-    listener_removed_event, operator_requests_start,
+    ListenerMarkRequest, ListenerSummary, MAX_DEMON_INIT_ATTEMPTS_PER_IP, action_from_mark,
+    handle_external_request, listener_config_from_operator, listener_error_event,
+    listener_event_for_action, listener_removed_event, operator_requests_start,
 };
 pub use metrics::{MetricsHandle, MetricsInitError, install_prometheus_recorder};
 pub use normalize::NormalizedMakeService;

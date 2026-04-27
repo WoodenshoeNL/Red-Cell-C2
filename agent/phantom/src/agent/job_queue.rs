@@ -1,6 +1,7 @@
 //! Pending callback queue management and checkin dispatch.
 
 use red_cell_common::demon::{DemonCommand, DemonMessage, DemonPackage};
+use tracing::warn;
 
 use super::PhantomAgent;
 use crate::command::{PendingCallback, execute};
@@ -117,7 +118,9 @@ impl PhantomAgent {
             }
             if !callbacks.is_empty() {
                 let pkgs = demon_packages_for_callbacks(callbacks)?;
-                let _ = self.ecdh_send_packages(pkgs).await?;
+                if let Err(e) = self.ecdh_send_packages(pkgs).await {
+                    warn!(error = %e, "ecdh: failed to send callback batch");
+                }
             }
         }
 

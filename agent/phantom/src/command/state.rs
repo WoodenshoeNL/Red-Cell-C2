@@ -41,6 +41,18 @@ impl PhantomState {
         self.pending_callbacks.push(callback);
     }
 
+    /// Prepend `front` in order before any existing pending callbacks.
+    ///
+    /// Used when a send fails after [`Self::drain_callbacks`] so drained work is not lost.
+    pub(crate) fn requeue_callbacks_front(&mut self, front: Vec<PendingCallback>) {
+        if front.is_empty() {
+            return;
+        }
+        let rest = std::mem::take(&mut self.pending_callbacks);
+        self.pending_callbacks = front;
+        self.pending_callbacks.extend(rest);
+    }
+
     /// Return the kill date set dynamically by the teamserver, if any.
     pub(crate) fn kill_date(&self) -> Option<i64> {
         self.kill_date
@@ -645,5 +657,33 @@ impl PendingCallback {
             Self::FileChunk { file_id, data, .. } => encode_file_chunk(*file_id, data),
             Self::FileClose { file_id, .. } => encode_file_close(*file_id),
         }
+    }
+}
+
+#[cfg(test)]
+mod requeue_callback_tests {
+    use crate::command::types::{PendingCallback, PhantomState};
+
+    #[test]
+    fn requeue_callbacks_front_prepends_in_order() {
+        let mut state = PhantomState::default();
+        state.queue_callback(PendingCallback::Output { request_id: 2, text: "after".into() });
+        state.requeue_callbacks_front(vec![
+            PendingCallback::Output { request_id: 0, text: "first".into() },
+            PendingCallback::Output { request_id: 1, text: "second".into() },
+        ]);
+        let drained = state.drain_callbacks();
+        assert_eq!(drained.len(), 3);
+        assert!(matches!(&drained[0], PendingCallback::Output { text, .. } if text == "first"));
+        assert!(matches!(&drained[1], PendingCallback::Output { text, .. } if text == "second"));
+        assert!(matches!(&drained[2], PendingCallback::Output { text, .. } if text == "after"));
+    }
+
+    #[test]
+    fn requeue_callbacks_front_empty_is_noop() {
+        let mut state = PhantomState::default();
+        state.queue_callback(PendingCallback::KillDate { request_id: 0 });
+        state.requeue_callbacks_front(vec![]);
+        assert_eq!(state.drain_callbacks().len(), 1);
     }
 }

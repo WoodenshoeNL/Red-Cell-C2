@@ -117,9 +117,19 @@ impl PhantomAgent {
                 }
             }
             if !callbacks.is_empty() {
-                let pkgs = demon_packages_for_callbacks(callbacks)?;
+                // Keep a copy so we can restore the queue if batching or transport fails.
+                let recovery = callbacks.clone();
+                let pkgs = match demon_packages_for_callbacks(callbacks) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        self.state.requeue_callbacks_front(recovery);
+                        return Err(e);
+                    }
+                };
                 if let Err(e) = self.ecdh_send_packages(pkgs).await {
-                    warn!(error = %e, "ecdh: failed to send callback batch");
+                    warn!(error = %e, "ecdh: failed to send callback batch; re-queuing callbacks");
+                    self.state.requeue_callbacks_front(recovery);
+                    return Err(e);
                 }
             }
         }

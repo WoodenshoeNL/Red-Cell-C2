@@ -149,6 +149,7 @@ mod tests {
     use std::thread;
     use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time};
 
+    use red_cell_common::crypto::ecdh::ConnectionId;
     use red_cell_common::crypto::{
         ctr_blocks_for_len, decrypt_agent_data_at_offset, encrypt_agent_data,
         encrypt_agent_data_at_offset,
@@ -157,7 +158,9 @@ mod tests {
 
     use super::PhantomAgent;
     use super::run_loop::{is_within_working_hours_at, sleep_until_working_hours};
+    use crate::command::PendingCallback;
     use crate::config::PhantomConfig;
+    use crate::ecdh::EcdhSession;
     use crate::protocol::callback_ctr_blocks;
 
     #[test]
@@ -379,6 +382,34 @@ mod tests {
         assert_eq!(agent.ctr_offset, offset_before + callback_ctr_blocks(0));
 
         server.join().map_err(|_| "server thread panicked")??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ecdh_flush_pending_callbacks_requeues_on_transport_error()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let mut config = PhantomConfig::default();
+        config.callback_url = "http://127.0.0.1:1/".to_string();
+        let mut agent = PhantomAgent::new(config)?;
+        agent.ecdh_session = Some(EcdhSession {
+            connection_id: ConnectionId::generate()?,
+            session_key: [7u8; 32],
+            agent_id: agent.agent_id,
+        });
+        agent.state.queue_callback(PendingCallback::Output {
+            request_id: 42,
+            text: "pending flush".into(),
+        });
+
+        let result = agent.flush_pending_callbacks().await;
+        assert!(result.is_err(), "expected transport error");
+
+        let pending = agent.state.drain_callbacks();
+        assert_eq!(pending.len(), 1);
+        assert!(matches!(
+            &pending[0],
+            PendingCallback::Output { request_id: 42, text } if text == "pending flush"
+        ));
         Ok(())
     }
 

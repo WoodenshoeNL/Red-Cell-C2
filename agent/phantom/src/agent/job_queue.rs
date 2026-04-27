@@ -143,8 +143,19 @@ impl PhantomAgent {
         if callbacks.is_empty() {
             return Ok(());
         }
-        let pkgs = demon_packages_for_callbacks(callbacks)?;
-        let _ = self.ecdh_send_packages(pkgs).await?;
+        let recovery = callbacks.clone();
+        let pkgs = match demon_packages_for_callbacks(callbacks) {
+            Ok(p) => p,
+            Err(e) => {
+                self.state.requeue_callbacks_front(recovery);
+                return Err(e);
+            }
+        };
+        if let Err(e) = self.ecdh_send_packages(pkgs).await {
+            warn!(error = %e, "ecdh: failed to flush pending callbacks; re-queuing callbacks");
+            self.state.requeue_callbacks_front(recovery);
+            return Err(e);
+        }
         Ok(())
     }
 

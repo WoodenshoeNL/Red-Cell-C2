@@ -1667,6 +1667,13 @@ Start directly with understanding the task and implementing it.
                 for line in tail:
                     log.log(f"  {line}")
 
+        # Sweep up beads changes the agent made (br update/close/create) so the
+        # working tree stays clean for the next git pull --rebase. Runs for all
+        # agents — codex/cursor previously had no equivalent. Done before the
+        # Claude WIP block so beads-only changes get a clean chore message
+        # instead of being mislabeled as 'wip: interrupted'.
+        commit_beads_if_dirty(f"post-agent sweep for {next_id} [{agent_id}]", log)
+
         # Claude only: commit any uncommitted changes left by a token-limit interruption
         if agent == "claude":
             git(["add", "-A"])
@@ -1712,6 +1719,9 @@ Start directly with understanding the task and implementing it.
                     log.log(f"Lite QA completed for task {next_id}")
             else:
                 log.log(f"WARNING: lite QA prompt not found at {liteqa_prompt_file} — skipping")
+
+            # Lite QA may have run br update/create — sweep before iteration ends.
+            commit_beads_if_dirty(f"post-lite-qa sweep for {next_id} [{agent_id}]", log)
 
         final_status = issue_status_from_jsonl(next_id)
         if final_status == "in_progress":
@@ -2206,6 +2216,12 @@ def maintenance_loop(args, log: Logger):
         # 7. Stale SQLite files left by teamserver/integration tests
         all_actions.extend(maint_clean_tmp_sqlite(log))
 
+        # 8. Sweep up any uncommitted .beads/issues.jsonl changes — catches
+        # human-side `br update` calls and any agent leaks the dev/review
+        # loops missed.
+        if commit_beads_if_dirty("maintenance sweep of uncommitted JSONL", log):
+            all_actions.append("swept uncommitted .beads/issues.jsonl")
+
         # Summary
         if all_actions:
             log.log("--- Actions this run ---")
@@ -2303,6 +2319,35 @@ def harvest_worktree_beads(worktree_path: Path, log: Logger):
         log.log(f"harvest: push attempt {attempt + 1}/{retries} failed, retrying")
 
     log.log("WARNING: harvest: could not push after {retries} attempts — issues saved locally")
+
+
+def commit_beads_if_dirty(reason: str, log: Logger) -> bool:
+    """
+    Sweep up pending beads changes: flush DB → JSONL, commit + push if dirty.
+
+    Used at the end of each loop iteration to ensure agent-driven `br update` /
+    `br close` / `br create` calls don't leave .beads/issues.jsonl dirty in the
+    working tree, which would block the next iteration's git pull --rebase.
+    Returns True if a commit was made; False (and silently) if nothing to do.
+    """
+    br(["sync", "--flush-only", "--quiet"])
+    if git(["diff", "--quiet", "--", ".beads/issues.jsonl"]).returncode == 0:
+        return False
+
+    git(["add", ".beads/issues.jsonl"])
+    if git(["diff", "--cached", "--quiet"]).returncode == 0:
+        return False
+
+    if git(["commit", "-m", f"chore(beads): {reason}", "--quiet"]).returncode != 0:
+        git(["restore", "--staged", ".beads/issues.jsonl"])
+        log.log(f"WARNING: beads sweep commit failed: {reason}")
+        return False
+
+    if git(["push", "--quiet"]).returncode == 0:
+        log.log(f"beads: swept JSONL ({reason})")
+    else:
+        log.log(f"WARNING: beads sweep push failed (local commit retained): {reason}")
+    return True
 
 
 def remove_review_worktree(worktree_path: Path, log: Logger):
@@ -2657,6 +2702,10 @@ def review_loop(args, log: Logger):
         if worktree_path:
             harvest_worktree_beads(worktree_path, log)
             remove_review_worktree(worktree_path, log)
+
+        # Sweep any post-harvest beads changes (and cover live-tree loops like
+        # autotest, which skip harvest entirely).
+        commit_beads_if_dirty(f"post-{loop_type} sweep [{args.agent}]", log)
 
         if exit_code != 0:
             log.log(f"WARNING: {agent.title()} exited with code {exit_code}")

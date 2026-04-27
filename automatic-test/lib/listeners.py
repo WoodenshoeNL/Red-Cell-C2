@@ -72,3 +72,36 @@ def http_listener_kwargs(
     if agent_type and agent_type.lower() == "demon":
         kw["legacy_mode"] = True
     return kw
+
+
+def resolve_listener_row_status(lsnr: dict) -> str:
+    """Return lowercased lifecycle status for a row from :func:`lib.cli.listener_list`.
+
+    The teamserver API nests status under ``state.status``; ``red-cell-cli
+    listener list`` normally flattens to top-level ``status``. Autotest
+    cleanup accepts both so we never skip ``listener_stop`` when a row is
+    missing the flat field.
+    """
+    st = lsnr.get("status")
+    if st is not None and st != "":
+        return str(st).lower()
+    state = lsnr.get("state")
+    if isinstance(state, dict) and state.get("status") is not None:
+        return str(state["status"]).lower()
+    return ""
+
+
+def collect_env_listener_bind_ports(env: dict) -> frozenset[int]:
+    """Return TCP ports declared under ``[listeners]`` in env.toml (autotest range).
+
+    Used for pre-flight logging and optional matching; integer fields only
+    (``smb_pipe`` and similar strings are ignored).
+    """
+    raw = env.get("listeners")
+    if not isinstance(raw, dict):
+        return frozenset()
+    out: set[int] = set()
+    for v in raw.values():
+        if isinstance(v, int) and 0 < v < 65536:
+            out.add(v)
+    return frozenset(out)

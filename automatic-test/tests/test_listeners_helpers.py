@@ -8,7 +8,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from lib.listeners import http_listener_kwargs, normalize_callback_host_for_listener
+from lib.listeners import (
+    collect_env_listener_bind_ports,
+    http_listener_kwargs,
+    normalize_callback_host_for_listener,
+    resolve_listener_row_status,
+)
 
 
 class TestNormalizeCallbackHost(unittest.TestCase):
@@ -47,6 +52,46 @@ class TestHttpListenerKwargs(unittest.TestCase):
         env: dict = {"server": {}}
         kw = http_listener_kwargs(19082, env, agent_type="archon")
         self.assertNotIn("legacy_mode", kw)
+
+
+class TestListenerRowStatus(unittest.TestCase):
+    def test_flat_status(self) -> None:
+        self.assertEqual(resolve_listener_row_status({"name": "a", "status": "Running"}), "running")
+
+    def test_nested_state(self) -> None:
+        self.assertEqual(
+            resolve_listener_row_status(
+                {"name": "a", "state": {"status": "Stopped", "last_error": None}}
+            ),
+            "stopped",
+        )
+
+    def test_flat_takes_precedence(self) -> None:
+        self.assertEqual(
+            resolve_listener_row_status(
+                {"name": "a", "status": "Created", "state": {"status": "Running"}}
+            ),
+            "created",
+        )
+
+    def test_empty(self) -> None:
+        self.assertEqual(resolve_listener_row_status({}), "")
+
+
+class TestEnvListenerBindPorts(unittest.TestCase):
+    def test_collects_ints_from_listeners(self) -> None:
+        env = {
+            "listeners": {
+                "linux_port": 19181,
+                "windows_port": 19182,
+                "dns_port": 15354,
+                "smb_pipe": "redcell",
+            }
+        }
+        self.assertEqual(collect_env_listener_bind_ports(env), frozenset({19181, 19182, 15354}))
+
+    def test_missing_stanza(self) -> None:
+        self.assertEqual(collect_env_listener_bind_ports({}), frozenset())
 
 
 if __name__ == "__main__":

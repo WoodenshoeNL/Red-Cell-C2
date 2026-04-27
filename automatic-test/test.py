@@ -578,26 +578,73 @@ def main():
     # failures.  Stop and delete everything except the profile's default
     # listener.
     if not ctx.dry_run:
-        from lib.cli import CliError, listener_list, listener_stop, listener_delete
+        from lib.cli import CliError, listener_delete, listener_list, listener_stop
+        from lib.listeners import collect_env_listener_bind_ports, resolve_listener_row_status
+
         print(f"\n{'─' * 60}")
         print("  Listener cleanup (leftover from prior runs)")
         print(f"{'─' * 60}")
+        autotest_bind_ports = collect_env_listener_bind_ports(env)
+        if autotest_bind_ports:
+            ports_txt = ", ".join(str(p) for p in sorted(autotest_bind_ports))
+            print(f"  (env.toml [listeners] ports: {ports_txt})")
         try:
-            existing = listener_list(cli_cfg)
-            for lsnr in existing:
-                name = lsnr.get("name", "")
-                if name == "default":
-                    continue
-                status = lsnr.get("status", "").lower()
+            for round_idx in range(1, 4):
                 try:
-                    if status in ("running", "error"):
-                        listener_stop(cli_cfg, name)
-                    listener_delete(cli_cfg, name)
-                    print(f"  ✓ cleaned up: {name}")
+                    existing = listener_list(cli_cfg)
                 except CliError as exc:
-                    print(f"  ✗ failed to clean up {name}: {exc}")
-        except CliError as exc:
-            print(f"  ✗ listener list failed: {exc}")
+                    print(f"  ✗ listener list failed: {exc}")
+                    break
+                if not isinstance(existing, list):
+                    print(
+                        f"  ✗ listener list returned {type(existing).__name__!r}, expected a list"
+                    )
+                    break
+                to_clean = [lsnr for lsnr in existing if lsnr.get("name") != "default"]
+                if not to_clean:
+                    if round_idx == 1:
+                        print("  (no non-default listeners — OK)")
+                    break
+                print(
+                    f"  Pass {round_idx}/3: removing {len(to_clean)} non-default "
+                    "listener(s) (SQLite may restore Running listeners from prior runs)"
+                )
+                for lsnr in to_clean:
+                    name = lsnr.get("name", "")
+                    if not name:
+                        continue
+                    st = resolve_listener_row_status(lsnr)
+                    # Always stop before delete: stop is idempotent, and a missing/flat
+                    # `status` field would otherwise skip stop while the OS socket stays bound.
+                    try:
+                        listener_stop(cli_cfg, name)
+                    except CliError as exc:
+                        print(f"  ✗ listener_stop({name!r}) failed: {exc}")
+                    try:
+                        listener_delete(cli_cfg, name)
+                        detail = f" (list status={st!r})" if st else " (list status missing — still deleted)"
+                        print(f"  ✓ cleaned up: {name}{detail}")
+                    except CliError as exc:
+                        print(f"  ✗ listener_delete({name!r}) failed: {exc}")
+            # Final check so cascading port-in-use is visible in the log
+            try:
+                final = listener_list(cli_cfg)
+            except CliError as exc:
+                print(f"  ✗ final listener list failed: {exc}")
+            else:
+                if isinstance(final, list):
+                    leftover = [r for r in final if r.get("name") != "default"]
+                    if leftover:
+                        names = ", ".join(repr(x.get("name", "?")) for x in leftover)
+                        hint = ""
+                        if autotest_bind_ports:
+                            hint = (
+                                " If bind errors persist, stop the teamserver, remove its SQLite "
+                                "file for this profile, or clear listeners via the operator UI."
+                            )
+                        print(
+                            f"  ✗ non-default listener(s) still present after cleanup: {names}.{hint}"
+                        )
         except Exception as exc:
             print(f"  ✗ unexpected error during cleanup: {exc}")
 

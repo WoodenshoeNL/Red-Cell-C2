@@ -104,10 +104,11 @@ pub mod native {
         LsaLookupAuthenticationPackage, LsaRegisterLogonProcess, SECURITY_LOGON_SESSION_DATA,
     };
     use windows_sys::Win32::Security::{
-        GetTokenInformation, OpenProcessToken, OpenThreadToken, TOKEN_QUERY, TOKEN_STATISTICS,
-        TokenStatistics,
+        GetTokenInformation, TOKEN_QUERY, TOKEN_STATISTICS, TokenStatistics,
     };
-    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentThread};
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcess, GetCurrentThread, OpenProcessToken, OpenThreadToken,
+    };
 
     use super::{Luid, SessionInfo, TicketInfo};
 
@@ -545,7 +546,7 @@ pub mod native {
         }
         let s = unsafe { String::from_utf16_lossy(std::slice::from_raw_parts(str_ptr, len)) };
         unsafe {
-            windows_sys::Win32::System::Memory::LocalFree(str_ptr.cast());
+            windows_sys::Win32::Foundation::LocalFree(str_ptr.cast());
         }
         s
     }

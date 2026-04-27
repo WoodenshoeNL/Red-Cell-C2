@@ -530,7 +530,7 @@ pub(crate) unsafe extern "C" fn beacon_is_admin() -> i32 {
 #[allow(dead_code, unsafe_code)]
 pub(crate) unsafe extern "C" fn beacon_use_token(token: usize) -> i32 {
     use windows_sys::Win32::Foundation::FALSE;
-    use windows_sys::Win32::Security::SetThreadToken;
+    use windows_sys::Win32::System::Threading::SetThreadToken;
 
     // SetThreadToken(NULL, token) impersonates the token on the calling thread.
     let ok = unsafe { SetThreadToken(std::ptr::null(), token as isize) };

@@ -10,9 +10,10 @@
 mod imp {
     use std::mem;
 
+    use windows_sys::Wdk::System::SystemServices::RtlGetVersion;
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Security::{
-        GetTokenInformation, OpenProcessToken, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
+        GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
     };
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
@@ -20,11 +21,10 @@ mod imp {
     };
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::System::SystemInformation::{
-        ComputerNameDnsDomain, ComputerNameDnsHostname, GetComputerNameExW, RTL_OSVERSIONINFOEXW,
-        RtlGetVersion,
+        ComputerNameDnsDomain, ComputerNameDnsHostname, GetComputerNameExW, OSVERSIONINFOEXW,
     };
     use windows_sys::Win32::System::Threading::{
-        GetCurrentProcess, GetCurrentProcessId, GetCurrentThreadId,
+        GetCurrentProcess, GetCurrentProcessId, GetCurrentThreadId, OpenProcessToken,
     };
 
     /// Query the OS version via `RtlGetVersion` (kernel-level, not spoofable by
@@ -33,11 +33,11 @@ mod imp {
     /// Returns `(major, minor, build, service_pack_major)`.
     pub fn os_version() -> (u32, u32, u32, u16) {
         // SAFETY: OSVERSIONINFOEXW is a plain C struct; zeroing is safe and required by the API.
-        let mut info: RTL_OSVERSIONINFOEXW = unsafe { mem::zeroed() };
-        info.dwOSVersionInfoSize = mem::size_of::<RTL_OSVERSIONINFOEXW>() as u32;
+        let mut info: OSVERSIONINFOEXW = unsafe { mem::zeroed() };
+        info.dwOSVersionInfoSize = mem::size_of::<OSVERSIONINFOEXW>() as u32;
         // SAFETY: RtlGetVersion always succeeds for this struct size on Windows 2000+.
         unsafe {
-            RtlGetVersion(&mut info as *mut RTL_OSVERSIONINFOEXW as *mut _);
+            RtlGetVersion(&mut info as *mut OSVERSIONINFOEXW as *mut _);
         }
         (info.dwMajorVersion, info.dwMinorVersion, info.dwBuildNumber, info.wServicePackMajor)
     }

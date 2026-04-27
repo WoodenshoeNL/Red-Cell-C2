@@ -13,14 +13,14 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Security::{
     GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, ImpersonateLoggedOnUser,
-    OpenProcessToken, OpenThreadToken, RevertToSelf, SecurityDelegation, SecurityImpersonation,
-    TOKEN_DUPLICATE, TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TOKEN_STATISTICS, TokenImpersonation,
-    TokenIntegrityLevel, TokenPrimary, TokenStatistics,
+    RevertToSelf, SecurityDelegation, SecurityImpersonation, TOKEN_DUPLICATE,
+    TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TOKEN_STATISTICS, TokenImpersonation, TokenIntegrityLevel,
+    TokenPrimary, TokenStatistics,
 };
 use windows_sys::Win32::System::SystemServices::MAXIMUM_ALLOWED;
 use windows_sys::Win32::System::Threading::{
-    GetCurrentProcess, GetCurrentProcessId, GetCurrentThread, OpenProcess, PROCESS_DUP_HANDLE,
-    PROCESS_QUERY_INFORMATION,
+    GetCurrentProcess, GetCurrentProcessId, GetCurrentThread, OpenProcess, OpenProcessToken,
+    OpenThreadToken, PROCESS_DUP_HANDLE, PROCESS_QUERY_INFORMATION,
 };
 
 use super::super::FoundToken;

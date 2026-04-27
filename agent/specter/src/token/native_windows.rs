@@ -7,14 +7,13 @@ use windows_sys::Win32::Foundation::{CloseHandle, FALSE, GetLastError, HANDLE, L
 use windows_sys::Win32::Security::{
     AdjustTokenPrivileges, DuplicateTokenEx, GetTokenInformation, LOGON32_PROVIDER_DEFAULT,
     LUID_AND_ATTRIBUTES, LogonUserW, LookupAccountSidW, LookupPrivilegeNameW,
-    LookupPrivilegeValueW, OpenProcessToken, OpenThreadToken, RevertToSelf, SE_PRIVILEGE_ENABLED,
-    SID_NAME_USE, SecurityImpersonation, SetThreadToken, TOKEN_ADJUST_PRIVILEGES, TOKEN_ALL_ACCESS,
-    TOKEN_DUPLICATE, TOKEN_ELEVATION, TOKEN_PRIVILEGES, TOKEN_QUERY, TOKEN_USER, TokenElevation,
-    TokenImpersonation, TokenPrivileges, TokenUser,
+    LookupPrivilegeValueW, RevertToSelf, SE_PRIVILEGE_ENABLED, SID_NAME_USE, SecurityImpersonation,
+    TOKEN_ADJUST_PRIVILEGES, TOKEN_ALL_ACCESS, TOKEN_DUPLICATE, TOKEN_ELEVATION, TOKEN_PRIVILEGES,
+    TOKEN_QUERY, TOKEN_USER, TokenElevation, TokenImpersonation, TokenPrivileges, TokenUser,
 };
 use windows_sys::Win32::System::Threading::{
-    GetCurrentProcess, GetCurrentProcessId, GetCurrentThread, OpenProcess,
-    PROCESS_QUERY_INFORMATION,
+    GetCurrentProcess, GetCurrentProcessId, GetCurrentThread, OpenProcess, OpenProcessToken,
+    OpenThreadToken, PROCESS_QUERY_INFORMATION, SetThreadToken,
 };
 
 #[path = "enumerate_windows.rs"]

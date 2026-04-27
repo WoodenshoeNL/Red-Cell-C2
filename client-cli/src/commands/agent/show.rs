@@ -28,6 +28,7 @@ pub(crate) fn agent_detail_from_raw(r: RawAgent) -> AgentDetail {
         status: r.status,
         sleep_interval: r.sleep_interval,
         jitter: r.jitter,
+        listener: r.listener,
     }
 }
 

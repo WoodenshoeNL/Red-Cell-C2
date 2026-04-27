@@ -18,11 +18,13 @@ pub struct AgentSummary {
     pub last_seen: String,
     /// Liveness status: `"alive"` or `"dead"`.
     pub status: String,
+    /// Name of the listener that accepted this agent.
+    pub listener: String,
 }
 
 impl TextRow for AgentSummary {
     fn headers() -> Vec<&'static str> {
-        vec!["ID", "Hostname", "OS", "Last Seen", "Status"]
+        vec!["ID", "Hostname", "OS", "Last Seen", "Status", "Listener"]
     }
 
     fn row(&self) -> Vec<String> {
@@ -32,6 +34,7 @@ impl TextRow for AgentSummary {
             self.os.clone(),
             self.last_seen.clone(),
             self.status.clone(),
+            self.listener.clone(),
         ]
     }
 }
@@ -55,6 +58,7 @@ pub struct AgentDetail {
     pub status: String,
     pub sleep_interval: Option<u64>,
     pub jitter: Option<u64>,
+    pub listener: String,
 }
 
 impl TextRender for AgentDetail {
@@ -80,6 +84,7 @@ impl TextRender for AgentDetail {
             ("status", self.status.clone()),
             ("sleep_interval", self.sleep_interval.map_or_else(String::new, |s| s.to_string())),
             ("jitter", self.jitter.map_or_else(String::new, |j| j.to_string())),
+            ("listener", self.listener.clone()),
         ];
         for (field, val) in rows {
             table.add_row([Cell::new(*field), Cell::new(val)]);

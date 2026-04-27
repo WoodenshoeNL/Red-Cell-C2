@@ -53,6 +53,24 @@ impl AgentRegistry {
         agents
     }
 
+    /// Return all tracked agents paired with their listener names.
+    #[instrument(skip(self))]
+    pub async fn list_with_listeners(&self) -> Vec<(AgentRecord, String)> {
+        let entries = self.entries.read().await;
+        let handles: Vec<_> = entries.values().cloned().collect();
+        drop(entries);
+
+        let mut agents = Vec::with_capacity(handles.len());
+        for handle in handles {
+            let info = handle.info.read().await;
+            let listener = handle.listener_name.read().await;
+            agents.push((info.clone(), listener.clone()));
+        }
+
+        agents.sort_by_key(|(agent, _)| agent.agent_id);
+        agents
+    }
+
     /// Return the listener that accepted the current or most recent session.
     #[instrument(skip(self), fields(agent_id = format_args!("0x{:08X}", agent_id)))]
     pub async fn listener_name(&self, agent_id: u32) -> Option<String> {

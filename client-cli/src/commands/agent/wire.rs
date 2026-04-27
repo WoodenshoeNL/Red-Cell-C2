@@ -51,6 +51,8 @@ struct ApiAgentWire {
     first_call_in: String,
     #[serde(rename = "LastCallIn")]
     last_call_in: String,
+    #[serde(rename = "Listener", default)]
+    listener: String,
 }
 
 /// Normalised agent record used throughout the CLI.
@@ -85,6 +87,7 @@ pub(crate) struct RawAgent {
     pub(crate) elevated: Option<bool>,
     pub(crate) sleep_interval: Option<u64>,
     pub(crate) jitter: Option<u64>,
+    pub(crate) listener: String,
 }
 
 impl From<ApiAgentWire> for RawAgent {
@@ -106,6 +109,7 @@ impl From<ApiAgentWire> for RawAgent {
             elevated: Some(w.elevated),
             sleep_interval: Some(w.sleep_delay as u64),
             jitter: Some(w.sleep_jitter as u64),
+            listener: w.listener,
         }
     }
 }

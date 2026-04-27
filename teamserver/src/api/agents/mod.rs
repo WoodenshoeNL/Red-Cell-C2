@@ -108,16 +108,13 @@ pub(super) struct ApiAgentInfo {
     /// Last callback timestamp.
     #[serde(rename = "LastCallIn")]
     last_call_in: String,
+    /// Name of the listener that accepted this agent's registration.
+    #[serde(rename = "Listener")]
+    listener: String,
 }
 
-impl From<AgentRecord> for ApiAgentInfo {
-    fn from(agent: AgentRecord) -> Self {
-        Self::from(&agent)
-    }
-}
-
-impl From<&AgentRecord> for ApiAgentInfo {
-    fn from(agent: &AgentRecord) -> Self {
+impl ApiAgentInfo {
+    fn from_record_with_listener(agent: &AgentRecord, listener: String) -> Self {
         Self {
             agent_id: agent.agent_id,
             active: agent.active,
@@ -144,6 +141,7 @@ impl From<&AgentRecord> for ApiAgentInfo {
             working_hours: agent.working_hours,
             first_call_in: agent.first_call_in.clone(),
             last_call_in: agent.last_call_in.clone(),
+            listener,
         }
     }
 }
@@ -375,11 +373,11 @@ pub(super) async fn list_agents(
     State(state): State<TeamserverState>,
     identity: ReadApiAccess,
 ) -> Json<Vec<ApiAgentInfo>> {
-    let agents = state.agent_registry.list().await;
+    let agents = state.agent_registry.list_with_listeners().await;
     let mut visible = Vec::with_capacity(agents.len());
-    for agent in agents {
+    for (agent, listener) in agents {
         if operator_may_access_agent(&state, &identity.key_id, agent.agent_id).await {
-            visible.push(ApiAgentInfo::from(agent));
+            visible.push(ApiAgentInfo::from_record_with_listener(&agent, listener));
         }
     }
     Json(visible)
@@ -412,7 +410,12 @@ pub(super) async fn get_agent(
         .await
         .ok_or(crate::TeamserverError::AgentNotFound { agent_id })?;
     authorize_agent_access(&state, &identity.key_id, agent_id).await?;
-    Ok(Json(ApiAgentInfo::from(agent)))
+    let listener = state
+        .agent_registry
+        .listener_name(agent_id)
+        .await
+        .unwrap_or_default();
+    Ok(Json(ApiAgentInfo::from_record_with_listener(&agent, listener)))
 }
 
 #[utoipa::path(

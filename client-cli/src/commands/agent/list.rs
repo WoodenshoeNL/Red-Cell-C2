@@ -24,6 +24,7 @@ pub(crate) fn agent_summary_from_raw(r: RawAgent) -> AgentSummary {
         os: r.os,
         last_seen: r.last_seen,
         status: r.status,
+        listener: r.listener,
     }
 }
 
@@ -203,6 +204,7 @@ mod tests {
             os: "Windows".to_owned(),
             last_seen: "2026-01-01T00:00:00Z".to_owned(),
             status: status.to_owned(),
+            listener: String::new(),
         }
     }
 

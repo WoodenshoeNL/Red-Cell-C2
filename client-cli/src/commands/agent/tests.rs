@@ -32,6 +32,7 @@ fn agent_summary_serialises_required_fields() {
         os: "Windows 10".to_owned(),
         last_seen: "2026-01-01T00:00:00Z".to_owned(),
         status: "alive".to_owned(),
+        listener: "http-test".to_owned(),
     };
     let v = serde_json::to_value(&s).expect("serialise");
     assert_eq!(v["id"], "00000ABC");
@@ -47,6 +48,7 @@ fn agent_summary_text_row_headers_match_row_length() {
         os: "linux".to_owned(),
         last_seen: "t".to_owned(),
         status: "alive".to_owned(),
+        listener: String::new(),
     };
     assert_eq!(AgentSummary::headers().len(), s.row().len());
 }
@@ -59,6 +61,7 @@ fn vec_agent_summary_renders_table() {
         os: "Windows 10".to_owned(),
         last_seen: "2026-01-01T00:00:00Z".to_owned(),
         status: "alive".to_owned(),
+        listener: "http-test".to_owned(),
     }];
     let rendered = items.render_text();
     assert!(rendered.contains("00000ABC"));
@@ -87,6 +90,7 @@ fn agent_detail_serialises_optional_fields_as_null() {
         status: "alive".to_owned(),
         sleep_interval: None,
         jitter: None,
+        listener: String::new(),
     };
     let v = serde_json::to_value(&d).expect("serialise");
     assert!(v["arch"].is_null());
@@ -114,6 +118,7 @@ fn agent_detail_render_text_contains_key_fields() {
         status: "alive".to_owned(),
         sleep_interval: Some(60),
         jitter: Some(10),
+        listener: "http-listener".to_owned(),
     };
     let rendered = d.render_text();
     assert!(rendered.contains("00ABC123"));
@@ -312,6 +317,7 @@ fn agent_summary_from_raw_maps_all_fields() {
         elevated: None,
         sleep_interval: None,
         jitter: None,
+        listener: "http-test".to_owned(),
     };
     let s = agent_summary_from_raw(raw);
     assert_eq!(s.id, agent_id(0x1D1));
@@ -338,6 +344,7 @@ fn agent_detail_from_raw_preserves_optional_fields() {
         elevated: Some(false),
         sleep_interval: Some(30),
         jitter: None,
+        listener: "http-listener".to_owned(),
     };
     let d = agent_detail_from_raw(raw);
     assert_eq!(d.arch, Some("x86".to_owned()));

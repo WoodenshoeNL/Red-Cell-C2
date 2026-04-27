@@ -32,11 +32,12 @@ row to *Resolved* and add the closing commit / fix description.
 
 | Signature (substring of error / stderr) | Scenario | Bead | First seen | Last seen | Status |
 |----------------------------------------|----------|------|------------|-----------|--------|
-| `[TIMEOUT] timed out waiting for output from task` | 04, 11, 21 | red-cell-c2-2g1nj | 2026-04-24 | 2026-04-27 | P1, regression of red-cell-c2-pa1wi |
-| `Timed out after 60s waiting for agent checkin` (Windows Demon/Archon) | 14, 17, 19 | red-cell-c2-gxabx | 2026-04-24 | 2026-04-27 | P1, regression of red-cell-c2-dvd3p |
-| `error[E0425]: cannot find function` + `windows_sys` in Specter cross-compile | 05, 06, 07, 08 | red-cell-c2-as0gd | 2026-04-27 | 2026-04-27 | P1, new error after E0433+unsafe fix |
-| `still present in agent list after 120s — expected implant to stop after kill-date` | 22 | red-cell-c2-dv5ev | 2026-04-24 | 2026-04-27 | P2, regression of red-cell-c2-0h0et |
-| `checked in unexpectedly — outside working hours` | 23 | red-cell-c2-dv5ev | 2026-04-24 | 2026-04-27 | (same bead as above) |
+| `[TIMEOUT] timed out waiting for output from task` | 04, 11, 21 | red-cell-c2-asy66 | 2026-04-27 | 2026-04-27 | P1, regression of red-cell-c2-2g1nj (wstring fix) |
+| `Timed out after 30s waiting for download loot entry` | 11 | red-cell-c2-asy66 | 2026-04-27 | 2026-04-27 | (cascade of exec timeout — same bead) |
+| `Timed out after 60s waiting for agent checkin` (Windows Demon/Archon) | 17, 19 | red-cell-c2-db6yd | 2026-04-27 | 2026-04-27 | P1, regression of red-cell-c2-gxabx (WMI fix) |
+| `Timed out after 30s waiting for 10 new agent checkins` (Windows Demon stress) | 14 | red-cell-c2-db6yd | 2026-04-27 | 2026-04-27 | (cascade — same bead) |
+| `No new agent checked in on Windows listener` | 19 | red-cell-c2-db6yd | 2026-04-27 | 2026-04-27 | (cascade — same bead) |
+| `cargo build --release --target x86_64-pc-windows-gnu` + `error[E0308]` in Specter | 05, 06, 07, 08 | red-cell-c2-z85a3 | 2026-04-27 | 2026-04-27 | P1, regression of red-cell-c2-as0gd (112 type mismatches + 23 unsafe blocks) |
 
 ---
 
@@ -66,6 +67,10 @@ than a new bug.
 | `Python was not found` (DoH probe on Windows VM) | 20 | red-cell-c2-2gg26 | 2026-04-25 | preflight_dns uses PowerShell on Windows targets. Scenario 20 now skips due to DNS resolution failure instead. |
 | `Address already in use (os error 98)` on port 19181/19182 from prior-run listeners | 04, 06, 07, 11, 17, 21–24 | red-cell-c2-hyhgf | 2026-04-27 | Preflight listener cleanup: resolve status, always stop before delete, multi-pass. Not seen this run. |
 | `unparseable last_seen` (nanosecond timestamp with Z suffix) | 24 | *(no bead — fixed inline)* | 2026-04-27 | parse_last_seen now strips Z suffix and truncates nanoseconds to microseconds |
+| `[TIMEOUT] timed out waiting for output from task` (wstring fix) | 04, 11, 21 | red-cell-c2-2g1nj | 2026-04-27 | Phantom wstring null terminator fix (commit eeead79c). **REGRESSED** — see red-cell-c2-asy66 |
+| `Timed out after 60s waiting for agent checkin` (Invoke-WmiMethod fix) | 14, 17, 19 | red-cell-c2-gxabx | 2026-04-27 | Switched to Invoke-WmiMethod for Windows deploy. Process survives SSH, but agents still don't check in. **REGRESSED** — see red-cell-c2-db6yd |
+| `error[E0425]: cannot find function` + `windows_sys` in Specter cross-compile | 05, 06, 07, 08 | red-cell-c2-as0gd | 2026-04-27 | Relocated imports to windows-sys 0.59 module paths. E0425 resolved, but 138 new errors (E0308, unsafe). **NEW ERROR** — see red-cell-c2-z85a3 |
+| `still present in agent list after 120s — expected implant to stop after kill-date` | 22, 23 | red-cell-c2-dv5ev | 2026-04-27 | Phantom pre-init kill-date + working-hours checks + build.rs rerun-if-env-changed. Scenarios 22/23/24 now pass. |
 
 ---
 

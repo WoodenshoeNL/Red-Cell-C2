@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1718 | 296 | 124 |
-| Bugs filed against | 275 | 50 | 16 |
+| Tasks closed | 1726 | 296 | 124 |
+| Bugs filed against | 283 | 50 | 16 |
 | Bug rate (bugs/task) | 0.16 | 0.17 | 0.13 |
 | Quality score | 84% | 83% | 87% |
 
-*Bug rates: Claude 275/1718=0.1601→0.16, Codex 50/296=0.1689→0.17, Cursor 16/124=0.1290→0.13*
+*Bug rates: Claude 283/1726=0.1640→0.16, Codex 50/296=0.1689→0.17, Cursor 16/124=0.1290→0.13*
 
 ## Violation Breakdown
 
@@ -41,6 +41,18 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-27 16:10 — e89ad950..13f3e993
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 8 | 0 | Productive cycle on agent resilience and Windows autotest reliability. Fixed eight lite-qa-filed regressions, all closed clean: (1) eeead79c red-cell-c2-2g1nj P1 — Phantom `wstring()` in `agent/phantom/src/parser.rs` was returning UTF-16 strings with the wire-format trailing `\0` intact, causing `Command::new("\0")` to crash agent on every `exec`. Fixed with `trim_end_matches('\0')` plus two new unit tests covering the null-stripped and null-only-empty cases. (2) 731a4179 red-cell-c2-dv5ev + b1659dcb red-cell-c2-mzekm — Phantom `run()` did not check kill-date or wait for working hours before `init_handshake`/`ecdh_init_handshake`; agent would phone home once even when kill-date had elapsed at startup. Added `wait_for_working_hours()` helper using the existing `is_within_working_hours_at`/`sleep_until_working_hours` machinery, plus pre- and post-sleep `kill_date_elapsed()` guards. (3) 8e7fd90e red-cell-c2-b9s9h + 98d22791 red-cell-c2-jnxmw — same fix mirrored to Specter: introduced free-function `is_within_working_hours_at`, `sleep_until_working_hours`, `unpack_working_hours_time`, and `current_local_time` (intentionally duplicating Phantom's preexisting impl rather than extracting to common — agents stay independent), plus 9 new unit tests covering the disabled-bit, midpoint, both boundaries, before/after, and same-day wrap cases. Added `time = "0.3"` with `local-offset` to specter Cargo.toml. (4) 5b163918 red-cell-c2-as0gd P1 — Specter cross-compile broken after windows-sys 0.59 API relocations: `OpenProcessToken`, `OpenThreadToken`, `SetThreadToken` moved from `Win32_Security` to `Win32_System_Threading`; `LocalFree` from `Win32_System_Memory` to `Win32_Foundation`; `RTL_OSVERSIONINFOEXW`+`RtlGetVersion` moved/renamed to `OSVERSIONINFOEXW` and `Wdk_System_SystemServices`. Fixed import paths across `beacon_api.rs`, `kerberos.rs`, `platform.rs`, `token/enumerate_windows.rs`, `token/native_windows.rs`; added `Win32_Security_Credentials`, `Win32_System_IO`, `Wdk_System_SystemServices` features to Cargo.toml. (5) 7cb755c0 + e627ea16 red-cell-c2-gxabx + 8c6d6060 red-cell-c2-ydsty — Autotest Windows agent launch via `Start-Process` was killed when SSH session torn down (Windows job objects); switched to `Invoke-WmiMethod -Class Win32_Process -Name Create` which spawns outside the job. Initial fix mis-quoted paths with spaces; follow-up wraps the command in inner double-quotes inside the PS single-quoted ArgumentList so CreateProcess's leading-quoted-token rule sees the full path. Three new unit tests assert WMI is used, paths with spaces are double-quoted, and embedded single quotes are PS-doubled. (6) 074dd87e — Specter `build.rs` adds `cargo::rerun-if-env-changed` directives for all 12 `SPECTER_*` baked-in config env vars (matches Phantom's b08d6a37 fix); also added `agent/phantom/build.rs` with the same directives for the 10 `PHANTOM_*` vars. (7) 3026d326 — Scenario 22 was timing out asserting agent absence from `agent list`; teamserver keeps dead agents listed for forensic review. New `wait_until_agent_dead()` helper in `automatic-test/lib/resilience.py` polls for `status: dead` (or absent), and scenario 22 switched over. Bonus: `automatic-test/lib/agent_timing.py:parse_last_seen` now strips trailing `Z` and truncates sub-microsecond fractional seconds (server emits nanosecond precision but Python `%f` only handles up to 6 digits) — fixes scenario 24 ValueError on parse. Bonus: `automatic-test/test.py` now auto-discovers the CLI binary at `target/release/red-cell-cli` when not on PATH. KNOWN_FAILURES.md updated to reflect the regression chain (4 P1/P2 entries moved to Resolved with explicit "REGRESSED → see ..." pointers). |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: passed (cargo check workspace 1m14s; cargo nextest run --workspace 6075/6075 PASS in 222.9s; cargo clippy --workspace -- -D warnings 8m59s, no warnings; autotest unittest discover 368 OK).
+
+Notes: Claude landed eight back-to-back regression fixes against bugs filed by the lite-qa loop earlier in the same window — all the original work was filed against Claude's prior batch-callback / per-IP-cap / env-clearing commits, so the +8 closes are matched by +8 bugs filed against. The wstring-null-terminator fix is the standout: Phantom had been silently corrupting every command exec by passing `"\0"` as the program when `program_path` was empty; the bug only surfaced as "agent dead 2s after task" timeouts in scenarios 04/11/21. The Specter working-hours plumbing is a clean copy of Phantom's design — duplication is justified here because Phantom and Specter are independently maintained agents on different platforms. The windows-sys 0.59 API churn fix is mechanical but well-targeted: every relocated symbol is now imported from the right module, and the new feature flags (`Win32_Security_Credentials`, `Win32_System_IO`, `Wdk_System_SystemServices`) are tight to what's actually used. No new bugs to file. Codex and Cursor idle.
 
 ### QA Review — 2026-04-27 11:45 — 46de956f..e89ad950
 

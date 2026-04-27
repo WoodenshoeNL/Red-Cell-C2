@@ -29,6 +29,7 @@ impl PayloadBuilderService {
     /// variables so it can be embedded at compile time (`option_env!`) or read
     /// at runtime.  The resulting release binary is read from the cargo target
     /// directory and returned as the payload artifact.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn build_rust_agent<F>(
         &self,
         listener: &ListenerConfig,
@@ -113,6 +114,15 @@ impl PayloadBuilderService {
             .current_dir(source_root)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+
+        // `option_env!` / `parse_compile_env` in Phantom/Specter read rustc's
+        // environment.  Cargo forwards the parent process env; any stray
+        // `PHANTOM_*` / `SPECTER_*` in the teamserver's environment (or a stale
+        // shell export) would be baked in even when this build path omits
+        // that key from `env_vars` — e.g. wrong kill date or sleep from a
+        // previous operator session.  Clear known bake keys, then set exactly
+        // what this listener/demon build requires.
+        clear_inherited_rust_agent_bake_env(&mut cmd, &env_prefix);
 
         for (key, value) in &env_vars {
             cmd.env(key, value);
@@ -228,6 +238,33 @@ impl PayloadBuilderService {
         })
     }
 }
+
+/// Remove compile-time bake variables for `env_prefix` from a `cargo` command
+/// so the parent (teamserver) process cannot leak `PHANTOM_*` / `SPECTER_*`
+/// into `rustc` when this build does not set them in [`rust_agent_env_vars`].
+fn clear_inherited_rust_agent_bake_env(cmd: &mut Command, env_prefix: &str) {
+    for suffix in RUST_AGENT_BAKE_ENV_SUFFIXES {
+        cmd.env_remove(format!("{env_prefix}_{suffix}"));
+    }
+}
+
+/// Suffixes after `PHANTOM_` / `SPECTER_` that are read via `option_env!` or
+/// `parse_compile_env` in `agent/phantom` and `agent/specter` `config.rs`
+/// (keep in sync with those crates when adding new bake-time env vars).
+const RUST_AGENT_BAKE_ENV_SUFFIXES: &[&str] = &[
+    "CALLBACK_URL",
+    "DOH_DOMAIN",
+    "DOH_PROVIDER",
+    "INIT_SECRET",
+    "INIT_SECRET_VERSION",
+    "KILL_DATE",
+    "LISTENER_PUB_KEY",
+    "PINNED_CERT_PEM",
+    "SLEEP_DELAY_MS",
+    "SLEEP_JITTER",
+    "USER_AGENT",
+    "WORKING_HOURS",
+];
 
 /// Build the full set of `cargo build` environment variables that configure a
 /// Phantom/Specter binary for `listener` and `demon`.
@@ -441,6 +478,14 @@ mod tests {
         });
         let err = rust_agent_callback_url(&listener).expect_err("SMB listener should be rejected");
         assert!(matches!(err, PayloadBuildError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn rust_agent_bake_env_suffixes_includes_sleep_kill_and_working_hours() {
+        let joined = RUST_AGENT_BAKE_ENV_SUFFIXES.join(",");
+        assert!(joined.contains("SLEEP_DELAY_MS"));
+        assert!(joined.contains("KILL_DATE"));
+        assert!(joined.contains("WORKING_HOURS"));
     }
 
     // ── rust_agent_env_vars tests ────────────────────────────────────

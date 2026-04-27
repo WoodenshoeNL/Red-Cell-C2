@@ -16,7 +16,12 @@ use tokio::sync::Mutex;
 
 use crate::rate_limiter::{AttemptWindow, evict_oldest_windows, prune_expired_windows};
 
-pub(crate) const MAX_DEMON_INIT_ATTEMPTS_PER_IP: u32 = 5;
+/// Cap for full `DEMON_INIT` registrations per source IP per sliding window.
+///
+/// Must comfortably exceed NAT fan-in for lab stress tests (e.g. ~10 Windows
+/// agents from one host in `14_stress_concurrent_agents`) while still bounding
+/// blind registration spam.
+pub(crate) const MAX_DEMON_INIT_ATTEMPTS_PER_IP: u32 = 32;
 pub(crate) const DEMON_INIT_WINDOW_DURATION: Duration = Duration::from_secs(60);
 pub(crate) const MAX_DEMON_INIT_ATTEMPT_WINDOWS: usize = 10_000;
 /// Per-IP budget of ECDH registration attempts allowed within

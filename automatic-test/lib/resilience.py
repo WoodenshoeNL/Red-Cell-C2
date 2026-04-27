@@ -9,6 +9,7 @@ import time
 from typing import Any
 
 from lib.cli import CliConfig, CliError, agent_list
+from lib.listeners import normalize_callback_host_for_listener
 
 
 def extract_http_callback_host(env: dict) -> str:
@@ -41,7 +42,7 @@ def http_listener_inner_config(
     working_hours: str | None = None,
 ) -> dict[str, Any]:
     """Build inner JSON for ``listener create --type http --config-json ...``."""
-    host = extract_http_callback_host(env)
+    host = normalize_callback_host_for_listener(extract_http_callback_host(env))
     inner: dict[str, Any] = {
         "name": name,
         "host_bind": "0.0.0.0",

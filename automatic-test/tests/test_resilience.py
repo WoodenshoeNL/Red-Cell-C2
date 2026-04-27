@@ -65,6 +65,16 @@ class TestResilienceHelpers(unittest.TestCase):
         self.assertEqual(inner["kill_date"], "1234567890")
         self.assertEqual(inner["working_hours"], "02:00-03:00")
 
+    def test_http_listener_inner_config_strips_conflicting_port_in_callback_host(self) -> None:
+        env = {
+            "server": {
+                "rest_url": "https://127.0.0.1:40056",
+                "callback_host": "10.0.0.1:19999",
+            }
+        }
+        inner = http_listener_inner_config("ln", 19100, env)
+        self.assertEqual(inner["hosts"], ["10.0.0.1:19100"])
+
     def test_http_listener_inner_config_falls_back_to_rest_url(self) -> None:
         env = {"server": {"rest_url": "https://10.0.0.1:8443"}}
         inner = http_listener_inner_config("ln", 19100, env)

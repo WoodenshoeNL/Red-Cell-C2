@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1726 | 296 | 124 |
-| Bugs filed against | 283 | 50 | 16 |
+| Tasks closed | 1728 | 296 | 125 |
+| Bugs filed against | 284 | 50 | 16 |
 | Bug rate (bugs/task) | 0.16 | 0.17 | 0.13 |
 | Quality score | 84% | 83% | 87% |
 
-*Bug rates: Claude 283/1726=0.1640→0.16, Codex 50/296=0.1689→0.17, Cursor 16/124=0.1290→0.13*
+*Bug rates: Claude 284/1728=0.1644→0.16, Codex 50/296=0.1689→0.17, Cursor 16/125=0.1280→0.13*
 
 ## Violation Breakdown
 
@@ -30,7 +30,7 @@ Each loop run updates the running totals and appends a review entry.
 | Startup / lifecycle regressions | 5 | 10 | 0 |
 | Test infrastructure / flakiness | 67 | 6 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
-| Availability / timeout regressions | 5 | 5 | 0 |
+| Availability / timeout regressions | 6 | 5 | 0 |
 | Correctness / pagination | 72 | 9 | 1 |
 | Workflow / close-hygiene | 40 | 1 | 2 |
 | Code reuse / duplication | 14 | 0 | 0 |
@@ -113,6 +113,16 @@ Notes: Three legitimately interesting fixes this cycle. The phantom/specter seq_
 Build: passed (cargo check + clippy -D warnings clean on red-cell-cli; only Rust change in range was the BuildWait flag rename). Python autotest unit tests 8/8 PASS.
 
 Notes: All work in range was Claude responding to the first real `--loop autotest` run on 2026-04-26. The end-to-end pattern (autotest exposes failure → file bead → fix in next session) is working: the BuildWait panic was caught, scoped, and fixed cleanly within one session, and the rate-limit cascade was addressed with both an inline profile bump (immediate unblock) and a proper Retry-After backoff (durable fix) — exactly the right mix of expedient + correct. The retry-after regex `r"retry after Some\((\d+)\)"` is brittle to upstream CLI message changes but degrades gracefully to a 60s default; not bug-worthy. No real bugs to file this cycle.
+
+### QA Review — 2026-04-27 21:31 — 52266895..d16ae55d
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 1 | Closed `red-cell-c2-9c96p` and `red-cell-c2-db6yd`. Filed `red-cell-c2-x835o` for a Phantom regression in `agent/phantom/src/agent/job_queue.rs` that drains ECDH callbacks, logs send failure, and drops task output on transient transport errors. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 1 | 0 | Closed `red-cell-c2-z85a3` with a clean Specter Windows GNU cross-build and clippy fix. |
+
+Build: passed (`cargo check --workspace`; `cargo nextest run --workspace` 6077/6077; `cargo clippy --workspace -- -D warnings`).
 
 
 

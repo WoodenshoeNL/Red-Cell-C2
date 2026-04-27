@@ -410,11 +410,7 @@ pub(super) async fn get_agent(
         .await
         .ok_or(crate::TeamserverError::AgentNotFound { agent_id })?;
     authorize_agent_access(&state, &identity.key_id, agent_id).await?;
-    let listener = state
-        .agent_registry
-        .listener_name(agent_id)
-        .await
-        .unwrap_or_default();
+    let listener = state.agent_registry.listener_name(agent_id).await.unwrap_or_default();
     Ok(Json(ApiAgentInfo::from_record_with_listener(&agent, listener)))
 }
 

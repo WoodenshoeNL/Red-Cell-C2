@@ -29,7 +29,7 @@ use super::{current_token_handle, enable_privilege, query_token_user};
 // ─── NT syscall declarations ─────────────────────────────────────────────
 
 #[link(name = "ntdll")]
-extern "system" {
+unsafe extern "system" {
     fn NtQuerySystemInformation(
         system_information_class: i32,
         system_information: *mut core::ffi::c_void,

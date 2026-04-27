@@ -1,5 +1,11 @@
 use super::*;
 
+/// `disabled_for_tests` uses empty `DemonConfig` defaults, so the merge step does
+/// not fill `Sleep` / `Jitter`.  Phantom and Specter builds run `demon_config_for_rust_agent_build`
+/// before the source-tree check; the request must include these keys or the build
+/// fails with `InvalidRequest` first.
+const MIN_RUST_AGENT_BUILD_CONFIG: &str = r#"{"Sleep":"5","Jitter":"0"}"#;
+
 #[tokio::test]
 async fn build_payload_archon_rejects_missing_source_tree() -> Result<(), Box<dyn std::error::Error>>
 {
@@ -58,7 +64,7 @@ async fn build_payload_phantom_rejects_missing_source_tree()
         listener: "http".to_owned(),
         arch: "x64".to_owned(),
         format: "Linux ELF".to_owned(),
-        config: "{}".to_owned(),
+        config: MIN_RUST_AGENT_BUILD_CONFIG.to_owned(),
     };
     let listener = ListenerConfig::Http(Box::new(HttpListenerConfig {
         name: "http".to_owned(),
@@ -107,7 +113,7 @@ async fn build_payload_specter_rejects_missing_source_tree()
         listener: "http".to_owned(),
         arch: "x64".to_owned(),
         format: "Windows Exe".to_owned(),
-        config: "{}".to_owned(),
+        config: MIN_RUST_AGENT_BUILD_CONFIG.to_owned(),
     };
     let listener = ListenerConfig::Http(Box::new(HttpListenerConfig {
         name: "http".to_owned(),

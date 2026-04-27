@@ -1,5 +1,10 @@
 //! Specter library surface for tests and alternate entrypoints.
 
+// Rust 2024: the body of `unsafe fn` is not an implicit `unsafe` block; Win32/NT
+// FFI call sites are therefore dense. Nesting a redundant `unsafe { }` around
+// every syscall in every `unsafe fn` would add no safety signal; allow here.
+#![allow(unsafe_op_in_unsafe_fn)]
+
 pub mod agent;
 pub mod beacon_api;
 pub mod bof_context;

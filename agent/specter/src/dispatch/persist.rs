@@ -282,13 +282,13 @@ fn persist_paths() -> Result<PersistPaths, String> {
         let powershell_profile = PathBuf::from(&userprofile)
             .join("Documents\\WindowsPowerShell\\Microsoft.PowerShell_profile.ps1");
 
-        return Ok(PersistPaths {
+        Ok(PersistPaths {
             registry_run_value: PathBuf::from(format!(
                 "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\{SPECTER_RUN_VALUE_NAME}"
             )),
             startup_script,
             powershell_profile,
-        });
+        })
     }
 
     #[cfg(not(windows))]

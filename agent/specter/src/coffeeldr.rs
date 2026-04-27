@@ -55,7 +55,6 @@ pub fn coffee_execute(
 
     const IMAGE_SCN_CNT_CODE: u32 = 0x0000_0020;
     const IMAGE_SCN_MEM_EXECUTE: u32 = 0x2000_0000;
-    const IMAGE_SCN_MEM_READ: u32 = 0x4000_0000;
     const IMAGE_SCN_MEM_WRITE: u32 = 0x8000_0000;
 
     const COFF_HEADER_SIZE: usize = 20;
@@ -103,10 +102,6 @@ pub fn coffee_execute(
 
     fn read_u32_le(data: &[u8], offset: usize) -> u32 {
         u32::from_le_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]])
-    }
-
-    fn read_i32_le(data: &[u8], offset: usize) -> i32 {
-        i32::from_le_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]])
     }
 
     // ── Parse COFF header ───────────────────────────────────────────────
@@ -310,10 +305,8 @@ pub fn coffee_execute(
         symbol_values.push(address);
 
         // Skip aux symbols
-        for _ in 0..aux_count {
-            sym_idx += 1;
-            symbol_values.push(0);
-        }
+        symbol_values.extend(std::iter::repeat_n(0u64, aux_count as usize));
+        sym_idx = sym_idx.saturating_add(aux_count as usize);
         sym_idx += 1;
     }
 
@@ -352,8 +345,8 @@ pub fn coffee_execute(
                 let slot_addr = unsafe { fun_map.as_ptr().add(slot_index) } as u64;
                 resolved_imports.insert(sym_idx_key, slot_addr);
             }
-        } else if sym_name.starts_with("__imp_") {
-            let import_name = &sym_name[6..]; // strip __imp_
+        } else if let Some(import_name) = sym_name.strip_prefix("__imp_") {
+            // strip __imp_
             if let Some(dollar_pos) = import_name.find('$') {
                 let dll_name = &import_name[..dollar_pos];
                 let func_name = &import_name[dollar_pos + 1..];
@@ -377,7 +370,7 @@ pub fn coffee_execute(
                 };
                 if let Some(addr) = proc {
                     let slot_index = fun_map.len();
-                    fun_map.push(addr as u64);
+                    fun_map.push(addr as usize as u64);
                     let slot_addr = unsafe { fun_map.as_ptr().add(slot_index) } as u64;
                     resolved_imports.insert(sym_idx_key, slot_addr);
                 } else {
@@ -401,7 +394,7 @@ pub fn coffee_execute(
                     };
                     if let Some(addr) = proc {
                         let slot_index = fun_map.len();
-                        fun_map.push(addr as u64);
+                        fun_map.push(addr as usize as u64);
                         let slot_addr = unsafe { fun_map.as_ptr().add(slot_index) } as u64;
                         resolved_imports.insert(sym_idx_key, slot_addr);
                         break;

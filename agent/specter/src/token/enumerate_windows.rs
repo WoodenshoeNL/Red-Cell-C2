@@ -9,7 +9,7 @@ use std::mem;
 use std::ptr;
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, FALSE, GetLastError, HANDLE, STATUS_INFO_LENGTH_MISMATCH, STATUS_SUCCESS, TRUE,
+    CloseHandle, FALSE, HANDLE, STATUS_INFO_LENGTH_MISMATCH, STATUS_SUCCESS, TRUE,
 };
 use windows_sys::Win32::Security::{
     GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, ImpersonateLoggedOnUser,

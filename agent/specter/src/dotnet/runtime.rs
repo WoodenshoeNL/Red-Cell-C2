@@ -4,7 +4,7 @@
 //! `pub(super)` — callers outside the `dotnet` module use the public API in
 //! `mod.rs`.
 
-#![allow(unsafe_code)]
+#![allow(unsafe_code, clippy::missing_transmute_annotations)]
 
 use std::ffi::c_void;
 use tracing::{debug, error};

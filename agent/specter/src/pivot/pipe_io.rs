@@ -40,7 +40,7 @@ mod native {
 
         // Ensure NUL-terminated for CreateFileW.
         let mut wide_nul = wide.clone();
-        if !wide_nul.last().is_some_and(|&c| c == 0) {
+        if wide_nul.last().is_none_or(|&c| c != 0) {
             wide_nul.push(0);
         }
 

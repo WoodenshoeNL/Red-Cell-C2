@@ -177,7 +177,7 @@ pub fn find_jmp_rbx_gadget(bytes: &[u8]) -> Option<usize> {
 //       jmp  [rcx+8]      — jump to real return address
 
 #[cfg(all(windows, target_arch = "x86_64"))]
-#[allow(unsafe_code)]
+#[allow(unsafe_code, bad_asm_style)] // `global_asm!` uses Intel/ATT directive strings
 mod spoof_asm {
     std::arch::global_asm!(
         ".intel_syntax noprefix",
@@ -240,6 +240,7 @@ mod imp {
     /// `params` must be a valid, writable [`SpoofParams`] on the caller's stack
     /// with `trampoline` pre-filled with `gadget_addr` and `real_return` set to
     /// the address of the actual target function.
+    #[allow(clippy::too_many_arguments)]
     pub unsafe fn call_spoofed(
         params: &mut SpoofParams,
         arg1: usize,

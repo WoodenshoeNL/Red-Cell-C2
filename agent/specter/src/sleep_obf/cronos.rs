@@ -23,7 +23,7 @@ use windows_sys::Win32::System::Memory::{
 use windows_sys::Win32::System::SystemServices::{IMAGE_DOS_HEADER, PROCESS_HEAP_ENTRY_BUSY};
 use windows_sys::Win32::System::Threading::{
     CreateEventW, CreateTimerQueue, CreateTimerQueueTimer, DeleteTimerQueueEx, SetEvent,
-    WAITORTIMERCALLBACK, WT_EXECUTEINTIMERTHREAD, WT_EXECUTEONLYONCE, WaitForSingleObject,
+    WT_EXECUTEINTIMERTHREAD, WT_EXECUTEONLYONCE, WaitForSingleObject,
 };
 
 /// `MZ` magic bytes — marks a valid DOS stub.

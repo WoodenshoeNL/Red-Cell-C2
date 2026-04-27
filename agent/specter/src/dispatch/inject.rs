@@ -450,7 +450,10 @@ mod inject_native {
             process,
             core::ptr::null(),
             0,
-            Some(core::mem::transmute(base)),
+            Some(core::mem::transmute::<
+                *mut core::ffi::c_void,
+                unsafe extern "system" fn(*mut std::ffi::c_void) -> u32,
+            >(base)),
             core::ptr::null(),
             0,
             core::ptr::null_mut(),
@@ -619,7 +622,10 @@ mod inject_native {
             process,
             core::ptr::null(),
             0,
-            Some(core::mem::transmute(base)),
+            Some(core::mem::transmute::<
+                *mut core::ffi::c_void,
+                unsafe extern "system" fn(*mut std::ffi::c_void) -> u32,
+            >(base)),
             param_addr,
             0,
             core::ptr::null_mut(),

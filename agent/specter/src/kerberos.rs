@@ -94,7 +94,6 @@ pub mod native {
         CloseHandle, FALSE, GetLastError, HANDLE, LUID, NTSTATUS, TRUE,
     };
     use windows_sys::Win32::Security::Authentication::Identity::{
-        KERB_EXTERNAL_NAME, KERB_EXTERNAL_TICKET, KERB_PROTOCOL_MESSAGE_TYPE,
         KERB_PURGE_TKT_CACHE_REQUEST, KERB_QUERY_TKT_CACHE_EX_RESPONSE,
         KERB_QUERY_TKT_CACHE_REQUEST, KERB_RETRIEVE_TKT_REQUEST, KERB_RETRIEVE_TKT_RESPONSE,
         KERB_SUBMIT_TKT_REQUEST, KERB_TICKET_CACHE_INFO_EX, KerbPurgeTicketCacheMessage,
@@ -294,9 +293,9 @@ pub mod native {
         let mut handle: HANDLE = core::ptr::null_mut();
 
         // Try privileged first.
-        let mut name = lsa_string(b"RedCell");
+        let name = lsa_string(b"RedCell");
         let mut mode: u32 = 0;
-        let status = unsafe { LsaRegisterLogonProcess(&mut name, &mut handle, &mut mode) };
+        let status = unsafe { LsaRegisterLogonProcess(&name, &mut handle, &mut mode) };
         if status == 0 {
             return Ok(handle);
         }
@@ -312,10 +311,9 @@ pub mod native {
 
     /// Look up the Kerberos authentication package.
     fn lookup_kerberos_package(lsa_handle: HANDLE) -> Result<u32, u32> {
-        let mut name = lsa_string(KERBEROS_PACKAGE);
+        let name = lsa_string(KERBEROS_PACKAGE);
         let mut package_id: u32 = 0;
-        let status =
-            unsafe { LsaLookupAuthenticationPackage(lsa_handle, &mut name, &mut package_id) };
+        let status = unsafe { LsaLookupAuthenticationPackage(lsa_handle, &name, &mut package_id) };
         if status != 0 {
             return Err(lsa_ntstatus_to_win32(status));
         }

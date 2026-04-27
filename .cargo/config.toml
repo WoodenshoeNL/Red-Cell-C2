@@ -12,12 +12,18 @@
 # To use a custom Python, set PYO3_PYTHON=/path/to/python3 instead.
 
 [build]
-rustflags = ["-L", ".python-lib", "-C", "link-arg=-Wl,--threads=2"]
+rustflags = ["-L", ".python-lib"]
 # Cap parallelism to prevent systemd-oomd from killing the terminal scope.
 # Full-parallelism cargo builds on this 8-core/16GB machine push user-slice
 # memory pressure past the 50% oomd threshold for >20s.  4 jobs keeps builds
 # reasonably fast while keeping peak RSS well below the kill threshold.
 jobs = 4
+
+# Parallel GNU ld (native Linux) only. mingw's `ld` used for Specter
+# `x86_64-pc-windows-gnu` does not support `--threads=2` and would fail
+# the link step.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-Wl,--threads=2"]
 
 # Specter cross-compile: x86_64 Windows from Linux.
 # Requires: sudo apt-get install mingw-w64

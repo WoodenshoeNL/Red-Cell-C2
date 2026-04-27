@@ -17,6 +17,7 @@
 //! | `appdomain` | AppDomain creation, assembly load, entry-point invocation |
 //! | `assembly` | Pipe I/O, arg parsing, top-level `execute` driver |
 
+#[cfg(not(windows))]
 use tracing::warn;
 
 #[cfg(windows)]

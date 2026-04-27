@@ -178,9 +178,9 @@ mod imp {
     /// Returns `None` if any GDI call fails.
     pub fn capture_screenshot() -> Option<Vec<u8>> {
         use windows_sys::Win32::Graphics::Gdi::{
-            BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleDC,
-            CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetCurrentObject, GetDC,
-            GetObjectW, OBJ_BITMAP, ReleaseDC, SRCCOPY, SelectObject,
+            BI_RGB, BITMAP, BITMAPINFO, BitBlt, CreateCompatibleDC, CreateDIBSection,
+            DIB_RGB_COLORS, DeleteDC, DeleteObject, GetCurrentObject, GetDC, GetObjectW,
+            OBJ_BITMAP, ReleaseDC, SRCCOPY, SelectObject,
         };
         use windows_sys::Win32::UI::WindowsAndMessaging::{
             GetSystemMetrics, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
@@ -289,7 +289,7 @@ mod imp {
                 bmp.extend_from_slice(&height.to_le_bytes());
                 bmp.extend_from_slice(&1u16.to_le_bytes()); // biPlanes
                 bmp.extend_from_slice(&24u16.to_le_bytes()); // biBitCount
-                bmp.extend_from_slice(&(BI_RGB as u32).to_le_bytes());
+                bmp.extend_from_slice(&BI_RGB.to_le_bytes());
                 #[allow(clippy::cast_possible_truncation)]
                 let image_size = pixel_bytes as u32;
                 bmp.extend_from_slice(&image_size.to_le_bytes()); // biSizeImage

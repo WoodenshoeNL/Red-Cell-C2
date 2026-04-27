@@ -4,6 +4,8 @@
 //! indirect syscall engine: locating ntdll, extracting SSNs, and providing
 //! the `sys_set_config` / `sys_invoke` assembly pair used by every NT wrapper.
 
+#![allow(bad_asm_style)] // `global_asm!` uses Intel/ATT directive strings by design
+
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleA;
 
 use super::{SyscallEntry, SyscallError, SyscallTable};
@@ -40,6 +42,8 @@ unsafe extern "C" {
     pub(crate) fn sys_set_config(config: *const SyscallEntry);
 }
 
+// One assembly entry `sys_invoke`; Rust signatures only reflect arity for callers.
+#[allow(clashing_extern_declarations)]
 unsafe extern "C" {
     #[link_name = "sys_invoke"]
     pub(crate) fn sys_invoke_4(a: usize, b: usize, c: usize, d: usize) -> i32;
@@ -51,6 +55,7 @@ unsafe extern "C" {
     pub(crate) fn sys_invoke_6(a: usize, b: usize, c: usize, d: usize, e: usize, f: usize) -> i32;
 
     #[link_name = "sys_invoke"]
+    #[allow(dead_code)]
     pub(crate) fn sys_invoke_7(
         a: usize,
         b: usize,
@@ -106,7 +111,7 @@ const NEIGHBOUR_LIMIT: u32 = 500;
 /// `Err(SyscallError::NtdllNotFound)`.
 pub(crate) fn ntdll_base() -> Result<*const u8, SyscallError> {
     // SAFETY: "ntdll.dll\0" is a valid null-terminated ASCII string.
-    let handle = unsafe { GetModuleHandleA(b"ntdll.dll\0".as_ptr()) };
+    let handle = unsafe { GetModuleHandleA(c"ntdll.dll".as_ptr().cast()) };
     if handle.is_null() { Err(SyscallError::NtdllNotFound) } else { Ok(handle as *const u8) }
 }
 
@@ -230,7 +235,7 @@ pub(crate) fn stub_size(base: *const u8) -> usize {
                 return;
             }
             if name.starts_with(b"Nt") && rva != 0 {
-                let fptr = base.add(rva as usize) as *const u8;
+                let fptr = base.add(rva as usize);
                 if extract_ssn(fptr).is_some() {
                     found[count] = fptr as u64;
                     count += 1;
@@ -375,7 +380,7 @@ unsafe fn find_indirect_syscall_addr(base: *const u8) -> Option<u64> {
                 return;
             }
             if name == b"NtAddBootEntry" {
-                let fptr = base.add(rva as usize) as *const u8;
+                let fptr = base.add(rva as usize);
                 indirect = find_syscall_instruction(fptr);
             }
         });
@@ -386,7 +391,7 @@ unsafe fn find_indirect_syscall_addr(base: *const u8) -> Option<u64> {
                     return;
                 }
                 if name.starts_with(b"Nt") && rva != 0 {
-                    let fptr = base.add(rva as usize) as *const u8;
+                    let fptr = base.add(rva as usize);
                     if let Some(addr) = find_syscall_instruction(fptr) {
                         indirect = Some(addr);
                     }
@@ -400,6 +405,7 @@ unsafe fn find_indirect_syscall_addr(base: *const u8) -> Option<u64> {
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 /// `NTSTATUS` not-supported sentinel for when the table is not initialised.
+#[allow(dead_code)]
 pub(crate) const STATUS_NOT_SUPPORTED: i32 = 0xC00000BBu32 as i32;
 
 /// Return `Some(entry)` if the entry has been resolved, otherwise `None`.

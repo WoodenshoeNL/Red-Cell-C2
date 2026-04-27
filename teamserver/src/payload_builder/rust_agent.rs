@@ -37,6 +37,7 @@ impl PayloadBuilderService {
         target_triple: &str,
         file_extension: &'static str,
         listener_pub_key: Option<[u8; 32]>,
+        demon: &DemonConfig,
         progress: &mut F,
     ) -> Result<PayloadArtifact, PayloadBuildError>
     where
@@ -67,13 +68,8 @@ impl PayloadBuilderService {
             _ => None,
         };
 
-        let env_vars = rust_agent_env_vars(
-            listener,
-            &env_prefix,
-            &self.inner.default_demon,
-            listener_pub_key,
-            pinned_cert_pem,
-        )?;
+        let env_vars =
+            rust_agent_env_vars(listener, &env_prefix, demon, listener_pub_key, pinned_cert_pem)?;
 
         // Compute a cache key covering the agent type, target, and listener config.
         let cache_input =
@@ -213,14 +209,8 @@ impl PayloadBuilderService {
         } else {
             file_extension.trim_start_matches('.')
         };
-        let manifest = build_manifest(
-            listener,
-            &agent_type_pascal,
-            "x64",
-            format_label,
-            &self.inner.default_demon,
-            None,
-        );
+        let manifest =
+            build_manifest(listener, &agent_type_pascal, "x64", format_label, demon, None);
         append_manifest(&mut bytes, &manifest)?;
 
         progress(BuildProgress {

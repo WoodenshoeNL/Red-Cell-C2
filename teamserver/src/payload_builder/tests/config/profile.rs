@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::payload_builder::demon_config::demon_config_for_rust_agent_build;
+
 // ── merged_request_config profile default tests ──────────────────────
 
 #[test]
@@ -356,6 +358,39 @@ fn merged_request_config_injection_spawn_overrides_profile()
     )?;
     assert_eq!(config["Injection"]["Spawn64"], Value::String("custom64.exe".to_owned()));
     assert_eq!(config["Injection"]["Spawn32"], Value::String("custom32.exe".to_owned()));
+    Ok(())
+}
+
+/// Regression: API payload `sleep` is JSON `{"Sleep":N}` (number), same as
+/// `demon_config_for_rust_agent_build` must use merged request — not profile
+/// `default_demon` alone (red-cell-c2-0h0et).
+#[test]
+fn demon_config_for_rust_agent_build_applies_numeric_sleep_from_api()
+-> Result<(), Box<dyn std::error::Error>> {
+    let defaults = DemonConfig {
+        sleep: Some(1),
+        jitter: Some(0),
+        indirect_syscall: false,
+        stack_duplication: false,
+        sleep_technique: None,
+        proxy_loading: None,
+        amsi_etw_patching: None,
+        injection: None,
+        dotnet_name_pipe: None,
+        binary: None,
+        init_secret: None,
+        init_secrets: Vec::new(),
+        trust_x_forwarded_for: false,
+        trusted_proxy_peers: Vec::new(),
+        heap_enc: true,
+        allow_legacy_ctr: false,
+        job_execution: JobExecutionMode::Thread,
+        stomp_dll: None,
+    };
+    let merged = merged_request_config(r#"{"Sleep":10}"#, "phantom", &defaults)?;
+    let demon = demon_config_for_rust_agent_build(&merged, &defaults)?;
+    assert_eq!(demon.sleep, Some(10));
+    assert_eq!(demon.jitter, Some(0));
     Ok(())
 }
 

@@ -15,7 +15,7 @@ mod toolchain;
 pub use cache::PayloadCache;
 use cache::compute_cache_key;
 pub use compiler::parse_compiler_diagnostic;
-use demon_config::{merged_request_config, pack_config};
+use demon_config::{demon_config_for_rust_agent_build, merged_request_config, pack_config};
 use formats::{Architecture, OutputFormat};
 pub use toolchain::ToolchainVersion;
 use toolchain::{
@@ -299,6 +299,9 @@ impl PayloadBuilderService {
         // Route them to the dedicated Rust-agent builder and return early.
         match agent_type {
             "Phantom" => {
+                let merged =
+                    merged_request_config(&request.config, "phantom", &self.inner.default_demon)?;
+                let demon = demon_config_for_rust_agent_build(&merged, &self.inner.default_demon)?;
                 return self
                     .build_rust_agent(
                         listener,
@@ -307,11 +310,15 @@ impl PayloadBuilderService {
                         "x86_64-unknown-linux-gnu",
                         "",
                         ecdh_pub_key,
+                        &demon,
                         &mut progress,
                     )
                     .await;
             }
             "Specter" => {
+                let merged =
+                    merged_request_config(&request.config, "specter", &self.inner.default_demon)?;
+                let demon = demon_config_for_rust_agent_build(&merged, &self.inner.default_demon)?;
                 return self
                     .build_rust_agent(
                         listener,
@@ -320,6 +327,7 @@ impl PayloadBuilderService {
                         "x86_64-pc-windows-gnu",
                         ".exe",
                         ecdh_pub_key,
+                        &demon,
                         &mut progress,
                     )
                     .await;

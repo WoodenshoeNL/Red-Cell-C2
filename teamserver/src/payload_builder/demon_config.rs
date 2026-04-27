@@ -95,6 +95,29 @@ pub(crate) fn merged_request_config(
     Ok(config)
 }
 
+/// Build a [`DemonConfig`] for Phantom / Specter compilation from the merged
+/// operator JSON + profile defaults.
+///
+/// Phantom/Specter return early from `build_payload` and do not run [`pack_config`],
+/// but they must still honor the merged `Sleep` / `Jitter` (including API
+/// `payload build --sleep`) for `rust_agent_env_vars` and the payload manifest.
+pub(crate) fn demon_config_for_rust_agent_build(
+    merged: &Map<String, Value>,
+    defaults: &DemonConfig,
+) -> Result<DemonConfig, PayloadBuildError> {
+    let sleep = u64::from(required_u32(merged, "Sleep")?);
+    let jitter = required_u32(merged, "Jitter")?;
+    if jitter > 100 {
+        return Err(PayloadBuildError::InvalidRequest {
+            message: "Jitter has to be between 0 and 100".to_owned(),
+        });
+    }
+    let mut demon = defaults.clone();
+    demon.sleep = Some(sleep);
+    demon.jitter = Some(jitter as u8);
+    Ok(demon)
+}
+
 fn insert_default_string(config: &mut Map<String, Value>, key: &str, value: Option<String>) {
     if !config.contains_key(key) {
         if let Some(value) = value {

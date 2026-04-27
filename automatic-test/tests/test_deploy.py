@@ -553,6 +553,25 @@ class TestDeployErrorPaths(unittest.TestCase):
         self.assertIn("C:\\Temp\\rc-test\\agent.exe", remote_cmd)
         self.assertNotIn("Start-Process", remote_cmd)
 
+    def test_execute_background_windows_quotes_paths_with_spaces(self) -> None:
+        """Paths with spaces must be double-quoted for CreateProcess."""
+        ok = self._completed(0)
+        t = _make_target(work_dir="C:\\Program Files\\rc", key=self.key_path)
+        with patch("subprocess.run", return_value=ok) as m:
+            execute_background(t, "C:\\Program Files\\rc\\agent.exe")
+        remote_cmd = m.call_args[0][0][-1]
+        self.assertIn("Invoke-WmiMethod", remote_cmd)
+        self.assertIn('"C:\\Program Files\\rc\\agent.exe"', remote_cmd)
+
+    def test_execute_background_windows_escapes_single_quotes(self) -> None:
+        """Single quotes in the command must be doubled for PS single-quote string."""
+        ok = self._completed(0)
+        t = _make_target(work_dir="C:\\Temp", key=self.key_path)
+        with patch("subprocess.run", return_value=ok) as m:
+            execute_background(t, "C:\\it's here\\agent.exe")
+        remote_cmd = m.call_args[0][0][-1]
+        self.assertIn("it''s here", remote_cmd)
+
 
 class TestInjectHostsEntry(unittest.TestCase):
     """Tests for inject_hosts_entry — idempotent /etc/hosts injection via SSH."""

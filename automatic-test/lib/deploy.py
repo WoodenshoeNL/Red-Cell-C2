@@ -449,11 +449,12 @@ def execute_background(target: TargetConfig, command: str) -> None:
     not use job objects.
     """
     if target.work_dir.startswith("C:\\") or "\\" in target.work_dir:
-        escaped = command.replace("'", "''")
+        quoted_cmd = f'"{command}"'
+        ps_arg = _quote_powershell(quoted_cmd)
         bg_cmd = (
             f"powershell -Command \""
             f"Invoke-WmiMethod -Class Win32_Process -Name Create "
-            f"-ArgumentList '{escaped}'\""
+            f"-ArgumentList {ps_arg}\""
         )
     else:
         quoted = _quote_posix(command)

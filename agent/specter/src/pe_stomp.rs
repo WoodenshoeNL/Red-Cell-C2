@@ -98,7 +98,7 @@ mod imp {
         unsafe {
             // ── Locate the module image ───────────────────────────────────
             let hmodule = GetModuleHandleW(std::ptr::null());
-            if hmodule == 0 {
+            if hmodule.is_null() {
                 return Err(StompError::GetModuleHandle);
             }
             let base = hmodule as *mut u8;

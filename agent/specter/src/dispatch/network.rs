@@ -504,7 +504,7 @@ fn platform_servers_by_type(domain: &str, server_type: u32) -> Vec<String> {
                         }
                         std::slice::from_raw_parts(entry.sv101_name, len)
                     };
-                    names.push(String::from_utf16_lossy(name).into_owned());
+                    names.push(String::from_utf16_lossy(name));
                 }
             }
         }

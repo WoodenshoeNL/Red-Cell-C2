@@ -3,6 +3,7 @@
 // ── Windows NT wrappers ───────────────────────────────────────────────────────
 
 #[cfg(all(windows, target_arch = "x86_64"))]
+#[allow(unsafe_code)]
 mod windows_impl {
     use std::ffi::c_void;
 

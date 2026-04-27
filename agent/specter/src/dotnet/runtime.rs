@@ -210,11 +210,11 @@ pub(super) struct ClrSession {
     pub(super) method_args: *mut c_void,
 
     // Pipe handles
-    pub(super) pipe_read: isize,
-    pub(super) pipe_write: isize,
+    pub(super) pipe_read: *mut c_void,
+    pub(super) pipe_write: *mut c_void,
 
     // Stdout redirection state
-    pub(super) original_stdout: isize,
+    pub(super) original_stdout: *mut c_void,
     pub(super) stdout_redirected: bool,
 }
 
@@ -231,9 +231,9 @@ impl ClrSession {
             method_info: std::ptr::null_mut(),
             safe_array: std::ptr::null_mut(),
             method_args: std::ptr::null_mut(),
-            pipe_read: 0,
-            pipe_write: 0,
-            original_stdout: 0,
+            pipe_read: std::ptr::null_mut(),
+            pipe_write: std::ptr::null_mut(),
+            original_stdout: std::ptr::null_mut(),
             stdout_redirected: false,
         }
     }
@@ -297,12 +297,12 @@ impl Drop for ClrSession {
         }
 
         // Close pipe handles.
-        if self.pipe_write != 0 {
+        if !self.pipe_write.is_null() {
             unsafe {
                 windows_sys::Win32::Foundation::CloseHandle(self.pipe_write);
             }
         }
-        if self.pipe_read != 0 {
+        if !self.pipe_read.is_null() {
             unsafe {
                 windows_sys::Win32::Foundation::CloseHandle(self.pipe_read);
             }
@@ -332,7 +332,7 @@ pub(super) unsafe fn release_if_nonnull(ptr: *mut c_void) {
 /// `module` must be a valid `HMODULE` and `name` must be a null-terminated
 /// ASCII byte slice.
 pub(super) unsafe fn get_proc(
-    module: isize,
+    module: *mut c_void,
     name: &[u8], // must be null-terminated
 ) -> Result<*const c_void, String> {
     // SAFETY: module is a valid HMODULE from LoadLibraryA and name is
@@ -352,10 +352,10 @@ pub(super) unsafe fn get_proc(
 /// # Safety
 ///
 /// `name` must be a null-terminated ASCII byte slice.
-pub(super) unsafe fn load_library(name: &[u8]) -> Result<isize, String> {
+pub(super) unsafe fn load_library(name: &[u8]) -> Result<*mut c_void, String> {
     // SAFETY: name is a valid null-terminated ASCII string.
     let h = windows_sys::Win32::System::LibraryLoader::LoadLibraryA(name.as_ptr());
-    if h == 0 {
+    if h.is_null() {
         Err(format!(
             "LoadLibraryA failed for {}",
             String::from_utf8_lossy(&name[..name.len().saturating_sub(1)])
@@ -395,10 +395,10 @@ pub(super) unsafe fn load_oleaut32() -> Result<OleAutApi, String> {
 /// Calls Win32 console functions; safe in a normal agent process context.
 pub(super) unsafe fn ensure_console() {
     let wnd = windows_sys::Win32::System::Console::GetConsoleWindow();
-    if wnd == 0 {
+    if wnd.is_null() {
         windows_sys::Win32::System::Console::AllocConsole();
         let wnd = windows_sys::Win32::System::Console::GetConsoleWindow();
-        if wnd != 0 {
+        if !wnd.is_null() {
             // SW_HIDE = 0
             windows_sys::Win32::UI::WindowsAndMessaging::ShowWindow(wnd, 0);
         }
@@ -416,7 +416,7 @@ pub(super) fn enumerate_clr_versions_impl() -> Vec<String> {
     // Check for .NET Framework 4.x via registry
     // HKLM\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full
     let subkey = b"SOFTWARE\\Microsoft\\NET Framework Setup\\NDP\\v4\\Full\0";
-    let mut hkey: isize = 0;
+    let mut hkey: *mut c_void = std::ptr::null_mut();
 
     // SAFETY: calling RegOpenKeyExA to read registry.
     let status = unsafe {
@@ -464,7 +464,7 @@ pub(super) fn enumerate_clr_versions_impl() -> Vec<String> {
 
     // Check for .NET 3.5
     let subkey_35 = b"SOFTWARE\\Microsoft\\NET Framework Setup\\NDP\\v3.5\0";
-    let mut hkey_35: isize = 0;
+    let mut hkey_35: *mut c_void = std::ptr::null_mut();
     let status_35 = unsafe {
         windows_sys::Win32::System::Registry::RegOpenKeyExA(
             windows_sys::Win32::System::Registry::HKEY_LOCAL_MACHINE,
@@ -483,7 +483,7 @@ pub(super) fn enumerate_clr_versions_impl() -> Vec<String> {
 
     // Check for .NET 2.0
     let subkey_20 = b"SOFTWARE\\Microsoft\\NET Framework Setup\\NDP\\v2.0.50727\0";
-    let mut hkey_20: isize = 0;
+    let mut hkey_20: *mut c_void = std::ptr::null_mut();
     let status_20 = unsafe {
         windows_sys::Win32::System::Registry::RegOpenKeyExA(
             windows_sys::Win32::System::Registry::HKEY_LOCAL_MACHINE,

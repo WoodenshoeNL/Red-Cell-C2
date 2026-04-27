@@ -364,7 +364,7 @@ pub fn coffee_execute(
                 let module = unsafe {
                     windows_sys::Win32::System::LibraryLoader::LoadLibraryA(dll_cstr.as_ptr())
                 };
-                if module == 0 {
+                if module.is_null() {
                     missing_symbols.push(sym_name.clone());
                     continue;
                 }
@@ -389,7 +389,7 @@ pub fn coffee_execute(
                     let module = unsafe {
                         windows_sys::Win32::System::LibraryLoader::GetModuleHandleA(dll.as_ptr())
                     };
-                    if module == 0 {
+                    if module.is_null() {
                         continue;
                     }
                     let func_cstr = format!("{import_name}\0");
@@ -726,7 +726,7 @@ pub fn coffee_execute_threaded(
     output_queue: BofOutputQueue,
     request_id: u32,
     spawn_ctx: BofContext,
-) -> Option<isize> {
+) -> Option<*mut core::ffi::c_void> {
     let args = Box::new(BofThreadArgs {
         function_name,
         object_data,
@@ -750,7 +750,7 @@ pub fn coffee_execute_threaded(
         )
     };
 
-    if handle == 0 {
+    if handle.is_null() {
         // CreateThread failed — reclaim to prevent a memory leak.
         // SAFETY: param still points to our Box<BofThreadArgs>, thread was not started.
         unsafe { drop(Box::from_raw(param.cast::<BofThreadArgs>())) };
@@ -771,7 +771,7 @@ pub fn coffee_execute_threaded(
     _output_queue: BofOutputQueue,
     _request_id: u32,
     _spawn_ctx: BofContext,
-) -> Option<isize> {
+) -> Option<*mut core::ffi::c_void> {
     warn!("Threaded BOF execution is only supported on Windows");
     None
 }

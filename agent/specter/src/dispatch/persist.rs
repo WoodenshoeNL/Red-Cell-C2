@@ -298,6 +298,7 @@ fn persist_paths() -> Result<PersistPaths, String> {
 }
 
 #[cfg(windows)]
+#[allow(unsafe_code)]
 fn persist_registry_run_key_impl(op: PhantomPersistOp, command: &str) -> Result<String, String> {
     use windows_sys::Win32::Foundation::ERROR_FILE_NOT_FOUND;
     use windows_sys::Win32::System::Registry::{
@@ -310,7 +311,7 @@ fn persist_registry_run_key_impl(op: PhantomPersistOp, command: &str) -> Result<
         "Software\\Microsoft\\Windows\\CurrentVersion\\Run\0".encode_utf16().collect();
     let value_name: Vec<u16> = format!("{SPECTER_RUN_VALUE_NAME}\0").encode_utf16().collect();
 
-    let mut key: HKEY = 0;
+    let mut key: HKEY = core::ptr::null_mut();
     let status = unsafe {
         RegCreateKeyExW(
             HKEY_CURRENT_USER,

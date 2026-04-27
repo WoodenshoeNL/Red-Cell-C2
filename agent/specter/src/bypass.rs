@@ -172,7 +172,7 @@ mod imp {
         // SAFETY: the string literal is null-terminated ASCII; LoadLibraryA
         // copies it internally.
         let amsi_mod = unsafe { LoadLibraryA(b"amsi.dll\0".as_ptr()) };
-        if amsi_mod == 0 {
+        if amsi_mod.is_null() {
             return Err(BypassError::GetModule("amsi.dll"));
         }
 
@@ -192,7 +192,7 @@ mod imp {
         // `ntdll.dll` is always mapped into every process.
         // SAFETY: "ntdll.dll\0" is null-terminated ASCII.
         let ntdll = unsafe { GetModuleHandleA(b"ntdll.dll\0".as_ptr()) };
-        if ntdll == 0 {
+        if ntdll.is_null() {
             return Err(BypassError::GetModule("ntdll.dll"));
         }
 

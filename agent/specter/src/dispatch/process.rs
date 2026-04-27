@@ -311,7 +311,7 @@ fn enum_processes() -> Vec<ProcessInfo> {
 
             let hproc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, entry.th32ProcessID);
             let mut is_wow: i32 = 0;
-            if hproc != 0 {
+            if !hproc.is_null() {
                 IsWow64Process(hproc, &mut is_wow);
                 CloseHandle(hproc);
             }
@@ -402,7 +402,7 @@ fn query_memory(pid: u32, protect_filter: u32) -> Vec<MemRegion> {
     // valid arguments; MEMORY_BASIC_INFORMATION is zeroed before use.
     unsafe {
         let hprocess = OpenProcess(PROCESS_ALL_ACCESS, 0, pid);
-        if hprocess == 0 {
+        if hprocess.is_null() {
             return result;
         }
         let mut offset: usize = 0;
@@ -449,7 +449,7 @@ fn kill_process(pid: u32) -> bool {
     // valid handle values; the handle is closed before return.
     unsafe {
         let hprocess = OpenProcess(PROCESS_TERMINATE, 0, pid);
-        if hprocess == 0 {
+        if hprocess.is_null() {
             return false;
         }
         let success = TerminateProcess(hprocess, 0) != 0;

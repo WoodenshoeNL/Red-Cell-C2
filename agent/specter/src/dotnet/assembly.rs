@@ -29,7 +29,7 @@ const PIPE_BUFFER: u32 = super::runtime::PIPE_BUFFER;
 /// # Safety
 ///
 /// `pipe_name` must be a valid named pipe path (e.g. `\\.\pipe\xyz`).
-unsafe fn create_pipe_pair(pipe_name: &str) -> Result<(isize, isize), String> {
+unsafe fn create_pipe_pair(pipe_name: &str) -> Result<(*mut c_void, *mut c_void), String> {
     let wide = to_wide(pipe_name);
 
     // SAFETY: CreateNamedPipeW with valid wide string and standard flags.
@@ -59,7 +59,7 @@ unsafe fn create_pipe_pair(pipe_name: &str) -> Result<(isize, isize), String> {
         std::ptr::null(),
         3,           // OPEN_EXISTING
         0x0000_0080, // FILE_ATTRIBUTE_NORMAL
-        0,
+        std::ptr::null_mut(),
     );
 
     if pipe_write == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
@@ -78,7 +78,7 @@ unsafe fn create_pipe_pair(pipe_name: &str) -> Result<(isize, isize), String> {
 /// # Safety
 ///
 /// `pipe_read` must be a valid readable pipe handle.
-unsafe fn read_pipe_output(pipe_read: isize) -> Vec<u8> {
+unsafe fn read_pipe_output(pipe_read: *mut c_void) -> Vec<u8> {
     let mut available: u32 = 0;
 
     // SAFETY: PeekNamedPipe with valid handle.

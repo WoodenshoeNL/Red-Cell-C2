@@ -38,7 +38,7 @@ pub struct Job {
     pub request_id: u32,
     /// Platform-native handle (HANDLE on Windows).
     #[cfg(windows)]
-    pub handle: isize,
+    pub handle: *mut core::ffi::c_void,
     /// Placeholder on non-Windows targets (not used).
     #[cfg(not(windows))]
     pub handle: u64,
@@ -71,7 +71,7 @@ impl JobStore {
     /// preserved so that `DEMON_COMMAND_JOB_DIED` can reference the
     /// originating task (see Havoc `Jobs.c:JobAdd`).
     #[cfg(windows)]
-    pub fn add(&mut self, job_type: u32, handle: isize, request_id: u32) -> u32 {
+    pub fn add(&mut self, job_type: u32, handle: *mut core::ffi::c_void, request_id: u32) -> u32 {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
         self.jobs
@@ -95,6 +95,7 @@ impl JobStore {
     }
 
     /// Suspend a running job.  Returns `true` on success.
+    #[allow(unsafe_code)]
     pub fn suspend(&mut self, job_id: u32) -> bool {
         let Some(job) = self.jobs.get_mut(&job_id) else { return false };
         if job.state != JOB_STATE_RUNNING {
@@ -116,6 +117,7 @@ impl JobStore {
     }
 
     /// Resume a suspended job.  Returns `true` on success.
+    #[allow(unsafe_code)]
     pub fn resume(&mut self, job_id: u32) -> bool {
         let Some(job) = self.jobs.get_mut(&job_id) else { return false };
         if job.state != JOB_STATE_SUSPENDED {
@@ -136,6 +138,7 @@ impl JobStore {
     }
 
     /// Kill and remove a job.  Returns `true` on success.
+    #[allow(unsafe_code)]
     pub fn kill(&mut self, job_id: u32) -> bool {
         let Some(job) = self.jobs.remove(&job_id) else { return false };
 
@@ -175,6 +178,7 @@ impl JobStore {
     /// `DEMON_COMMAND_JOB_DIED` (see `Jobs.c:102-119`).  Thread and plain
     /// process jobs are still marked dead and reaped, but do not generate
     /// teamserver notifications.
+    #[allow(unsafe_code)]
     pub fn poll(&mut self) -> Vec<(u32, u32)> {
         #[allow(unused_mut)]
         let mut tracked_dead = Vec::new();
@@ -219,7 +223,7 @@ impl JobStore {
                     unsafe {
                         windows_sys::Win32::Foundation::CloseHandle(job.handle);
                     };
-                    job.handle = 0;
+                    job.handle = core::ptr::null_mut();
 
                     // Only tracked-process jobs generate DIED notifications
                     // (Havoc Jobs.c:102-119).  Threads and plain processes are

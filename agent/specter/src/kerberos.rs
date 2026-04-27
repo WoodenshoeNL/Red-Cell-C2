@@ -91,7 +91,7 @@ pub mod native {
     use std::ptr;
 
     use windows_sys::Win32::Foundation::{
-        CloseHandle, FALSE, GetLastError, HANDLE, LUID, NTSTATUS, TRUE, UNICODE_STRING,
+        CloseHandle, FALSE, GetLastError, HANDLE, LUID, NTSTATUS, TRUE,
     };
     use windows_sys::Win32::Security::Authentication::Identity::{
         KERB_EXTERNAL_NAME, KERB_EXTERNAL_TICKET, KERB_PROTOCOL_MESSAGE_TYPE,
@@ -99,9 +99,10 @@ pub mod native {
         KERB_QUERY_TKT_CACHE_REQUEST, KERB_RETRIEVE_TKT_REQUEST, KERB_RETRIEVE_TKT_RESPONSE,
         KERB_SUBMIT_TKT_REQUEST, KERB_TICKET_CACHE_INFO_EX, KerbPurgeTicketCacheMessage,
         KerbQueryTicketCacheExMessage, KerbRetrieveEncodedTicketMessage, KerbSubmitTicketMessage,
-        LsaCallAuthenticationPackage, LsaConnectUntrusted, LsaDeregisterLogonProcess,
-        LsaEnumerateLogonSessions, LsaFreeReturnBuffer, LsaGetLogonSessionData,
-        LsaLookupAuthenticationPackage, LsaRegisterLogonProcess, SECURITY_LOGON_SESSION_DATA,
+        LSA_UNICODE_STRING, LsaCallAuthenticationPackage, LsaConnectUntrusted,
+        LsaDeregisterLogonProcess, LsaEnumerateLogonSessions, LsaFreeReturnBuffer,
+        LsaGetLogonSessionData, LsaLookupAuthenticationPackage, LsaRegisterLogonProcess,
+        SECURITY_LOGON_SESSION_DATA,
     };
     use windows_sys::Win32::Security::{
         GetTokenInformation, TOKEN_QUERY, TOKEN_STATISTICS, TokenStatistics,
@@ -290,7 +291,7 @@ pub mod native {
     /// Tries `LsaRegisterLogonProcess` (requires SeTcbPrivilege / SYSTEM).
     /// Falls back to `LsaConnectUntrusted` for unprivileged access.
     fn open_lsa_handle() -> Result<HANDLE, u32> {
-        let mut handle: HANDLE = 0;
+        let mut handle: HANDLE = core::ptr::null_mut();
 
         // Try privileged first.
         let mut name = lsa_string(b"RedCell");
@@ -505,7 +506,7 @@ pub mod native {
 
     /// Get a token handle for the current thread or process.
     fn current_token_handle() -> Result<HANDLE, u32> {
-        let mut handle: HANDLE = 0;
+        let mut handle: HANDLE = core::ptr::null_mut();
         unsafe {
             if OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &mut handle) != FALSE {
                 return Ok(handle);
@@ -517,8 +518,8 @@ pub mod native {
         Ok(handle)
     }
 
-    /// Convert a `UNICODE_STRING` to a Rust `String`.
-    fn unicode_string_to_string(us: &UNICODE_STRING) -> String {
+    /// Convert an `LSA_UNICODE_STRING` to a Rust `String`.
+    fn unicode_string_to_string(us: &LSA_UNICODE_STRING) -> String {
         if us.Buffer.is_null() || us.Length == 0 {
             return String::new();
         }

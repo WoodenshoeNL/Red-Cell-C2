@@ -135,7 +135,7 @@ mod imp {
         // to be closed. OpenProcessToken and GetTokenInformation are called with
         // correctly sized structs; the token handle is closed before return.
         unsafe {
-            let mut token = 0isize;
+            let mut token: *mut core::ffi::c_void = core::ptr::null_mut();
             if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
                 return false;
             }
@@ -199,14 +199,14 @@ mod imp {
             let x = GetSystemMetrics(SM_XVIRTUALSCREEN);
             let y = GetSystemMetrics(SM_YVIRTUALSCREEN);
 
-            let h_dc = GetDC(0);
-            if h_dc == 0 {
+            let h_dc = GetDC(core::ptr::null_mut());
+            if h_dc.is_null() {
                 return None;
             }
 
             let result = (|| -> Option<Vec<u8>> {
-                let h_temp = GetCurrentObject(h_dc, OBJ_BITMAP);
-                if h_temp == 0 {
+                let h_temp = GetCurrentObject(h_dc, OBJ_BITMAP as u32);
+                if h_temp.is_null() {
                     return None;
                 }
 
@@ -240,19 +240,26 @@ mod imp {
                 bmi.bmiHeader.biHeight = height;
 
                 let h_mem_dc = CreateCompatibleDC(h_dc);
-                if h_mem_dc == 0 {
+                if h_mem_dc.is_null() {
                     return None;
                 }
 
                 let mut bits_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
-                let h_bitmap = CreateDIBSection(h_dc, &bmi, DIB_RGB_COLORS, &mut bits_ptr, 0, 0);
-                if h_bitmap == 0 || bits_ptr.is_null() {
+                let h_bitmap = CreateDIBSection(
+                    h_dc,
+                    &bmi,
+                    DIB_RGB_COLORS,
+                    &mut bits_ptr,
+                    core::ptr::null_mut(),
+                    0,
+                );
+                if h_bitmap.is_null() || bits_ptr.is_null() {
                     DeleteDC(h_mem_dc);
                     return None;
                 }
 
                 let old_obj = SelectObject(h_mem_dc, h_bitmap);
-                if old_obj == 0 {
+                if old_obj.is_null() {
                     DeleteObject(h_bitmap);
                     DeleteDC(h_mem_dc);
                     return None;
@@ -306,7 +313,7 @@ mod imp {
                 if blt_ok != 0 { Some(bmp) } else { None }
             })();
 
-            ReleaseDC(0, h_dc);
+            ReleaseDC(core::ptr::null_mut(), h_dc);
             result
         }
     }

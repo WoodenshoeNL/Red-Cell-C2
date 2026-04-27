@@ -107,7 +107,7 @@ const NEIGHBOUR_LIMIT: u32 = 500;
 pub(crate) fn ntdll_base() -> Result<*const u8, SyscallError> {
     // SAFETY: "ntdll.dll\0" is a valid null-terminated ASCII string.
     let handle = unsafe { GetModuleHandleA(b"ntdll.dll\0".as_ptr()) };
-    if handle == 0 { Err(SyscallError::NtdllNotFound) } else { Ok(handle as *const u8) }
+    if handle.is_null() { Err(SyscallError::NtdllNotFound) } else { Ok(handle as *const u8) }
 }
 
 // ── PE export table walk ──────────────────────────────────────────────────────

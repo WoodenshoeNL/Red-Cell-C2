@@ -319,14 +319,14 @@ pub(crate) unsafe extern "C" fn beacon_inject_process(
 
     let mut close_on_exit = false;
     let handle = if h_proc != 0 {
-        h_proc as isize
+        h_proc as *mut std::ffi::c_void
     } else {
         if pid <= 0 {
             return;
         }
         close_on_exit = true;
         let h = unsafe { OpenProcess(PROCESS_ALL_ACCESS, 0, pid as u32) };
-        if h == 0 {
+        if h.is_null() {
             return;
         }
         h
@@ -460,15 +460,18 @@ pub(crate) unsafe extern "C" fn beacon_cleanup_process(pi: *mut u8) {
     if pi.is_null() {
         return;
     }
-    // PROCESS_INFORMATION: { hProcess: isize, hThread: isize, ... }
-    let h_process = unsafe { std::ptr::read_unaligned(pi.cast::<isize>()) };
-    let h_thread =
-        unsafe { std::ptr::read_unaligned(pi.add(std::mem::size_of::<isize>()).cast::<isize>()) };
+    // PROCESS_INFORMATION: { hProcess: HANDLE, hThread: HANDLE, ... }
+    let h_process = unsafe { std::ptr::read_unaligned(pi.cast::<*mut std::ffi::c_void>()) };
+    let h_thread = unsafe {
+        std::ptr::read_unaligned(
+            pi.add(std::mem::size_of::<*mut std::ffi::c_void>()).cast::<*mut std::ffi::c_void>(),
+        )
+    };
 
-    if h_process != 0 {
+    if !h_process.is_null() {
         unsafe { CloseHandle(h_process) };
     }
-    if h_thread != 0 {
+    if !h_thread.is_null() {
         unsafe { CloseHandle(h_thread) };
     }
 }
@@ -488,7 +491,7 @@ pub(crate) unsafe extern "C" fn beacon_is_admin() -> i32 {
     use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TokenElevation};
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
-    let mut token: isize = 0;
+    let mut token: *mut std::ffi::c_void = std::ptr::null_mut();
     // TOKEN_QUERY = 0x0008
     let ok = unsafe { OpenProcessToken(GetCurrentProcess(), 0x0008, &mut token) };
     if ok == FALSE {
@@ -533,7 +536,7 @@ pub(crate) unsafe extern "C" fn beacon_use_token(token: usize) -> i32 {
     use windows_sys::Win32::System::Threading::SetThreadToken;
 
     // SetThreadToken(NULL, token) impersonates the token on the calling thread.
-    let ok = unsafe { SetThreadToken(std::ptr::null(), token as isize) };
+    let ok = unsafe { SetThreadToken(std::ptr::null(), token as *mut std::ffi::c_void) };
     if ok == FALSE { 0 } else { 1 }
 }
 

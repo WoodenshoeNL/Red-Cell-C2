@@ -177,48 +177,34 @@ pub fn find_jmp_rbx_gadget(bytes: &[u8]) -> Option<usize> {
 //       jmp  [rcx+8]      — jump to real return address
 
 #[cfg(all(windows, target_arch = "x86_64"))]
-std::arch::global_asm!(
-    ".intel_syntax noprefix",
-    ".globl spoof_trampoline",
-    "spoof_trampoline:",
-    // Save our real return address (top of stack at entry) into r11.
-    "  pop   r11",
-    // Skip one shadow-space slot so [rsp+24] addresses the 5th argument.
-    "  add   rsp, 8",
-    // rax = &SpoofParams  (5th argument, at [rsp+24] after the adjustments).
-    "  mov   rax, QWORD PTR [rsp + 24]",
-    // r10 = SpoofParams.trampoline  (the jmp-rbx gadget in kernel32).
-    "  mov   r10, QWORD PTR [rax]",
-    // Put the gadget as the target function's apparent return address.
-    "  mov   QWORD PTR [rsp], r10",
-    // r10 = SpoofParams.real_return  (the actual target function to call).
-    "  mov   r10, QWORD PTR [rax + 8]",
-    // Store our real return address in SpoofParams.real_return.
-    "  mov   QWORD PTR [rax + 8], r11",
-    // Save the current value of rbx.
-    "  mov   QWORD PTR [rax + 16], rbx",
-    // rbx = &spoof_fixup  (RIP-relative; GAS Intel syntax requires [rip+label]).
-    "  lea   rbx, QWORD PTR [rip + spoof_fixup]",
-    // SpoofParams.trampoline = &spoof_fixup  (so jmp-rbx → spoof_fixup).
-    "  mov   QWORD PTR [rax], rbx",
-    // rbx = &SpoofParams  (so spoof_fixup can find it).
-    "  mov   rbx, rax",
-    // Jump to the real target function.  Its return address on the stack is
-    // the jmp-rbx gadget, which redirects to spoof_fixup.
-    "  jmp   r10",
-    "",
-    ".globl spoof_fixup",
-    "spoof_fixup:",
-    // Realign the stack (target fn may have left it 8-byte aligned here).
-    "  sub   rsp, 16",
-    // rcx = &SpoofParams.
-    "  mov   rcx, rbx",
-    // Restore the caller's rbx.
-    "  mov   rbx, QWORD PTR [rcx + 16]",
-    // Return to the real caller (inside spoof_call_fn, or the original caller).
-    "  jmp   QWORD PTR [rcx + 8]",
-    ".att_syntax prefix",
-);
+#[allow(unsafe_code)]
+mod spoof_asm {
+    std::arch::global_asm!(
+        ".intel_syntax noprefix",
+        ".globl spoof_trampoline",
+        "spoof_trampoline:",
+        "  pop   r11",
+        "  add   rsp, 8",
+        "  mov   rax, QWORD PTR [rsp + 24]",
+        "  mov   r10, QWORD PTR [rax]",
+        "  mov   QWORD PTR [rsp], r10",
+        "  mov   r10, QWORD PTR [rax + 8]",
+        "  mov   QWORD PTR [rax + 8], r11",
+        "  mov   QWORD PTR [rax + 16], rbx",
+        "  lea   rbx, QWORD PTR [rip + spoof_fixup]",
+        "  mov   QWORD PTR [rax], rbx",
+        "  mov   rbx, rax",
+        "  jmp   r10",
+        "",
+        ".globl spoof_fixup",
+        "spoof_fixup:",
+        "  sub   rsp, 16",
+        "  mov   rcx, rbx",
+        "  mov   rbx, QWORD PTR [rcx + 16]",
+        "  jmp   QWORD PTR [rcx + 8]",
+        ".att_syntax prefix",
+    );
+}
 
 // ── Windows implementation ────────────────────────────────────────────────────
 

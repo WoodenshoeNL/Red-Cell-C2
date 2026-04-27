@@ -33,6 +33,9 @@ logs/
 # Per-machine node identifier — create once with: echo "my-machine-name" > .node-id
 .node-id
 
+# Maintenance loop stall state (per-VM; must not dirty the tree for other loops' pull --rebase)
+.maintenance-progress.json
+
 # br/beads history snapshots — ephemeral, not needed in version control
 .beads/.br_history/
 

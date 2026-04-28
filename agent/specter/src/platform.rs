@@ -178,12 +178,12 @@ mod imp {
     /// Returns `None` if any GDI call fails.
     pub fn capture_screenshot() -> Option<Vec<u8>> {
         use windows_sys::Win32::Graphics::Gdi::{
-            BI_RGB, BITMAP, BITMAPINFO, BitBlt, CreateCompatibleDC, CreateDIBSection,
-            DIB_RGB_COLORS, DeleteDC, DeleteObject, GetCurrentObject, GetDC, GetObjectW,
-            OBJ_BITMAP, ReleaseDC, SRCCOPY, SelectObject,
+            BI_RGB, BITMAPINFO, BitBlt, CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS,
+            DeleteDC, DeleteObject, GetDC, ReleaseDC, SRCCOPY, SelectObject,
         };
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            GetSystemMetrics, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+            GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+            SM_YVIRTUALSCREEN,
         };
 
         // BITMAPFILEHEADER is 14 bytes: 2 (type) + 4 (size) + 2 (reserved1) +
@@ -196,8 +196,16 @@ mod imp {
         // Each acquired resource (DC, bitmap, memory DC) is released in the
         // cleanup section before returning.
         unsafe {
+            // Extent + origin mirror Demon `WinScreenshot`: virtual-screen metrics, not the
+            // display DC's current bitmap (invalid + wrong geometry on multi-monitor / some sessions).
             let x = GetSystemMetrics(SM_XVIRTUALSCREEN);
             let y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+            let width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+            let height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+
+            if width <= 0 || height <= 0 {
+                return None;
+            }
 
             let h_dc = GetDC(core::ptr::null_mut());
             if h_dc.is_null() {
@@ -205,26 +213,6 @@ mod imp {
             }
 
             let result = (|| -> Option<Vec<u8>> {
-                let h_temp = GetCurrentObject(h_dc, OBJ_BITMAP as u32);
-                if h_temp.is_null() {
-                    return None;
-                }
-
-                let mut all_desktops: BITMAP = mem::zeroed();
-                if GetObjectW(
-                    h_temp,
-                    mem::size_of::<BITMAP>() as i32,
-                    &mut all_desktops as *mut BITMAP as *mut _,
-                ) == 0
-                {
-                    DeleteObject(h_temp);
-                    return None;
-                }
-                DeleteObject(h_temp);
-
-                let width = all_desktops.bmWidth;
-                let height = all_desktops.bmHeight;
-
                 // Row stride: each row is padded to a 4-byte boundary.
                 #[allow(clippy::cast_sign_loss)]
                 let row_stride = (((24 * width + 31) & !31) / 8) as usize;

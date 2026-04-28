@@ -17,16 +17,32 @@ async fn proc_create_with_pipe_returns_structured_and_output_callbacks() {
     let callbacks = state.drain_callbacks();
     let [
         PendingCallback::Structured { command_id, request_id, payload },
-        PendingCallback::Output { request_id: output_request_id, text },
+        PendingCallback::Structured {
+            command_id: output_command_id,
+            request_id: output_request_id,
+            payload: output_payload,
+        },
     ] = callbacks.as_slice()
     else {
         panic!("unexpected callbacks: {callbacks:?}");
     };
     assert_eq!(*command_id, u32::from(DemonCommand::CommandProc));
     assert_eq!(*request_id, 2);
+    assert_eq!(*output_command_id, u32::from(DemonCommand::CommandOutput));
     assert_eq!(*output_request_id, 2);
-    assert_eq!(text, "phantom-test");
 
+    // Verify the output payload contains the command text + trailing exit code.
+    let mut out_offset = 0;
+    let text_len = read_u32(output_payload, &mut out_offset) as usize;
+    let text = std::str::from_utf8(&output_payload[out_offset..out_offset + text_len])
+        .expect("valid utf8");
+    out_offset += text_len;
+    assert_eq!(text, "phantom-test");
+    let exit_code =
+        i32::from_le_bytes(output_payload[out_offset..out_offset + 4].try_into().expect("4 bytes"));
+    assert_eq!(exit_code, 0);
+
+    // Verify the proc create structured payload has verbose=false.
     let mut offset = 0;
     assert_eq!(read_u32(payload, &mut offset), u32::from(DemonProcessCommand::Create));
     assert_eq!(read_utf16(payload, &mut offset), "/bin/sh");

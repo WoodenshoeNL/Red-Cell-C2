@@ -381,3 +381,81 @@ async fn invalidate_done_builds_for_listener_returns_zero_for_unknown_listener()
         .expect("invalidate");
     assert_eq!(count, 0);
 }
+
+#[tokio::test]
+async fn list_correlated_for_task_excludes_other_task_same_request_id() {
+    let db = Database::connect_in_memory().await.expect("db");
+    seed_agents(&db, &[200]).await;
+    let repo = db.agent_responses();
+
+    let shared_rid: u32 = 42;
+
+    let task_a = AgentResponseRecord {
+        id: None,
+        agent_id: 200,
+        command_id: 1,
+        request_id: shared_rid,
+        response_type: "Good".to_owned(),
+        message: String::new(),
+        output: "from-task-a".to_owned(),
+        command_line: None,
+        task_id: Some("task-a".to_owned()),
+        operator: None,
+        received_at: "2026-04-28T00:00:00Z".to_owned(),
+        extra: None,
+    };
+    let task_b = AgentResponseRecord {
+        id: None,
+        agent_id: 200,
+        command_id: 2,
+        request_id: shared_rid,
+        response_type: "Good".to_owned(),
+        message: String::new(),
+        output: "from-task-b".to_owned(),
+        command_line: None,
+        task_id: Some("task-b".to_owned()),
+        operator: None,
+        received_at: "2026-04-28T00:01:00Z".to_owned(),
+        extra: None,
+    };
+    let orphan = AgentResponseRecord {
+        id: None,
+        agent_id: 200,
+        command_id: 3,
+        request_id: shared_rid,
+        response_type: "Good".to_owned(),
+        message: String::new(),
+        output: "orphan-row".to_owned(),
+        command_line: None,
+        task_id: None,
+        operator: None,
+        received_at: "2026-04-28T00:02:00Z".to_owned(),
+        extra: None,
+    };
+
+    repo.create(&task_a).await.expect("create a");
+    repo.create(&task_b).await.expect("create b");
+    repo.create(&orphan).await.expect("create orphan");
+
+    // Query for task-a with the shared request_id: must NOT see task-b's row.
+    let results_a =
+        repo.list_correlated_for_task(200, "task-a", Some(shared_rid)).await.expect("query a");
+    assert_eq!(results_a.len(), 2, "should include task-a row + orphan row");
+    assert!(results_a.iter().any(|r| r.output == "from-task-a"));
+    assert!(results_a.iter().any(|r| r.output == "orphan-row"));
+    assert!(!results_a.iter().any(|r| r.output == "from-task-b"));
+
+    // Query for task-b with the shared request_id: must NOT see task-a's row.
+    let results_b =
+        repo.list_correlated_for_task(200, "task-b", Some(shared_rid)).await.expect("query b");
+    assert_eq!(results_b.len(), 2, "should include task-b row + orphan row");
+    assert!(results_b.iter().any(|r| r.output == "from-task-b"));
+    assert!(results_b.iter().any(|r| r.output == "orphan-row"));
+    assert!(!results_b.iter().any(|r| r.output == "from-task-a"));
+
+    // Query without request_id hint: only exact task_id match.
+    let results_no_rid =
+        repo.list_correlated_for_task(200, "task-a", None).await.expect("query no rid");
+    assert_eq!(results_no_rid.len(), 1);
+    assert_eq!(results_no_rid[0].output, "from-task-a");
+}

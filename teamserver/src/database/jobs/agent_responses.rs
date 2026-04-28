@@ -125,8 +125,9 @@ impl AgentResponseRepository {
     /// Persisted callback rows for an agent correlated with a task identifier.
     ///
     /// Matches rows whose `task_id` column equals `task_id`, or whose
-    /// `request_id` equals `request_id_match` when provided (covers callbacks
-    /// stored with only numeric request correlation).
+    /// `request_id` equals `request_id_match` AND `task_id IS NULL` (orphaned
+    /// rows with only numeric correlation). Rows explicitly owned by a
+    /// different task are never included.
     pub async fn list_correlated_for_task(
         &self,
         agent_id: u32,
@@ -136,7 +137,7 @@ impl AgentResponseRepository {
         let rows = match request_id_match {
             Some(rid) => sqlx::query_as::<_, AgentResponseRow>(
                 r#"SELECT * FROM ts_agent_responses WHERE agent_id = ?
-                   AND (task_id = ? OR request_id = ?) ORDER BY id"#,
+                   AND (task_id = ? OR (request_id = ? AND task_id IS NULL)) ORDER BY id"#,
             )
             .bind(i64::from(agent_id))
             .bind(task_id)

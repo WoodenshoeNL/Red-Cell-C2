@@ -200,7 +200,11 @@ pub async fn get_agent_task_status(
         .or(rid_from_hex);
 
     let dispatched_by_rid = match rid_from_hex {
-        Some(rid) => state.agent_registry.request_context(agent_id, rid).await.is_some(),
+        Some(rid) => state
+            .agent_registry
+            .request_context(agent_id, rid)
+            .await
+            .is_some_and(|c| c.task_id == task_id),
         None => false,
     };
 

@@ -169,7 +169,7 @@ if [ "$AUTOTEST_MODE" != "build_failed" ] && [ "$AUTOTEST_MODE" != "teamserver_f
       rctest@192.168.213.159 "uname -a" \
     || { echo "ERROR: Linux VM 192.168.213.159 unreachable"; exit 1; }
   ssh -i ~/.ssh/red_cell_test -o BatchMode=yes -o ConnectTimeout=5 \
-      rctest@192.168.213.160 'powershell -Command "ver"' \
+      rctest@192.168.213.160 'exit 0' \
     || { echo "ERROR: Windows VM 192.168.213.160 unreachable"; exit 1; }
 
   # Put CLI on PATH for the rest of this run

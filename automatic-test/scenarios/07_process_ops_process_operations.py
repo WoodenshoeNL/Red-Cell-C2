@@ -44,6 +44,12 @@ def _short_id() -> str:
     return uuid.uuid4().hex[:8]
 
 
+def _linux_spawn_sleep_command() -> str:
+    """Return a detached Linux sleep command that lets SSH exit immediately."""
+
+    return "sh -c 'nohup sleep 9999 >/dev/null 2>&1 < /dev/null & echo $!'"
+
+
 def _run_for_agent(ctx, agent_type: str, fmt: str,
                    *, listener_name: str, pre_built_payload: bytes) -> None:
     """Run the full process-operations suite for one Linux agent type.
@@ -107,7 +113,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str,
         print(f"  [{agent_type}][spawn] starting sleep process on target via SSH")
         pid_str = run_remote(
             target,
-            f"bash -c 'sleep 9999 & echo $!'",
+            _linux_spawn_sleep_command(),
             timeout=ssh,
         ).strip()
         assert pid_str.isdigit(), (

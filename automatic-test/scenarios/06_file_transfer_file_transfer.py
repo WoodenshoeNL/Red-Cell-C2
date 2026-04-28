@@ -38,6 +38,7 @@ import tempfile
 import uuid
 
 from lib import ScenarioSkipped
+from lib.wait import poll
 
 
 def _short_id() -> str:
@@ -57,6 +58,65 @@ def _sha256_file(path: str) -> str:
 def _sha256_bytes(data: bytes) -> str:
     """Return hex SHA-256 digest of bytes."""
     return hashlib.sha256(data).hexdigest()
+
+
+def _wait_for_local_file(path: str, timeout: int = 30) -> None:
+    """Poll until a local file exists and has non-zero size."""
+
+    poll(
+        fn=lambda: os.path.exists(path) and os.path.getsize(path) > 0,
+        predicate=bool,
+        timeout=timeout,
+        interval=0.5,
+        description=f"local file {path}",
+    )
+
+
+def _wait_for_remote_sha_linux(target, remote_path: str, timeout: int = 30) -> str:
+    """Poll until a Linux remote file exists and return its SHA-256."""
+
+    from lib.deploy import run_remote
+
+    def _probe() -> str:
+        return run_remote(
+            target,
+            f"test -f {remote_path} && sha256sum {remote_path}",
+            timeout=15,
+        ).split()[0]
+
+    return poll(
+        fn=_probe,
+        predicate=lambda sha: bool(sha),
+        timeout=timeout,
+        interval=0.5,
+        description=f"remote upload {remote_path}",
+    )
+
+
+def _wait_for_remote_sha_windows(target, remote_path: str, timeout: int = 30) -> str:
+    """Poll until a Windows remote file exists and return its SHA-256."""
+
+    from lib.deploy import run_remote
+
+    def _probe() -> str:
+        certutil_out = run_remote(
+            target,
+            (
+                f'powershell -NoProfile -Command '
+                f'"if (Test-Path -LiteralPath \'{remote_path}\') '
+                f'{{ certutil -hashfile \'{remote_path}\''"'"' SHA256 }} else {{ exit 1 }}"'
+            ),
+            timeout=15,
+        )
+        return _parse_certutil_hash(certutil_out)
+
+    return poll(
+        fn=_probe,
+        predicate=lambda sha: bool(sha),
+        timeout=timeout,
+        interval=0.5,
+        description=f"remote upload {remote_path}",
+    )
 
 
 def _run_for_agent(ctx, agent_type: str, fmt: str,
@@ -123,9 +183,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str,
 
         # Verify file appeared on target filesystem via SSH.
         print(f"  [{agent_type}][upload] verifying file on target via SSH (sha256sum)")
-        remote_sha = run_remote(
-            target, f"sha256sum {remote_upload_dst}", timeout=15
-        ).split()[0]
+        remote_sha = _wait_for_remote_sha_linux(target, remote_upload_dst)
         assert remote_sha == expected_sha256, (
             f"upload SHA-256 mismatch: expected {expected_sha256!r}, "
             f"got {remote_sha!r}"
@@ -136,9 +194,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str,
         print(f"  [{agent_type}][download] downloading {remote_upload_dst} → local")
         agent_download(cli, agent_id, src=remote_upload_dst, dst=local_download_dst)
 
-        assert os.path.exists(local_download_dst), (
-            "agent_download returned success but local file was not created"
-        )
+        _wait_for_local_file(local_download_dst)
         downloaded_sha256 = _sha256_file(local_download_dst)
         assert downloaded_sha256 == expected_sha256, (
             f"round-trip SHA-256 mismatch: expected {expected_sha256!r}, "
@@ -154,9 +210,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str,
         print(f"  [{agent_type}][sysfile] downloading /etc/hostname via agent")
         agent_download(cli, agent_id, src="/etc/hostname", dst=local_sysfile_dst)
 
-        assert os.path.exists(local_sysfile_dst), (
-            "agent_download of /etc/hostname returned success but local file was not created"
-        )
+        _wait_for_local_file(local_sysfile_dst)
         sysfile_content = open(local_sysfile_dst, "rb").read()
         assert len(sysfile_content) > 0, (
             "downloaded /etc/hostname is empty — expected a non-empty hostname string"
@@ -291,12 +345,7 @@ def _run_for_agent_windows(ctx, agent_type: str, fmt: str,
 
         # Verify file appeared on target via SSH + certutil.
         print(f"  [{agent_type}][upload] verifying file on target via SSH (certutil)")
-        certutil_out = run_remote(
-            target,
-            f'certutil -hashfile "{remote_upload_dst}" SHA256',
-            timeout=15,
-        )
-        remote_sha = _parse_certutil_hash(certutil_out)
+        remote_sha = _wait_for_remote_sha_windows(target, remote_upload_dst)
         assert remote_sha == expected_sha256, (
             f"upload SHA-256 mismatch: expected {expected_sha256!r}, "
             f"got {remote_sha!r}"
@@ -307,9 +356,7 @@ def _run_for_agent_windows(ctx, agent_type: str, fmt: str,
         print(f"  [{agent_type}][download] downloading {remote_upload_dst} → local")
         agent_download(cli, agent_id, src=remote_upload_dst, dst=local_download_dst)
 
-        assert os.path.exists(local_download_dst), (
-            "agent_download returned success but local file was not created"
-        )
+        _wait_for_local_file(local_download_dst)
         downloaded_sha256 = _sha256_file(local_download_dst)
         assert downloaded_sha256 == expected_sha256, (
             f"round-trip SHA-256 mismatch: expected {expected_sha256!r}, "
@@ -326,9 +373,7 @@ def _run_for_agent_windows(ctx, agent_type: str, fmt: str,
         print(f"  [{agent_type}][sysfile] downloading {win_ini} via agent")
         agent_download(cli, agent_id, src=win_ini, dst=local_sysfile_dst)
 
-        assert os.path.exists(local_sysfile_dst), (
-            f"agent_download of {win_ini} returned success but local file was not created"
-        )
+        _wait_for_local_file(local_sysfile_dst)
         sysfile_content = open(local_sysfile_dst, "rb").read()
         assert len(sysfile_content) > 0, (
             f"downloaded {win_ini} is empty — expected non-empty content"

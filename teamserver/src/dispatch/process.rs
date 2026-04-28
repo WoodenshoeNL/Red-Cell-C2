@@ -389,21 +389,32 @@ pub(super) async fn handle_inject_shellcode_callback(
 
     let cmd_id = u32::from(DemonCommand::CommandInjectShellcode);
     let message_owned = message.to_owned();
-    persist_process_agent_response(
-        registry,
-        database,
-        events,
-        AgentResponseEntry {
+    if registry.get(agent_id).await.is_some() {
+        persist_process_agent_response(
+            registry,
+            database,
+            events,
+            AgentResponseEntry {
+                agent_id,
+                command_id: cmd_id,
+                request_id,
+                kind: kind.to_owned(),
+                message: message_owned.clone(),
+                extra: BTreeMap::new(),
+                output: message_owned,
+            },
+        )
+        .await?;
+    } else {
+        events.broadcast(agent_response_event(
             agent_id,
-            command_id: cmd_id,
+            cmd_id,
             request_id,
-            kind: kind.to_owned(),
-            message: message_owned.clone(),
-            extra: BTreeMap::new(),
-            output: message_owned,
-        },
-    )
-    .await?;
+            kind,
+            &message_owned,
+            Some(message_owned.clone()),
+        )?);
+    }
     Ok(None)
 }
 
@@ -440,21 +451,32 @@ pub(super) async fn handle_inject_dll_callback(
     };
 
     let message_owned = message.to_owned();
-    persist_process_agent_response(
-        registry,
-        database,
-        events,
-        AgentResponseEntry {
+    if registry.get(agent_id).await.is_some() {
+        persist_process_agent_response(
+            registry,
+            database,
+            events,
+            AgentResponseEntry {
+                agent_id,
+                command_id: cmd,
+                request_id,
+                kind: kind.to_owned(),
+                message: message_owned.clone(),
+                extra: BTreeMap::new(),
+                output: message_owned,
+            },
+        )
+        .await?;
+    } else {
+        events.broadcast(agent_response_event(
             agent_id,
-            command_id: cmd,
+            cmd,
             request_id,
-            kind: kind.to_owned(),
-            message: message_owned.clone(),
-            extra: BTreeMap::new(),
-            output: message_owned,
-        },
-    )
-    .await?;
+            kind,
+            &message_owned,
+            Some(message_owned.clone()),
+        )?);
+    }
     Ok(None)
 }
 
@@ -491,21 +513,32 @@ pub(super) async fn handle_spawn_dll_callback(
     };
 
     let message_owned = message.to_owned();
-    persist_process_agent_response(
-        registry,
-        database,
-        events,
-        AgentResponseEntry {
+    if registry.get(agent_id).await.is_some() {
+        persist_process_agent_response(
+            registry,
+            database,
+            events,
+            AgentResponseEntry {
+                agent_id,
+                command_id: cmd,
+                request_id,
+                kind: kind.to_owned(),
+                message: message_owned.clone(),
+                extra: BTreeMap::new(),
+                output: message_owned,
+            },
+        )
+        .await?;
+    } else {
+        events.broadcast(agent_response_event(
             agent_id,
-            command_id: cmd,
+            cmd,
             request_id,
-            kind: kind.to_owned(),
-            message: message_owned.clone(),
-            extra: BTreeMap::new(),
-            output: message_owned,
-        },
-    )
-    .await?;
+            kind,
+            &message_owned,
+            Some(message_owned.clone()),
+        )?);
+    }
     Ok(None)
 }
 

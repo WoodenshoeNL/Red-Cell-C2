@@ -153,6 +153,29 @@ async fn ppid_spoof_missing_agent_still_broadcasts_response() {
 }
 
 #[tokio::test]
+async fn inject_shellcode_missing_agent_still_broadcasts_response() {
+    let (registry, database, events) = process_callback_stub_harness().await;
+    let mut rx = events.subscribe();
+    let agent_id = 0xDEAD_BEEF;
+
+    let payload = build_status_payload(u32::from(DemonInjectError::Success));
+    let result =
+        handle_inject_shellcode_callback(&registry, &database, &events, agent_id, 9, &payload)
+            .await;
+
+    assert!(result.is_ok(), "handler should not fail for missing agent (FK-safe path)");
+
+    let event = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+        .await
+        .expect("should receive response event")
+        .expect("response event");
+
+    let (kind, message) = extract_response_kind_and_message(&event);
+    assert_eq!(kind, "Good");
+    assert!(message.contains("Successfully injected shellcode"), "got: {message}");
+}
+
+#[tokio::test]
 async fn ppid_spoof_truncated_payload_returns_error() {
     let (registry, database, events) = process_callback_stub_harness().await;
     // Payload too short — only 2 bytes instead of 4.

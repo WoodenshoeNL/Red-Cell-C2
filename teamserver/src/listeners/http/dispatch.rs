@@ -109,12 +109,6 @@ pub(crate) async fn process_demon_transport(
             )
             .await
             {
-                warn!(
-                    listener = listener_name,
-                    agent_id = format_args!("{agent_id:08X}"),
-                    %error,
-                    "failed to persist agent.registered audit entry"
-                );
                 broadcast_teamserver_warning(
                     events,
                     format!(
@@ -176,12 +170,6 @@ pub(crate) async fn process_demon_transport(
             )
             .await
             {
-                warn!(
-                    listener = listener_name,
-                    agent_id = format_args!("{agent_id:08X}"),
-                    %error,
-                    "failed to persist agent.reregistered audit entry"
-                );
                 broadcast_teamserver_warning(
                     events,
                     format!(
@@ -209,19 +197,13 @@ pub(crate) async fn process_demon_transport(
 
             if agent_known {
                 if !reconnect_probe_rate_limiter.allow(header.agent_id).await {
-                    warn!(
-                        listener = listener_name,
-                        agent_id = format_args!("{:08X}", header.agent_id),
-                        external_ip,
-                        max_probes = MAX_RECONNECT_PROBES_PER_AGENT,
-                        window_seconds = RECONNECT_PROBE_WINDOW_DURATION.as_secs(),
-                        "reconnect probe rate limit exceeded — possible probe spam"
-                    );
                     broadcast_teamserver_warning(
                         events,
                         format!(
-                            "[listener={listener_name}] agent={:08X} reconnect probe rate limit exceeded (from {external_ip})",
-                            header.agent_id
+                            "[listener={listener_name}] agent={:08X} reconnect probe rate limit exceeded (max {max} probes per {secs}s window, from {external_ip})",
+                            header.agent_id,
+                            max = MAX_RECONNECT_PROBES_PER_AGENT,
+                            secs = RECONNECT_PROBE_WINDOW_DURATION.as_secs(),
                         ),
                     );
                     return Ok(ProcessedDemonResponse {
@@ -246,12 +228,6 @@ pub(crate) async fn process_demon_transport(
                 let ip: IpAddr =
                     external_ip.parse().unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
                 if !demon_init_rate_limiter.allow(ip).await {
-                    warn!(
-                        listener = listener_name,
-                        agent_id = format_args!("{:08X}", header.agent_id),
-                        external_ip,
-                        "unknown-agent reconnect probe rejected by per-IP rate limiter"
-                    );
                     broadcast_teamserver_warning(
                         events,
                         format!(
@@ -267,12 +243,6 @@ pub(crate) async fn process_demon_transport(
                 }
 
                 if unknown_callback_probe_audit_limiter.allow(listener_name, &external_ip).await {
-                    warn!(
-                        listener = listener_name,
-                        agent_id = format_args!("{:08X}", header.agent_id),
-                        external_ip,
-                        "unknown agent sent reconnect probe"
-                    );
                     broadcast_teamserver_warning(
                         events,
                         format!(
@@ -320,12 +290,6 @@ pub(crate) async fn process_demon_transport(
         }
         Err(DemonParserError::Registry(TeamserverError::AgentNotFound { agent_id })) => {
             if unknown_callback_probe_audit_limiter.allow(listener_name, &external_ip).await {
-                warn!(
-                    listener = listener_name,
-                    agent_id = format_args!("{:08X}", agent_id),
-                    external_ip,
-                    "unknown agent sent callback probe"
-                );
                 broadcast_teamserver_warning(
                     events,
                     format!(
@@ -349,17 +313,10 @@ pub(crate) async fn process_demon_transport(
             })
         }
         Err(DemonParserError::ArchonMagicMismatch { agent_id, actual }) => {
-            warn!(
-                listener = listener_name,
-                agent_id = format_args!("{:08X}", agent_id),
-                actual = format_args!("{:08X}", actual),
-                external_ip,
-                "Archon magic mismatch — possible replay or probe from different build"
-            );
             broadcast_teamserver_warning(
                 events,
                 format!(
-                    "[listener={listener_name}] agent={agent_id:08X} Archon magic mismatch (actual 0x{actual:08X}) from {external_ip}"
+                    "[listener={listener_name}] agent={agent_id:08X} Archon magic mismatch (actual 0x{actual:08X}) from {external_ip} — possible replay or probe from different build"
                 ),
             );
             record_archon_magic_mismatch(
@@ -379,16 +336,10 @@ pub(crate) async fn process_demon_transport(
             })
         }
         Err(DemonParserError::ArchonMagicNotOnFile { agent_id }) => {
-            warn!(
-                listener = listener_name,
-                agent_id = format_args!("{:08X}", agent_id),
-                external_ip,
-                "Archon magic not on file — agent may be registered as legacy Demon"
-            );
             broadcast_teamserver_warning(
                 events,
                 format!(
-                    "[listener={listener_name}] agent={agent_id:08X} Archon magic not on file (from {external_ip})"
+                    "[listener={listener_name}] agent={agent_id:08X} Archon magic not on file (from {external_ip}) — agent may be registered as legacy Demon"
                 ),
             );
             record_archon_magic_mismatch(

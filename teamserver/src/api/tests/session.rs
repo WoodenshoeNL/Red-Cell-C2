@@ -605,7 +605,7 @@ async fn session_agent_exec_wait_ignores_stale_output_with_colliding_request_id(
         received_at: "2026-04-01T00:00:00Z".to_owned(),
         extra: Some(serde_json::json!({"ExitCode": 0})),
     };
-    let _stale_id =
+    let stale_id =
         database.agent_responses().create(&stale_record).await.expect("insert stale output");
 
     // Background: once the task is queued, update the stale row's request_id
@@ -629,6 +629,7 @@ async fn session_agent_exec_wait_ignores_stale_output_with_colliding_request_id(
         // Update the stale row's request_id to match the new task.
         sqlx::query("UPDATE ts_agent_responses SET request_id = ? WHERE id = ?")
             .bind(new_request_id)
+            .bind(stale_id)
             .execute(db_clone.pool())
             .await
             .expect("update stale row request_id");

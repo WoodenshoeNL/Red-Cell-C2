@@ -168,6 +168,38 @@ impl AgentRegistry {
         self.request_contexts.read().await.get(&(agent_id, request_id)).cloned()
     }
 
+    /// Return the queued job and its FIFO index when `task_id` matches the
+    /// stable task label.
+    #[instrument(skip(self), fields(agent_id = format_args!("0x{:08X}", agent_id)))]
+    pub async fn queued_job_lookup_by_task_id(
+        &self,
+        agent_id: u32,
+        task_id: &str,
+    ) -> Result<Option<(usize, Job)>, TeamserverError> {
+        let jobs = self.queued_jobs(agent_id).await?;
+        for (idx, job) in jobs.iter().enumerate() {
+            if job.task_id == task_id {
+                return Ok(Some((idx, job.clone())));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Find retained request metadata by stable `task_id` (scan of bounded context map).
+    pub async fn request_context_lookup_by_task_id(
+        &self,
+        agent_id: u32,
+        task_id: &str,
+    ) -> Option<(u32, JobContext)> {
+        let contexts = self.request_contexts.read().await;
+        for (&(aid, rid), ctx) in contexts.iter() {
+            if aid == agent_id && ctx.task_id == task_id {
+                return Some((rid, ctx.clone()));
+            }
+        }
+        None
+    }
+
     pub(super) async fn purge_request_contexts(&self, agent_id: u32) {
         self.request_contexts.write().await.retain(|&(aid, _), _| aid != agent_id);
     }

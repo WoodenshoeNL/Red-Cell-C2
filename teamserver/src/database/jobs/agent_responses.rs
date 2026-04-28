@@ -122,6 +122,39 @@ impl AgentResponseRepository {
         rows.into_iter().map(TryInto::try_into).collect()
     }
 
+    /// Persisted callback rows for an agent correlated with a task identifier.
+    ///
+    /// Matches rows whose `task_id` column equals `task_id`, or whose
+    /// `request_id` equals `request_id_match` when provided (covers callbacks
+    /// stored with only numeric request correlation).
+    pub async fn list_correlated_for_task(
+        &self,
+        agent_id: u32,
+        task_id: &str,
+        request_id_match: Option<u32>,
+    ) -> Result<Vec<AgentResponseRecord>, TeamserverError> {
+        let rows = match request_id_match {
+            Some(rid) => sqlx::query_as::<_, AgentResponseRow>(
+                r#"SELECT * FROM ts_agent_responses WHERE agent_id = ?
+                   AND (task_id = ? OR request_id = ?) ORDER BY id"#,
+            )
+            .bind(i64::from(agent_id))
+            .bind(task_id)
+            .bind(i64::from(rid))
+            .fetch_all(&self.pool)
+            .await?,
+            None => sqlx::query_as::<_, AgentResponseRow>(
+                r#"SELECT * FROM ts_agent_responses WHERE agent_id = ? AND task_id = ? ORDER BY id"#,
+            )
+            .bind(i64::from(agent_id))
+            .bind(task_id)
+            .fetch_all(&self.pool)
+            .await?,
+        };
+
+        rows.into_iter().map(TryInto::try_into).collect()
+    }
+
     /// Return every persisted response in insertion order.
     pub async fn list(&self) -> Result<Vec<AgentResponseRecord>, TeamserverError> {
         let rows =

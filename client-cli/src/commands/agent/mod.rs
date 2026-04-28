@@ -18,6 +18,7 @@
 //! | `agent download <id>` | `POST /agents/{id}/download` | queue download task |
 //! | `agent groups <id>` | `GET /agents/{id}/groups` | RBAC group tags on the agent |
 //! | `agent set-groups <id>` | `PUT /agents/{id}/groups` | replace group membership |
+//! | `agent task <id> --task-id` | `GET /agents/{id}/task-status?task_id=` | queue / dispatch / callback correlation |
 
 pub(crate) mod exec;
 pub(crate) mod groups;
@@ -26,6 +27,7 @@ pub(crate) mod list;
 pub(crate) mod output_cmd;
 pub(crate) mod shell;
 pub(crate) mod show;
+pub(crate) mod task;
 pub(crate) mod transfer;
 pub(crate) mod types;
 pub(crate) mod wire;
@@ -45,6 +47,7 @@ use self::kill::{KillMode, kill};
 use self::list::{list, watch_agents};
 use self::output_cmd::{fetch_output, take_cursor_reset_warning, watch_output};
 use self::show::show;
+use self::task::fetch_task_status;
 use self::transfer::{download, upload};
 
 /// Dispatch an [`AgentCommands`] variant and return a process exit code.
@@ -257,6 +260,21 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) 
                 e.exit_code()
             }
         },
+        AgentCommands::Task { id, task_id } => {
+            match fetch_task_status(client, id, &task_id).await {
+                Ok(data) => match print_success(fmt, &data) {
+                    Ok(()) => EXIT_SUCCESS,
+                    Err(e) => {
+                        print_error(&e).ok();
+                        e.exit_code()
+                    }
+                },
+                Err(e) => {
+                    print_error(&e).ok();
+                    e.exit_code()
+                }
+            }
+        }
     }
 }
 

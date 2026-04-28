@@ -147,6 +147,23 @@ pub(super) fn build_session_rest_request(
                 .body(Body::empty())
                 .map_err(|e| SessionBuildError::InvalidBody(e.to_string()))?)
         }
+        "agent.task_status" => {
+            let id = val
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| SessionBuildError::missing(cmd, "id"))?;
+            let task_id = val
+                .get("task_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| SessionBuildError::missing(cmd, "task_id"))?;
+            let qs = serde_urlencoded::to_string([("task_id", task_id)])
+                .map_err(|e| SessionBuildError::InvalidBody(e.to_string()))?;
+            Ok(HttpRequest::builder()
+                .method("GET")
+                .uri(format!("/agents/{id}/task-status?{qs}"))
+                .body(Body::empty())
+                .map_err(|e| SessionBuildError::InvalidBody(e.to_string()))?)
+        }
         "agent.kill" => {
             let id = val
                 .get("id")
@@ -627,6 +644,23 @@ mod tests {
         let req = build_session_rest_request("agent.groups", &val).unwrap();
         assert_eq!(req.method(), "GET");
         assert_eq!(req.uri(), "/agents/DEADBEEF/groups");
+    }
+
+    #[test]
+    fn agent_task_status_produces_correct_request() {
+        let val = serde_json::json!({"id": "DEADBEEF", "task_id": "A1B2&bad"});
+        let req = build_session_rest_request("agent.task_status", &val).unwrap();
+        assert_eq!(req.method(), "GET");
+        assert!(
+            req.uri().to_string().starts_with("/agents/DEADBEEF/task-status?task_id="),
+            "unexpected uri: {}",
+            req.uri()
+        );
+        assert!(
+            req.uri().to_string().contains("%26"),
+            "task_id values must be query-encoded: {}",
+            req.uri()
+        );
     }
 
     #[test]

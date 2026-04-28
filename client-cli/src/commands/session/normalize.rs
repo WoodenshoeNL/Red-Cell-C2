@@ -16,6 +16,7 @@ static SESSION_KNOWN_COMMANDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|
         "agent.show",
         "agent.exec",
         "agent.output",
+        "agent.task_status",
         "agent.kill",
         "agent.upload",
         "agent.download",
@@ -94,6 +95,7 @@ fn command_accepts_agent_id(cmd: &str) -> bool {
         "agent.show"
             | "agent.exec"
             | "agent.output"
+            | "agent.task_status"
             | "agent.kill"
             | "agent.upload"
             | "agent.download"

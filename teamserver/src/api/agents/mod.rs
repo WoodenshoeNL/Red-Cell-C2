@@ -1,6 +1,7 @@
 //! Agent inventory, tasking, upload/download, and group-membership REST handlers.
 
 pub(crate) mod groups;
+pub(crate) mod task_status;
 pub(crate) mod transfer;
 
 use axum::Json;

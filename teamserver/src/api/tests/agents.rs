@@ -1055,6 +1055,59 @@ async fn get_agent_output_returns_404_for_unknown_agent() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
+// ── GET /agents/{id}/task-status ────────────────────────────────────
+
+#[tokio::test]
+async fn get_agent_task_status_reports_queued_job() {
+    let (app, registry, _) =
+        test_router_with_registry(Some((60, "tasker", "secret-tasker", OperatorRole::Operator)))
+            .await;
+    let agent_id = 0xDEAD_00F0u32;
+    registry.insert(sample_agent(agent_id)).await.expect("insert");
+    let job = sample_job(0x100, 0x2A, "op");
+    registry.enqueue_job(agent_id, job.clone()).await.expect("enqueue");
+
+    let uri = format!("/agents/DEAD00F0/task-status?task_id={}", job.task_id);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(&uri)
+                .header(API_KEY_HEADER, "secret-tasker")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["lifecycle"], "queued");
+    assert_eq!(body["queued"]["queue_position"], 0);
+    assert_eq!(body["queued"]["request_id"], 0x2A);
+    assert_eq!(body["task_id"], job.task_id);
+}
+
+#[tokio::test]
+async fn get_agent_task_status_rejects_empty_task_id_query() {
+    let (app, registry, _) =
+        test_router_with_registry(Some((60, "tasker", "secret-tasker", OperatorRole::Operator)))
+            .await;
+    registry.insert(sample_agent(0xDEAD_00F1u32)).await.expect("insert");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/agents/DEAD00F1/task-status?task_id=")
+                .header(API_KEY_HEADER, "secret-tasker")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
 // ── POST /agents/{id}/upload ────────────────────────────────────────
 
 #[tokio::test]

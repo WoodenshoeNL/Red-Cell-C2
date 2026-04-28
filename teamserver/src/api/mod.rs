@@ -64,6 +64,7 @@ pub fn api_routes(api: ApiRuntime) -> Router<TeamserverState> {
         .route("/agents/{id}", get(agents::get_agent).delete(agents::kill_agent))
         .route("/agents/{id}/task", post(agents::queue_agent_task))
         .route("/agents/{id}/output", get(agents::get_agent_output))
+        .route("/agents/{id}/task-status", get(agents::task_status::get_agent_task_status))
         .route("/agents/{id}/upload", post(agents::transfer::agent_upload))
         .route("/agents/{id}/download", post(agents::transfer::agent_download))
         .route("/audit", get(audit::list_audit).post(audit::create_audit))

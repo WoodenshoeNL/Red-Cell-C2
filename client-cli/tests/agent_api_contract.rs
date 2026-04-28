@@ -12,8 +12,8 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use red_cell::{
     AgentRegistry, AgentResponseRecord, ApiRuntime, AuditWebhookNotifier, AuthService, Database,
-    EventBus, ListenerManager, LoginRateLimiter, OperatorConnectionManager, PayloadBuilderService,
-    ShutdownController, SocketRelayManager, TeamserverState, build_router,
+    EventBus, Job, ListenerManager, LoginRateLimiter, OperatorConnectionManager,
+    PayloadBuilderService, ShutdownController, SocketRelayManager, TeamserverState, build_router,
 };
 use red_cell_common::config::Profile;
 use red_cell_common::{AgentEncryptionInfo, AgentRecord};
@@ -581,4 +581,30 @@ async fn get_agent_output_since_cursor_returns_only_newer_entries() {
         paged_entries[0]["output"], "second output",
         "the entry after the cursor must be the second record"
     );
+}
+
+/// `GET /api/v1/agents/{id}/task-status?task_id=` returns lifecycle + queue snapshot.
+#[tokio::test]
+async fn get_agent_task_status_contract_queued() {
+    let (state, registry) = build_test_state().await;
+    registry.insert(sample_agent(AGENT_ID_U32)).await.expect("insert agent");
+
+    let job = Job {
+        command: 0x100,
+        request_id: 0x42,
+        payload: vec![0x01],
+        command_line: "whoami".to_owned(),
+        task_id: "TCHECK01".to_owned(),
+        created_at: "2026-04-01T00:00:00Z".to_owned(),
+        operator: "testop".to_owned(),
+    };
+    registry.enqueue_job(AGENT_ID_U32, job.clone()).await.expect("enqueue");
+
+    let uri = format!("/api/v1/agents/{AGENT_ID_HEX}/task-status?task_id={}", job.task_id);
+    let response = call(state, "GET", &uri, API_KEY, None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = read_json(response).await;
+    assert_eq!(json["lifecycle"], "queued");
+    assert_eq!(json["task_id"], job.task_id);
+    assert_eq!(json["queued"]["request_id"], 0x42);
 }

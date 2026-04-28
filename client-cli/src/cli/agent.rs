@@ -220,4 +220,23 @@ pub enum AgentCommands {
         #[arg(long)]
         group: Vec<String>,
     },
+
+    /// Introspect a task by id: queue position, dispatch context, persisted
+    /// callback rows, and a machine-friendly `lifecycle` label (`queued`,
+    /// `dispatched_pending`, `responses_present`, `unknown`).
+    ///
+    /// Use after `agent exec` without `--wait` (or when `--wait` times out with
+    /// exit 5) to see whether the job is still queued, was dispatched, or has
+    /// stored output under correlated `request_id` / response row ids.
+    ///
+    /// Examples:
+    ///   red-cell-cli agent task DEADBEEF --task-id A1B2C3D4
+    #[command(verbatim_doc_comment)]
+    Task {
+        /// Agent ID
+        id: AgentId,
+        /// Task id returned when the job was submitted (`task_id` in JSON)
+        #[arg(long)]
+        task_id: String,
+    },
 }

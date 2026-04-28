@@ -24,6 +24,14 @@ fn demon_packages_for_callbacks(
     Ok(out)
 }
 
+/// Returns whether `callbacks` includes an Exit reply (only meaningful after the batch was sent successfully).
+///
+/// Mirrors non-ECDH [`PhantomAgent::checkin`], which sets exit only per successful `send_packet`.
+/// Regression: red-cell-c2-heloe — `exit_requested` must not be set when ECDH batch send fails.
+fn batch_contains_exit_callback(callbacks: &[PendingCallback]) -> bool {
+    callbacks.iter().any(|c| matches!(c, PendingCallback::Exit { .. }))
+}
+
 impl PhantomAgent {
     /// Send a `COMMAND_CHECKIN` heartbeat, then fetch and dispatch queued tasks
     /// with a separate `COMMAND_GET_JOB` request.
@@ -127,22 +135,27 @@ impl PhantomAgent {
         for package in job_message.packages {
             execute(&package, &mut self.config, &mut self.state).await?;
             let callbacks = self.state.drain_callbacks();
-            for c in &callbacks {
-                if matches!(c, PendingCallback::Exit { .. }) {
-                    exit_requested = true;
-                }
+            if callbacks.is_empty() {
+                continue;
             }
-            if !callbacks.is_empty() {
-                // Keep a copy so we can restore the queue if batching or transport fails.
-                let recovery = callbacks.clone();
-                let pkgs = match demon_packages_for_callbacks(callbacks) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        self.state.requeue_callbacks_front(recovery);
-                        return Err(e);
+            // Keep a copy so we can restore the queue if batching or transport fails.
+            let recovery = callbacks.clone();
+            let pkgs = match demon_packages_for_callbacks(callbacks) {
+                Ok(p) => p,
+                Err(e) => {
+                    self.state.requeue_callbacks_front(recovery);
+                    return Err(e);
+                }
+            };
+            match self.ecdh_send_packages(pkgs).await {
+                Ok(_) => {
+                    // Mirror non-ECDH `checkin`: Exit is only acknowledged after the callback
+                    // reaches the teamserver (red-cell-c2-heloe / dz867).
+                    if batch_contains_exit_callback(&recovery) {
+                        exit_requested = true;
                     }
-                };
-                if let Err(e) = self.ecdh_send_packages(pkgs).await {
+                }
+                Err(e) => {
                     // Do not abort the rest of this job message: the teamserver has already
                     // dequeued every package in the batch. Returning early would leave later
                     // tasks never executed (e.g. CommandFs upload after CommandMemFile chunks)
@@ -210,8 +223,24 @@ impl PhantomAgent {
 mod tests {
     use red_cell_common::demon::DemonCommand;
 
-    use super::demon_packages_for_callbacks;
+    use super::{batch_contains_exit_callback, demon_packages_for_callbacks};
     use crate::command::PendingCallback;
+
+    #[test]
+    fn batch_contains_exit_callback_true_when_exit_present() {
+        assert!(batch_contains_exit_callback(&[PendingCallback::Exit {
+            request_id: 1,
+            exit_method: 0,
+        }]));
+    }
+
+    #[test]
+    fn batch_contains_exit_callback_false_without_exit() {
+        assert!(!batch_contains_exit_callback(&[PendingCallback::Output {
+            request_id: 2,
+            text: String::new(),
+        }]));
+    }
 
     #[test]
     fn callback_batch_bundles_proc_then_output_in_order() {

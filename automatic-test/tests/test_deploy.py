@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from lib.deploy import (
     DeployError,
     TargetConfig,
+    cleanup_windows_harness_work_dir,
     _is_transient_ssh_failure,
     _quote_posix,
     _quote_powershell,
@@ -737,6 +738,65 @@ class TestInjectHostsEntryWindows(unittest.TestCase):
         self.assertIn("grep", remote_cmd)
         self.assertIn("sudo", remote_cmd)
         self.assertNotIn("powershell", remote_cmd)
+
+
+class TestCleanupWindowsHarnessWorkDir(unittest.TestCase):
+    """Unit tests for :func:`cleanup_windows_harness_work_dir`."""
+
+    def setUp(self) -> None:
+        self.key_path = _module_key_path()
+
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_linux_target_does_not_open_ssh(self, mock_ssh: object) -> None:
+        t = _make_target(work_dir="/tmp/rc-test", key=self.key_path)
+        cleanup_windows_harness_work_dir(t)
+        mock_ssh.assert_not_called()
+
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_windows_uses_encoded_cleanup_script(self, mock_ssh: object) -> None:
+        mock_ssh.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        t = _make_target(work_dir=r"C:\Temp\rc-test", key=self.key_path)
+        cleanup_windows_harness_work_dir(t, timeout=100)
+        mock_ssh.assert_called_once()
+        cmd_list = mock_ssh.call_args[0][0]
+        remote = cmd_list[-1]
+        self.assertIn("-EncodedCommand", remote)
+        decoded = _decoded_windows_launch_script(remote)
+        self.assertIn("agent-*.exe", decoded)
+        self.assertIn("stress-agent-*.exe", decoded)
+        self.assertIn("Stop-Process", decoded)
+        self.assertIn(r"C:\Temp\rc-test", decoded)
+
+    @patch("builtins.print")
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_locked_files_emits_single_summary_line(
+        self, mock_ssh: object, mock_print: object,
+    ) -> None:
+        mock_ssh.return_value = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="HARNESS_LOCKED_FILES:C:\\Temp\\rc-test\\a.exe\n",
+            stderr="",
+        )
+        t = _make_target(work_dir=r"C:\Temp\rc-test", key=self.key_path)
+        cleanup_windows_harness_work_dir(t, log_prefix="  [tag]")
+        printed = [str(c.args[0]) for c in mock_print.call_args_list if c.args]
+        self.assertTrue(
+            any("locked harness files remain" in p for p in printed),
+            printed,
+        )
+
+    @patch("builtins.print")
+    @patch("lib.deploy._run_ssh_cli_with_retry", side_effect=DeployError("ssh failed"))
+    def test_deploy_error_prints_skipped_message(
+        self, mock_ssh: object, mock_print: object,
+    ) -> None:
+        t = _make_target(work_dir=r"C:\Temp\rc-test", key=self.key_path)
+        cleanup_windows_harness_work_dir(t, log_prefix="  [tag]")
+        printed = [str(c.args[0]) for c in mock_print.call_args_list if c.args]
+        self.assertTrue(any("cleanup skipped" in p for p in printed), printed)
 
 
 if __name__ == "__main__":

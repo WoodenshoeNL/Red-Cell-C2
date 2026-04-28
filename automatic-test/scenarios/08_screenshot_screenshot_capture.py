@@ -129,7 +129,7 @@ def _run_for_agent(
         loot_download,
         loot_list,
     )
-    from lib.deploy import run_remote
+    from lib.deploy import cleanup_windows_harness_work_dir, run_remote
     from lib.deploy_agent import deploy_and_checkin
     from lib.wait import poll
 
@@ -233,18 +233,18 @@ def _run_for_agent(
             except Exception as exc:
                 print(f"  [{agent_type}][cleanup] agent kill failed (non-fatal): {exc}")
 
-        print(f"  [{agent_type}][cleanup] removing work_dir on target")
-        try:
-            if is_windows:
-                run_remote(
-                    target,
-                    f'powershell -Command "Remove-Item -Recurse -Force -Path \'{target.work_dir}\'"',
-                    timeout=15,
-                )
-            else:
+        print(f"  [{agent_type}][cleanup] cleaning harness artifacts in work_dir on target")
+        if is_windows:
+            cleanup_windows_harness_work_dir(
+                target,
+                log_prefix=f"  [{agent_type}][cleanup]",
+                timeout=90,
+            )
+        else:
+            try:
                 run_remote(target, f"rm -rf {target.work_dir}", timeout=15)
-        except Exception as exc:
-            print(f"  [{agent_type}][cleanup] work_dir removal failed (non-fatal): {exc}")
+            except Exception as exc:
+                print(f"  [{agent_type}][cleanup] work_dir removal failed (non-fatal): {exc}")
 
         try:
             os.unlink(local_screenshot)

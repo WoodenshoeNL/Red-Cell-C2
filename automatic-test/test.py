@@ -46,7 +46,7 @@ from lib.config import (
     TimeoutsConfig,
     timeouts_to_env_dict,
 )
-from lib.deploy import TargetConfig, configure_deploy_timeouts
+from lib.deploy import TargetConfig, cleanup_windows_harness_work_dir, configure_deploy_timeouts
 from lib.teamserver_monitor import configure_teamserver_ssh_connect_timeout
 from lib.wait import configure_wait_defaults
 from lib.failure_diagnostics import build_failure_diagnostic_report, create_run_dir, write_scenario_failure_file
@@ -65,6 +65,21 @@ def make_target(cfg: dict) -> TargetConfig:
         key=cfg.get("key", ""),
         display=cfg.get("display", ""),
     )
+
+
+def _windows_harness_cleanup_targets(
+    windows: TargetConfig | None,
+    windows2: TargetConfig | None,
+) -> list[tuple[str, TargetConfig]]:
+    """Return configured Windows targets that use a Windows-style ``work_dir`` path."""
+
+    out: list[tuple[str, TargetConfig]] = []
+    for label, t in (("windows", windows), ("windows2", windows2)):
+        if t is None:
+            continue
+        if t.work_dir.startswith("C:\\") or "\\" in t.work_dir:
+            out.append((label, t))
+    return out
 
 
 # ── Toolchain pre-flight ─────────────────────────────────────────────────────
@@ -760,6 +775,23 @@ def main():
         except Exception as exc:
             print(f"  ✗ unexpected error during cleanup: {exc}")
 
+    if not ctx.dry_run:
+        print(f"\n{'─' * 60}")
+        print("  Windows work-dir cleanup (stale harness payloads)")
+        print(f"{'─' * 60}")
+        w_cleanup_targets = _windows_harness_cleanup_targets(windows_target, windows2_target)
+        if not w_cleanup_targets:
+            print("  (no Windows work_dir targets — skipped)")
+        else:
+            win_cleanup_timeout = max(90, int(tmo.command_output))
+            for wlabel, wtgt in w_cleanup_targets:
+                print(f"  Target {wlabel!r} ({wtgt.host}) {wtgt.work_dir!r}")
+                cleanup_windows_harness_work_dir(
+                    wtgt,
+                    log_prefix="  [win-workdir]",
+                    timeout=win_cleanup_timeout,
+                )
+
     automatic_test_root = Path(__file__).resolve().parent
     run_dir = create_run_dir(automatic_test_root)
     print(f"Run dir:  {run_dir}")
@@ -776,6 +808,15 @@ def main():
             failed += 1
             if report_path is not None:
                 failure_reports.append(report_path)
+
+        if not ctx.dry_run:
+            win_cleanup_timeout = max(90, int(tmo.command_output))
+            for _, wtgt in _windows_harness_cleanup_targets(windows_target, windows2_target):
+                cleanup_windows_harness_work_dir(
+                    wtgt,
+                    log_prefix="  [between-scenarios]",
+                    timeout=win_cleanup_timeout,
+                )
 
     total = passed + failed + skipped
     print(f"\n{'═' * 60}")

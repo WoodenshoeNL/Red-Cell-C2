@@ -515,3 +515,96 @@ def execute_background(target: TargetConfig, command: str) -> None:
             f"Background remote command failed (exit {result.returncode}):\n"
             f"  {detail}"
         )
+
+
+def cleanup_windows_harness_work_dir(
+    target: TargetConfig,
+    *,
+    log_prefix: str = "  [win-workdir]",
+    timeout: int | None = None,
+) -> None:
+    """Stop processes running from *target.work_dir*, then delete harness-owned files.
+
+    Removes only well-known autotest artifacts: ``agent-*.exe``, ``stress-agent-*.exe``,
+    and ``uploaded-*.dat`` under the Windows work directory. This avoids the noisy
+    ``Access to the path ... is denied`` failures from ``Remove-Item -Recurse`` when
+    stale payload binaries are still loaded or scanning-locked.
+
+    Never raises: SSH failures, non-zero exit, or locked files are summarized on stdout.
+
+    Args:
+        target: Windows SSH target (no-op when ``work_dir`` is a POSIX path).
+        log_prefix: Prefix for diagnostic lines printed to the harness log.
+        timeout: SSH wait ceiling; defaults to ``max(90, configured remote cmd timeout)``.
+    """
+
+    is_windows = target.work_dir.startswith("C:\\") or "\\" in target.work_dir
+    if not is_windows:
+        return
+
+    if timeout is None:
+        timeout = max(90, _DEFAULT_REMOTE_CMD_SECS)
+
+    wd = target.work_dir.replace("'", "''")
+    script = (
+        f"$wd = '{wd}'\n"
+        "if (-not (Test-Path -LiteralPath $wd)) { exit 0 }\n"
+        "Get-Process -ErrorAction SilentlyContinue | ForEach-Object {\n"
+        "  $proc = $_\n"
+        "  try {\n"
+        "    if ($proc.Path -and ($proc.Path.StartsWith($wd, "
+        "[StringComparison]::OrdinalIgnoreCase))) {\n"
+        "      Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue\n"
+        "    }\n"
+        "  } catch { }\n"
+        "}\n"
+        "Start-Sleep -Milliseconds 800\n"
+        "$locked = New-Object System.Collections.Generic.List[string]\n"
+        "foreach ($pat in @('agent-*.exe','stress-agent-*.exe','uploaded-*.dat')) {\n"
+        "  Get-ChildItem -LiteralPath $wd -Filter $pat -ErrorAction SilentlyContinue "
+        "| ForEach-Object {\n"
+        "    $f = $_\n"
+        "    try {\n"
+        "      Remove-Item -LiteralPath $f.FullName -Force -ErrorAction Stop\n"
+        "    } catch {\n"
+        "      $locked.Add($f.FullName) | Out-Null\n"
+        "    }\n"
+        "  }\n"
+        "}\n"
+        "if ($locked.Count -gt 0) {\n"
+        "  Write-Output ('HARNESS_LOCKED_FILES:' + ($locked -join ';'))\n"
+        "}\n"
+        "exit 0\n"
+    )
+    enc = _powershell_encoded_command(script)
+    remote = f"powershell -NoProfile -EncodedCommand {enc}"
+    cmd = _ssh_args(target) + [remote]
+    try:
+        result = _run_ssh_cli_with_retry(
+            cmd,
+            target.host,
+            timeout=timeout,
+            tool="ssh",
+        )
+    except Exception as exc:
+        print(f"{log_prefix} cleanup skipped ({target.host}): {exc}")
+        return
+
+    if result.returncode != 0:
+        err = (result.stderr or "").strip()
+        tail = err[-240:] if len(err) > 240 else err
+        print(
+            f"{log_prefix} remote cleanup failed ({target.host}): "
+            f"exit {result.returncode} stderr_tail={tail!r}"
+        )
+        return
+
+    for line in (result.stdout or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("HARNESS_LOCKED_FILES:"):
+            payload = stripped.split(":", 1)[1].strip()
+            print(
+                f"{log_prefix} locked harness files remain ({target.host}): {payload}"
+            )
+            return
+

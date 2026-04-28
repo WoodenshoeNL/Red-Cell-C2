@@ -477,16 +477,14 @@ def run(ctx):
                 pass
 
         # Remove remote payloads
-        if win_remote_payload and ctx.windows:
-            try:
-                from lib.deploy import run_remote
-                run_remote(
-                    ctx.windows,
-                    f'powershell -Command "Remove-Item -Force -Path \'{win_remote_payload}\'"',
-                    timeout=15,
-                )
-            except Exception as exc:
-                print(f"  [cleanup] Windows payload removal failed (non-fatal): {exc}")
+        if ctx.windows:
+            from lib.deploy import cleanup_windows_harness_work_dir
+
+            cleanup_windows_harness_work_dir(
+                ctx.windows,
+                log_prefix="  [cleanup]",
+                timeout=90,
+            )
 
         if lin_remote_payload and ctx.linux:
             try:

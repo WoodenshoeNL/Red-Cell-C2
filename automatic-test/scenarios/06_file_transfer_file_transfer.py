@@ -303,7 +303,7 @@ def _run_for_agent_windows(ctx, agent_type: str, fmt: str,
         agent_kill,
         agent_upload,
     )
-    from lib.deploy import run_remote
+    from lib.deploy import cleanup_windows_harness_work_dir, run_remote
     from lib.deploy_agent import deploy_and_checkin
 
     cli = ctx.cli
@@ -406,15 +406,12 @@ def _run_for_agent_windows(ctx, agent_type: str, fmt: str,
             except Exception as exc:
                 print(f"  [{agent_type}][cleanup] agent kill failed (non-fatal): {exc}")
 
-        print(f"  [{agent_type}][cleanup] removing work_dir on target")
-        try:
-            run_remote(
-                target,
-                f'powershell -Command "Remove-Item -Recurse -Force -Path \'{target.work_dir}\'"',
-                timeout=15,
-            )
-        except Exception as exc:
-            print(f"  [{agent_type}][cleanup] work_dir removal failed (non-fatal): {exc}")
+        print(f"  [{agent_type}][cleanup] cleaning harness artifacts in work_dir on target")
+        cleanup_windows_harness_work_dir(
+            target,
+            log_prefix=f"  [{agent_type}][cleanup]",
+            timeout=90,
+        )
 
         for path in (local_upload_src, local_download_dst, local_sysfile_dst):
             try:

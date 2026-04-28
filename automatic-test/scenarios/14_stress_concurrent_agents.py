@@ -206,7 +206,7 @@ def _run_stress_for_agent(
         agent_list,
         log_list,
     )
-    from lib.deploy import ensure_work_dir, execute_background, run_remote, upload
+    from lib.deploy import cleanup_windows_harness_work_dir, ensure_work_dir, execute_background, run_remote, upload
 
     cli = ctx.cli
     co = int(ctx.timeouts.command_output)
@@ -416,14 +416,18 @@ def _run_stress_for_agent(
 
         # Remove remote payloads.
         _win_cleanup = target.work_dir.startswith("C:\\") or "\\" in target.work_dir
-        for rp in remote_payloads:
-            try:
-                if _win_cleanup:
-                    run_remote(target, f'del /f /q "{rp}"', timeout=ssh)
-                else:
+        if _win_cleanup:
+            cleanup_windows_harness_work_dir(
+                target,
+                log_prefix=f"  [{agent_type}][cleanup]",
+                timeout=max(ssh, 90),
+            )
+        else:
+            for rp in remote_payloads:
+                try:
                     run_remote(target, f"rm -f {rp}", timeout=ssh)
-            except Exception as exc:
-                print(f"  [{agent_type}][cleanup] remove {rp} failed (non-fatal): {exc}")
+                except Exception as exc:
+                    print(f"  [{agent_type}][cleanup] remove {rp} failed (non-fatal): {exc}")
 
         print(f"  [{agent_type}][cleanup] done")
 

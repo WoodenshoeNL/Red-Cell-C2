@@ -4,6 +4,7 @@ use std::net::IpAddr;
 
 use tracing::{debug, warn};
 
+use crate::events::broadcast_teamserver_line;
 use crate::listeners::{
     DemonInitRateLimiter, ListenerManagerError, MAX_RECONNECT_PROBES_PER_AGENT,
     RECONNECT_PROBE_WINDOW_DURATION, ReconnectProbeRateLimiter, UnknownCallbackProbeAuditLimiter,
@@ -39,10 +40,27 @@ pub(crate) fn map_command_dispatch_error(error: CommandDispatchError) -> Listene
 
 async fn build_callback_response(
     dispatcher: &CommandDispatcher,
+    events: &EventBus,
+    listener_name: &str,
     agent_id: u32,
     packages: &[DemonCallbackPackage],
 ) -> Result<Vec<u8>, ListenerManagerError> {
-    dispatcher.dispatch_packages(agent_id, packages).await.map_err(map_command_dispatch_error)
+    match dispatcher.dispatch_packages(agent_id, packages).await {
+        Ok(payload) => Ok(payload),
+        Err(error) => {
+            let text = format!(
+                "[listener={listener_name}] agent={agent_id:08X} callback dispatch failed: {error}"
+            );
+            broadcast_teamserver_line(events, "teamserver", &text);
+            warn!(
+                listener = listener_name,
+                agent_id = format_args!("{agent_id:08X}"),
+                %error,
+                "callback dispatch failed"
+            );
+            Err(map_command_dispatch_error(error))
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -258,7 +276,14 @@ pub(crate) async fn process_demon_transport(
             }
         }
         Ok(ParsedDemonPacket::Callback { header, packages }) => {
-            let payload = build_callback_response(dispatcher, header.agent_id, &packages).await?;
+            let payload = build_callback_response(
+                dispatcher,
+                events,
+                listener_name,
+                header.agent_id,
+                &packages,
+            )
+            .await?;
 
             Ok(ProcessedDemonResponse {
                 agent_id: header.agent_id,
@@ -337,9 +362,18 @@ pub(crate) async fn process_demon_transport(
                 http_disposition: DemonHttpDisposition::Fake404,
             })
         }
-        Err(error) => Err(ListenerManagerError::InvalidConfig {
-            message: format!("failed to parse demon callback: {error}"),
-        }),
+        Err(error) => {
+            let text = format!("[listener={listener_name}] demon packet decode failed: {error}");
+            broadcast_teamserver_line(events, "teamserver", &text);
+            warn!(
+                listener = listener_name,
+                %error,
+                "failed to parse demon transport payload"
+            );
+            Err(ListenerManagerError::InvalidConfig {
+                message: format!("failed to parse demon callback: {error}"),
+            })
+        }
     }
 }
 

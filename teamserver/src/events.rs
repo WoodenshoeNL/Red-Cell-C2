@@ -3,11 +3,33 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use red_cell_common::operator::OperatorMessage;
+use red_cell_common::operator::{
+    EventCode, Message, MessageHead, OperatorMessage, TeamserverLogInfo,
+};
+use time::OffsetDateTime;
 use tokio::sync::broadcast;
 use tracing::{trace, warn};
 
 const DEFAULT_EVENT_BUS_CAPACITY: usize = 256;
+
+/// Builds a [`OperatorMessage::TeamserverLog`] retained for `/debug/server-logs` and operator consoles.
+#[must_use]
+pub(crate) fn teamserver_log_operator_message(user: &str, text: &str) -> OperatorMessage {
+    OperatorMessage::TeamserverLog(Message {
+        head: MessageHead {
+            event: EventCode::Teamserver,
+            user: user.to_owned(),
+            timestamp: OffsetDateTime::now_utc().unix_timestamp().to_string(),
+            one_time: String::new(),
+        },
+        info: TeamserverLogInfo { text: text.to_owned() },
+    })
+}
+
+/// Broadcasts a retained teamserver log line (ring buffer + live WebSocket subscribers).
+pub(crate) fn broadcast_teamserver_line(events: &EventBus, user: &str, text: &str) -> usize {
+    events.broadcast(teamserver_log_operator_message(user, text))
+}
 
 /// Fan-out broadcaster for operator WebSocket events.
 #[derive(Clone, Debug)]
@@ -134,7 +156,7 @@ mod tests {
         OperatorMessage, TeamserverLogInfo,
     };
 
-    use super::EventBus;
+    use super::{EventBus, broadcast_teamserver_line, teamserver_log_operator_message};
 
     fn log_message(text: &str) -> OperatorMessage {
         OperatorMessage::TeamserverLog(Message {
@@ -424,5 +446,34 @@ mod tests {
 
         let logs = bus.recent_teamserver_logs();
         assert_eq!(logs, vec![log_message("msg-3"), log_message("msg-4"), log_message("msg-5"),]);
+    }
+
+    #[test]
+    fn broadcast_teamserver_line_retains_operator_visible_entry() {
+        let bus = EventBus::new(8);
+        let subscribers = broadcast_teamserver_line(&bus, "teamserver", "callback dispatch failed");
+        assert_eq!(subscribers, 0);
+
+        let logs = bus.recent_teamserver_logs();
+        assert_eq!(logs.len(), 1);
+        match &logs[0] {
+            OperatorMessage::TeamserverLog(m) => {
+                assert_eq!(m.head.user, "teamserver");
+                assert_eq!(m.info.text, "callback dispatch failed");
+            }
+            other => panic!("expected TeamserverLog, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn teamserver_log_operator_message_matches_broadcast_shape() {
+        let msg = teamserver_log_operator_message("alice", "hello");
+        match msg {
+            OperatorMessage::TeamserverLog(m) => {
+                assert_eq!(m.head.user, "alice");
+                assert_eq!(m.info.text, "hello");
+            }
+            other => panic!("expected TeamserverLog, got {other:?}"),
+        }
     }
 }

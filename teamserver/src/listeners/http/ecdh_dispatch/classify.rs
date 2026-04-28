@@ -84,6 +84,8 @@ pub(crate) async fn process_ecdh_packet(
                     &candidate_id,
                     ecdh_db,
                     dispatcher,
+                    events,
+                    listener_name,
                 )
                 .await?,
             ));

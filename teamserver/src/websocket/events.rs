@@ -22,15 +22,7 @@ use crate::{PivotInfo, agent_events::agent_new_event};
 
 /// Build a `TeamserverLog` event from free-form text.
 pub(super) fn teamserver_log_event(user: &str, text: &str) -> OperatorMessage {
-    OperatorMessage::TeamserverLog(Message {
-        head: MessageHead {
-            event: EventCode::Teamserver,
-            user: user.to_owned(),
-            timestamp: OffsetDateTime::now_utc().unix_timestamp().to_string(),
-            one_time: String::new(),
-        },
-        info: TeamserverLogInfo { text: text.to_owned() },
-    })
+    crate::events::teamserver_log_operator_message(user, text)
 }
 
 /// Format a [`CompilerDiagnostic`] as a single human-readable string.

@@ -90,7 +90,18 @@ async fn invalid_ciphertext_does_not_refresh_last_seen() {
     body.extend_from_slice(&[0u8; 16]); // bad tag
 
     let dispatcher = CommandDispatcher::new();
-    let result = process_ecdh_session(&body, &session_key, 1, &conn_id.0, repo, &dispatcher).await;
+    let events = EventBus::default();
+    let result = process_ecdh_session(
+        &body,
+        &session_key,
+        1,
+        &conn_id.0,
+        repo,
+        &dispatcher,
+        &events,
+        "test-listener",
+    )
+    .await;
     assert!(result.is_err(), "expected decrypt failure");
 
     let last_seen_after = query_last_seen(&db, &conn_id.0).await;

@@ -562,6 +562,9 @@ class TestDeployErrorPaths(unittest.TestCase):
         self.assertIn("Win32_Process", script)
         self.assertIn("ReturnValue", script)
         self.assertIn("C:\\Temp\\rc-test\\agent.exe", script)
+        self.assertIn("C:\\Temp\\rc-test", script)
+        self.assertIn("-ArgumentList", script)
+        self.assertIn(",", script)
         self.assertNotIn("Start-Process", script)
 
     def test_execute_background_windows_quotes_paths_with_spaces(self) -> None:
@@ -574,6 +577,7 @@ class TestDeployErrorPaths(unittest.TestCase):
         script = _decoded_windows_launch_script(remote_cmd)
         self.assertIn("Invoke-WmiMethod", script)
         self.assertIn('"C:\\Program Files\\rc\\agent.exe"', script)
+        self.assertIn("C:\\Program Files\\rc", script)
 
     def test_execute_background_windows_escapes_single_quotes(self) -> None:
         """Single quotes in the command must be doubled for PS single-quote string."""

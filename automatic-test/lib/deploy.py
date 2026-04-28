@@ -449,13 +449,26 @@ def _powershell_encoded_command(script: str) -> str:
 
 
 def _windows_wmi_create_script(command_line: str) -> str:
-    """Build PowerShell that runs ``Win32_Process.Create`` and verifies *ReturnValue*."""
+    """Build PowerShell that runs ``Win32_Process.Create`` and verifies *ReturnValue*.
 
-    quoted_cmd = f'"{command_line}"'
-    ps_arg = _quote_powershell(quoted_cmd)
+    Passes the executable's parent directory as *CurrentDirectory* (second argument).
+    When that argument is omitted, Windows often starts the child with a poor default
+    CWD (for example ``System32``), which breaks Demon/Archon payloads that resolve
+    files relative to their install directory.
+    """
+
+    exe_path = command_line.strip().strip('"')
+    parent = str(Path(exe_path).parent)
+    if not parent or parent == ".":
+        parent = ""
+
+    # CommandLine for Create: quote only when required (spaces in path).
+    wmi_cmd = f'"{exe_path}"' if " " in exe_path else exe_path
+    arg_cmdline = _quote_powershell(wmi_cmd)
+    arg_cwd = _quote_powershell(parent)
     return (
         f"$r = Invoke-WmiMethod -Class Win32_Process -Name Create "
-        f"-ArgumentList {ps_arg}; "
+        f"-ArgumentList {arg_cmdline}, {arg_cwd}; "
         "if ($null -eq $r) { throw 'WMI Win32_Process.Create returned null' }; "
         "if ($r.ReturnValue -ne 0) { "
         "throw ('WMI Win32_Process.Create failed: ReturnValue=' + $r.ReturnValue + "
@@ -468,9 +481,10 @@ def _windows_wmi_create_script(command_line: str) -> str:
 def execute_background(target: TargetConfig, command: str) -> None:
     """Run a command on the target in the background (fire-and-forget).
 
-    On Windows, uses WMI ``Win32_Process.Create`` so the child process is
-    outside the SSH session's job object and survives session close.
-    ``Start-Process`` children are killed when OpenSSH tears down the session.
+    On Windows, uses WMI ``Win32_Process.Create`` (with the payload directory
+    as *CurrentDirectory*) so the child process is outside the SSH session's
+    job object and survives session close. ``Start-Process`` children are killed
+    when OpenSSH tears down the session.
 
     On Linux, the standard ``nohup … &`` detach works because POSIX SSH does
     not use job objects.

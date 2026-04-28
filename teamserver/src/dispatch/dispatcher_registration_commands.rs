@@ -17,7 +17,7 @@ impl CommandDispatcher {
     ) {
         let proc_registry = registry.clone();
         let proc_events = events.clone();
-        let proc_database = database;
+        let proc_database = database.clone();
         self.register_handler(
             u32::from(DemonCommand::CommandProc),
             move |agent_id, request_id, payload| {
@@ -47,54 +47,72 @@ impl CommandDispatcher {
 
         let proc_ppid_registry = registry.clone();
         let proc_ppid_events = events.clone();
+        let proc_ppid_database = database.clone();
         self.register_handler(
             u32::from(DemonCommand::CommandProcPpidSpoof),
             move |agent_id, request_id, payload| {
                 let registry = proc_ppid_registry.clone();
                 let events = proc_ppid_events.clone();
+                let database = proc_ppid_database.clone();
                 Box::pin(async move {
                     process::handle_proc_ppid_spoof_callback(
-                        &registry, &events, agent_id, request_id, &payload,
+                        &registry, &database, &events, agent_id, request_id, &payload,
                     )
                     .await
                 })
             },
         );
 
+        let inject_registry = registry.clone();
         let inject_events = events.clone();
+        let inject_database = database.clone();
         self.register_handler(
             u32::from(DemonCommand::CommandInjectShellcode),
             move |agent_id, request_id, payload| {
+                let registry = inject_registry.clone();
                 let events = inject_events.clone();
+                let database = inject_database.clone();
                 Box::pin(async move {
                     process::handle_inject_shellcode_callback(
-                        &events, agent_id, request_id, &payload,
+                        &registry, &database, &events, agent_id, request_id, &payload,
                     )
                     .await
                 })
             },
         );
 
+        let inject_dll_registry = registry.clone();
         let inject_dll_events = events.clone();
+        let inject_dll_database = database.clone();
         self.register_handler(
             u32::from(DemonCommand::CommandInjectDll),
             move |agent_id, request_id, payload| {
+                let registry = inject_dll_registry.clone();
                 let events = inject_dll_events.clone();
+                let database = inject_dll_database.clone();
                 Box::pin(async move {
-                    process::handle_inject_dll_callback(&events, agent_id, request_id, &payload)
-                        .await
+                    process::handle_inject_dll_callback(
+                        &registry, &database, &events, agent_id, request_id, &payload,
+                    )
+                    .await
                 })
             },
         );
 
+        let spawn_dll_registry = registry.clone();
         let spawn_dll_events = events.clone();
+        let spawn_dll_database = database.clone();
         self.register_handler(
             u32::from(DemonCommand::CommandSpawnDll),
             move |agent_id, request_id, payload| {
+                let registry = spawn_dll_registry.clone();
                 let events = spawn_dll_events.clone();
+                let database = spawn_dll_database.clone();
                 Box::pin(async move {
-                    process::handle_spawn_dll_callback(&events, agent_id, request_id, &payload)
-                        .await
+                    process::handle_spawn_dll_callback(
+                        &registry, &database, &events, agent_id, request_id, &payload,
+                    )
+                    .await
                 })
             },
         );

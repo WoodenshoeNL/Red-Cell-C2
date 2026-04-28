@@ -23,6 +23,7 @@ async fn persist_process_agent_response(
 
 pub(super) async fn handle_proc_ppid_spoof_callback(
     registry: &AgentRegistry,
+    database: &Database,
     events: &EventBus,
     agent_id: u32,
     request_id: u32,
@@ -30,19 +31,41 @@ pub(super) async fn handle_proc_ppid_spoof_callback(
 ) -> Result<Option<Vec<u8>>, CommandDispatchError> {
     let mut parser = CallbackParser::new(payload, u32::from(DemonCommand::CommandProcPpidSpoof));
     let ppid = parser.read_u32("proc ppid spoof pid")?;
-    if let Some(mut agent) = registry.get(agent_id).await {
+    let had_agent = if let Some(mut agent) = registry.get(agent_id).await {
         agent.process_ppid = ppid;
         registry.update_agent(agent.clone()).await?;
         events.broadcast(agent_mark_event(&agent));
+        true
+    } else {
+        false
+    };
+    let message = format!("Changed parent pid to spoof: {ppid}");
+    if had_agent {
+        persist_process_agent_response(
+            registry,
+            database,
+            events,
+            AgentResponseEntry {
+                agent_id,
+                command_id: u32::from(DemonCommand::CommandProcPpidSpoof),
+                request_id,
+                kind: "Good".to_owned(),
+                message: message.clone(),
+                extra: BTreeMap::new(),
+                output: message,
+            },
+        )
+        .await?;
+    } else {
+        events.broadcast(agent_response_event(
+            agent_id,
+            u32::from(DemonCommand::CommandProcPpidSpoof),
+            request_id,
+            "Good",
+            &message,
+            None,
+        )?);
     }
-    events.broadcast(agent_response_event(
-        agent_id,
-        u32::from(DemonCommand::CommandProcPpidSpoof),
-        request_id,
-        "Good",
-        &format!("Changed parent pid to spoof: {ppid}"),
-        None,
-    )?);
     Ok(None)
 }
 
@@ -336,6 +359,8 @@ pub(super) async fn handle_process_command_callback(
 }
 
 pub(super) async fn handle_inject_shellcode_callback(
+    registry: &AgentRegistry,
+    database: &Database,
     events: &EventBus,
     agent_id: u32,
     request_id: u32,
@@ -362,18 +387,29 @@ pub(super) async fn handle_inject_shellcode_callback(
         }
     };
 
-    events.broadcast(agent_response_event(
-        agent_id,
-        u32::from(DemonCommand::CommandInjectShellcode),
-        request_id,
-        kind,
-        message,
-        None,
-    )?);
+    let cmd_id = u32::from(DemonCommand::CommandInjectShellcode);
+    let message_owned = message.to_owned();
+    persist_process_agent_response(
+        registry,
+        database,
+        events,
+        AgentResponseEntry {
+            agent_id,
+            command_id: cmd_id,
+            request_id,
+            kind: kind.to_owned(),
+            message: message_owned.clone(),
+            extra: BTreeMap::new(),
+            output: message_owned,
+        },
+    )
+    .await?;
     Ok(None)
 }
 
 pub(super) async fn handle_inject_dll_callback(
+    registry: &AgentRegistry,
+    database: &Database,
     events: &EventBus,
     agent_id: u32,
     request_id: u32,
@@ -403,11 +439,28 @@ pub(super) async fn handle_inject_dll_callback(
         }
     };
 
-    events.broadcast(agent_response_event(agent_id, cmd, request_id, kind, message, None)?);
+    let message_owned = message.to_owned();
+    persist_process_agent_response(
+        registry,
+        database,
+        events,
+        AgentResponseEntry {
+            agent_id,
+            command_id: cmd,
+            request_id,
+            kind: kind.to_owned(),
+            message: message_owned.clone(),
+            extra: BTreeMap::new(),
+            output: message_owned,
+        },
+    )
+    .await?;
     Ok(None)
 }
 
 pub(super) async fn handle_spawn_dll_callback(
+    registry: &AgentRegistry,
+    database: &Database,
     events: &EventBus,
     agent_id: u32,
     request_id: u32,
@@ -437,7 +490,22 @@ pub(super) async fn handle_spawn_dll_callback(
         }
     };
 
-    events.broadcast(agent_response_event(agent_id, cmd, request_id, kind, message, None)?);
+    let message_owned = message.to_owned();
+    persist_process_agent_response(
+        registry,
+        database,
+        events,
+        AgentResponseEntry {
+            agent_id,
+            command_id: cmd,
+            request_id,
+            kind: kind.to_owned(),
+            message: message_owned.clone(),
+            extra: BTreeMap::new(),
+            output: message_owned,
+        },
+    )
+    .await?;
     Ok(None)
 }
 

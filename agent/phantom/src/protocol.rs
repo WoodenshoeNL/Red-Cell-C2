@@ -3,7 +3,7 @@
 use std::path::Path;
 
 pub use red_cell_common::agent_protocol::{
-    AgentMetadata, build_callback_packet, build_init_packet, parse_init_ack,
+    AgentMetadata, build_callback_packet, build_init_packet, callback_ctr_blocks, parse_init_ack,
 };
 use red_cell_common::crypto::{
     AgentCryptoMaterial, ctr_blocks_for_len, decrypt_agent_data_at_offset,
@@ -156,15 +156,6 @@ pub fn build_exit_packet(
     )?)
 }
 
-/// Return the number of CTR blocks consumed by a callback payload body.
-///
-/// The encrypted region is `seq_num(8 LE) | payload_len(4) | payload`;
-/// `command_id` and `request_id` are transmitted in the clear.
-#[must_use]
-pub fn callback_ctr_blocks(callback_payload_len: usize) -> u64 {
-    ctr_blocks_for_len(8 + 4 + callback_payload_len)
-}
-
 fn length_prefixed_bytes(bytes: &[u8]) -> Result<Vec<u8>, PhantomError> {
     let len = u32::try_from(bytes.len())
         .map_err(|_| PhantomError::InvalidResponse("length-prefixed field too large"))?;
@@ -196,8 +187,7 @@ mod tests {
 
     use super::{
         AgentMetadata, build_error_packet, build_exit_packet, build_init_packet,
-        build_output_packet, callback_ctr_blocks, executable_name, parse_init_ack,
-        parse_tasking_response,
+        build_output_packet, executable_name, parse_init_ack, parse_tasking_response,
     };
 
     fn metadata() -> AgentMetadata {
@@ -394,7 +384,7 @@ mod tests {
 
         let response = parse_tasking_response(11, &crypto, 0, &encrypted).expect("response");
         assert_eq!(response.packages.len(), 1);
-        assert_eq!(response.next_ctr_offset, callback_ctr_blocks(0));
+        assert_eq!(response.next_ctr_offset, ctr_blocks_for_len(encrypted.len()));
     }
 
     #[test]

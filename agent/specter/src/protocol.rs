@@ -4,7 +4,7 @@
 //! responses, matching the Havoc Demon wire format byte-for-byte.
 
 pub use red_cell_common::agent_protocol::{
-    AgentMetadata, build_callback_packet, build_init_packet, parse_init_ack,
+    AgentMetadata, build_callback_packet, build_init_packet, callback_ctr_blocks, parse_init_ack,
 };
 use red_cell_common::crypto::{AgentCryptoMaterial, decrypt_agent_data_at_offset};
 use red_cell_common::demon::DemonEnvelope;

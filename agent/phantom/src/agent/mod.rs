@@ -378,8 +378,11 @@ mod tests {
 
         let packages = agent.get_job().await?;
         assert!(packages.is_empty());
-        // CTR must advance by callback_ctr_blocks(0) for the sent packet only.
-        assert_eq!(agent.ctr_offset, offset_before + callback_ctr_blocks(0));
+        // CTR must advance by callback_ctr_blocks for the sent packet only.
+        assert_eq!(
+            agent.ctr_offset,
+            offset_before + callback_ctr_blocks(u32::from(DemonCommand::CommandGetJob), 0)
+        );
 
         server.join().map_err(|_| "server thread panicked")??;
         Ok(())
@@ -436,7 +439,8 @@ mod tests {
         // Simulate ctr_offset after init+checkin.
         agent.ctr_offset = 3;
         let get_job_send_offset = agent.ctr_offset; // 3
-        let after_send = get_job_send_offset + callback_ctr_blocks(0); // 4
+        let after_send =
+            get_job_send_offset + callback_ctr_blocks(u32::from(DemonCommand::CommandGetJob), 0); // 4
 
         // Server encrypts the task payload at 'after_send'.
         let plain_payload = 42_i32.to_le_bytes().to_vec();
@@ -503,13 +507,15 @@ mod tests {
         assert!(!init_packet.is_empty());
 
         // After init_handshake, ctr_offset == 1.  The agent will:
-        //   1. encrypt checkin at ctr_offset=1, advance by callback_ctr_blocks(0)   → offset=2
-        //   2. encrypt get_job at ctr_offset=2, advance by callback_ctr_blocks(0)   → offset=3
+        //   1. encrypt checkin at ctr_offset=1, advance by callback_ctr_blocks(CommandCheckin, 0)   → offset=2
+        //   2. encrypt get_job at ctr_offset=2, advance by callback_ctr_blocks(CommandGetJob, 0)   → offset=3
         //   3. decrypt task payload at offset=3, advance by ctr_blocks_for_len(4)   → offset=4
-        //   4. encrypt exit callback at ctr_offset=4, advance by callback_ctr_blocks(4) → offset=5
+        //   4. encrypt exit callback at ctr_offset=4, advance by callback_ctr_blocks(CommandExit, 4) → offset=5
         let checkin_encrypt_offset = agent.ctr_offset; // 1
-        let after_checkin_send = checkin_encrypt_offset + callback_ctr_blocks(0); // 2
-        let after_get_job_send = after_checkin_send + callback_ctr_blocks(0); // 3
+        let after_checkin_send = checkin_encrypt_offset
+            + callback_ctr_blocks(u32::from(DemonCommand::CommandCheckin), 0); // 2
+        let after_get_job_send =
+            after_checkin_send + callback_ctr_blocks(u32::from(DemonCommand::CommandGetJob), 0); // 3
         let task_payload = 9_i32.to_le_bytes().to_vec();
         let encrypted_task_payload = encrypt_agent_data_at_offset(
             &agent.session_crypto.key,
@@ -554,7 +560,8 @@ mod tests {
         assert_eq!(decoded_seq, 1_u64);
         // payload_len at offset 8 must be 0 (empty checkin body).
         assert_eq!(&decrypted[8..12], &0_u32.to_be_bytes());
-        let expected_final_offset = after_task_decrypt + callback_ctr_blocks(4); // 5
+        let expected_final_offset =
+            after_task_decrypt + callback_ctr_blocks(u32::from(DemonCommand::CommandExit), 4); // 5
         assert_eq!(agent.ctr_offset, expected_final_offset);
 
         let _get_job_packet = request_rx.recv_timeout(std::time::Duration::from_secs(1))?;
@@ -602,11 +609,12 @@ mod tests {
             &agent.agent_id.to_le_bytes(),
         )?)?;
 
-        // After init: ctr_offset = 1.
-        // checkin sends at 1, advances by callback_ctr_blocks(0) → 2.
-        // get_job sends at 2, advances by callback_ctr_blocks(0) → 3.
+        // checkin sends at 1, advances by callback_ctr_blocks(CommandCheckin, 0) → 2.
+        // get_job sends at 2, advances by callback_ctr_blocks(CommandGetJob, 0) → 3.
         // Task payload is encrypted at offset 3.
-        let after_get_job_send = 1 + callback_ctr_blocks(0) + callback_ctr_blocks(0); // 3
+        let after_get_job_send = 1
+            + callback_ctr_blocks(u32::from(DemonCommand::CommandCheckin), 0)
+            + callback_ctr_blocks(u32::from(DemonCommand::CommandGetJob), 0); // 3
         let task_payload = 1_i32.to_le_bytes().to_vec();
         let encrypted_task_payload = encrypt_agent_data_at_offset(
             &agent.session_crypto.key,

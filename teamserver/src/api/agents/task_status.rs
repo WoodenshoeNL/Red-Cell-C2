@@ -57,7 +57,9 @@ pub struct AgentTaskDispatchSnapshot {
 /// One persisted callback row (subset for correlation / debugging).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
 pub struct AgentTaskResponseSnapshot {
-    pub response_row_id: i64,
+    /// Primary key of the persisted agent_response row, when present in the DB projection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_row_id: Option<i64>,
     pub command_id: u32,
     pub request_id: u32,
     pub response_type: String,
@@ -176,7 +178,7 @@ pub async fn get_agent_task_status(
     let response_rows: Vec<AgentTaskResponseSnapshot> = responses
         .iter()
         .map(|r| AgentTaskResponseSnapshot {
-            response_row_id: r.id.unwrap_or(0),
+            response_row_id: r.id,
             command_id: r.command_id,
             request_id: r.request_id,
             response_type: r.response_type.clone(),
@@ -255,7 +257,37 @@ fn parse_task_id_as_request_id(task_id: &str) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_task_id_as_request_id;
+    use serde_json::json;
+
+    use super::{AgentTaskResponseSnapshot, parse_task_id_as_request_id};
+
+    #[test]
+    fn agent_task_response_snapshot_omits_response_row_id_when_unknown() {
+        let snap = AgentTaskResponseSnapshot {
+            response_row_id: None,
+            command_id: 1,
+            request_id: 2,
+            response_type: "stdout".to_owned(),
+            received_at: "2026-01-01T00:00:00Z".to_owned(),
+            exit_code: None,
+        };
+        let v = serde_json::to_value(&snap).expect("serialize");
+        assert!(v.get("response_row_id").is_none(), "{v:?}");
+    }
+
+    #[test]
+    fn agent_task_response_snapshot_includes_response_row_id_when_known() {
+        let snap = AgentTaskResponseSnapshot {
+            response_row_id: Some(42),
+            command_id: 1,
+            request_id: 2,
+            response_type: "stdout".to_owned(),
+            received_at: "2026-01-01T00:00:00Z".to_owned(),
+            exit_code: None,
+        };
+        let v = serde_json::to_value(&snap).expect("serialize");
+        assert_eq!(v["response_row_id"], json!(42));
+    }
 
     #[test]
     fn parse_hex_task_id_as_request_id() {

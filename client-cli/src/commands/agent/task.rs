@@ -39,7 +39,8 @@ pub(crate) struct AgentTaskDispatchSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
 pub(crate) struct AgentTaskResponseSnapshot {
-    pub(crate) response_row_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) response_row_id: Option<i64>,
     pub(crate) command_id: u32,
     pub(crate) request_id: u32,
     pub(crate) response_type: String,
@@ -90,5 +91,18 @@ mod tests {
         let body: AgentTaskStatusBody = serde_json::from_value(json).expect("deserialize");
         assert_eq!(body.lifecycle, "queued");
         assert!(body.queued.is_some());
+    }
+
+    #[test]
+    fn agent_task_response_snapshot_deserializes_without_response_row_id() {
+        let json = serde_json::json!({
+            "command_id": 1,
+            "request_id": 2,
+            "response_type": "stdout",
+            "received_at": "2026-01-01T00:00:00Z",
+            "exit_code": null
+        });
+        let snap: AgentTaskResponseSnapshot = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(snap.response_row_id, None);
     }
 }

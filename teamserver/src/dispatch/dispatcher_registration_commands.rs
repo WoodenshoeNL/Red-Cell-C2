@@ -13,15 +13,20 @@ impl CommandDispatcher {
         &mut self,
         registry: AgentRegistry,
         events: EventBus,
+        database: Database,
     ) {
+        let proc_registry = registry.clone();
         let proc_events = events.clone();
+        let proc_database = database;
         self.register_handler(
             u32::from(DemonCommand::CommandProc),
             move |agent_id, request_id, payload| {
+                let registry = proc_registry.clone();
                 let events = proc_events.clone();
+                let database = proc_database.clone();
                 Box::pin(async move {
                     process::handle_process_command_callback(
-                        &events, agent_id, request_id, &payload,
+                        &registry, &database, &events, agent_id, request_id, &payload,
                     )
                     .await
                 })

@@ -88,6 +88,21 @@ fn sample_agent(agent_id: u32) -> red_cell_common::AgentRecord {
     }
 }
 
+async fn process_callback_test_harness(agent_id: u32) -> (AgentRegistry, Database, EventBus) {
+    let database = Database::connect(temp_db_path()).await.expect("connect db");
+    let registry = AgentRegistry::new(database.clone());
+    registry.insert(sample_agent(agent_id)).await.expect("insert agent");
+    let events = EventBus::default();
+    (registry, database, events)
+}
+
+async fn process_callback_stub_harness() -> (AgentRegistry, Database, EventBus) {
+    let database = Database::connect(temp_db_path()).await.expect("connect db");
+    let registry = AgentRegistry::new(database.clone());
+    let events = EventBus::default();
+    (registry, database, events)
+}
+
 #[tokio::test]
 async fn ppid_spoof_updates_registry_and_broadcasts() {
     let registry = test_registry().await;
@@ -162,7 +177,7 @@ async fn ppid_spoof_truncated_payload_returns_error() {
 
 #[tokio::test]
 async fn process_list_happy_path_broadcasts_table_and_json() {
-    let events = EventBus::default();
+    let (registry, database, events) = process_callback_test_harness(0xAA).await;
     let mut rx = events.subscribe();
     let payload = build_process_list_payload(
         0, // from_process_manager
@@ -172,7 +187,8 @@ async fn process_list_happy_path_broadcasts_table_and_json() {
         ],
     );
 
-    let result = handle_process_list_callback(&events, 0xAA, 1, &payload).await;
+    let result =
+        handle_process_list_callback(&registry, &database, &events, 0xAA, 1, &payload).await;
     assert!(result.is_ok());
     assert!(result.expect("unwrap").is_none());
 
@@ -203,12 +219,13 @@ async fn process_list_happy_path_broadcasts_table_and_json() {
 
 #[tokio::test]
 async fn process_list_empty_returns_none_without_broadcasting() {
-    let events = EventBus::default();
+    let (registry, database, events) = process_callback_stub_harness().await;
     let mut rx = events.subscribe();
     // No rows, just the from_process_manager flag.
     let payload = build_process_list_payload(0, &[]);
 
-    let result = handle_process_list_callback(&events, 0xBB, 2, &payload).await;
+    let result =
+        handle_process_list_callback(&registry, &database, &events, 0xBB, 2, &payload).await;
     assert!(result.is_ok());
     assert!(result.expect("unwrap").is_none());
 
@@ -219,13 +236,14 @@ async fn process_list_empty_returns_none_without_broadcasting() {
 
 #[tokio::test]
 async fn process_list_truncated_row_returns_error() {
-    let events = EventBus::default();
+    let (registry, database, events) = process_callback_stub_harness().await;
     // Payload with the flag but a truncated row (just 2 bytes of garbage).
     let mut payload = Vec::new();
     add_u32(&mut payload, 0); // from_process_manager
     payload.extend_from_slice(&[0x01, 0x02]); // truncated — not enough for a utf16 length
 
-    let result = handle_process_list_callback(&events, 0xCC, 3, &payload).await;
+    let result =
+        handle_process_list_callback(&registry, &database, &events, 0xCC, 3, &payload).await;
     assert!(
         matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
         "expected InvalidCallbackPayload for truncated row, got: {result:?}"
@@ -487,11 +505,11 @@ fn build_process_kill_payload(success: u32, pid: u32) -> Vec<u8> {
 
 #[tokio::test]
 async fn process_kill_success_broadcasts_good_with_pid() {
-    let events = EventBus::default();
+    let (registry, database, events) = process_callback_test_harness(0xA1).await;
     let mut rx = events.subscribe();
     let payload = build_process_kill_payload(1, 4200);
 
-    handle_process_command_callback(&events, 0xA1, 10, &payload)
+    handle_process_command_callback(&registry, &database, &events, 0xA1, 10, &payload)
         .await
         .expect("handler should succeed");
 
@@ -506,11 +524,11 @@ async fn process_kill_success_broadcasts_good_with_pid() {
 
 #[tokio::test]
 async fn process_kill_failure_broadcasts_error() {
-    let events = EventBus::default();
+    let (registry, database, events) = process_callback_test_harness(0xA2).await;
     let mut rx = events.subscribe();
     let payload = build_process_kill_payload(0, 4200);
 
-    handle_process_command_callback(&events, 0xA2, 11, &payload)
+    handle_process_command_callback(&registry, &database, &events, 0xA2, 11, &payload)
         .await
         .expect("handler should succeed");
 
@@ -527,12 +545,13 @@ async fn process_kill_failure_broadcasts_error() {
 
 #[tokio::test]
 async fn process_kill_empty_payload_returns_error() {
-    let events = EventBus::default();
+    let (registry, database, events) = process_callback_stub_harness().await;
     // Payload: only the subcommand u32 (Kill), no success or pid fields.
     let mut payload = Vec::new();
     add_u32(&mut payload, u32::from(DemonProcessCommand::Kill));
 
-    let result = handle_process_command_callback(&events, 0xA3, 12, &payload).await;
+    let result =
+        handle_process_command_callback(&registry, &database, &events, 0xA3, 12, &payload).await;
     assert!(
         matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
         "expected InvalidCallbackPayload for empty kill body, got: {result:?}"
@@ -541,13 +560,14 @@ async fn process_kill_empty_payload_returns_error() {
 
 #[tokio::test]
 async fn process_kill_truncated_pid_returns_error() {
-    let events = EventBus::default();
+    let (registry, database, events) = process_callback_stub_harness().await;
     // Payload: subcommand u32 (Kill) + success u32, but NO pid field.
     let mut payload = Vec::new();
     add_u32(&mut payload, u32::from(DemonProcessCommand::Kill));
     add_u32(&mut payload, 1); // success field only
 
-    let result = handle_process_command_callback(&events, 0xA4, 13, &payload).await;
+    let result =
+        handle_process_command_callback(&registry, &database, &events, 0xA4, 13, &payload).await;
     assert!(
         matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
         "expected InvalidCallbackPayload for truncated kill pid, got: {result:?}"
@@ -557,10 +577,11 @@ async fn process_kill_truncated_pid_returns_error() {
 #[tokio::test]
 async fn process_kill_full_payload_success_returns_ok() {
     // Regression guard: a well-formed 8-byte body (success=1, pid) must still succeed.
-    let events = EventBus::default();
+    let (registry, database, events) = process_callback_test_harness(0xA5).await;
     let payload = build_process_kill_payload(1, 9999);
 
-    let result = handle_process_command_callback(&events, 0xA5, 14, &payload).await;
+    let result =
+        handle_process_command_callback(&registry, &database, &events, 0xA5, 14, &payload).await;
     assert!(result.is_ok(), "expected Ok for full kill payload, got: {result:?}");
 }
 
@@ -585,14 +606,14 @@ fn build_process_modules_payload(pid: u32, modules: &[(&str, u64)]) -> Vec<u8> {
 
 #[tokio::test]
 async fn process_modules_broadcasts_info_with_table_and_json() {
-    let events = EventBus::default();
+    let (registry, database, events) = process_callback_test_harness(0xB1).await;
     let mut rx = events.subscribe();
     let payload = build_process_modules_payload(
         1234,
         &[("ntdll.dll", 0x7FFE_0000_0000), ("kernel32.dll", 0x7FFE_0001_0000)],
     );
 
-    handle_process_command_callback(&events, 0xB1, 20, &payload)
+    handle_process_command_callback(&registry, &database, &events, 0xB1, 20, &payload)
         .await
         .expect("handler should succeed");
 
@@ -620,11 +641,11 @@ async fn process_modules_broadcasts_info_with_table_and_json() {
 
 #[tokio::test]
 async fn process_modules_empty_list_still_broadcasts() {
-    let events = EventBus::default();
+    let (registry, database, events) = process_callback_test_harness(0xB2).await;
     let mut rx = events.subscribe();
     let payload = build_process_modules_payload(999, &[]);
 
-    handle_process_command_callback(&events, 0xB2, 21, &payload)
+    handle_process_command_callback(&registry, &database, &events, 0xB2, 21, &payload)
         .await
         .expect("handler should succeed");
 
@@ -665,14 +686,14 @@ fn build_process_grep_payload(rows: &[(&str, u32, u32, &[u8], u32)]) -> Vec<u8> 
 
 #[tokio::test]
 async fn process_grep_broadcasts_info_with_table_and_json() {
-    let events = EventBus::default();
+    let (registry, database, events) = process_callback_test_harness(0xC1).await;
     let mut rx = events.subscribe();
     let payload = build_process_grep_payload(&[
         ("lsass.exe", 700, 4, b"SYSTEM\0", 64),
         ("cmd.exe", 1200, 700, b"user1\0", 86),
     ]);
 
-    handle_process_command_callback(&events, 0xC1, 30, &payload)
+    handle_process_command_callback(&registry, &database, &events, 0xC1, 30, &payload)
         .await
         .expect("handler should succeed");
 
@@ -701,7 +722,7 @@ async fn process_grep_broadcasts_info_with_table_and_json() {
 
 #[tokio::test]
 async fn process_grep_user_bytes_null_terminator_edge_cases() {
-    let events = EventBus::default();
+    let (registry, database, events) = process_callback_test_harness(0xC2).await;
     let mut rx = events.subscribe();
     let payload = build_process_grep_payload(&[
         // No null terminator — raw string should be preserved as-is
@@ -712,7 +733,7 @@ async fn process_grep_user_bytes_null_terminator_edge_cases() {
         ("idle.exe", 300, 4, b"\0", 86),
     ]);
 
-    handle_process_command_callback(&events, 0xC2, 31, &payload)
+    handle_process_command_callback(&registry, &database, &events, 0xC2, 31, &payload)
         .await
         .expect("handler should succeed");
 
@@ -765,7 +786,7 @@ fn build_process_memory_payload(
 
 #[tokio::test]
 async fn process_memory_broadcasts_info_with_table_and_json() {
-    let events = EventBus::default();
+    let (registry, database, events) = process_callback_test_harness(0xD1).await;
     let mut rx = events.subscribe();
     let payload = build_process_memory_payload(
         500,
@@ -773,7 +794,7 @@ async fn process_memory_broadcasts_info_with_table_and_json() {
         &[(0x7FF0_0000_0000, 0x1000, 0x20, 0x1000, 0x20000)],
     );
 
-    handle_process_command_callback(&events, 0xD1, 40, &payload)
+    handle_process_command_callback(&registry, &database, &events, 0xD1, 40, &payload)
         .await
         .expect("handler should succeed");
 
@@ -803,7 +824,7 @@ async fn process_memory_broadcasts_info_with_table_and_json() {
 
 #[tokio::test]
 async fn process_memory_with_protect_filter_shows_protect_name() {
-    let events = EventBus::default();
+    let (registry, database, events) = process_callback_test_harness(0xD2).await;
     let mut rx = events.subscribe();
     let payload = build_process_memory_payload(
         600,
@@ -811,7 +832,7 @@ async fn process_memory_with_protect_filter_shows_protect_name() {
         &[(0x1000, 0x100, 0x40, 0x1000, 0x1000000)],
     );
 
-    handle_process_command_callback(&events, 0xD2, 41, &payload)
+    handle_process_command_callback(&registry, &database, &events, 0xD2, 41, &payload)
         .await
         .expect("handler should succeed");
 
@@ -834,11 +855,12 @@ async fn process_memory_with_protect_filter_shows_protect_name() {
 
 #[tokio::test]
 async fn process_command_invalid_subcommand_returns_error() {
-    let events = EventBus::default();
+    let (registry, database, events) = process_callback_stub_harness().await;
     let mut buf = Vec::new();
     add_u32(&mut buf, 0xFF); // invalid subcommand
 
-    let result = handle_process_command_callback(&events, 0xE1, 50, &buf).await;
+    let result =
+        handle_process_command_callback(&registry, &database, &events, 0xE1, 50, &buf).await;
     assert!(
         matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
         "expected InvalidCallbackPayload for invalid subcommand, got: {result:?}"
@@ -849,7 +871,7 @@ async fn process_command_invalid_subcommand_returns_error() {
 
 #[tokio::test]
 async fn process_modules_truncated_second_row_returns_error() {
-    let events = EventBus::default();
+    let (registry, database, events) = process_callback_stub_harness().await;
     // Build a valid first module row, then a truncated second row
     let mut buf = Vec::new();
     add_u32(&mut buf, u32::from(DemonProcessCommand::Modules));
@@ -861,7 +883,8 @@ async fn process_modules_truncated_second_row_returns_error() {
     buf.extend_from_slice(&10u32.to_le_bytes());
     buf.extend_from_slice(&[0x41, 0x42, 0x43]); // only 3 of the promised 10 bytes
 
-    let result = handle_process_command_callback(&events, 0xF1, 60, &buf).await;
+    let result =
+        handle_process_command_callback(&registry, &database, &events, 0xF1, 60, &buf).await;
     assert!(
         matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
         "expected InvalidCallbackPayload for truncated module row, got: {result:?}"

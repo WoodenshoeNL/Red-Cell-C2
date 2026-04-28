@@ -4,11 +4,22 @@ use red_cell_common::demon::{DemonCommand, DemonInjectError, DemonProcessCommand
 use serde_json::{Value, json};
 
 use crate::agent_events::agent_mark_event;
-use crate::{AgentRegistry, EventBus};
+use crate::{AgentRegistry, Database, EventBus};
 
 use super::{
-    CallbackParser, CommandDispatchError, agent_response_event, agent_response_event_with_extra,
+    AgentResponseEntry, CallbackParser, CommandDispatchError, agent_response_event,
+    broadcast_and_persist_agent_response, loot_context,
 };
+
+async fn persist_process_agent_response(
+    registry: &AgentRegistry,
+    database: &Database,
+    events: &EventBus,
+    response: AgentResponseEntry,
+) -> Result<(), CommandDispatchError> {
+    let context = loot_context(registry, response.agent_id, response.request_id).await;
+    broadcast_and_persist_agent_response(database, events, response, &context).await
+}
 
 pub(super) async fn handle_proc_ppid_spoof_callback(
     registry: &AgentRegistry,
@@ -36,6 +47,8 @@ pub(super) async fn handle_proc_ppid_spoof_callback(
 }
 
 pub(super) async fn handle_process_list_callback(
+    registry: &AgentRegistry,
+    database: &Database,
     events: &EventBus,
     agent_id: u32,
     request_id: u32,
@@ -65,19 +78,27 @@ pub(super) async fn handle_process_list_callback(
     let mut extra = BTreeMap::new();
     extra.insert("ProcessListRows".to_owned(), process_rows_json(&rows));
 
-    events.broadcast(agent_response_event_with_extra(
-        agent_id,
-        u32::from(DemonCommand::CommandProcList),
-        request_id,
-        "Info",
-        "Process List:",
-        extra,
-        output,
-    )?);
+    persist_process_agent_response(
+        registry,
+        database,
+        events,
+        AgentResponseEntry {
+            agent_id,
+            command_id: u32::from(DemonCommand::CommandProcList),
+            request_id,
+            kind: "Info".to_owned(),
+            message: "Process List:".to_owned(),
+            extra,
+            output,
+        },
+    )
+    .await?;
     Ok(None)
 }
 
 pub(super) async fn handle_process_command_callback(
+    registry: &AgentRegistry,
+    database: &Database,
     events: &EventBus,
     agent_id: u32,
     request_id: u32,
@@ -105,23 +126,38 @@ pub(super) async fn handle_process_command_callback(
                 } else {
                     ("Error", format!("Process could not be started: Path:[{path}]"))
                 };
-                events.broadcast(agent_response_event(
-                    agent_id,
-                    u32::from(DemonCommand::CommandProc),
-                    request_id,
-                    kind,
-                    &message,
-                    None,
-                )?);
+                persist_process_agent_response(
+                    registry,
+                    database,
+                    events,
+                    AgentResponseEntry {
+                        agent_id,
+                        command_id: u32::from(DemonCommand::CommandProc),
+                        request_id,
+                        kind: kind.to_owned(),
+                        message: message.clone(),
+                        extra: BTreeMap::new(),
+                        output: message,
+                    },
+                )
+                .await?;
             } else if success == 0 || piped == 0 {
-                events.broadcast(agent_response_event(
-                    agent_id,
-                    u32::from(DemonCommand::CommandProc),
-                    request_id,
-                    "Info",
-                    "Process create completed",
-                    None,
-                )?);
+                let message = "Process create completed".to_owned();
+                persist_process_agent_response(
+                    registry,
+                    database,
+                    events,
+                    AgentResponseEntry {
+                        agent_id,
+                        command_id: u32::from(DemonCommand::CommandProc),
+                        request_id,
+                        kind: "Info".to_owned(),
+                        message: message.clone(),
+                        extra: BTreeMap::new(),
+                        output: message,
+                    },
+                )
+                .await?;
             }
         }
         DemonProcessCommand::Kill => {
@@ -132,14 +168,21 @@ pub(super) async fn handle_process_command_callback(
             } else {
                 ("Error", "Failed to kill process".to_owned())
             };
-            events.broadcast(agent_response_event(
-                agent_id,
-                u32::from(DemonCommand::CommandProc),
-                request_id,
-                kind,
-                &message,
-                None,
-            )?);
+            persist_process_agent_response(
+                registry,
+                database,
+                events,
+                AgentResponseEntry {
+                    agent_id,
+                    command_id: u32::from(DemonCommand::CommandProc),
+                    request_id,
+                    kind: kind.to_owned(),
+                    message: message.clone(),
+                    extra: BTreeMap::new(),
+                    output: message,
+                },
+            )
+            .await?;
         }
         DemonProcessCommand::Modules => {
             let pid = parser.read_u32("proc modules pid")?;
@@ -166,15 +209,22 @@ pub(super) async fn handle_process_command_callback(
                 ),
             );
 
-            events.broadcast(agent_response_event_with_extra(
-                agent_id,
-                u32::from(DemonCommand::CommandProc),
-                request_id,
-                "Info",
-                &format!("Process Modules (PID: {pid}):"),
-                extra,
-                output,
-            )?);
+            let message = format!("Process Modules (PID: {pid}):");
+            persist_process_agent_response(
+                registry,
+                database,
+                events,
+                AgentResponseEntry {
+                    agent_id,
+                    command_id: u32::from(DemonCommand::CommandProc),
+                    request_id,
+                    kind: "Info".to_owned(),
+                    message: message.clone(),
+                    extra,
+                    output,
+                },
+            )
+            .await?;
         }
         DemonProcessCommand::Grep => {
             let mut rows = Vec::new();
@@ -208,15 +258,21 @@ pub(super) async fn handle_process_command_callback(
                 ),
             );
 
-            events.broadcast(agent_response_event_with_extra(
-                agent_id,
-                u32::from(DemonCommand::CommandProc),
-                request_id,
-                "Info",
-                "Process Grep:",
-                extra,
-                output,
-            )?);
+            persist_process_agent_response(
+                registry,
+                database,
+                events,
+                AgentResponseEntry {
+                    agent_id,
+                    command_id: u32::from(DemonCommand::CommandProc),
+                    request_id,
+                    kind: "Info".to_owned(),
+                    message: "Process Grep:".to_owned(),
+                    extra,
+                    output,
+                },
+            )
+            .await?;
         }
         DemonProcessCommand::Memory => {
             let pid = parser.read_u32("proc memory pid")?;
@@ -250,22 +306,29 @@ pub(super) async fn handle_process_command_callback(
                 ),
             );
 
-            events.broadcast(agent_response_event_with_extra(
-                agent_id,
-                u32::from(DemonCommand::CommandProc),
-                request_id,
-                "Info",
-                &format!(
-                    "Process Memory (PID: {pid}, Filter: {}):",
-                    if query_protect == 0 {
-                        "All".to_owned()
-                    } else {
-                        format_memory_protect(query_protect)
-                    }
-                ),
-                extra,
-                output,
-            )?);
+            let message = format!(
+                "Process Memory (PID: {pid}, Filter: {}):",
+                if query_protect == 0 {
+                    "All".to_owned()
+                } else {
+                    format_memory_protect(query_protect)
+                }
+            );
+            persist_process_agent_response(
+                registry,
+                database,
+                events,
+                AgentResponseEntry {
+                    agent_id,
+                    command_id: u32::from(DemonCommand::CommandProc),
+                    request_id,
+                    kind: "Info".to_owned(),
+                    message: message.clone(),
+                    extra,
+                    output,
+                },
+            )
+            .await?;
         }
     }
 

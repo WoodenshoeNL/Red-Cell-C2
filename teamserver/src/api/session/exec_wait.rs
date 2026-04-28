@@ -77,6 +77,7 @@ pub(super) async fn session_exec_wait(
     };
 
     let task_id = submit_data["task_id"].as_str().unwrap_or_default().to_owned();
+    let want_request_id = u32::from_str_radix(task_id.as_str(), 16).ok();
     let agent_id = match value.get("id").and_then(|v| v.as_str()) {
         Some(id) => id.to_owned(),
         None => {
@@ -148,8 +149,11 @@ pub(super) async fn session_exec_wait(
                 if let Some(id) = entry["id"].as_i64() {
                     cursor = Some(id);
                 }
-                // Check if this entry matches our task.
-                if entry["task_id"].as_str() == Some(&task_id) && !task_id.is_empty() {
+                let matches_task_id =
+                    !task_id.is_empty() && entry["task_id"].as_str() == Some(task_id.as_str());
+                let matches_request_id = want_request_id
+                    .is_some_and(|rid| entry["request_id"].as_u64() == Some(u64::from(rid)));
+                if matches_task_id || matches_request_id {
                     return serde_json::json!({
                         "ok": true,
                         "cmd": cmd,

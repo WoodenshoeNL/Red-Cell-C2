@@ -569,11 +569,14 @@ fn build_process_create_payload(
 
 #[tokio::test]
 async fn process_create_verbose_success_broadcasts_info_with_path_and_pid() {
+    let database = Database::connect_in_memory().await.expect("db");
+    let registry = AgentRegistry::new(database.clone());
+    registry.insert(sample_agent_info(0xAA, test_key(0x11), test_iv(0x22))).await.expect("insert");
     let events = EventBus::default();
     let mut rx = events.subscribe();
     let payload = build_process_create_payload("C:\\cmd.exe", 1234, 1, 0, 1);
 
-    handle_process_command_callback(&events, 0xAA, 1, &payload)
+    handle_process_command_callback(&registry, &database, &events, 0xAA, 1, &payload)
         .await
         .expect("handler should succeed");
 
@@ -592,11 +595,14 @@ async fn process_create_verbose_success_broadcasts_info_with_path_and_pid() {
 
 #[tokio::test]
 async fn process_create_verbose_failure_broadcasts_error() {
+    let database = Database::connect_in_memory().await.expect("db");
+    let registry = AgentRegistry::new(database.clone());
+    registry.insert(sample_agent_info(0xBB, test_key(0x11), test_iv(0x22))).await.expect("insert");
     let events = EventBus::default();
     let mut rx = events.subscribe();
     let payload = build_process_create_payload("C:\\bad.exe", 0, 0, 0, 1);
 
-    handle_process_command_callback(&events, 0xBB, 2, &payload)
+    handle_process_command_callback(&registry, &database, &events, 0xBB, 2, &payload)
         .await
         .expect("handler should succeed");
 
@@ -612,12 +618,15 @@ async fn process_create_verbose_failure_broadcasts_error() {
 
 #[tokio::test]
 async fn process_create_non_verbose_failure_unpiped_broadcasts_fallback() {
+    let database = Database::connect_in_memory().await.expect("db");
+    let registry = AgentRegistry::new(database.clone());
+    registry.insert(sample_agent_info(0xCC, test_key(0x11), test_iv(0x22))).await.expect("insert");
     let events = EventBus::default();
     let mut rx = events.subscribe();
     // verbose=0, success=0, piped=0
     let payload = build_process_create_payload("C:\\app.exe", 0, 0, 0, 0);
 
-    handle_process_command_callback(&events, 0xCC, 3, &payload)
+    handle_process_command_callback(&registry, &database, &events, 0xCC, 3, &payload)
         .await
         .expect("handler should succeed");
 
@@ -633,12 +642,15 @@ async fn process_create_non_verbose_failure_unpiped_broadcasts_fallback() {
 
 #[tokio::test]
 async fn process_create_non_verbose_failure_piped_broadcasts_fallback() {
+    let database = Database::connect_in_memory().await.expect("db");
+    let registry = AgentRegistry::new(database.clone());
+    registry.insert(sample_agent_info(0xDD, test_key(0x11), test_iv(0x22))).await.expect("insert");
     let events = EventBus::default();
     let mut rx = events.subscribe();
     // verbose=0, success=0, piped=1
     let payload = build_process_create_payload("C:\\app.exe", 0, 0, 1, 0);
 
-    handle_process_command_callback(&events, 0xDD, 4, &payload)
+    handle_process_command_callback(&registry, &database, &events, 0xDD, 4, &payload)
         .await
         .expect("handler should succeed");
 
@@ -654,12 +666,15 @@ async fn process_create_non_verbose_failure_piped_broadcasts_fallback() {
 
 #[tokio::test]
 async fn process_create_non_verbose_success_unpiped_broadcasts_fallback() {
+    let database = Database::connect_in_memory().await.expect("db");
+    let registry = AgentRegistry::new(database.clone());
+    registry.insert(sample_agent_info(0xEE, test_key(0x11), test_iv(0x22))).await.expect("insert");
     let events = EventBus::default();
     let mut rx = events.subscribe();
     // verbose=0, success=1, piped=0
     let payload = build_process_create_payload("C:\\app.exe", 999, 1, 0, 0);
 
-    handle_process_command_callback(&events, 0xEE, 5, &payload)
+    handle_process_command_callback(&registry, &database, &events, 0xEE, 5, &payload)
         .await
         .expect("handler should succeed");
 
@@ -675,12 +690,14 @@ async fn process_create_non_verbose_success_unpiped_broadcasts_fallback() {
 
 #[tokio::test]
 async fn process_create_non_verbose_success_piped_does_not_broadcast() {
+    let database = Database::connect_in_memory().await.expect("db");
+    let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
     let mut rx = events.subscribe();
     // verbose=0, success=1, piped=1 → no broadcast
     let payload = build_process_create_payload("C:\\app.exe", 999, 1, 1, 0);
 
-    handle_process_command_callback(&events, 0xFF, 6, &payload)
+    handle_process_command_callback(&registry, &database, &events, 0xFF, 6, &payload)
         .await
         .expect("handler should succeed");
 

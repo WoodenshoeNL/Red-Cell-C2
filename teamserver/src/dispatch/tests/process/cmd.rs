@@ -8,6 +8,7 @@ async fn builtin_process_list_handler_broadcasts_formatted_agent_response()
 -> Result<(), Box<dyn std::error::Error>> {
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
+    registry.insert(sample_agent_info(0xDEAD_BEEF, test_key(0x10), test_iv(0x20))).await?;
     let events = EventBus::default();
     let mut receiver = events.subscribe();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
@@ -54,6 +55,7 @@ async fn builtin_process_kill_and_token_handlers_broadcast_agent_responses()
 -> Result<(), Box<dyn std::error::Error>> {
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
+    registry.insert(sample_agent_info(0xAABB_CCDD, test_key(0x21), test_iv(0x31))).await?;
     let events = EventBus::default();
     let mut receiver = events.subscribe();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
@@ -135,6 +137,7 @@ async fn builtin_process_modules_handler_broadcasts_module_list()
 -> Result<(), Box<dyn std::error::Error>> {
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
+    registry.insert(sample_agent_info(0xAABB_CCDD, test_key(0x21), test_iv(0x31))).await?;
     let events = EventBus::default();
     let mut receiver = events.subscribe();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
@@ -180,6 +183,7 @@ async fn builtin_process_grep_handler_broadcasts_matching_processes()
 -> Result<(), Box<dyn std::error::Error>> {
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
+    registry.insert(sample_agent_info(0x1122_3344, test_key(0x22), test_iv(0x32))).await?;
     let events = EventBus::default();
     let mut receiver = events.subscribe();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
@@ -221,6 +225,7 @@ async fn builtin_process_memory_handler_broadcasts_memory_regions()
 -> Result<(), Box<dyn std::error::Error>> {
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
+    registry.insert(sample_agent_info(0xDEAD_BEEF, test_key(0x10), test_iv(0x20))).await?;
     let events = EventBus::default();
     let mut receiver = events.subscribe();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
@@ -272,6 +277,7 @@ async fn builtin_process_modules_handler_handles_empty_module_list()
 -> Result<(), Box<dyn std::error::Error>> {
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
+    registry.insert(sample_agent_info(0xCAFE_BABE, test_key(0x23), test_iv(0x33))).await?;
     let events = EventBus::default();
     let mut receiver = events.subscribe();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());

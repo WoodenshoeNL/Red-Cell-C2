@@ -40,7 +40,7 @@ impl CommandDispatcher {
             sockets.clone(),
             include_get_job,
         );
-        self.register_process_handlers(registry.clone(), events.clone());
+        self.register_process_handlers(registry.clone(), events.clone(), database.clone());
         self.register_output_handlers(
             registry.clone(),
             events.clone(),
@@ -108,14 +108,20 @@ impl CommandDispatcher {
             },
         );
 
+        let proc_list_registry = registry.clone();
         let proc_list_events = events.clone();
+        let proc_list_database = database.clone();
         self.register_handler(
             u32::from(DemonCommand::CommandProcList),
             move |agent_id, request_id, payload| {
+                let registry = proc_list_registry.clone();
                 let events = proc_list_events.clone();
+                let database = proc_list_database.clone();
                 Box::pin(async move {
-                    process::handle_process_list_callback(&events, agent_id, request_id, &payload)
-                        .await
+                    process::handle_process_list_callback(
+                        &registry, &database, &events, agent_id, request_id, &payload,
+                    )
+                    .await
                 })
             },
         );

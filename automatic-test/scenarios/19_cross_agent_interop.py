@@ -55,9 +55,8 @@ def _unique_marker() -> str:
 
 # ── Deployment helpers ───────────────────────────────────────────────────────
 
-def _deploy_windows(ctx, target, listener_name, uid, raw: bytes):
+def _deploy_windows(target, uid, raw: bytes):
     """Deploy pre-built Demon EXE to Windows target.  Returns remote_payload path."""
-    ctx.scenario_active_pass = "demon (interop deploy)"
     from lib.deploy import ensure_work_dir, execute_background, upload
 
     remote_payload = f"{target.work_dir}\\agent-{uid}.exe"
@@ -84,9 +83,8 @@ def _deploy_windows(ctx, target, listener_name, uid, raw: bytes):
     return remote_payload
 
 
-def _deploy_linux(ctx, target, listener_name, uid, raw: bytes):
+def _deploy_linux(target, uid, raw: bytes):
     """Deploy pre-built Phantom payload to Linux target.  Returns remote_payload path."""
-    ctx.scenario_active_pass = "phantom (interop deploy)"
     from lib.deploy import ensure_work_dir, execute_background, run_remote, upload
 
     remote_payload = f"{target.work_dir}/agent-{uid}.bin"
@@ -117,11 +115,9 @@ def _deploy_linux(ctx, target, listener_name, uid, raw: bytes):
 # ── Isolation checks ─────────────────────────────────────────────────────────
 
 def _run_command_suite(
-    ctx,
     cli,
     agent_id: str,
     label: str,
-    pass_name: str,
     marker: str,
     exec_timeout: int,
 ) -> dict:
@@ -130,7 +126,6 @@ def _run_command_suite(
     Returns a dict with the raw outputs keyed by command name.
     Raises AssertionError if any command fails or returns empty output.
     """
-    ctx.scenario_active_pass = pass_name
     from lib.cli import agent_exec
 
     outputs = {}
@@ -345,17 +340,19 @@ def run(ctx):
         with ThreadPoolExecutor(max_workers=2) as pool:
             win_future = pool.submit(
                 _deploy_windows,
-                ctx, ctx.windows, listener_win_name, uid, raw_demon,
+                ctx.windows, uid, raw_demon,
             )
             lin_future = pool.submit(
                 _deploy_linux,
-                ctx, ctx.linux, listener_lin_name, uid, raw_phantom,
+                ctx.linux, uid, raw_phantom,
             )
 
             for future in as_completed([win_future, lin_future]):
                 if future is win_future:
+                    ctx.scenario_active_pass = "demon (interop deploy)"
                     win_remote_payload = future.result()
                 else:
+                    ctx.scenario_active_pass = "phantom (interop deploy)"
                     lin_remote_payload = future.result()
 
         print("  [deploy] both payloads deployed (Windows: Demon, Linux: Phantom)")
@@ -400,32 +397,29 @@ def run(ctx):
         with ThreadPoolExecutor(max_workers=2) as pool:
             win_suite = pool.submit(
                 _run_command_suite,
-                ctx,
                 cli,
                 win_agent_id,
                 "windows",
-                "demon (interop suite)",
                 win_marker,
                 co,
             )
             lin_suite = pool.submit(
                 _run_command_suite,
-                ctx,
                 cli,
                 lin_agent_id,
                 "linux",
-                "phantom (interop suite)",
                 lin_marker,
                 co,
             )
 
             for future in as_completed([win_suite, lin_suite]):
                 try:
-                    result = future.result()
                     if future is win_suite:
-                        win_outputs = result
+                        ctx.scenario_active_pass = "demon (interop suite)"
+                        win_outputs = future.result()
                     else:
-                        lin_outputs = result
+                        ctx.scenario_active_pass = "phantom (interop suite)"
+                        lin_outputs = future.result()
                 except Exception as exc:
                     suite_errors.append(str(exc))
 

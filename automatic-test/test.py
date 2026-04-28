@@ -26,6 +26,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import unittest
 from dataclasses import dataclass
@@ -244,6 +245,8 @@ class RunContext:
     #: When false, payload matrix scenarios use serial ``--wait`` builds (``--no-parallel``).
     payload_parallel: bool = True
     #: Matrix scenarios set this during each agent pass (failure diagnostics only).
+    #: Must not be mutated from ``ThreadPoolExecutor`` workers — set only on the main
+    #: thread (e.g. immediately before ``future.result()`` with a known label).
     scenario_active_pass: str | None = None
 
 
@@ -301,7 +304,7 @@ class _TeeTextIO:
 class _ScenarioStreamCapture:
     """Capture the last *max_chars* characters of stdout/stderr while active."""
 
-    __slots__ = ("_err", "_max_chars", "_old_err", "_old_out", "_out")
+    __slots__ = ("_err", "_lock", "_max_chars", "_old_err", "_old_out", "_out")
 
     def __init__(self, max_chars: int = 24_576) -> None:
         self._max_chars = max_chars
@@ -309,6 +312,7 @@ class _ScenarioStreamCapture:
         self._err = ""
         self._old_out = None
         self._old_err = None
+        self._lock = threading.Lock()
 
     def __enter__(self) -> "_ScenarioStreamCapture":
         self._out = ""
@@ -320,10 +324,12 @@ class _ScenarioStreamCapture:
         return self
 
     def _record_out(self, chunk: str) -> None:
-        self._out = (self._out + chunk)[-self._max_chars :]
+        with self._lock:
+            self._out = (self._out + chunk)[-self._max_chars :]
 
     def _record_err(self, chunk: str) -> None:
-        self._err = (self._err + chunk)[-self._max_chars :]
+        with self._lock:
+            self._err = (self._err + chunk)[-self._max_chars :]
 
     def __exit__(self, exc_type, exc, tb) -> bool:
         assert self._old_out is not None and self._old_err is not None
@@ -332,7 +338,8 @@ class _ScenarioStreamCapture:
         return False
 
     def tails(self) -> tuple[str, str]:
-        return self._out, self._err
+        with self._lock:
+            return self._out, self._err
 
 
 def _failure_diag_kwargs(ctx: RunContext, cap: _ScenarioStreamCapture | None) -> dict:

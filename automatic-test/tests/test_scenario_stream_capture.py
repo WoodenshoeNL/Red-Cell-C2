@@ -6,6 +6,7 @@ import importlib.util
 import io
 import sys
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 _PKG_ROOT = Path(__file__).resolve().parent.parent
@@ -58,3 +59,30 @@ class TestScenarioStreamCapture(unittest.TestCase):
         self.assertEqual(err, "err\n")
         self.assertEqual(out_sink.getvalue(), "out\n")
         self.assertEqual(err_sink.getvalue(), "err\n")
+
+    def test_concurrent_stdout_writes_bounded_atomic_tail(self) -> None:
+        """Regression: concurrent prints must not corrupt the captured tail buffer."""
+        harness = _load_harness()
+        sink = io.StringIO()
+        old_out, old_err = sys.stdout, sys.stderr
+        try:
+            sys.stdout = sink
+            sys.stderr = sink
+            max_chars = 4000
+            with harness._ScenarioStreamCapture(max_chars=max_chars) as cap:
+
+                def burst(tid: int) -> None:
+                    token = f"<{tid:03d}>"
+                    for _ in range(120):
+                        sys.stdout.write(token)
+
+                with ThreadPoolExecutor(max_workers=16) as pool:
+                    list(pool.map(burst, range(16)))
+                out, err = cap.tails()
+        finally:
+            sys.stdout, sys.stderr = old_out, old_err
+
+        self.assertEqual(err, "")
+        self.assertLessEqual(len(out), max_chars)
+        # Only expected characters from tokens and angle brackets / digits
+        self.assertTrue(set(out) <= set("0123456789<>"))

@@ -577,6 +577,89 @@ async fn session_agent_exec_wait_false_behaves_like_no_wait() {
 }
 
 #[tokio::test]
+async fn session_agent_exec_wait_ignores_stale_output_with_colliding_request_id() {
+    let database = Database::connect_in_memory().await.expect("database");
+    let agent_id = 0xDEAD_0020u32;
+
+    let (app, registry, _) = test_router_with_database(
+        database.clone(),
+        Some((60, "rest-admin", "secret-admin", OperatorRole::Admin)),
+    )
+    .await;
+    registry.insert(sample_agent(agent_id)).await.expect("insert agent");
+
+    // Pre-insert a stale output row with a placeholder request_id.
+    // A background task will update it to match the new task's request_id
+    // before the first poll, simulating a request_id collision.
+    let stale_record = AgentResponseRecord {
+        id: None,
+        agent_id,
+        command_id: 21,
+        request_id: 0,
+        response_type: "Good".to_owned(),
+        message: "Process Output".to_owned(),
+        output: "stale-output-from-old-task".to_owned(),
+        command_line: Some("whoami".to_owned()),
+        task_id: Some("STALE000".to_owned()),
+        operator: Some("neo".to_owned()),
+        received_at: "2026-04-01T00:00:00Z".to_owned(),
+        extra: Some(serde_json::json!({"ExitCode": 0})),
+    };
+    let _stale_id =
+        database.agent_responses().create(&stale_record).await.expect("insert stale output");
+
+    // Background: once the task is queued, update the stale row's request_id
+    // to collide with the new task so the first poll sees a matching row.
+    let db_clone = database.clone();
+    let reg_clone = registry.clone();
+    let updater = tokio::spawn(async move {
+        // Wait until the job appears in the queue.
+        let mut new_request_id = 0u32;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            if let Ok(queue) = reg_clone.queued_jobs(agent_id).await {
+                if let Some(job) = queue.first() {
+                    new_request_id = job.request_id;
+                    break;
+                }
+            }
+        }
+        assert_ne!(new_request_id, 0, "new task should have been queued");
+
+        // Update the stale row's request_id to match the new task.
+        sqlx::query("UPDATE ts_agent_responses SET request_id = ? WHERE id = ?")
+            .bind(new_request_id)
+            .execute(db_clone.pool())
+            .await
+            .expect("update stale row request_id");
+    });
+
+    let value = serde_json::json!({
+        "cmd": "agent.exec",
+        "id": "DEAD0020",
+        "command": "whoami",
+        "wait": true,
+        "timeout": 2,
+    });
+    let line = session_api_dispatch_line(
+        &app,
+        "agent.exec",
+        &value,
+        std::net::SocketAddr::from(([127, 0, 0, 1], 12345)),
+        "secret-admin",
+    )
+    .await;
+
+    updater.await.expect("updater should complete");
+
+    let parsed: Value = serde_json::from_str(&line).expect("session line json");
+    // Must NOT return the stale output — should time out instead.
+    assert_eq!(parsed["ok"], false, "expected timeout, not stale match: {parsed}");
+    assert_eq!(parsed["error"], "EXEC_TIMEOUT");
+    assert_eq!(parsed["data"]["agent_id"], "DEAD0020");
+}
+
+#[tokio::test]
 async fn session_dispatch_error_envelope_preserves_cmd_for_non_exec_commands() {
     let (app, _, _) =
         test_router_with_registry(Some((60, "op", "secret", OperatorRole::Admin))).await;

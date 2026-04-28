@@ -94,6 +94,7 @@ pub(super) async fn session_exec_wait(
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
 
     let mut cursor: Option<i64> = None;
+    let mut boundary_established = false;
 
     loop {
         if Instant::now() >= deadline {
@@ -145,14 +146,17 @@ pub(super) async fn session_exec_wait(
 
         if let Some(entries) = poll_data["entries"].as_array() {
             for entry in entries {
-                // Advance cursor to the latest entry id seen.
                 if let Some(id) = entry["id"].as_i64() {
                     cursor = Some(id);
                 }
                 let matches_task_id =
                     !task_id.is_empty() && entry["task_id"].as_str() == Some(task_id.as_str());
-                let matches_request_id = want_request_id
-                    .is_some_and(|rid| entry["request_id"].as_u64() == Some(u64::from(rid)));
+                // Only fall back to request_id after a cursor boundary is
+                // established, so historical rows from older tasks that happen
+                // to share the same request_id are not treated as matches.
+                let matches_request_id = boundary_established
+                    && want_request_id
+                        .is_some_and(|rid| entry["request_id"].as_u64() == Some(u64::from(rid)));
                 if matches_task_id || matches_request_id {
                     return serde_json::json!({
                         "ok": true,
@@ -167,6 +171,7 @@ pub(super) async fn session_exec_wait(
                     .to_string();
                 }
             }
+            boundary_established = true;
         }
     }
 }

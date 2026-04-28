@@ -43,9 +43,10 @@ class TestScenario19Gates(unittest.TestCase):
         self.assertIn("'phantom' not listed", str(cm.exception))
 
     def test_deploy_linux_rejects_empty_payload(self) -> None:
+        ctx = _make_ctx()
         target = MagicMock(work_dir="/tmp")
         with self.assertRaises(AssertionError) as cm:
-            _mod._deploy_linux(target, "listener-1", "uid", b"")
+            _mod._deploy_linux(ctx, target, "listener-1", "uid", b"")
         self.assertIn("empty", str(cm.exception).lower())
 
 

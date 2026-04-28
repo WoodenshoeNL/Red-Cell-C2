@@ -243,6 +243,8 @@ class RunContext:
     dry_run: bool
     #: When false, payload matrix scenarios use serial ``--wait`` builds (``--no-parallel``).
     payload_parallel: bool = True
+    #: Matrix scenarios set this during each agent pass (failure diagnostics only).
+    scenario_active_pass: str | None = None
 
 
 _RATE_LIMIT_EXIT_CODE = 6
@@ -275,6 +277,81 @@ def _wait_out_rate_limit(cli_cfg: CliConfig) -> None:
             time.sleep(wait)
 
 
+class _TeeTextIO:
+    """Forward writes to the real stream and append to a bounded in-memory tail."""
+
+    __slots__ = ("_on_write", "_real")
+
+    def __init__(self, real, on_write) -> None:
+        self._real = real
+        self._on_write = on_write
+
+    def write(self, s: str) -> int:
+        if s:
+            self._on_write(str(s))
+        return self._real.write(s)
+
+    def flush(self) -> None:
+        self._real.flush()
+
+    def __getattr__(self, name: str):
+        return getattr(self._real, name)
+
+
+class _ScenarioStreamCapture:
+    """Capture the last *max_chars* characters of stdout/stderr while active."""
+
+    __slots__ = ("_err", "_max_chars", "_old_err", "_old_out", "_out")
+
+    def __init__(self, max_chars: int = 24_576) -> None:
+        self._max_chars = max_chars
+        self._out = ""
+        self._err = ""
+        self._old_out = None
+        self._old_err = None
+
+    def __enter__(self) -> "_ScenarioStreamCapture":
+        self._out = ""
+        self._err = ""
+        self._old_out = sys.stdout
+        self._old_err = sys.stderr
+        sys.stdout = _TeeTextIO(self._old_out, self._record_out)
+        sys.stderr = _TeeTextIO(self._old_err, self._record_err)
+        return self
+
+    def _record_out(self, chunk: str) -> None:
+        self._out = (self._out + chunk)[-self._max_chars :]
+
+    def _record_err(self, chunk: str) -> None:
+        self._err = (self._err + chunk)[-self._max_chars :]
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        assert self._old_out is not None and self._old_err is not None
+        sys.stdout = self._old_out
+        sys.stderr = self._old_err
+        return False
+
+    def tails(self) -> tuple[str, str]:
+        return self._out, self._err
+
+
+def _failure_diag_kwargs(ctx: RunContext, cap: _ScenarioStreamCapture | None) -> dict:
+    """Keyword arguments for :func:`build_failure_diagnostic_report` from harness state."""
+    out_tail: str | None = None
+    err_tail: str | None = None
+    if cap is not None:
+        out, err = cap.tails()
+        if out.strip():
+            out_tail = out
+        if err.strip():
+            err_tail = err
+    return {
+        "scenario_active_pass": ctx.scenario_active_pass,
+        "scenario_stdout_tail": out_tail,
+        "scenario_stderr_tail": err_tail,
+    }
+
+
 def run_scenario(
     scenario_id: str, path: Path, ctx: RunContext, run_dir: Path,
 ) -> tuple[str, Path | None]:
@@ -301,11 +378,15 @@ def run_scenario(
         print("  [DRY RUN] skipping execution")
         return "passed", None
 
+    ctx.scenario_active_pass = None
+
     _wait_out_rate_limit(ctx.cli)
 
     start = time.monotonic()
+    capture = _ScenarioStreamCapture()
     try:
-        mod.run(ctx)
+        with capture:
+            mod.run(ctx)
         elapsed = time.monotonic() - start
         print(f"  ✓ PASSED ({elapsed:.1f}s)")
         return "passed", None
@@ -319,7 +400,12 @@ def run_scenario(
             print(f"  ✗ FAILED ({elapsed:.1f}s): {exc}")
             title = getattr(mod, "DESCRIPTION", path.stem)
             text = build_failure_diagnostic_report(
-                ctx, scenario_id, title, exc, log_lines=100
+                ctx,
+                scenario_id,
+                title,
+                exc,
+                log_lines=100,
+                **_failure_diag_kwargs(ctx, capture),
             )
             print(text, end="")
             report_path = write_scenario_failure_file(
@@ -336,8 +422,10 @@ def run_scenario(
         time.sleep(wait)
         _wait_out_rate_limit(ctx.cli)
         start = time.monotonic()
+        capture_retry = _ScenarioStreamCapture()
         try:
-            mod.run(ctx)
+            with capture_retry:
+                mod.run(ctx)
             elapsed = time.monotonic() - start
             print(f"  ✓ PASSED on retry ({elapsed:.1f}s)")
             return "passed", None
@@ -350,7 +438,12 @@ def run_scenario(
             print(f"  ✗ FAILED on retry ({elapsed:.1f}s): {exc2}")
             title = getattr(mod, "DESCRIPTION", path.stem)
             text = build_failure_diagnostic_report(
-                ctx, scenario_id, title, exc2, log_lines=100
+                ctx,
+                scenario_id,
+                title,
+                exc2,
+                log_lines=100,
+                **_failure_diag_kwargs(ctx, capture_retry),
             )
             print(text, end="")
             report_path = write_scenario_failure_file(
@@ -363,7 +456,12 @@ def run_scenario(
         print(f"  ✗ FAILED ({elapsed:.1f}s): {exc}")
         title = getattr(mod, "DESCRIPTION", path.stem)
         text = build_failure_diagnostic_report(
-            ctx, scenario_id, title, exc, log_lines=100
+            ctx,
+            scenario_id,
+            title,
+            exc,
+            log_lines=100,
+            **_failure_diag_kwargs(ctx, capture),
         )
         print(text, end="")
         report_path = write_scenario_failure_file(

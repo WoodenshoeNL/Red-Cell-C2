@@ -122,6 +122,7 @@ def _run_for_agent(
     Raises:
         AssertionError on test failure.
     """
+    ctx.scenario_active_pass = agent_type
     from lib.cli import (
         agent_exec,
         agent_kill,

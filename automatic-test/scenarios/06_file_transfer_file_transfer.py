@@ -133,6 +133,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str,
     Raises:
         AssertionError on test failure.
     """
+    ctx.scenario_active_pass = agent_type
     from lib.cli import (
         agent_download,
         agent_exec,
@@ -295,6 +296,7 @@ def _run_for_agent_windows(ctx, agent_type: str, fmt: str,
     Raises:
         AssertionError on test failure.
     """
+    ctx.scenario_active_pass = agent_type
     from lib.cli import (
         agent_download,
         agent_exec,

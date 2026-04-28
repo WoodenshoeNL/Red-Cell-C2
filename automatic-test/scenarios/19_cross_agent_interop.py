@@ -55,8 +55,9 @@ def _unique_marker() -> str:
 
 # ── Deployment helpers ───────────────────────────────────────────────────────
 
-def _deploy_windows(target, listener_name, uid, raw: bytes):
+def _deploy_windows(ctx, target, listener_name, uid, raw: bytes):
     """Deploy pre-built Demon EXE to Windows target.  Returns remote_payload path."""
+    ctx.scenario_active_pass = "demon (interop deploy)"
     from lib.deploy import ensure_work_dir, execute_background, upload
 
     remote_payload = f"{target.work_dir}\\agent-{uid}.exe"
@@ -83,8 +84,9 @@ def _deploy_windows(target, listener_name, uid, raw: bytes):
     return remote_payload
 
 
-def _deploy_linux(target, listener_name, uid, raw: bytes):
+def _deploy_linux(ctx, target, listener_name, uid, raw: bytes):
     """Deploy pre-built Phantom payload to Linux target.  Returns remote_payload path."""
+    ctx.scenario_active_pass = "phantom (interop deploy)"
     from lib.deploy import ensure_work_dir, execute_background, run_remote, upload
 
     remote_payload = f"{target.work_dir}/agent-{uid}.bin"
@@ -115,13 +117,20 @@ def _deploy_linux(target, listener_name, uid, raw: bytes):
 # ── Isolation checks ─────────────────────────────────────────────────────────
 
 def _run_command_suite(
-    cli, agent_id: str, label: str, marker: str, exec_timeout: int
+    ctx,
+    cli,
+    agent_id: str,
+    label: str,
+    pass_name: str,
+    marker: str,
+    exec_timeout: int,
 ) -> dict:
     """Run the standard command suite against one agent.
 
     Returns a dict with the raw outputs keyed by command name.
     Raises AssertionError if any command fails or returns empty output.
     """
+    ctx.scenario_active_pass = pass_name
     from lib.cli import agent_exec
 
     outputs = {}
@@ -336,11 +345,11 @@ def run(ctx):
         with ThreadPoolExecutor(max_workers=2) as pool:
             win_future = pool.submit(
                 _deploy_windows,
-                ctx.windows, listener_win_name, uid, raw_demon,
+                ctx, ctx.windows, listener_win_name, uid, raw_demon,
             )
             lin_future = pool.submit(
                 _deploy_linux,
-                ctx.linux, listener_lin_name, uid, raw_phantom,
+                ctx, ctx.linux, listener_lin_name, uid, raw_phantom,
             )
 
             for future in as_completed([win_future, lin_future]):
@@ -353,6 +362,7 @@ def run(ctx):
 
         # ── Step 5: Wait for both agents to check in ─────────────────────────
         checkin_timeout = int(ctx.timeouts.agent_checkin)
+        ctx.scenario_active_pass = "interop: checkin wait"
         print(f"  [wait] waiting up to {checkin_timeout}s for both agents to check in")
         new_agents = _wait_for_two_agents(cli, pre_existing_ids, timeout=checkin_timeout)
 
@@ -389,10 +399,24 @@ def run(ctx):
 
         with ThreadPoolExecutor(max_workers=2) as pool:
             win_suite = pool.submit(
-                _run_command_suite, cli, win_agent_id, "windows", win_marker, co
+                _run_command_suite,
+                ctx,
+                cli,
+                win_agent_id,
+                "windows",
+                "demon (interop suite)",
+                win_marker,
+                co,
             )
             lin_suite = pool.submit(
-                _run_command_suite, cli, lin_agent_id, "linux", lin_marker, co
+                _run_command_suite,
+                ctx,
+                cli,
+                lin_agent_id,
+                "linux",
+                "phantom (interop suite)",
+                lin_marker,
+                co,
             )
 
             for future in as_completed([win_suite, lin_suite]):

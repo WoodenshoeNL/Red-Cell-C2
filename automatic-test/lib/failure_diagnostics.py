@@ -176,10 +176,29 @@ def build_failure_diagnostic_report(
     exc: BaseException,
     *,
     log_lines: int = 100,
+    scenario_active_pass: str | None = None,
+    scenario_stdout_tail: str | None = None,
+    scenario_stderr_tail: str | None = None,
+    harness_output_max_chars: int = 24_576,
 ) -> str:
-    """Assemble the full diagnostic text written to the failure file and printed."""
+    """Assemble the full diagnostic text written to the failure file and printed.
+
+    *scenario_active_pass* — optional label from matrix scenarios (e.g. ``"demon"``,
+    ``"specter"``) set on the harness ``RunContext`` while a pass runs.
+
+    *scenario_stdout_tail* / *scenario_stderr_tail* — bounded tails of harness
+    process streams while the scenario executed (typically the last
+    *harness_output_max_chars* characters per stream).
+    """
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     err_txt = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+
+    def _cap_tail(text: str | None) -> str:
+        if not text:
+            return ""
+        if len(text) <= harness_output_max_chars:
+            return text
+        return text[-harness_output_max_chars:]
 
     log_tail = capture_server_logs(ctx, lines=log_lines)
     agents_txt, raw_listeners, listeners_txt, audit_txt = _gather_cli_snapshot(ctx.cli)
@@ -190,25 +209,59 @@ def build_failure_diagnostic_report(
         f"Scenario: {scenario_id} — {scenario_title}",
         f"Captured (UTC): {ts}",
         "",
-        "=== EXCEPTION ===",
-        err_txt.rstrip("\n"),
-        "",
-        "=== TEAMSERVER LOG TAIL ===",
-        log_tail.rstrip("\n"),
-        "",
-        "=== ACTIVE AGENTS ===",
-        agents_txt,
-        "",
-        "=== ACTIVE LISTENERS ===",
-        listeners_txt,
-        "",
-        "=== LISTENER REQUEST DIAGNOSTICS ===",
-        request_diag,
-        "",
-        "=== RECENT AUDIT LOG (last 20) ===",
-        audit_txt,
-        "",
     ]
+
+    if scenario_active_pass:
+        parts.extend(
+            [
+                "=== SCENARIO CONTEXT ===",
+                f"Active agent pass: {scenario_active_pass}",
+                "",
+            ]
+        )
+
+    out_tail = _cap_tail(scenario_stdout_tail)
+    if out_tail.strip():
+        parts.extend(
+            [
+                "=== SCENARIO STDOUT TAIL (harness) ===",
+                out_tail.rstrip("\n"),
+                "",
+            ]
+        )
+
+    err_harness_tail = _cap_tail(scenario_stderr_tail)
+    if err_harness_tail.strip():
+        parts.extend(
+            [
+                "=== SCENARIO STDERR TAIL (harness) ===",
+                err_harness_tail.rstrip("\n"),
+                "",
+            ]
+        )
+
+    parts.extend(
+        [
+            "=== EXCEPTION ===",
+            err_txt.rstrip("\n"),
+            "",
+            "=== TEAMSERVER LOG TAIL ===",
+            log_tail.rstrip("\n"),
+            "",
+            "=== ACTIVE AGENTS ===",
+            agents_txt,
+            "",
+            "=== ACTIVE LISTENERS ===",
+            listeners_txt,
+            "",
+            "=== LISTENER REQUEST DIAGNOSTICS ===",
+            request_diag,
+            "",
+            "=== RECENT AUDIT LOG (last 20) ===",
+            audit_txt,
+            "",
+        ]
+    )
     return "\n".join(parts) + "\n"
 
 

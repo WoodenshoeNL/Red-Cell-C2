@@ -311,6 +311,53 @@ class TestBuildFailureDiagnosticReport(unittest.TestCase):
         self.assertIn("Agent registrations (total): 1", text)
         self.assertIn("Listener 'http1' (status=Running):", text)
 
+    def test_includes_scenario_pass_and_harness_tails_when_given(self) -> None:
+        ctx = SimpleNamespace(cli=_cli(), env={})
+
+        with _patch_snapshot(
+            agents=[{"id": "a1"}],
+            listeners=[{"name": "L1"}],
+            log_entries=[],
+        ):
+            text = build_failure_diagnostic_report(
+                ctx,
+                "08",
+                "Screenshot matrix",
+                RuntimeError("loot wait"),
+                scenario_active_pass="specter",
+                scenario_stdout_tail="  [specter][wait] screenshot loot\n",
+                scenario_stderr_tail="side note\n",
+            )
+
+        self.assertIn("=== SCENARIO CONTEXT ===", text)
+        self.assertIn("Active agent pass: specter", text)
+        self.assertIn("=== SCENARIO STDOUT TAIL (harness) ===", text)
+        self.assertIn("[specter][wait] screenshot loot", text)
+        self.assertIn("=== SCENARIO STDERR TAIL (harness) ===", text)
+        self.assertIn("side note", text)
+        self.assertIn("=== EXCEPTION ===", text)
+        self.assertLess(text.index("=== SCENARIO CONTEXT ==="), text.index("=== EXCEPTION ==="))
+
+    def test_harness_stdout_tail_respects_max_chars(self) -> None:
+        ctx = SimpleNamespace(cli=_cli(), env={})
+        blob = "a" * 50
+
+        with _patch_snapshot(agents=[], listeners=[], log_entries=[]):
+            text = build_failure_diagnostic_report(
+                ctx,
+                "01",
+                "t",
+                ValueError("x"),
+                scenario_stdout_tail=blob,
+                harness_output_max_chars=10,
+            )
+
+        pos = text.find("=== SCENARIO STDOUT TAIL (harness) ===")
+        self.assertGreaterEqual(pos, 0)
+        tail_section = text[pos : pos + 200]
+        self.assertIn("a" * 10, tail_section)
+        self.assertNotIn("a" * 11, tail_section)
+
 
 class TestCreateRunDir(unittest.TestCase):
     def test_creates_run_dir_with_expected_structure(self) -> None:

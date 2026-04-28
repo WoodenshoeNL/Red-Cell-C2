@@ -32,13 +32,12 @@ row to *Resolved* and add the closing commit / fix description.
 
 | Signature (substring of error / stderr) | Scenario | Bead | First seen | Last seen | Status |
 |----------------------------------------|----------|------|------------|-----------|--------|
-| `[TIMEOUT] timeout: timed out waiting for output from task` | 04, 05, 07, 19, 21, 23 | red-cell-c2-4vogq | 2026-04-28 | 2026-04-28 | P1, cross-agent task-output regression after acceptance (Demon + Phantom) |
-| `CLI subprocess did not exit within expected timeout (40s)` | 11 | red-cell-c2-4vogq | 2026-04-28 | 2026-04-28 | (same task-output family; CLI wait path hangs instead of returning task timeout cleanly) |
-| `Timed out after 30s waiting for remote upload /tmp/rc-test/uploaded-` | 06 | red-cell-c2-roz1h | 2026-04-28 | 2026-04-28 | P2, Phantom upload accepted but file never appears on target |
-| `Timed out after 30s waiting for screenshot loot entry` | 08 | red-cell-c2-dn3yy | 2026-04-28 | 2026-04-28 | P2, runtime screenshot/loot failure on first failing Windows baseline pass |
-| `Timed out after 30s waiting for 10 new agent checkins` | 14 | red-cell-c2-4302s | 2026-04-28 | 2026-04-28 | P1, Windows Demon stress deploy never yields expected registrations |
-| `Timed out after 60s waiting for agent checkin` | 17 | red-cell-c2-4302s | 2026-04-28 | 2026-04-28 | (same Windows deploy/checkin regression for Archon single-agent baseline) |
-| `last_seen never changed from initial '` | 24 | red-cell-c2-dz867 | 2026-04-28 | 2026-04-28 | P2, Phantom heartbeat/sleep-cadence regression after initial checkin |
+| `[TIMEOUT] timeout: timed out waiting for output from task` | 04, 07, 21 | red-cell-c2-5dggm | 2026-04-28 | 2026-04-29 | P1, Phantom task-output timeout regression after 4vogq fix (CommandProc persist didn't stick) |
+| `Timed out after 30s waiting for local file` | 06 | red-cell-c2-5dggm | 2026-04-29 | 2026-04-29 | (cascade of task-output timeout — upload succeeds, download never returns) |
+| `Timed out after 30s waiting for download loot entry` | 11 | red-cell-c2-5dggm | 2026-04-29 | 2026-04-29 | (cascade — whoami succeeds but download /etc/hostname loot never appears) |
+| `WMI Win32_Process.Create failed: ReturnValue=21` | 05, 08, 14, 17, 19 | red-cell-c2-irxsr | 2026-04-29 | 2026-04-29 | P1, every Windows deploy via Invoke-WmiMethod returns ReturnValue=21 (Invalid Parameter) |
+| `GET_JOB accepted (HTTP 200): got HTTP 404` | 13 | red-cell-c2-irlsn | 2026-04-29 | 2026-04-29 | P2, synthetic DEMON_INIT handshake succeeds but GET_JOB poll returns 404 |
+| `DoH uplink chunk 0/1 expected NXDOMAIN (rcode=3), got rcode=5` | 20 | red-cell-c2-qb8gw | 2026-04-29 | 2026-04-29 | P2, DNS listener returns REFUSED instead of NXDOMAIN for DoH uplink chunks |
 
 ---
 
@@ -74,6 +73,13 @@ than a new bug.
 | `still present in agent list after 120s — expected implant to stop after kill-date` | 22, 23 | red-cell-c2-dv5ev | 2026-04-27 | Phantom pre-init kill-date + working-hours checks + build.rs rerun-if-env-changed. Scenarios 22/23/24 now pass. |
 | `[TIMEOUT] timeout: timed out waiting for output from task` (wstring null-terminator follow-up) | 04, 11, 21 | red-cell-c2-asy66 | 2026-04-27 | Phantom run loop retry/callback-send fix landed, but the timeout family still regressed the next day. **REGRESSED** — see red-cell-c2-4vogq |
 | `Timed out after 60s waiting for agent checkin` (listener wiring / WMI follow-up) | 14, 17, 19 | red-cell-c2-db6yd | 2026-04-27 | Listener name now reaches API/CLI and scenario 19 no longer fails at listener attribution, but Windows deploy/checkin still regressed. **REGRESSED** — see red-cell-c2-4302s |
+| `[TIMEOUT] timeout: timed out waiting for output from task` (CommandProc persist fix) | 04, 05, 07, 19, 21, 23 | red-cell-c2-4vogq | 2026-04-28 | Persisted CommandProc/CommandProcList callbacks to ts_agent_responses, added request_id matching. Timeout still occurs on Phantom. **REGRESSED** — see red-cell-c2-5dggm |
+| `CLI subprocess did not exit within expected timeout (40s)` (CLI hang variant) | 11 | red-cell-c2-4vogq | 2026-04-28 | Same family as above; CLI subprocess hang is cascade of task output pipeline failure. **REGRESSED** — see red-cell-c2-5dggm |
+| `Timed out after 30s waiting for remote upload /tmp/rc-test/uploaded-` | 06 | red-cell-c2-roz1h | 2026-04-28 | ECDH batch re-queue fix: upload now succeeds (SHA-256 verified in 2026-04-29 run). Download side still fails (cascade of task output). |
+| `Timed out after 30s waiting for screenshot loot entry` | 08 | red-cell-c2-dn3yy | 2026-04-28 | Raised MAX_AGENT_MESSAGE_LEN to 100 MiB, case-insensitive loot filters. Not observed 2026-04-29 (sc08 now fails at WMI deploy stage). |
+| `Timed out after 30s waiting for 10 new agent checkins` (WMI validation) | 14 | red-cell-c2-4302s | 2026-04-28 | Added WMI ReturnValue validation and staggered launches. Now surfaces ReturnValue=21 cleanly. **REGRESSED** — see red-cell-c2-irxsr |
+| `Timed out after 60s waiting for agent checkin` (WMI validation) | 17 | red-cell-c2-4302s | 2026-04-28 | Same fix as above. **REGRESSED** — see red-cell-c2-irxsr |
+| `last_seen never changed from initial '` | 24 | red-cell-c2-dz867 | 2026-04-28 | ECDH exit_requested set after successful batch send. **FIXED** — sc24 passes on 2026-04-29. |
 | `cargo build --release --target x86_64-pc-windows-gnu` + `error[E0308]` in Specter | 05, 06, 07, 08 | red-cell-c2-z85a3 | 2026-04-27 | Specter cross-compile fixes landed; this build failure was not seen in the 2026-04-28 run. |
 
 ---

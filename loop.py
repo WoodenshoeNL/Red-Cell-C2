@@ -1674,22 +1674,26 @@ Start directly with understanding the task and implementing it.
         # instead of being mislabeled as 'wip: interrupted'.
         commit_beads_if_dirty(f"post-agent sweep for {next_id} [{agent_id}]", log)
 
-        # Claude only: commit any uncommitted changes left by a token-limit interruption
-        if agent == "claude":
-            git(["add", "-A"])
-            if git(["diff", "--cached", "--quiet"]).returncode != 0:
-                log.log(f"WIP: committing uncommitted changes for {next_id}")
-                r = git(["commit", "-m", f"wip: interrupted {next_id} [{agent_id}]", "--quiet"])
-                if r.returncode == 0:
-                    git(["fetch", "origin", "--quiet"])
-                    git(["rebase", "origin/main", "--quiet"])
-                    if git(["push", "--quiet"]).returncode == 0:
-                        log.log("WIP: pushed")
-                    else:
-                        log.log("WARNING: WIP push failed")
+        # WIP-commit any uncommitted changes the agent left behind. Originally
+        # added for Claude's max-turn handoff (resume on next iteration via
+        # find_resumable_task), but codex/cursor leave dirty trees too when
+        # they skip their prompt's commit step — the WIP commit is the only
+        # safety net that keeps git pull --rebase working in the next iter.
+        # Auto-resume remains Claude-only (find_resumable_task at line 1450).
+        git(["add", "-A"])
+        if git(["diff", "--cached", "--quiet"]).returncode != 0:
+            log.log(f"WIP: committing uncommitted changes for {next_id}")
+            r = git(["commit", "-m", f"wip: interrupted {next_id} [{agent_id}]", "--quiet"])
+            if r.returncode == 0:
+                git(["fetch", "origin", "--quiet"])
+                git(["rebase", "origin/main", "--quiet"])
+                if git(["push", "--quiet"]).returncode == 0:
+                    log.log("WIP: pushed")
                 else:
-                    log.log("WARNING: WIP commit failed — unstaging")
-                    git(["restore", "--staged", "."])
+                    log.log("WARNING: WIP push failed")
+            else:
+                log.log("WARNING: WIP commit failed — unstaging")
+                git(["restore", "--staged", "."])
 
         # Lite QA: second agent pass reviewing code quality of this task's changes.
         # Skipped when --dev-light is set, or when the dev run was incomplete

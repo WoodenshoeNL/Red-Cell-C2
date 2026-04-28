@@ -633,7 +633,7 @@ async fn external_listener_rejects_oversized_body() -> Result<(), Box<dyn std::e
     let client = Client::new();
     let bridge_url = format!("http://{}/oversized", server.addr);
 
-    // Build a body that exceeds MAX_AGENT_MESSAGE_LEN (30 MiB).
+    // Build a body that exceeds MAX_AGENT_MESSAGE_LEN.
     // Include valid Demon magic at bytes 4–7 so the rejection is due to size, not magic.
     let oversized_len = MAX_AGENT_MESSAGE_LEN + 1;
     let mut oversized_body = vec![0_u8; oversized_len];

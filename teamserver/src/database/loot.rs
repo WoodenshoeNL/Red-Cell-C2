@@ -41,9 +41,9 @@ pub struct LootRepository {
 /// interpretation). JSON-embedded fields are extracted with `json_extract()`.
 #[derive(Clone, Debug, Default)]
 pub struct LootFilter {
-    /// Exact match against the `kind` column.
+    /// Exact match against the `kind` column (ASCII case-insensitive).
     pub kind_exact: Option<String>,
-    /// Substring match against the `kind` column.
+    /// Substring match against the `kind` column (ASCII case-insensitive).
     pub kind_contains: Option<String>,
     /// Exact match against the `agent_id` column.
     pub agent_id: Option<u32>,
@@ -162,10 +162,11 @@ impl LootRepository {
 
 pub(super) fn append_loot_filters(builder: &mut QueryBuilder<'_, Sqlite>, filter: &LootFilter) {
     if let Some(ref value) = filter.kind_exact {
-        builder.push(" AND kind = ").push_bind(value.clone());
+        builder.push(" AND lower(kind) = ").push_bind(value.to_lowercase());
     }
     if let Some(ref value) = filter.kind_contains {
-        builder.push(" AND instr(kind, ").push_bind(value.clone()).push(") > 0");
+        let needle = value.to_lowercase();
+        builder.push(" AND instr(lower(kind), ").push_bind(needle).push(") > 0");
     }
     if let Some(value) = filter.agent_id {
         builder.push(" AND agent_id = ").push_bind(i64::from(value));
@@ -406,6 +407,24 @@ mod tests {
         let results = repo.query_filtered(&filter, 100, 0).await.expect("query");
         assert_eq!(results.len(), 2);
         assert!(results.iter().all(|r| r.kind == "hash"));
+
+        let filter_ci = LootFilter { kind_exact: Some("HaSh".to_string()), ..Default::default() };
+        let results_ci = repo.query_filtered(&filter_ci, 100, 0).await.expect("query");
+        assert_eq!(results_ci.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn loot_query_filtered_kind_contains_is_case_insensitive() {
+        let db = Database::connect_in_memory().await.expect("db");
+        seed_agents(&db, &[1]).await;
+        let repo = db.loot();
+        repo.create(&sample_loot(1, "screenshot", "cap.png")).await.expect("create");
+
+        let filter_upper =
+            LootFilter { kind_contains: Some("SCREENSHOT".to_string()), ..Default::default() };
+        let results = repo.query_filtered(&filter_upper, 100, 0).await.expect("query");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].kind, "screenshot");
     }
 
     #[tokio::test]

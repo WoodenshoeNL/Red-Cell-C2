@@ -590,7 +590,7 @@ async fn http_listener_rejects_oversized_body() -> Result<(), Box<dyn std::error
     let client = Client::new();
     let url = format!("http://127.0.0.1:{port}/");
 
-    // Build a body that exceeds MAX_AGENT_MESSAGE_LEN (30 MiB).
+    // Build a body that exceeds MAX_AGENT_MESSAGE_LEN.
     // Include valid Demon magic at bytes 4–7 so the rejection is due to size, not magic.
     let oversized_len = MAX_AGENT_MESSAGE_LEN + 1;
     let mut oversized_body = vec![0_u8; oversized_len];

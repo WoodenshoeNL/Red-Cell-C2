@@ -631,7 +631,7 @@ mod tests {
     /// An oversized request body on an external listener path must be silently
     /// rejected with a camouflage 404 — not a 400 BAD_REQUEST that would
     /// fingerprint the endpoint as a C2 bridge.  The limit is aligned with
-    /// `MAX_AGENT_MESSAGE_LEN` (30 MiB) used by every other listener path.
+    /// `MAX_AGENT_MESSAGE_LEN` used by every other listener path.
     #[tokio::test]
     async fn fallback_rejects_oversized_body_for_external_listener() {
         use red_cell_common::ExternalListenerConfig;
@@ -654,7 +654,7 @@ mod tests {
             "external endpoint should be registered"
         );
 
-        // Send a body that exceeds MAX_AGENT_MESSAGE_LEN (30 MiB).
+        // Send a body that exceeds MAX_AGENT_MESSAGE_LEN.
         let oversized = vec![0x41_u8; MAX_AGENT_MESSAGE_LEN + 1];
 
         let response = build_router(state)

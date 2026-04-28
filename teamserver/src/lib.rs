@@ -68,7 +68,12 @@ pub const DEFAULT_MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
 /// Applied as:
 /// - the HTTP body limit in [`listeners`] (agent → teamserver)
 /// - the WebSocket chunk size in [`websocket`] (teamserver → operator console)
-pub const MAX_AGENT_MESSAGE_LEN: usize = 0x01E0_0000; // 30 MiB
+///
+/// Set large enough for Demon-style **uncompressed 24-bit BMP screenshots** on
+/// wide multi-monitor virtual desktops (payloads can exceed 50 MiB). The former
+/// 30 MiB cap caused valid screenshot callbacks to be rejected before dispatch,
+/// so operators never saw matching loot rows.
+pub const MAX_AGENT_MESSAGE_LEN: usize = 100 * 1024 * 1024; // 100 MiB
 
 pub use dispatch::{CommandDispatchError, CommandDispatcher};
 pub use events::{EventBus, EventReceiver};

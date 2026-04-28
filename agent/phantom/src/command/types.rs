@@ -238,5 +238,5 @@ pub(crate) const SOCKS_REPLY_ADDRESS_TYPE_NOT_SUPPORTED: u8 = 8;
 
 /// Maximum number of framed messages to read per pivot per poll cycle.
 pub(crate) const MAX_PIVOT_READS_PER_POLL: usize = 30;
-/// Maximum allowed pivot frame size (30 MiB, matches `DEMON_MAX_RESPONSE_LENGTH`).
-pub(crate) const PIVOT_MAX_FRAME_SIZE: usize = 0x1E0_0000;
+/// Maximum allowed pivot frame size (matches teamserver `MAX_AGENT_MESSAGE_LEN`).
+pub(crate) const PIVOT_MAX_FRAME_SIZE: usize = 100 * 1024 * 1024;

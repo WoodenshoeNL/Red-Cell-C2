@@ -148,8 +148,8 @@ async fn file_open_callback_encodes_beacon_output_command_id() {
     assert_eq!(read_u32(&payload, &mut offset), u32::from(DemonCallback::File));
     let inner_len = read_u32(&payload, &mut offset) as usize;
     assert_eq!(inner_len, 4 + 4 + "/tmp/test.bin".len());
-    assert_eq!(read_u32(&payload, &mut offset), 0x1234);
-    assert_eq!(read_u32(&payload, &mut offset), 4096);
+    assert_eq!(read_u32_be(&payload, &mut offset), 0x1234);
+    assert_eq!(read_u32_be(&payload, &mut offset), 4096);
     let path_bytes = &payload[offset..];
     assert_eq!(path_bytes, b"/tmp/test.bin");
 }
@@ -165,7 +165,7 @@ async fn file_chunk_callback_encodes_correctly() {
     assert_eq!(read_u32(&payload, &mut offset), u32::from(DemonCallback::FileWrite));
     let inner_len = read_u32(&payload, &mut offset) as usize;
     assert_eq!(inner_len, 4 + 4); // file_id + data
-    assert_eq!(read_u32(&payload, &mut offset), 0xDEAD);
+    assert_eq!(read_u32_be(&payload, &mut offset), 0xDEAD);
     assert_eq!(&payload[offset..], &[1, 2, 3, 4]);
 }
 
@@ -178,7 +178,7 @@ async fn file_close_callback_encodes_correctly() {
     let mut offset = 0;
     assert_eq!(read_u32(&payload, &mut offset), u32::from(DemonCallback::FileClose));
     assert_eq!(read_u32(&payload, &mut offset), 4); // inner len
-    assert_eq!(read_u32(&payload, &mut offset), 0xBEEF);
+    assert_eq!(read_u32_be(&payload, &mut offset), 0xBEEF);
 }
 
 #[tokio::test]

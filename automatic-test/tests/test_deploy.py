@@ -4,6 +4,7 @@ tests/test_deploy.py — Unit tests for lib/deploy.py.
 Run with:  python3 -m unittest discover -s automatic-test/tests
 """
 
+import base64
 import os
 import shlex
 import subprocess
@@ -35,6 +36,13 @@ from lib.deploy import (
 )
 
 _MODULE_KEY_PATH: str | None = None
+
+
+def _decoded_windows_launch_script(remote_ssh_cmd: str) -> str:
+    """Decode ``powershell -EncodedCommand`` payload (UTF-16 LE) from the SSH remote command."""
+
+    suffix = remote_ssh_cmd.split("-EncodedCommand", 1)[1].strip()
+    return base64.b64decode(suffix).decode("utf-16-le")
 
 
 def _module_key_path() -> str:
@@ -548,10 +556,13 @@ class TestDeployErrorPaths(unittest.TestCase):
             execute_background(t, "C:\\Temp\\rc-test\\agent.exe")
         self.assertEqual(m.call_count, 1)
         remote_cmd = m.call_args[0][0][-1]
-        self.assertIn("Invoke-WmiMethod", remote_cmd)
-        self.assertIn("Win32_Process", remote_cmd)
-        self.assertIn("C:\\Temp\\rc-test\\agent.exe", remote_cmd)
-        self.assertNotIn("Start-Process", remote_cmd)
+        self.assertIn("-EncodedCommand", remote_cmd)
+        script = _decoded_windows_launch_script(remote_cmd)
+        self.assertIn("Invoke-WmiMethod", script)
+        self.assertIn("Win32_Process", script)
+        self.assertIn("ReturnValue", script)
+        self.assertIn("C:\\Temp\\rc-test\\agent.exe", script)
+        self.assertNotIn("Start-Process", script)
 
     def test_execute_background_windows_quotes_paths_with_spaces(self) -> None:
         """Paths with spaces must be double-quoted for CreateProcess."""
@@ -560,8 +571,9 @@ class TestDeployErrorPaths(unittest.TestCase):
         with patch("subprocess.run", return_value=ok) as m:
             execute_background(t, "C:\\Program Files\\rc\\agent.exe")
         remote_cmd = m.call_args[0][0][-1]
-        self.assertIn("Invoke-WmiMethod", remote_cmd)
-        self.assertIn('"C:\\Program Files\\rc\\agent.exe"', remote_cmd)
+        script = _decoded_windows_launch_script(remote_cmd)
+        self.assertIn("Invoke-WmiMethod", script)
+        self.assertIn('"C:\\Program Files\\rc\\agent.exe"', script)
 
     def test_execute_background_windows_escapes_single_quotes(self) -> None:
         """Single quotes in the command must be doubled for PS single-quote string."""
@@ -570,7 +582,8 @@ class TestDeployErrorPaths(unittest.TestCase):
         with patch("subprocess.run", return_value=ok) as m:
             execute_background(t, "C:\\it's here\\agent.exe")
         remote_cmd = m.call_args[0][0][-1]
-        self.assertIn("it''s here", remote_cmd)
+        script = _decoded_windows_launch_script(remote_cmd)
+        self.assertIn("it''s here", script)
 
 
 class TestInjectHostsEntry(unittest.TestCase):

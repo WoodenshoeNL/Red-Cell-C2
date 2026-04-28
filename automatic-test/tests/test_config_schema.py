@@ -114,7 +114,7 @@ class TestValidateEnvDict(unittest.TestCase):
     def test_timeouts_for_unit_tests(self) -> None:
         t = timeouts_for_unit_tests()
         self.assertEqual(t.poll_interval, 2.0)
-        self.assertEqual(t.stress_concurrent_checkin, 30.0)
+        self.assertEqual(t.stress_concurrent_checkin, 45.0)
 
     def test_unknown_top_level_key(self) -> None:
         raw = _minimal_valid_env()

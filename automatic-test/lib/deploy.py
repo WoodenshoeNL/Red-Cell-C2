@@ -8,6 +8,7 @@ are needed. Both Linux and Windows targets are accessed via SSH
 
 from __future__ import annotations
 
+import base64
 import logging
 import shlex
 import subprocess
@@ -438,6 +439,32 @@ def _quote_powershell(path: str) -> str:
     return "'" + path.replace("'", "''") + "'"
 
 
+def _powershell_encoded_command(script: str) -> str:
+    """Return UTF-16 LE Base64 for ``powershell -NoProfile -EncodedCommand``.
+
+    Avoids brittle nested quoting over SSH for multi-statement WMI scripts.
+    """
+
+    return base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+
+
+def _windows_wmi_create_script(command_line: str) -> str:
+    """Build PowerShell that runs ``Win32_Process.Create`` and verifies *ReturnValue*."""
+
+    quoted_cmd = f'"{command_line}"'
+    ps_arg = _quote_powershell(quoted_cmd)
+    return (
+        f"$r = Invoke-WmiMethod -Class Win32_Process -Name Create "
+        f"-ArgumentList {ps_arg}; "
+        "if ($null -eq $r) { throw 'WMI Win32_Process.Create returned null' }; "
+        "if ($r.ReturnValue -ne 0) { "
+        "throw ('WMI Win32_Process.Create failed: ReturnValue=' + $r.ReturnValue + "
+        "' ProcessId=' + $r.ProcessId) "
+        "}; "
+        "exit 0"
+    )
+
+
 def execute_background(target: TargetConfig, command: str) -> None:
     """Run a command on the target in the background (fire-and-forget).
 
@@ -449,13 +476,9 @@ def execute_background(target: TargetConfig, command: str) -> None:
     not use job objects.
     """
     if target.work_dir.startswith("C:\\") or "\\" in target.work_dir:
-        quoted_cmd = f'"{command}"'
-        ps_arg = _quote_powershell(quoted_cmd)
-        bg_cmd = (
-            f"powershell -Command \""
-            f"Invoke-WmiMethod -Class Win32_Process -Name Create "
-            f"-ArgumentList {ps_arg}\""
-        )
+        script = _windows_wmi_create_script(command)
+        enc = _powershell_encoded_command(script)
+        bg_cmd = f"powershell -NoProfile -EncodedCommand {enc}"
     else:
         quoted = _quote_posix(command)
         bg_cmd = f"nohup {quoted} </dev/null >/dev/null 2>&1 &"
@@ -466,7 +489,15 @@ def execute_background(target: TargetConfig, command: str) -> None:
         tool="ssh",
     )
     if result.returncode != 0:
+        err_tail = (result.stderr or "").strip()
+        out_tail = (result.stdout or "").strip()
+        detail_bits = []
+        if err_tail:
+            detail_bits.append(f"stderr: {err_tail}")
+        if out_tail:
+            detail_bits.append(f"stdout: {out_tail}")
+        detail = "\n  ".join(detail_bits) if detail_bits else "(no output)"
         raise DeployError(
             f"Background remote command failed (exit {result.returncode}):\n"
-            f"  stderr: {result.stderr.strip()}"
+            f"  {detail}"
         )

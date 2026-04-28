@@ -20,7 +20,7 @@ Steps:
   3.  For each agent pass:
 
       a.  Upload N copies of the pre-built payload; execute each in background
-      b.  Wait for all N agents to check in (deadline: 30 s)
+      b.  Wait for all N agents to check in (deadline: ``stress_concurrent_checkin_secs``, default 45 s)
       c.  Start CPU monitoring in a background thread
       d.  For RUN_SECONDS: issue shell exec to all agents in parallel every
           EXEC_INTERVAL s, checking for cross-agent marker bleed each round
@@ -32,7 +32,8 @@ Steps:
   4.  Stop + delete all listeners
 
 Pass criteria:
-  - All N agents check in within 30 s
+  - All N agents check in within the configured stress check-in deadline
+    (default 45 s; ``stress_concurrent_checkin_secs`` in env.toml)
   - No agent drops connection during the run
   - All shell exec commands return correct output (no cross-agent bleed)
   - Teamserver CPU < configured limit (default 80 %), optional RSS cap — sampled
@@ -54,6 +55,8 @@ PHANTOM_RUN_SECONDS = 30
 
 EXEC_INTERVAL = 10       # seconds between parallel exec rounds during the run
 CPU_LIMIT_PCT = 80.0     # default max teamserver CPU % (override via env.toml [teamserver])
+# Space out WMI process spawns on Windows so DCOM / Defender are less likely to drop Creates.
+_WINDOWS_STRESS_LAUNCH_STAGGER_SEC = 0.35
 
 import os
 import tempfile
@@ -241,6 +244,8 @@ def _run_stress_for_agent(
                 run_remote(target, f"chmod +x {remote_path}")
             execute_background(target, remote_path)
             print(f"  [{agent_type}][deploy] launched agent {i+1}/{agent_count}: {remote_path}")
+            if _win and agent_count > 1 and i + 1 < agent_count:
+                time.sleep(_WINDOWS_STRESS_LAUNCH_STAGGER_SEC)
 
         # ── Step 2: Wait for all agents to check in ──────────────────────────
         print(

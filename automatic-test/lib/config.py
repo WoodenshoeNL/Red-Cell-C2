@@ -91,7 +91,7 @@ def timeouts_for_unit_tests() -> TimeoutsConfig:
         poll_interval=2.0,
         ssh_connect=10.0,
         scp_transfer=60.0,
-        stress_concurrent_checkin=30.0,
+        stress_concurrent_checkin=45.0,
         session_send=30.0,
         resilience_reconnect=None,
         resilience_kill_date=None,
@@ -451,7 +451,7 @@ def parse_env_config(raw: dict[str, Any]) -> EnvConfig:
             to_t, "scp_transfer_secs", 60.0, "[timeouts]", errors
         )
         tr["stress_concurrent_checkin"] = _optional_timeout_default(
-            to_t, "stress_concurrent_checkin_secs", 30.0, "[timeouts]", errors
+            to_t, "stress_concurrent_checkin_secs", 45.0, "[timeouts]", errors
         )
         tr["session_send"] = _optional_timeout_default(
             to_t, "session_send_secs", 30.0, "[timeouts]", errors

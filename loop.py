@@ -2321,30 +2321,48 @@ def harvest_worktree_beads(worktree_path: Path, log: Logger):
     log.log("WARNING: harvest: could not push after {retries} attempts — issues saved locally")
 
 
+# Tracked cross-VM state files that loops/agents may write but forget to commit.
+# Both leak into the main tree via the worktree .beads symlink; both block
+# `git pull --rebase` in the next loop iteration if left dirty.
+SWEPT_STATE_FILES = [
+    ".beads/issues.jsonl",
+    ".beads/qa_checkpoint",
+]
+
+
 def commit_beads_if_dirty(reason: str, log: Logger) -> bool:
     """
-    Sweep up pending beads changes: flush DB → JSONL, commit + push if dirty.
+    Sweep up dirty cross-VM state files (see SWEPT_STATE_FILES).
 
-    Used at the end of each loop iteration to ensure agent-driven `br update` /
-    `br close` / `br create` calls don't leave .beads/issues.jsonl dirty in the
-    working tree, which would block the next iteration's git pull --rebase.
-    Returns True if a commit was made; False (and silently) if nothing to do.
+    Flushes the beads DB → JSONL, then commits + pushes any of the watched
+    files that are dirty. Catches:
+      - agent `br update` / `br close` / `br create` left uncommitted
+      - QA prompt `echo $HEAD_SHA > .beads/qa_checkpoint` left uncommitted
+      - human `br update` on the same VM (via the maintenance-tick sweep)
+
+    Returns True if a commit was made; False if nothing to do.
     """
     br(["sync", "--flush-only", "--quiet"])
-    if git(["diff", "--quiet", "--", ".beads/issues.jsonl"]).returncode == 0:
+
+    dirty = [
+        path for path in SWEPT_STATE_FILES
+        if git(["diff", "--quiet", "--", path]).returncode != 0
+    ]
+    if not dirty:
         return False
 
-    git(["add", ".beads/issues.jsonl"])
+    git(["add", "--"] + dirty)
     if git(["diff", "--cached", "--quiet"]).returncode == 0:
         return False
 
     if git(["commit", "-m", f"chore(beads): {reason}", "--quiet"]).returncode != 0:
-        git(["restore", "--staged", ".beads/issues.jsonl"])
+        for path in dirty:
+            git(["restore", "--staged", "--", path])
         log.log(f"WARNING: beads sweep commit failed: {reason}")
         return False
 
     if git(["push", "--quiet"]).returncode == 0:
-        log.log(f"beads: swept JSONL ({reason})")
+        log.log(f"beads: swept {','.join(dirty)} ({reason})")
     else:
         log.log(f"WARNING: beads sweep push failed (local commit retained): {reason}")
     return True

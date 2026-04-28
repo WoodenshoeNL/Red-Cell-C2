@@ -2390,7 +2390,7 @@ Biggest blindspot: AgentCryptoMaterial's `#[derive(Debug)]` at `common/src/crypt
 
 Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (all ~1987 tests passing, 0 failures)
 
-Deep review covered: full structural map (102k lines, 68 .rs files across 3 crates), all common crate modules (crypto, demon protocol, TLS, config, domain, operator, error), all teamserver modules (22 source + 14 dispatch), all integration tests (16 files), full client source (6 files). Security posture strong: constant-time comparisons for all secrets (auth tokens via `subtle::ct_eq`, API keys via HMAC+`ct_eq`, passwords via Argon2 with dummy verifier for timing equalization), AES-256-CTR offset management correct with deferred-advance pattern, DEMON_INIT rate-limited (5/60s per IP, 10k window cap), body size bounded (30 MiB), agent registration capped (10k), job queues capped (1k/agent), request contexts LRU-evicted (10k), pivot depth capped (16), operator sessions capped (64 global / 8 per account). All length-prefixed network reads validated against buffer bounds before allocation. No `todo!`/`unimplemented!`/`unwrap`/`expect` in production code (enforced by clippy deny lints). Architecture decisions (Axum+Tokio, SQLite/sqlx, HCL config, thiserror/anyhow separation, egui, edition 2024) all honored. Most previously-identified issues already tracked in beads. 3 new issues filed.
+Deep review covered: full structural map (102k lines, 68 .rs files across 3 crates), all common crate modules (crypto, demon protocol, TLS, config, domain, operator, error), all teamserver modules (22 source + 14 dispatch), all integration tests (16 files), full client source (6 files). Security posture strong: constant-time comparisons for all secrets (auth tokens via `subtle::ct_eq`, API keys via HMAC+`ct_eq`, passwords via Argon2 with dummy verifier for timing equalization), AES-256-CTR offset management correct with deferred-advance pattern, DEMON_INIT rate-limited (5/60s per IP, 10k window cap), body size bounded (`MAX_AGENT_MESSAGE_LEN`; see `teamserver/src/lib.rs`), agent registration capped (10k), job queues capped (1k/agent), request contexts LRU-evicted (10k), pivot depth capped (16), operator sessions capped (64 global / 8 per account). All length-prefixed network reads validated against buffer bounds before allocation. No `todo!`/`unimplemented!`/`unwrap`/`expect` in production code (enforced by clippy deny lints). Architecture decisions (Axum+Tokio, SQLite/sqlx, HCL config, thiserror/anyhow separation, egui, edition 2024) all honored. Most previously-identified issues already tracked in beads. 3 new issues filed.
 
 ### QA Review — 2026-03-19 16:45 — 62ab041..c181363
 
@@ -2459,7 +2459,7 @@ Biggest blindspot: Integration test coverage for cross-cutting concerns — webh
 
 Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (all tests passing, 0 failures)
 
-Deep review covered: full structural map (97k lines, 68 .rs files), all common crate modules, all teamserver modules (22 source files + 14 dispatch handlers), all integration tests (16 files across 3 crates), client source (6 files), Cargo.toml dependency audit. Security posture verified: AES-256-CTR offset management correct, DEMON_INIT validation comprehensive (agent_id!=0, duplicate rejection, weak key/IV rejection, decrypted ID cross-check), constant-time token/password comparison via `subtle` crate, Argon2id password hashing with dummy verifier for user enumeration prevention, per-IP rate limiting on DEMON_INIT and login, download memory bounded (30 MiB per request, 2 GB aggregate), DNS upload capped (1000 pending, 256 chunks, 120s timeout), agent registration capped at 10k, job queue capped at 1000/agent. Architecture decisions all honored: Axum+Tokio, SQLite/sqlx, HCL config, thiserror/anyhow separation, egui client, edition 2024. No todo!/unimplemented!/println!/eprintln! in production code. No unwrap/expect in production code paths. No clippy warnings.
+Deep review covered: full structural map (97k lines, 68 .rs files), all common crate modules, all teamserver modules (22 source files + 14 dispatch handlers), all integration tests (16 files across 3 crates), client source (6 files), Cargo.toml dependency audit. Security posture verified: AES-256-CTR offset management correct, DEMON_INIT validation comprehensive (agent_id!=0, duplicate rejection, weak key/IV rejection, decrypted ID cross-check), constant-time token/password comparison via `subtle` crate, Argon2id password hashing with dummy verifier for user enumeration prevention, per-IP rate limiting on DEMON_INIT and login, download memory bounded (`MAX_AGENT_MESSAGE_LEN` per ingress request; see `teamserver/src/lib.rs`, 2 GB aggregate), DNS upload capped (1000 pending, 256 chunks, 120s timeout), agent registration capped at 10k, job queue capped at 1000/agent. Architecture decisions all honored: Axum+Tokio, SQLite/sqlx, HCL config, thiserror/anyhow separation, egui client, edition 2024. No todo!/unimplemented!/println!/eprintln! in production code. No unwrap/expect in production code paths. No clippy warnings.
 
 ### QA Review — 2026-03-18 22:15 — 2fcd12d..e8f423f
 
@@ -2909,7 +2909,7 @@ Notes: Both deliverables are high quality. The CTR fix is the correct defense-in
 
 | Agent | Findings | Categories | Notes |
 |-------|---------|------------|-------|
-| Claude | 5 | Security (2), Protocol (1), Docs (1), Maintainability (1) | red-cell-c2-dbve: CTR desync attack — garbage callback advances offset before parse succeeds, permanently breaking session (P1); red-cell-c2-a55z: 30 MiB body buffered pre-magic-check, memory DoS via concurrent connections (P1); red-cell-c2-t6dz: reconnect ack encrypted without advancing offset — post-reconnect callback path has no end-to-end test and protocol intent undocumented (P2); red-cell-c2-bp5w: crypto.rs module comment states CTR resets to 0 per message but production code uses advancing offsets (P3); red-cell-c2-ime3: dispatch.rs at 9 800 lines, split into per-command-family modules (P3) |
+| Claude | 5 | Security (2), Protocol (1), Docs (1), Maintainability (1) | red-cell-c2-dbve: CTR desync attack — garbage callback advances offset before parse succeeds, permanently breaking session (P1); red-cell-c2-a55z: up to `MAX_AGENT_MESSAGE_LEN` body buffered pre-magic-check, memory DoS via concurrent connections (P1); red-cell-c2-t6dz: reconnect ack encrypted without advancing offset — post-reconnect callback path has no end-to-end test and protocol intent undocumented (P2); red-cell-c2-bp5w: crypto.rs module comment states CTR resets to 0 per message but production code uses advancing offsets (P3); red-cell-c2-ime3: dispatch.rs at 9 800 lines, split into per-command-family modules (P3) |
 | Codex | 0 | — | No new findings attributed |
 | Cursor | 0 | — | No new findings attributed |
 
@@ -5113,7 +5113,7 @@ Overall codebase health: **on track**
 - Zero bare println/eprintln in production code
 - Proper constant-time comparisons (subtle crate) for all secret comparisons
 - Key material consistently redacted in Debug impls and logs
-- Resource limits well-defined for all listener types (HTTP 30MiB, SMB 16MiB, DNS 256 chunks/1000 sessions)
+- Resource limits well-defined for all listener types (HTTP agent paths: `MAX_AGENT_MESSAGE_LEN` in `teamserver/src/lib.rs`, SMB 16MiB, DNS 256 chunks/1000 sessions)
 - Authentication enforced on all endpoints; rate limiting on init handshakes and API auth
 
 Biggest blindspot: Service bridge dispatch completeness — two message types silently dropped
@@ -5401,7 +5401,7 @@ Pre-existing failure: agent_reconnects_after_listener_restart (404 after restart
 
 | Agent | Findings | Categories | Notes |
 |-------|---------|------------|-------|
-| Claude | 6 | architecture drift (4), protocol (1), missing tests (1) | mvvgt: client-cli agent commands target nonexistent REST routes; 2d1jn: client-cli RawAgent schema does not match ApiAgentInfo; 39ucn: operator create/set-role request/response shapes drift from REST API; lhlzp: session mode only implements a subset of the documented CLI surface; 30okz: External listeners enforce a 10 MiB body cap while other agent listeners accept 30 MiB; 2qrdj: no end-to-end client-cli↔teamserver contract test catches this drift. |
+| Claude | 6 | architecture drift (4), protocol (1), missing tests (1) | mvvgt: client-cli agent commands target nonexistent REST routes; 2d1jn: client-cli RawAgent schema does not match ApiAgentInfo; 39ucn: operator create/set-role request/response shapes drift from REST API; lhlzp: session mode only implements a subset of the documented CLI surface; 30okz: External listeners enforce a 10 MiB body cap while other agent listeners accept `MAX_AGENT_MESSAGE_LEN`; 2qrdj: no end-to-end client-cli↔teamserver contract test catches this drift. |
 | Codex | 0 | — | No findings this pass |
 | Cursor | 0 | — | No findings this pass |
 
@@ -7069,7 +7069,7 @@ Build: `cargo check --workspace` **passed** (clean, 18m 12s — slow due to conc
 
 | Agent | Tasks closed | Bugs filed | Notes |
 |-------|-------------|------------|-------|
-| Claude | 2 | 0 | Closed pfy74: raised REST API body limit from 2 MB to 30 MiB (matching listener paths), added >2MB upload test. Closed e969d: verified TLS cert hot-reload already implemented, fixed 3 TLS tests missing `install_default_crypto_provider()`. Split csclv (websocket.rs refactor) into sub-issues. Clean, focused work — proper reuse of `MAX_AGENT_MESSAGE_LEN` constant, good test coverage. |
+| Claude | 2 | 0 | Closed pfy74: raised REST API body limit from 2 MB to `MAX_AGENT_MESSAGE_LEN` (matching listener paths), added >2MB upload test. Closed e969d: verified TLS cert hot-reload already implemented, fixed 3 TLS tests missing `install_default_crypto_provider()`. Split csclv (websocket.rs refactor) into sub-issues. Clean, focused work — proper reuse of `MAX_AGENT_MESSAGE_LEN` constant, good test coverage. |
 | Codex | 0 | 0 | No activity this run. |
 | Cursor | 0 | 0 | No activity this run. |
 

@@ -90,7 +90,8 @@ pub(super) async fn execute_process(
                     merged.push_str(&String::from_utf8_lossy(&output.stderr));
                 }
                 // Include trailing exit code (i32 LE) matching Specter wire format.
-                let exit_code = output.status.code().unwrap_or(0);
+                // Unix: `code()` is None when terminated by signal — use -1 (not 0).
+                let exit_code = output.status.code().unwrap_or(-1);
                 let mut out_payload = encode_bytes(merged.as_bytes())?;
                 out_payload.extend_from_slice(&exit_code.to_le_bytes());
                 state.queue_callback(PendingCallback::Structured {

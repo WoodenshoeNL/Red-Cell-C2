@@ -53,6 +53,38 @@ async fn proc_create_with_pipe_returns_structured_and_output_callbacks() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
+async fn proc_create_with_pipe_reports_minus_one_when_shell_sigkilled() {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&(DemonProcessCommand::Create as i32).to_le_bytes());
+    payload.extend_from_slice(&0_i32.to_le_bytes());
+    payload.extend_from_slice(&utf16_payload("/bin/sh"));
+    payload.extend_from_slice(&utf16_payload("kill -KILL $$"));
+    payload.extend_from_slice(&1_i32.to_le_bytes());
+    payload.extend_from_slice(&0_i32.to_le_bytes());
+    let package = DemonPackage::new(DemonCommand::CommandProc, 3, payload);
+    let mut state = PhantomState::default();
+
+    execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
+
+    let callbacks = state.drain_callbacks();
+    let [
+        PendingCallback::Structured { .. },
+        PendingCallback::Structured { payload: output_payload, .. },
+    ] = callbacks.as_slice()
+    else {
+        panic!("unexpected callbacks: {callbacks:?}");
+    };
+
+    let mut out_offset = 0;
+    let text_len = read_u32(output_payload, &mut out_offset) as usize;
+    out_offset += text_len;
+    let exit_code =
+        i32::from_le_bytes(output_payload[out_offset..out_offset + 4].try_into().expect("4 bytes"));
+    assert_eq!(exit_code, -1, "SIGKILL'd process has no exit code — must not report 0 (success)");
+}
+
+#[tokio::test]
 async fn proc_list_returns_structured_process_payload() {
     let package = DemonPackage::new(DemonCommand::CommandProcList, 7, 0_i32.to_le_bytes().to_vec());
     let mut state = PhantomState::default();

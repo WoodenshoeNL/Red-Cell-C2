@@ -1,6 +1,6 @@
 //! Callback package decoding and binary read helpers for Demon transport.
 
-use red_cell_common::demon::DemonProtocolError;
+use red_cell_common::demon::{DemonCommand, DemonProtocolError};
 
 use super::{DemonCallbackPackage, DemonParserError};
 
@@ -58,7 +58,7 @@ pub(crate) fn parse_batched_callback_packages(
     Ok(packages)
 }
 
-const GET_JOB_COMMAND_ID: u32 = 1; // DemonCommand::CommandGetJob
+const GET_JOB_COMMAND_ID: u32 = DemonCommand::CommandGetJob as u32;
 
 pub(crate) fn read_fixed<const N: usize>(
     bytes: &[u8],

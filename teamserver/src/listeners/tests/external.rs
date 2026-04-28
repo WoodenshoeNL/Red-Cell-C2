@@ -349,9 +349,9 @@ async fn external_listener_with_init_secret_rejects_callback_with_raw_keys()
         agent_id,
         key,
         iv,
-        u32::from(DemonCommand::CommandGetJob),
+        u32::from(DemonCommand::CommandCheckin),
         7,
-        &[],
+        &[0xDE, 0xAD],
     );
     let callback_result: Result<Vec<u8>, StatusCode> =
         handle_external_request(&state, peer, &callback_body).await;

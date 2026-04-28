@@ -475,11 +475,20 @@ pub fn valid_demon_callback_body(
     request_id: u32,
     payload: &[u8],
 ) -> Vec<u8> {
-    let mut decrypted = Vec::new();
-    decrypted.extend_from_slice(
-        &u32::try_from(payload.len()).expect("test data fits in u32").to_be_bytes(),
-    );
-    decrypted.extend_from_slice(payload);
+    let is_get_job = command_id == u32::from(DemonCommand::CommandGetJob);
+    let decrypted = if is_get_job {
+        // Demon batched format: GET_JOB is a container whose encrypted body
+        // holds zero or more [cmd(4)|req(4)|len(4)|data] sub-packages.  An
+        // empty payload means a heartbeat (no queued output).
+        Vec::new()
+    } else {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(
+            &u32::try_from(payload.len()).expect("test data fits in u32").to_be_bytes(),
+        );
+        buf.extend_from_slice(payload);
+        buf
+    };
 
     let encrypted = encrypt_agent_data_at_offset(&key, &iv, ctr_offset, &decrypted)
         .unwrap_or_else(|error| panic!("callback encrypt failed: {error}"));
@@ -576,11 +585,17 @@ pub fn valid_archon_callback_body(
     payload: &[u8],
     magic: u32,
 ) -> Vec<u8> {
-    let mut decrypted = Vec::new();
-    decrypted.extend_from_slice(
-        &u32::try_from(payload.len()).expect("test data fits in u32").to_be_bytes(),
-    );
-    decrypted.extend_from_slice(payload);
+    let is_get_job = command_id == u32::from(DemonCommand::CommandGetJob);
+    let decrypted = if is_get_job {
+        Vec::new()
+    } else {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(
+            &u32::try_from(payload.len()).expect("test data fits in u32").to_be_bytes(),
+        );
+        buf.extend_from_slice(payload);
+        buf
+    };
 
     let encrypted = encrypt_agent_data_at_offset(&key, &iv, ctr_offset, &decrypted)
         .unwrap_or_else(|error| panic!("archon callback encrypt failed: {error}"));

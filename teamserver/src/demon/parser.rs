@@ -9,7 +9,7 @@ use tracing::{info, warn};
 use zeroize::Zeroizing;
 
 use super::ack::lift_crypto_encoding_error;
-use super::callback::{parse_callback_packages, read_u32_be};
+use super::callback::{parse_batched_callback_packages, parse_callback_packages, read_u32_be};
 use super::init::parse_init_agent;
 use super::{DemonInitSecretConfig, DemonParserError, ParsedDemonInit, ParsedDemonPacket};
 use crate::{AgentRegistry, TeamserverError};
@@ -365,7 +365,16 @@ impl DemonPacketParser {
                 (None, Cow::Borrowed(decrypted.as_slice()))
             };
 
-        let packages = parse_callback_packages(command_id, request_id, &callback_body)?;
+        // Demon/Archon wrap all queued response packages inside a single
+        // DEMON_COMMAND_GET_JOB envelope where every sub-package carries its own
+        // (command_id, request_id) header.  Phantom/Specter send one command per
+        // envelope with the command_id/request_id in the outer (cleartext) header.
+        let is_batched_get_job = command_id == u32::from(DemonCommand::CommandGetJob);
+        let packages = if is_batched_get_job {
+            parse_batched_callback_packages(request_id, &callback_body)?
+        } else {
+            parse_callback_packages(command_id, request_id, &callback_body)?
+        };
 
         // Parse succeeded — the payload is authenticated by having valid Demon structure.
         // Commit the seq advance first (atomic check-and-advance under the per-agent

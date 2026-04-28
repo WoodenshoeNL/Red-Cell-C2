@@ -273,7 +273,7 @@ async fn smb_listener_serializes_all_queued_jobs_for_get_job()
     let (response_agent_id, response_bytes) = read_test_smb_frame(&mut stream).await?;
     assert_eq!(response_agent_id, agent_id);
     let message = DemonMessage::from_bytes(response_bytes.as_ref())?;
-    let response_ctr_offset = ctr_blocks_for_len(4);
+    let response_ctr_offset = ctr_blocks_for_len(0);
     assert_eq!(message.packages.len(), 2);
     assert_eq!(message.packages[0].command_id, u32::from(DemonCommand::CommandSleep));
     assert_eq!(message.packages[0].request_id, 41);

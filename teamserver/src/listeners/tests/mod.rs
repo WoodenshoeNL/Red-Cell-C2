@@ -391,19 +391,34 @@ fn valid_demon_multi_callback_body(
     first: (u32, u32, Vec<u8>),
     additional: &[(u32, u32, Vec<u8>)],
 ) -> Vec<u8> {
+    let is_get_job = first.0 == u32::from(DemonCommand::CommandGetJob);
     let mut decrypted = Vec::new();
-    decrypted.extend_from_slice(
-        &u32::try_from(first.2.len()).expect("test data fits in u32").to_be_bytes(),
-    );
-    decrypted.extend_from_slice(&first.2);
 
-    for (command_id, request_id, payload) in additional {
-        decrypted.extend_from_slice(&command_id.to_be_bytes());
-        decrypted.extend_from_slice(&request_id.to_be_bytes());
+    if is_get_job {
+        // Demon batched format: the outer GET_JOB is a container, and each
+        // sub-package carries its own [cmd(4)|req(4)|len(4)|data].
+        for (command_id, request_id, payload) in additional {
+            decrypted.extend_from_slice(&command_id.to_be_bytes());
+            decrypted.extend_from_slice(&request_id.to_be_bytes());
+            decrypted.extend_from_slice(
+                &u32::try_from(payload.len()).expect("test data fits in u32").to_be_bytes(),
+            );
+            decrypted.extend_from_slice(payload);
+        }
+    } else {
         decrypted.extend_from_slice(
-            &u32::try_from(payload.len()).expect("test data fits in u32").to_be_bytes(),
+            &u32::try_from(first.2.len()).expect("test data fits in u32").to_be_bytes(),
         );
-        decrypted.extend_from_slice(payload);
+        decrypted.extend_from_slice(&first.2);
+
+        for (command_id, request_id, payload) in additional {
+            decrypted.extend_from_slice(&command_id.to_be_bytes());
+            decrypted.extend_from_slice(&request_id.to_be_bytes());
+            decrypted.extend_from_slice(
+                &u32::try_from(payload.len()).expect("test data fits in u32").to_be_bytes(),
+            );
+            decrypted.extend_from_slice(payload);
+        }
     }
 
     let encrypted =

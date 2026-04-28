@@ -194,7 +194,7 @@ async fn monotonic_ctr_init_and_sequential_callbacks() -> Result<(), Box<dyn std
 
     // ── Step 3: First callback (GetJob) at the advancing offset ─────────────────────────────────
 
-    // The agent encrypts its GetJob callback at offset 1 (empty inner payload → 4 bytes encrypted).
+    // The agent encrypts its GetJob callback at offset 1 (batched format: empty body = 0 encrypted bytes).
     let offset_cb1 = expected_offset_after_init; // 1
     let get_job_response = client
         .post(format!("http://127.0.0.1:{listener_port}/"))
@@ -216,16 +216,16 @@ async fn monotonic_ctr_init_and_sequential_callbacks() -> Result<(), Box<dyn std
     let message = DemonMessage::from_bytes(job_bytes.as_ref())?;
     assert_eq!(message.packages.len(), 0, "job queue must be empty (no tasks queued)");
 
-    // After the GetJob callback: encrypted portion was 4+0=4 bytes → 1 block.
-    let expected_offset_after_cb1 = offset_cb1 + ctr_blocks_for_len(4); // 1 + 1 = 2
+    // After the GetJob callback: batched format encrypts 0 bytes → 0 blocks advanced.
+    let expected_offset_after_cb1 = offset_cb1 + ctr_blocks_for_len(0); // 1 + 0 = 1
     assert_eq!(
         server.agent_registry.ctr_offset(agent_id).await?,
         expected_offset_after_cb1,
         "CTR offset must advance by 1 block after GetJob callback (4-byte encrypted payload)"
     );
-    assert!(
-        expected_offset_after_cb1 > expected_offset_after_init,
-        "offset must have advanced beyond the post-init value"
+    assert_eq!(
+        expected_offset_after_cb1, expected_offset_after_init,
+        "empty GET_JOB body encrypts 0 bytes, so CTR offset must not advance"
     );
 
     // ── Step 4: Second callback (CommandOutput) at the advancing offset ─────────────────────────

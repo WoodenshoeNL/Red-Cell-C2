@@ -70,7 +70,9 @@ async fn http_listener_serializes_all_queued_jobs_for_get_job()
     assert_eq!(response.status(), StatusCode::OK);
     let bytes = response.bytes().await?;
     let message = DemonMessage::from_bytes(bytes.as_ref())?;
-    let response_ctr_offset = ctr_blocks_for_len(4);
+    // Demon batched GET_JOB with empty body encrypts 0 bytes, so response
+    // starts at CTR offset 0.
+    let response_ctr_offset = ctr_blocks_for_len(0);
     assert_eq!(message.packages.len(), 2);
     assert_eq!(message.packages[0].command_id, u32::from(DemonCommand::CommandSleep));
     assert_eq!(message.packages[0].request_id, 41);
@@ -142,10 +144,10 @@ async fn http_listener_checkin_refreshes_metadata_and_rejects_key_rotation()
     assert_eq!(updated.encryption.aes_iv.as_slice(), iv.as_slice());
     // CTR must NOT be reset since the rotation was rejected.
     //
-    // The multi-callback body encrypts:
-    //   4 bytes (first payload len=0) + 4 (CheckIn cmd) + 4 (req_id) + 4 (payload len) +
-    //   checkin_payload
-    let first_request_encrypted_len = 4 + 4 + 4 + 4 + checkin_payload.len();
+    // Demon batched format: GET_JOB is a container with sub-packages.
+    // The encrypted body contains only the CheckIn sub-package:
+    //   4 (CheckIn cmd) + 4 (req_id) + 4 (payload len) + checkin_payload
+    let first_request_encrypted_len = 4 + 4 + 4 + checkin_payload.len();
     let expected_ctr_after_first = ctr_blocks_for_len(first_request_encrypted_len);
     assert_eq!(registry.ctr_offset(agent_id).await?, expected_ctr_after_first);
     assert_eq!(
@@ -262,9 +264,9 @@ async fn http_listener_with_init_secret_rejects_callback_with_raw_keys()
             agent_id,
             key,
             iv,
-            u32::from(DemonCommand::CommandGetJob),
+            u32::from(DemonCommand::CommandCheckin),
             7,
-            &[],
+            &[0xDE, 0xAD],
         ))
         .send()
         .await?;

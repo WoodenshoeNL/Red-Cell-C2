@@ -59,9 +59,9 @@ async fn wrong_key_callback_returns_404_and_preserves_ctr_offset()
             wrong_key,
             iv,
             ctr_offset,
-            u32::from(DemonCommand::CommandGetJob),
+            u32::from(DemonCommand::CommandCheckin),
             1,
-            &[],
+            &[0xDE, 0xAD],
         ))
         .send()
         .await?;

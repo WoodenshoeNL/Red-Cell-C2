@@ -9,7 +9,7 @@ use super::{
     build_init_packet_with_ext_flags, legacy_parser, temp_db_path, test_iv, test_key,
     test_registry, u32_be,
 };
-use crate::demon::callback::parse_callback_packages;
+use crate::demon::callback::{parse_batched_callback_packages, parse_callback_packages};
 use crate::demon::{
     DemonCallbackPackage, DemonPacketParser, DemonParserError, INIT_EXT_MONOTONIC_CTR,
     INIT_EXT_SEQ_PROTECTED, ParsedDemonPacket, build_init_ack,
@@ -826,4 +826,172 @@ async fn seq_protected_malformed_packages_does_not_consume_seq_or_ctr() {
         registry.check_callback_seq(agent_id, 2).await.is_ok(),
         "seq=2 must still be acceptable"
     );
+}
+
+// ── parse_batched_callback_packages (Demon/Archon GET_JOB format) ─────────
+
+fn build_raw_batched_callback(packages: &[(u32, u32, &[u8])]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    for &(cmd, req, payload) in packages {
+        buf.extend_from_slice(&u32_be(cmd));
+        buf.extend_from_slice(&u32_be(req));
+        buf.extend_from_slice(&u32_be(u32::try_from(payload.len()).expect("len")));
+        buf.extend_from_slice(payload);
+    }
+    buf
+}
+
+#[test]
+fn batched_callback_empty_body_returns_get_job_only() {
+    let packages =
+        parse_batched_callback_packages(0x99, &[]).expect("empty heartbeat body must be accepted");
+    assert_eq!(packages.len(), 1);
+    assert_eq!(packages[0].command_id, u32::from(DemonCommand::CommandGetJob));
+    assert_eq!(packages[0].request_id, 0x99);
+    assert!(packages[0].payload.is_empty());
+}
+
+#[test]
+fn batched_callback_single_package() {
+    let buf =
+        build_raw_batched_callback(&[(u32::from(DemonCommand::CommandOutput), 0xABCD, b"hello")]);
+    let packages =
+        parse_batched_callback_packages(0, &buf).expect("single batched package should parse");
+    assert_eq!(packages.len(), 2);
+    assert_eq!(packages[0].command_id, u32::from(DemonCommand::CommandGetJob));
+    assert_eq!(packages[1].command_id, u32::from(DemonCommand::CommandOutput));
+    assert_eq!(packages[1].request_id, 0xABCD);
+    assert_eq!(packages[1].payload, b"hello");
+}
+
+#[test]
+fn batched_callback_multiple_packages() {
+    let buf = build_raw_batched_callback(&[
+        (u32::from(DemonCommand::CommandOutput), 0x01, b"first"),
+        (u32::from(DemonCommand::CommandError), 0x02, b"second"),
+        (u32::from(DemonCommand::CommandJob), 0x03, b"third"),
+    ]);
+    let packages =
+        parse_batched_callback_packages(0, &buf).expect("three batched packages should parse");
+    assert_eq!(packages.len(), 4);
+    assert_eq!(packages[0].command_id, u32::from(DemonCommand::CommandGetJob));
+    assert_eq!(packages[1].command_id, u32::from(DemonCommand::CommandOutput));
+    assert_eq!(packages[1].payload, b"first");
+    assert_eq!(packages[2].command_id, u32::from(DemonCommand::CommandError));
+    assert_eq!(packages[2].payload, b"second");
+    assert_eq!(packages[3].command_id, u32::from(DemonCommand::CommandJob));
+    assert_eq!(packages[3].payload, b"third");
+}
+
+#[test]
+fn batched_callback_truncated_command_id_returns_error() {
+    let buf = &[0xDE, 0xAD]; // only 2 bytes, not enough for 4-byte command_id
+    let error =
+        parse_batched_callback_packages(0, buf).expect_err("truncated command_id must fail");
+    assert!(matches!(error, DemonParserError::Protocol(_)));
+}
+
+#[test]
+fn batched_callback_truncated_payload_returns_error() {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&u32_be(u32::from(DemonCommand::CommandOutput)));
+    buf.extend_from_slice(&u32_be(0x01));
+    buf.extend_from_slice(&u32_be(100)); // claims 100 bytes
+    buf.extend_from_slice(&[0xAA, 0xBB]); // only 2 available
+    let error = parse_batched_callback_packages(0, &buf).expect_err("truncated payload must fail");
+    assert!(matches!(error, DemonParserError::Protocol(_)));
+}
+
+// ── DemonPacketParser integration: Demon-style GET_JOB batched callback ───
+
+fn build_demon_get_job_callback(
+    agent_id: u32,
+    key: [u8; AGENT_KEY_LENGTH],
+    iv: [u8; AGENT_IV_LENGTH],
+    ctr_offset: u64,
+    sub_packages: &[(u32, u32, &[u8])],
+) -> Vec<u8> {
+    let decrypted = build_raw_batched_callback(sub_packages);
+    let encrypted = encrypt_agent_data_at_offset(&key, &iv, ctr_offset, &decrypted)
+        .expect("callback encryption should succeed");
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&u32_be(u32::from(DemonCommand::CommandGetJob)));
+    payload.extend_from_slice(&u32_be(0)); // outer request_id
+    payload.extend_from_slice(&encrypted);
+    DemonEnvelope::new(agent_id, payload).expect("envelope").to_bytes()
+}
+
+#[tokio::test]
+async fn parser_handles_demon_get_job_with_output() {
+    let registry = test_registry().await;
+    let parser = legacy_parser(registry.clone());
+    let key = test_key(0x61);
+    let iv = test_iv(0x62);
+    let agent_id: u32 = 0xDEAD_0001;
+
+    let init_packet = build_init_packet(agent_id, key, iv);
+    parser
+        .parse_at(&init_packet, "10.0.0.1".to_owned(), datetime!(2026-04-28 10:00:00 UTC))
+        .await
+        .expect("init should succeed");
+
+    let _ack = build_init_ack(&registry, agent_id).await.expect("ack");
+
+    let callback = build_demon_get_job_callback(
+        agent_id,
+        key,
+        iv,
+        0,
+        &[
+            (u32::from(DemonCommand::CommandOutput), 0x1234, b"whoami output"),
+            (u32::from(DemonCommand::CommandError), 0x5678, b"err"),
+        ],
+    );
+    let parsed = parser
+        .parse_at(&callback, "10.0.0.1".to_owned(), datetime!(2026-04-28 10:01:00 UTC))
+        .await
+        .expect("demon GET_JOB callback should parse");
+
+    let ParsedDemonPacket::Callback { header, packages } = parsed else {
+        panic!("expected Callback variant");
+    };
+    assert_eq!(header.agent_id, agent_id);
+    assert_eq!(packages.len(), 3);
+    assert_eq!(packages[0].command_id, u32::from(DemonCommand::CommandGetJob));
+    assert_eq!(packages[1].command_id, u32::from(DemonCommand::CommandOutput));
+    assert_eq!(packages[1].request_id, 0x1234);
+    assert_eq!(packages[1].payload, b"whoami output");
+    assert_eq!(packages[2].command_id, u32::from(DemonCommand::CommandError));
+    assert_eq!(packages[2].request_id, 0x5678);
+    assert_eq!(packages[2].payload, b"err");
+}
+
+#[tokio::test]
+async fn parser_handles_demon_empty_heartbeat() {
+    let registry = test_registry().await;
+    let parser = legacy_parser(registry.clone());
+    let key = test_key(0x71);
+    let iv = test_iv(0x72);
+    let agent_id: u32 = 0xDEAD_0002;
+
+    let init_packet = build_init_packet(agent_id, key, iv);
+    parser
+        .parse_at(&init_packet, "10.0.0.1".to_owned(), datetime!(2026-04-28 11:00:00 UTC))
+        .await
+        .expect("init should succeed");
+
+    let _ack = build_init_ack(&registry, agent_id).await.expect("ack");
+
+    let callback = build_demon_get_job_callback(agent_id, key, iv, 0, &[]);
+    let parsed = parser
+        .parse_at(&callback, "10.0.0.1".to_owned(), datetime!(2026-04-28 11:01:00 UTC))
+        .await
+        .expect("empty heartbeat GET_JOB should parse");
+
+    let ParsedDemonPacket::Callback { header, packages } = parsed else {
+        panic!("expected Callback variant");
+    };
+    assert_eq!(header.agent_id, agent_id);
+    assert_eq!(packages.len(), 1, "empty heartbeat should yield only the synthetic GET_JOB");
+    assert_eq!(packages[0].command_id, u32::from(DemonCommand::CommandGetJob));
 }

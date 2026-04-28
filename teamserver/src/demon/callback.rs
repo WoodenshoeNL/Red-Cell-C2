@@ -28,6 +28,38 @@ pub(crate) fn parse_callback_packages(
     Ok(packages)
 }
 
+/// Parse the Demon/Archon batched callback format used by `DEMON_COMMAND_GET_JOB`.
+///
+/// In this format every sub-package carries its own `(command_id, request_id,
+/// length-prefixed payload)` triple — including the first one.  An empty body
+/// (heartbeat with no queued output) is valid.
+///
+/// A synthetic `CommandGetJob` package with `outer_request_id` and an empty
+/// payload is always prepended so the dispatcher knows to dequeue pending
+/// tasks for the agent — this mirrors the role the outer GET_JOB header plays
+/// in the original Havoc protocol.
+pub(crate) fn parse_batched_callback_packages(
+    outer_request_id: u32,
+    decrypted: &[u8],
+) -> Result<Vec<DemonCallbackPackage>, DemonParserError> {
+    let mut packages = vec![DemonCallbackPackage {
+        command_id: GET_JOB_COMMAND_ID,
+        request_id: outer_request_id,
+        payload: Vec::new(),
+    }];
+    let mut offset = 0_usize;
+    while offset < decrypted.len() {
+        let command_id = read_u32_be(decrypted, &mut offset, "batched callback command id")?;
+        let request_id = read_u32_be(decrypted, &mut offset, "batched callback request id")?;
+        let payload =
+            read_length_prefixed_bytes_be(decrypted, &mut offset, "batched callback payload")?;
+        packages.push(DemonCallbackPackage { command_id, request_id, payload });
+    }
+    Ok(packages)
+}
+
+const GET_JOB_COMMAND_ID: u32 = 1; // DemonCommand::CommandGetJob
+
 pub(crate) fn read_fixed<const N: usize>(
     bytes: &[u8],
     offset: &mut usize,

@@ -2,6 +2,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
 use red_cell_common::crypto::ecdh::{ECDH_REG_MIN_LEN, ListenerKeypair, build_registration_packet};
+use red_cell_common::demon::{ArchonEnvelope, DemonCommand};
 use sqlx::Row;
 
 use crate::AgentRegistry;
@@ -402,6 +403,57 @@ async fn process_ecdh_packet_no_keypair_does_not_consume_budget() {
     }
 
     assert_eq!(limiter.tracked_ip_count().await, 0, "no-keypair path must not touch the limiter");
+}
+
+/// Archon INIT/callback packets are large enough to pass the ECDH_REG_MIN_LEN
+/// threshold but must NOT consume the ECDH registration budget. The
+/// ArchonEnvelope size-field validation reliably distinguishes them from ECDH
+/// registration packets (whose first 4 bytes are random X25519 key material).
+///
+/// Regression test: stale Archon agents from previous runs would exhaust the
+/// per-IP ECDH budget, blocking the new Archon agent's DEMON_INIT.
+#[tokio::test]
+async fn process_ecdh_packet_archon_body_does_not_consume_budget() {
+    let (db, registry, events, dispatcher, keypair, limiter) = ecdh_test_fixture().await;
+    let ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 48));
+
+    let cmd = u32::from(DemonCommand::DemonInit);
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&cmd.to_be_bytes());
+    payload.extend_from_slice(&0u32.to_be_bytes()); // request_id
+    payload.extend_from_slice(&[0xAA; 80]); // simulated key + encrypted metadata
+
+    let body =
+        ArchonEnvelope::new(0x1234_5678, 0xCAFE_BABE, payload).expect("archon envelope").to_bytes();
+    assert!(
+        body.len() >= ECDH_REG_MIN_LEN,
+        "Archon body must be large enough to cross the ECDH threshold"
+    );
+
+    for _ in 0..(MAX_ECDH_REGISTRATIONS_PER_IP * 2) {
+        let result = process_ecdh_packet(
+            "test-listener",
+            Some(&keypair),
+            &registry,
+            &db,
+            &events,
+            &dispatcher,
+            &limiter,
+            &body,
+            ip,
+        )
+        .await;
+        assert!(
+            matches!(result, Ok(EcdhOutcome::NotEcdh)),
+            "Archon body must fall through to Demon transport; got: {result:?}"
+        );
+    }
+
+    assert_eq!(
+        limiter.tracked_ip_count().await,
+        0,
+        "Archon packets must not register an entry in the ECDH registration limiter"
+    );
 }
 
 // ── ECDH registration seq_protected persistence ─────────────────────

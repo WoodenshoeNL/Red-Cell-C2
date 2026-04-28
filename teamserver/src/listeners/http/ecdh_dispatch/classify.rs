@@ -8,6 +8,7 @@ use red_cell_common::crypto::ecdh::{
     ECDH_REG_MIN_LEN, EcdhError, ListenerKeypair, extract_connection_id_candidate,
     open_registration_packet,
 };
+use red_cell_common::demon::ArchonEnvelope;
 
 use crate::listeners::{
     ECDH_REGISTRATION_WINDOW_DURATION, EcdhRegistrationRateLimiter, ListenerManagerError,
@@ -99,6 +100,18 @@ pub(crate) async fn process_ecdh_packet(
     };
 
     if body.len() < ECDH_REG_MIN_LEN {
+        return Ok(EcdhOutcome::NotEcdh);
+    }
+
+    // Archon INIT/callback packets are large enough to cross the ECDH_REG_MIN_LEN
+    // threshold but are NOT ECDH registrations. ArchonEnvelope::from_bytes validates
+    // the declared size field against the actual body length — ECDH packets (which
+    // start with an X25519 public key) fail this check because their first 4 bytes
+    // are random key material, not a matching size value. Returning NotEcdh here
+    // prevents Archon traffic from consuming the tight ECDH registration budget,
+    // which would otherwise block new Archon agents when stale agents from previous
+    // runs exhaust the per-IP allowance.
+    if ArchonEnvelope::from_bytes(body).is_ok() {
         return Ok(EcdhOutcome::NotEcdh);
     }
 

@@ -4,7 +4,7 @@ use std::net::IpAddr;
 
 use tracing::{debug, warn};
 
-use crate::events::broadcast_teamserver_line;
+use crate::events::broadcast_teamserver_warning;
 use crate::listeners::{
     DemonInitRateLimiter, ListenerManagerError, MAX_RECONNECT_PROBES_PER_AGENT,
     RECONNECT_PROBE_WINDOW_DURATION, ReconnectProbeRateLimiter, UnknownCallbackProbeAuditLimiter,
@@ -51,13 +51,7 @@ async fn build_callback_response(
             let text = format!(
                 "[listener={listener_name}] agent={agent_id:08X} callback dispatch failed: {error}"
             );
-            broadcast_teamserver_line(events, "teamserver", &text);
-            warn!(
-                listener = listener_name,
-                agent_id = format_args!("{agent_id:08X}"),
-                %error,
-                "callback dispatch failed"
-            );
+            broadcast_teamserver_warning(events, text);
             Err(map_command_dispatch_error(error))
         }
     }
@@ -121,6 +115,12 @@ pub(crate) async fn process_demon_transport(
                     %error,
                     "failed to persist agent.registered audit entry"
                 );
+                broadcast_teamserver_warning(
+                    events,
+                    format!(
+                        "[listener={listener_name}] agent={agent_id:08X} listener audit persist failed (agent.registered): {error}"
+                    ),
+                );
             }
             if let Ok(Some(plugins)) = PluginRuntime::current() {
                 if let Err(error) = plugins.emit_agent_registered(agent_id).await {
@@ -182,6 +182,12 @@ pub(crate) async fn process_demon_transport(
                     %error,
                     "failed to persist agent.reregistered audit entry"
                 );
+                broadcast_teamserver_warning(
+                    events,
+                    format!(
+                        "[listener={listener_name}] agent={agent_id:08X} listener audit persist failed (agent.reregistered): {error}"
+                    ),
+                );
             }
             if let Ok(Some(plugins)) = PluginRuntime::current() {
                 if let Err(error) = plugins.emit_agent_registered(agent_id).await {
@@ -211,6 +217,13 @@ pub(crate) async fn process_demon_transport(
                         window_seconds = RECONNECT_PROBE_WINDOW_DURATION.as_secs(),
                         "reconnect probe rate limit exceeded — possible probe spam"
                     );
+                    broadcast_teamserver_warning(
+                        events,
+                        format!(
+                            "[listener={listener_name}] agent={:08X} reconnect probe rate limit exceeded (from {external_ip})",
+                            header.agent_id
+                        ),
+                    );
                     return Ok(ProcessedDemonResponse {
                         agent_id: header.agent_id,
                         payload: Vec::new(),
@@ -239,6 +252,13 @@ pub(crate) async fn process_demon_transport(
                         external_ip,
                         "unknown-agent reconnect probe rejected by per-IP rate limiter"
                     );
+                    broadcast_teamserver_warning(
+                        events,
+                        format!(
+                            "[listener={listener_name}] agent={:08X} unknown reconnect rejected (per-IP rate limit) from {external_ip}",
+                            header.agent_id
+                        ),
+                    );
                     return Ok(ProcessedDemonResponse {
                         agent_id: header.agent_id,
                         payload: Vec::new(),
@@ -252,6 +272,13 @@ pub(crate) async fn process_demon_transport(
                         agent_id = format_args!("{:08X}", header.agent_id),
                         external_ip,
                         "unknown agent sent reconnect probe"
+                    );
+                    broadcast_teamserver_warning(
+                        events,
+                        format!(
+                            "[listener={listener_name}] agent={:08X} unknown reconnect probe from {external_ip}",
+                            header.agent_id
+                        ),
                     );
                     record_unknown_reconnect_probe(
                         database,
@@ -299,6 +326,12 @@ pub(crate) async fn process_demon_transport(
                     external_ip,
                     "unknown agent sent callback probe"
                 );
+                broadcast_teamserver_warning(
+                    events,
+                    format!(
+                        "[listener={listener_name}] agent={agent_id:08X} callback probe (agent not registered) from {external_ip}"
+                    ),
+                );
                 record_unknown_callback_probe(database, listener_name, agent_id, &external_ip)
                     .await;
             } else {
@@ -323,6 +356,12 @@ pub(crate) async fn process_demon_transport(
                 external_ip,
                 "Archon magic mismatch — possible replay or probe from different build"
             );
+            broadcast_teamserver_warning(
+                events,
+                format!(
+                    "[listener={listener_name}] agent={agent_id:08X} Archon magic mismatch (actual 0x{actual:08X}) from {external_ip}"
+                ),
+            );
             record_archon_magic_mismatch(
                 database,
                 listener_name,
@@ -346,6 +385,12 @@ pub(crate) async fn process_demon_transport(
                 external_ip,
                 "Archon magic not on file — agent may be registered as legacy Demon"
             );
+            broadcast_teamserver_warning(
+                events,
+                format!(
+                    "[listener={listener_name}] agent={agent_id:08X} Archon magic not on file (from {external_ip})"
+                ),
+            );
             record_archon_magic_mismatch(
                 database,
                 listener_name,
@@ -364,12 +409,7 @@ pub(crate) async fn process_demon_transport(
         }
         Err(error) => {
             let text = format!("[listener={listener_name}] demon packet decode failed: {error}");
-            broadcast_teamserver_line(events, "teamserver", &text);
-            warn!(
-                listener = listener_name,
-                %error,
-                "failed to parse demon transport payload"
-            );
+            broadcast_teamserver_warning(events, text);
             Err(ListenerManagerError::InvalidConfig {
                 message: format!("failed to parse demon callback: {error}"),
             })

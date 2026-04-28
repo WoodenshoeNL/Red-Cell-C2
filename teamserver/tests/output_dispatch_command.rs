@@ -586,6 +586,7 @@ async fn command_error_unknown_class_no_broadcast() -> Result<(), Box<dyn std::e
         response.status()
     );
 
+    common::skip_optional_teamserver_log(&mut socket, std::time::Duration::from_millis(200)).await;
     common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
 
     socket.close(None).await?;
@@ -822,6 +823,7 @@ async fn command_output_empty_payload_returns_error_no_broadcast()
         response.status()
     );
 
+    common::skip_optional_teamserver_log(&mut socket, std::time::Duration::from_millis(200)).await;
     common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
 
     socket.close(None).await?;
@@ -886,6 +888,7 @@ async fn command_output_truncated_length_prefix_returns_error_no_broadcast()
         response.status()
     );
 
+    common::skip_optional_teamserver_log(&mut socket, std::time::Duration::from_millis(200)).await;
     common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
 
     socket.close(None).await?;
@@ -954,6 +957,7 @@ async fn command_output_length_exceeds_payload_returns_error_no_broadcast()
         response.status()
     );
 
+    common::skip_optional_teamserver_log(&mut socket, std::time::Duration::from_millis(200)).await;
     common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
 
     socket.close(None).await?;
@@ -1024,6 +1028,7 @@ async fn command_output_u32_max_length_prefix_returns_error_no_broadcast()
         response.status()
     );
 
+    common::skip_optional_teamserver_log(&mut socket, std::time::Duration::from_millis(200)).await;
     common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
 
     socket.close(None).await?;
@@ -1092,6 +1097,7 @@ async fn command_error_win32_truncated_body_returns_error_no_broadcast()
         response.status()
     );
 
+    common::skip_optional_teamserver_log(&mut socket, std::time::Duration::from_millis(200)).await;
     common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
 
     socket.close(None).await?;
@@ -1158,6 +1164,7 @@ async fn command_error_token_truncated_body_returns_error_no_broadcast()
         response.status()
     );
 
+    common::skip_optional_teamserver_log(&mut socket, std::time::Duration::from_millis(200)).await;
     common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
 
     socket.close(None).await?;
@@ -1221,6 +1228,7 @@ async fn sleep_callback_empty_payload_returns_error_no_broadcast()
         response.status()
     );
 
+    common::skip_optional_teamserver_log(&mut socket, std::time::Duration::from_millis(200)).await;
     common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
 
     socket.close(None).await?;
@@ -1284,6 +1292,7 @@ async fn sleep_callback_truncated_missing_jitter_returns_error_no_broadcast()
         response.status()
     );
 
+    common::skip_optional_teamserver_log(&mut socket, std::time::Duration::from_millis(200)).await;
     common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
 
     socket.close(None).await?;

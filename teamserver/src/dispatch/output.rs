@@ -6,6 +6,7 @@ use red_cell_common::demon::{
 use tracing::warn;
 
 use crate::agent_events::agent_mark_event;
+use crate::events::broadcast_teamserver_warning;
 use crate::{
     AgentRegistry, Database, EventBus, PluginRuntime, SocketRelayManager, TeamserverError,
 };
@@ -134,11 +135,11 @@ pub(super) async fn handle_command_error_callback(
             return Ok(None);
         }
         Err(unknown) => {
-            warn!(
-                agent_id,
-                request_id,
-                error = %unknown,
-                "unknown DemonCallbackError variant — callback silently dropped"
+            broadcast_teamserver_warning(
+                events,
+                format!(
+                    "[callback CommandError] agent {agent_id:08X} request 0x{request_id:X} unknown error class ({unknown}) — dropped"
+                ),
             );
             return Ok(None);
         }
@@ -287,11 +288,11 @@ pub(super) async fn handle_demon_info_callback(
             }
         }
         Err(unknown) => {
-            warn!(
-                agent_id,
-                request_id,
-                error = %unknown,
-                "unknown DemonInfoClass variant — callback silently dropped"
+            broadcast_teamserver_warning(
+                events,
+                format!(
+                    "[callback DemonInfo] agent {agent_id:08X} request 0x{request_id:X} unknown info class ({unknown}) — dropped"
+                ),
             );
             return Ok(None);
         }

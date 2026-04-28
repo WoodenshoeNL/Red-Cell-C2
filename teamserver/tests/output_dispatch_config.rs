@@ -459,6 +459,7 @@ async fn config_invalid_key_returns_error() -> Result<(), Box<dyn std::error::Er
         response.status()
     );
 
+    common::skip_optional_teamserver_log(&mut socket, std::time::Duration::from_millis(200)).await;
     common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
 
     socket.close(None).await?;

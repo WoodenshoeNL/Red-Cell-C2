@@ -105,6 +105,7 @@ async fn builtin_shellcode_handler_broadcasts_agent_response()
 -> Result<(), Box<dyn std::error::Error>> {
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
+    registry.insert(sample_agent_info(0x0102_0304, test_key(0x55), test_iv(0x66))).await?;
     let events = EventBus::default();
     let mut receiver = events.subscribe();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
@@ -308,6 +309,7 @@ async fn builtin_process_modules_handler_handles_empty_module_list()
 async fn builtin_inject_dll_handler_broadcasts_success() -> Result<(), Box<dyn std::error::Error>> {
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
+    registry.insert(sample_agent_info(0xBEEF_0001, test_key(0x71), test_iv(0x81))).await?;
     let events = EventBus::default();
     let mut receiver = events.subscribe();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
@@ -339,6 +341,7 @@ async fn builtin_inject_dll_handler_broadcasts_success() -> Result<(), Box<dyn s
 async fn builtin_inject_dll_handler_broadcasts_error() -> Result<(), Box<dyn std::error::Error>> {
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
+    registry.insert(sample_agent_info(0xBEEF_0002, test_key(0x72), test_iv(0x82))).await?;
     let events = EventBus::default();
     let mut receiver = events.subscribe();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
@@ -371,6 +374,7 @@ async fn builtin_inject_dll_handler_broadcasts_arch_mismatch()
 -> Result<(), Box<dyn std::error::Error>> {
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
+    registry.insert(sample_agent_info(0xBEEF_0003, test_key(0x73), test_iv(0x83))).await?;
     let events = EventBus::default();
     let mut receiver = events.subscribe();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
@@ -401,6 +405,7 @@ async fn builtin_inject_dll_handler_broadcasts_arch_mismatch()
 async fn builtin_spawn_dll_handler_broadcasts_success() -> Result<(), Box<dyn std::error::Error>> {
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
+    registry.insert(sample_agent_info(0xBEEF_0010, test_key(0x74), test_iv(0x84))).await?;
     let events = EventBus::default();
     let mut receiver = events.subscribe();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
@@ -432,6 +437,7 @@ async fn builtin_spawn_dll_handler_broadcasts_success() -> Result<(), Box<dyn st
 async fn builtin_spawn_dll_handler_broadcasts_error() -> Result<(), Box<dyn std::error::Error>> {
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
+    registry.insert(sample_agent_info(0xBEEF_0011, test_key(0x75), test_iv(0x85))).await?;
     let events = EventBus::default();
     let mut receiver = events.subscribe();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
@@ -770,6 +776,7 @@ async fn command_error_handler_coffee_and_unknown_class_broadcast_nothing()
 -> Result<(), Box<dyn std::error::Error>> {
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
+    registry.insert(sample_agent_info(0xCAFE_BABE, test_key(0x77), test_iv(0x88))).await?;
     let events = EventBus::default();
     let mut receiver = events.subscribe();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
@@ -784,13 +791,21 @@ async fn command_error_handler_coffee_and_unknown_class_broadcast_nothing()
     let result = timeout(Duration::from_millis(50), receiver.recv()).await;
     assert!(result.is_err(), "Coffee error class should not broadcast any event");
 
-    // Case 4: Unknown error class (0xFF) — should also return Ok(None) with no broadcast
+    // Case 4: Unknown error class (0xFF) — `Ok(None)` for gameplay; retained TeamserverLog for server-tail.
     let mut payload = Vec::new();
     add_u32(&mut payload, 0xFF_u32);
     dispatcher.dispatch(0xCAFE_BABE, u32::from(DemonCommand::CommandError), 53, &payload).await?;
 
+    let first = timeout(Duration::from_millis(50), receiver.recv()).await;
+    match first {
+        Ok(Some(OperatorMessage::TeamserverLog(_))) => {}
+        Ok(None) => panic!("event subscription closed before unknown-class TeamserverLog"),
+        Err(_) => panic!("unknown CommandError class should retain a TeamserverLog line"),
+        Ok(Some(other)) => panic!("expected TeamserverLog for unknown error class, got {other:?}"),
+    }
+
     let result = timeout(Duration::from_millis(50), receiver.recv()).await;
-    assert!(result.is_err(), "Unknown error class should not broadcast any event");
+    assert!(result.is_err(), "unknown error class must not broadcast a second gameplay event");
 
     Ok(())
 }

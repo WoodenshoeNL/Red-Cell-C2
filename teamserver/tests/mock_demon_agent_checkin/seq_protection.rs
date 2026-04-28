@@ -71,6 +71,12 @@ async fn wrong_key_callback_returns_404_and_preserves_ctr_offset()
         "wrong-key callback must be rejected with fake 404"
     );
 
+    common::skip_optional_teamserver_log(
+        &mut harness.socket,
+        std::time::Duration::from_millis(250),
+    )
+    .await;
+
     // --- Verify the server's CTR offset was NOT advanced ----------------------------
     assert_eq!(
         harness.server.agent_registry.ctr_offset(agent_id).await?,
@@ -171,6 +177,12 @@ async fn duplicate_demon_init_rejected_preserves_original_agent()
         reqwest::StatusCode::NOT_FOUND,
         "duplicate DEMON_INIT must be rejected with fake 404"
     );
+
+    common::skip_optional_teamserver_log(
+        &mut harness.socket,
+        std::time::Duration::from_millis(250),
+    )
+    .await;
 
     // --- Verify CTR offset unchanged ------------------------------------------------
     assert_eq!(

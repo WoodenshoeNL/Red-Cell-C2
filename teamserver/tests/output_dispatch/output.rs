@@ -806,6 +806,7 @@ async fn demon_info_unknown_class_no_broadcast() -> Result<(), Box<dyn std::erro
         response.status()
     );
 
+    common::skip_optional_teamserver_log(&mut socket, std::time::Duration::from_millis(200)).await;
     common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
 
     socket.close(None).await?;

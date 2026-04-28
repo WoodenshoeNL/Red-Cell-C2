@@ -10,6 +10,7 @@ use tokio_tungstenite::connect_async;
 
 /// `handle_demon_info_callback` with a truncated payload (info_class only, no class data)
 /// must return an error to the HTTP caller and must NOT broadcast any `AgentResponse`.
+/// The teamserver may retain a [`OperatorMessage::TeamserverLog`] line for server-tail.
 #[tokio::test]
 async fn demon_info_truncated_payload_returns_error_no_broadcast()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -63,7 +64,8 @@ async fn demon_info_truncated_payload_returns_error_no_broadcast()
         response.status()
     );
 
-    // No broadcast should be emitted on error.
+    common::skip_optional_teamserver_log(&mut socket, std::time::Duration::from_millis(200)).await;
+    // No AgentResponse / gameplay broadcast on parse error.
     common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
 
     socket.close(None).await?;
@@ -73,6 +75,7 @@ async fn demon_info_truncated_payload_returns_error_no_broadcast()
 
 /// A `CommandExit` callback with an empty payload must return a
 /// non-2xx HTTP status and must NOT broadcast `AgentUpdate` or `AgentResponse`.
+/// The teamserver may retain a [`OperatorMessage::TeamserverLog`] line for server-tail.
 #[tokio::test]
 async fn exit_callback_empty_payload_returns_error_no_broadcast()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -128,6 +131,7 @@ async fn exit_callback_empty_payload_returns_error_no_broadcast()
         response.status()
     );
 
+    common::skip_optional_teamserver_log(&mut socket, std::time::Duration::from_millis(200)).await;
     // Neither AgentUpdate nor AgentResponse should be broadcast.
     common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
 
@@ -138,6 +142,7 @@ async fn exit_callback_empty_payload_returns_error_no_broadcast()
 
 /// A `CommandExit` callback with fewer than four bytes (truncated exit_method)
 /// must return a non-2xx HTTP status and must NOT broadcast any events.
+/// The teamserver may retain a [`OperatorMessage::TeamserverLog`] line for server-tail.
 #[tokio::test]
 async fn exit_callback_truncated_exit_method_returns_error_no_broadcast()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -193,7 +198,8 @@ async fn exit_callback_truncated_exit_method_returns_error_no_broadcast()
         response.status()
     );
 
-    // No events should be broadcast on parse error.
+    common::skip_optional_teamserver_log(&mut socket, std::time::Duration::from_millis(200)).await;
+    // No AgentResponse / gameplay broadcast on parse error.
     common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
 
     socket.close(None).await?;
@@ -204,6 +210,7 @@ async fn exit_callback_truncated_exit_method_returns_error_no_broadcast()
 /// A `CommandJob/List` callback with an incomplete trailing row (only job_id, missing
 /// type and state) must return a non-2xx HTTP status and must NOT broadcast any
 /// `AgentResponse` to the operator socket.
+/// The teamserver may retain a [`OperatorMessage::TeamserverLog`] line for server-tail.
 #[tokio::test]
 async fn job_list_malformed_incomplete_row_returns_error_no_broadcast()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -269,6 +276,7 @@ async fn job_list_malformed_incomplete_row_returns_error_no_broadcast()
         response.status()
     );
 
+    common::skip_optional_teamserver_log(&mut socket, std::time::Duration::from_millis(200)).await;
     common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
 
     socket.close(None).await?;
@@ -278,6 +286,7 @@ async fn job_list_malformed_incomplete_row_returns_error_no_broadcast()
 
 /// `handle_job_callback` with an unknown subcommand value (not 1–5) must return a
 /// non-2xx HTTP status and must NOT broadcast any `AgentResponse`.
+/// The teamserver may retain a [`OperatorMessage::TeamserverLog`] line for server-tail.
 #[tokio::test]
 async fn job_unknown_subcommand_returns_error() -> Result<(), Box<dyn std::error::Error>> {
     let server = common::spawn_test_server(common::default_test_profile()).await?;
@@ -331,6 +340,7 @@ async fn job_unknown_subcommand_returns_error() -> Result<(), Box<dyn std::error
         response.status()
     );
 
+    common::skip_optional_teamserver_log(&mut socket, std::time::Duration::from_millis(200)).await;
     common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
 
     socket.close(None).await?;

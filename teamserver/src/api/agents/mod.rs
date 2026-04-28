@@ -18,6 +18,7 @@ use red_cell_common::demon::DemonCommand;
 use red_cell_common::operator::{AgentTaskInfo, EventCode, Message, MessageHead};
 
 use crate::app::TeamserverState;
+use crate::events::broadcast_teamserver_warning;
 use crate::websocket::{AgentCommandError, execute_agent_task};
 use crate::{
     AuditResultStatus, AuthorizationError, audit_details, authorize_agent_group_access,
@@ -536,6 +537,13 @@ async fn queue_kill_task(
                 ),
             )
             .await;
+            broadcast_teamserver_warning(
+                &state.events,
+                format!(
+                    "[rest agent.task] key={} agent={:08X} kill task queue failed: {}",
+                    identity.key_id, agent_id, error
+                ),
+            );
             Err(error.into())
         }
     }
@@ -660,6 +668,13 @@ pub(super) async fn queue_agent_task(
                 ),
             )
             .await;
+            broadcast_teamserver_warning(
+                &state.events,
+                format!(
+                    "[rest agent.task] key={} agent={} agent.task failed: {}",
+                    identity.key_id, canonical_id, error
+                ),
+            );
             return Err(error.into());
         }
     };

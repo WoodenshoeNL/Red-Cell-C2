@@ -9,6 +9,7 @@ use red_cell_common::demon::{DemonCommand, DemonFilesystemCommand};
 use red_cell_common::operator::{AgentTaskInfo, EventCode, Message, MessageHead};
 
 use crate::app::TeamserverState;
+use crate::events::broadcast_teamserver_warning;
 use crate::websocket::{AgentCommandError, execute_agent_task};
 use crate::{
     AuditResultStatus, audit_details, authorize_agent_group_access, authorize_listener_access,
@@ -134,6 +135,13 @@ pub(crate) async fn agent_upload(
                 ),
             )
             .await;
+            broadcast_teamserver_warning(
+                &state.events,
+                format!(
+                    "[rest agent.upload] key={} agent={} upload task failed: {}",
+                    identity.key_id, canonical_id, error
+                ),
+            );
             return Err(error.into());
         }
     };
@@ -252,6 +260,13 @@ pub(crate) async fn agent_download(
                 ),
             )
             .await;
+            broadcast_teamserver_warning(
+                &state.events,
+                format!(
+                    "[rest agent.download] key={} agent={} download task failed: {}",
+                    identity.key_id, canonical_id, error
+                ),
+            );
             return Err(error.into());
         }
     };

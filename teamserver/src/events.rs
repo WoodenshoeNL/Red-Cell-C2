@@ -31,6 +31,15 @@ pub(crate) fn broadcast_teamserver_line(events: &EventBus, user: &str, text: &st
     events.broadcast(teamserver_log_operator_message(user, text))
 }
 
+/// Emits a `WARN` tracing record and retains `text` for [`EventBus::recent_teamserver_logs`]
+/// (`GET /api/v1/debug/server-logs`, operator consoles). Use for failures that would
+/// otherwise be invisible when only tracing-to-file or stderr is configured.
+pub(crate) fn broadcast_teamserver_warning(events: &EventBus, text: impl ToString) -> usize {
+    let text = text.to_string();
+    warn!(target: "red_cell_teamserver", "{text}");
+    broadcast_teamserver_line(events, "teamserver", &text)
+}
+
 /// Fan-out broadcaster for operator WebSocket events.
 #[derive(Clone, Debug)]
 pub struct EventBus {
@@ -156,7 +165,10 @@ mod tests {
         OperatorMessage, TeamserverLogInfo,
     };
 
-    use super::{EventBus, broadcast_teamserver_line, teamserver_log_operator_message};
+    use super::{
+        EventBus, broadcast_teamserver_line, broadcast_teamserver_warning,
+        teamserver_log_operator_message,
+    };
 
     fn log_message(text: &str) -> OperatorMessage {
         OperatorMessage::TeamserverLog(Message {
@@ -446,6 +458,22 @@ mod tests {
 
         let logs = bus.recent_teamserver_logs();
         assert_eq!(logs, vec![log_message("msg-3"), log_message("msg-4"), log_message("msg-5"),]);
+    }
+
+    #[test]
+    fn broadcast_teamserver_warning_retains_operator_visible_entry() {
+        let bus = EventBus::new(8);
+        let subscribers = broadcast_teamserver_warning(&bus, "callback decode dropped: test");
+        assert_eq!(subscribers, 0);
+
+        let logs = bus.recent_teamserver_logs();
+        assert_eq!(logs.len(), 1);
+        match &logs[0] {
+            OperatorMessage::TeamserverLog(m) => {
+                assert_eq!(m.info.text, "callback decode dropped: test");
+            }
+            other => panic!("expected TeamserverLog, got {other:?}"),
+        }
     }
 
     #[test]

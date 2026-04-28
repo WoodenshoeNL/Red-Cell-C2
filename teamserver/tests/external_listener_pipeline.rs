@@ -791,10 +791,22 @@ async fn external_listener_pipeline_rejects_duplicate_init_preserves_original_ke
     assert_eq!(active.len(), 1, "duplicate DEMON_INIT must not create a second registry entry");
     assert_eq!(active[0].agent_id, agent_id);
 
-    // ── No second AgentNew event ─────────────────────────────────────────────
-    // Give a brief window for any spurious event to arrive, then assert none did.
+    // ── No duplicate AgentNew — key-mismatch may emit a retained TeamserverLog diagnostic only.
+    let after_replay = timeout(Duration::from_millis(250), event_receiver.recv()).await;
+    match after_replay {
+        Err(_) => {}
+        Ok(None) => {}
+        Ok(Some(msg)) => assert!(
+            matches!(msg, OperatorMessage::TeamserverLog(_)),
+            "expected optional TeamserverLog after rejected duplicate DEMON_INIT, got {msg:?}"
+        ),
+    }
+
     let spurious = timeout(Duration::from_millis(250), event_receiver.recv()).await;
-    assert!(spurious.is_err(), "duplicate DEMON_INIT must not broadcast a second AgentNew event");
+    assert!(
+        spurious.is_err(),
+        "duplicate DEMON_INIT must not broadcast additional AgentNew traffic"
+    );
 
     server.listeners.stop("ext-bridge-dup-init").await?;
     Ok(())

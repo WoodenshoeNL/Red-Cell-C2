@@ -404,7 +404,9 @@ async fn pivot_connect_non_init_inner_envelope_is_rejected()
         "child agent must NOT be registered when inner envelope is not a DemonInit"
     );
 
-    // No AgentNew event should have been broadcast for this child.
+    // No AgentNew event should have been broadcast for this child (optional TeamserverLog ok).
+    common::skip_optional_teamserver_log(&mut h.socket, std::time::Duration::from_millis(500))
+        .await;
     common::assert_no_operator_message(&mut h.socket, std::time::Duration::from_millis(500)).await;
 
     Ok(())
@@ -436,7 +438,9 @@ async fn pivot_connect_malformed_inner_envelope_is_rejected()
         .send()
         .await?;
 
-    // No AgentNew event should have been broadcast, and no child registered.
+    // No AgentNew event should have been broadcast, and no child registered (optional TeamserverLog ok).
+    common::skip_optional_teamserver_log(&mut h.socket, std::time::Duration::from_millis(500))
+        .await;
     common::assert_no_operator_message(&mut h.socket, std::time::Duration::from_millis(500)).await;
 
     Ok(())
@@ -775,9 +779,9 @@ async fn pivot_connect_self_referential_is_rejected() -> Result<(), Box<dyn std:
         .send()
         .await?;
 
-    // No AgentNew event should be broadcast (the agent already exists and
-    // the link creation fails before any event is emitted on the reconnect
-    // path).
+    // No AgentNew event should be broadcast ... (optional TeamserverLog diagnostic ok).
+    common::skip_optional_teamserver_log(&mut h.socket, std::time::Duration::from_millis(500))
+        .await;
     common::assert_no_operator_message(&mut h.socket, std::time::Duration::from_millis(500)).await;
 
     // The parent's AES key and IV must NOT have been overwritten.
@@ -900,7 +904,8 @@ async fn pivot_connect_from_unregistered_parent_returns_404()
         "no agents should be registered after CommandPivot from unknown parent"
     );
 
-    // No AgentNew event should have been broadcast.
+    // No AgentNew event should have been broadcast (optional TeamserverLog for 404 is ok).
+    common::skip_optional_teamserver_log(&mut socket, std::time::Duration::from_millis(500)).await;
     common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(500)).await;
 
     Ok(())

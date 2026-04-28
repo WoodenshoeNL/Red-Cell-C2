@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use crate::agent_events::agent_new_event;
 use crate::audit::{AuditResultStatus, audit_details};
+use crate::events::broadcast_teamserver_warning;
 use crate::sockets::AgentSocketSnapshot;
 use crate::{AgentRegistry, AuditWebhookNotifier, Database, EventBus, PivotInfo};
 
@@ -156,7 +157,15 @@ pub(super) async fn handle_agent_task(
                 operator: "service".to_owned(),
             };
 
-            agent_registry.enqueue_job(agent_id, job).await?;
+            if let Err(error) = agent_registry.enqueue_job(agent_id, job).await {
+                broadcast_teamserver_warning(
+                    events,
+                    format!(
+                        "[service bridge] task enqueue failed for agent {agent_id:08X}: {error}"
+                    ),
+                );
+                return Err(error.into());
+            }
             info!(agent_id = %agent_id_str, "service agent task enqueued");
 
             log_service_action(

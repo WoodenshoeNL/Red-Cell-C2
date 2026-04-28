@@ -351,9 +351,19 @@ async fn smb_listener_rejects_callbacks_from_unregistered_agent()
         timeout(Duration::from_millis(200), read_smb_frame(&mut callback_stream)).await.is_err(),
         "unknown SMB callback must not produce a response frame"
     );
+    match timeout(Duration::from_millis(500), event_receiver.recv()).await {
+        Err(_) => {}
+        Ok(None) => panic!("event channel closed unexpectedly before optional TeamserverLog"),
+        Ok(Some(OperatorMessage::TeamserverLog(_))) => {}
+        Ok(Some(other)) => {
+            panic!(
+                "unknown SMB callback must not emit an operator event except optional TeamserverLog, got {other:?}"
+            )
+        }
+    }
     assert!(
         timeout(Duration::from_millis(200), event_receiver.recv()).await.is_err(),
-        "unknown SMB callback must not emit an operator event"
+        "unknown SMB callback must not emit a second operator event"
     );
     assert!(
         registry.get(unknown_agent_id).await.is_none(),

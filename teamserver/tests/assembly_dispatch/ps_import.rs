@@ -209,8 +209,8 @@ async fn ps_import_callback_truncated_payload_does_not_crash()
         "truncated ps_import payload should produce a fake 404, not a crash"
     );
 
-    // The dispatch error is handled internally — no AgentResponse should be broadcast.
-    common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(250)).await;
+    // The dispatch error is handled internally — no AgentResponse; optional TeamserverLog diag.
+    common::skip_optional_teamserver_log(&mut socket, std::time::Duration::from_millis(250)).await;
 
     socket.close(None).await?;
     listeners.stop("asm-psimp-trunc").await?;

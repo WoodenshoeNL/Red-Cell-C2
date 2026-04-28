@@ -298,6 +298,20 @@ pub async fn assert_no_operator_message(session: &mut WsSession, wait: Duration)
     assert!(result.is_err(), "unexpected operator message during empty session snapshot");
 }
 
+/// After Demon callback dispatch fails (fake HTTP 404), the teamserver may broadcast a
+/// retained [`OperatorMessage::TeamserverLog`] for `/debug/server-logs`. Consume that
+/// optional frame so gameplay-focused tests stay stable.
+pub async fn skip_optional_teamserver_log(session: &mut WsSession, wait: Duration) {
+    match timeout(wait, session.recv_msg()).await {
+        Err(_) => {}
+        Ok(Ok(OperatorMessage::TeamserverLog(_))) => {}
+        Ok(Ok(other)) => panic!(
+            "expected silence or TeamserverLog diagnostic after dispatch failure, got {other:?}"
+        ),
+        Ok(Err(error)) => panic!("recv_msg failed: {error:?}"),
+    }
+}
+
 /// Bind a free TCP port on `127.0.0.1` and return the port number together with
 /// the [`std::net::TcpListener`] that keeps it reserved.
 ///

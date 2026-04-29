@@ -32,12 +32,12 @@ row to *Resolved* and add the closing commit / fix description.
 
 | Signature (substring of error / stderr) | Scenario | Bead | First seen | Last seen | Status |
 |----------------------------------------|----------|------|------------|-----------|--------|
-| `[TIMEOUT] timeout: timed out waiting for output from task` | 04, 07, 21 | red-cell-c2-5dggm | 2026-04-28 | 2026-04-29 | P1, Phantom task-output timeout regression after 4vogq fix (CommandProc persist didn't stick) |
-| `Timed out after 30s waiting for local file` | 06 | red-cell-c2-5dggm | 2026-04-29 | 2026-04-29 | (cascade of task-output timeout — upload succeeds, download never returns) |
-| `Timed out after 30s waiting for download loot entry` | 11 | red-cell-c2-5dggm | 2026-04-29 | 2026-04-29 | (cascade — whoami succeeds but download /etc/hostname loot never appears) |
-| `WMI Win32_Process.Create failed: ReturnValue=21` | 05, 08, 14, 17, 19 | red-cell-c2-irxsr | 2026-04-29 | 2026-04-29 | P1, every Windows deploy via Invoke-WmiMethod returns ReturnValue=21 (Invalid Parameter) |
-| `GET_JOB accepted (HTTP 200): got HTTP 404` | 13 | red-cell-c2-irlsn | 2026-04-29 | 2026-04-29 | P2, synthetic DEMON_INIT handshake succeeds but GET_JOB poll returns 404 |
-| `DoH uplink chunk 0/1 expected NXDOMAIN (rcode=3), got rcode=5` | 20 | red-cell-c2-qb8gw | 2026-04-29 | 2026-04-29 | P2, DNS listener returns REFUSED instead of NXDOMAIN for DoH uplink chunks |
+| `[TIMEOUT] timeout: timed out waiting for output from task` | 04, 05, 07, 19, 21 | red-cell-c2-vk3xs | 2026-04-28 | 2026-04-29 | P1, task-output timeout regression after 5dggm seq_num fix — now also affects Windows Demon (sc05 NEW) |
+| `Timed out after 30s waiting for local file` | 06 | red-cell-c2-vk3xs | 2026-04-29 | 2026-04-29 | (cascade — upload SHA-256 verified, download never returns) |
+| `Timed out after 30s waiting for screenshot loot entry` | 08 | red-cell-c2-vk3xs | 2026-04-29 | 2026-04-29 | (cascade — screenshot command queued, loot entry never appears) |
+| `[SUBPROCESS_TIMEOUT] CLI subprocess did not exit within expected timeout (40s)` | 11 | red-cell-c2-vk3xs | 2026-04-28 | 2026-04-29 | (cascade — CLI hangs on download, same task-output pipeline) |
+| `Timed out after 60s waiting for agent checkin` | 17 | red-cell-c2-al4eo | 2026-04-29 | 2026-04-29 | P2, Archon ECDH checkin fails despite WMI fix and TCP reachability from Windows VM |
+| `Timed out after 30s waiting for 10 new agent checkins` | 14 | red-cell-c2-8ss6q | 2026-04-29 | 2026-04-29 | P2, 10 Demon agents launched via WMI but none check in (single Demon checks in fine in sc05) |
 
 ---
 
@@ -49,11 +49,30 @@ than a new bug.
 
 | Signature (substring of error / stderr) | Scenario | Bead | Resolved at | Notes |
 |----------------------------------------|----------|------|-------------|-------|
+| `[TIMEOUT] timeout: timed out waiting for output from task` (seq_num desync fix) | 04, 06, 07, 11, 21 | red-cell-c2-5dggm | 2026-04-29 | ECDH seq_num desync: always increment callback_seq after send attempt. **REGRESSED** — see red-cell-c2-vk3xs |
+| `WMI Win32_Process.Create failed: ReturnValue=21` | 05, 08, 14, 17, 19 | red-cell-c2-irxsr | 2026-04-29 | PureWindowsPath fix for WMI CurrentDirectory extraction. WMI deploys now work. Downstream issues exposed: sc17 Archon checkin (red-cell-c2-al4eo), sc14 stress checkin (red-cell-c2-8ss6q). |
+| `GET_JOB accepted (HTTP 200): got HTTP 404` | 13 | red-cell-c2-irlsn | 2026-04-29 | Fixed GET_JOB heartbeat packet: removed spurious u32be(0) length prefix. sc13 passes. |
+| `DoH uplink chunk 0/1 expected NXDOMAIN (rcode=3), got rcode=5` | 20 | red-cell-c2-qb8gw | 2026-04-29 | Fixed by commit 1de06fac (irlsn fix). sc20 now skips for DNS resolution issue, not REFUSED. |
+| `[TIMEOUT] timeout: timed out waiting for output from task` (CommandProc persist fix) | 04, 05, 07, 19, 21, 23 | red-cell-c2-4vogq | 2026-04-28 | Persisted CommandProc/CommandProcList callbacks to ts_agent_responses, added request_id matching. **REGRESSED** — see red-cell-c2-5dggm → red-cell-c2-vk3xs |
+| `CLI subprocess did not exit within expected timeout (40s)` (CLI hang variant) | 11 | red-cell-c2-4vogq | 2026-04-28 | Same family as above; CLI subprocess hang is cascade of task output pipeline failure. **REGRESSED** — see red-cell-c2-vk3xs |
+| `Timed out after 30s waiting for remote upload /tmp/rc-test/uploaded-` | 06 | red-cell-c2-roz1h | 2026-04-28 | ECDH batch re-queue fix: upload now succeeds (SHA-256 verified in 2026-04-29 run). Download side still fails (cascade of task output). |
+| `Timed out after 30s waiting for screenshot loot entry` | 08 | red-cell-c2-dn3yy | 2026-04-28 | Raised MAX_AGENT_MESSAGE_LEN to 100 MiB. **REGRESSED** — screenshot loot still times out, now cascade of task-output (red-cell-c2-vk3xs). |
+| `Timed out after 30s waiting for 10 new agent checkins` (WMI validation) | 14 | red-cell-c2-4302s | 2026-04-28 | Added WMI ReturnValue validation. WMI now fixed (red-cell-c2-irxsr). **NEW ISSUE** — checkin itself fails under stress (red-cell-c2-8ss6q). |
+| `Timed out after 60s waiting for agent checkin` (WMI validation) | 17 | red-cell-c2-4302s | 2026-04-28 | Same fix as above. **NEW ISSUE** — Archon checkin fails despite WMI fix (red-cell-c2-al4eo). |
+| `last_seen never changed from initial '` | 24 | red-cell-c2-dz867 | 2026-04-28 | ECDH exit_requested set after successful batch send. **FIXED** — sc24 passes. |
+| `[TIMEOUT] timed out waiting for output from task` (wstring fix) | 04, 11, 21 | red-cell-c2-2g1nj | 2026-04-27 | Phantom wstring null terminator fix. **REGRESSED** — see red-cell-c2-asy66 → 4vogq → 5dggm → vk3xs |
+| `Timed out after 60s waiting for agent checkin` (Invoke-WmiMethod fix) | 14, 17, 19 | red-cell-c2-gxabx | 2026-04-27 | Switched to Invoke-WmiMethod for Windows deploy. **REGRESSED** — see red-cell-c2-db6yd → 4302s → irxsr |
+| `still present in agent list after 120s — expected implant to stop after kill-date` | 22, 23 | red-cell-c2-dv5ev | 2026-04-27 | Phantom pre-init kill-date + working-hours checks. Scenarios 22/23/24 now pass. |
+| `[TIMEOUT] timeout: timed out waiting for output from task` (wstring follow-up) | 04, 11, 21 | red-cell-c2-asy66 | 2026-04-27 | Phantom run loop retry/callback-send fix. **REGRESSED** — see red-cell-c2-4vogq → 5dggm → vk3xs |
+| `Timed out after 60s waiting for agent checkin` (listener wiring follow-up) | 14, 17, 19 | red-cell-c2-db6yd | 2026-04-27 | Listener name wiring fix. **REGRESSED** — see red-cell-c2-4302s → irxsr |
+| `Address already in use (os error 98)` on port 19181/19182 | 04, 06, 07, 11, 17, 21–24 | red-cell-c2-hyhgf | 2026-04-27 | Preflight listener cleanup. Not seen this run. |
+| `unparseable last_seen` (nanosecond timestamp with Z suffix) | 24 | *(no bead — fixed inline)* | 2026-04-27 | parse_last_seen now strips Z suffix and truncates nanoseconds to microseconds |
+| `cargo build --release --target x86_64-pc-windows-gnu` + `error[E0308]` in Specter | 05, 06, 07, 08 | red-cell-c2-z85a3 | 2026-04-27 | Specter cross-compile fixes landed; not seen since 2026-04-28. |
 | `panic` + `TypeId` + `payload build-wait` clap collision | 03 | red-cell-c2-2edsr | 2026-04-26 | Renamed `BuildWait --output` → `--dst` to avoid TypeId collision with global `--output` (commit 71d115df) |
 | Listener create fails: `address already in use` on 19081 / 19082 | 04, 05, 06, 07, 08, 11 | *(no bead — fixed inline)* | 2026-04-26 | `test.py` now stops + deletes leftover non-default listeners before scenarios start (commit 311d6253) |
 | HTTP 429 / rate-limit cascade after scenarios 01–11 | 12–24 | *(no bead — fixed inline)* | 2026-04-26 | `profiles/autotest.yaotl` `RateLimitPerMinute` raised 120 → 600 (commit 311d6253) |
 | `[INVALID_ARGS] unknown format 'elf': expected exe, dll, or bin` | 04, 06, 07, 11, 15, 21–24 | *(no bead — fixed inline)* | 2026-04-24 | Replaced `fmt='elf'` with `fmt='exe'` for Phantom (commit 9cddb9a5) |
-| `not reachable via SSH` against the Windows VM despite `whoami` working | every scenario with `[windows]` configured | red-cell-c2-3jlpo | 2026-04-24 | `preflight_ssh` sent `true`, which `cmd.exe` does not know — switched to `exit 0` (commit c6fb4086) |
+| `not reachable via SSH` against the Windows VM despite `whoami` working | every scenario with `[windows]` | red-cell-c2-3jlpo | 2026-04-24 | `preflight_ssh` sent `true`, which `cmd.exe` does not know — switched to `exit 0` (commit c6fb4086) |
 | `[TIMEOUT] timed out waiting for output from task` (original) | 04, 07, 11, 21 | red-cell-c2-yde2a | 2026-04-25 | CommandProc(0x1010) + DemonCallbackError::Generic fix. **REGRESSED** — see red-cell-c2-3ecje |
 | `Timed out after 60s waiting for agent checkin` (original Windows Demon) | 05, 08, 14, 16, 17, 19 | red-cell-c2-2it9u | 2026-04-25 | HeapEnc packing fix for Demon transport config. **REGRESSED** — see red-cell-c2-jtsiv |
 | `[TIMEOUT] timed out waiting for output from task` (seq_num fix) | 04, 11, 14 | red-cell-c2-3ecje | 2026-04-26 | ecdh_send_packages seq_num prefix fix. **REGRESSED** — see red-cell-c2-pa1wi |
@@ -65,22 +84,7 @@ than a new bug.
 | `error: extern blocks must be unsafe` in `agent/specter/src/token/enumerate_windows.rs` | 05, 06, 07, 08 | red-cell-c2-5k8ed | 2026-04-27 | Mark ntdll FFI block as unsafe extern for Rust 2024. **NEW ERROR** — see red-cell-c2-as0gd |
 | `agent ... still present / checked in / sleep_interval` (env-var clearing fix) | 22, 23, 24 | red-cell-c2-0h0et | 2026-04-27 | Clear inherited PHANTOM_*/SPECTER_* from compiler env. **REGRESSED** — see red-cell-c2-dv5ev |
 | `Python was not found` (DoH probe on Windows VM) | 20 | red-cell-c2-2gg26 | 2026-04-25 | preflight_dns uses PowerShell on Windows targets. Scenario 20 now skips due to DNS resolution failure instead. |
-| `Address already in use (os error 98)` on port 19181/19182 from prior-run listeners | 04, 06, 07, 11, 17, 21–24 | red-cell-c2-hyhgf | 2026-04-27 | Preflight listener cleanup: resolve status, always stop before delete, multi-pass. Not seen this run. |
-| `unparseable last_seen` (nanosecond timestamp with Z suffix) | 24 | *(no bead — fixed inline)* | 2026-04-27 | parse_last_seen now strips Z suffix and truncates nanoseconds to microseconds |
-| `[TIMEOUT] timed out waiting for output from task` (wstring fix) | 04, 11, 21 | red-cell-c2-2g1nj | 2026-04-27 | Phantom wstring null terminator fix (commit eeead79c). **REGRESSED** — see red-cell-c2-asy66 |
-| `Timed out after 60s waiting for agent checkin` (Invoke-WmiMethod fix) | 14, 17, 19 | red-cell-c2-gxabx | 2026-04-27 | Switched to Invoke-WmiMethod for Windows deploy. Process survives SSH, but agents still don't check in. **REGRESSED** — see red-cell-c2-db6yd |
-| `error[E0425]: cannot find function` + `windows_sys` in Specter cross-compile | 05, 06, 07, 08 | red-cell-c2-as0gd | 2026-04-27 | Relocated imports to windows-sys 0.59 module paths. E0425 resolved, but 138 new errors (E0308, unsafe). **NEW ERROR** — see red-cell-c2-z85a3 |
-| `still present in agent list after 120s — expected implant to stop after kill-date` | 22, 23 | red-cell-c2-dv5ev | 2026-04-27 | Phantom pre-init kill-date + working-hours checks + build.rs rerun-if-env-changed. Scenarios 22/23/24 now pass. |
-| `[TIMEOUT] timeout: timed out waiting for output from task` (wstring null-terminator follow-up) | 04, 11, 21 | red-cell-c2-asy66 | 2026-04-27 | Phantom run loop retry/callback-send fix landed, but the timeout family still regressed the next day. **REGRESSED** — see red-cell-c2-4vogq |
-| `Timed out after 60s waiting for agent checkin` (listener wiring / WMI follow-up) | 14, 17, 19 | red-cell-c2-db6yd | 2026-04-27 | Listener name now reaches API/CLI and scenario 19 no longer fails at listener attribution, but Windows deploy/checkin still regressed. **REGRESSED** — see red-cell-c2-4302s |
-| `[TIMEOUT] timeout: timed out waiting for output from task` (CommandProc persist fix) | 04, 05, 07, 19, 21, 23 | red-cell-c2-4vogq | 2026-04-28 | Persisted CommandProc/CommandProcList callbacks to ts_agent_responses, added request_id matching. Timeout still occurs on Phantom. **REGRESSED** — see red-cell-c2-5dggm |
-| `CLI subprocess did not exit within expected timeout (40s)` (CLI hang variant) | 11 | red-cell-c2-4vogq | 2026-04-28 | Same family as above; CLI subprocess hang is cascade of task output pipeline failure. **REGRESSED** — see red-cell-c2-5dggm |
-| `Timed out after 30s waiting for remote upload /tmp/rc-test/uploaded-` | 06 | red-cell-c2-roz1h | 2026-04-28 | ECDH batch re-queue fix: upload now succeeds (SHA-256 verified in 2026-04-29 run). Download side still fails (cascade of task output). |
-| `Timed out after 30s waiting for screenshot loot entry` | 08 | red-cell-c2-dn3yy | 2026-04-28 | Raised MAX_AGENT_MESSAGE_LEN to 100 MiB, case-insensitive loot filters. Not observed 2026-04-29 (sc08 now fails at WMI deploy stage). |
-| `Timed out after 30s waiting for 10 new agent checkins` (WMI validation) | 14 | red-cell-c2-4302s | 2026-04-28 | Added WMI ReturnValue validation and staggered launches. Now surfaces ReturnValue=21 cleanly. **REGRESSED** — see red-cell-c2-irxsr |
-| `Timed out after 60s waiting for agent checkin` (WMI validation) | 17 | red-cell-c2-4302s | 2026-04-28 | Same fix as above. **REGRESSED** — see red-cell-c2-irxsr |
-| `last_seen never changed from initial '` | 24 | red-cell-c2-dz867 | 2026-04-28 | ECDH exit_requested set after successful batch send. **FIXED** — sc24 passes on 2026-04-29. |
-| `cargo build --release --target x86_64-pc-windows-gnu` + `error[E0308]` in Specter | 05, 06, 07, 08 | red-cell-c2-z85a3 | 2026-04-27 | Specter cross-compile fixes landed; this build failure was not seen in the 2026-04-28 run. |
+| `error[E0425]: cannot find function` + `windows_sys` in Specter cross-compile | 05, 06, 07, 08 | red-cell-c2-as0gd | 2026-04-27 | Relocated imports to windows-sys 0.59 module paths. E0425 resolved, but 138 new errors. **NEW ERROR** — see red-cell-c2-z85a3 |
 
 ---
 

@@ -307,20 +307,17 @@ def _build_demon_init_reconnect_packet(agent_id: int) -> bytes:
 
 
 def _build_get_job_packet(agent_id: int, key: bytes, iv: bytes, block_offset: int = 0) -> bytes:
-    """Build a GET_JOB callback packet.
+    """Build a GET_JOB callback packet (heartbeat — no sub-packages).
 
-    The callback body is: u32be(len=0) — an empty length-prefixed payload —
-    encrypted with AES-256-CTR starting at the agent's current monotonic CTR
-    block offset.  Callers are responsible for tracking that offset across
-    packets.
+    GET_JOB uses the batched format: the encrypted body is a stream of
+    (command_id, request_id, payload) sub-packages.  A heartbeat with no
+    outbound data has an *empty* encrypted body — no length prefix, because
+    the parser would misinterpret it as a truncated sub-command.
     """
-    plaintext = _u32be(0)          # length-prefixed empty payload
-    encrypted = _aes_256_ctr_at_offset(key, iv, block_offset, plaintext)
     request_id = 3
     payload = (
         _u32be(DEMON_GET_JOB_CMD)
         + _u32be(request_id)
-        + encrypted
     )
     return _build_envelope(agent_id, payload)
 

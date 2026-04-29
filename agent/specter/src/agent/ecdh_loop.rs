@@ -60,10 +60,11 @@ impl SpecterAgent {
             &EcdhSession { connection_id, session_key, agent_id },
             &payload,
         )
-        .await?;
+        .await;
 
+        // Always advance — see Phantom's ecdh_send_packages for rationale.
         self.callback_seq += 1;
-        Ok(result)
+        result
     }
 
     /// ECDH-mode checkin + job fetch in one session packet.

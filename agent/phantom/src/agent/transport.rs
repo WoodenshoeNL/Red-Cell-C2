@@ -109,9 +109,14 @@ impl PhantomAgent {
             &crate::ecdh::EcdhSession { connection_id, session_key, agent_id },
             &payload,
         )
-        .await?;
+        .await;
 
+        // Always advance the sequence counter — even on failure. The teamserver
+        // consumes the seq_num *before* dispatching the payload, so if the
+        // server accepted the packet but returned an error (dispatch failure,
+        // transient DB issue, etc.) and we do NOT advance, every subsequent
+        // packet replays the same seq and is permanently rejected.
         self.callback_seq += 1;
-        Ok(result)
+        result
     }
 }

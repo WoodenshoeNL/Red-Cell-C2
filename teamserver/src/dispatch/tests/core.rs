@@ -67,7 +67,12 @@ async fn dispatch_packages_concatenates_handler_responses() -> Result<(), Box<dy
         crate::DemonCallbackPackage { command_id: 0x2222, request_id: 2, payload: Vec::new() },
     ];
 
-    assert_eq!(dispatcher.dispatch_packages(0x1234_5678, &packages).await?, vec![1, 2, 3, 4]);
+    assert_eq!(
+        dispatcher
+            .dispatch_packages(0x1234_5678, &packages, crate::dispatch::PayloadEndian::Le)
+            .await?,
+        vec![1, 2, 3, 4]
+    );
     Ok(())
 }
 

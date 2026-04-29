@@ -26,12 +26,13 @@ impl CommandDispatcher {
 
     /// Dispatch multiple parsed callback packages and concatenate any response packages.
     #[tracing::instrument(skip(self, packages), fields(agent_id = format_args!("0x{:08X}", agent_id), package_count = packages.len()))]
-    pub async fn dispatch_packages(
+    pub(crate) async fn dispatch_packages(
         &self,
         agent_id: u32,
         packages: &[DemonCallbackPackage],
+        endian: super::PayloadEndian,
     ) -> Result<Vec<u8>, CommandDispatchError> {
-        self.collect_response_bytes(agent_id, packages).await
+        super::PAYLOAD_ENDIAN.scope(endian, self.collect_response_bytes(agent_id, packages)).await
     }
 
     pub(in crate::dispatch) async fn collect_response_bytes(
@@ -42,11 +43,21 @@ impl CommandDispatcher {
         let mut response = Vec::new();
 
         for package in packages {
-            if let Some(bytes) = self
+            match self
                 .dispatch(agent_id, package.command_id, package.request_id, &package.payload)
-                .await?
+                .await
             {
-                response.extend_from_slice(&bytes);
+                Ok(Some(bytes)) => response.extend_from_slice(&bytes),
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        agent_id = format_args!("0x{agent_id:08X}"),
+                        command_id = format_args!("0x{:04X}", package.command_id),
+                        request_id = format_args!("0x{:08X}", package.request_id),
+                        %error,
+                        "callback handler failed; continuing remaining packages"
+                    );
+                }
             }
         }
 

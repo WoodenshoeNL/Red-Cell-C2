@@ -121,13 +121,17 @@ impl<'a> CallbackParser<'a> {
             });
         }
 
-        let value =
-            u32::from_le_bytes(self.bytes[self.offset..self.offset + 4].try_into().map_err(
-                |_| super::CommandDispatchError::InvalidCallbackPayload {
-                    command_id: self.command_id,
-                    message: format!("{context}: failed to read u32"),
-                },
-            )?);
+        let raw: [u8; 4] = self.bytes[self.offset..self.offset + 4].try_into().map_err(|_| {
+            super::CommandDispatchError::InvalidCallbackPayload {
+                command_id: self.command_id,
+                message: format!("{context}: failed to read u32"),
+            }
+        })?;
+        let endian = super::PAYLOAD_ENDIAN.try_with(|e| *e).unwrap_or(super::PayloadEndian::Le);
+        let value = match endian {
+            super::PayloadEndian::Le => u32::from_le_bytes(raw),
+            super::PayloadEndian::Be => u32::from_be_bytes(raw),
+        };
         self.offset += 4;
         Ok(value)
     }
@@ -144,13 +148,17 @@ impl<'a> CallbackParser<'a> {
             });
         }
 
-        let value =
-            u64::from_le_bytes(self.bytes[self.offset..self.offset + 8].try_into().map_err(
-                |_| super::CommandDispatchError::InvalidCallbackPayload {
-                    command_id: self.command_id,
-                    message: format!("{context}: failed to read u64"),
-                },
-            )?);
+        let raw: [u8; 8] = self.bytes[self.offset..self.offset + 8].try_into().map_err(|_| {
+            super::CommandDispatchError::InvalidCallbackPayload {
+                command_id: self.command_id,
+                message: format!("{context}: failed to read u64"),
+            }
+        })?;
+        let endian = super::PAYLOAD_ENDIAN.try_with(|e| *e).unwrap_or(super::PayloadEndian::Le);
+        let value = match endian {
+            super::PayloadEndian::Le => u64::from_le_bytes(raw),
+            super::PayloadEndian::Be => u64::from_be_bytes(raw),
+        };
         self.offset += 8;
         Ok(value)
     }

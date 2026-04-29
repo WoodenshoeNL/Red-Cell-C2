@@ -72,6 +72,20 @@ use response::{
 #[allow(unused_imports)]
 use util::CallbackParser;
 
+/// Byte order used by the agent for inner callback payload fields.
+///
+/// Demon (legacy Havoc C/ASM) encodes u32/u64 fields as big-endian.
+/// Phantom and Specter (Rust agents) encode as little-endian.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PayloadEndian {
+    Le,
+    Be,
+}
+
+tokio::task_local! {
+    pub(crate) static PAYLOAD_ENDIAN: PayloadEndian;
+}
+
 type HandlerFuture =
     Pin<Box<dyn Future<Output = Result<Option<Vec<u8>>, CommandDispatchError>> + Send>>;
 type Handler = dyn Fn(u32, u32, Vec<u8>) -> HandlerFuture + Send + Sync + 'static;

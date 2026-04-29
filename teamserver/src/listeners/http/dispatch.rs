@@ -15,6 +15,7 @@ use crate::{
     TeamserverError,
     agent_events::{agent_new_event, agent_reregistered_event},
     audit_details, build_init_ack, build_reconnect_ack,
+    dispatch::PayloadEndian,
     events::EventBus,
     parameter_object, record_operator_action,
     sockets::AgentSocketSnapshot,
@@ -40,12 +41,18 @@ pub(crate) fn map_command_dispatch_error(error: CommandDispatchError) -> Listene
 
 async fn build_callback_response(
     dispatcher: &CommandDispatcher,
+    registry: &AgentRegistry,
     events: &EventBus,
     listener_name: &str,
     agent_id: u32,
     packages: &[DemonCallbackPackage],
 ) -> Result<Vec<u8>, ListenerManagerError> {
-    match dispatcher.dispatch_packages(agent_id, packages).await {
+    let endian = if registry.legacy_ctr(agent_id).await.unwrap_or(true) {
+        PayloadEndian::Be
+    } else {
+        PayloadEndian::Le
+    };
+    match dispatcher.dispatch_packages(agent_id, packages, endian).await {
         Ok(payload) => Ok(payload),
         Err(error) => {
             let text = format!(
@@ -275,6 +282,7 @@ pub(crate) async fn process_demon_transport(
         Ok(ParsedDemonPacket::Callback { header, packages }) => {
             let payload = build_callback_response(
                 dispatcher,
+                registry,
                 events,
                 listener_name,
                 header.agent_id,

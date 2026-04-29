@@ -6,7 +6,7 @@ use red_cell::{
     SocketRelayManager, TeamserverState, build_router,
 };
 use red_cell_common::config::Profile;
-use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH};
+use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len};
 use tokio::net::TcpListener;
 
 // ── payload builders ────────────────────────────────────────────────────────
@@ -198,7 +198,12 @@ pub(super) async fn start_server()
     Ok((addr, listeners))
 }
 
-/// Register a fresh agent via DEMON_INIT and return the ctr_offset after init.
+/// Register a fresh agent via DEMON_INIT with `INIT_EXT_MONOTONIC_CTR` and
+/// return the ctr_offset after init.
+///
+/// The payload builders in this module encode inner callback fields as LE
+/// (matching Phantom/Specter), so the agent must opt into monotonic CTR to
+/// signal LE inner-payload encoding to the dispatcher.
 pub(super) async fn register_agent(
     client: &reqwest::Client,
     listener_port: u16,
@@ -208,10 +213,14 @@ pub(super) async fn register_agent(
 ) -> Result<u64, Box<dyn std::error::Error>> {
     client
         .post(format!("http://127.0.0.1:{listener_port}/"))
-        .body(super::common::valid_demon_init_body(agent_id, key, iv))
+        .body(super::common::valid_demon_init_body_with_ext_flags(
+            agent_id,
+            key,
+            iv,
+            red_cell::demon::INIT_EXT_MONOTONIC_CTR,
+        ))
         .send()
         .await?
         .error_for_status()?;
-    // DEMON_INIT registers agents in legacy CTR mode — every packet starts at block 0.
-    Ok(0)
+    Ok(ctr_blocks_for_len(4))
 }

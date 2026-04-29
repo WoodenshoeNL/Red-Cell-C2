@@ -109,7 +109,10 @@ pub(crate) async fn process_ecdh_session(
         let _ = registry.set_last_call_in(agent_id, ts).await;
     }
 
-    let response_bytes = match dispatcher.dispatch_packages(agent_id, &packages).await {
+    let response_bytes = match dispatcher
+        .dispatch_packages(agent_id, &packages, crate::dispatch::PayloadEndian::Le)
+        .await
+    {
         Ok(bytes) => bytes,
         Err(error) => {
             let text = format!(

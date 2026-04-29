@@ -427,13 +427,10 @@ def run(ctx):
         assert init_plaintext == expected_plaintext, (
             f"init ACK mismatch: got {init_plaintext.hex()}, expected {expected_plaintext.hex()}"
         )
-        post_init_offset = scenario13._ctr_blocks_for_len(len(init_ack))
         print("  [init] ACK decrypted correctly")
 
         print("  [get-job] uploading synthetic GET_JOB callback")
-        get_job_packet = scenario13._build_get_job_packet(
-            agent_id, key, iv, block_offset=post_init_offset
-        )
+        get_job_packet = scenario13._build_get_job_packet(agent_id)
         get_job_session = _random_session_hex()
         _upload_packet_via_doh_grammar(server_host, dns_port, dns_domain, get_job_packet, get_job_session)
         get_job_total = _poll_ready_via_doh_grammar(server_host, dns_port, dns_domain, get_job_session)

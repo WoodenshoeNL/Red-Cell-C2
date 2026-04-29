@@ -2,8 +2,11 @@
 
 use red_cell_common::crypto::ecdh::{open_session_packet, seal_session_response};
 use red_cell_common::demon::DemonPackage;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use tracing::warn;
 
+use crate::AgentRegistry;
 use crate::database::ecdh::EcdhRepository;
 use crate::events::broadcast_teamserver_line;
 use crate::listeners::ListenerManagerError;
@@ -18,6 +21,7 @@ pub(crate) async fn process_ecdh_session(
     agent_id: u32,
     connection_id: &[u8; 16],
     ecdh_db: EcdhRepository,
+    registry: &AgentRegistry,
     dispatcher: &CommandDispatcher,
     events: &EventBus,
     listener_name: &str,
@@ -90,6 +94,13 @@ pub(crate) async fn process_ecdh_session(
 
     // Packet is authenticated and seq-validated — now it is safe to refresh liveness.
     let _ = ecdh_db.touch_session(connection_id).await;
+
+    // Refresh the agent's last_call_in so the liveness monitor does not mark the
+    // agent dead while it is actively communicating via ECDH callback packets
+    // (which do not contain CommandCheckin).
+    if let Ok(ts) = OffsetDateTime::now_utc().format(&Rfc3339) {
+        let _ = registry.set_last_call_in(agent_id, ts).await;
+    }
 
     let response_bytes = match dispatcher.dispatch_packages(agent_id, &packages).await {
         Ok(bytes) => bytes,

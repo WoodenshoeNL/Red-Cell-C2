@@ -84,6 +84,7 @@ pub(crate) async fn process_ecdh_packet(
                     agent_id,
                     &candidate_id,
                     ecdh_db,
+                    registry,
                     dispatcher,
                     events,
                     listener_name,

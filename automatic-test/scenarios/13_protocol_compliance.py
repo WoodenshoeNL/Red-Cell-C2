@@ -306,7 +306,7 @@ def _build_demon_init_reconnect_packet(agent_id: int) -> bytes:
     return _build_envelope(agent_id, payload)
 
 
-def _build_get_job_packet(agent_id: int, key: bytes, iv: bytes, block_offset: int = 0) -> bytes:
+def _build_get_job_packet(agent_id: int) -> bytes:
     """Build a GET_JOB callback packet (heartbeat — no sub-packages).
 
     GET_JOB uses the batched format: the encrypted body is a stream of
@@ -506,16 +506,11 @@ def _run_reconnect_check(
 
 
 def _run_get_job_check(
-    base_url: str, agent_id: int, key: bytes, iv: bytes, block_offset: int
+    base_url: str, agent_id: int
 ) -> None:
-    """Verify that a GET_JOB poll with no queued jobs returns an empty 200.
-
-    The callback body is encrypted at the agent's current monotonic CTR
-    offset (`block_offset`).  An empty response body means the server has
-    nothing to send back, so no further offset bookkeeping is needed.
-    """
+    """Verify that a GET_JOB poll with no queued jobs returns an empty 200."""
     print(f"  [check] GET_JOB poll (no jobs queued) → 200 + empty body")
-    packet = _build_get_job_packet(agent_id, key, iv, block_offset=block_offset)
+    packet = _build_get_job_packet(agent_id)
     status, body = _post_raw(base_url, packet)
     _check("GET_JOB accepted (HTTP 200)", status == 200, f"got HTTP {status}")
     _check("GET_JOB response empty (no jobs)", len(body) == 0, f"body has {len(body)} bytes")
@@ -601,7 +596,7 @@ def run(ctx):
         # Phase 4: GET_JOB poll (no jobs queued).  Encrypted at the post-init
         # offset; the empty response means no further offset advance.
         print("  [phase 4] GET_JOB poll")
-        _run_get_job_check(base_url, agent_id, key, iv, post_init_offset)
+        _run_get_job_check(base_url, agent_id)
 
         # Phase 5: garbled-endian probe — server accepts (transport is valid),
         # process_path stored with garbled content.

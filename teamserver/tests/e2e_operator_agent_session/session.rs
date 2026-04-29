@@ -1,6 +1,7 @@
 use std::time::Duration;
 
-use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH};
+use red_cell::demon::INIT_EXT_MONOTONIC_CTR;
+use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len};
 use red_cell_common::demon::{DemonCommand, DemonMessage};
 use red_cell_common::operator::OperatorMessage;
 use tokio_tungstenite::connect_async;
@@ -13,7 +14,7 @@ use crate::helpers::{
 #[tokio::test]
 async fn operator_session_listener_and_mock_demon_round_trip()
 -> Result<(), Box<dyn std::error::Error>> {
-    let server = crate::common::spawn_test_server(crate::common::legacy_ctr_test_profile()).await?;
+    let server = crate::common::spawn_test_server(crate::common::default_test_profile()).await?;
 
     let (listener_port, listener_guard) =
         crate::common::available_port_excluding(server.addr.port())?;
@@ -61,19 +62,22 @@ async fn operator_session_listener_and_mock_demon_round_trip()
         0xB0, 0xC3, 0xD6, 0xE9, 0xFC, 0x0F, 0x22, 0x35, 0x48, 0x5B, 0x6E, 0x81, 0x94, 0xA7, 0xBA,
         0xCD,
     ];
-    let ctr_offset = 0_u64;
-
     let init_response = client
         .post(format!("http://127.0.0.1:{listener_port}/"))
-        .body(crate::common::valid_demon_init_body(agent_id, key, iv))
+        .body(crate::common::valid_demon_init_body_with_ext_flags(
+            agent_id,
+            key,
+            iv,
+            INIT_EXT_MONOTONIC_CTR,
+        ))
         .send()
         .await?
         .error_for_status()?;
     let init_bytes = init_response.bytes().await?;
     let init_ack =
-        red_cell_common::crypto::decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &init_bytes)?;
+        red_cell_common::crypto::decrypt_agent_data_at_offset(&key, &iv, 0, &init_bytes)?;
     assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
-    // Legacy CTR mode: offset stays at 0 regardless of prior traffic.
+    let ctr_offset = ctr_blocks_for_len(4);
 
     let agent_new = crate::common::read_operator_message(&mut socket).await?;
     let OperatorMessage::AgentNew(message) = agent_new else {
@@ -124,7 +128,6 @@ async fn operator_session_listener_and_mock_demon_round_trip()
         .send()
         .await?
         .error_for_status()?;
-    // Legacy CTR mode: offset stays at 0.
     let job_bytes = get_job_response.bytes().await?;
     let job_message = DemonMessage::from_bytes(job_bytes.as_ref())?;
     assert_eq!(job_message.packages.len(), 1);
@@ -203,7 +206,7 @@ async fn operator_session_listener_and_mock_demon_round_trip()
 #[tokio::test]
 async fn reconnect_probe_does_not_duplicate_agent_new_and_resumes_callbacks()
 -> Result<(), Box<dyn std::error::Error>> {
-    let server = crate::common::spawn_test_server(crate::common::legacy_ctr_test_profile()).await?;
+    let server = crate::common::spawn_test_server(crate::common::default_test_profile()).await?;
 
     let (listener_port, listener_guard) =
         crate::common::available_port_excluding(server.addr.port())?;
@@ -234,20 +237,23 @@ async fn reconnect_probe_does_not_duplicate_agent_new_and_resumes_callbacks()
         0xE5, 0xF8, 0x0B, 0x1E, 0x31, 0x44, 0x57, 0x6A, 0x7D, 0x90, 0xA3, 0xB6, 0xC9, 0xDC, 0xEF,
         0x02,
     ];
-    let ctr_offset = 0_u64;
-
     // --- Step 1: full DEMON_INIT registration ---
     let init_response = client
         .post(format!("http://127.0.0.1:{listener_port}/"))
-        .body(crate::common::valid_demon_init_body(agent_id, key, iv))
+        .body(crate::common::valid_demon_init_body_with_ext_flags(
+            agent_id,
+            key,
+            iv,
+            INIT_EXT_MONOTONIC_CTR,
+        ))
         .send()
         .await?
         .error_for_status()?;
     let init_bytes = init_response.bytes().await?;
     let init_ack =
-        red_cell_common::crypto::decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &init_bytes)?;
+        red_cell_common::crypto::decrypt_agent_data_at_offset(&key, &iv, 0, &init_bytes)?;
     assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
-    // Legacy CTR mode: offset stays at 0 regardless of prior traffic.
+    let ctr_offset = ctr_blocks_for_len(4);
 
     // Operator must see AgentNew.
     let agent_new = crate::common::read_operator_message(&mut socket).await?;
@@ -265,7 +271,9 @@ async fn reconnect_probe_does_not_duplicate_agent_new_and_resumes_callbacks()
         .error_for_status()?;
     let reconnect_bytes = reconnect_response.bytes().await?;
 
-    // Verify the reconnect ACK decrypts correctly at the current (unchanged) CTR offset.
+    // Verify the reconnect ACK decrypts correctly at the current CTR offset.
+    // The reconnect ACK is encrypted by the server at its stored offset but is
+    // NOT counter-consuming — neither side advances after the reconnect handshake.
     let reconnect_ack = red_cell_common::crypto::decrypt_agent_data_at_offset(
         &key,
         &iv,
@@ -282,9 +290,6 @@ async fn reconnect_probe_does_not_duplicate_agent_new_and_resumes_callbacks()
     // The reconnect probe should not broadcast any operator event.
     crate::common::assert_no_operator_message(&mut socket, Duration::from_millis(500)).await;
 
-    // CTR offset must not have advanced (reconnect ACK is not counter-consuming).
-    // We do NOT advance ctr_offset here.
-
     // --- Step 4: queue a task so we can verify output delivery ---
     socket.send_text(agent_task_message_for("3B", "ABCDEF01")).await?;
 
@@ -295,7 +300,7 @@ async fn reconnect_probe_does_not_duplicate_agent_new_and_resumes_callbacks()
     assert_eq!(task_msg.info.demon_id, "ABCDEF01");
     assert_eq!(task_msg.info.task_id, "3B");
 
-    // --- Step 5: agent sends CommandOutput at the unchanged CTR offset ---
+    // --- Step 5: agent sends CommandOutput at the current CTR offset ---
     let output_text = "reconnect callback output";
     let callback_response = client
         .post(format!("http://127.0.0.1:{listener_port}/"))

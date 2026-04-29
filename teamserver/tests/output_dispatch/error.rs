@@ -59,8 +59,8 @@ async fn demon_info_truncated_payload_returns_error_no_broadcast()
         .await?;
 
     assert!(
-        !response.status().is_success(),
-        "truncated DemonInfo payload must not return 2xx, got {}",
+        response.status().is_success(),
+        "handler errors are now swallowed, response should be 2xx, got {}",
         response.status()
     );
 
@@ -126,8 +126,8 @@ async fn exit_callback_empty_payload_returns_error_no_broadcast()
         .await?;
 
     assert!(
-        !response.status().is_success(),
-        "empty CommandExit payload must not return 2xx, got {}",
+        response.status().is_success(),
+        "handler errors are now swallowed, response should be 2xx, got {}",
         response.status()
     );
 
@@ -193,8 +193,8 @@ async fn exit_callback_truncated_exit_method_returns_error_no_broadcast()
         .await?;
 
     assert!(
-        !response.status().is_success(),
-        "truncated CommandExit payload must not return 2xx, got {}",
+        response.status().is_success(),
+        "handler errors are now swallowed, response should be 2xx, got {}",
         response.status()
     );
 
@@ -271,8 +271,8 @@ async fn job_list_malformed_incomplete_row_returns_error_no_broadcast()
         .await?;
 
     assert!(
-        !response.status().is_success(),
-        "expected error HTTP status for malformed job list payload, got {}",
+        response.status().is_success(),
+        "handler errors are now swallowed, response should be 2xx, got {}",
         response.status()
     );
 
@@ -335,8 +335,8 @@ async fn job_unknown_subcommand_returns_error() -> Result<(), Box<dyn std::error
         .await?;
 
     assert!(
-        !response.status().is_success(),
-        "expected error HTTP status for unknown job subcommand, got {}",
+        response.status().is_success(),
+        "handler errors are now swallowed, response should be 2xx, got {}",
         response.status()
     );
 

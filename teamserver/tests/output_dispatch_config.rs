@@ -454,8 +454,8 @@ async fn config_invalid_key_returns_error() -> Result<(), Box<dyn std::error::Er
         .await?;
 
     assert!(
-        !response.status().is_success(),
-        "invalid config key should return error, got {}",
+        response.status().is_success(),
+        "handler errors are now swallowed, response should be 2xx, got {}",
         response.status()
     );
 

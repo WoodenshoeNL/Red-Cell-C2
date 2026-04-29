@@ -818,8 +818,8 @@ async fn command_output_empty_payload_returns_error_no_broadcast()
         .await?;
 
     assert!(
-        !response.status().is_success(),
-        "empty CommandOutput payload must not return 2xx, got {}",
+        response.status().is_success(),
+        "handler errors are now swallowed, response should be 2xx, got {}",
         response.status()
     );
 
@@ -883,8 +883,8 @@ async fn command_output_truncated_length_prefix_returns_error_no_broadcast()
         .await?;
 
     assert!(
-        !response.status().is_success(),
-        "truncated CommandOutput payload must not return 2xx, got {}",
+        response.status().is_success(),
+        "handler errors are now swallowed, response should be 2xx, got {}",
         response.status()
     );
 
@@ -952,8 +952,8 @@ async fn command_output_length_exceeds_payload_returns_error_no_broadcast()
         .await?;
 
     assert!(
-        !response.status().is_success(),
-        "CommandOutput with oversized length prefix must not return 2xx, got {}",
+        response.status().is_success(),
+        "handler errors are now swallowed, response should be 2xx, got {}",
         response.status()
     );
 
@@ -1023,8 +1023,8 @@ async fn command_output_u32_max_length_prefix_returns_error_no_broadcast()
         .await?;
 
     assert!(
-        !response.status().is_success(),
-        "CommandOutput with u32::MAX length prefix must not return 2xx, got {}",
+        response.status().is_success(),
+        "handler errors are now swallowed, response should be 2xx, got {}",
         response.status()
     );
 
@@ -1092,8 +1092,8 @@ async fn command_error_win32_truncated_body_returns_error_no_broadcast()
         .await?;
 
     assert!(
-        !response.status().is_success(),
-        "Win32 error with truncated body must not return 2xx, got {}",
+        response.status().is_success(),
+        "handler errors are now swallowed, response should be 2xx, got {}",
         response.status()
     );
 
@@ -1159,8 +1159,8 @@ async fn command_error_token_truncated_body_returns_error_no_broadcast()
         .await?;
 
     assert!(
-        !response.status().is_success(),
-        "Token error with truncated body must not return 2xx, got {}",
+        response.status().is_success(),
+        "handler errors are now swallowed, response should be 2xx, got {}",
         response.status()
     );
 
@@ -1223,8 +1223,8 @@ async fn sleep_callback_empty_payload_returns_error_no_broadcast()
         .await?;
 
     assert!(
-        !response.status().is_success(),
-        "empty CommandSleep payload must not return 2xx, got {}",
+        response.status().is_success(),
+        "handler errors are now swallowed, response should be 2xx, got {}",
         response.status()
     );
 
@@ -1287,8 +1287,8 @@ async fn sleep_callback_truncated_missing_jitter_returns_error_no_broadcast()
         .await?;
 
     assert!(
-        !response.status().is_success(),
-        "truncated CommandSleep (missing jitter) must not return 2xx, got {}",
+        response.status().is_success(),
+        "handler errors are now swallowed, response should be 2xx, got {}",
         response.status()
     );
 

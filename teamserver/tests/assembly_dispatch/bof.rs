@@ -1,6 +1,6 @@
 //! BOF (Beacon Object File) inline-execute callback dispatch tests.
 
-use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH};
+use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len};
 use red_cell_common::demon::DemonCommand;
 use red_cell_common::operator::OperatorMessage;
 use tokio_tungstenite::connect_async;
@@ -570,7 +570,7 @@ async fn bof_payload_shorter_than_subtype_header_does_not_crash()
         0x91, 0x82, 0x73, 0x64, 0x55, 0x46, 0x37, 0x28, 0x19, 0x0A, 0xF1, 0xE2, 0xD3, 0xC4, 0xB5,
         0xA6,
     ];
-    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let mut ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     let agent_new = common::read_operator_message(&mut socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -590,13 +590,13 @@ async fn bof_payload_shorter_than_subtype_header_does_not_crash()
         ))
         .send()
         .await?;
-    // Dispatch error causes a fake 404 — the server must not panic.
+    // Handler errors are swallowed — response is 200, the server must not panic.
     assert_eq!(
         response.status().as_u16(),
-        404,
-        "truncated payload should produce a fake 404, not a crash"
+        200,
+        "handler errors are now swallowed, response should be 200"
     );
-    // Legacy CTR mode: ctr_offset stays at 0 regardless of prior traffic.
+    ctr_offset += ctr_blocks_for_len(4 + truncated_payload.len());
 
     common::skip_optional_teamserver_log(&mut socket, std::time::Duration::from_millis(250)).await;
 
@@ -657,7 +657,7 @@ async fn bof_output_truncated_string_does_not_crash() -> Result<(), Box<dyn std:
         0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
         0x19,
     ];
-    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let mut ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     let agent_new = common::read_operator_message(&mut socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -682,12 +682,13 @@ async fn bof_output_truncated_string_does_not_crash() -> Result<(), Box<dyn std:
         ))
         .send()
         .await?;
+    // Handler errors are swallowed — response is 200, the server must not panic.
     assert_eq!(
         response.status().as_u16(),
-        404,
-        "truncated string payload should produce a fake 404"
+        200,
+        "handler errors are now swallowed, response should be 200"
     );
-    // Legacy CTR mode: ctr_offset stays at 0 regardless of prior traffic.
+    ctr_offset += ctr_blocks_for_len(4 + truncated_payload.len());
 
     common::skip_optional_teamserver_log(&mut socket, std::time::Duration::from_millis(250)).await;
 
@@ -748,7 +749,7 @@ async fn bof_exception_missing_address_does_not_crash() -> Result<(), Box<dyn st
         0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5A, 0x5B, 0x5C, 0x5D, 0x5E,
         0x5F,
     ];
-    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let mut ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     let agent_new = common::read_operator_message(&mut socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -775,10 +776,10 @@ async fn bof_exception_missing_address_does_not_crash() -> Result<(), Box<dyn st
         .await?;
     assert_eq!(
         response.status().as_u16(),
-        404,
-        "BOF_EXCEPTION with missing address should produce a fake 404"
+        200,
+        "handler errors are now swallowed, response should be 200"
     );
-    // Legacy CTR mode: ctr_offset stays at 0 regardless of prior traffic.
+    ctr_offset += ctr_blocks_for_len(4 + truncated_payload.len());
 
     common::skip_optional_teamserver_log(&mut socket, std::time::Duration::from_millis(250)).await;
 

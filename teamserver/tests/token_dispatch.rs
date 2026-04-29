@@ -1074,8 +1074,8 @@ async fn token_invalid_subcommand_rejects() -> Result<(), Box<dyn std::error::Er
         .await?;
 
     assert!(
-        !resp.status().is_success(),
-        "invalid subcommand must not return 2xx, got {}",
+        resp.status().is_success(),
+        "handler errors are now swallowed, response should be 2xx, got {}",
         resp.status()
     );
 
@@ -1119,8 +1119,8 @@ async fn token_truncated_impersonate_rejects() -> Result<(), Box<dyn std::error:
         .await?;
 
     assert!(
-        !resp.status().is_success(),
-        "truncated Impersonate payload must not return 2xx, got {}",
+        resp.status().is_success(),
+        "handler errors are now swallowed, response should be 2xx, got {}",
         resp.status()
     );
 
@@ -1163,8 +1163,8 @@ async fn token_truncated_steal_rejects() -> Result<(), Box<dyn std::error::Error
         .await?;
 
     assert!(
-        !resp.status().is_success(),
-        "truncated Steal payload must not return 2xx, got {}",
+        resp.status().is_success(),
+        "handler errors are now swallowed, response should be 2xx, got {}",
         resp.status()
     );
 
@@ -1209,8 +1209,8 @@ async fn token_truncated_find_tokens_rejects() -> Result<(), Box<dyn std::error:
         .await?;
 
     assert!(
-        !resp.status().is_success(),
-        "truncated FindTokens payload must not return 2xx, got {}",
+        resp.status().is_success(),
+        "handler errors are now swallowed, response should be 2xx, got {}",
         resp.status()
     );
 
@@ -1251,8 +1251,8 @@ async fn token_empty_payload_rejects() -> Result<(), Box<dyn std::error::Error>>
         .await?;
 
     assert!(
-        !resp.status().is_success(),
-        "empty token payload must not return 2xx, got {}",
+        resp.status().is_success(),
+        "handler errors are now swallowed, response should be 2xx, got {}",
         resp.status()
     );
 
@@ -1306,8 +1306,8 @@ async fn token_malformed_list_truncated_entry_rejects() -> Result<(), Box<dyn st
         .await?;
 
     assert!(
-        !resp.status().is_success(),
-        "malformed List entry must not return 2xx, got {}",
+        resp.status().is_success(),
+        "handler errors are now swallowed, response should be 2xx, got {}",
         resp.status()
     );
 
@@ -1355,8 +1355,8 @@ async fn token_truncated_privs_get_rejects() -> Result<(), Box<dyn std::error::E
         .await?;
 
     assert!(
-        !resp.status().is_success(),
-        "truncated PrivsGetOrList (get mode) must not return 2xx, got {}",
+        resp.status().is_success(),
+        "handler errors are now swallowed, response should be 2xx, got {}",
         resp.status()
     );
 

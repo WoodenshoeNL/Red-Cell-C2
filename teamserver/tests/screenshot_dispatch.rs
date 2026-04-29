@@ -396,8 +396,8 @@ async fn screenshot_callback_truncated_after_success_flag_rejects()
         .await?;
 
     assert!(
-        !resp.status().is_success(),
-        "truncated payload (no bytes after success=1) must not return 2xx, got {}",
+        resp.status().is_success(),
+        "handler errors are now swallowed, response should be 2xx, got {}",
         resp.status()
     );
 
@@ -461,8 +461,8 @@ async fn screenshot_callback_overstated_length_rejects() -> Result<(), Box<dyn s
         .await?;
 
     assert!(
-        !resp.status().is_success(),
-        "overstated-length payload must not return 2xx, got {}",
+        resp.status().is_success(),
+        "handler errors are now swallowed, response should be 2xx, got {}",
         resp.status()
     );
 

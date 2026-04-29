@@ -5,7 +5,7 @@
 
 mod common;
 
-use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH};
+use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len};
 use red_cell_common::demon::{DemonCommand, DemonFilesystemCommand};
 use red_cell_common::operator::OperatorMessage;
 use tokio_tungstenite::connect_async;
@@ -471,10 +471,9 @@ async fn getpwd_callback_broadcasts_current_directory() -> Result<(), Box<dyn st
 #[tokio::test]
 async fn download_flow_emits_progress_loot_and_complete_events()
 -> Result<(), Box<dyn std::error::Error>> {
-    // This test sends 3 sequential callbacks (start/chunk/close) for the same agent.
-    // Use the legacy CTR profile to avoid tracking monotonic offsets across multiple
-    // callback-response cycles, which is orthogonal to the download-flow logic under test.
-    let server = common::spawn_test_server(common::legacy_ctr_test_profile()).await?;
+    // This test sends 3 sequential callbacks (start/chunk/close) for the same agent,
+    // tracking the monotonic CTR offset across each callback-response cycle.
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
@@ -491,8 +490,8 @@ async fn download_flow_emits_progress_loot_and_complete_events()
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xDD01_0005_u32;
-    let ctr_offset =
-        common::register_legacy_agent(&client, listener_port, agent_id, KEY_E, IV_E).await?;
+    let mut ctr_offset =
+        common::register_agent(&client, listener_port, agent_id, KEY_E, IV_E).await?;
 
     let agent_new = common::read_operator_message(&mut socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)), "expected AgentNew");
@@ -546,6 +545,9 @@ async fn download_flow_emits_progress_loot_and_complete_events()
         "start event must carry the file ID"
     );
 
+    // Advance CTR offset: the encrypted inner data is 4-byte length prefix + payload.
+    ctr_offset += ctr_blocks_for_len(4 + start_payload.len());
+
     // ── Step 2: mode=1 (chunk) ───────────────────────────────────────────────
     let chunk_payload = download_chunk_payload(file_id, file_data);
     client
@@ -582,6 +584,9 @@ async fn download_flow_emits_progress_loot_and_complete_events()
         Some(expected_size.to_string().as_str()),
         "chunk event CurrentSize must equal the chunk length"
     );
+
+    // Advance CTR offset: the encrypted inner data is 4-byte length prefix + payload.
+    ctr_offset += ctr_blocks_for_len(4 + chunk_payload.len());
 
     // ── Step 3: mode=2 (close, reason=0 = success) ───────────────────────────
     let close_payload = download_close_payload(file_id, 0);

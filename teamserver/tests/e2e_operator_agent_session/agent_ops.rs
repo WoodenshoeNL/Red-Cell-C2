@@ -1,6 +1,7 @@
 use std::time::Duration;
 
-use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH};
+use red_cell::demon::INIT_EXT_MONOTONIC_CTR;
+use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len};
 use red_cell_common::demon::{DemonCommand, DemonMessage};
 use red_cell_common::operator::{EventCode, ListenerMarkInfo, OperatorMessage};
 use tokio_tungstenite::connect_async;
@@ -22,7 +23,7 @@ async fn operator_session_smb_listener_and_mock_demon_round_trip()
 -> Result<(), Box<dyn std::error::Error>> {
     use tokio::time::timeout;
 
-    let server = crate::common::spawn_test_server(crate::common::legacy_ctr_test_profile()).await?;
+    let server = crate::common::spawn_test_server(crate::common::default_test_profile()).await?;
 
     let pipe_name = unique_pipe_name("operator-round-trip");
     let listener_name = "edge-smb";
@@ -70,13 +71,16 @@ async fn operator_session_smb_listener_and_mock_demon_round_trip()
         0x1A, 0x2D, 0x40, 0x53, 0x66, 0x79, 0x8C, 0x9F, 0xB2, 0xC5, 0xD8, 0xEB, 0xFE, 0x11, 0x24,
         0x37,
     ];
-    let ctr_offset = 0_u64;
-
     let mut init_stream = connect_smb(&pipe_name).await?;
     write_smb_frame(
         &mut init_stream,
         agent_id,
-        &crate::common::valid_demon_init_body(agent_id, key, iv),
+        &crate::common::valid_demon_init_body_with_ext_flags(
+            agent_id,
+            key,
+            iv,
+            INIT_EXT_MONOTONIC_CTR,
+        ),
     )
     .await?;
 
@@ -84,9 +88,9 @@ async fn operator_session_smb_listener_and_mock_demon_round_trip()
         timeout(Duration::from_secs(5), read_smb_frame(&mut init_stream)).await??;
     assert_eq!(ack_agent_id, agent_id);
     let init_ack =
-        red_cell_common::crypto::decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &ack_payload)?;
+        red_cell_common::crypto::decrypt_agent_data_at_offset(&key, &iv, 0, &ack_payload)?;
     assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
-    // Legacy CTR mode: offset stays at 0.
+    let ctr_offset = ctr_blocks_for_len(4);
     drop(init_stream);
 
     let agent_new = crate::common::read_operator_message(&mut socket).await?;
@@ -139,7 +143,6 @@ async fn operator_session_smb_listener_and_mock_demon_round_trip()
         ),
     )
     .await?;
-    // Legacy CTR mode: offset stays at 0.
 
     let (job_agent_id, job_bytes) =
         timeout(Duration::from_secs(5), read_smb_frame(&mut get_job_stream)).await??;
@@ -193,7 +196,7 @@ async fn operator_session_smb_listener_and_mock_demon_round_trip()
 #[tokio::test]
 async fn operator_session_dns_listener_and_mock_demon_round_trip()
 -> Result<(), Box<dyn std::error::Error>> {
-    let server = crate::common::spawn_test_server(crate::common::legacy_ctr_test_profile()).await?;
+    let server = crate::common::spawn_test_server(crate::common::default_test_profile()).await?;
 
     let dns_port = crate::helpers::free_udp_port();
     let dns_domain = "c2.example.com";
@@ -243,7 +246,12 @@ async fn operator_session_dns_listener_and_mock_demon_round_trip()
     ];
 
     // 1. Upload DEMON_INIT via chunked DNS queries.
-    let init_body = crate::common::valid_demon_init_body(agent_id, key, iv);
+    let init_body = crate::common::valid_demon_init_body_with_ext_flags(
+        agent_id,
+        key,
+        iv,
+        INIT_EXT_MONOTONIC_CTR,
+    );
     let init_result =
         dns_upload_demon_packet(&dns_client, agent_id, &init_body, dns_domain, 0x1000).await?;
     assert_eq!(init_result, "ack", "DEMON_INIT upload must be acknowledged");
@@ -251,11 +259,10 @@ async fn operator_session_dns_listener_and_mock_demon_round_trip()
     // 2. Download init ACK via DNS download queries.
     let ack_payload = dns_download_response(&dns_client, agent_id, dns_domain, 0x2000).await?;
     assert!(!ack_payload.is_empty(), "init ACK response must be non-empty");
-    // Legacy Demon agents reset AES-CTR to block 0 for every packet, so both the
-    // init ACK and all subsequent callbacks use offset 0.
     let decrypted =
         red_cell_common::crypto::decrypt_agent_data_at_offset(&key, &iv, 0, &ack_payload)?;
     assert_eq!(decrypted.as_slice(), &agent_id.to_le_bytes());
+    let ctr_offset = ctr_blocks_for_len(4);
 
     // 3. Operator sees AgentNew.
     let agent_new = crate::common::read_operator_message(&mut socket).await?;
@@ -294,12 +301,11 @@ async fn operator_session_dns_listener_and_mock_demon_round_trip()
     assert_eq!(message.info.command_line, "checkin");
 
     // 6. Agent polls for task via DNS: upload CommandGetJob, then download response.
-    // Legacy Demon mode: every callback is encrypted at CTR offset 0.
     let get_job_body = crate::common::valid_demon_callback_body(
         agent_id,
         key,
         iv,
-        0,
+        ctr_offset,
         u32::from(DemonCommand::CommandGetJob),
         5,
         &[],
@@ -321,7 +327,7 @@ async fn operator_session_dns_listener_and_mock_demon_round_trip()
         agent_id,
         key,
         iv,
-        0,
+        ctr_offset,
         u32::from(DemonCommand::CommandOutput),
         0x2A,
         &crate::common::command_output_payload(output_text),

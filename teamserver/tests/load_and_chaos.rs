@@ -17,12 +17,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::future::join_all;
+use red_cell::demon::INIT_EXT_MONOTONIC_CTR;
 use red_cell::{
     AgentRegistry, DEFAULT_MAX_DOWNLOAD_BYTES, Database, EventBus, EventReceiver, ListenerManager,
     SocketRelayManager,
 };
 use red_cell_common::HttpListenerConfig;
-use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH};
+use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len};
 use red_cell_common::demon::{DemonCommand, DemonEnvelope, DemonFilesystemCommand};
 use red_cell_common::operator::OperatorMessage;
 use reqwest::Client;
@@ -573,15 +574,21 @@ async fn download_limit_enforced_under_concurrent_upload() -> Result<(), Box<dyn
 
     let client = Arc::new(Client::new());
 
-    // Step 1 — register all agents sequentially.
+    // Step 1 — register all agents sequentially (monotonic-CTR mode).
+    let mut ctr_offsets: Vec<u64> = Vec::with_capacity(CONCURRENT_AGENTS as usize);
     for i in 1..=CONCURRENT_AGENTS {
-        let body = common::valid_demon_init_body(i, key_from_seed(i as u8), iv_from_seed(i as u8));
+        let body = common::valid_demon_init_body_with_ext_flags(
+            i,
+            key_from_seed(i as u8),
+            iv_from_seed(i as u8),
+            INIT_EXT_MONOTONIC_CTR,
+        );
         let resp = client.post(format!("http://127.0.0.1:{port}/")).body(body).send().await?;
         assert!(resp.status().is_success(), "agent {i} should register; status={}", resp.status());
+        ctr_offsets.push(ctr_blocks_for_len(4));
     }
 
     // Step 2 — open a download slot for every agent (mode=0, sequential).
-    // In legacy CTR mode every packet starts at AES-CTR block 0.
     for i in 1..=CONCURRENT_AGENTS {
         let file_id = 0x0100_u32 + i;
         let start_payload = download_start_payload(
@@ -593,7 +600,7 @@ async fn download_limit_enforced_under_concurrent_upload() -> Result<(), Box<dyn
             i,
             key_from_seed(i as u8),
             iv_from_seed(i as u8),
-            0, // ctr_offset=0 — legacy mode, never advances
+            ctr_offsets[(i - 1) as usize],
             u32::from(DemonCommand::CommandFs),
             i, // request_id
             &start_payload,
@@ -604,6 +611,7 @@ async fn download_limit_enforced_under_concurrent_upload() -> Result<(), Box<dyn
             "agent {i} download-start should succeed; status={}",
             resp.status()
         );
+        ctr_offsets[(i - 1) as usize] += ctr_blocks_for_len(4 + start_payload.len());
     }
 
     // Step 3 — push 256 KiB chunks concurrently (total 1 280 KiB > 512 KiB cap).
@@ -621,7 +629,7 @@ async fn download_limit_enforced_under_concurrent_upload() -> Result<(), Box<dyn
                 i,
                 key_from_seed(i as u8),
                 iv_from_seed(i as u8),
-                0, // ctr_offset=0 — legacy mode, never advances
+                ctr_offsets[(i - 1) as usize],
                 u32::from(DemonCommand::CommandFs),
                 i,
                 &chunk_payload,

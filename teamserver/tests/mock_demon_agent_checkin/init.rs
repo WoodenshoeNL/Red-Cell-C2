@@ -1,6 +1,9 @@
 //! Basic agent init, output delivery, and idle-poll tests.
 
-use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, decrypt_agent_data_at_offset};
+use red_cell::demon::INIT_EXT_MONOTONIC_CTR;
+use red_cell_common::crypto::{
+    AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len, decrypt_agent_data_at_offset,
+};
 use red_cell_common::demon::{DemonCommand, DemonMessage};
 use red_cell_common::operator::OperatorMessage;
 
@@ -22,19 +25,22 @@ async fn mock_demon_checkin_get_job_and_output_flow() -> Result<(), Box<dyn std:
         0xB0, 0xC3, 0xD6, 0xE9, 0xFC, 0x0F, 0x22, 0x35, 0x48, 0x5B, 0x6E, 0x81, 0x94, 0xA7, 0xBA,
         0xCD,
     ];
-    let ctr_offset = 0_u64;
-
     let init_response = harness
         .client
         .post(format!("http://127.0.0.1:{listener_port}/"))
-        .body(common::valid_demon_init_body(agent_id, key, iv))
+        .body(common::valid_demon_init_body_with_ext_flags(
+            agent_id,
+            key,
+            iv,
+            INIT_EXT_MONOTONIC_CTR,
+        ))
         .send()
         .await?
         .error_for_status()?;
     let init_bytes = init_response.bytes().await?;
-    let init_ack = decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &init_bytes)?;
+    let init_ack = decrypt_agent_data_at_offset(&key, &iv, 0, &init_bytes)?;
     assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
-    // Legacy CTR mode: offset stays at 0.
+    let ctr_offset = ctr_blocks_for_len(4);
 
     let agent_new = common::read_operator_message(&mut harness.socket).await?;
     let OperatorMessage::AgentNew(message) = agent_new else {
@@ -75,7 +81,6 @@ async fn mock_demon_checkin_get_job_and_output_flow() -> Result<(), Box<dyn std:
     assert_eq!(message.packages[0].command_id, u32::from(DemonCommand::CommandCheckin));
     assert_eq!(message.packages[0].request_id, 0x2A);
     assert!(message.packages[0].payload.is_empty());
-    // Legacy CTR mode: offset stays at 0.
 
     let output_text = "hello from demon";
     let callback_response = harness
@@ -125,19 +130,22 @@ async fn mock_demon_checkin_streams_multiple_output_events_for_one_task()
         0xE5, 0xF8, 0x0B, 0x1E, 0x31, 0x44, 0x57, 0x6A, 0x7D, 0x90, 0xA3, 0xB6, 0xC9, 0xDC, 0xEF,
         0x02,
     ];
-    let ctr_offset = 0_u64;
-
     let init_response = harness
         .client
         .post(format!("http://127.0.0.1:{listener_port}/"))
-        .body(common::valid_demon_init_body(agent_id, key, iv))
+        .body(common::valid_demon_init_body_with_ext_flags(
+            agent_id,
+            key,
+            iv,
+            INIT_EXT_MONOTONIC_CTR,
+        ))
         .send()
         .await?
         .error_for_status()?;
     let init_bytes = init_response.bytes().await?;
-    let init_ack = decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &init_bytes)?;
+    let init_ack = decrypt_agent_data_at_offset(&key, &iv, 0, &init_bytes)?;
     assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
-    // Legacy CTR mode: offset stays at 0.
+    let mut ctr_offset = ctr_blocks_for_len(4);
 
     let agent_new = common::read_operator_message(&mut harness.socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -171,11 +179,12 @@ async fn mock_demon_checkin_streams_multiple_output_events_for_one_task()
     let message = DemonMessage::from_bytes(job_bytes.as_ref())?;
     assert_eq!(message.packages.len(), 1);
     assert_eq!(message.packages[0].request_id, 0x2A);
-    // Legacy CTR mode: offset stays at 0.
+    // GET_JOB encrypts 0 bytes — CTR offset does not advance.
 
     let outputs = ["chunk one\n", "chunk two\n", "chunk three"];
     for output in outputs {
         let payload = common::command_output_payload(output);
+        let encrypted_len = 4 + payload.len(); // length-prefix + payload
         harness
             .client
             .post(format!("http://127.0.0.1:{listener_port}/"))
@@ -191,7 +200,7 @@ async fn mock_demon_checkin_streams_multiple_output_events_for_one_task()
             .send()
             .await?
             .error_for_status()?;
-        // Legacy CTR mode: offset stays at 0.
+        ctr_offset += ctr_blocks_for_len(encrypted_len);
     }
 
     for output in outputs {
@@ -222,19 +231,22 @@ async fn mock_demon_checkin_interleaved_output_keeps_task_attribution()
         0x1A, 0x2D, 0x40, 0x53, 0x66, 0x79, 0x8C, 0x9F, 0xB2, 0xC5, 0xD8, 0xEB, 0xFE, 0x11, 0x24,
         0x37,
     ];
-    let ctr_offset = 0_u64;
-
     let init_response = harness
         .client
         .post(format!("http://127.0.0.1:{listener_port}/"))
-        .body(common::valid_demon_init_body(agent_id, key, iv))
+        .body(common::valid_demon_init_body_with_ext_flags(
+            agent_id,
+            key,
+            iv,
+            INIT_EXT_MONOTONIC_CTR,
+        ))
         .send()
         .await?
         .error_for_status()?;
     let init_bytes = init_response.bytes().await?;
-    let init_ack = decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &init_bytes)?;
+    let init_ack = decrypt_agent_data_at_offset(&key, &iv, 0, &init_bytes)?;
     assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
-    // Legacy CTR mode: offset stays at 0.
+    let mut ctr_offset = ctr_blocks_for_len(4);
 
     let agent_new = common::read_operator_message(&mut harness.socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -275,7 +287,7 @@ async fn mock_demon_checkin_interleaved_output_keeps_task_attribution()
     assert_eq!(message.packages.len(), 2);
     assert_eq!(message.packages[0].request_id, 0x2A);
     assert_eq!(message.packages[1].request_id, 0x2B);
-    // Legacy CTR mode: offset stays at 0.
+    // GET_JOB encrypts 0 bytes — CTR offset does not advance.
 
     let callbacks = [
         (0x2A, "shell whoami", "whoami chunk 1"),
@@ -285,6 +297,7 @@ async fn mock_demon_checkin_interleaved_output_keeps_task_attribution()
     ];
     for (request_id, _, output) in callbacks {
         let payload = common::command_output_payload(output);
+        let encrypted_len = 4 + payload.len(); // length-prefix + payload
         harness
             .client
             .post(format!("http://127.0.0.1:{listener_port}/"))
@@ -300,7 +313,7 @@ async fn mock_demon_checkin_interleaved_output_keeps_task_attribution()
             .send()
             .await?
             .error_for_status()?;
-        // Legacy CTR mode: offset stays at 0.
+        ctr_offset += ctr_blocks_for_len(encrypted_len);
     }
 
     for (request_id, command_line, output) in callbacks {
@@ -336,20 +349,23 @@ async fn get_job_with_empty_task_queue_returns_empty_response()
         0x84, 0x97, 0xAA, 0xBD, 0xD0, 0xE3, 0xF6, 0x09, 0x1C, 0x2F, 0x42, 0x55, 0x68, 0x7B, 0x8E,
         0xA1,
     ];
-    let ctr_offset = 0_u64;
-
     // --- DEMON_INIT handshake ----------------------------------------------------
     let init_response = harness
         .client
         .post(format!("http://127.0.0.1:{listener_port}/"))
-        .body(common::valid_demon_init_body(agent_id, key, iv))
+        .body(common::valid_demon_init_body_with_ext_flags(
+            agent_id,
+            key,
+            iv,
+            INIT_EXT_MONOTONIC_CTR,
+        ))
         .send()
         .await?
         .error_for_status()?;
     let init_bytes = init_response.bytes().await?;
-    let init_ack = decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &init_bytes)?;
+    let init_ack = decrypt_agent_data_at_offset(&key, &iv, 0, &init_bytes)?;
     assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
-    // Legacy CTR mode: offset stays at 0.
+    let ctr_offset = ctr_blocks_for_len(4);
 
     // Consume the AgentNew operator event so it doesn't block later reads.
     let agent_new = common::read_operator_message(&mut harness.socket).await?;
@@ -386,8 +402,6 @@ async fn get_job_with_empty_task_queue_returns_empty_response()
         "expected empty response body when no tasks are queued, got {} bytes",
         job_bytes.len()
     );
-    // The callback itself encrypted 4 bytes (length prefix), advancing the CTR offset.
-    // Legacy CTR mode: offset stays at 0.
 
     // --- Verify CTR synchronisation by sending another callback -------------------
     // Queue a task so the next GET_JOB has work to return.  If the empty-poll had
@@ -484,15 +498,19 @@ async fn multiple_concurrent_agents_on_same_listener() -> Result<(), Box<dyn std
         let init_response = harness
             .client
             .post(format!("http://127.0.0.1:{listener_port}/"))
-            .body(common::valid_demon_init_body(agent.agent_id, agent.key, agent.iv))
+            .body(common::valid_demon_init_body_with_ext_flags(
+                agent.agent_id,
+                agent.key,
+                agent.iv,
+                INIT_EXT_MONOTONIC_CTR,
+            ))
             .send()
             .await?
             .error_for_status()?;
         let init_bytes = init_response.bytes().await?;
-        let init_ack =
-            decrypt_agent_data_at_offset(&agent.key, &agent.iv, agent.ctr_offset, &init_bytes)?;
+        let init_ack = decrypt_agent_data_at_offset(&agent.key, &agent.iv, 0, &init_bytes)?;
         assert_eq!(init_ack.as_slice(), &agent.agent_id.to_le_bytes());
-        // Legacy CTR mode: offset stays at 0.
+        agent.ctr_offset = ctr_blocks_for_len(4);
 
         // Consume the AgentNew event.
         let agent_new = common::read_operator_message(&mut harness.socket).await?;
@@ -540,7 +558,6 @@ async fn multiple_concurrent_agents_on_same_listener() -> Result<(), Box<dyn std
             "agent 0x{:08X} received wrong task",
             agent.agent_id
         );
-        // Legacy CTR mode: offset stays at 0.
     }
 
     // --- Each agent sends output — verify no cross-contamination --------------------

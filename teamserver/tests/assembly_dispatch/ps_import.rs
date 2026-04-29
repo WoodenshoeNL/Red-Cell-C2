@@ -202,11 +202,11 @@ async fn ps_import_callback_truncated_payload_does_not_crash()
         ))
         .send()
         .await?;
-    // Dispatch error produces a fake 404 — the server must not crash.
+    // Handler errors are swallowed — response is 200, the server must not crash.
     assert_eq!(
         response.status().as_u16(),
-        404,
-        "truncated ps_import payload should produce a fake 404, not a crash"
+        200,
+        "handler errors are now swallowed, response should be 200"
     );
 
     // The dispatch error is handled internally — no AgentResponse; optional TeamserverLog diag.

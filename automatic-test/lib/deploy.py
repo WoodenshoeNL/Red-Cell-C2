@@ -14,7 +14,7 @@ import shlex
 import subprocess
 import time
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from lib import ScenarioSkipped
 
@@ -458,7 +458,8 @@ def _windows_wmi_create_script(command_line: str) -> str:
     """
 
     exe_path = command_line.strip().strip('"')
-    parent = str(Path(exe_path).parent)
+    # PureWindowsPath handles backslash separators correctly on Linux.
+    parent = str(PureWindowsPath(exe_path).parent)
     if not parent or parent == ".":
         parent = ""
 

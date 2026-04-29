@@ -27,6 +27,7 @@ from lib.deploy import (
     _quote_powershell,
     _scp_args,
     _ssh_args,
+    _windows_wmi_create_script,
     ensure_work_dir,
     execute_background,
     inject_hosts_entry,
@@ -589,6 +590,40 @@ class TestDeployErrorPaths(unittest.TestCase):
         remote_cmd = m.call_args[0][0][-1]
         script = _decoded_windows_launch_script(remote_cmd)
         self.assertIn("it''s here", script)
+
+    def test_wmi_script_current_directory_not_empty(self) -> None:
+        """CurrentDirectory must be the exe's parent dir, not an empty string.
+
+        PureWindowsPath is required because pathlib.Path on Linux treats
+        backslashes as literal characters, returning '.' as the parent.
+        """
+        script = _windows_wmi_create_script("C:\\Temp\\rc-test\\agent.exe")
+        args = script.split("-ArgumentList ", 1)[1].split(";")[0]
+        cmd_arg, cwd_arg = args.split(",", 1)
+        cwd_arg = cwd_arg.strip()
+        self.assertNotEqual(cwd_arg, "''", "CurrentDirectory must not be empty")
+        self.assertIn("C:\\Temp\\rc-test", cwd_arg)
+        self.assertNotIn("agent.exe", cwd_arg)
+
+    def test_wmi_script_deep_path(self) -> None:
+        """Deeply nested Windows paths extract the correct parent."""
+        script = _windows_wmi_create_script(
+            "C:\\Users\\admin\\AppData\\Local\\Temp\\work\\agent.exe"
+        )
+        args = script.split("-ArgumentList ", 1)[1].split(";")[0]
+        _, cwd_arg = args.split(",", 1)
+        cwd_arg = cwd_arg.strip()
+        self.assertIn("C:\\Users\\admin\\AppData\\Local\\Temp\\work", cwd_arg)
+        self.assertNotIn("agent.exe", cwd_arg)
+
+    def test_wmi_script_root_path(self) -> None:
+        """Exe at drive root should have drive root as CurrentDirectory."""
+        script = _windows_wmi_create_script("C:\\agent.exe")
+        args = script.split("-ArgumentList ", 1)[1].split(";")[0]
+        _, cwd_arg = args.split(",", 1)
+        cwd_arg = cwd_arg.strip()
+        self.assertNotEqual(cwd_arg, "''")
+        self.assertIn("C:\\", cwd_arg)
 
 
 class TestInjectHostsEntry(unittest.TestCase):

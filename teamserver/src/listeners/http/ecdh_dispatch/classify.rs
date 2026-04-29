@@ -17,7 +17,7 @@ use crate::listeners::{
 use crate::{AgentRegistry, CommandDispatcher, Database, events::EventBus};
 
 use super::registration::process_ecdh_registration;
-use super::session::process_ecdh_session;
+use super::session::{EcdhSessionContext, process_ecdh_session};
 use super::types::{ECDH_REPLAY_WINDOW_SECS, EcdhOutcome};
 
 /// Returns `true` when the client IP is allowed to attempt an ECDH
@@ -83,11 +83,7 @@ pub(crate) async fn process_ecdh_packet(
                     &session_key,
                     agent_id,
                     &candidate_id,
-                    ecdh_db,
-                    registry,
-                    dispatcher,
-                    events,
-                    listener_name,
+                    EcdhSessionContext { ecdh_db, registry, dispatcher, events, listener_name },
                 )
                 .await?,
             ));

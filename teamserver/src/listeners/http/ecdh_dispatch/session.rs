@@ -15,17 +15,24 @@ use crate::{CommandDispatcher, DemonCallbackPackage, EventBus};
 use super::parse::{parse_ecdh_session_payload, parse_seq_num_prefix};
 use super::types::EcdhResponse;
 
+/// Infrastructure dependencies for processing an ECDH session packet.
+pub(crate) struct EcdhSessionContext<'a> {
+    pub(crate) ecdh_db: EcdhRepository,
+    pub(crate) registry: &'a AgentRegistry,
+    pub(crate) dispatcher: &'a CommandDispatcher,
+    pub(crate) events: &'a EventBus,
+    pub(crate) listener_name: &'a str,
+}
+
 pub(crate) async fn process_ecdh_session(
     body: &[u8],
     session_key: &[u8; 32],
     agent_id: u32,
     connection_id: &[u8; 16],
-    ecdh_db: EcdhRepository,
-    registry: &AgentRegistry,
-    dispatcher: &CommandDispatcher,
-    events: &EventBus,
-    listener_name: &str,
+    ctx: EcdhSessionContext<'_>,
 ) -> Result<EcdhResponse, ListenerManagerError> {
+    let EcdhSessionContext { ecdh_db, registry, dispatcher, events, listener_name } = ctx;
+
     // body = [connection_id: 16] | [nonce: 12] | [ciphertext] | [tag: 16]
     let decrypted = open_session_packet(session_key, &body[16..]).map_err(|e| {
         let msg = format!("ECDH session decrypt failed: {e}");

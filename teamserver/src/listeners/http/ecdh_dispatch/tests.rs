@@ -14,7 +14,7 @@ use crate::listeners::MAX_ECDH_REGISTRATIONS_PER_IP;
 use super::classify::{allow_ecdh_registration_for_ip, process_ecdh_packet};
 use super::parse::parse_seq_num_prefix;
 use super::registration::process_ecdh_registration;
-use super::session::process_ecdh_session;
+use super::session::{EcdhSessionContext, process_ecdh_session};
 use super::types::EcdhOutcome;
 use crate::listeners::EcdhRegistrationRateLimiter;
 
@@ -90,6 +90,7 @@ async fn invalid_ciphertext_does_not_refresh_last_seen() {
     body.push(0xAB); // ciphertext byte
     body.extend_from_slice(&[0u8; 16]); // bad tag
 
+    let registry = AgentRegistry::new(db.clone());
     let dispatcher = CommandDispatcher::new();
     let events = EventBus::default();
     let result = process_ecdh_session(
@@ -97,10 +98,13 @@ async fn invalid_ciphertext_does_not_refresh_last_seen() {
         &session_key,
         1,
         &conn_id.0,
-        repo,
-        &dispatcher,
-        &events,
-        "test-listener",
+        EcdhSessionContext {
+            ecdh_db: repo,
+            registry: &registry,
+            dispatcher: &dispatcher,
+            events: &events,
+            listener_name: "test-listener",
+        },
     )
     .await;
     assert!(result.is_err(), "expected decrypt failure");

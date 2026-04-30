@@ -406,7 +406,14 @@ stash them with `-- <path>`, pull, push, pop. Never blanket-stash or
 
 ## Step 9 — Final report
 
-End your turn with:
+If `RC_AUTOTEST_PULL_REBASE_OK=0`, prepend the report with:
+
+> NOTE: this iteration ran against potentially stale main —
+> the pre-iteration `git pull --rebase` failed.  Verify any
+> regression beads filed below were not already resolved on
+> origin/main before treating them as new bugs.
+
+Then end your turn with:
 
 - Pass / fail / skip counts (vs. the prior baseline if available)
 - One-line classification of each failure

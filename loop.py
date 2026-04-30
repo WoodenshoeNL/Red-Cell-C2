@@ -2679,7 +2679,7 @@ def review_loop(args, log: Logger):
         label = f"{iteration + 1} of {max_iters}" if max_iters > 0 else str(iteration + 1)
         log.log(f"=== {loop_type.title()} review run {label} ===")
 
-        git_pull_rebase(log)
+        pull_rebase_ok = git_pull_rebase(log)
 
         # Run the review agent in an isolated worktree so it can never touch the main
         # checkout's working tree (which may have a concurrent dev agent's uncommitted
@@ -2720,12 +2720,13 @@ def review_loop(args, log: Logger):
             autotest_kill_target_vm_orphans(log)
 
             run_env.update({
-                "RC_AUTOTEST_BUILD_OK":      "1" if build_ok else "0",
-                "RC_AUTOTEST_BUILD_LOG":     str(build_log),
-                "RC_AUTOTEST_TEAMSERVER_OK": "1" if ts_ok else "0",
-                "RC_AUTOTEST_CONFIG_DIR":    AUTOTEST_CONFIG_DIR,
-                "RC_AUTOTEST_PROFILE":       AUTOTEST_PROFILE,
-                "RC_AUTOTEST_PORT":          str(AUTOTEST_PORT),
+                "RC_AUTOTEST_BUILD_OK":          "1" if build_ok else "0",
+                "RC_AUTOTEST_BUILD_LOG":         str(build_log),
+                "RC_AUTOTEST_TEAMSERVER_OK":     "1" if ts_ok else "0",
+                "RC_AUTOTEST_PULL_REBASE_OK":    "1" if pull_rebase_ok else "0",
+                "RC_AUTOTEST_CONFIG_DIR":        AUTOTEST_CONFIG_DIR,
+                "RC_AUTOTEST_PROFILE":           AUTOTEST_PROFILE,
+                "RC_AUTOTEST_PORT":              str(AUTOTEST_PORT),
             })
 
         extra_log = None

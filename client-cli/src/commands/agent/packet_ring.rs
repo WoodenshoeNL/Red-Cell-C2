@@ -60,6 +60,96 @@ impl TextRender for PacketRingData {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_data(frames: Vec<PacketRingFrame>, note: Option<&str>) -> PacketRingData {
+        PacketRingData {
+            agent_id: "deadbeef".to_owned(),
+            n: 5,
+            frames,
+            note: note.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn render_text_empty_frames_with_note() {
+        let data = make_data(vec![], Some("ring-buffer not yet populated"));
+        let out = data.render_text();
+        assert!(out.contains("deadbeef"), "should contain agent id");
+        assert!(out.contains("n=5"), "should contain n value");
+        assert!(out.contains("ring-buffer not yet populated"), "should contain the note");
+        assert!(out.contains("0 frames"), "should show zero frames");
+    }
+
+    #[test]
+    fn render_text_empty_frames_no_note_uses_fallback() {
+        let data = make_data(vec![], None);
+        let out = data.render_text();
+        assert!(out.contains("no frames available"), "should use fallback note text");
+    }
+
+    #[test]
+    fn render_text_frames_present_short_bytes() {
+        let frame = PacketRingFrame {
+            direction: "rx".to_owned(),
+            seq: Some(42),
+            bytes_hex: "aabbcc".to_owned(),
+        };
+        let data = make_data(vec![frame], None);
+        let out = data.render_text();
+        assert!(out.contains("1 frame(s)"), "should show frame count");
+        assert!(out.contains("dir=rx"), "should show direction");
+        assert!(out.contains("seq=42"), "should show seq number");
+        assert!(out.contains("bytes=aabbcc"), "should show bytes without truncation");
+        // no note line when note is None
+        assert!(!out.contains("note:"), "should not show note line");
+    }
+
+    #[test]
+    fn render_text_frames_present_long_bytes_truncated() {
+        // 128 hex chars (64 bytes) — exceeds the 64-char cutoff
+        let long_hex = "ab".repeat(64);
+        let frame = PacketRingFrame {
+            direction: "tx".to_owned(),
+            seq: None,
+            bytes_hex: long_hex.clone(),
+        };
+        let data = make_data(vec![frame], None);
+        let out = data.render_text();
+        assert!(out.contains(&long_hex[..64]), "should include first 64 hex chars");
+        assert!(out.contains("128 hex chars"), "should show total char count");
+        assert!(out.contains('…'), "should include ellipsis");
+        assert!(out.contains("seq=?"), "should show ? for unknown seq");
+    }
+
+    #[test]
+    fn render_text_frames_present_with_note() {
+        let frame = PacketRingFrame {
+            direction: "rx".to_owned(),
+            seq: Some(1),
+            bytes_hex: "ff".to_owned(),
+        };
+        let data = make_data(vec![frame], Some("partial capture"));
+        let out = data.render_text();
+        assert!(out.contains("note: partial capture"), "should append note after frames");
+    }
+
+    #[test]
+    fn render_text_multiple_frames_indexed() {
+        let frames = vec![
+            PacketRingFrame { direction: "rx".to_owned(), seq: Some(0), bytes_hex: "00".to_owned() },
+            PacketRingFrame { direction: "tx".to_owned(), seq: Some(1), bytes_hex: "01".to_owned() },
+        ];
+        let data = make_data(frames, None);
+        let out = data.render_text();
+        assert!(out.contains("2 frame(s)"), "should show 2 frames");
+        assert!(out.contains("[0]"), "should index first frame");
+        assert!(out.contains("[1]"), "should index second frame");
+    }
+}
+
 /// `agent packet-ring <id> [--n N]` — fetch the last N raw frames per direction.
 ///
 /// Calls `GET /agents/{id}/debug/packet-ring?n={n}`.

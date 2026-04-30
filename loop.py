@@ -1059,8 +1059,10 @@ def _clean_cargo_target_inplace(target_dir: Path, label: str, size_limit_gb: flo
     Clean heavyweight subdirs inside a stable cargo target dir when it exceeds
     size_limit_gb.  Never deletes the directory itself so incremental builds survive.
 
-    Cargo lays out target/ as <profile>/{deps,build,incremental,.fingerprint}.
-    We iterate profile subdirs and remove those heavyweight children.
+    Cargo lays out target/ as <profile>/{deps,build,incremental,.fingerprint}
+    for host-only builds, or <triple>/<profile>/{...} for cross-compile targets.
+    We handle both shapes — without the depth-2 fallback, cross-compile
+    heavyweights (musl, mingw) accumulate forever (red-cell-c2-drxmc).
     """
     import shutil as _shutil
     size_gb = _dir_size_gb(target_dir)
@@ -1074,19 +1076,38 @@ def _clean_cargo_target_inplace(target_dir: Path, label: str, size_limit_gb: flo
         return
     log.log(f"tmp cargo: {label} is {size_gb:.1f} GB — cleaning heavyweight subdirs")
     heavyweight_dirs = ["incremental", "deps", "build", ".fingerprint"]
+    profile_markers = {"deps", "build", "incremental", ".fingerprint"}
     cleaned = []
-    for profile in target_dir.iterdir():
-        if not profile.is_dir():
-            continue
-        children = {e.name for e in profile.iterdir()}
-        if not children & {"deps", "build", "incremental", ".fingerprint"}:
-            continue
+
+    def _clean_profile(profile: Path, prefix: str = "") -> bool:
+        try:
+            children = {e.name for e in profile.iterdir()}
+        except OSError:
+            return False
+        if not children & profile_markers:
+            return False
         for name in heavyweight_dirs:
             d = profile / name
             if d.exists():
                 _shutil.rmtree(d, ignore_errors=True)
                 if not d.exists():
-                    cleaned.append(f"{profile.name}/{name}")
+                    cleaned.append(f"{prefix}{profile.name}/{name}")
+        return True
+
+    for entry in target_dir.iterdir():
+        if not entry.is_dir():
+            continue
+        # Depth 1: <profile>/{deps,...} — host-only builds.
+        if _clean_profile(entry):
+            continue
+        # Depth 2: <triple>/<profile>/{deps,...} — cross-compile (musl, mingw, ...).
+        try:
+            for sub in entry.iterdir():
+                if sub.is_dir():
+                    _clean_profile(sub, prefix=f"{entry.name}/")
+        except OSError:
+            continue
+
     if cleaned:
         log.log(f"tmp cargo: cleaned {label}/{{{','.join(cleaned)}}}")
 

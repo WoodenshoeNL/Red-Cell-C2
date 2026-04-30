@@ -19,7 +19,7 @@
 //! | `agent groups <id>` | `GET /agents/{id}/groups` | RBAC group tags on the agent |
 //! | `agent set-groups <id>` | `PUT /agents/{id}/groups` | replace group membership |
 //! | `agent task <id> --task-id` | `GET /agents/{id}/task-status?task_id=` | queue / dispatch / callback correlation |
-//! | `agent packet-ring <id>` | `GET /agents/{id}/debug/packet-ring` | last N raw frames (hex) | |
+//! | `agent packet-ring <id>` | `GET /agents/{id}/debug/packet-ring` | last N raw frames (hex) |
 
 pub(crate) mod exec;
 pub(crate) mod groups;

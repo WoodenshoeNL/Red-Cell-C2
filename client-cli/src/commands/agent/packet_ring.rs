@@ -111,11 +111,8 @@ mod tests {
     fn render_text_frames_present_long_bytes_truncated() {
         // 128 hex chars (64 bytes) — exceeds the 64-char cutoff
         let long_hex = "ab".repeat(64);
-        let frame = PacketRingFrame {
-            direction: "tx".to_owned(),
-            seq: None,
-            bytes_hex: long_hex.clone(),
-        };
+        let frame =
+            PacketRingFrame { direction: "tx".to_owned(), seq: None, bytes_hex: long_hex.clone() };
         let data = make_data(vec![frame], None);
         let out = data.render_text();
         assert!(out.contains(&long_hex[..64]), "should include first 64 hex chars");
@@ -139,8 +136,16 @@ mod tests {
     #[test]
     fn render_text_multiple_frames_indexed() {
         let frames = vec![
-            PacketRingFrame { direction: "rx".to_owned(), seq: Some(0), bytes_hex: "00".to_owned() },
-            PacketRingFrame { direction: "tx".to_owned(), seq: Some(1), bytes_hex: "01".to_owned() },
+            PacketRingFrame {
+                direction: "rx".to_owned(),
+                seq: Some(0),
+                bytes_hex: "00".to_owned(),
+            },
+            PacketRingFrame {
+                direction: "tx".to_owned(),
+                seq: Some(1),
+                bytes_hex: "01".to_owned(),
+            },
         ];
         let data = make_data(frames, None);
         let out = data.render_text();

@@ -725,14 +725,28 @@ async fn reg_replay_within_window_rejected() {
 /// `process_ecdh_packet` must fail closed — returning `NotEcdh` instead of
 /// proceeding without replay protection.  A sustained non-zero rate on the
 /// `red_cell_ecdh_replay_db_errors_total` counter signals DB instability.
+///
+/// This test also asserts that `red_cell_ecdh_replay_db_errors_total` is
+/// actually incremented so a future regression that silently removes the
+/// `inc_ecdh_replay_db_errors` call does not go undetected.
 #[tokio::test]
 async fn process_ecdh_packet_fails_closed_on_replay_db_error() {
+    use metrics_exporter_prometheus::PrometheusBuilder;
+
     let (db, registry, events, dispatcher, keypair, limiter) = ecdh_test_fixture().await;
     let ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 77));
 
     // Build a cryptographically valid packet so it passes AEAD + timestamp
     // checks and reaches the replay-fingerprint DB call.
     let body = valid_registration_body(&keypair);
+
+    // Install a thread-local Prometheus recorder so counter! calls inside
+    // process_ecdh_packet are captured without racing against other tests.
+    // #[tokio::test] uses the current_thread executor, so all polls of the
+    // future below happen on this same thread and see the same thread-local.
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let _recorder_guard = metrics::set_default_local_recorder(&recorder);
 
     // Close the pool — any subsequent DB call will return an error.
     db.close().await;
@@ -753,6 +767,25 @@ async fn process_ecdh_packet_fails_closed_on_replay_db_error() {
     assert!(
         matches!(result, Ok(EcdhOutcome::NotEcdh)),
         "DB error during replay guard must return NotEcdh (fail-closed); got: {result:?}"
+    );
+
+    // Verify the SOC-observable counter was actually incremented.
+    let rendered = handle.render();
+    assert!(
+        rendered.contains("red_cell_ecdh_replay_db_errors_total"),
+        "counter red_cell_ecdh_replay_db_errors_total must appear in metrics output;\n\
+         got:\n{rendered}"
+    );
+    assert!(
+        rendered.contains(r#"red_cell_ecdh_replay_db_errors_total{listener="test-listener"}"#),
+        "counter must be labelled listener=\"test-listener\";\ngot:\n{rendered}"
+    );
+    // The exact Prometheus text line is:
+    //   red_cell_ecdh_replay_db_errors_total{listener="test-listener"} 1
+    let expected_line = r#"red_cell_ecdh_replay_db_errors_total{listener="test-listener"} 1"#;
+    assert!(
+        rendered.contains(expected_line),
+        "counter value must be 1 after one DB-error rejection;\nexpected line: {expected_line}\ngot:\n{rendered}"
     );
 }
 

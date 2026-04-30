@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import struct
 import traceback
 import uuid
 from collections import deque
@@ -442,8 +443,6 @@ def _collect_packet_ring_bytes(cli: CliConfig, agents: list[dict]) -> bytes:
     ring-buffer data is available — this is expected until the teamserver
     implements the backing store.
     """
-    import struct
-
     buf = bytearray()
     for entry in agents:
         agent_id = entry.get("id") or entry.get("AgentID") or entry.get("agent_id")

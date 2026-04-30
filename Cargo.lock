@@ -4782,6 +4782,7 @@ dependencies = [
  "ctr",
  "getrandom 0.3.4",
  "hcl-rs",
+ "hex",
  "hex-literal",
  "hkdf",
  "hmac",

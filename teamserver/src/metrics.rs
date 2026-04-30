@@ -35,6 +35,13 @@ pub const LISTENER_ERRORS_TOTAL: &str = "red_cell_listener_errors_total";
 /// Counter: plugin execution failures, labelled by `plugin`.
 pub const PLUGIN_FAILURES_TOTAL: &str = "red_cell_plugin_failures_total";
 
+/// Counter: ECDH replay-guard DB errors that caused a registration to be
+/// rejected (fail-closed path), labelled by `listener`.
+///
+/// A non-zero rate here means the replay-fingerprint database is unhealthy.
+/// Check SQLite WAL pressure, disk space, and connection-pool exhaustion.
+pub const ECDH_REPLAY_DB_ERRORS_TOTAL: &str = "red_cell_ecdh_replay_db_errors_total";
+
 // ---------------------------------------------------------------------------
 // Metrics handle
 // ---------------------------------------------------------------------------
@@ -127,6 +134,15 @@ pub fn inc_plugin_failures(plugin: &str) {
     counter!(PLUGIN_FAILURES_TOTAL, "plugin" => plugin.to_owned()).increment(1);
 }
 
+/// Increment the ECDH replay-guard DB error counter for a listener.
+///
+/// Called when `try_record_reg_fingerprint` returns an error and the
+/// registration is rejected (fail-closed).  A sustained non-zero rate
+/// indicates database instability on the replay-fingerprint store.
+pub fn inc_ecdh_replay_db_errors(listener: &str) {
+    counter!(ECDH_REPLAY_DB_ERRORS_TOTAL, "listener" => listener.to_owned()).increment(1);
+}
+
 // ---------------------------------------------------------------------------
 // Axum handler
 // ---------------------------------------------------------------------------
@@ -159,6 +175,7 @@ mod tests {
         assert!(DOWNLOAD_BYTES_TOTAL.starts_with("red_cell_"));
         assert!(LISTENER_ERRORS_TOTAL.starts_with("red_cell_"));
         assert!(PLUGIN_FAILURES_TOTAL.starts_with("red_cell_"));
+        assert!(ECDH_REPLAY_DB_ERRORS_TOTAL.starts_with("red_cell_"));
     }
 
     #[test]

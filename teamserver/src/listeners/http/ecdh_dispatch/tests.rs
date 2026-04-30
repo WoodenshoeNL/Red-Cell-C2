@@ -663,6 +663,41 @@ async fn duplicate_registration_does_not_leak_session_row() {
     );
 }
 
+/// When `try_record_reg_fingerprint` cannot reach the database (pool closed),
+/// `process_ecdh_packet` must fail closed — returning `NotEcdh` instead of
+/// proceeding without replay protection.  A sustained non-zero rate on the
+/// `red_cell_ecdh_replay_db_errors_total` counter signals DB instability.
+#[tokio::test]
+async fn process_ecdh_packet_fails_closed_on_replay_db_error() {
+    let (db, registry, events, dispatcher, keypair, limiter) = ecdh_test_fixture().await;
+    let ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 77));
+
+    // Build a cryptographically valid packet so it passes AEAD + timestamp
+    // checks and reaches the replay-fingerprint DB call.
+    let body = valid_registration_body(&keypair);
+
+    // Close the pool — any subsequent DB call will return an error.
+    db.close().await;
+
+    let result = process_ecdh_packet(
+        "test-listener",
+        Some(&keypair),
+        &registry,
+        &db,
+        &events,
+        &dispatcher,
+        &limiter,
+        &body,
+        ip,
+    )
+    .await;
+
+    assert!(
+        matches!(result, Ok(EcdhOutcome::NotEcdh)),
+        "DB error during replay guard must return NotEcdh (fail-closed); got: {result:?}"
+    );
+}
+
 /// A successful registration must commit both the agent row and the ECDH
 /// session row — verify the happy path end-to-end via the internal
 /// `process_ecdh_registration` helper.

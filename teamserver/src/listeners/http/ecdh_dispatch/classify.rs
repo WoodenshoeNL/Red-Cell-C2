@@ -2,7 +2,7 @@
 
 use std::net::IpAddr;
 
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 use red_cell_common::crypto::ecdh::{
     ECDH_REG_FINGERPRINT_LEN, ECDH_REG_MIN_LEN, EcdhError, ListenerKeypair,
@@ -163,12 +163,17 @@ pub(crate) async fn process_ecdh_packet(
             return Ok(EcdhOutcome::NotEcdh);
         }
         Err(e) => {
-            // DB errors are non-fatal: fail open to avoid blocking legitimate agents.
-            warn!(
+            // Fail closed: a DB error means we cannot determine whether this
+            // packet is a replay, so we reject it rather than allow a potential
+            // attacker who caused the DB error to bypass the replay guard.
+            // The metric lets operators diagnose sustained DB instability.
+            error!(
                 listener = listener_name,
                 error = %e,
-                "ECDH replay fingerprint DB check failed — proceeding without replay guard"
+                "ECDH replay fingerprint DB check failed — rejecting registration (fail-closed)"
             );
+            crate::metrics::inc_ecdh_replay_db_errors(listener_name);
+            return Ok(EcdhOutcome::NotEcdh);
         }
     }
 

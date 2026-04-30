@@ -5,8 +5,8 @@ use std::net::IpAddr;
 use tracing::{debug, warn};
 
 use red_cell_common::crypto::ecdh::{
-    ECDH_REG_MIN_LEN, EcdhError, ListenerKeypair, extract_connection_id_candidate,
-    open_registration_packet,
+    ECDH_REG_FINGERPRINT_LEN, ECDH_REG_MIN_LEN, EcdhError, ListenerKeypair,
+    extract_connection_id_candidate, open_registration_packet,
 };
 use red_cell_common::demon::ArchonEnvelope;
 
@@ -138,6 +138,39 @@ pub(crate) async fn process_ecdh_packet(
             return Ok(EcdhOutcome::NotEcdh);
         }
     };
+
+    // Reject packets replayed within the timestamp window.  The fingerprint
+    // (ephemeral_pubkey[32] || nonce[12]) is unique per genuine registration
+    // because the agent generates a fresh ephemeral key each time.  A captured
+    // and replayed packet carries identical bytes, so the DB-level unique
+    // constraint catches it here — before any session row is created.
+    //
+    // SAFETY: body.len() >= ECDH_REG_MIN_LEN (68) > ECDH_REG_FINGERPRINT_LEN (44).
+    let fingerprint_slice = &body[..ECDH_REG_FINGERPRINT_LEN];
+    let fingerprint: [u8; ECDH_REG_FINGERPRINT_LEN] =
+        fingerprint_slice.try_into().map_err(|_| ListenerManagerError::InvalidConfig {
+            message: "fingerprint slice conversion failed".into(),
+        })?;
+
+    match ecdh_db.try_record_reg_fingerprint(&fingerprint, ECDH_REPLAY_WINDOW_SECS).await {
+        Ok(true) => {}
+        Ok(false) => {
+            warn!(
+                listener = listener_name,
+                client_ip = %external_ip,
+                "ECDH registration rejected: duplicate ephemeral pubkey/nonce (replay within window)"
+            );
+            return Ok(EcdhOutcome::NotEcdh);
+        }
+        Err(e) => {
+            // DB errors are non-fatal: fail open to avoid blocking legitimate agents.
+            warn!(
+                listener = listener_name,
+                error = %e,
+                "ECDH replay fingerprint DB check failed — proceeding without replay guard"
+            );
+        }
+    }
 
     Ok(EcdhOutcome::Handled(
         process_ecdh_registration(

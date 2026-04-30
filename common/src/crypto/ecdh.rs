@@ -45,6 +45,14 @@ pub const ECDH_SESSION_MIN_LEN: usize = 16 + 12 + 1 + 16;
 pub const ECDH_RESP_MIN_LEN: usize = 12 + 16;
 /// Length of a connection ID (random token returned at registration).
 pub const CONNECTION_ID_LEN: usize = 16;
+/// Length of the replay-detection fingerprint for a registration packet.
+///
+/// The fingerprint is the first 44 bytes of the wire packet:
+/// `ephemeral_pubkey[32] || aes_gcm_nonce[12]`.  Because the ephemeral key
+/// is generated fresh for every legitimate registration, this value is unique
+/// per attempt; an attacker replaying a captured packet will present the same
+/// 44 bytes.
+pub const ECDH_REG_FINGERPRINT_LEN: usize = 32 + 12;
 
 /// HKDF info string for session key derivation.
 const HKDF_INFO_SESSION_KEY: &[u8] = b"red-cell-ecdh-session-key-v1";
@@ -718,9 +726,8 @@ mod tests {
             0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b,
             0x1c, 0x1d, 0x1e, 0x1f,
         ];
-        let nonce_bytes: [u8; 12] = [
-            0xca, 0xfe, 0xba, 0xbe, 0xfa, 0xce, 0xdb, 0xad, 0xde, 0xca, 0xf8, 0x88,
-        ];
+        let nonce_bytes: [u8; 12] =
+            [0xca, 0xfe, 0xba, 0xbe, 0xfa, 0xce, 0xdb, 0xad, 0xde, 0xca, 0xf8, 0x88];
         let plaintext = b"ECDH session test payload for Archon";
 
         let key = Key::<Aes256Gcm>::from_slice(&key_bytes);

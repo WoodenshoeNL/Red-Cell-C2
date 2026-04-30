@@ -6,7 +6,9 @@ use base64::Engine as _;
 use sqlx::SqlitePool;
 use tracing::instrument;
 
-use red_cell_common::crypto::ecdh::{CONNECTION_ID_LEN, ConnectionId, ListenerKeypair};
+use red_cell_common::crypto::ecdh::{
+    CONNECTION_ID_LEN, ConnectionId, ECDH_REG_FINGERPRINT_LEN, ListenerKeypair,
+};
 
 use super::crypto::DbMasterKey;
 use super::error::TeamserverError;
@@ -243,6 +245,47 @@ impl EcdhRepository {
         }
         Ok(ids)
     }
+
+    // ─── Registration replay cache ──────────────────────────────────────────────
+
+    /// Record a registration-packet fingerprint to prevent replay within the window.
+    ///
+    /// `fingerprint` is the first [`ECDH_REG_FINGERPRINT_LEN`] bytes of the
+    /// wire packet (`ephemeral_pubkey[32] || nonce[12]`).
+    ///
+    /// Returns `Ok(true)` when the fingerprint is new (packet accepted).
+    /// Returns `Ok(false)` when the fingerprint already exists (replay rejected).
+    ///
+    /// Expired entries (older than `replay_window_secs`) are pruned on each call
+    /// so the table stays bounded without a background sweeper.
+    pub async fn try_record_reg_fingerprint(
+        &self,
+        fingerprint: &[u8; ECDH_REG_FINGERPRINT_LEN],
+        replay_window_secs: u64,
+    ) -> Result<bool, TeamserverError> {
+        let now = now_secs();
+        let expires_at = now.saturating_add(i64::try_from(replay_window_secs).unwrap_or(i64::MAX));
+
+        // Prune entries at or past their expiry time.
+        sqlx::query("DELETE FROM ts_ecdh_reg_nonces WHERE expires_at <= ?")
+            .bind(now)
+            .execute(&self.pool)
+            .await
+            .map_err(TeamserverError::Sqlx)?;
+
+        // Atomically claim the fingerprint slot.
+        let rows = sqlx::query(
+            "INSERT OR IGNORE INTO ts_ecdh_reg_nonces (fingerprint, expires_at) VALUES (?, ?)",
+        )
+        .bind(fingerprint.as_slice())
+        .bind(expires_at)
+        .execute(&self.pool)
+        .await
+        .map_err(TeamserverError::Sqlx)?
+        .rows_affected();
+
+        Ok(rows > 0)
+    }
 }
 
 fn now_secs() -> i64 {
@@ -432,6 +475,59 @@ mod tests {
         assert!(
             repo.advance_seq_num(&conn_id.0, max_ok).await.expect("advance at i64::MAX"),
             "seq i64::MAX must be accepted"
+        );
+    }
+
+    #[tokio::test]
+    async fn reg_fingerprint_first_call_accepted() {
+        let (db, master_key) = test_db().await;
+        let repo = EcdhRepository::new(db.pool().clone(), master_key);
+
+        let fp = [0xAB_u8; ECDH_REG_FINGERPRINT_LEN];
+        assert!(
+            repo.try_record_reg_fingerprint(&fp, 300).await.expect("record"),
+            "first occurrence must be accepted"
+        );
+    }
+
+    #[tokio::test]
+    async fn reg_fingerprint_second_call_rejected() {
+        let (db, master_key) = test_db().await;
+        let repo = EcdhRepository::new(db.pool().clone(), master_key);
+
+        let fp = [0x12_u8; ECDH_REG_FINGERPRINT_LEN];
+        assert!(repo.try_record_reg_fingerprint(&fp, 300).await.expect("first"), "first accepted");
+        assert!(
+            !repo.try_record_reg_fingerprint(&fp, 300).await.expect("second"),
+            "duplicate must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn reg_fingerprint_distinct_fps_both_accepted() {
+        let (db, master_key) = test_db().await;
+        let repo = EcdhRepository::new(db.pool().clone(), master_key);
+
+        let fp_a = [0x01_u8; ECDH_REG_FINGERPRINT_LEN];
+        let fp_b = [0x02_u8; ECDH_REG_FINGERPRINT_LEN];
+        assert!(repo.try_record_reg_fingerprint(&fp_a, 300).await.expect("a"), "fp_a accepted");
+        assert!(repo.try_record_reg_fingerprint(&fp_b, 300).await.expect("b"), "fp_b accepted");
+    }
+
+    #[tokio::test]
+    async fn reg_fingerprint_expired_entry_reaccepted() {
+        let (db, master_key) = test_db().await;
+        let repo = EcdhRepository::new(db.pool().clone(), master_key);
+
+        let fp = [0x99_u8; ECDH_REG_FINGERPRINT_LEN];
+
+        // Insert with a TTL of 0 seconds (expires immediately).
+        assert!(repo.try_record_reg_fingerprint(&fp, 0).await.expect("first"), "first accepted");
+
+        // A second call should prune the already-expired entry and accept it again.
+        assert!(
+            repo.try_record_reg_fingerprint(&fp, 300).await.expect("second"),
+            "re-registration after expiry must be accepted"
         );
     }
 }

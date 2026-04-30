@@ -55,7 +55,7 @@ def _make_fake_proc_entry(
     return pid_dir
 
 
-class TestIsCargoBuilProcess(unittest.TestCase):
+class TestIsCargoBuildProcess(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.proc_root = Path(self._tmp.name)

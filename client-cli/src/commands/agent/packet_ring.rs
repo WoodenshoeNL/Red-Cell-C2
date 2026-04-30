@@ -1,0 +1,81 @@
+//! `agent packet-ring` — fetch the last N raw protocol frames for an agent.
+
+use serde::{Deserialize, Serialize};
+use tracing::instrument;
+
+use crate::AgentId;
+use crate::client::ApiClient;
+use crate::error::CliError;
+use crate::output::TextRender;
+
+/// A single captured packet frame returned by the server.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PacketRingFrame {
+    /// Direction: `"rx"` (agent → teamserver) or `"tx"` (teamserver → agent).
+    pub direction: String,
+    /// Agent-protocol sequence number for this frame, if known.
+    pub seq: Option<u64>,
+    /// Raw frame bytes, hex-encoded.
+    pub bytes_hex: String,
+}
+
+/// Response data for `agent packet-ring`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PacketRingData {
+    /// Agent id in hex.
+    pub agent_id: String,
+    /// Requested frame count per direction.
+    pub n: u8,
+    /// Captured frames (empty when the ring-buffer is not yet populated).
+    pub frames: Vec<PacketRingFrame>,
+    /// Human-readable note when the ring-buffer is unavailable.
+    pub note: Option<String>,
+}
+
+impl TextRender for PacketRingData {
+    fn render_text(&self) -> String {
+        if self.frames.is_empty() {
+            let note = self.note.as_deref().unwrap_or("no frames available");
+            return format!(
+                "agent {} — 0 frames (n={})\nnote: {}",
+                self.agent_id, self.n, note
+            );
+        }
+        let mut lines = vec![format!(
+            "agent {} — {} frame(s) (n={})",
+            self.agent_id,
+            self.frames.len(),
+            self.n
+        )];
+        for (i, frame) in self.frames.iter().enumerate() {
+            let seq_label = frame.seq.map_or_else(|| "?".to_owned(), |s| s.to_string());
+            let trunc = if frame.bytes_hex.len() > 64 {
+                format!("{}…({} hex chars)", &frame.bytes_hex[..64], frame.bytes_hex.len())
+            } else {
+                frame.bytes_hex.clone()
+            };
+            lines.push(format!(
+                "  [{i}] dir={} seq={seq_label} bytes={}",
+                frame.direction, trunc
+            ));
+        }
+        if let Some(note) = &self.note {
+            lines.push(format!("note: {note}"));
+        }
+        lines.join("\n")
+    }
+}
+
+/// `agent packet-ring <id> [--n N]` — fetch the last N raw frames per direction.
+///
+/// Calls `GET /agents/{id}/debug/packet-ring?n={n}`.
+/// Returns an empty `frames` list (with a `note`) when the server has the
+/// endpoint but has not yet implemented the ring-buffer backing store.
+#[instrument(skip(client))]
+pub async fn fetch_packet_ring(
+    client: &ApiClient,
+    id: AgentId,
+    n: u8,
+) -> Result<PacketRingData, CliError> {
+    client.get(&format!("/agents/{id}/debug/packet-ring?n={n}")).await
+}

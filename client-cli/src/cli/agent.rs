@@ -239,4 +239,24 @@ pub enum AgentCommands {
         #[arg(long)]
         task_id: String,
     },
+
+    /// Fetch the last N raw protocol frames captured for an agent.
+    ///
+    /// Returns hex-encoded frames from the server-side packet ring-buffer.
+    /// When the ring-buffer backing store is not yet populated the `frames`
+    /// array will be empty and the response will include a `note` field.
+    ///
+    /// Used by the diagnostic bundle writer to populate `last_packets.bin`.
+    ///
+    /// Examples:
+    ///   red-cell-cli agent packet-ring DEADBEEF
+    ///   red-cell-cli agent packet-ring DEADBEEF --n 10
+    #[command(verbatim_doc_comment)]
+    PacketRing {
+        /// Agent ID
+        id: AgentId,
+        /// Number of frames to request per direction (default: 5, server caps at 20)
+        #[arg(long, default_value_t = 5)]
+        n: u8,
+    },
 }

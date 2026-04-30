@@ -24,6 +24,7 @@ from .cli import (
     CliConfig,
     CliError,
     agent_list,
+    agent_packet_ring,
     agent_show,
     listener_list,
     listener_show,
@@ -311,8 +312,10 @@ def _build_agent_state(cli: CliConfig) -> dict:
     return {
         "captured_at": datetime.now(timezone.utc).isoformat(),
         "note": (
-            "seq_num/ECDH-state/packet ring-buffer not exposed by CLI API; "
-            "query the SQLite DB column last_seen_seq in ts_agents for raw seq info"
+            "ECDH-state not exposed by CLI API; "
+            "raw packet frames are captured in last_packets.bin via agent packet-ring "
+            "(empty until teamserver ring-buffer backing store is implemented); "
+            "query ts_agents.last_seen_seq in SQLite for raw seq info"
         ),
         "agents": per_agent,
     }
@@ -420,6 +423,65 @@ def _build_timeline(
     return "\n".join(result_parts)
 
 
+def _collect_packet_ring_bytes(cli: CliConfig, agents: list[dict]) -> bytes:
+    """Collect packet ring-buffer data for each agent and encode as a binary blob.
+
+    Format (big-endian throughout)::
+
+        For each agent that has frames:
+          [4]  agent_id_len  — byte length of the UTF-8 agent-id string
+          [N]  agent_id      — UTF-8 string (N = agent_id_len)
+          [4]  frame_count   — number of frames
+          For each frame:
+            [1]  direction   — 0x00 = rx, 0x01 = tx, 0xFF = unknown
+            [4]  frame_len   — byte length of the raw frame
+            [M]  frame_data  — raw bytes (M = frame_len, decoded from hex)
+
+    If the endpoint is not available (404) or returns an empty frame list, no
+    bytes are written for that agent.  The resulting file may be empty when no
+    ring-buffer data is available — this is expected until the teamserver
+    implements the backing store.
+    """
+    import struct
+
+    buf = bytearray()
+    for entry in agents:
+        agent_id = entry.get("id") or entry.get("AgentID") or entry.get("agent_id")
+        if not agent_id:
+            continue
+        agent_id_str = str(agent_id)
+        try:
+            ring = agent_packet_ring(cli, agent_id_str)
+        except CliError:
+            continue
+
+        frames = ring.get("frames") or []
+        if not frames:
+            continue
+
+        agent_id_bytes = agent_id_str.encode("utf-8")
+        buf += struct.pack(">I", len(agent_id_bytes))
+        buf += agent_id_bytes
+        buf += struct.pack(">I", len(frames))
+        for frame in frames:
+            direction_str = frame.get("direction", "")
+            if direction_str == "rx":
+                direction_byte = 0x00
+            elif direction_str == "tx":
+                direction_byte = 0x01
+            else:
+                direction_byte = 0xFF
+            try:
+                raw = bytes.fromhex(frame.get("bytes_hex") or "")
+            except ValueError:
+                raw = b""
+            buf += struct.pack(">B", direction_byte)
+            buf += struct.pack(">I", len(raw))
+            buf += raw
+
+    return bytes(buf)
+
+
 def write_scenario_diag_bundle(
     run_dir: Path,
     scenario_id: str,
@@ -435,7 +497,7 @@ def write_scenario_diag_bundle(
     * ``agent_state.json``     — per-agent info + per-agent audit tail
     * ``teamserver_state.json``— full agent registry, listener detail, audit tail, server log
     * ``timeline.txt``         — chronological merge of audit log + server log + harness output
-    * ``last_packets.bin``     — empty placeholder (raw packet ring-buffer not exposed by CLI)
+    * ``last_packets.bin``     — raw packet ring-buffer frames (length-prefixed per agent); empty when server ring-buffer not yet populated
 
     All CLI errors are caught and embedded as ``"error"`` fields so a partial
     failure never suppresses the rest of the bundle.
@@ -468,10 +530,13 @@ def write_scenario_diag_bundle(
     (diag_dir / "timeline.txt").write_text(timeline, encoding="utf-8")
 
     # ── last_packets.bin ──────────────────────────────────────────────────────
-    # The CLI API does not expose raw packet ring buffers.  Write an empty file
-    # so the expected artifact is always present; future server-side work can
-    # populate it when a /debug/packet-ring endpoint is added.
-    (diag_dir / "last_packets.bin").write_bytes(b"")
+    # Collect raw packet ring-buffer data for each known agent.  The helper
+    # calls `agent packet-ring` per agent; if the endpoint returns 404 or the
+    # ring-buffer is not yet populated the helper skips that agent silently.
+    # The file is always written (possibly empty) so the artifact is present.
+    known_agents: list[dict] = agent_state.get("agents") or []
+    packet_bytes = _collect_packet_ring_bytes(ctx.cli, known_agents)
+    (diag_dir / "last_packets.bin").write_bytes(packet_bytes)
 
     return diag_dir.resolve()
 

@@ -361,6 +361,17 @@ def agent_kill(cfg: CliConfig, agent_id: str) -> dict:
     return _run(cfg, "agent", "kill", agent_id, "--wait")
 
 
+def agent_packet_ring(cfg: CliConfig, agent_id: str, n: int = 5) -> dict:
+    """Fetch the last N raw protocol frames for an agent.
+
+    Returns a dict with keys ``agent_id``, ``n``, ``frames`` (list of
+    ``{direction, seq, bytes_hex}``), and optionally ``note``.
+
+    Raises :class:`CliError` on 404 (agent not found) or other server errors.
+    """
+    return _run(cfg, "agent", "packet-ring", agent_id, "--n", str(n))
+
+
 def agent_output(
     cfg: CliConfig,
     agent_id: str,

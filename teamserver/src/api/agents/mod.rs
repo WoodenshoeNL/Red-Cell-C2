@@ -760,3 +760,85 @@ pub(super) async fn get_agent_output(
     let total = entries.len();
     Ok(Json(AgentOutputPage { total, entries }))
 }
+
+// ── Debug: packet ring-buffer ─────────────────────────────────────────────────
+
+/// Query parameters for `GET /agents/{id}/debug/packet-ring`.
+#[derive(Debug, Deserialize, IntoParams)]
+pub(super) struct PacketRingQuery {
+    /// Number of frames to return per direction (default: 5, max: 20).
+    n: Option<u8>,
+}
+
+/// A single captured packet frame (placeholder for future ring-buffer data).
+#[derive(Debug, Serialize, ToSchema)]
+pub(super) struct PacketRingFrame {
+    /// Direction of the frame: `"rx"` (agent → teamserver) or `"tx"` (teamserver → agent).
+    pub direction: String,
+    /// Agent-protocol sequence number for this frame, if known.
+    pub seq: Option<u64>,
+    /// Raw frame bytes, hex-encoded.
+    pub bytes_hex: String,
+}
+
+/// Response body for `GET /agents/{id}/debug/packet-ring`.
+#[derive(Debug, Serialize, ToSchema)]
+pub(super) struct PacketRingResponse {
+    /// Agent id in hex.
+    pub agent_id: String,
+    /// Requested frame count per direction.
+    pub n: u8,
+    /// Captured frames (may be empty when the ring-buffer is not yet populated).
+    pub frames: Vec<PacketRingFrame>,
+    /// Human-readable note when the ring-buffer is unavailable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<&'static str>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/agents/{id}/debug/packet-ring",
+    context_path = "/api/v1",
+    tag = "agents",
+    security(("api_key" = [])),
+    params(
+        ("id" = String, Path, description = "Agent id in hex (with optional 0x prefix)"),
+        PacketRingQuery,
+    ),
+    responses(
+        (status = 200, description = "Last N raw frames per direction (empty when ring-buffer not yet implemented)", body = PacketRingResponse),
+        (status = 400, description = "Invalid agent id", body = ApiErrorBody),
+        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
+        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
+        (status = 404, description = "Agent not found", body = ApiErrorBody)
+    )
+)]
+pub(super) async fn get_agent_packet_ring(
+    State(state): State<TeamserverState>,
+    identity: ReadApiAccess,
+    Path(id): Path<String>,
+    Query(query): Query<PacketRingQuery>,
+) -> Result<Json<PacketRingResponse>, AgentApiError> {
+    let agent_id = parse_api_agent_id(&id)?;
+
+    state
+        .agent_registry
+        .get(agent_id)
+        .await
+        .ok_or(crate::TeamserverError::AgentNotFound { agent_id })?;
+    authorize_agent_access(&state, &identity.key_id, agent_id).await?;
+
+    let n = query.n.unwrap_or(5).min(20);
+
+    // The in-memory packet ring-buffer is not yet implemented.  Return an empty
+    // frame list with a note so callers know the endpoint is wired up but the
+    // backing store is not yet populated.  When a ring-buffer is added to the
+    // agent registry this handler will fill `frames` without any CLI / Python
+    // changes.
+    Ok(Json(PacketRingResponse {
+        agent_id: format!("{agent_id:08X}"),
+        n,
+        frames: vec![],
+        note: Some("packet ring-buffer not yet implemented; frames will appear here once added"),
+    }))
+}

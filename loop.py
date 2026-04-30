@@ -863,14 +863,64 @@ def _path_within_tree(path: Path, root: Path) -> bool:
         return False
 
 
+# Commands that legitimately hold files open inside a Cargo target directory.
+# A shell, editor, or test binary with CWD inside target/ must NOT block cleanup.
+# "build-script-build" exceeds the 15-char comm limit; the exe-basename fallback
+# covers it.
+_CARGO_BUILD_COMMS: frozenset[str] = frozenset(
+    {
+        "cargo",
+        "rustc",
+        "cargo-nextest",
+        "nextest",
+        "cc1",
+        "ld",
+        "ar",
+        "build-script-build",
+        "build-script-bui",  # comm-truncated form of build-script-build
+    }
+)
+
+
+def _is_cargo_build_process(pid_dir: Path) -> bool:
+    """
+    Return True if the process in pid_dir is a cargo / rustc / build-tool binary.
+
+    Reads /proc/<pid>/comm first (fast kernel short-name, ≤15 chars).
+    Falls back to the basename of /proc/<pid>/exe for names that get truncated.
+    Returns False on any read error so callers stay conservative only where needed.
+    """
+    comm_path = pid_dir / "comm"
+    try:
+        comm = comm_path.read_text().strip()
+        if comm in _CARGO_BUILD_COMMS:
+            return True
+    except OSError:
+        pass
+
+    exe_path = pid_dir / "exe"
+    try:
+        exe_name = Path(os.readlink(str(exe_path))).name
+        if exe_name in _CARGO_BUILD_COMMS:
+            return True
+    except OSError:
+        pass
+
+    return False
+
+
 def _stable_cargo_target_in_use(target_dir: Path) -> bool:
     """
-    Return True if any live process is likely executing against target_dir.
+    Return True if a cargo/rustc/nextest process is actively using target_dir.
 
     Cargo holds .cargo-lock only while compiling; ``cargo nextest`` releases it
     before running tests.  ``clean_tmp_cargo_targets`` must not delete
     ``debug/deps`` during that window or nextest's [double-spawn] exec hits
     ENOENT (see red-cell-c2-sl2cm / red-cell-c2-5jieq).
+
+    We only block on processes whose command name is in ``_CARGO_BUILD_COMMS``.
+    A long-lived shell, editor, or test binary with CWD inside the target dir is
+    not a risk to ``debug/deps`` and must not prevent cleanup.
     """
     try:
         resolved_root = target_dir.resolve()
@@ -884,6 +934,10 @@ def _stable_cargo_target_in_use(target_dir: Path) -> bool:
         return False
 
     for pid_dir in pid_dirs:
+        # Only consider this process if it is a cargo/rust build tool.
+        if not _is_cargo_build_process(pid_dir):
+            continue
+
         cwd_link = pid_dir / "cwd"
         try:
             cwd = cwd_link.readlink()

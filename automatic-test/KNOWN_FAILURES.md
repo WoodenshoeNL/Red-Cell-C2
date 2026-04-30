@@ -32,12 +32,12 @@ row to *Resolved* and add the closing commit / fix description.
 
 | Signature (substring of error / stderr) | Scenario | Bead | First seen | Last seen | Status |
 |----------------------------------------|----------|------|------------|-----------|--------|
-| `[TIMEOUT] timeout: timed out waiting for output from task` | 04, 05, 07, 19, 21 | red-cell-c2-vk3xs | 2026-04-28 | 2026-04-29 | P1, task-output timeout regression after 5dggm seq_num fix — now also affects Windows Demon (sc05 NEW) |
-| `Timed out after 30s waiting for local file` | 06 | red-cell-c2-vk3xs | 2026-04-29 | 2026-04-29 | (cascade — upload SHA-256 verified, download never returns) |
-| `Timed out after 30s waiting for screenshot loot entry` | 08 | red-cell-c2-vk3xs | 2026-04-29 | 2026-04-29 | (cascade — screenshot command queued, loot entry never appears) |
-| `[SUBPROCESS_TIMEOUT] CLI subprocess did not exit within expected timeout (40s)` | 11 | red-cell-c2-vk3xs | 2026-04-28 | 2026-04-29 | (cascade — CLI hangs on download, same task-output pipeline) |
-| `Timed out after 60s waiting for agent checkin` | 17 | red-cell-c2-al4eo | 2026-04-29 | 2026-04-29 | P2, Archon ECDH checkin fails despite WMI fix and TCP reachability from Windows VM |
-| `Timed out after 30s waiting for 10 new agent checkins` | 14 | red-cell-c2-8ss6q | 2026-04-29 | 2026-04-29 | P2, 10 Demon agents launched via WMI but none check in (single Demon checks in fine in sc05) |
+| `[TIMEOUT] timeout: timed out waiting for output from task` | 04, 07, 21 | red-cell-c2-vk3xs | 2026-04-28 | 2026-04-30 | P1, task-output timeout regression after 5dggm seq_num fix |
+| `Timed out after 30s waiting for remote upload` | 06 | red-cell-c2-vk3xs | 2026-04-29 | 2026-04-30 | (cascade — upload command accepted, file never appears on target) |
+| `Timed out after 30s waiting for screenshot loot entry` | 08 | red-cell-c2-vk3xs | 2026-04-29 | 2026-04-30 | (cascade — screenshot command queued, loot entry never appears) |
+| `Timed out after 30s waiting for download loot entry` | 11 | red-cell-c2-vk3xs | 2026-04-28 | 2026-04-30 | (cascade — download loot entry never appears) |
+| `Process could not be started: Path:[]` | 05, 14, 19 | red-cell-c2-z1hl9 | 2026-04-30 | 2026-04-30 | P1, Demon ProcessCreate on Windows fails — CreateProcessW called with NULL lpEnvironment; child process gets empty PATH |
+| `Timed out after 60s waiting for agent checkin` | 17 | red-cell-c2-al4eo | 2026-04-29 | 2026-04-30 | P2, Archon ECDH checkin fails despite WMI fix and TCP reachability from Windows VM |
 
 ---
 
@@ -49,6 +49,7 @@ than a new bug.
 
 | Signature (substring of error / stderr) | Scenario | Bead | Resolved at | Notes |
 |----------------------------------------|----------|------|-------------|-------|
+| `Timed out after 30s waiting for 10 new agent checkins` | 14 | red-cell-c2-8ss6q | 2026-04-30 | 10/10 Demon agents now check in (was 0/10). Checkin fixed by stale-process cleanup + listener-name filtering. Command execution now blocked by new PATH bug (red-cell-c2-z1hl9). |
 | `[TIMEOUT] timeout: timed out waiting for output from task` (seq_num desync fix) | 04, 06, 07, 11, 21 | red-cell-c2-5dggm | 2026-04-29 | ECDH seq_num desync: always increment callback_seq after send attempt. **REGRESSED** — see red-cell-c2-vk3xs |
 | `WMI Win32_Process.Create failed: ReturnValue=21` | 05, 08, 14, 17, 19 | red-cell-c2-irxsr | 2026-04-29 | PureWindowsPath fix for WMI CurrentDirectory extraction. WMI deploys now work. Downstream issues exposed: sc17 Archon checkin (red-cell-c2-al4eo), sc14 stress checkin (red-cell-c2-8ss6q). |
 | `GET_JOB accepted (HTTP 200): got HTTP 404` | 13 | red-cell-c2-irlsn | 2026-04-29 | Fixed GET_JOB heartbeat packet: removed spurious u32be(0) length prefix. sc13 passes. |

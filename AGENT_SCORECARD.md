@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1728 | 296 | 148 |
+| Tasks closed | 1746 | 296 | 148 |
 | Bugs filed against | 284 | 50 | 18 |
 | Bug rate (bugs/task) | 0.16 | 0.17 | 0.12 |
 | Quality score | 84% | 83% | 88% |
 
-*Bug rates: Claude 284/1728=0.1644→0.16, Codex 50/296=0.1689→0.17, Cursor 18/148=0.1216→0.12*
+*Bug rates: Claude 284/1746=0.1627→0.16, Codex 50/296=0.1689→0.17, Cursor 18/148=0.1216→0.12*
 
 ## Violation Breakdown
 
@@ -41,6 +41,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-04-30 10:00 — c6e3a61c..84995d70
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 18 | 0 | Highly productive cycle spanning teamserver, agents, autotest, archon, and loop infrastructure. Key fixes: (1) **Request-ID collision prevention** (3 commits — `1685dd73`, `4804fc74`, `1099b423`): `task_status` now validates `c.task_id == task_id` before returning request-context matches; `exec_wait` introduces `boundary_established` flag so historical rows sharing a request_id are never treated as matches on the first poll; `list_correlated_for_task` SQL tightened to `(request_id = ? AND task_id IS NULL)` so explicitly-owned rows from other tasks are excluded. Regression tests for all three paths. (2) **Archon X25519 crypto fix** (`8bb9e204`): Montgomery ladder was computing `E*(BB+a24*E)` instead of `E*(AA+a24*E)` — corrected test vectors to match RFC 7748 §6.1. SHA-256 known-answer test vector also corrected. Cross-implementation crypto tests added in `common/src/crypto/ecdh.rs` for AES-256-GCM and X25519. (3) **Agent seq_num desync prevention** (`306e9b61`, `6c57df6c`): Phantom and Specter now always advance `callback_seq` and `ctr_offset` before checking the transport result, preventing permanent desync when the server accepted the packet but the response was lost. (4) **PayloadEndian dispatch** (`ba4bda51`, `fe28cde0`): new `PayloadEndian` enum (Le/Be) propagated via `tokio::task_local!` so `CallbackParser` reads u32/u64 in the correct byte order for Demon (BE) vs Phantom/Specter (LE). ECDH path hardcodes LE. Clippy `too_many_arguments` resolved by introducing `EcdhSessionContext` struct. (5) **ECDH liveness refresh**: session handler now calls `set_last_call_in` so agents using ECDH callbacks are not marked dead. (6) **Dispatcher error resilience**: `collect_response_bytes` now logs and continues on individual package dispatch failures instead of aborting the batch. Integration tests updated (404 → 200 for error packets). (7) **Autotest fixes** (3 commits): GET_JOB heartbeat format corrected (empty body, no length prefix); stress scenario sc14 now counts agents per-listener instead of "new since test start"; deploy WMI path extraction fixed with `PureWindowsPath`. (8) **Loop improvements** (6 commits): `TMP_CARGO_HARD_LIMIT_GB` force-clean at 15 GB; `_stable_cargo_target_in_use` tightened to only block on cargo/rustc/nextest binaries; cross-compile heavyweight cleanup for musl/mingw targets; pull-rebase failure surfaced via `RC_AUTOTEST_PULL_REBASE_OK` env var. All work attributed to Claude (Sonnet 4.6 for loop, Opus 4.6 for teamserver/agents/autotest, Opus 4.7 for beads management and cross-compile cleanup). |
+| Codex | 0 | 0 | One beads sweep commit (`582d110f`) — no code changes. |
+| Cursor | 0 | 0 | No activity in this review range. |
+
+Build: passed (cargo check workspace 1m16s; cargo nextest run --workspace 6110/6110 PASS in 218s; cargo clippy --workspace -- -D warnings clean).
 
 ### QA Review — 2026-04-27 16:10 — e89ad950..13f3e993
 

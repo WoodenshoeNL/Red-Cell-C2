@@ -462,7 +462,7 @@ class TestBuildAgentState(unittest.TestCase):
         self.assertIn("agents", result)
         self.assertEqual(len(result["agents"]), 1)
         self.assertIn("note", result)
-        self.assertIn("seq_num", result["note"])
+        self.assertIn("last_seen_seq", result["note"])
 
     def test_agent_show_error_is_embedded(self) -> None:
         agents = [{"id": "DEADBEEF"}]

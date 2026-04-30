@@ -741,6 +741,28 @@ class TestCollectPacketRingBytes(unittest.TestCase):
 
         self.assertEqual(result, b"")
 
+    def test_invalid_bytes_hex_produces_zero_length_frame(self) -> None:
+        agent_id = "BADHEX01"
+        agents = [{"id": agent_id}]
+        ring = {"frames": [{"direction": "rx", "bytes_hex": "ZZ"}]}
+
+        with patch("lib.failure_diagnostics.agent_packet_ring", return_value=ring):
+            # Must not raise even though "ZZ" is not valid hex.
+            result = _collect_packet_ring_bytes(_cli(), agents)
+
+        agent_id_encoded = agent_id.encode("utf-8")
+        # Header: agent_id_len + agent_id + frame_count
+        header_size = 4 + len(agent_id_encoded) + 4
+        # Frame: direction (1) + frame_len (4) + raw (0)
+        expected_total = header_size + 1 + 4
+        self.assertEqual(len(result), expected_total)
+
+        frame_count = struct.unpack_from(">I", result, 4 + len(agent_id_encoded))[0]
+        self.assertEqual(frame_count, 1)
+
+        frame_len = struct.unpack_from(">I", result, header_size + 1)[0]
+        self.assertEqual(frame_len, 0)
+
     def test_mixed_agents_only_encodes_agents_with_frames(self) -> None:
         agents = [{"id": "NOFRAMES"}, {"id": "HASFRAMES"}]
         no_frames_ring = {"frames": []}

@@ -96,6 +96,21 @@ git push                # Push to remote
 - Use descriptive titles and set appropriate priority/type
 - Always sync before ending session
 
+### Closing autotest-tracked bugs
+
+**Do not close a bead while its failure signature is still observed in the most recent autotest run.** Green unit tests are not sufficient evidence of a fix when the bug was filed against an integration scenario.
+
+This has burned us repeatedly (e.g. `vk3xs`, `al4eo`, `8ss6q` were closed on green unit tests, then reopened the next autotest run because the integration scenarios still failed). The fix-and-reopen churn obscures the real status board.
+
+**Required before `br close <id>` for any bug filed from an autotest scenario:**
+
+1. Identify the failure signature(s) in the issue body (e.g. `[TIMEOUT] timeout: timed out waiting for output`, `Timed out after 60s waiting for agent checkin`).
+2. Check the latest autotest report under `automatic-test/runs/` (or the most recent run summary in chat). If any scenario still fails with that signature, **do not close**.
+3. If the unit-test layer is fixed but the integration scenario still fails, update the issue body with a note like *"unit tests pass at <commit>, integration sc<NN> still fails — fix necessary but not sufficient"* and **leave it open**.
+4. Only close when the latest autotest run shows the previously-failing scenarios pass (or the scenarios are explicitly retired).
+
+The autotest report's **Active Issues** table is the source of truth — if a bead appears there, it is still observable and must stay open.
+
 <!-- end-br-agent-instructions -->
 
 ## Landing the Plane (Session Completion)

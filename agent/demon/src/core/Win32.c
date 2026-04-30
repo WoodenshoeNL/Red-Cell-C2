@@ -688,7 +688,7 @@ BOOL ProcessCreate(
             PUTS( "CreateProcessWithTokenW" )
             if ( ! Instance->Win32.CreateProcessWithTokenW(
                     PrimaryToken,
-                    LOGON_NETCREDENTIALS_ONLY,
+                    0, /* flag=0: child runs fully as stolen-token user for both local and network access */
                     App,
                     CmdLine,
                     Flags | CREATE_NO_WINDOW | EnvFlags,

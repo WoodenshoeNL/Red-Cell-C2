@@ -430,6 +430,39 @@ BOOL RtSspicli(
     return TRUE;
 }
 
+BOOL RtUserenv(
+    VOID
+) {
+    /* "userenv.dll" — assignments are in scrambled order to avoid plaintext DLL name */
+    CHAR ModuleName[ 12 ] = { 0 };
+
+    ModuleName[  5 ] = HideChar('n');
+    ModuleName[  0 ] = HideChar('u');
+    ModuleName[  9 ] = HideChar('l');
+    ModuleName[  3 ] = HideChar('r');
+    ModuleName[  7 ] = HideChar('.');
+    ModuleName[  2 ] = HideChar('e');
+    ModuleName[ 10 ] = HideChar('l');
+    ModuleName[  8 ] = HideChar('d');
+    ModuleName[  1 ] = HideChar('s');
+    ModuleName[  6 ] = HideChar('v');
+    ModuleName[  4 ] = HideChar('e');
+    ModuleName[ 11 ] = HideChar('\0');
+
+    if ( ( Instance->Modules.Userenv = LdrModuleLoad( ModuleName ) ) ) {
+        MemZero( ModuleName, sizeof( ModuleName ) );
+        Instance->Win32.CreateEnvironmentBlock  = LdrFunctionAddr( Instance->Modules.Userenv, H_FUNC_CREATEENVIRONMENTBLOCK );
+        Instance->Win32.DestroyEnvironmentBlock = LdrFunctionAddr( Instance->Modules.Userenv, H_FUNC_DESTROYENVIRONMENTBLOCK );
+        PUTS( "Loaded Userenv functions" )
+    } else {
+        MemZero( ModuleName, sizeof( ModuleName ) );
+        PUTS( "Failed to load Userenv — environment block unavailable" )
+        /* non-fatal: ProcessCreate falls back to NULL lpEnvironment */
+    }
+
+    return TRUE;
+}
+
 BOOL RtAmsi(
     VOID
 ) {

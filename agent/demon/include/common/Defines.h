@@ -367,5 +367,9 @@
 
 #define H_MODULE_KERNEL32                         0xadd31df0
 #define H_MODULE_NTDLL                            0x70e61753
+#define H_MODULE_USERENV                          0x10d30ab7
+
+#define H_FUNC_CREATEENVIRONMENTBLOCK             0x830f9d19
+#define H_FUNC_DESTROYENVIRONMENTBLOCK            0x5154b02f
 
 #endif

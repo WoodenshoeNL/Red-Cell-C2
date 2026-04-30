@@ -279,6 +279,7 @@ VOID DemonInit( PVOID ModuleInst, PKAYN_ARGS KArgs )
             RtNetApi32,
             RtWs2_32,
             RtSspicli,
+            RtUserenv,
 #ifdef TRANSPORT_HTTP
             RtWinHttp,
 #endif

@@ -47,6 +47,10 @@ BOOL RtSspicli(
     VOID
 );
 
+BOOL RtUserenv(
+    VOID
+);
+
 BOOL RtAmsi(
     VOID
 );

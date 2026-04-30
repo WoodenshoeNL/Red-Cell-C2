@@ -593,6 +593,7 @@ BOOL ProcessCreate(
     BOOL            DisabledWow64Redir = FALSE;
     BOOL            DisabledImp        = FALSE;
     HANDLE          PrimaryToken       = NULL;
+    LPVOID          EnvBlock           = NULL;
 
     StartUpInfo.cb          = sizeof( STARTUPINFOA );
     StartUpInfo.dwFlags     = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
@@ -636,6 +637,18 @@ BOOL ProcessCreate(
     }
 #endif
 
+    /* Build an environment block so child processes get a proper PATH even when
+     * the Demon process was started with an empty environment (e.g. spawned by
+     * a service with no inherited environment).  CreateEnvironmentBlock reads
+     * the user's environment from the registry and is independent of the
+     * current process's own (potentially empty) environment block. */
+    if ( Instance->Win32.CreateEnvironmentBlock ) {
+        Instance->Win32.CreateEnvironmentBlock( &EnvBlock, NULL, FALSE );
+        PRINTF( "CreateEnvironmentBlock: %s\n", EnvBlock ? "OK" : "FAILED" )
+    }
+    /* When we have an explicit environment block it must be a Unicode block. */
+    DWORD EnvFlags = EnvBlock ? CREATE_UNICODE_ENVIRONMENT : 0;
+
     if ( Instance->Tokens.Impersonate )
     {
         PUTS( "Impersonate" )
@@ -674,8 +687,8 @@ BOOL ProcessCreate(
                     LOGON_NETCREDENTIALS_ONLY,
                     App,
                     CmdLine,
-                    Flags | CREATE_NO_WINDOW,
-                    NULL,
+                    Flags | CREATE_NO_WINDOW | EnvFlags,
+                    EnvBlock,
                     lpCurrentDirectory,
                     &StartUpInfo,
                     ProcessInfo
@@ -699,8 +712,8 @@ BOOL ProcessCreate(
                     LOGON_NETCREDENTIALS_ONLY,
                     App,
                     CmdLine,
-                    Flags | CREATE_NO_WINDOW,
-                    NULL,
+                    Flags | CREATE_NO_WINDOW | EnvFlags,
+                    EnvBlock,
                     lpCurrentDirectory,
                     &StartUpInfo,
                     ProcessInfo
@@ -720,8 +733,8 @@ BOOL ProcessCreate(
                 NULL,
                 NULL,
                 TRUE,
-                Flags | CREATE_NO_WINDOW,
-                NULL,
+                Flags | CREATE_NO_WINDOW | EnvFlags,
+                EnvBlock,
                 NULL,
                 &StartUpInfo,
                 ProcessInfo
@@ -790,6 +803,11 @@ BOOL ProcessCreate(
         }
 
         DATA_FREE( AnonPipe, sizeof( ANONPIPE ) );
+    }
+
+    if ( EnvBlock && Instance->Win32.DestroyEnvironmentBlock ) {
+        Instance->Win32.DestroyEnvironmentBlock( EnvBlock );
+        EnvBlock = NULL;
     }
 
     if ( PrimaryToken ) {

@@ -36,10 +36,7 @@ impl TextRender for PacketRingData {
     fn render_text(&self) -> String {
         if self.frames.is_empty() {
             let note = self.note.as_deref().unwrap_or("no frames available");
-            return format!(
-                "agent {} — 0 frames (n={})\nnote: {}",
-                self.agent_id, self.n, note
-            );
+            return format!("agent {} — 0 frames (n={})\nnote: {}", self.agent_id, self.n, note);
         }
         let mut lines = vec![format!(
             "agent {} — {} frame(s) (n={})",
@@ -54,10 +51,7 @@ impl TextRender for PacketRingData {
             } else {
                 frame.bytes_hex.clone()
             };
-            lines.push(format!(
-                "  [{i}] dir={} seq={seq_label} bytes={}",
-                frame.direction, trunc
-            ));
+            lines.push(format!("  [{i}] dir={} seq={seq_label} bytes={}", frame.direction, trunc));
         }
         if let Some(note) = &self.note {
             lines.push(format!("note: {note}"));

@@ -49,6 +49,7 @@ profiles/*.tls.key
 
 # Claude Code worktrees (ephemeral, machine-local)
 .claude/worktrees/
+.claude/scheduled_tasks.lock
 
 # Temporary files and runtime artifacts
 .tmp/

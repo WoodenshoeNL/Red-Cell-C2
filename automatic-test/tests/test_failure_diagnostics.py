@@ -18,6 +18,7 @@ from lib.failure_diagnostics import (
     _build_agent_state,
     _build_teamserver_state,
     _build_timeline,
+    _collect_packet_ring_bytes,
     _fetch_log_tail_cli,
     _listener_request_summary,
     build_failure_diagnostic_report,
@@ -665,6 +666,105 @@ class TestWriteScenarioDiagBundle(unittest.TestCase):
             diag_dir = write_scenario_diag_bundle(run_dir, "05", ctx)
         for artifact in ("agent_state.json", "teamserver_state.json", "timeline.txt", "last_packets.bin"):
             self.assertTrue((diag_dir / artifact).exists())
+
+
+class TestCollectPacketRingBytes(unittest.TestCase):
+    """Unit tests for _collect_packet_ring_bytes."""
+
+    def test_empty_agent_list_returns_empty_bytes(self) -> None:
+        result = _collect_packet_ring_bytes(_cli(), [])
+        self.assertEqual(result, b"")
+
+    def test_cli_error_agent_silently_skipped(self) -> None:
+        agents = [{"id": "DEADBEEF"}]
+        with patch(
+            "lib.failure_diagnostics.agent_packet_ring",
+            side_effect=CliError("NOT_FOUND", "no ring", 1),
+        ):
+            result = _collect_packet_ring_bytes(_cli(), agents)
+        self.assertEqual(result, b"")
+
+    def test_agent_with_frames_encodes_correct_structure(self) -> None:
+        agent_id = "CAFE0001"
+        frame_hex = "deadbeef"
+        raw_bytes = bytes.fromhex(frame_hex)
+        agents = [{"id": agent_id}]
+        ring = {"frames": [{"direction": "rx", "bytes_hex": frame_hex}]}
+
+        with patch("lib.failure_diagnostics.agent_packet_ring", return_value=ring):
+            result = _collect_packet_ring_bytes(_cli(), agents)
+
+        import struct
+        agent_id_encoded = agent_id.encode("utf-8")
+        expected = (
+            struct.pack(">I", len(agent_id_encoded))
+            + agent_id_encoded
+            + struct.pack(">I", 1)          # frame_count
+            + struct.pack(">B", 0x00)       # direction: rx
+            + struct.pack(">I", len(raw_bytes))
+            + raw_bytes
+        )
+        self.assertEqual(result, expected)
+
+    def test_direction_bytes_encoding(self) -> None:
+        agents = [{"id": "A1"}]
+        frames = [
+            {"direction": "rx", "bytes_hex": "aa"},
+            {"direction": "tx", "bytes_hex": "bb"},
+            {"direction": "???", "bytes_hex": "cc"},
+        ]
+        ring = {"frames": frames}
+
+        with patch("lib.failure_diagnostics.agent_packet_ring", return_value=ring):
+            result = _collect_packet_ring_bytes(_cli(), agents)
+
+        import struct
+        agent_id_encoded = b"A1"
+        # Skip header (4 + 2 + 4 bytes) then read direction bytes
+        offset = 4 + len(agent_id_encoded) + 4  # agent_id_len + agent_id + frame_count
+        directions = []
+        for _ in range(3):
+            direction_byte = struct.unpack_from(">B", result, offset)[0]
+            directions.append(direction_byte)
+            frame_len = struct.unpack_from(">I", result, offset + 1)[0]
+            offset += 1 + 4 + frame_len
+
+        self.assertEqual(directions[0], 0x00)   # rx
+        self.assertEqual(directions[1], 0x01)   # tx
+        self.assertEqual(directions[2], 0xFF)   # unknown
+
+    def test_agent_with_empty_frames_list_is_skipped(self) -> None:
+        agents = [{"id": "EMPTY01"}]
+        ring = {"frames": []}
+
+        with patch("lib.failure_diagnostics.agent_packet_ring", return_value=ring):
+            result = _collect_packet_ring_bytes(_cli(), agents)
+
+        self.assertEqual(result, b"")
+
+    def test_mixed_agents_only_encodes_agents_with_frames(self) -> None:
+        agents = [{"id": "NOFRAMES"}, {"id": "HASFRAMES"}]
+        no_frames_ring = {"frames": []}
+        has_frames_ring = {"frames": [{"direction": "tx", "bytes_hex": "ff"}]}
+
+        def _ring(_cli_arg, agent_id: str):
+            if agent_id == "NOFRAMES":
+                return no_frames_ring
+            return has_frames_ring
+
+        with patch("lib.failure_diagnostics.agent_packet_ring", side_effect=_ring):
+            result = _collect_packet_ring_bytes(_cli(), agents)
+
+        import struct
+        # Only HASFRAMES should appear — check the agent_id encoded in the blob
+        agent_id_len = struct.unpack_from(">I", result, 0)[0]
+        agent_id_in_blob = result[4 : 4 + agent_id_len].decode("utf-8")
+        self.assertEqual(agent_id_in_blob, "HASFRAMES")
+        # Verify no second agent follows
+        frame_count = struct.unpack_from(">I", result, 4 + agent_id_len)[0]
+        frame_len = struct.unpack_from(">I", result, 4 + agent_id_len + 4 + 1)[0]
+        expected_total = 4 + agent_id_len + 4 + 1 + 4 + frame_len
+        self.assertEqual(len(result), expected_total)
 
 
 if __name__ == "__main__":

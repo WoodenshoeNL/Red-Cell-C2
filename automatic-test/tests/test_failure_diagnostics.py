@@ -5,6 +5,7 @@ Unit tests for lib.failure_diagnostics.
 from __future__ import annotations
 
 import json
+import struct
 import sys
 import unittest
 from pathlib import Path
@@ -694,7 +695,6 @@ class TestCollectPacketRingBytes(unittest.TestCase):
         with patch("lib.failure_diagnostics.agent_packet_ring", return_value=ring):
             result = _collect_packet_ring_bytes(_cli(), agents)
 
-        import struct
         agent_id_encoded = agent_id.encode("utf-8")
         expected = (
             struct.pack(">I", len(agent_id_encoded))
@@ -718,7 +718,6 @@ class TestCollectPacketRingBytes(unittest.TestCase):
         with patch("lib.failure_diagnostics.agent_packet_ring", return_value=ring):
             result = _collect_packet_ring_bytes(_cli(), agents)
 
-        import struct
         agent_id_encoded = b"A1"
         # Skip header (4 + 2 + 4 bytes) then read direction bytes
         offset = 4 + len(agent_id_encoded) + 4  # agent_id_len + agent_id + frame_count
@@ -755,7 +754,6 @@ class TestCollectPacketRingBytes(unittest.TestCase):
         with patch("lib.failure_diagnostics.agent_packet_ring", side_effect=_ring):
             result = _collect_packet_ring_bytes(_cli(), agents)
 
-        import struct
         # Only HASFRAMES should appear — check the agent_id encoded in the blob
         agent_id_len = struct.unpack_from(">I", result, 0)[0]
         agent_id_in_blob = result[4 : 4 + agent_id_len].decode("utf-8")

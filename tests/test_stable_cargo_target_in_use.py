@@ -104,11 +104,9 @@ class TestIsCargoBuilProcess(unittest.TestCase):
 
 class TestStableCargoTargetInUse(unittest.TestCase):
     """
-    _stable_cargo_target_in_use reads /proc directly.  We monkey-patch
-    Path("/proc") by temporarily pointing the function at a fake proc tree
-    via unittest.mock.patch on the Path constructor is awkward, so instead
-    we test the composite behaviour through a wrapper that lets us inject a
-    custom proc root.
+    _stable_cargo_target_in_use accepts an optional _proc_root parameter;
+    tests inject a temporary directory to simulate /proc without touching
+    the real filesystem.
     """
 
     def setUp(self):

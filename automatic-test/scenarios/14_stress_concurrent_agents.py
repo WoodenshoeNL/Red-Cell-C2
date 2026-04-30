@@ -84,22 +84,22 @@ def _unique_marker() -> str:
 
 
 def _wait_for_n_agents(
-    cli, pre_existing_ids: set, n: int, timeout: int, poll_interval: float
+    cli, listener_name: str, n: int, timeout: int, poll_interval: float
 ) -> list[str]:
-    """Block until at least n new agent IDs appear.  Returns list of new IDs."""
+    """Block until at least n agents appear on *listener_name*.  Returns list of IDs."""
     from lib.wait import poll
 
-    def _new_agents():
+    def _agents_on_listener():
         from lib.cli import agent_list
         agents = agent_list(cli)
-        return [a["id"] for a in agents if a["id"] not in pre_existing_ids]
+        return [a["id"] for a in agents if a.get("listener") == listener_name]
 
     new_ids = poll(
-        fn=_new_agents,
+        fn=_agents_on_listener,
         predicate=lambda ids: len(ids) >= n,
         timeout=timeout,
         interval=poll_interval,
-        description=f"{n} new agent checkins",
+        description=f"{n} agents on listener {listener_name}",
     )
     return new_ids
 
@@ -183,6 +183,7 @@ def _run_stress_for_agent(
     agent_type: str,
     fmt: str,
     pre_built_payload: bytes,
+    listener_name: str,
     agent_count: int,
     run_seconds: int,
 ) -> None:
@@ -194,6 +195,7 @@ def _run_stress_for_agent(
         agent_type:        Agent name (e.g. ``"demon"`` or ``"phantom"``).
         fmt:               Payload format (``"exe"``).
         pre_built_payload: Raw payload bytes from :func:`~lib.payload.build_parallel`.
+        listener_name:     Name of the listener these agents connect to.
         agent_count:       Number of concurrent agent instances to spawn.
         run_seconds:       Duration of the load-run phase in seconds.
 
@@ -215,12 +217,6 @@ def _run_stress_for_agent(
     ssh = int(ctx.timeouts.ssh_connect)
     uid = _short_id()
 
-    # Record pre-existing agent IDs.
-    try:
-        pre_existing_ids = {a["id"] for a in agent_list(cli)}
-    except Exception:
-        pre_existing_ids = set()
-
     remote_payloads: list[str] = []
     agent_ids: list[str] = []
 
@@ -230,11 +226,20 @@ def _run_stress_for_agent(
         fh.write(pre_built_payload)
 
     try:
+        # ── Step 0: Kill stale agent processes from previous runs ────────
+        _win = target.work_dir.startswith("C:\\") or "\\" in target.work_dir
+        if _win:
+            print(f"  [{agent_type}][deploy] cleaning up stale processes from previous runs")
+            cleanup_windows_harness_work_dir(
+                target,
+                log_prefix=f"  [{agent_type}][pre-cleanup]",
+                timeout=max(ssh, 90),
+            )
+
         # ── Step 1: Upload agent_count copies and launch each ─────────────
         print(f"  [{agent_type}][deploy] ensuring work dir on target")
         ensure_work_dir(target)
 
-        _win = target.work_dir.startswith("C:\\") or "\\" in target.work_dir
         _sep = "\\" if _win else "/"
         for i in range(agent_count):
             remote_path = f"{target.work_dir}{_sep}stress-agent-{uid}-{i:02d}.{fmt}"
@@ -255,7 +260,7 @@ def _run_stress_for_agent(
         checkin_start = time.monotonic()
         agent_ids = _wait_for_n_agents(
             cli,
-            pre_existing_ids,
+            listener_name,
             agent_count,
             timeout=checkin_deadline,
             poll_interval=poll_iv,
@@ -533,6 +538,7 @@ def run(ctx):
                 agent_type="demon",
                 fmt="exe",
                 pre_built_payload=payloads["demon"],
+                listener_name=demon_listener_name,
                 agent_count=DEMON_AGENT_COUNT,
                 run_seconds=DEMON_RUN_SECONDS,
             )
@@ -545,6 +551,7 @@ def run(ctx):
                 agent_type="phantom",
                 fmt="exe",
                 pre_built_payload=payloads["phantom"],
+                listener_name=phantom_listener_name,
                 agent_count=PHANTOM_AGENT_COUNT,
                 run_seconds=PHANTOM_RUN_SECONDS,
             )

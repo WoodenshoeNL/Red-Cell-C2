@@ -1106,9 +1106,16 @@ def clean_tmp_worktrees(log: Logger):
 
 TMP_CARGO_MAX_AGE_SECS = 7200   # remove non-worktree /tmp/red-cell* cargo dirs older than 2 hours
 TMP_CARGO_SIZE_LIMIT_GB = 5     # also clean heavyweight subdirs of review target when it exceeds this
+TMP_CARGO_HARD_LIMIT_GB = 15    # force clean even if _stable_cargo_target_in_use; .cargo-lock still respected
 
 
-def _clean_cargo_target_inplace(target_dir: Path, label: str, size_limit_gb: float, log: Logger):
+def _clean_cargo_target_inplace(
+    target_dir: Path,
+    label: str,
+    size_limit_gb: float,
+    log: Logger,
+    hard_limit_gb: float = TMP_CARGO_HARD_LIMIT_GB,
+):
     """
     Clean heavyweight subdirs inside a stable cargo target dir when it exceeds
     size_limit_gb.  Never deletes the directory itself so incremental builds survive.
@@ -1117,17 +1124,27 @@ def _clean_cargo_target_inplace(target_dir: Path, label: str, size_limit_gb: flo
     for host-only builds, or <triple>/<profile>/{...} for cross-compile targets.
     We handle both shapes — without the depth-2 fallback, cross-compile
     heavyweights (musl, mingw) accumulate forever (red-cell-c2-drxmc).
+
+    hard_limit_gb: when size >= this threshold the _stable_cargo_target_in_use
+    check is bypassed and the dir is cleaned unconditionally (modulo .cargo-lock,
+    which is checked by the caller).  Unbounded disk growth is worse than a
+    recoverable test ENOENT.
     """
     import shutil as _shutil
     size_gb = _dir_size_gb(target_dir)
     if size_gb < size_limit_gb:
         return
     if _stable_cargo_target_in_use(target_dir):
+        if size_gb < hard_limit_gb:
+            log.log(
+                f"tmp cargo: {label} — in use (cwd or CARGO_TARGET_DIR), "
+                "deferring heavyweight clean"
+            )
+            return
         log.log(
-            f"tmp cargo: {label} — in use (cwd or CARGO_TARGET_DIR), "
-            "deferring heavyweight clean"
+            f"tmp cargo: {label} is {size_gb:.1f} GB >= hard limit {hard_limit_gb:.0f} GB — "
+            "forcing clean despite in-use check"
         )
-        return
     log.log(f"tmp cargo: {label} is {size_gb:.1f} GB — cleaning heavyweight subdirs")
     heavyweight_dirs = ["incremental", "deps", "build", ".fingerprint"]
     profile_markers = {"deps", "build", "incremental", ".fingerprint"}

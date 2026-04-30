@@ -192,6 +192,7 @@ mod tests {
         assert!(LISTENER_ERRORS_TOTAL.starts_with("red_cell_"));
         assert!(PLUGIN_FAILURES_TOTAL.starts_with("red_cell_"));
         assert!(ECDH_REPLAY_DB_ERRORS_TOTAL.starts_with("red_cell_"));
+        assert!(ECDH_REPLAYS_REJECTED_TOTAL.starts_with("red_cell_"));
     }
 
     #[test]

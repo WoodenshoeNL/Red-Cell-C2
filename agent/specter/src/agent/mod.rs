@@ -27,7 +27,9 @@ use crate::token::TokenVault;
 use crate::transport::FallbackTransport;
 
 mod ecdh_loop;
-mod run_loop;
+mod legacy_loop;
+mod pivot_bridge;
+mod working_hours;
 
 /// Running state of a Specter agent session.
 #[derive(Debug)]

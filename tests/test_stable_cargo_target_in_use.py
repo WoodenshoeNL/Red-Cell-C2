@@ -123,51 +123,9 @@ class TestStableCargoTargetInUse(unittest.TestCase):
         self._tmp.cleanup()
 
     def _run(self) -> bool:
-        """Run _stable_cargo_target_in_use with proc_root injected via monkeypatch."""
+        """Run _stable_cargo_target_in_use with the fake proc tree injected."""
         import loop
-        original_proc = loop.Path("/proc")
-
-        # Temporarily replace the /proc sentinel inside the function by patching
-        # at the source: re-run the function body with proc pointing at our fake tree.
-        resolved_root = self.target_dir.resolve()
-        try:
-            pid_dirs = [e for e in self.proc_root.iterdir() if e.name.isdigit()]
-        except OSError:
-            return False
-
-        for pid_dir in pid_dirs:
-            if not loop._is_cargo_build_process(pid_dir):
-                continue
-
-            cwd_link = pid_dir / "cwd"
-            try:
-                cwd = cwd_link.readlink()
-            except OSError:
-                cwd = None
-            if cwd is not None and loop._path_within_tree(cwd, resolved_root):
-                return True
-
-            env_path = pid_dir / "environ"
-            try:
-                raw = env_path.read_bytes()
-            except OSError:
-                continue
-            for chunk in raw.split(b"\0"):
-                if not chunk.startswith(b"CARGO_TARGET_DIR="):
-                    continue
-                rest = chunk[len(b"CARGO_TARGET_DIR="):]
-                try:
-                    val = rest.decode("utf-8")
-                except UnicodeDecodeError:
-                    val = rest.decode("utf-8", errors="replace")
-                env_path_val = Path(val).expanduser()
-                if loop._path_within_tree(env_path_val, resolved_root):
-                    return True
-                if val.rstrip("/") == str(resolved_root).rstrip("/"):
-                    return True
-                break
-
-        return False
+        return loop._stable_cargo_target_in_use(self.target_dir, _proc_root=self.proc_root)
 
     # --- CWD-based tests ---
 

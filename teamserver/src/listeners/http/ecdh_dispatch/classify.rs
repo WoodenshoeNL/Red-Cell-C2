@@ -160,6 +160,7 @@ pub(crate) async fn process_ecdh_packet(
                 client_ip = %external_ip,
                 "ECDH registration rejected: duplicate ephemeral pubkey/nonce (replay within window)"
             );
+            crate::metrics::inc_ecdh_replays_rejected(listener_name);
             return Ok(EcdhOutcome::NotEcdh);
         }
         Err(e) => {

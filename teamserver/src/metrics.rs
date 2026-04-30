@@ -42,6 +42,13 @@ pub const PLUGIN_FAILURES_TOTAL: &str = "red_cell_plugin_failures_total";
 /// Check SQLite WAL pressure, disk space, and connection-pool exhaustion.
 pub const ECDH_REPLAY_DB_ERRORS_TOTAL: &str = "red_cell_ecdh_replay_db_errors_total";
 
+/// Counter: ECDH registrations rejected because the ephemeral pubkey/nonce
+/// fingerprint was already seen within the replay window, labelled by `listener`.
+///
+/// A non-zero rate here means the replay guard is actively blocking duplicate
+/// packets.  A sustained high rate indicates a replay attack in progress.
+pub const ECDH_REPLAYS_REJECTED_TOTAL: &str = "red_cell_ecdh_replays_rejected_total";
+
 // ---------------------------------------------------------------------------
 // Metrics handle
 // ---------------------------------------------------------------------------
@@ -141,6 +148,15 @@ pub fn inc_plugin_failures(plugin: &str) {
 /// indicates database instability on the replay-fingerprint store.
 pub fn inc_ecdh_replay_db_errors(listener: &str) {
     counter!(ECDH_REPLAY_DB_ERRORS_TOTAL, "listener" => listener.to_owned()).increment(1);
+}
+
+/// Increment the ECDH replay-rejected counter for a listener.
+///
+/// Called when `try_record_reg_fingerprint` returns `Ok(false)` (fingerprint
+/// already seen within the replay window).  A sustained non-zero rate indicates
+/// a replay attack or misbehaving agent.
+pub fn inc_ecdh_replays_rejected(listener: &str) {
+    counter!(ECDH_REPLAYS_REJECTED_TOTAL, "listener" => listener.to_owned()).increment(1);
 }
 
 // ---------------------------------------------------------------------------

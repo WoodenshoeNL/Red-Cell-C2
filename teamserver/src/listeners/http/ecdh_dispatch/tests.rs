@@ -674,6 +674,7 @@ async fn duplicate_registration_does_not_leak_session_row() {
 #[tokio::test]
 async fn reg_replay_within_window_rejected() {
     use crate::demon::INIT_EXT_MONOTONIC_CTR;
+    use metrics_exporter_prometheus::PrometheusBuilder;
 
     let (db, registry, events, dispatcher, keypair, limiter) = ecdh_test_fixture().await;
     let agent_id: u32 = 0xDEAD_CAFE;
@@ -681,6 +682,11 @@ async fn reg_replay_within_window_rejected() {
     let metadata = build_ecdh_init_metadata(agent_id, INIT_EXT_MONOTONIC_CTR);
     let (packet, _session_key) =
         build_registration_packet(&keypair.public_bytes, &metadata).expect("build packet");
+
+    // Install a thread-local Prometheus recorder so counter! calls are captured.
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let _recorder_guard = metrics::set_default_local_recorder(&recorder);
 
     // First call: valid registration — fingerprint recorded, agent registered.
     let first = process_ecdh_packet(
@@ -718,6 +724,14 @@ async fn reg_replay_within_window_rejected() {
     assert!(
         matches!(second, EcdhOutcome::NotEcdh),
         "replayed packet must be rejected with NotEcdh; got: {second:?}"
+    );
+
+    // Verify the SOC-observable replay-rejected counter was incremented.
+    let rendered = handle.render();
+    let expected_line = r#"red_cell_ecdh_replays_rejected_total{listener="test-listener"} 1"#;
+    assert!(
+        rendered.contains(expected_line),
+        "counter value must be 1 after one replay rejection;\nexpected line: {expected_line}\ngot:\n{rendered}"
     );
 }
 

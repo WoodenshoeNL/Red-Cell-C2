@@ -4,6 +4,7 @@ Unit tests for lib.failure_diagnostics.
 
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -14,12 +15,16 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from lib.cli import CliConfig, CliError
 from lib.failure_diagnostics import (
+    _build_agent_state,
+    _build_teamserver_state,
+    _build_timeline,
     _fetch_log_tail_cli,
     _listener_request_summary,
     build_failure_diagnostic_report,
     capture_server_logs,
     create_run_dir,
     tail_text_file,
+    write_scenario_diag_bundle,
     write_scenario_failure_file,
 )
 
@@ -402,6 +407,264 @@ class TestWriteScenarioFailureFile(unittest.TestCase):
         self.assertEqual(p.read_text(encoding="utf-8"), text)
         self.assertRegex(p.name, r"scenario_04_failure\.txt")
         self.assertEqual(p.parent, run_dir)
+
+
+# ── New diagnostic bundle tests ───────────────────────────────────────────────
+
+def _make_ctx(cli: CliConfig) -> SimpleNamespace:
+    """Return a minimal DiagnosticContext for bundle tests."""
+    return SimpleNamespace(cli=cli, env={})
+
+
+def _patch_bundle_snapshot(
+    agents=None,
+    listeners=None,
+    log_entries=None,
+    listener_detail=None,
+    server_tail_entries=None,
+    agent_show_return=None,
+    agent_show_side_effect=None,
+):
+    """Combined context manager that patches every CLI call used by the bundle functions."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def _ctx():
+        with patch(
+            "lib.failure_diagnostics.agent_list",
+            return_value=agents or [],
+        ), patch(
+            "lib.failure_diagnostics.agent_show",
+            side_effect=agent_show_side_effect or (lambda *_a, **_kw: agent_show_return or {}),
+        ), patch(
+            "lib.failure_diagnostics.listener_list",
+            return_value=listeners or [],
+        ), patch(
+            "lib.failure_diagnostics.log_list",
+            return_value=log_entries if log_entries is not None else [],
+        ), patch(
+            "lib.failure_diagnostics.listener_show",
+            return_value=listener_detail or {},
+        ), patch(
+            "lib.failure_diagnostics.log_server_tail",
+            return_value=server_tail_entries or [],
+        ):
+            yield
+
+    return _ctx()
+
+
+class TestBuildAgentState(unittest.TestCase):
+    def test_returns_agents_and_note(self) -> None:
+        agents = [{"id": "DEADBEEF", "status": "active"}]
+        with _patch_bundle_snapshot(agents=agents, log_entries=[]):
+            result = _build_agent_state(_cli())
+        self.assertIn("agents", result)
+        self.assertEqual(len(result["agents"]), 1)
+        self.assertIn("note", result)
+        self.assertIn("seq_num", result["note"])
+
+    def test_agent_show_error_is_embedded(self) -> None:
+        agents = [{"id": "DEADBEEF"}]
+        with _patch_bundle_snapshot(
+            agents=agents,
+            agent_show_side_effect=lambda *_a, **_kw: (_ for _ in ()).throw(
+                CliError("NOT_FOUND", "no such agent", 1)
+            ),
+        ):
+            result = _build_agent_state(_cli())
+        record = result["agents"][0]
+        self.assertIn("detail_error", record)
+        self.assertIn("NOT_FOUND", record["detail_error"])
+
+    def test_agent_list_error_returns_error_key(self) -> None:
+        with patch(
+            "lib.failure_diagnostics.agent_list",
+            side_effect=CliError("UNAUTH", "forbidden", 3),
+        ):
+            result = _build_agent_state(_cli())
+        self.assertIn("error", result)
+        self.assertEqual(result["agents"], [])
+
+    def test_missing_id_field_embedded(self) -> None:
+        agents = [{"hostname": "box1"}]  # no id field
+        with _patch_bundle_snapshot(agents=agents):
+            result = _build_agent_state(_cli())
+        self.assertIn("error", result["agents"][0])
+
+
+class TestBuildTeamserverState(unittest.TestCase):
+    def test_contains_all_keys(self) -> None:
+        with _patch_bundle_snapshot(
+            agents=[{"id": "A1"}],
+            listeners=[{"name": "L1", "status": "Running"}],
+            log_entries=[{"ts": "t1", "action": "agent.registered"}],
+            server_tail_entries=[{"timestamp": "09:00:00", "text": "started"}],
+        ):
+            result = _build_teamserver_state(_cli())
+        self.assertIn("agents", result)
+        self.assertIn("listeners", result)
+        self.assertIn("audit_log_tail", result)
+        self.assertIn("server_log_tail", result)
+        self.assertIn("captured_at", result)
+
+    def test_listener_detail_fetched(self) -> None:
+        with _patch_bundle_snapshot(
+            listeners=[{"name": "http1", "status": "Running"}],
+            listener_detail={"last_error": "bind failed"},
+        ):
+            result = _build_teamserver_state(_cli())
+        lsnr = result["listeners"][0]
+        self.assertIn("detail", lsnr)
+        self.assertEqual(lsnr["detail"]["last_error"], "bind failed")
+
+    def test_server_log_formatted(self) -> None:
+        with _patch_bundle_snapshot(
+            server_tail_entries=[
+                {"timestamp": "2026-04-30T10:00:00Z", "text": "hello"},
+            ],
+        ):
+            result = _build_teamserver_state(_cli())
+        self.assertIn("2026-04-30T10:00:00Z", result["server_log_tail"])
+        self.assertIn("hello", result["server_log_tail"])
+
+
+class TestBuildTimeline(unittest.TestCase):
+    def test_audit_entries_appear(self) -> None:
+        audit = [
+            {"ts": "2026-04-30T10:00:00Z", "action": "agent.registered", "agent_id": "BEEF"},
+        ]
+        timeline = _build_timeline(audit, "", None, None)
+        self.assertIn("[AUDIT]", timeline)
+        self.assertIn("agent.registered", timeline)
+        self.assertIn("BEEF", timeline)
+
+    def test_server_log_appears(self) -> None:
+        timeline = _build_timeline([], "2026-04-30T10:00:01Z  hello server\n", None, None)
+        self.assertIn("[SERVER]", timeline)
+        self.assertIn("hello server", timeline)
+
+    def test_harness_stdout_appended(self) -> None:
+        timeline = _build_timeline([], "", "harness output line", None)
+        self.assertIn("HARNESS STDOUT", timeline)
+        self.assertIn("harness output line", timeline)
+
+    def test_harness_stderr_appended(self) -> None:
+        timeline = _build_timeline([], "", None, "error output")
+        self.assertIn("HARNESS STDERR", timeline)
+        self.assertIn("error output", timeline)
+
+    def test_chronological_sort(self) -> None:
+        audit = [
+            {"ts": "2026-04-30T10:00:02Z", "action": "b"},
+            {"ts": "2026-04-30T10:00:01Z", "action": "a"},
+        ]
+        timeline = _build_timeline(audit, "", None, None)
+        pos_a = timeline.find("action=a")
+        pos_b = timeline.find("action=b")
+        self.assertLess(pos_a, pos_b, "Earlier timestamp must appear first")
+
+    def test_empty_inputs(self) -> None:
+        timeline = _build_timeline([], "", None, None)
+        self.assertIn("TIMELINE", timeline)
+
+
+class TestWriteScenarioDiagBundle(unittest.TestCase):
+    def _make_run_dir(self) -> Path:
+        import tempfile
+        return Path(tempfile.mkdtemp()) / "test-results" / "2026-04-30" / "run_100000_abcd1234"
+
+    def test_creates_diag_dir_with_four_artifacts(self) -> None:
+        run_dir = self._make_run_dir()
+        ctx = _make_ctx(_cli())
+        with _patch_bundle_snapshot(
+            agents=[{"id": "DEADBEEF"}],
+            listeners=[{"name": "L1"}],
+            log_entries=[],
+        ):
+            diag_dir = write_scenario_diag_bundle(run_dir, "04", ctx)
+
+        self.assertTrue(diag_dir.is_dir())
+        self.assertRegex(diag_dir.name, r"^scenario_04_diag$")
+        for artifact in ("agent_state.json", "teamserver_state.json", "timeline.txt", "last_packets.bin"):
+            p = diag_dir / artifact
+            self.assertTrue(p.exists(), f"{artifact} must exist")
+
+    def test_agent_state_json_is_valid(self) -> None:
+        run_dir = self._make_run_dir()
+        ctx = _make_ctx(_cli())
+        with _patch_bundle_snapshot(agents=[{"id": "CAFE0001"}]):
+            diag_dir = write_scenario_diag_bundle(run_dir, "07", ctx)
+        data = json.loads((diag_dir / "agent_state.json").read_text())
+        self.assertIn("agents", data)
+
+    def test_teamserver_state_json_is_valid(self) -> None:
+        run_dir = self._make_run_dir()
+        ctx = _make_ctx(_cli())
+        with _patch_bundle_snapshot():
+            diag_dir = write_scenario_diag_bundle(run_dir, "07", ctx)
+        data = json.loads((diag_dir / "teamserver_state.json").read_text())
+        self.assertIn("agents", data)
+        self.assertIn("listeners", data)
+
+    def test_timeline_includes_harness_streams(self) -> None:
+        run_dir = self._make_run_dir()
+        ctx = _make_ctx(_cli())
+        with _patch_bundle_snapshot():
+            diag_dir = write_scenario_diag_bundle(
+                run_dir, "04", ctx,
+                harness_stdout="stdout line\n",
+                harness_stderr="stderr line\n",
+            )
+        timeline = (diag_dir / "timeline.txt").read_text()
+        self.assertIn("stdout line", timeline)
+        self.assertIn("stderr line", timeline)
+
+    def test_last_packets_bin_is_empty(self) -> None:
+        run_dir = self._make_run_dir()
+        ctx = _make_ctx(_cli())
+        with _patch_bundle_snapshot():
+            diag_dir = write_scenario_diag_bundle(run_dir, "04", ctx)
+        self.assertEqual((diag_dir / "last_packets.bin").read_bytes(), b"")
+
+    def test_existing_failure_file_unchanged(self) -> None:
+        """Diag bundle must not overwrite the scenario_NN_failure.txt."""
+        import tempfile
+        run_dir = Path(tempfile.mkdtemp()) / "run"
+        run_dir.mkdir(parents=True)
+        failure_file = run_dir / "scenario_04_failure.txt"
+        failure_file.write_text("original failure text\n")
+        ctx = _make_ctx(_cli())
+        with _patch_bundle_snapshot():
+            write_scenario_diag_bundle(run_dir, "04", ctx)
+        self.assertEqual(failure_file.read_text(), "original failure text\n")
+
+    def test_cli_errors_do_not_raise(self) -> None:
+        """All CLI errors must be absorbed — the bundle must still be created."""
+        run_dir = self._make_run_dir()
+        ctx = _make_ctx(_cli())
+        with patch(
+            "lib.failure_diagnostics.agent_list",
+            side_effect=CliError("UNAUTH", "forbidden", 3),
+        ), patch(
+            "lib.failure_diagnostics.listener_list",
+            side_effect=CliError("UNAUTH", "forbidden", 3),
+        ), patch(
+            "lib.failure_diagnostics.log_list",
+            side_effect=CliError("UNAUTH", "forbidden", 3),
+        ), patch(
+            "lib.failure_diagnostics.listener_show",
+            side_effect=CliError("UNAUTH", "forbidden", 3),
+        ), patch(
+            "lib.failure_diagnostics.log_server_tail",
+            side_effect=CliError("UNAUTH", "forbidden", 3),
+        ), patch(
+            "lib.failure_diagnostics.agent_show",
+            side_effect=CliError("UNAUTH", "forbidden", 3),
+        ):
+            diag_dir = write_scenario_diag_bundle(run_dir, "05", ctx)
+        for artifact in ("agent_state.json", "teamserver_state.json", "timeline.txt", "last_packets.bin"):
+            self.assertTrue((diag_dir / artifact).exists())
 
 
 if __name__ == "__main__":

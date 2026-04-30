@@ -49,7 +49,12 @@ from lib.config import (
 from lib.deploy import TargetConfig, cleanup_windows_harness_work_dir, configure_deploy_timeouts
 from lib.teamserver_monitor import configure_teamserver_ssh_connect_timeout
 from lib.wait import configure_wait_defaults
-from lib.failure_diagnostics import build_failure_diagnostic_report, create_run_dir, write_scenario_failure_file
+from lib.failure_diagnostics import (
+    build_failure_diagnostic_report,
+    create_run_dir,
+    write_scenario_diag_bundle,
+    write_scenario_failure_file,
+)
 
 
 # ── Config loading ───────────────────────────────────────────────────────────
@@ -374,6 +379,34 @@ def _failure_diag_kwargs(ctx: RunContext, cap: _ScenarioStreamCapture | None) ->
     }
 
 
+def _write_diag_bundle(
+    ctx: RunContext,
+    run_dir: Path,
+    scenario_id: str,
+    cap: _ScenarioStreamCapture | None,
+) -> Path | None:
+    """Write the per-scenario diagnostic bundle; return its path or None on error."""
+    out_tail: str | None = None
+    err_tail: str | None = None
+    if cap is not None:
+        out, err = cap.tails()
+        if out.strip():
+            out_tail = out
+        if err.strip():
+            err_tail = err
+    try:
+        return write_scenario_diag_bundle(
+            run_dir,
+            scenario_id,
+            ctx,
+            harness_stdout=out_tail,
+            harness_stderr=err_tail,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"  [diag] bundle write failed (non-fatal): {exc}")
+        return None
+
+
 def run_scenario(
     scenario_id: str, path: Path, ctx: RunContext, run_dir: Path,
 ) -> tuple[str, Path | None]:
@@ -434,6 +467,9 @@ def run_scenario(
                 run_dir, scenario_id, text
             )
             print(f"  Diagnostic report written to: {report_path}")
+            diag_path = _write_diag_bundle(ctx, run_dir, scenario_id, capture)
+            if diag_path:
+                print(f"  Diagnostic bundle written to: {diag_path}")
             return "failed", report_path
         wait = _parse_retry_after(exc)
         elapsed = time.monotonic() - start
@@ -472,6 +508,9 @@ def run_scenario(
                 run_dir, scenario_id, text
             )
             print(f"  Diagnostic report written to: {report_path}")
+            diag_path = _write_diag_bundle(ctx, run_dir, scenario_id, capture_retry)
+            if diag_path:
+                print(f"  Diagnostic bundle written to: {diag_path}")
             return "failed", report_path
     except Exception as exc:
         elapsed = time.monotonic() - start
@@ -490,6 +529,9 @@ def run_scenario(
             run_dir, scenario_id, text
         )
         print(f"  Diagnostic report written to: {report_path}")
+        diag_path = _write_diag_bundle(ctx, run_dir, scenario_id, capture)
+        if diag_path:
+            print(f"  Diagnostic bundle written to: {diag_path}")
         return "failed", report_path
 
 

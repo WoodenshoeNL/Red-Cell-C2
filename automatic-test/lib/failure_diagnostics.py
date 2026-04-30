@@ -4,6 +4,9 @@ Capture teamserver-oriented diagnostics when a scenario fails.
 Used by ``test.py`` to write
 ``test-results/YYYY-MM-DD/run_<HHMMSS>_<uuid>/scenario_NN_failure.txt``
 and print the same sections to stdout.
+
+Also writes a per-scenario diagnostic bundle at failure time:
+``test-results/YYYY-MM-DD/run_<HHMMSS>_<uuid>/scenario_NN_diag/``
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ from .cli import (
     CliConfig,
     CliError,
     agent_list,
+    agent_show,
     listener_list,
     listener_show,
     log_list,
@@ -263,6 +267,213 @@ def build_failure_diagnostic_report(
         ]
     )
     return "\n".join(parts) + "\n"
+
+
+def _build_agent_state(cli: CliConfig) -> dict:
+    """Collect per-agent state snapshot from the CLI.
+
+    Returns a dict suitable for JSON serialisation.  All CLI errors are caught
+    and recorded inline so a partial failure does not suppress other agents.
+    """
+    try:
+        agents = agent_list(cli)
+    except CliError as exc:
+        return {"error": f"agent list failed: [{exc.code}] {exc.message}", "agents": []}
+
+    per_agent = []
+    for entry in agents:
+        agent_id = entry.get("id") or entry.get("AgentID") or entry.get("agent_id")
+        if not agent_id:
+            per_agent.append({"raw": entry, "error": "no id field"})
+            continue
+
+        record: dict[str, Any] = {"id": agent_id}
+
+        # Populate what's in the list entry first.
+        record.update(entry)
+
+        # Enrich with per-agent detail.
+        try:
+            detail = agent_show(cli, str(agent_id))
+            record["detail"] = detail
+        except CliError as exc:
+            record["detail_error"] = f"[{exc.code}] {exc.message}"
+
+        # Fetch the last 20 audit entries for this specific agent.
+        try:
+            agent_audit = log_list(cli, agent_id=str(agent_id), limit=20)
+            record["audit_tail"] = agent_audit
+        except CliError as exc:
+            record["audit_tail_error"] = f"[{exc.code}] {exc.message}"
+
+        per_agent.append(record)
+
+    return {
+        "captured_at": datetime.now(timezone.utc).isoformat(),
+        "note": (
+            "seq_num/ECDH-state/packet ring-buffer not exposed by CLI API; "
+            "query the SQLite DB column last_seen_seq in ts_agents for raw seq info"
+        ),
+        "agents": per_agent,
+    }
+
+
+def _build_teamserver_state(cli: CliConfig) -> dict:
+    """Collect a teamserver-side snapshot: agents, listeners, audit tail, log tail."""
+    ts = datetime.now(timezone.utc).isoformat()
+
+    try:
+        agents = agent_list(cli)
+    except CliError as exc:
+        agents = [{"error": f"[{exc.code}] {exc.message}"}]
+
+    raw_listeners: list[dict] = []
+    listeners_with_detail: list[dict] = []
+    try:
+        raw_listeners = listener_list(cli)
+    except CliError as exc:
+        listeners_with_detail = [{"error": f"[{exc.code}] {exc.message}"}]
+
+    for lsnr in raw_listeners:
+        name = lsnr.get("name", "")
+        entry = dict(lsnr)
+        if name:
+            try:
+                entry["detail"] = listener_show(cli, name)
+            except CliError as exc:
+                entry["detail_error"] = f"[{exc.code}] {exc.message}"
+        listeners_with_detail.append(entry)
+
+    try:
+        audit = log_list(cli, limit=50)
+    except CliError as exc:
+        audit = [{"error": f"[{exc.code}] {exc.message}"}]
+
+    try:
+        log_entries = log_server_tail(cli, lines=200)
+        log_tail = "\n".join(
+            f"{e.get('timestamp', '?')}  {e.get('text', '')}" for e in log_entries
+        )
+    except CliError as exc:
+        log_tail = f"(log server-tail failed: [{exc.code}] {exc.message})"
+
+    return {
+        "captured_at": ts,
+        "agents": agents,
+        "listeners": listeners_with_detail,
+        "audit_log_tail": audit,
+        "server_log_tail": log_tail,
+    }
+
+
+def _build_timeline(
+    audit_log: list[dict],
+    server_log_tail: str,
+    harness_stdout: str | None,
+    harness_stderr: str | None,
+) -> str:
+    """Merge audit log, server log lines, and harness output into a readable timeline.
+
+    Items that carry a timestamp are sorted chronologically.  Harness output is
+    appended at the end (it carries no per-line timestamps).
+    """
+    lines: list[tuple[str, str]] = []  # (iso-ish timestamp, text)
+
+    for entry in audit_log:
+        ts = str(entry.get("ts") or entry.get("timestamp") or "")
+        parts = []
+        for key in ("action", "operator", "agent_id", "detail", "result_status"):
+            val = entry.get(key)
+            if val:
+                parts.append(f"{key}={val}")
+        text = "  ".join(parts) if parts else str(entry)
+        lines.append((ts, f"[AUDIT] {text}"))
+
+    for raw_line in server_log_tail.splitlines():
+        # Server log lines look like "2026-04-30T10:43:57Z  <text>" or "<text>".
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+        parts_split = stripped.split(None, 1)
+        if len(parts_split) == 2 and "T" in parts_split[0] and ":" in parts_split[0]:
+            ts, text = parts_split
+        else:
+            ts, text = "", stripped
+        lines.append((ts, f"[SERVER] {text}"))
+
+    # Sort by timestamp; empty timestamps sort last so they appear at the top
+    # of the "no timestamp" group rather than pushing out timestamped entries.
+    lines.sort(key=lambda t: (t[0] == "", t[0]))
+
+    result_parts = ["=== TIMELINE (audit + server log, chronological) ===", ""]
+    for _ts, text in lines:
+        prefix = f"{_ts}  " if _ts else "                     "
+        result_parts.append(f"{prefix}{text}")
+
+    if harness_stdout and harness_stdout.strip():
+        result_parts.extend(["", "=== HARNESS STDOUT (at failure) ===", harness_stdout.rstrip()])
+
+    if harness_stderr and harness_stderr.strip():
+        result_parts.extend(["", "=== HARNESS STDERR (at failure) ===", harness_stderr.rstrip()])
+
+    result_parts.append("")
+    return "\n".join(result_parts)
+
+
+def write_scenario_diag_bundle(
+    run_dir: Path,
+    scenario_id: str,
+    ctx: DiagnosticContext,
+    *,
+    harness_stdout: str | None = None,
+    harness_stderr: str | None = None,
+) -> Path:
+    """Write a per-scenario diagnostic bundle to ``<run_dir>/scenario_<id>_diag/``.
+
+    Creates four artifacts:
+
+    * ``agent_state.json``     — per-agent info + per-agent audit tail
+    * ``teamserver_state.json``— full agent registry, listener detail, audit tail, server log
+    * ``timeline.txt``         — chronological merge of audit log + server log + harness output
+    * ``last_packets.bin``     — empty placeholder (raw packet ring-buffer not exposed by CLI)
+
+    All CLI errors are caught and embedded as ``"error"`` fields so a partial
+    failure never suppresses the rest of the bundle.
+
+    Returns the path to the created directory.
+    """
+    diag_dir = run_dir / f"scenario_{scenario_id}_diag"
+    diag_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── agent_state.json ─────────────────────────────────────────────────────
+    agent_state = _build_agent_state(ctx.cli)
+    (diag_dir / "agent_state.json").write_text(
+        _safe_json_dump(agent_state), encoding="utf-8"
+    )
+
+    # ── teamserver_state.json ─────────────────────────────────────────────────
+    ts_state = _build_teamserver_state(ctx.cli)
+    (diag_dir / "teamserver_state.json").write_text(
+        _safe_json_dump(ts_state), encoding="utf-8"
+    )
+
+    # ── timeline.txt ──────────────────────────────────────────────────────────
+    # Reuse the audit log and server log already fetched for teamserver_state
+    # to avoid double-querying the server.
+    audit_log = ts_state.get("audit_log_tail") or []
+    if not isinstance(audit_log, list):
+        audit_log = []
+    server_log_tail = ts_state.get("server_log_tail") or ""
+    timeline = _build_timeline(audit_log, server_log_tail, harness_stdout, harness_stderr)
+    (diag_dir / "timeline.txt").write_text(timeline, encoding="utf-8")
+
+    # ── last_packets.bin ──────────────────────────────────────────────────────
+    # The CLI API does not expose raw packet ring buffers.  Write an empty file
+    # so the expected artifact is always present; future server-side work can
+    # populate it when a /debug/packet-ring endpoint is added.
+    (diag_dir / "last_packets.bin").write_bytes(b"")
+
+    return diag_dir.resolve()
 
 
 def create_run_dir(automatic_test_root: Path) -> Path:

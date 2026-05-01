@@ -126,10 +126,10 @@ class TestReleaseCapOutBead(unittest.TestCase):
                 note_val = c[note_idx + 1]
                 self.assertIn("my checkpoint text", note_val)
 
-    def test_note_length_capped_at_2000_chars(self):
+    def test_note_length_capped_at_4000_chars(self):
         calls = []
         log = _FakeLogger()
-        long_checkpoint = "x" * 3000
+        long_checkpoint = "x" * 5000
         with patch("loop.br", side_effect=self._mock_br(calls)), \
              patch("loop.commit_beads_if_dirty", return_value=True):
             release_cap_out_bead("abc-123", long_checkpoint, "agent1", log)
@@ -138,7 +138,7 @@ class TestReleaseCapOutBead(unittest.TestCase):
             if "--notes" in c:
                 note_idx = c.index("--notes")
                 note_val = c[note_idx + 1]
-                self.assertLessEqual(len(note_val), 2000, "note must be ≤ 2000 chars")
+                self.assertLessEqual(len(note_val), 4000, "note must be ≤ 4000 chars")
 
     def test_empty_checkpoint_writes_fallback_message(self):
         calls = []

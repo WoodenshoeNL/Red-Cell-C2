@@ -1321,13 +1321,13 @@ def extract_cap_out_checkpoint(output: str, summary: list) -> str:
     return output[-2048:].strip() if output else ""
 
 
-def release_cap_out_bead(task_id: str, checkpoint: str, agent_id: str, log: Logger) -> None:
+def release_cap_out_bead(task_id: str, checkpoint: str, agent_id: str, log: Logger, cause: str = "turn_limit") -> None:
     """Reset a cap-out bead to open and prepend a checkpoint note, preserving prior checkpoints."""
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     new_entry = (
         f"--- CAP-OUT CHECKPOINT {ts} (auto-reset by {agent_id}) ---\n\n{checkpoint}"
         if checkpoint
-        else f"--- CAP-OUT {ts}: session hit turn limit. Auto-reset by {agent_id}. ---"
+        else f"--- CAP-OUT {ts}: session hit {cause.replace('_', ' ')}. Auto-reset by {agent_id}. ---"
     )
 
     # Read existing notes so we can prepend rather than overwrite.
@@ -2090,7 +2090,7 @@ Start directly with understanding the task and implementing it.
 
         if max_turns_hit:
             checkpoint = extract_cap_out_checkpoint(output, summary)
-            release_cap_out_bead(next_id, checkpoint, agent_id, log)
+            release_cap_out_bead(next_id, checkpoint, agent_id, log, cause="turn_limit")
             streak = cap_out_streak.get(next_id, 0) + 1
             cap_out_streak[next_id] = streak
             cap_out_pending_skip.add(next_id)
@@ -2106,7 +2106,7 @@ Start directly with understanding the task and implementing it.
             # No sleep: immediately proceed to the next task (a different one due to skip).
         elif token_limit_hit:
             checkpoint = extract_cap_out_checkpoint(output, summary)
-            release_cap_out_bead(next_id, checkpoint, agent_id, log)
+            release_cap_out_bead(next_id, checkpoint, agent_id, log, cause="token_limit")
             streak = cap_out_streak.get(next_id, 0) + 1
             cap_out_streak[next_id] = streak
             cap_out_pending_skip.add(next_id)

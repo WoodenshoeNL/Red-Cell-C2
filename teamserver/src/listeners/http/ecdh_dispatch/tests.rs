@@ -924,10 +924,7 @@ async fn ecdh_handled_path_writes_corpus_files() {
     );
     corpus.write_session_keys_once(resp.agent_id, keys).await;
 
-    let agent_dir = tmp
-        .path()
-        .join("archon")
-        .join(format!("{:08x}", resp.agent_id));
+    let agent_dir = tmp.path().join("archon").join(format!("{:08x}", resp.agent_id));
     assert!(agent_dir.join("0000.bin").exists(), "RX corpus packet must be written as 0000.bin");
     assert!(
         agent_dir.join("0000.meta.json").exists(),
@@ -938,10 +935,7 @@ async fn ecdh_handled_path_writes_corpus_files() {
         agent_dir.join("0001.meta.json").exists(),
         "TX corpus meta must be written as 0001.meta.json"
     );
-    assert!(
-        agent_dir.join("session.keys.json").exists(),
-        "session.keys.json must be written"
-    );
+    assert!(agent_dir.join("session.keys.json").exists(), "session.keys.json must be written");
 
     let keys_json = std::fs::read_to_string(agent_dir.join("session.keys.json"))
         .expect("read session.keys.json");

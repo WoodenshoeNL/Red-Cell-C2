@@ -19,12 +19,7 @@ impl HttpTransport {
     /// trusted root so the transport only accepts the pinned teamserver certificate.  When no
     /// pinned cert is configured, the system CA store is used instead.
     pub fn new(config: &PhantomConfig) -> Result<Self, PhantomError> {
-        // pool_max_idle_per_host(0): close connections immediately after each response.
-        // `mprotect_sleep` marks the heap PROT_NONE between checkins. With connection
-        // pooling, hyper spawns a background Tokio task that monitors the idle socket.
-        // If the teamserver sends a FIN or data during the mprotect window, that task
-        // wakes and accesses heap memory → SIGSEGV. Disabling the pool ensures no
-        // background socket tasks exist between requests.
+        // pool_max_idle_per_host(0): background socket tasks would fault during mprotect_sleep; see sleep_obfuscate.rs.
         let mut builder =
             reqwest::Client::builder().user_agent(&config.user_agent).pool_max_idle_per_host(0);
 

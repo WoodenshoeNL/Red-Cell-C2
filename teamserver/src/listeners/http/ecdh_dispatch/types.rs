@@ -7,6 +7,11 @@ pub(crate) const ECDH_REPLAY_WINDOW_SECS: u64 = 300;
 #[derive(Debug)]
 pub(crate) struct EcdhResponse {
     pub(crate) payload: Vec<u8>,
+    /// Agent ID resolved during ECDH handling, needed for corpus capture.
+    pub(crate) agent_id: u32,
+    /// ECDH session key; the registry stores zeros for ECDH agents, so we
+    /// carry the real key here for corpus `session.keys.json` sidecars.
+    pub(crate) session_key: [u8; 32],
 }
 
 /// Outcome of an ECDH packet dispatch attempt.

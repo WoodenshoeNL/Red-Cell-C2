@@ -137,5 +137,5 @@ pub(crate) async fn process_ecdh_session(
         ListenerManagerError::InvalidConfig { message: msg }
     })?;
 
-    Ok(EcdhResponse { payload: sealed })
+    Ok(EcdhResponse { payload: sealed, agent_id, session_key: *session_key })
 }

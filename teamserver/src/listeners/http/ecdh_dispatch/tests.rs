@@ -841,3 +841,121 @@ async fn successful_registration_commits_agent_and_session() {
         db.agents().get_persisted(agent_id).await.expect("db query").expect("agent row");
     assert_eq!(persisted.info.agent_id, agent_id);
 }
+
+/// `process_ecdh_registration` must populate `agent_id` and `session_key` on
+/// the returned `EcdhResponse` so the handler can write corpus entries without
+/// an extra registry lookup.
+#[tokio::test]
+async fn ecdh_registration_response_carries_agent_id_and_session_key() {
+    use crate::demon::INIT_EXT_MONOTONIC_CTR;
+
+    let (db, registry, events, _dispatcher, _keypair, _limiter) = ecdh_test_fixture().await;
+    let agent_id: u32 = 0xC0_DE_00_01;
+    let session_key = [0x77u8; 32];
+    let metadata = build_ecdh_init_metadata(agent_id, INIT_EXT_MONOTONIC_CTR);
+    let ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 77));
+
+    let resp = process_ecdh_registration(
+        "test-listener",
+        session_key,
+        &metadata,
+        &registry,
+        &db,
+        &events,
+        ip,
+    )
+    .await
+    .expect("registration must succeed");
+
+    assert_eq!(resp.agent_id, agent_id, "EcdhResponse.agent_id must match the registered agent");
+    assert_eq!(
+        resp.session_key, session_key,
+        "EcdhResponse.session_key must carry the ECDH session key"
+    );
+    assert!(!resp.payload.is_empty(), "EcdhResponse.payload must be non-empty");
+}
+
+/// Simulates the corpus-write logic that runs inside `handler.rs` when
+/// `EcdhOutcome::Handled` is returned: verifies that `record_packet` (RX + TX)
+/// and `write_session_keys_once` produce the expected files under the agent
+/// subdirectory when the data comes from an `EcdhResponse`.
+///
+/// This complements the `CorpusCapture` unit tests in `corpus_capture.rs`
+/// by coupling them to the fields we added to `EcdhResponse` in this bug fix.
+#[tokio::test]
+async fn ecdh_handled_path_writes_corpus_files() {
+    use red_cell_common::corpus::{CorpusAgentType, CorpusPacketDir, CorpusSessionKeys};
+    use tempfile::TempDir;
+
+    use crate::corpus_capture::{CorpusCapture, bytes_to_hex};
+    use crate::demon::INIT_EXT_MONOTONIC_CTR;
+
+    let (db, registry, events, _dispatcher, _keypair, _limiter) = ecdh_test_fixture().await;
+    let agent_id: u32 = 0xC0_DE_00_02;
+    let session_key = [0xABu8; 32];
+    let metadata = build_ecdh_init_metadata(agent_id, INIT_EXT_MONOTONIC_CTR);
+    let ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 78));
+
+    let resp = process_ecdh_registration(
+        "test-listener",
+        session_key,
+        &metadata,
+        &registry,
+        &db,
+        &events,
+        ip,
+    )
+    .await
+    .expect("registration must succeed");
+
+    let tmp = TempDir::new().expect("tempdir");
+    let corpus = CorpusCapture::new(tmp.path().to_path_buf(), CorpusAgentType::Archon);
+
+    let fake_rx = b"fake-ecdh-registration-ciphertext";
+    corpus.record_packet(resp.agent_id, CorpusPacketDir::Rx, fake_rx, None).await;
+    corpus.record_packet(resp.agent_id, CorpusPacketDir::Tx, &resp.payload, None).await;
+
+    let keys = CorpusSessionKeys::new(
+        bytes_to_hex(&resp.session_key),
+        String::new(),
+        false,
+        0,
+        format!("0x{:08x}", resp.agent_id),
+    );
+    corpus.write_session_keys_once(resp.agent_id, keys).await;
+
+    let agent_dir = tmp
+        .path()
+        .join("archon")
+        .join(format!("{:08x}", resp.agent_id));
+    assert!(agent_dir.join("0000.bin").exists(), "RX corpus packet must be written as 0000.bin");
+    assert!(
+        agent_dir.join("0000.meta.json").exists(),
+        "RX corpus meta must be written as 0000.meta.json"
+    );
+    assert!(agent_dir.join("0001.bin").exists(), "TX corpus packet must be written as 0001.bin");
+    assert!(
+        agent_dir.join("0001.meta.json").exists(),
+        "TX corpus meta must be written as 0001.meta.json"
+    );
+    assert!(
+        agent_dir.join("session.keys.json").exists(),
+        "session.keys.json must be written"
+    );
+
+    let keys_json = std::fs::read_to_string(agent_dir.join("session.keys.json"))
+        .expect("read session.keys.json");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&keys_json).expect("session.keys.json must be valid JSON");
+    let expected_key_hex = bytes_to_hex(&session_key);
+    assert_eq!(
+        parsed["aes_key_hex"].as_str().expect("aes_key_hex"),
+        expected_key_hex,
+        "session.keys.json must embed the ECDH session key"
+    );
+    assert_eq!(
+        parsed["agent_id_hex"].as_str().expect("agent_id_hex"),
+        format!("0x{agent_id:08x}"),
+        "session.keys.json must embed the correct agent_id"
+    );
+}

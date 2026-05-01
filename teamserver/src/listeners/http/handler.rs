@@ -82,6 +82,22 @@ pub(super) async fn http_listener_handler(
         .await
         {
             Ok(EcdhOutcome::Handled(ecdh_resp)) => {
+                // Write corpus RX + TX and session keys for ECDH agents.
+                if let Some(corpus) = &state.corpus_capture {
+                    let agent_id = ecdh_resp.agent_id;
+                    corpus.record_packet(agent_id, CorpusPacketDir::Rx, body.as_ref(), None).await;
+                    corpus
+                        .record_packet(agent_id, CorpusPacketDir::Tx, &ecdh_resp.payload, None)
+                        .await;
+                    let keys = CorpusSessionKeys::new(
+                        bytes_to_hex(&ecdh_resp.session_key),
+                        String::new(),
+                        false,
+                        0,
+                        format!("0x{agent_id:08x}"),
+                    );
+                    corpus.write_session_keys_once(agent_id, keys).await;
+                }
                 return if ecdh_resp.payload.is_empty() {
                     state.callback_empty_response()
                 } else {
@@ -115,8 +131,8 @@ pub(super) async fn http_listener_handler(
         return state.fake_404_response();
     }
 
-    // Snapshot the encrypted request bytes before dispatch so the corpus RX
-    // entry can be written after we know the agent_id from the parsed result.
+    // Snapshot the encrypted request bytes after the ECDH early-return so we
+    // only clone for packets that reach the Demon transport path.
     let corpus_rx_snapshot: Option<axum::body::Bytes> =
         state.corpus_capture.as_ref().map(|_| body.clone());
 

@@ -125,5 +125,5 @@ pub(crate) async fn process_ecdh_registration(
         }
     }
 
-    Ok(EcdhResponse { payload: response })
+    Ok(EcdhResponse { payload: response, agent_id, session_key })
 }

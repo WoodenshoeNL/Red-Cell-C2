@@ -77,6 +77,10 @@ DEV_PROMPTS = {
 DEV_LITEQA_PROMPT = "prompts/DEV_LITEQA_PROMPT.md"
 DEV_LITEQA_MAX_TURNS = 50
 
+# Cap-out post-mortem prompt run when a dev session hits the turn/token limit
+DEV_LITEQA_CAPOUT_PROMPT = "prompts/DEV_LITEQA_CAPOUT_PROMPT.md"
+DEV_LITEQA_CAPOUT_MAX_TURNS = 30
+
 # Pre-claim QA prompt run before claiming a bead (agent-independent)
 PRE_CLAIM_QA_PROMPT = "prompts/PRE_CLAIM_QA_PROMPT.md"
 PRE_CLAIM_QA_MAX_TURNS = 20
@@ -1975,6 +1979,50 @@ Start directly with understanding the task and implementing it.
 
             # Lite QA may have run br update/create — sweep before iteration ends.
             commit_beads_if_dirty(f"post-lite-qa sweep for {next_id} [{agent_id}]", log)
+
+        # Cap-out post-mortem: run when the dev session hit the turn or token limit.
+        # Analyses the dead session's transcript, writes a checkpoint note to the bead
+        # body, and corrects any misinformation — so the next session doesn't repeat the
+        # same wrong path.  Runs before release_cap_out_bead so the body is updated while
+        # the bead is still in the current state.
+        if (
+            not getattr(args, "dev_light", False)
+            and (max_turns_hit or token_limit_hit)
+        ):
+            capout_prompt_file = SCRIPT_DIR / DEV_LITEQA_CAPOUT_PROMPT
+            if capout_prompt_file.exists():
+                capout_template = capout_prompt_file.read_text()
+                issue_details = br(["show", next_id]).stdout.strip() or f"Issue ID: {next_id}"
+                transcript_tail = output[-5120:] if len(output) > 5120 else output
+                capout_prompt = (
+                    capout_template
+                    .replace("{ISSUE_ID}", next_id)
+                    .replace("{AGENT_ID}", agent_id)
+                    .replace("{MAX_TURNS}", str(DEV_LITEQA_CAPOUT_MAX_TURNS))
+                )
+                capout_prompt += f"\n\n---\n\n## Issue Details\n\n{issue_details}\n"
+                capout_prompt += (
+                    f"\n\n---\n\n## Dead Session's Final Output (last 5 KB)\n\n"
+                    f"```\n{transcript_tail}\n```\n"
+                )
+                log.log(f"Running cap-out lite QA on task {next_id}...")
+                cq_exit, _cq_output, _ = run_agent(
+                    agent, args.model, capout_prompt, log,
+                    max_turns=DEV_LITEQA_CAPOUT_MAX_TURNS if agent == "claude" else 0,
+                    extra_env=dev_extra_env or None,
+                )
+                if cq_exit != 0:
+                    log.log(f"WARNING: cap-out lite QA exited with code {cq_exit}")
+                else:
+                    log.log(f"Cap-out lite QA completed for task {next_id}")
+            else:
+                log.log(
+                    f"WARNING: cap-out lite QA prompt not found at {capout_prompt_file}"
+                    f" — skipping"
+                )
+
+            # Cap-out QA may have run br update — sweep before release.
+            commit_beads_if_dirty(f"post-capout-qa sweep for {next_id} [{agent_id}]", log)
 
         final_status = issue_status_from_jsonl(next_id)
         if final_status == "in_progress" and not max_turns_hit:

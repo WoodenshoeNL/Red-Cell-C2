@@ -484,6 +484,10 @@ fn pack_http_listener_packs_doh_provider_google() -> Result<(), Box<dyn std::err
 
 /// Skip over the 12 common fields that precede the Archon-only section.
 ///
+/// The canonical field order is defined by `pack_config_matches_expected_http_layout`.
+/// If a HeapEnc test fails with an unexpected value, verify that test first — a field
+/// added or reordered before this section will shift the Archon-only offset.
+///
 /// Returns `Ok(())` on success; the caller then reads the next field(s).
 fn skip_common_pre_archon_fields(cursor: &mut &[u8]) -> Result<(), Box<dyn std::error::Error>> {
     read_u32(cursor)?; // Sleep
@@ -499,6 +503,26 @@ fn skip_common_pre_archon_fields(cursor: &mut &[u8]) -> Result<(), Box<dyn std::
     read_u32(cursor)?; // Indirect Syscall
     read_u32(cursor)?; // Amsi/Etw Patch
     Ok(())
+}
+
+/// Assert that `skip_common_pre_archon_fields` consumed exactly the expected number of bytes
+/// for the test fixture produced by `minimal_config_json()` + `http_listener_with_method(None)`.
+///
+/// Expected layout (56 bytes total):
+///   4× u32 (Sleep, Jitter, Alloc, Execute)                    = 16 bytes
+///   wstring("a")  — 4-byte length + 2-byte char + 2-byte null =  8 bytes
+///   wstring("b")  — same                                       =  8 bytes
+///   6× u32 (SleepTechnique, SleepJmpGadget, StackDup,
+///            ProxyLoading, IndirectSyscall, AmsiEtw)           = 24 bytes
+fn assert_common_fields_consumed(bytes: &[u8], cursor: &[u8]) {
+    const EXPECTED_COMMON_BYTES: usize = 56;
+    let consumed = bytes.len() - cursor.len();
+    assert_eq!(
+        consumed, EXPECTED_COMMON_BYTES,
+        "skip_common_pre_archon_fields consumed {consumed} bytes but expected \
+         {EXPECTED_COMMON_BYTES}; a field was added or reordered before the Archon-only \
+         section — verify field order against pack_config_matches_expected_http_layout",
+    );
 }
 
 /// `HeapEnc = true` in an Archon build must be serialised as `u32(1)` in the
@@ -517,6 +541,7 @@ fn pack_config_archon_heap_enc_true_written_as_one_at_archon_only_offset()
     let mut cursor = bytes.as_slice();
 
     skip_common_pre_archon_fields(&mut cursor)?;
+    assert_common_fields_consumed(&bytes, cursor);
 
     let heap_enc = read_u32(&mut cursor)?;
     assert_eq!(
@@ -545,6 +570,7 @@ fn pack_config_archon_heap_enc_false_written_as_zero_at_archon_only_offset()
     let mut cursor = bytes.as_slice();
 
     skip_common_pre_archon_fields(&mut cursor)?;
+    assert_common_fields_consumed(&bytes, cursor);
 
     let heap_enc = read_u32(&mut cursor)?;
     assert_eq!(

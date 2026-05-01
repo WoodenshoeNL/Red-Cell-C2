@@ -248,7 +248,7 @@ fn phantom_demon_message_from_bytes_parses_all_packages_in_batched_session_packe
         3,
         "ECDH session payload with 3 packages must yield 3 decoded packages; \
          DemonMessage::from_bytes stopped early at byte offset {offset}",
-        offset = if decoded.packages.is_empty() { 0 } else { decoded.packages[0].encoded_len() }
+        offset = decoded.packages.iter().map(DemonPackage::encoded_len).sum::<usize>()
     );
 
     for (i, (got, expected)) in decoded.packages.iter().zip(packages_in.iter()).enumerate() {

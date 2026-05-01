@@ -527,6 +527,68 @@ fn load_corpus_detects_digest_mismatch() {
     );
 }
 
+/// Verify that `replay_entry` returns `ReplayError::HandlerMismatch` when
+/// `meta.expected_handler` names a phase that does not match the packet kind
+/// the parser actually produced.
+///
+/// The synthetic DEMON_INIT fixture bytes are fed through the parser normally;
+/// the mismatch is injected by setting `expected_handler = "DEMON_REINIT"` on
+/// a manually constructed [`CorpusEntry`] — the parser returns
+/// `ParsedDemonPacket::Init`, which does not match that label.
+#[tokio::test]
+async fn replay_entry_returns_handler_mismatch_for_wrong_expected_handler()
+-> Result<(), Box<dyn std::error::Error>> {
+    ensure_synthetic_demon_checkin_fixture()?;
+
+    // Load the synthetic INIT bytes.
+    let entries = load_corpus("demon", "checkin")?;
+    assert_eq!(entries.len(), 1, "synthetic checkin fixture must contain exactly one packet");
+    let entry = &entries[0];
+
+    // Build an in-memory registry and parser (same as the happy-path test).
+    let database = Database::connect_in_memory().await?;
+    let registry = AgentRegistry::new(database);
+    let parser = DemonPacketParser::new(registry);
+
+    // Construct a CorpusEntry with the same DEMON_INIT bytes but with
+    // expected_handler pointing at the wrong phase.
+    let mismatched = CorpusEntry {
+        dir: entry.dir,
+        bytes: entry.bytes.clone(),
+        meta: CorpusPacketMeta::new(
+            entry.meta.seq,
+            entry.meta.direction,
+            entry.meta.agent_type,
+            entry.meta.scenario.clone(),
+            entry.meta.captured_at_unix,
+            entry.meta.bytes_sha256.clone(),
+            entry.meta.byte_len,
+            Some("DEMON_REINIT".to_string()),
+        ),
+    };
+
+    let result = replay_entry(&parser, &mismatched, "127.0.0.1", "replay-test").await;
+
+    assert!(
+        matches!(result, Err(ReplayError::HandlerMismatch { .. })),
+        "expected ReplayError::HandlerMismatch, got: {result:?}"
+    );
+
+    // The error message must name both the expected and actual phases so a
+    // failing replay reports which handler was expected vs. which fired.
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("DEMON_REINIT"),
+        "error message must contain the expected phase label 'DEMON_REINIT': {err_msg}"
+    );
+    assert!(
+        err_msg.contains("DEMON_INIT"),
+        "error message must contain the actual phase label 'DEMON_INIT': {err_msg}"
+    );
+
+    Ok(())
+}
+
 /// Lower-level corpus loader that reads directly from an arbitrary directory
 /// (used by tests that construct synthetic directories).
 fn load_corpus_from_dir(dir: &Path) -> Result<Vec<CorpusEntry>, ReplayError> {

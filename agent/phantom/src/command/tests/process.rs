@@ -1,5 +1,73 @@
 use super::*;
 
+/// Build a UTF-16LE wstring payload whose code units include an explicit
+/// null-terminator `U+0000` at the end — matching the wire format sent by the
+/// Havoc C agent, which always appends `\x00\x00` after the string body.
+///
+/// `TaskParser::wstring()` must strip this terminator; if it does not, callers
+/// receive a `String` ending with `'\0'` which poisons comparisons and path
+/// lookups (bug 2g1nj).
+fn utf16_payload_with_null(value: &str) -> Vec<u8> {
+    let utf16: Vec<u8> =
+        value.encode_utf16().chain(std::iter::once(0u16)).flat_map(u16::to_le_bytes).collect();
+    let mut out = Vec::with_capacity(4 + utf16.len());
+    out.extend_from_slice(&(utf16.len() as i32).to_le_bytes());
+    out.extend_from_slice(&utf16);
+    out
+}
+
+/// Sending a process Create command whose name wstring carries an explicit
+/// UTF-16LE null terminator `\x00\x00` must produce the same process-path in
+/// the callback as sending the same name without the terminator (bug 2g1nj).
+///
+/// If `TaskParser::wstring()` does NOT strip the null, the spawned `binary`
+/// variable would be `/bin/sh\0`, and the proc-create callback would encode
+/// `/bin/sh\0` as the process path.  The assertion detects this by checking
+/// that the encoded process path contains no null character.
+#[tokio::test]
+async fn proc_create_wstring_null_terminator_stripped_from_process_path_in_callback() {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&(DemonProcessCommand::Create as i32).to_le_bytes());
+    payload.extend_from_slice(&0_i32.to_le_bytes()); // process_state = 0
+
+    // Send "/bin/sh\0" — explicit null terminator matching the C agent wire format.
+    payload.extend_from_slice(&utf16_payload_with_null("/bin/sh"));
+    payload.extend_from_slice(&utf16_payload("printf null-term-test"));
+    payload.extend_from_slice(&1_i32.to_le_bytes()); // piped = true
+    payload.extend_from_slice(&0_i32.to_le_bytes()); // verbose = false
+
+    let package = DemonPackage::new(DemonCommand::CommandProc, 77, payload);
+    let mut state = PhantomState::default();
+
+    execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
+
+    let callbacks = state.drain_callbacks();
+    assert!(!callbacks.is_empty(), "proc create must produce at least one structured callback");
+
+    // The first callback is the proc-create structured result; it encodes the
+    // process path via `encode_proc_create(&binary, ...)` where `binary` comes
+    // from `parser.wstring()`.  If the null was not stripped, the encoded path
+    // would end with '\0' and the assertion below would catch it.
+    let PendingCallback::Structured { payload: cb_payload, .. } = &callbacks[0] else {
+        panic!("expected Structured callback, got {:?}", callbacks[0]);
+    };
+
+    let mut offset = 0_usize;
+    // First field is the subcommand ID (Create).
+    let _ = read_u32(cb_payload, &mut offset);
+    // Second field is the process path as UTF-16LE wstring.
+    let proc_path = read_utf16(cb_payload, &mut offset);
+
+    assert!(
+        !proc_path.contains('\0'),
+        "proc create callback at offset {offset}: process path {:?} contains null char — \
+         TaskParser::wstring() must strip the null terminator (bug 2g1nj); \
+         got bytes: {:?}",
+        proc_path,
+        &cb_payload[4..offset],
+    );
+}
+
 #[tokio::test]
 async fn proc_create_with_pipe_returns_structured_and_output_callbacks() {
     let mut payload = Vec::new();

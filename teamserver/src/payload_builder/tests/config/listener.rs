@@ -479,3 +479,81 @@ fn pack_http_listener_packs_doh_provider_google() -> Result<(), Box<dyn std::err
     assert_eq!(provider, 1, "Google provider should be encoded as 1");
     Ok(())
 }
+
+// ── HeapEnc conditional packing (bug 2it9u) ─────────────────────
+
+/// Skip over the 12 common fields that precede the Archon-only section.
+///
+/// Returns `Ok(())` on success; the caller then reads the next field(s).
+fn skip_common_pre_archon_fields(cursor: &mut &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    read_u32(cursor)?; // Sleep
+    read_u32(cursor)?; // Jitter
+    read_u32(cursor)?; // Injection.Alloc
+    read_u32(cursor)?; // Injection.Execute
+    read_wstring(cursor)?; // Spawn64
+    read_wstring(cursor)?; // Spawn32
+    read_u32(cursor)?; // Sleep Technique (obfuscation value)
+    read_u32(cursor)?; // Sleep Jmp Gadget (0 when no obfuscation)
+    read_u32(cursor)?; // Stack Duplication (0 when no obfuscation)
+    read_u32(cursor)?; // Proxy Loading
+    read_u32(cursor)?; // Indirect Syscall
+    read_u32(cursor)?; // Amsi/Etw Patch
+    Ok(())
+}
+
+/// `HeapEnc = true` in an Archon build must be serialised as `u32(1)` in the
+/// binary config blob at the first Archon-only field position (bug 2it9u).
+///
+/// The Archon agent reads a `u32` at this exact byte offset to determine
+/// whether to encrypt the heap during sleep.  A wrong value (0 instead of 1,
+/// or shifted by 4+ bytes due to a missing Demon-only field) would silently
+/// disable HeapEnc or crash with a bad field read.
+#[test]
+fn pack_config_archon_heap_enc_true_written_as_one_at_archon_only_offset()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut config = minimal_config_json();
+    config.insert("HeapEnc".to_owned(), Value::Bool(true));
+    let bytes = pack_config(&http_listener_with_method(None), &config, "archon")?;
+    let mut cursor = bytes.as_slice();
+
+    skip_common_pre_archon_fields(&mut cursor)?;
+
+    let heap_enc = read_u32(&mut cursor)?;
+    assert_eq!(
+        heap_enc,
+        1,
+        "HeapEnc=true: archon-only field at byte offset {} must be u32(1); \
+         got {} — either the value is wrong or an earlier field shifted this offset",
+        bytes.len() - cursor.len() - 4,
+        heap_enc,
+    );
+    Ok(())
+}
+
+/// `HeapEnc = false` in an Archon build must be serialised as `u32(0)` in the
+/// binary config blob at the first Archon-only field position (bug 2it9u).
+///
+/// If `HeapEnc = false` is not propagated correctly — e.g. because the
+/// `optional_bool` default of `true` overrides the explicit `false` — the
+/// Archon agent will always encrypt the heap regardless of profile settings.
+#[test]
+fn pack_config_archon_heap_enc_false_written_as_zero_at_archon_only_offset()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut config = minimal_config_json();
+    config.insert("HeapEnc".to_owned(), Value::Bool(false));
+    let bytes = pack_config(&http_listener_with_method(None), &config, "archon")?;
+    let mut cursor = bytes.as_slice();
+
+    skip_common_pre_archon_fields(&mut cursor)?;
+
+    let heap_enc = read_u32(&mut cursor)?;
+    assert_eq!(
+        heap_enc,
+        0,
+        "HeapEnc=false: archon-only field at byte offset {} must be u32(0); \
+         got {} — explicit HeapEnc=false is being overridden by the default",
+        bytes.len() - cursor.len() - 4,
+        heap_enc,
+    );
+    Ok(())
+}

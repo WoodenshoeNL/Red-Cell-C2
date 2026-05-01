@@ -286,8 +286,8 @@ class TestCorpusCapturePatch(unittest.TestCase):
 
         self.assertEqual(body, payload)  # caller still sees response
 
-        self.assertTrue((cap.output_dir / "0000.bin").exists())  # TX
-        self.assertTrue((cap.output_dir / "0001.bin").exists())  # RX
+        self.assertTrue((cap.output_dir / "0000.bin").exists())  # RX (agent request)
+        self.assertTrue((cap.output_dir / "0001.bin").exists())  # TX (teamserver response)
         self.assertEqual((cap.output_dir / "0000.bin").read_bytes(), payload)
         self.assertEqual((cap.output_dir / "0001.bin").read_bytes(), payload)
 
@@ -298,10 +298,12 @@ class TestCorpusCapturePatch(unittest.TestCase):
             with urllib.request.urlopen(req, timeout=5) as resp:
                 resp.read()
 
-        tx_meta = json.loads((cap.output_dir / "0000.meta.json").read_text())
-        rx_meta = json.loads((cap.output_dir / "0001.meta.json").read_text())
-        self.assertEqual(tx_meta["direction"], "tx")
-        self.assertEqual(rx_meta["direction"], "rx")
+        # 0000 = agent request body, received by teamserver → "rx"
+        # 0001 = teamserver response body, transmitted by teamserver → "tx"
+        req_meta = json.loads((cap.output_dir / "0000.meta.json").read_text())
+        resp_meta = json.loads((cap.output_dir / "0001.meta.json").read_text())
+        self.assertEqual(req_meta["direction"], "rx")
+        self.assertEqual(resp_meta["direction"], "tx")
 
     def test_patch_restores_urlopen_after_exit(self) -> None:
         original = urllib.request.urlopen
@@ -371,12 +373,14 @@ class TestCapturingSession(unittest.TestCase):
         session.post(self._url(), data=b"pkt", expected_handler="DEMON_CHECKIN")
 
         self.assertEqual(cap.packet_count(), 2)
-        tx_meta = json.loads((cap.output_dir / "0000.meta.json").read_text())
-        rx_meta = json.loads((cap.output_dir / "0001.meta.json").read_text())
-        self.assertEqual(tx_meta["direction"], "tx")
-        self.assertEqual(tx_meta["expected_handler"], "DEMON_CHECKIN")
-        self.assertEqual(rx_meta["direction"], "rx")
-        self.assertIsNone(rx_meta["expected_handler"])
+        # 0000 = agent request body, received by teamserver → direction "rx"
+        # 0001 = teamserver response body, transmitted by teamserver → direction "tx"
+        req_meta = json.loads((cap.output_dir / "0000.meta.json").read_text())
+        resp_meta = json.loads((cap.output_dir / "0001.meta.json").read_text())
+        self.assertEqual(req_meta["direction"], "rx")
+        self.assertEqual(req_meta["expected_handler"], "DEMON_CHECKIN")
+        self.assertEqual(resp_meta["direction"], "tx")
+        self.assertIsNone(resp_meta["expected_handler"])
 
     def test_meta_bytes_sha256_correct(self) -> None:
         cap = CorpusCapture(self.corpus_dir, "phantom", "04")

@@ -9,9 +9,9 @@ On-disk layout (mirrors the Rust corpus format):
     <corpus_dir>/
       <agent_type>/          e.g. "demon", "archon", "phantom", "specter"
         <scenario_id>/       e.g. "04", "13", "checkin"
-          0000.bin           raw on-wire bytes (TX = agent→teamserver)
+          0000.bin           raw on-wire bytes (RX = teamserver receives from agent)
           0000.meta.json     metadata sidecar (see CorpusPacketMeta in corpus.rs)
-          0001.bin           raw bytes (RX = teamserver→agent)
+          0001.bin           raw bytes (TX = teamserver transmits to agent)
           0001.meta.json
           ...
           session.keys.json  CorpusSessionKeys — null until teamserver middleware lands
@@ -102,7 +102,8 @@ class CorpusCapture:
         (metadata sidecar matching ``CorpusPacketMeta`` in corpus.rs).
 
         Args:
-            direction:        ``"tx"`` (agent→teamserver) or ``"rx"`` (teamserver→agent).
+            direction:        ``"rx"`` (agent→teamserver, received by teamserver) or
+                              ``"tx"`` (teamserver→agent, transmitted by teamserver).
             raw_bytes:        Raw on-wire bytes — HTTP body after chunked-transfer
                               decoding but before any agent-layer decryption.
             expected_handler: Optional teamserver handler hint for replay tests
@@ -247,13 +248,15 @@ class CapturingSession:
         headers: dict[str, str] | None = None,
         expected_handler: str | None = None,
     ) -> tuple[int, bytes]:
-        """POST raw bytes to ``url``, capturing the TX body and RX response.
+        """POST raw bytes to ``url``, capturing the request body as RX (received by
+        teamserver) and the response body as TX (transmitted by teamserver).
 
         Args:
             url:              Target URL (e.g. ``http://teamserver:19081/demon``).
-            data:             Raw request body bytes to send and capture as TX.
+            data:             Raw request body bytes to send and capture as RX.
             headers:          Additional HTTP request headers.
-            expected_handler: Forwarded to ``CorpusCapture.record_packet`` TX entry.
+            expected_handler: Forwarded to ``CorpusCapture.record_packet`` RX entry
+                              (agent request received by teamserver).
 
         Returns:
             ``(status_code, response_body)`` — 4xx/5xx responses are returned,
@@ -264,7 +267,7 @@ class CapturingSession:
         for k, v in (headers or {}).items():
             req.add_header(k, v)
 
-        self._capture.record_packet("tx", data, expected_handler=expected_handler)
+        self._capture.record_packet("rx", data, expected_handler=expected_handler)
 
         try:
             with urllib.request.urlopen(req, timeout=self._timeout) as resp:
@@ -274,7 +277,7 @@ class CapturingSession:
             body = exc.read()
             status = exc.code
 
-        self._capture.record_packet("rx", body)
+        self._capture.record_packet("tx", body)
         return status, body
 
     def get(
@@ -282,9 +285,9 @@ class CapturingSession:
         url: str,
         headers: dict[str, str] | None = None,
     ) -> tuple[int, bytes]:
-        """GET ``url``, capturing the RX response body.
+        """GET ``url``, capturing the TX response body (transmitted by teamserver).
 
-        The GET request itself has no body; only the response is recorded (as RX).
+        The GET request itself has no body; only the response is recorded (as TX).
 
         Returns:
             ``(status_code, response_body)``.
@@ -301,7 +304,7 @@ class CapturingSession:
             body = exc.read()
             status = exc.code
 
-        self._capture.record_packet("rx", body)
+        self._capture.record_packet("tx", body)
         return status, body
 
 
@@ -313,9 +316,9 @@ class CorpusCapturePatch:
     While active, every call to ``urllib.request.urlopen`` within the same
     process is intercepted:
 
-    * The request body (if any) is recorded as a TX packet.
-    * The response body is buffered, recorded as an RX packet, and then
-      returned to the caller wrapped in ``_BufferedHTTPResponse`` so the
+    * The request body (if any) is recorded as an RX packet (received by teamserver).
+    * The response body is buffered, recorded as a TX packet (transmitted by teamserver),
+      and returned to the caller wrapped in ``_BufferedHTTPResponse`` so the
       caller can still ``read()`` the data normally.
     * ``urllib.error.HTTPError`` (4xx/5xx) responses are also captured before
       the exception is re-raised.
@@ -355,7 +358,7 @@ class CorpusCapturePatch:
                 tx_body = data
 
             if tx_body:
-                capture.record_packet("tx", tx_body)
+                capture.record_packet("rx", tx_body)
 
             call_kw: dict[str, Any] = {}
             if timeout is not None:
@@ -366,12 +369,12 @@ class CorpusCapturePatch:
             except urllib.error.HTTPError as exc:
                 rx_body = exc.read()
                 if rx_body:
-                    capture.record_packet("rx", rx_body)
+                    capture.record_packet("tx", rx_body)
                 raise
 
             rx_body = resp.read()
             if rx_body:
-                capture.record_packet("rx", rx_body)
+                capture.record_packet("tx", rx_body)
 
             return _BufferedHTTPResponse(resp, rx_body)
 

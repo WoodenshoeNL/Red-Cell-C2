@@ -66,9 +66,9 @@ automatic-test/config/env.toml
 automatic-test/config-autotest/targets.toml
 automatic-test/config-autotest/env.toml
 
-# Python bytecode artifacts (autotest harness)
-automatic-test/**/__pycache__/
-automatic-test/**/*.pyc
+# Python bytecode artifacts
+__pycache__/
+*.pyc
 
 # Generated rustdoc output (cargo doc)
 /doc/

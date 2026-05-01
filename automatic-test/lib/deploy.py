@@ -479,7 +479,7 @@ def _windows_wmi_create_script(command_line: str) -> str:
     )
 
 
-def _windows_schtask_script(exe_path: str) -> str:
+def _windows_schtask_script(exe_path: str, arguments: str = "") -> str:
     """Build PowerShell that uses Task Scheduler (S4U) to run *exe_path* as the current user.
 
     Unlike ``WMI Win32_Process.Create`` (which runs as SYSTEM), this approach
@@ -492,11 +492,17 @@ def _windows_schtask_script(exe_path: str) -> str:
     of the SSH job object (unlike ``Start-Process``, which is killed when
     OpenSSH tears down the session).  The task registration is removed after
     launch; the child process keeps running as an independent process.
+
+    Args:
+        exe_path:  Path to the executable (no arguments).
+        arguments: Optional arguments string passed via ``-Argument`` to
+                   ``New-ScheduledTaskAction``.  Must not include the exe path.
     """
     exe_q = _quote_powershell(exe_path)
+    arg_clause = f" -Argument {_quote_powershell(arguments)}" if arguments else ""
     return (
         "$name = 'RCTest-' + [System.Guid]::NewGuid().ToString('N').Substring(0, 12); "
-        f"$action = New-ScheduledTaskAction -Execute {exe_q}; "
+        f"$action = New-ScheduledTaskAction -Execute {exe_q}{arg_clause}; "
         "$settings = New-ScheduledTaskSettingsSet "
         "-ExecutionTimeLimit ([TimeSpan]::Zero) -StartWhenAvailable; "
         "$me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name; "
@@ -542,7 +548,7 @@ def defender_add_exclusion(target: TargetConfig, path: str) -> None:
     run_remote(target, f"powershell -NoProfile -EncodedCommand {enc}")
 
 
-def execute_background(target: TargetConfig, command: str) -> None:
+def execute_background(target: TargetConfig, command: str, arguments: str = "") -> None:
     """Run a command on the target in the background (fire-and-forget).
 
     On Windows, uses Task Scheduler (``Register-ScheduledTask`` with S4U logon)
@@ -553,9 +559,19 @@ def execute_background(target: TargetConfig, command: str) -> None:
 
     On Linux, the standard ``nohup … &`` detach works because POSIX SSH does
     not use job objects.
+
+    Args:
+        target:    SSH target.
+        command:   Executable path (Windows) or full command line (Linux).
+                   On Windows this must be the executable path only — do not
+                   embed arguments here; use *arguments* instead.
+        arguments: Optional arguments forwarded via ``-Argument`` to
+                   ``New-ScheduledTaskAction`` (Windows only; ignored on Linux).
     """
     if target.work_dir.startswith("C:\\") or "\\" in target.work_dir:
-        script = _windows_schtask_script(command)
+        # Pass exe and args separately so New-ScheduledTaskAction -Execute receives
+        # only the binary path; arguments go via -Argument.
+        script = _windows_schtask_script(command, arguments)
         enc = _powershell_encoded_command(script)
         bg_cmd = f"powershell -NoProfile -EncodedCommand {enc}"
     else:

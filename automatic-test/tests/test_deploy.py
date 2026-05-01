@@ -683,6 +683,79 @@ class TestWindowsSchedTaskScript(unittest.TestCase):
         self.assertIn("ExecutionTimeLimit", script)
         self.assertIn("TimeSpan]::Zero", script)
 
+    def test_no_arguments_omits_argument_clause(self) -> None:
+        """When no arguments are supplied, -Argument must not appear in the script."""
+        script = _windows_schtask_script("C:\\Temp\\agent.exe")
+        self.assertNotIn("-Argument", script)
+
+    def test_arguments_included_via_argument_flag(self) -> None:
+        """-Argument must be passed to New-ScheduledTaskAction when args are present."""
+        script = _windows_schtask_script("C:\\Temp\\agent.exe", "--sleep 5")
+        self.assertIn("-Argument", script)
+        self.assertIn("--sleep 5", script)
+
+    def test_arguments_do_not_appear_in_execute(self) -> None:
+        """-Execute must contain only the exe path, not the arguments."""
+        script = _windows_schtask_script("C:\\Temp\\agent.exe", "--sleep 5")
+        execute_idx = script.index("-Execute")
+        argument_idx = script.index("-Argument")
+        # -Execute comes before -Argument in the action definition
+        self.assertLess(execute_idx, argument_idx)
+        # The exe path is correctly single-quoted without arguments
+        self.assertIn("-Execute 'C:\\Temp\\agent.exe'", script)
+
+    def test_arguments_with_spaces_single_quoted(self) -> None:
+        """Argument values containing spaces must be single-quoted."""
+        script = _windows_schtask_script("C:\\Temp\\agent.exe", "--config C:\\path with spaces\\cfg.toml")
+        self.assertIn("-Argument", script)
+        self.assertIn("--config C:\\path with spaces\\cfg.toml", script)
+
+
+class TestExecuteBackgroundWindowsArguments(unittest.TestCase):
+    """Tests that execute_background correctly passes arguments on Windows."""
+
+    def setUp(self) -> None:
+        self.key_path = _module_key_path()
+
+    def _completed(
+        self, returncode: int, stderr: str = "", stdout: str = ""
+    ) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(
+            args=[], returncode=returncode, stdout=stdout, stderr=stderr
+        )
+
+    def test_no_arguments_no_argument_clause(self) -> None:
+        """Plain exe path (no args) must not produce -Argument in the script."""
+        ok = self._completed(0)
+        t = _make_target(work_dir="C:\\Temp\\rc-test", key=self.key_path)
+        with patch("subprocess.run", return_value=ok) as m:
+            execute_background(t, "C:\\Temp\\rc-test\\agent.exe")
+        script = _decoded_windows_launch_script(m.call_args[0][0][-1])
+        self.assertNotIn("-Argument", script)
+        self.assertIn("C:\\Temp\\rc-test\\agent.exe", script)
+
+    def test_arguments_parameter_produces_argument_clause(self) -> None:
+        """Passing arguments= must produce -Argument in the scheduled task action."""
+        ok = self._completed(0)
+        t = _make_target(work_dir="C:\\Temp\\rc-test", key=self.key_path)
+        with patch("subprocess.run", return_value=ok) as m:
+            execute_background(t, "C:\\Temp\\rc-test\\agent.exe", "--sleep 5 --port 8443")
+        script = _decoded_windows_launch_script(m.call_args[0][0][-1])
+        self.assertIn("-Execute 'C:\\Temp\\rc-test\\agent.exe'", script)
+        self.assertIn("-Argument", script)
+        self.assertIn("--sleep 5 --port 8443", script)
+
+    def test_arguments_with_spaces_in_exe_path(self) -> None:
+        """Exe path with spaces plus arguments — both must appear correctly."""
+        ok = self._completed(0)
+        t = _make_target(work_dir="C:\\Program Files\\rc", key=self.key_path)
+        with patch("subprocess.run", return_value=ok) as m:
+            execute_background(t, "C:\\Program Files\\rc\\agent.exe", "--flag")
+        script = _decoded_windows_launch_script(m.call_args[0][0][-1])
+        self.assertIn("-Execute 'C:\\Program Files\\rc\\agent.exe'", script)
+        self.assertIn("-Argument", script)
+        self.assertIn("--flag", script)
+
 
 class TestDefenderAddExclusion(unittest.TestCase):
     """Unit tests for defender_add_exclusion."""

@@ -1,3 +1,4 @@
+mod apply_replay_lockout_config_tests;
 mod crypto_tests;
 mod degraded_tests;
 mod jobs_tests;

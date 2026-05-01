@@ -581,6 +581,30 @@ class TestDeployErrorPaths(unittest.TestCase):
         self.assertIn("Remote command failed", msg)
         self.assertIn("mkdir", msg)
 
+    def test_ensure_work_dir_windows_c_drive(self) -> None:
+        """Windows branch must issue a PowerShell New-Item command for C:\\ paths."""
+        ok = self._completed(0)
+        t = _make_target(work_dir="C:\\Temp\\rc-test", platform="windows", key=self.key_path)
+        with patch("subprocess.run", return_value=ok) as m:
+            ensure_work_dir(t)
+        self.assertEqual(m.call_count, 1)
+        remote_cmd = m.call_args[0][0][-1]
+        self.assertIn("New-Item", remote_cmd)
+        self.assertIn("-ItemType Directory", remote_cmd)
+        self.assertIn("C:\\Temp\\rc-test", remote_cmd)
+
+    def test_ensure_work_dir_windows_d_drive(self) -> None:
+        """Windows branch must issue a PowerShell New-Item command for D:\\ paths."""
+        ok = self._completed(0)
+        t = _make_target(work_dir="D:\\Workdir\\rc-test", platform="windows", key=self.key_path)
+        with patch("subprocess.run", return_value=ok) as m:
+            ensure_work_dir(t)
+        self.assertEqual(m.call_count, 1)
+        remote_cmd = m.call_args[0][0][-1]
+        self.assertIn("New-Item", remote_cmd)
+        self.assertIn("-ItemType Directory", remote_cmd)
+        self.assertIn("D:\\Workdir\\rc-test", remote_cmd)
+
     def test_execute_background_returns_immediately(self) -> None:
         """Local subprocess.run must return quickly; remote command uses nohup … &."""
         ok = self._completed(0)

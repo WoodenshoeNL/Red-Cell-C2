@@ -9,7 +9,7 @@ use tracing::{instrument, warn};
 
 use crate::database::{DeferredWrite, TeamserverError};
 
-use super::{AgentEntry, AgentRegistry};
+use super::{AgentEntry, AgentEntryState, AgentRegistry};
 
 impl AgentRegistry {
     /// Insert a newly registered agent and persist it to SQLite.
@@ -122,13 +122,15 @@ impl AgentRegistry {
             Arc::new(AgentEntry::new(
                 agent,
                 listener_name.to_owned(),
-                ctr_block_offset,
-                legacy_ctr,
-                0, // last_seen_seq starts at 0 for new agents
-                seq_protected,
-                ecdh_transport,
-                0,    // replay_attempt_count starts at 0
-                None, // no lockout for new agents
+                AgentEntryState {
+                    ctr_block_offset,
+                    legacy_ctr,
+                    last_seen_seq: 0,
+                    seq_protected,
+                    ecdh_transport,
+                    replay_attempt_count: 0,
+                    lockout_until: None,
+                },
             )),
         );
         self.update_active_agent_gauge(&entries).await;

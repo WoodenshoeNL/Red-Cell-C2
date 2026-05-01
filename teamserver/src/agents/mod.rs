@@ -55,29 +55,37 @@ struct AgentEntry {
     lockout_until: Mutex<Option<Instant>>,
 }
 
+/// Transport and session state passed to [`AgentEntry::new`].
+///
+/// Grouped into a struct to keep the constructor argument count within clippy's
+/// `too_many_arguments` limit while remaining self-documenting at call sites.
+struct AgentEntryState {
+    ctr_block_offset: u64,
+    legacy_ctr: bool,
+    last_seen_seq: u64,
+    seq_protected: bool,
+    ecdh_transport: bool,
+    replay_attempt_count: u32,
+    lockout_until: Option<Instant>,
+}
+
 impl AgentEntry {
     fn new(
         info: AgentRecord,
         listener_name: String,
-        ctr_block_offset: u64,
-        legacy_ctr: bool,
-        last_seen_seq: u64,
-        seq_protected: bool,
-        ecdh_transport: bool,
-        replay_attempt_count: u32,
-        lockout_until: Option<Instant>,
+        state: AgentEntryState,
     ) -> Self {
         Self {
             info: RwLock::new(info),
             listener_name: RwLock::new(listener_name),
             jobs: Mutex::new(VecDeque::new()),
-            ctr_block_offset: Mutex::new(ctr_block_offset),
-            legacy_ctr: AtomicBool::new(legacy_ctr),
-            last_seen_seq: Mutex::new(last_seen_seq),
-            seq_protected: AtomicBool::new(seq_protected),
-            ecdh_transport: AtomicBool::new(ecdh_transport),
-            replay_attempt_count: Mutex::new(replay_attempt_count),
-            lockout_until: Mutex::new(lockout_until),
+            ctr_block_offset: Mutex::new(state.ctr_block_offset),
+            legacy_ctr: AtomicBool::new(state.legacy_ctr),
+            last_seen_seq: Mutex::new(state.last_seen_seq),
+            seq_protected: AtomicBool::new(state.seq_protected),
+            ecdh_transport: AtomicBool::new(state.ecdh_transport),
+            replay_attempt_count: Mutex::new(state.replay_attempt_count),
+            lockout_until: Mutex::new(state.lockout_until),
         }
     }
 }
@@ -220,13 +228,15 @@ impl AgentRegistry {
                 Arc::new(AgentEntry::new(
                     agent.info,
                     agent.listener_name,
-                    agent.ctr_block_offset,
-                    agent.legacy_ctr,
-                    agent.last_seen_seq,
-                    agent.seq_protected,
-                    ecdh_transport,
-                    agent.replay_attempt_count,
-                    lockout_until,
+                    AgentEntryState {
+                        ctr_block_offset: agent.ctr_block_offset,
+                        legacy_ctr: agent.legacy_ctr,
+                        last_seen_seq: agent.last_seen_seq,
+                        seq_protected: agent.seq_protected,
+                        ecdh_transport,
+                        replay_attempt_count: agent.replay_attempt_count,
+                        lockout_until,
+                    },
                 )),
             );
         }

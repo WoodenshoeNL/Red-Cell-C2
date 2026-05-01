@@ -282,20 +282,23 @@ async fn check_and_advance_callback_seq_is_atomic_under_concurrency() -> Result<
     }
 
     let mut successes = 0usize;
-    let mut replays = 0usize;
+    let mut rejections = 0usize;
     for h in handles {
         match h.await.expect("task must not panic") {
             Ok(()) => successes += 1,
-            Err(TeamserverError::CallbackSeqReplay { .. }) => replays += 1,
+            // After REPLAY_LOCKOUT_THRESHOLD consecutive replays the agent becomes locked.
+            // Both Replay and ReplayLockout are valid rejection outcomes in this race.
+            Err(TeamserverError::CallbackSeqReplay { .. }) => rejections += 1,
+            Err(TeamserverError::CallbackSeqReplayLockout { .. }) => rejections += 1,
             Err(other) => panic!("unexpected error from concurrent caller: {other:?}"),
         }
     }
 
     assert_eq!(successes, 1, "exactly one concurrent caller must advance the seq");
     assert_eq!(
-        replays,
+        rejections,
         CONCURRENT_CALLERS - 1,
-        "all other concurrent callers must be rejected as replays"
+        "all other concurrent callers must be rejected (as replay or lockout)"
     );
     Ok(())
 }

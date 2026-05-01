@@ -211,12 +211,18 @@ impl AgentRegistry {
                 }
                 Ok(())
             }
-            Err(e @ red_cell_common::callback_seq::CallbackSeqError::Replay { .. }) => {
+            Err(red_cell_common::callback_seq::CallbackSeqError::Replay {
+                incoming_seq,
+                last_seen_seq,
+                ..
+            }) => {
                 // Increment the consecutive-replay counter and possibly trigger lockout.
                 let mut count = entry.replay_attempt_count.lock().await;
                 *count = count.saturating_add(1);
 
                 if *count >= REPLAY_LOCKOUT_THRESHOLD {
+                    // Threshold reached — activate lockout and surface it to the caller
+                    // so they know immediately that a lockout is now in effect.
                     let expiry_unix = lockout_expiry_unix_secs();
                     let until = Instant::now() + Duration::from_secs(REPLAY_LOCKOUT_DURATION_SECS);
                     *entry.lockout_until.lock().await = Some(until);
@@ -234,6 +240,11 @@ impl AgentRegistry {
                         },
                     )
                     .await?;
+
+                    Err(TeamserverError::CallbackSeqReplayLockout {
+                        agent_id,
+                        lockout_until: expiry_unix as u64,
+                    })
                 } else {
                     let new_count = *count;
                     let repo = self.repository.clone();
@@ -248,9 +259,13 @@ impl AgentRegistry {
                         },
                     )
                     .await?;
-                }
 
-                Err(map_seq_error(agent_id, e))
+                    Err(TeamserverError::CallbackSeqReplay {
+                        agent_id,
+                        incoming_seq,
+                        last_seen_seq,
+                    })
+                }
             }
             Err(e) => {
                 // GapTooLarge or other errors do not count toward lockout.

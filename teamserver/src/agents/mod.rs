@@ -25,7 +25,7 @@ use red_cell_common::callback_seq::{REPLAY_LOCKOUT_DURATION_SECS, REPLAY_LOCKOUT
 use red_cell_common::demon::DemonCommand;
 use tokio::sync::{Mutex, RwLock};
 use tracing::error;
-use tracing::{instrument, warn};
+use tracing::{info, instrument, warn};
 
 use crate::database::{
     AuditLogRepository, Database, DatabaseHealthState, DeferredWrite, TeamserverError, WriteQueue,
@@ -193,16 +193,32 @@ impl AgentRegistry {
         }
     }
 
-    /// Override the replay-lockout parameters.
+    /// Apply operator-configurable replay-lockout parameters from the HCL profile.
     ///
-    /// Call this after construction when the HCL profile provides custom values.
-    /// Falls back to compile-time constants when not called.
+    /// Accepts the raw `Option` values from the profile. When both are `None` this
+    /// is a no-op and compile-time defaults are retained. Logs when custom values
+    /// are applied.
+    pub fn apply_replay_lockout_config(
+        &mut self,
+        threshold: Option<u32>,
+        duration_secs: Option<u64>,
+    ) {
+        if threshold.is_none() && duration_secs.is_none() {
+            return;
+        }
+        let t = threshold.unwrap_or(REPLAY_LOCKOUT_THRESHOLD);
+        let d = duration_secs.unwrap_or(REPLAY_LOCKOUT_DURATION_SECS);
+        info!(threshold = t, duration_secs = d, "applying custom replay-lockout parameters");
+        self.set_replay_lockout_params(t, d);
+    }
+
+    /// Override the replay-lockout parameters.
     ///
     /// Degenerate values are rejected with a warning and the existing defaults are kept:
     /// - `threshold == 0` would make K=0 behave identically to K=1 (confusing edge case)
     /// - `duration_secs == 0` would make every lockout expire immediately, silently
     ///   disabling the replay-lockout mechanism entirely
-    pub fn set_replay_lockout_params(&mut self, threshold: u32, duration_secs: u64) {
+    pub(crate) fn set_replay_lockout_params(&mut self, threshold: u32, duration_secs: u64) {
         if threshold == 0 {
             warn!("ReplayLockoutThreshold=0 is invalid (minimum 1); ignoring");
             return;

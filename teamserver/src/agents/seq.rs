@@ -41,12 +41,12 @@ fn map_seq_error(
 }
 
 /// Compute the Unix-seconds timestamp for a lockout expiring `duration_secs` from now.
-fn lockout_expiry_unix_secs(duration_secs: u64) -> i64 {
+fn lockout_expiry_unix_secs(duration_secs: u64) -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::ZERO)
         .as_secs()
-        .saturating_add(duration_secs) as i64
+        .saturating_add(duration_secs)
 }
 
 impl AgentRegistry {
@@ -224,6 +224,7 @@ impl AgentRegistry {
                     // Threshold reached — activate lockout and surface it to the caller
                     // so they know immediately that a lockout is now in effect.
                     let expiry_unix = lockout_expiry_unix_secs(self.replay_lockout_duration_secs);
+                    let expiry_unix_db: i64 = i64::try_from(expiry_unix).unwrap_or(i64::MAX);
                     let until =
                         Instant::now() + Duration::from_secs(self.replay_lockout_duration_secs);
                     *entry.lockout_until.lock().await = Some(until);
@@ -234,10 +235,10 @@ impl AgentRegistry {
                         DeferredWrite::AgentSetReplayLockout {
                             agent_id,
                             attempt_count: new_count,
-                            lockout_until: Some(expiry_unix),
+                            lockout_until: Some(expiry_unix_db),
                         },
                         move || async move {
-                            repo.set_replay_lockout(agent_id, new_count, Some(expiry_unix)).await
+                            repo.set_replay_lockout(agent_id, new_count, Some(expiry_unix_db)).await
                         },
                     )
                     .await?;
@@ -269,7 +270,7 @@ impl AgentRegistry {
 
                     Err(TeamserverError::CallbackSeqReplayLockout {
                         agent_id,
-                        lockout_until: expiry_unix as u64,
+                        lockout_until: expiry_unix,
                     })
                 } else {
                     let new_count = *count;

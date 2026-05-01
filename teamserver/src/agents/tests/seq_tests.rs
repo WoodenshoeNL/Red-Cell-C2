@@ -568,10 +568,8 @@ async fn custom_duration_lockout_expiry_is_approximately_t_secs() -> Result<(), 
     registry.check_and_advance_callback_seq(agent.agent_id, 10).await?;
 
     // Record now before triggering lockout.
-    let now_unix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO)
-        .as_secs() as i64;
+    let now_unix =
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO).as_secs() as i64;
 
     // Trigger lockout in K=2 replay attempts.
     for _ in 0..2 {

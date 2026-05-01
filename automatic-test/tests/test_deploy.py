@@ -595,6 +595,23 @@ class TestDeployErrorPaths(unittest.TestCase):
         self.assertIn("nohup", remote_cmd)
         self.assertIn("&", remote_cmd)
 
+    def test_execute_background_linux_ignores_arguments(self) -> None:
+        """On Linux, the arguments parameter must be silently ignored.
+
+        The nohup command issued over SSH must contain only the executable path —
+        the arguments string must not appear anywhere in the SSH command.
+        """
+        ok = self._completed(0)
+        t = _make_target(work_dir="/tmp/rc-bg", key=self.key_path)
+        with patch("subprocess.run", return_value=ok) as m:
+            execute_background(t, "/tmp/rc/agent", "--sleep 5 --port 8443")
+        self.assertEqual(m.call_count, 1)
+        remote_cmd = m.call_args[0][0][-1]
+        self.assertIn("nohup", remote_cmd)
+        self.assertNotIn("--sleep", remote_cmd)
+        self.assertNotIn("--port", remote_cmd)
+        self.assertNotIn("8443", remote_cmd)
+
     def test_execute_background_windows_uses_schtask(self) -> None:
         """Windows deploy must use Task Scheduler (S4U) to run as user, not SYSTEM."""
         ok = self._completed(0)

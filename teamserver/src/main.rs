@@ -144,6 +144,23 @@ async fn main() -> Result<()> {
     agent_registry
         .set_degraded_mode_support(_db_health_monitor.health_state().clone(), write_queue);
 
+    // Apply operator-configurable replay-lockout parameters when present.
+    {
+        use red_cell_common::callback_seq::{
+            REPLAY_LOCKOUT_DURATION_SECS, REPLAY_LOCKOUT_THRESHOLD,
+        };
+        let threshold =
+            profile.teamserver.replay_lockout_threshold.unwrap_or(REPLAY_LOCKOUT_THRESHOLD);
+        let duration_secs =
+            profile.teamserver.replay_lockout_duration_secs.unwrap_or(REPLAY_LOCKOUT_DURATION_SECS);
+        if profile.teamserver.replay_lockout_threshold.is_some()
+            || profile.teamserver.replay_lockout_duration_secs.is_some()
+        {
+            info!(threshold, duration_secs, "applying custom replay-lockout parameters");
+            agent_registry.set_replay_lockout_params(threshold, duration_secs);
+        }
+    }
+
     let _db_backup_scheduler: Option<DatabaseBackupScheduler> = {
         let db_cfg = profile.teamserver.database.as_ref();
         if let Some(dir_str) = db_cfg.and_then(|c| c.backup_dir.as_deref()) {

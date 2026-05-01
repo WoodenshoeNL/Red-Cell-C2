@@ -7,8 +7,6 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tracing::instrument;
 
-use red_cell_common::callback_seq::{REPLAY_LOCKOUT_DURATION_SECS, REPLAY_LOCKOUT_THRESHOLD};
-
 use crate::database::audit::AuditLogEntry;
 use crate::database::{DeferredWrite, TeamserverError};
 
@@ -42,14 +40,13 @@ fn map_seq_error(
     }
 }
 
-/// Compute the Unix-seconds timestamp for a lockout that expires in
-/// [`REPLAY_LOCKOUT_DURATION_SECS`] from now.
-fn lockout_expiry_unix_secs() -> i64 {
+/// Compute the Unix-seconds timestamp for a lockout expiring `duration_secs` from now.
+fn lockout_expiry_unix_secs(duration_secs: u64) -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::ZERO)
         .as_secs()
-        .saturating_add(REPLAY_LOCKOUT_DURATION_SECS) as i64
+        .saturating_add(duration_secs) as i64
 }
 
 impl AgentRegistry {
@@ -223,11 +220,12 @@ impl AgentRegistry {
                 let mut count = entry.replay_attempt_count.lock().await;
                 *count = count.saturating_add(1);
 
-                if *count >= REPLAY_LOCKOUT_THRESHOLD {
+                if *count >= self.replay_lockout_threshold {
                     // Threshold reached — activate lockout and surface it to the caller
                     // so they know immediately that a lockout is now in effect.
-                    let expiry_unix = lockout_expiry_unix_secs();
-                    let until = Instant::now() + Duration::from_secs(REPLAY_LOCKOUT_DURATION_SECS);
+                    let expiry_unix = lockout_expiry_unix_secs(self.replay_lockout_duration_secs);
+                    let until =
+                        Instant::now() + Duration::from_secs(self.replay_lockout_duration_secs);
                     *entry.lockout_until.lock().await = Some(until);
 
                     let new_count = *count;

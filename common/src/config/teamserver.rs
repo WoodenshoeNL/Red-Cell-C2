@@ -69,6 +69,16 @@ pub struct TeamserverConfig {
     /// Optional observability configuration for Prometheus metrics and OTel tracing.
     #[serde(rename = "Observability", default)]
     pub observability: Option<ObservabilityConfig>,
+    /// Number of consecutive replay rejections before an agent is locked out.
+    ///
+    /// Defaults to the compile-time constant when absent.
+    #[serde(rename = "ReplayLockoutThreshold", default)]
+    pub replay_lockout_threshold: Option<u32>,
+    /// Duration in seconds that a replay lockout remains active.
+    ///
+    /// Defaults to the compile-time constant when absent.
+    #[serde(rename = "ReplayLockoutDurationSecs", default)]
+    pub replay_lockout_duration_secs: Option<u64>,
 }
 
 /// Database resilience and automated backup configuration.

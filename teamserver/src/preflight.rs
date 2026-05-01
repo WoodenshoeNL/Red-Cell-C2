@@ -248,6 +248,8 @@ mod tests {
                 cert: None,
                 database: None,
                 observability: None,
+                replay_lockout_threshold: None,
+                replay_lockout_duration_secs: None,
             },
             operators: OperatorsConfig {
                 users: std::collections::BTreeMap::new(),

@@ -21,6 +21,8 @@ fn constructor_test_profile(compiler_x64: &Path, compiler_x86: &Path, nasm: &Pat
             cert: None,
             database: None,
             observability: None,
+            replay_lockout_threshold: None,
+            replay_lockout_duration_secs: None,
             build: Some(red_cell_common::config::BuildConfig {
                 compiler64: Some(compiler_x64.display().to_string()),
                 compiler86: Some(compiler_x86.display().to_string()),

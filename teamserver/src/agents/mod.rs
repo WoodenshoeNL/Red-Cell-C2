@@ -21,6 +21,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 use red_cell_common::AgentRecord;
+use red_cell_common::callback_seq::{REPLAY_LOCKOUT_DURATION_SECS, REPLAY_LOCKOUT_THRESHOLD};
 use red_cell_common::demon::DemonCommand;
 use tokio::sync::{Mutex, RwLock};
 use tracing::error;
@@ -140,6 +141,10 @@ pub struct AgentRegistry {
     request_contexts: Arc<RwLock<HashMap<(u32, u32), JobContext>>>,
     cleanup_hooks: Arc<StdMutex<Vec<AgentCleanupHook>>>,
     max_registered_agents: usize,
+    /// Consecutive replay rejections required to trigger lockout.
+    replay_lockout_threshold: u32,
+    /// Duration in seconds that a replay lockout stays active.
+    replay_lockout_duration_secs: u64,
     /// Shared health state for checking database degradation.
     health_state: Option<DatabaseHealthState>,
     /// Write queue for deferring DB writes during degraded mode.
@@ -181,9 +186,20 @@ impl AgentRegistry {
             request_contexts: Arc::new(RwLock::new(HashMap::new())),
             cleanup_hooks: Arc::new(StdMutex::new(Vec::new())),
             max_registered_agents,
+            replay_lockout_threshold: REPLAY_LOCKOUT_THRESHOLD,
+            replay_lockout_duration_secs: REPLAY_LOCKOUT_DURATION_SECS,
             health_state: None,
             write_queue: None,
         }
+    }
+
+    /// Override the replay-lockout parameters.
+    ///
+    /// Call this after construction when the HCL profile provides custom values.
+    /// Falls back to compile-time constants when not called.
+    pub fn set_replay_lockout_params(&mut self, threshold: u32, duration_secs: u64) {
+        self.replay_lockout_threshold = threshold;
+        self.replay_lockout_duration_secs = duration_secs;
     }
 
     /// Load all persisted agents from SQLite into a new registry.

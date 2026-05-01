@@ -475,6 +475,141 @@ async fn replay_lockout_persists_and_survives_reload() -> Result<(), TeamserverE
     Ok(())
 }
 
+// ── Configurable K / T ────────────────────────────────────────────────────────
+
+/// With K=2, lockout must trigger after exactly 2 consecutive replay attempts,
+/// not the default 5.
+#[tokio::test]
+async fn custom_threshold_triggers_lockout_at_k_equals_2() -> Result<(), TeamserverError> {
+    let mut registry = AgentRegistry::new(test_database().await?);
+    registry.set_replay_lockout_params(2, 60);
+
+    let agent = sample_agent_with_crypto(0x200C_0001, test_key(0xD1), test_iv(0xE1));
+    registry.insert(agent.clone()).await?;
+
+    // Advance to seq=10 so replays are well-defined.
+    registry.check_and_advance_callback_seq(agent.agent_id, 10).await?;
+
+    // First replay — must be rejected as Replay (not yet locked out with K=2).
+    let err = registry
+        .check_and_advance_callback_seq(agent.agent_id, 5)
+        .await
+        .expect_err("first replay must be rejected");
+    assert!(
+        matches!(err, TeamserverError::CallbackSeqReplay { .. }),
+        "1st of 2: expected CallbackSeqReplay, got: {err:?}"
+    );
+
+    // Second replay — K=2 threshold reached; must trigger lockout.
+    let err = registry
+        .check_and_advance_callback_seq(agent.agent_id, 5)
+        .await
+        .expect_err("2nd replay must trigger lockout with K=2");
+    assert!(
+        matches!(err, TeamserverError::CallbackSeqReplayLockout { .. }),
+        "2nd of 2: expected CallbackSeqReplayLockout, got: {err:?}"
+    );
+
+    Ok(())
+}
+
+/// With K=2 the default K=5 threshold must NOT fire on attempt 3–4.
+/// (Regression guard: ensure the old constant is not consulted.)
+#[tokio::test]
+async fn custom_threshold_k2_does_not_use_default_k5() -> Result<(), TeamserverError> {
+    let mut registry = AgentRegistry::new(test_database().await?);
+    registry.set_replay_lockout_params(2, 60);
+
+    let agent = sample_agent_with_crypto(0x200C_0002, test_key(0xD2), test_iv(0xE2));
+    registry.insert(agent.clone()).await?;
+
+    registry.check_and_advance_callback_seq(agent.agent_id, 10).await?;
+
+    // First replay — Replay, no lockout yet.
+    let _ = registry.check_and_advance_callback_seq(agent.agent_id, 5).await;
+
+    // Second replay — triggers lockout (K=2).
+    let err = registry
+        .check_and_advance_callback_seq(agent.agent_id, 5)
+        .await
+        .expect_err("K=2 threshold must fire on the 2nd attempt");
+    assert!(
+        matches!(err, TeamserverError::CallbackSeqReplayLockout { .. }),
+        "expected lockout on 2nd attempt with K=2, got: {err:?}"
+    );
+
+    // Third attempt — still in lockout, not a plain Replay.
+    let err = registry
+        .check_and_advance_callback_seq(agent.agent_id, 5)
+        .await
+        .expect_err("3rd attempt must stay in lockout");
+    assert!(
+        matches!(err, TeamserverError::CallbackSeqReplayLockout { .. }),
+        "expected CallbackSeqReplayLockout on 3rd attempt, got: {err:?}"
+    );
+
+    Ok(())
+}
+
+/// With T=10s the lockout expiry persisted to the DB must be approximately
+/// 10 seconds from now (between 5s and 15s in the future).
+#[tokio::test]
+async fn custom_duration_lockout_expiry_is_approximately_t_secs() -> Result<(), TeamserverError> {
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    const CUSTOM_T: u64 = 10;
+    let database = test_database().await?;
+    let mut registry = AgentRegistry::new(database.clone());
+    registry.set_replay_lockout_params(2, CUSTOM_T);
+
+    let agent = sample_agent_with_crypto(0x200C_0003, test_key(0xD3), test_iv(0xE3));
+    registry.insert(agent.clone()).await?;
+
+    registry.check_and_advance_callback_seq(agent.agent_id, 10).await?;
+
+    // Record now before triggering lockout.
+    let now_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_secs() as i64;
+
+    // Trigger lockout in K=2 replay attempts.
+    for _ in 0..2 {
+        let _ = registry.check_and_advance_callback_seq(agent.agent_id, 5).await;
+    }
+
+    // The persisted lockout_until must be approximately T seconds from now.
+    let persisted =
+        database.agents().get_persisted(agent.agent_id).await?.expect("agent must exist");
+    let lockout_until = persisted.replay_lockout_until.expect("lockout_until must be set");
+    let delta = lockout_until - now_unix;
+    assert!(
+        (5..=15).contains(&delta),
+        "lockout expiry must be ~{CUSTOM_T}s from now; got delta={delta}s (lockout_until={lockout_until}, now_unix={now_unix})"
+    );
+
+    // Immediately after trigger the agent must be locked.
+    let err = registry
+        .check_and_advance_callback_seq(agent.agent_id, 11)
+        .await
+        .expect_err("should be locked out immediately after trigger");
+    assert!(
+        matches!(err, TeamserverError::CallbackSeqReplayLockout { .. }),
+        "expected lockout, got: {err:?}"
+    );
+
+    // Manually expire the lockout and verify the agent is released.
+    let past = Instant::now() - Duration::from_millis(1);
+    registry.set_lockout_until(agent.agent_id, Some(past)).await;
+
+    registry
+        .check_and_advance_callback_seq(agent.agent_id, 11)
+        .await
+        .expect("valid seq must be accepted after custom-T lockout expiry");
+
+    Ok(())
+}
+
 /// `GapTooLarge` rejections must NOT count toward the replay lockout counter.
 #[tokio::test]
 async fn gap_too_large_does_not_count_toward_lockout() -> Result<(), TeamserverError> {

@@ -153,6 +153,20 @@ class TestReleaseCapOutBead(unittest.TestCase):
                 note_val = c[note_idx + 1]
                 self.assertIn("turn limit", note_val)
 
+    def test_empty_checkpoint_writes_token_limit_fallback(self):
+        calls = []
+        log = _FakeLogger()
+        with patch("loop.br", side_effect=self._mock_br(calls)), \
+             patch("loop.commit_beads_if_dirty", return_value=True):
+            release_cap_out_bead("abc-123", "", "agent1", log, cause="token_limit")
+
+        for c in calls:
+            if "--notes" in c:
+                note_idx = c.index("--notes")
+                note_val = c[note_idx + 1]
+                self.assertIn("token limit", note_val)
+                self.assertNotIn("turn limit", note_val)
+
     def test_calls_commit_beads_if_dirty(self):
         log = _FakeLogger()
         with patch("loop.br", return_value=_FakeResult()), \

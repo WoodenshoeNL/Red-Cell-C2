@@ -269,6 +269,12 @@ class RunContext:
     #: Must not be mutated from ``ThreadPoolExecutor`` workers — set only on the main
     #: thread (e.g. immediately before ``future.result()`` with a known label).
     scenario_active_pass: str | None = None
+    #: Root directory for wire-corpus capture (set by --capture-corpus).
+    #: When None, corpus capture is disabled.
+    corpus_dir: Path | None = None
+    #: Active CorpusCapture for the currently-running scenario.
+    #: Created by run_scenario; available to scenarios via ctx.corpus_capture.
+    corpus_capture: object | None = None
 
 
 _RATE_LIMIT_EXIT_CODE = 6
@@ -408,6 +414,47 @@ def _write_diag_bundle(
         return None
 
 
+def _setup_corpus_capture(ctx: RunContext, scenario_id: str, mod: object) -> None:
+    """Initialise ``ctx.corpus_capture`` for the current scenario when corpus capture is active.
+
+    The agent type is read from the scenario module's ``CORPUS_AGENT_TYPE`` attribute when
+    present; otherwise it defaults to ``"phantom"`` (the primary Linux scenario agent).
+    Scenarios that use a different agent type should declare::
+
+        CORPUS_AGENT_TYPE = "demon"   # at module level
+
+    This function is a no-op when ``ctx.corpus_dir`` is None.
+    """
+    if ctx.corpus_dir is None:
+        return
+    from lib.capture import CorpusCapture
+    agent_type: str = getattr(mod, "CORPUS_AGENT_TYPE", "phantom")
+    ctx.corpus_capture = CorpusCapture(ctx.corpus_dir, agent_type, scenario_id)
+
+
+def _flush_corpus_capture(ctx: RunContext) -> None:
+    """Write ``session.keys.json`` stub and clear ``ctx.corpus_capture``.
+
+    The key fields are all null until the teamserver HTTP capture middleware
+    (``red-cell-c2-00hf1``) is merged.  Always called after a scenario finishes
+    (pass, skip, or fail) when corpus capture is active.  Never raises — errors
+    are printed and swallowed so the original scenario exception is not masked.
+    """
+    if ctx.corpus_capture is None:
+        return
+    try:
+        keys_path = ctx.corpus_capture.write_session_keys()
+        pkt_count = ctx.corpus_capture.packet_count()
+        print(
+            f"  [corpus] {pkt_count} packet(s) captured → {ctx.corpus_capture.output_dir}"
+        )
+        print(f"  [corpus] session keys stub → {keys_path}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"  [corpus] flush error (non-fatal): {exc}")
+    finally:
+        ctx.corpus_capture = None
+
+
 def run_scenario(
     scenario_id: str, path: Path, ctx: RunContext, run_dir: Path,
 ) -> tuple[str, Path | None]:
@@ -435,14 +482,29 @@ def run_scenario(
         return "passed", None
 
     ctx.scenario_active_pass = None
+    _setup_corpus_capture(ctx, scenario_id, mod)
 
     _wait_out_rate_limit(ctx.cli)
+
+    from lib.capture import CorpusCapturePatch
+    _corpus_patch = (
+        CorpusCapturePatch(ctx.corpus_capture)
+        if ctx.corpus_capture is not None
+        else None
+    )
 
     start = time.monotonic()
     capture = _ScenarioStreamCapture()
     try:
-        with capture:
-            mod.run(ctx)
+        try:
+            with capture:
+                if _corpus_patch is not None:
+                    with _corpus_patch:
+                        mod.run(ctx)
+                else:
+                    mod.run(ctx)
+        finally:
+            _flush_corpus_capture(ctx)
         elapsed = time.monotonic() - start
         print(f"  ✓ PASSED ({elapsed:.1f}s)")
         return "passed", None
@@ -613,6 +675,11 @@ def main():
         "--config-dir", type=Path, default=Path(__file__).parent / "config",
         help="Path to config directory",
     )
+    parser.add_argument(
+        "--capture-corpus", type=Path, default=None, metavar="DIR",
+        help="Record wire-corpus packets to DIR/<agent_type>/<scenario_id>/ "
+             "(see lib/capture.py).  Requires red-cell-c2-00hf1 for full key export.",
+    )
     args = parser.parse_args()
 
     # --unit: run only unit tests then exit (no scenarios, no config required)
@@ -671,6 +738,12 @@ def main():
     windows_target = make_target(targets_raw["windows"]) if (use_windows and "windows" in targets_raw) else None
     windows2_target = make_target(targets_raw["windows2"]) if (use_windows and "windows2" in targets_raw) else None
 
+    corpus_dir: Path | None = None
+    if args.capture_corpus is not None:
+        corpus_dir = args.capture_corpus.resolve()
+        corpus_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Corpus:   {corpus_dir}  (--capture-corpus active)")
+
     ctx = RunContext(
         cli=cli_cfg,
         linux=linux_target,
@@ -680,6 +753,7 @@ def main():
         timeouts=tmo,
         dry_run=args.dry_run,
         payload_parallel=not args.no_parallel,
+        corpus_dir=corpus_dir,
     )
 
     all_scenarios = discover_scenarios()

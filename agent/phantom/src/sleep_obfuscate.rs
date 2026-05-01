@@ -13,9 +13,9 @@
 //! accessing heap-allocated data.  This is safe for Phantom's single-checkin
 //! loop because Tokio worker threads are blocked on `epoll` (no pending futures)
 //! during the sleep interval between callbacks.  Any inflight network I/O that
-//! wakes a worker thread during the sleep window could fault; this is accepted as
-//! a known limitation and will be addressed by a future userfaultfd-based
-//! technique (see tracking issue).
+//! wakes a worker thread during the sleep window could fault.  The HTTP transport
+//! uses `pool_max_idle_per_host(0)` so connections are closed after each response
+//! and no background socket tasks exist between checkins.
 //!
 //! All storage used between the `mprotect(PROT_NONE)` and `mprotect` restore
 //! calls is stack-allocated — no heap access occurs in that window.

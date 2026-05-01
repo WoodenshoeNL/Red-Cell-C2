@@ -229,22 +229,7 @@ fn aes_gcm_open(key: &[u8; 32], sealed: &[u8]) -> Result<Vec<u8>, EcdhError> {
 
 // ─── Agent-side helpers ───────────────────────────────────────────────────────
 
-/// Build a registration packet from caller-supplied ephemeral secret and timestamp.
-///
-/// Returns `(packet_bytes, session_key)`.  Use this variant when deterministic
-/// output is required — for example when generating corpus fixtures for replay
-/// tests.  The caller must ensure `ephemeral_secret_bytes` are freshly generated
-/// and never reused across registrations in production code.
-///
-/// For normal agent use, prefer [`build_registration_packet`] which generates
-/// both the ephemeral secret and timestamp automatically.
-///
-/// # Arguments
-/// - `listener_public_key` — 32-byte X25519 public key compiled into the agent.
-/// - `ephemeral_secret_bytes` — caller-supplied ephemeral X25519 secret.
-/// - `timestamp_unix_secs` — Unix timestamp to embed in the plaintext.
-/// - `metadata` — arbitrary agent metadata bytes.
-pub fn build_registration_packet_from_parts(
+fn build_registration_packet_from_parts_impl(
     listener_public_key: &[u8; 32],
     ephemeral_secret_bytes: [u8; 32],
     timestamp_unix_secs: u64,
@@ -271,6 +256,40 @@ pub fn build_registration_packet_from_parts(
     Ok((packet, session_key))
 }
 
+/// Build a registration packet from caller-supplied ephemeral secret and timestamp.
+///
+/// Returns `(packet_bytes, session_key)`.  Use this variant when deterministic
+/// output is required — for example when generating corpus fixtures for replay
+/// tests.  The caller must ensure `ephemeral_secret_bytes` are freshly generated
+/// and never reused across registrations in production code.
+///
+/// For normal agent use, prefer [`build_registration_packet`] which generates
+/// both the ephemeral secret and timestamp automatically.
+///
+/// # Arguments
+/// - `listener_public_key` — 32-byte X25519 public key compiled into the agent.
+/// - `ephemeral_secret_bytes` — caller-supplied ephemeral X25519 secret.
+/// - `timestamp_unix_secs` — Unix timestamp to embed in the plaintext.
+/// - `metadata` — arbitrary agent metadata bytes.
+///
+/// # Feature gate
+/// This function is only available when the `test-utils` Cargo feature is
+/// enabled.  It must not be called from production code.
+#[cfg(feature = "test-utils")]
+pub fn build_registration_packet_from_parts(
+    listener_public_key: &[u8; 32],
+    ephemeral_secret_bytes: [u8; 32],
+    timestamp_unix_secs: u64,
+    metadata: &[u8],
+) -> Result<(Vec<u8>, [u8; 32]), EcdhError> {
+    build_registration_packet_from_parts_impl(
+        listener_public_key,
+        ephemeral_secret_bytes,
+        timestamp_unix_secs,
+        metadata,
+    )
+}
+
 /// Build a registration packet to send to the teamserver.
 ///
 /// Returns `(packet_bytes, session_key)`. The session key must be stored for
@@ -290,7 +309,7 @@ pub fn build_registration_packet(
     // discard the secret after the ECDH step.
     let mut ephemeral_secret_bytes = [0u8; 32];
     getrandom_fill(&mut ephemeral_secret_bytes).map_err(|e| EcdhError::Rng(e.to_string()))?;
-    build_registration_packet_from_parts(
+    build_registration_packet_from_parts_impl(
         listener_public_key,
         ephemeral_secret_bytes,
         current_unix_secs(),

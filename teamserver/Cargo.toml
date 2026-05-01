@@ -67,6 +67,7 @@ test-helpers = []
 
 [dev-dependencies]
 futures-util = "0.3"
+red-cell-common = { path = "../common", features = ["test-utils"] }
 tokio-tungstenite = "0.26"
 tower = { version = "0.5", features = ["util"] }
 

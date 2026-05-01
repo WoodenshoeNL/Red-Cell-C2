@@ -35,6 +35,11 @@ tracing = "0.1"
 utoipa = "5.4"
 x509-parser = "0.18"
 
+[features]
+## Expose test-only helpers such as `build_registration_packet_from_parts`.
+## Enable this only in dev-dependencies or test builds — never in production.
+test-utils = []
+
 [dev-dependencies]
 hex = "0.4"
 hex-literal = "1.0"

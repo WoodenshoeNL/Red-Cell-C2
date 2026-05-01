@@ -472,15 +472,7 @@ class TestCapturingSession(unittest.TestCase):
         self.assertEqual(meta["direction"], "tx")
 
     def test_get_http_error_captured_as_tx(self) -> None:
-        # Point at a port with no listener to provoke an error response via
-        # the HTTPError path; use a 404 from the echo server instead, which
-        # requires a path the handler rejects.  The echo handler returns 200
-        # for any GET, so simulate a 4xx by subclassing inline — but the
-        # simplest approach is to verify the captured packet is still written
-        # even when the server returns an error status.
-        #
-        # The echo handler always returns 200, so test the HTTPError branch
-        # indirectly: open a second server that returns 404.
+        # Spin up a dedicated 404 server to exercise the HTTPError branch.
         class _404Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self) -> None:  # noqa: N802
                 msg = b"not found"

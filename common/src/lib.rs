@@ -3,6 +3,7 @@
 pub mod agent_protocol;
 pub mod callback_seq;
 pub mod config;
+pub mod corpus;
 pub mod crypto;
 pub mod demon;
 pub mod domain;

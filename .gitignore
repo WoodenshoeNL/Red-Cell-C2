@@ -72,3 +72,10 @@ __pycache__/
 
 # Generated rustdoc output (cargo doc)
 /doc/
+
+# Wire-corpus bulk capture binaries — large, machine-specific, never committed.
+# Only hand-crafted golden fixtures (*.meta.json, session.keys.json) are tracked.
+# Session key files (*.keys.json) are excluded even for golden fixtures since
+# they contain raw key material.
+tests/wire-corpus/**/*.bin
+tests/wire-corpus/**/*.keys.json

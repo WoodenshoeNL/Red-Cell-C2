@@ -333,6 +333,48 @@ class TestCorpusCapturePatch(unittest.TestCase):
                 body = resp.read()
         self.assertEqual(len(body), 512)
 
+    def test_patch_records_empty_request_body(self) -> None:
+        """Empty request body must still produce an RX packet (seq 0)."""
+        cap = CorpusCapture(self.corpus_dir, "demon", "14")
+        with CorpusCapturePatch(cap):
+            req = urllib.request.Request(self._url(), data=b"", method="POST")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                resp.read()
+        # Both RX (empty request) and TX (empty echo response) must be recorded.
+        self.assertEqual(cap.packet_count(), 2)
+        self.assertEqual((cap.output_dir / "0000.bin").read_bytes(), b"")
+        self.assertEqual((cap.output_dir / "0001.bin").read_bytes(), b"")
+
+    def test_patch_empty_body_seq_consistent_with_capturing_session(self) -> None:
+        """CorpusCapturePatch and CapturingSession must assign identical seq numbers
+        for empty-body exchanges on the same CorpusCapture instance."""
+        cap_patch = CorpusCapture(self.corpus_dir / "patch", "demon", "15")
+        cap_session = CorpusCapture(self.corpus_dir / "session", "demon", "15")
+
+        # Route an empty-body POST through CorpusCapturePatch.
+        with CorpusCapturePatch(cap_patch):
+            req = urllib.request.Request(self._url(), data=b"", method="POST")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                resp.read()
+
+        # Route the same empty-body POST through CapturingSession.
+        session = CapturingSession(cap_session, timeout=5)
+        session.post(self._url(), data=b"")
+
+        # Both must produce exactly 2 packets with the same seq numbers.
+        self.assertEqual(cap_patch.packet_count(), 2)
+        self.assertEqual(cap_session.packet_count(), 2)
+
+        patch_rx_meta = json.loads((cap_patch.output_dir / "0000.meta.json").read_text())
+        patch_tx_meta = json.loads((cap_patch.output_dir / "0001.meta.json").read_text())
+        sess_rx_meta = json.loads((cap_session.output_dir / "0000.meta.json").read_text())
+        sess_tx_meta = json.loads((cap_session.output_dir / "0001.meta.json").read_text())
+
+        self.assertEqual(patch_rx_meta["seq"], sess_rx_meta["seq"])
+        self.assertEqual(patch_tx_meta["seq"], sess_tx_meta["seq"])
+        self.assertEqual(patch_rx_meta["direction"], sess_rx_meta["direction"])
+        self.assertEqual(patch_tx_meta["direction"], sess_tx_meta["direction"])
+
 
 # ── CapturingSession tests ────────────────────────────────────────────────────
 

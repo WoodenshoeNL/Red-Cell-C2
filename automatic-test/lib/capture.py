@@ -357,8 +357,7 @@ class CorpusCapturePatch:
             elif data is not None:
                 tx_body = data
 
-            if tx_body:
-                capture.record_packet("rx", tx_body)
+            capture.record_packet("rx", tx_body)
 
             call_kw: dict[str, Any] = {}
             if timeout is not None:
@@ -368,13 +367,11 @@ class CorpusCapturePatch:
                 resp = orig(req, data=data, **call_kw, **kwargs)
             except urllib.error.HTTPError as exc:
                 rx_body = exc.read()
-                if rx_body:
-                    capture.record_packet("tx", rx_body)
+                capture.record_packet("tx", rx_body)
                 raise
 
             rx_body = resp.read()
-            if rx_body:
-                capture.record_packet("tx", rx_body)
+            capture.record_packet("tx", rx_body)
 
             return _BufferedHTTPResponse(resp, rx_body)
 

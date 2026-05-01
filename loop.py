@@ -1346,6 +1346,8 @@ def release_cap_out_bead(task_id: str, checkpoint: str, agent_id: str, log: Logg
         combined = new_entry
 
     # Cap total note length so br update never rejects an oversized payload.
+    if len(combined) > 4000:
+        log.log(f"WARNING: cap-out notes for {task_id} truncated from {len(combined)} to 4000 chars — oldest checkpoint(s) may be lost")
     note = combined[:4000]
     r = br(["update", task_id, "--notes", note, "--status=open", "--owner", ""])
     if r.returncode != 0:

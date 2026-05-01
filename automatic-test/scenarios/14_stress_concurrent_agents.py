@@ -227,7 +227,7 @@ def _run_stress_for_agent(
 
     try:
         # ── Step 0: Kill stale agent processes from previous runs ────────
-        _win = target.work_dir.startswith("C:\\") or "\\" in target.work_dir
+        _win = target.platform == "windows"
         if _win:
             print(f"  [{agent_type}][deploy] cleaning up stale processes from previous runs")
             cleanup_windows_harness_work_dir(
@@ -429,7 +429,7 @@ def _run_stress_for_agent(
                 print(f"  [{agent_type}][cleanup] kill agent {aid} failed (non-fatal): {exc}")
 
         # Remove remote payloads.
-        _win_cleanup = target.work_dir.startswith("C:\\") or "\\" in target.work_dir
+        _win_cleanup = target.platform == "windows"
         if _win_cleanup:
             cleanup_windows_harness_work_dir(
                 target,

@@ -189,6 +189,7 @@ class TargetSectionConfig:
     work_dir: str
     key: str
     display: str | None = None
+    platform: str = "linux"  # "linux" or "windows"
 
 
 @dataclass
@@ -281,7 +282,7 @@ _REQUIRED_TIMEOUTS_CORE = (
 )
 
 _ALLOWED_TARGET_STANZAS = frozenset({"linux", "windows", "windows2"})
-_ALLOWED_TARGET_KEYS = frozenset({"host", "port", "user", "work_dir", "key", "display"})
+_ALLOWED_TARGET_KEYS = frozenset({"host", "port", "user", "work_dir", "key", "display", "platform"})
 
 
 def _unknown_keys(d: dict[str, Any], allowed: Iterable[str], label: str, errors: list[str]) -> None:
@@ -729,10 +730,20 @@ def _parse_target_section(
             errors.append(f"{label}.display: expected string, got {type(disp_raw).__name__}")
         else:
             display = disp_raw
+    platform_raw = d.get("platform", "linux")
+    platform: str = "linux"
+    if platform_raw is not None:
+        if not isinstance(platform_raw, str):
+            errors.append(f"{label}.platform: expected string, got {type(platform_raw).__name__}")
+        elif platform_raw not in ("linux", "windows"):
+            errors.append(f"{label}.platform: must be 'linux' or 'windows', got {platform_raw!r}")
+        else:
+            platform = platform_raw
     if host is None or port is None or user is None or work_dir is None or key is None:
         return None
     return TargetSectionConfig(
-        host=host, port=port, user=user, work_dir=work_dir, key=key, display=display
+        host=host, port=port, user=user, work_dir=work_dir, key=key, display=display,
+        platform=platform,
     )
 
 

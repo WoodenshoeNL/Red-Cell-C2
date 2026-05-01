@@ -134,6 +134,7 @@ class TargetConfig:
     work_dir: str
     key: str  # path to SSH private key — required, password auth is not supported
     display: str = ""  # X11 DISPLAY value for Linux targets with Xvfb (e.g. ":99")
+    platform: str = "linux"  # "linux" or "windows"
 
     def __post_init__(self) -> None:
         if not self.key:
@@ -225,7 +226,7 @@ def preflight_dns(target: TargetConfig, domain: str, expected_ip: str) -> None:
             with an actionable message describing the required hosts-file
             entry.
     """
-    is_windows = target.work_dir.startswith("C:\\") or "\\" in target.work_dir
+    is_windows = target.platform == "windows"
     if is_windows:
         escaped = domain.replace("'", "''")
         probe = (
@@ -293,7 +294,7 @@ def inject_hosts_entry(target: TargetConfig, domain: str, ip: str) -> None:
         DeployError: if the SSH command exits non-zero.
     """
     entry = f"{ip}  {domain}"
-    is_windows = target.work_dir.startswith("C:\\") or "\\" in target.work_dir
+    is_windows = target.platform == "windows"
     if is_windows:
         hosts_path = r"C:\Windows\System32\drivers\etc\hosts"
         escaped_entry = entry.replace("'", "''")
@@ -418,8 +419,7 @@ def download(target: TargetConfig, remote_path: str, local_path: str | Path) -> 
 
 def ensure_work_dir(target: TargetConfig) -> None:
     """Create the work directory on the target if it doesn't exist."""
-    if target.work_dir.startswith("C:\\") or "\\" in target.work_dir:
-        # Windows path — use PowerShell mkdir
+    if target.platform == "windows":
         run_remote(target, f'powershell -Command "New-Item -ItemType Directory -Force -Path \'{target.work_dir}\'"')
     else:
         run_remote(target, f"mkdir -p {target.work_dir}")
@@ -537,7 +537,7 @@ def defender_add_exclusion(target: TargetConfig, path: str) -> None:
         ValueError: when *target* is not a Windows target.
         DeployError: when the remote SSH command fails at the transport level.
     """
-    if not (target.work_dir.startswith("C:\\") or "\\" in target.work_dir):
+    if target.platform != "windows":
         raise ValueError("defender_add_exclusion is only supported on Windows targets")
     path_q = _quote_powershell(path)
     script = (
@@ -568,7 +568,7 @@ def execute_background(target: TargetConfig, command: str, arguments: str = "") 
         arguments: Optional arguments forwarded via ``-Argument`` to
                    ``New-ScheduledTaskAction`` (Windows only; ignored on Linux).
     """
-    if target.work_dir.startswith("C:\\") or "\\" in target.work_dir:
+    if target.platform == "windows":
         # Pass exe and args separately so New-ScheduledTaskAction -Execute receives
         # only the binary path; arguments go via -Argument.
         script = _windows_schtask_script(command, arguments)
@@ -619,7 +619,7 @@ def cleanup_windows_harness_work_dir(
         timeout: SSH wait ceiling; defaults to ``max(90, configured remote cmd timeout)``.
     """
 
-    is_windows = target.work_dir.startswith("C:\\") or "\\" in target.work_dir
+    is_windows = target.platform == "windows"
     if not is_windows:
         return
 

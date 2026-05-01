@@ -124,8 +124,51 @@ class TestTargetConfigValidation(unittest.TestCase):
             host="10.0.0.5",
             user="Administrator",
             work_dir="C:\\Temp\\rc-test",
+            platform="windows",
         )
         self.assertEqual(t.work_dir, "C:\\Temp\\rc-test")
+        self.assertEqual(t.platform, "windows")
+
+    def test_platform_defaults_to_linux(self) -> None:
+        t = _make_target()
+        self.assertEqual(t.platform, "linux")
+
+    def test_platform_windows_explicit(self) -> None:
+        t = _make_target(platform="windows")
+        self.assertEqual(t.platform, "windows")
+
+    def test_non_c_drive_windows_target_uses_platform_field(self) -> None:
+        """D:\\ work_dir must work as Windows when platform='windows' is set."""
+        ok_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        t = _make_target(
+            work_dir="D:\\Workdir\\rc-test",
+            platform="windows",
+        )
+        with patch("subprocess.run", return_value=ok_result) as m:
+            execute_background(t, "D:\\Workdir\\rc-test\\agent.exe")
+        remote_cmd = m.call_args[0][0][-1]
+        self.assertIn("-EncodedCommand", remote_cmd)
+
+    def test_defender_add_exclusion_non_c_drive(self) -> None:
+        """defender_add_exclusion must work for D:\\ paths when platform='windows'."""
+        ok_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        t = _make_target(
+            work_dir="D:\\Workdir\\rc-test",
+            platform="windows",
+        )
+        with patch("subprocess.run", return_value=ok_result) as m:
+            defender_add_exclusion(t, "D:\\Workdir\\rc-test")
+        remote_cmd = m.call_args[0][0][-1]
+        script = _decoded_windows_launch_script(remote_cmd)
+        self.assertIn("Add-MpPreference", script)
+        self.assertIn("D:\\Workdir\\rc-test", script)
+
+    def test_defender_add_exclusion_linux_platform_raises(self) -> None:
+        """defender_add_exclusion must raise ValueError for platform='linux' targets."""
+        t = _make_target(work_dir="/tmp/rc-test", platform="linux")
+        with self.assertRaises(ValueError) as ctx:
+            defender_add_exclusion(t, "/tmp/rc-test")
+        self.assertIn("Windows", str(ctx.exception))
 
 
 class TestSshArgs(unittest.TestCase):
@@ -415,7 +458,7 @@ class TestPreflightDnsWindows(unittest.TestCase):
     def setUp(self) -> None:
         self.key_path = _module_key_path()
         self.target = _make_target(
-            host="192.168.213.160", work_dir="C:\\rc-test", key=self.key_path,
+            host="192.168.213.160", work_dir="C:\\rc-test", platform="windows", key=self.key_path,
         )
 
     def _completed(self, stdout: str, returncode: int = 0) -> subprocess.CompletedProcess:
@@ -555,7 +598,7 @@ class TestDeployErrorPaths(unittest.TestCase):
     def test_execute_background_windows_uses_schtask(self) -> None:
         """Windows deploy must use Task Scheduler (S4U) to run as user, not SYSTEM."""
         ok = self._completed(0)
-        t = _make_target(work_dir="C:\\Temp\\rc-test", key=self.key_path)
+        t = _make_target(work_dir="C:\\Temp\\rc-test", platform="windows", key=self.key_path)
         with patch("subprocess.run", return_value=ok) as m:
             execute_background(t, "C:\\Temp\\rc-test\\agent.exe")
         self.assertEqual(m.call_count, 1)
@@ -573,7 +616,7 @@ class TestDeployErrorPaths(unittest.TestCase):
     def test_execute_background_windows_quotes_paths_with_spaces(self) -> None:
         """Paths with spaces must be single-quoted for PowerShell New-ScheduledTaskAction."""
         ok = self._completed(0)
-        t = _make_target(work_dir="C:\\Program Files\\rc", key=self.key_path)
+        t = _make_target(work_dir="C:\\Program Files\\rc", platform="windows", key=self.key_path)
         with patch("subprocess.run", return_value=ok) as m:
             execute_background(t, "C:\\Program Files\\rc\\agent.exe")
         remote_cmd = m.call_args[0][0][-1]
@@ -584,7 +627,7 @@ class TestDeployErrorPaths(unittest.TestCase):
     def test_execute_background_windows_escapes_single_quotes(self) -> None:
         """Single quotes in the path must be doubled for PS single-quote string."""
         ok = self._completed(0)
-        t = _make_target(work_dir="C:\\Temp", key=self.key_path)
+        t = _make_target(work_dir="C:\\Temp", platform="windows", key=self.key_path)
         with patch("subprocess.run", return_value=ok) as m:
             execute_background(t, "C:\\it's here\\agent.exe")
         remote_cmd = m.call_args[0][0][-1]
@@ -727,7 +770,7 @@ class TestExecuteBackgroundWindowsArguments(unittest.TestCase):
     def test_no_arguments_no_argument_clause(self) -> None:
         """Plain exe path (no args) must not produce -Argument in the script."""
         ok = self._completed(0)
-        t = _make_target(work_dir="C:\\Temp\\rc-test", key=self.key_path)
+        t = _make_target(work_dir="C:\\Temp\\rc-test", platform="windows", key=self.key_path)
         with patch("subprocess.run", return_value=ok) as m:
             execute_background(t, "C:\\Temp\\rc-test\\agent.exe")
         script = _decoded_windows_launch_script(m.call_args[0][0][-1])
@@ -737,7 +780,7 @@ class TestExecuteBackgroundWindowsArguments(unittest.TestCase):
     def test_arguments_parameter_produces_argument_clause(self) -> None:
         """Passing arguments= must produce -Argument in the scheduled task action."""
         ok = self._completed(0)
-        t = _make_target(work_dir="C:\\Temp\\rc-test", key=self.key_path)
+        t = _make_target(work_dir="C:\\Temp\\rc-test", platform="windows", key=self.key_path)
         with patch("subprocess.run", return_value=ok) as m:
             execute_background(t, "C:\\Temp\\rc-test\\agent.exe", "--sleep 5 --port 8443")
         script = _decoded_windows_launch_script(m.call_args[0][0][-1])
@@ -748,7 +791,7 @@ class TestExecuteBackgroundWindowsArguments(unittest.TestCase):
     def test_arguments_with_spaces_in_exe_path(self) -> None:
         """Exe path with spaces plus arguments — both must appear correctly."""
         ok = self._completed(0)
-        t = _make_target(work_dir="C:\\Program Files\\rc", key=self.key_path)
+        t = _make_target(work_dir="C:\\Program Files\\rc", platform="windows", key=self.key_path)
         with patch("subprocess.run", return_value=ok) as m:
             execute_background(t, "C:\\Program Files\\rc\\agent.exe", "--flag")
         script = _decoded_windows_launch_script(m.call_args[0][0][-1])
@@ -772,7 +815,7 @@ class TestDefenderAddExclusion(unittest.TestCase):
 
     def test_windows_target_runs_add_mppreference(self) -> None:
         ok = self._completed(0)
-        t = _make_target(work_dir="C:\\Temp\\rc-test", key=self.key_path)
+        t = _make_target(work_dir="C:\\Temp\\rc-test", platform="windows", key=self.key_path)
         with patch("subprocess.run", return_value=ok) as m:
             defender_add_exclusion(t, "C:\\Temp\\rc-test")
         self.assertEqual(m.call_count, 1)
@@ -784,7 +827,7 @@ class TestDefenderAddExclusion(unittest.TestCase):
 
     def test_path_is_single_quoted(self) -> None:
         ok = self._completed(0)
-        t = _make_target(work_dir="C:\\Temp\\rc-test", key=self.key_path)
+        t = _make_target(work_dir="C:\\Temp\\rc-test", platform="windows", key=self.key_path)
         with patch("subprocess.run", return_value=ok) as m:
             defender_add_exclusion(t, "C:\\Temp\\rc-test")
         remote_cmd = m.call_args[0][0][-1]
@@ -793,7 +836,7 @@ class TestDefenderAddExclusion(unittest.TestCase):
 
     def test_uses_silent_continue_so_disabled_defender_does_not_fail(self) -> None:
         ok = self._completed(0)
-        t = _make_target(work_dir="C:\\Temp\\rc-test", key=self.key_path)
+        t = _make_target(work_dir="C:\\Temp\\rc-test", platform="windows", key=self.key_path)
         with patch("subprocess.run", return_value=ok) as m:
             defender_add_exclusion(t, "C:\\Temp\\rc-test")
         remote_cmd = m.call_args[0][0][-1]
@@ -808,7 +851,7 @@ class TestDefenderAddExclusion(unittest.TestCase):
 
     def test_path_with_spaces_quoted(self) -> None:
         ok = self._completed(0)
-        t = _make_target(work_dir="C:\\Program Files\\rc", key=self.key_path)
+        t = _make_target(work_dir="C:\\Program Files\\rc", platform="windows", key=self.key_path)
         with patch("subprocess.run", return_value=ok) as m:
             defender_add_exclusion(t, "C:\\Program Files\\rc")
         remote_cmd = m.call_args[0][0][-1]
@@ -898,6 +941,7 @@ class TestInjectHostsEntryWindows(unittest.TestCase):
             host="10.0.0.2",
             key=self.key_path,
             work_dir="C:\\Users\\testuser\\Desktop",
+            platform="windows",
         )
 
     def _completed(
@@ -982,7 +1026,7 @@ class TestCleanupWindowsHarnessWorkDir(unittest.TestCase):
         mock_ssh.return_value = subprocess.CompletedProcess(
             args=[], returncode=0, stdout="", stderr=""
         )
-        t = _make_target(work_dir=r"C:\Temp\rc-test", key=self.key_path)
+        t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
         cleanup_windows_harness_work_dir(t, timeout=100)
         mock_ssh.assert_called_once()
         cmd_list = mock_ssh.call_args[0][0]
@@ -1005,7 +1049,7 @@ class TestCleanupWindowsHarnessWorkDir(unittest.TestCase):
             stdout="HARNESS_LOCKED_FILES:C:\\Temp\\rc-test\\a.exe\n",
             stderr="",
         )
-        t = _make_target(work_dir=r"C:\Temp\rc-test", key=self.key_path)
+        t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
         cleanup_windows_harness_work_dir(t, log_prefix="  [tag]")
         printed = [str(c.args[0]) for c in mock_print.call_args_list if c.args]
         self.assertTrue(
@@ -1018,7 +1062,7 @@ class TestCleanupWindowsHarnessWorkDir(unittest.TestCase):
     def test_deploy_error_prints_skipped_message(
         self, mock_ssh: object, mock_print: object,
     ) -> None:
-        t = _make_target(work_dir=r"C:\Temp\rc-test", key=self.key_path)
+        t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
         cleanup_windows_harness_work_dir(t, log_prefix="  [tag]")
         printed = [str(c.args[0]) for c in mock_print.call_args_list if c.args]
         self.assertTrue(any("cleanup skipped" in p for p in printed), printed)

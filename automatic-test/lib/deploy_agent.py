@@ -98,7 +98,7 @@ def deploy_and_checkin(
             pre_existing_ids = set()
 
     uid = uuid.uuid4().hex[:8]
-    is_windows = target.work_dir.startswith("C:\\") or "\\" in target.work_dir
+    is_windows = target.platform == "windows"
     sep = "\\" if is_windows else "/"
     remote_payload = f"{target.work_dir}{sep}agent-{uid}.{fmt}"
 

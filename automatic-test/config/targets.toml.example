@@ -28,6 +28,8 @@ user     = "testuser"
 key      = "~/.ssh/red_cell_test"
 # Directory on the target where payloads will be uploaded and executed
 work_dir = "C:\\Temp\\rc-test"
+# Platform — must be "windows" for Windows targets (enables PowerShell paths, Defender exclusions, etc.)
+platform = "windows"
 
 # Optional second Windows target — required only for scenario 10 (SMB pivot chain).
 # Both [windows] and [windows2] hosts must be able to reach each other over SMB (TCP 445).
@@ -37,3 +39,4 @@ work_dir = "C:\\Temp\\rc-test"
 # user     = "testuser"
 # key      = "~/.ssh/red_cell_test"
 # work_dir = "C:\\Temp\\rc-test"
+# platform = "windows"

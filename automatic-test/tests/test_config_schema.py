@@ -221,6 +221,43 @@ class TestValidateTargetsDict(unittest.TestCase):
         }
         validate_targets_dict(raw)
 
+    def test_platform_defaults_to_linux(self) -> None:
+        cfg = parse_targets_config(_minimal_valid_targets())
+        assert cfg.linux is not None
+        self.assertEqual(cfg.linux.platform, "linux")
+
+    def test_platform_windows_accepted(self) -> None:
+        raw = _minimal_valid_targets()
+        raw["windows"]["platform"] = "windows"
+        cfg = parse_targets_config(raw)
+        assert cfg.windows is not None
+        self.assertEqual(cfg.windows.platform, "windows")
+
+    def test_platform_linux_explicit(self) -> None:
+        raw = _minimal_valid_targets()
+        raw["linux"]["platform"] = "linux"
+        cfg = parse_targets_config(raw)
+        assert cfg.linux is not None
+        self.assertEqual(cfg.linux.platform, "linux")
+
+    def test_platform_invalid_value_raises(self) -> None:
+        raw = _minimal_valid_targets()
+        raw["linux"]["platform"] = "macos"
+        with self.assertRaises(ConfigError) as ctx:
+            parse_targets_config(raw)
+        self.assertIn("platform", str(ctx.exception))
+        self.assertIn("macos", str(ctx.exception))
+
+    def test_platform_non_c_drive_windows_target(self) -> None:
+        """D:\\ work_dir is valid when platform='windows' is explicit."""
+        raw = _minimal_valid_targets()
+        raw["windows"]["work_dir"] = "D:\\Workdir\\rc"
+        raw["windows"]["platform"] = "windows"
+        cfg = parse_targets_config(raw)
+        assert cfg.windows is not None
+        self.assertEqual(cfg.windows.platform, "windows")
+        self.assertEqual(cfg.windows.work_dir, "D:\\Workdir\\rc")
+
 
 class TestLoadTargetsFile(unittest.TestCase):
     def test_missing_file_returns_empty_dict(self) -> None:

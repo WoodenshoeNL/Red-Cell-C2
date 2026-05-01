@@ -69,6 +69,7 @@ def make_target(cfg: dict) -> TargetConfig:
         work_dir=cfg["work_dir"],
         key=cfg.get("key", ""),
         display=cfg.get("display", ""),
+        platform=cfg.get("platform", "linux"),
     )
 
 
@@ -82,7 +83,7 @@ def _windows_harness_cleanup_targets(
     for label, t in (("windows", windows), ("windows2", windows2)):
         if t is None:
             continue
-        if t.work_dir.startswith("C:\\") or "\\" in t.work_dir:
+        if t.platform == "windows":
             out.append((label, t))
     return out
 

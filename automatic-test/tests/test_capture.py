@@ -248,6 +248,13 @@ class _EchoHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_GET(self) -> None:  # noqa: N802
+        body = b"get-response"
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def log_message(self, *_: object) -> None:
         pass  # suppress test output
 
@@ -432,6 +439,63 @@ class TestCapturingSession(unittest.TestCase):
 
         tx_meta = json.loads((cap.output_dir / "0000.meta.json").read_text())
         self.assertEqual(tx_meta["bytes_sha256"], _sha256(raw))
+
+    def test_get_returns_status_and_body(self) -> None:
+        cap = CorpusCapture(self.corpus_dir, "demon", "14")
+        session = CapturingSession(cap, timeout=5)
+        status, body = session.get(self._url())
+        self.assertEqual(status, 200)
+        self.assertEqual(body, b"get-response")
+
+    def test_get_writes_tx_meta(self) -> None:
+        cap = CorpusCapture(self.corpus_dir, "demon", "15")
+        session = CapturingSession(cap, timeout=5)
+        session.get(self._url())
+
+        # GET records only the response — one packet total
+        self.assertEqual(cap.packet_count(), 1)
+        meta = json.loads((cap.output_dir / "0000.meta.json").read_text())
+        # Response from teamserver → agent is "tx" (transmitted by teamserver)
+        self.assertEqual(meta["direction"], "tx")
+
+    def test_get_http_error_captured_as_tx(self) -> None:
+        # Point at a port with no listener to provoke an error response via
+        # the HTTPError path; use a 404 from the echo server instead, which
+        # requires a path the handler rejects.  The echo handler returns 200
+        # for any GET, so simulate a 4xx by subclassing inline — but the
+        # simplest approach is to verify the captured packet is still written
+        # even when the server returns an error status.
+        #
+        # The echo handler always returns 200, so test the HTTPError branch
+        # indirectly: open a second server that returns 404.
+        class _404Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802
+                msg = b"not found"
+                self.send_response(404)
+                self.send_header("Content-Length", str(len(msg)))
+                self.end_headers()
+                self.wfile.write(msg)
+
+            def log_message(self, *_: object) -> None:
+                pass
+
+        srv = http.server.HTTPServer(("127.0.0.1", 0), _404Handler)
+        port = srv.server_address[1]
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        try:
+            cap = CorpusCapture(self.corpus_dir, "demon", "16")
+            session = CapturingSession(cap, timeout=5)
+            status, body = session.get(f"http://127.0.0.1:{port}/")
+            self.assertEqual(status, 404)
+            self.assertEqual(body, b"not found")
+            # HTTPError response is still captured as TX
+            self.assertEqual(cap.packet_count(), 1)
+            meta = json.loads((cap.output_dir / "0000.meta.json").read_text())
+            self.assertEqual(meta["direction"], "tx")
+        finally:
+            srv.shutdown()
+            srv.server_close()
 
 
 # ── Format-version constant tests ────────────────────────────────────────────

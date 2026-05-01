@@ -2071,6 +2071,8 @@ Start directly with understanding the task and implementing it.
 
         final_status = issue_status_from_jsonl(next_id)
         cap_out = max_turns_hit or token_limit_hit
+        # Determine cause before the shared cap-out block so both branches can use it.
+        cap_out_cause = "token_limit" if token_limit_hit else "turn_limit"
         if final_status == "in_progress" and not cap_out:
             log.log(
                 f"Task {next_id} still in_progress after agent ran"
@@ -2088,39 +2090,29 @@ Start directly with understanding the task and implementing it.
             clean_tmp_worktrees(log)
             clean_tmp_cargo_targets(log)
 
-        if max_turns_hit:
+        if cap_out:
+            # Unified cap-out handling for both turn-limit and token-limit exhaustion.
+            # cap_out_cause is set above ("turn_limit" or "token_limit").
+            log_prefix = "TOKEN-LIMIT" if cap_out_cause == "token_limit" else "CAP-OUT"
             checkpoint = extract_cap_out_checkpoint(output, summary)
-            release_cap_out_bead(next_id, checkpoint, agent_id, log, cause="turn_limit")
+            release_cap_out_bead(next_id, checkpoint, agent_id, log, cause=cap_out_cause)
             streak = cap_out_streak.get(next_id, 0) + 1
             cap_out_streak[next_id] = streak
             cap_out_pending_skip.add(next_id)
             log.log(
-                f"CAP-OUT [{next_id}] streak={streak}: bead released to open,"
+                f"{log_prefix} [{next_id}] streak={streak}: bead released to open,"
                 f" skip 1 iteration"
             )
             if streak >= MAX_CONSECUTIVE_CAP_OUTS:
+                # Unified escalation message: always includes cause so both paths are explicit.
                 log.log(
-                    f"ESCALATE [{next_id}]: {streak} consecutive cap-outs —"
+                    f"ESCALATE [{next_id}]: {streak} consecutive cap-outs ({cap_out_cause}) —"
                     f" issue likely needs refinement before next attempt"
                 )
-            # No sleep: immediately proceed to the next task (a different one due to skip).
-        elif token_limit_hit:
-            checkpoint = extract_cap_out_checkpoint(output, summary)
-            release_cap_out_bead(next_id, checkpoint, agent_id, log, cause="token_limit")
-            streak = cap_out_streak.get(next_id, 0) + 1
-            cap_out_streak[next_id] = streak
-            cap_out_pending_skip.add(next_id)
-            log.log(
-                f"TOKEN-LIMIT [{next_id}] streak={streak}: bead released to open,"
-                f" skip 1 iteration"
-            )
-            if streak >= MAX_CONSECUTIVE_CAP_OUTS:
-                log.log(
-                    f"ESCALATE [{next_id}]: {streak} consecutive cap-outs (token limit) —"
-                    f" issue likely needs refinement before next attempt"
-                )
-            log.log(f"Token limit hit — sleeping {DEV_SLEEP_TOKEN_LIMIT}s before next iteration")
-            time.sleep(DEV_SLEEP_TOKEN_LIMIT)
+            if token_limit_hit:
+                log.log(f"Token limit hit — sleeping {DEV_SLEEP_TOKEN_LIMIT}s before next iteration")
+                time.sleep(DEV_SLEEP_TOKEN_LIMIT)
+            # turn_limit: no sleep — immediately proceed to the next task (different due to skip).
         else:
             do_sleep(sleep_secs, jitter_secs, log)
 

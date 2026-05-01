@@ -1365,7 +1365,7 @@ def extract_pre_claim_verdict(output: str) -> tuple:
     Returns (verdict, reason) where verdict is one of 'PASS', 'REFINED', 'BLOCKED',
     or 'UNKNOWN' if the block is missing or malformed.
     """
-    start = output.find("=== PRE-CLAIM QA RESULT ===")
+    start = output.rfind("=== PRE-CLAIM QA RESULT ===")
     end = output.find("=== END PRE-CLAIM QA ===", start)
     if start == -1 or end == -1:
         return "UNKNOWN", "pre-claim agent produced no structured result block"

@@ -118,7 +118,7 @@ static int json_get_string(const char *json, const char *key,
     if (!pos) return 0;
     pos += strlen(needle);
     /* Skip whitespace and colon */
-    while (*pos == ' ' || *pos == '\t' || *pos == ':' || *pos == ' ') pos++;
+    while (*pos == ' ' || *pos == '\t' || *pos == ':') pos++;
     if (*pos != '"') return 0;
     pos++; /* skip opening quote */
     size_t i = 0;

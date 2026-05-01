@@ -156,23 +156,28 @@ pub struct CorpusSessionKeys {
 
     /// AES-256 session key as a lowercase hex string (64 hex chars = 32 bytes).
     /// `None` in stub files written before key material is available.
+    #[serde(default)]
     pub aes_key_hex: Option<String>,
 
     /// AES-CTR IV as a lowercase hex string (32 hex chars = 16 bytes).
     /// `None` in stub files written before key material is available.
+    #[serde(default)]
     pub aes_iv_hex: Option<String>,
 
     /// Whether this session uses monotonic CTR (Archon/Phantom/Specter) or
     /// legacy per-packet reset CTR (Demon).
     /// `None` in stub files written before key material is available.
+    #[serde(default)]
     pub monotonic_ctr: Option<bool>,
 
     /// CTR block offset at the start of the captured scenario (usually 0).
     /// `None` in stub files written before key material is available.
+    #[serde(default)]
     pub initial_ctr_block_offset: Option<u64>,
 
     /// Agent ID assigned during INIT handshake, as a hex string (e.g. `"0x12345678"`).
     /// `None` in stub files written before key material is available.
+    #[serde(default)]
     pub agent_id_hex: Option<String>,
 }
 

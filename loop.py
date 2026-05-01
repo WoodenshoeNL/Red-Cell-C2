@@ -77,6 +77,10 @@ DEV_PROMPTS = {
 DEV_LITEQA_PROMPT = "prompts/DEV_LITEQA_PROMPT.md"
 DEV_LITEQA_MAX_TURNS = 50
 
+# Pre-claim QA prompt run before claiming a bead (agent-independent)
+PRE_CLAIM_QA_PROMPT = "prompts/PRE_CLAIM_QA_PROMPT.md"
+PRE_CLAIM_QA_MAX_TURNS = 20
+
 # Review loops use a single best-of prompt per loop type (agent-independent)
 REVIEW_PROMPTS = {
     "qa":       "prompts/CLAUDE_PROMPT.md",        # identical across agents
@@ -1326,6 +1330,82 @@ def release_cap_out_bead(task_id: str, checkpoint: str, agent_id: str, log: Logg
     log.log(f"CAP-OUT: {task_id} reset to open, checkpoint written")
 
 
+def extract_pre_claim_verdict(output: str) -> tuple:
+    """
+    Parse the PRE-CLAIM QA RESULT block from agent output.
+
+    Returns (verdict, reason) where verdict is one of 'PASS', 'REFINED', 'BLOCKED',
+    or 'UNKNOWN' if the block is missing or malformed.
+    """
+    start = output.find("=== PRE-CLAIM QA RESULT ===")
+    end = output.find("=== END PRE-CLAIM QA ===", start)
+    if start == -1 or end == -1:
+        return "UNKNOWN", "pre-claim agent produced no structured result block"
+
+    block = output[start:end]
+    verdict = "UNKNOWN"
+    reason = ""
+    for line in block.splitlines():
+        if line.startswith("Verdict:"):
+            verdict = line.split(":", 1)[1].strip().upper()
+        elif line.startswith("Reason:"):
+            reason = line.split(":", 1)[1].strip()
+
+    if verdict not in ("PASS", "REFINED", "BLOCKED"):
+        verdict = "UNKNOWN"
+    return verdict, reason
+
+
+def run_pre_claim_qa(
+    task_id: str,
+    agent: str,
+    model: str,
+    agent_id: str,
+    max_turns: int,
+    log: Logger,
+    extra_env: dict | None = None,
+) -> tuple:
+    """
+    Run the pre-claim quality gate for a candidate bead.
+
+    Returns (verdict, reason) where verdict is 'PASS', 'REFINED', 'BLOCKED',
+    or 'UNKNOWN' (treated as PASS to avoid blocking on gate failures).
+    """
+    prompt_file = SCRIPT_DIR / PRE_CLAIM_QA_PROMPT
+    if not prompt_file.exists():
+        log.log(f"WARNING: pre-claim QA prompt not found at {prompt_file} — skipping gate")
+        return "PASS", "prompt file missing"
+
+    template = prompt_file.read_text()
+    issue_details = br(["show", task_id]).stdout.strip() or f"Issue ID: {task_id}"
+    prompt = (
+        template
+        .replace("{ISSUE_ID}", task_id)
+        .replace("{AGENT_ID}", agent_id)
+        .replace("{MAX_TURNS}", str(max_turns))
+    )
+    prompt += f"\n\n---\n\n## Bead Details\n\n{issue_details}\n"
+
+    log.log(f"Running pre-claim QA on {task_id} (max {max_turns} turns)...")
+    _exit, output, _ = run_agent(
+        agent, model, prompt, log,
+        max_turns=max_turns if agent == "claude" else 0,
+        extra_env=extra_env,
+    )
+
+    verdict, reason = extract_pre_claim_verdict(output)
+    log.log(f"Pre-claim QA [{task_id}]: verdict={verdict} reason={reason}")
+
+    if verdict == "UNKNOWN":
+        log.log(
+            f"WARNING: pre-claim agent returned no structured verdict for {task_id}"
+            f" — treating as PASS"
+        )
+        return "PASS", reason
+
+    return verdict, reason
+
+
 def filter_cap_out_candidates(
     candidates: list,
     cap_out_pending_skip: set,
@@ -1507,7 +1587,13 @@ def dev_loop(args, log: Logger):
     iteration = 0
 
     zone_desc = ", ".join(zones) if zones else "all zones"
-    lite_qa_mode = "off (--dev-light)" if getattr(args, "dev_light", False) else "on"
+    dev_light = getattr(args, "dev_light", False)
+    lite_qa_mode = "off (--dev-light)" if dev_light else "on"
+    pre_claim_qa_turns = getattr(args, "pre_claim_qa_turns", PRE_CLAIM_QA_MAX_TURNS)
+    pre_claim_qa_mode = (
+        "off (--dev-light)" if dev_light
+        else f"on (max {pre_claim_qa_turns} turns)"
+    )
     log.banner([
         f"{agent.title()} development loop starting",
         f"Agent ID:  {agent_id}",
@@ -1517,6 +1603,7 @@ def dev_loop(args, log: Logger):
         f"Stale thr: {args.stale_threshold}m",
         f"Zones:     {zone_desc}",
         f"Lite QA:   {lite_qa_mode}",
+        f"Pre-claim: {pre_claim_qa_mode}",
     ])
 
     lock_path = SCRIPT_DIR / ".agent-claim.lock"
@@ -1642,6 +1729,25 @@ def dev_loop(args, log: Logger):
                     log.log(f"Skipping candidate already in_progress in JSONL: {candidate}")
                     continue
                 log.log(f"Selected task: {candidate}")
+
+                # Pre-claim QA gate: verify bead body accuracy before claiming.
+                # Skipped when --dev-light is set or for non-claude agents (no max_turns support).
+                if not dev_light and agent == "claude":
+                    pq_verdict, pq_reason = run_pre_claim_qa(
+                        candidate, agent, args.model, agent_id,
+                        max_turns=pre_claim_qa_turns, log=log,
+                    )
+                    # Sweep up any bead updates the QA agent made before deciding.
+                    commit_beads_if_dirty(
+                        f"pre-claim-qa refine {candidate} [{agent_id}]", log
+                    )
+                    if pq_verdict == "BLOCKED":
+                        log.log(
+                            f"PRE-CLAIM BLOCKED [{candidate}]: {pq_reason}"
+                            f" — skipping this candidate"
+                        )
+                        continue
+
                 if claim_task(candidate, agent_id, log, rename_prefix):
                     next_id = candidate
                     break
@@ -2936,7 +3042,8 @@ examples:
   ./loop.py --agent codex  --loop dev  --zone teamserver
   ./loop.py --agent cursor --loop dev  --zone client-cli client
   ./loop.py --agent claude --loop dev  --sleep 0 --iterations 1
-  ./loop.py --agent claude --loop dev  --dev-light          # skip lite QA (original behaviour)
+  ./loop.py --agent claude --loop dev  --dev-light          # skip pre-claim QA + lite QA (original behaviour)
+  ./loop.py --agent claude --loop dev  --pre-claim-qa-turns 10  # faster pre-claim gate
   ./loop.py --agent codex  --loop qa   --sleep 20
   ./loop.py --agent claude --loop arch --zone teamserver
   ./loop.py --agent claude --loop arch --sleep 120 --jitter 15
@@ -3036,8 +3143,17 @@ examples:
         action="store_true",
         default=False,
         help=(
-            "Dev loop only: skip the lite QA pass after each task. "
-            "Use this to get the original single-agent-call behaviour."
+            "Dev loop only: skip the lite QA pass and pre-claim QA gate after/before "
+            "each task. Use this to get the original single-agent-call behaviour."
+        ),
+    )
+    parser.add_argument(
+        "--pre-claim-qa-turns",
+        type=int, default=PRE_CLAIM_QA_MAX_TURNS, metavar="N",
+        dest="pre_claim_qa_turns",
+        help=(
+            f"Dev loop only: max turns for the pre-claim QA gate (default: {PRE_CLAIM_QA_MAX_TURNS}). "
+            "Increase for complex beads, decrease to save time. --dev-light disables the gate entirely."
         ),
     )
     parser.add_argument(

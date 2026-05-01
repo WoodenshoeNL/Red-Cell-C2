@@ -69,13 +69,7 @@ fn build_job_encodes_process_create_payload() {
     assert_eq!(read_u32_le(&job.payload, &mut offset), 1);
 }
 
-/// Empty program field (shell-exec path: `agent exec --cmd "whoami"`) must encode
-/// as length=0, not length=2 (null-terminator-only), so the Demon parser sets
-/// `ProcessSize=0` → `Process=NULL` → `CreateProcessW(NULL, L"whoami", …)` succeeds.
-///
-/// The regression (red-cell-c2-qaru8) was caused by `encode_utf16("")` producing
-/// a 2-byte null-terminator, giving `ProcessSize=2` → `Process=L""` →
-/// `CreateProcessW(L"", …)` failing with an invalid application-name error.
+/// Empty program must encode as length=0 so Demon sets Process=NULL (not L"" which fails CreateProcessW).
 #[test]
 fn build_job_encodes_process_create_empty_program_as_length_zero() {
     use red_cell_common::demon::format_proc_create_args;

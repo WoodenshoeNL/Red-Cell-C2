@@ -110,10 +110,7 @@ pub fn encode_proc_command_payload(
             let process_args = String::from_utf8_lossy(&process_args).into_owned();
 
             write_u32(&mut payload, state);
-            // Empty program → write length-0 field so the Demon parser returns
-            // ProcessSize=0 and sets Process=NULL.  encode_utf16("") would produce
-            // a 2-byte null-terminator-only value (length=2) which the parser treats
-            // as a non-empty string, causing CreateProcessW(L"", …) to fail.
+            // encode_utf16("") produces [0x00,0x00] (length=2 not 0); use [] directly so Demon sets Process=NULL
             let program_encoded = if program.is_empty() { vec![] } else { encode_utf16(program) };
             write_len_prefixed_bytes(&mut payload, &program_encoded)?;
             write_len_prefixed_bytes(&mut payload, &encode_utf16(&process_args))?;

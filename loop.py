@@ -52,6 +52,7 @@ DEV_SLEEP_BETWEEN     = 15     # wait between tasks when --sleep not set
 DEV_SLEEP_TOKEN_LIMIT = 1200   # wait after Claude context limit hit
 DEV_CLEAN_EVERY       = 1      # run build-artifact cleanup every N dev iterations
 DEV_MAX_TURNS         = 150    # max turns per dev session; agent commits WIP and resumes next iteration
+MAX_CONSECUTIVE_CAP_OUTS = 2  # escalate after this many consecutive cap-outs on the same bead
 
 # Valid zone names and their corresponding source paths
 ZONES = {
@@ -1305,6 +1306,43 @@ def reset_stuck_tasks(log: Logger, stale_threshold_secs: int):
             pass
 
 
+def extract_cap_out_checkpoint(output: str, summary: list) -> str:
+    """Return a short checkpoint string from a capped-out session."""
+    if summary:
+        return "\n".join(summary)[:2048]
+    return output[-2048:].strip() if output else ""
+
+
+def release_cap_out_bead(task_id: str, checkpoint: str, agent_id: str, log: Logger) -> None:
+    """Reset a cap-out bead to open and write a checkpoint note to the bead."""
+    note = (
+        f"CAP-OUT CHECKPOINT (auto-reset by {agent_id}):\n\n{checkpoint}"
+        if checkpoint
+        else f"CAP-OUT: session hit turn limit. Auto-reset by {agent_id}."
+    )
+    note = note[:2000]
+    br(["update", task_id, "--notes", note, "--status=open", "--owner", ""])
+    commit_beads_if_dirty(f"release {task_id} after cap-out [{agent_id}]", log)
+    log.log(f"CAP-OUT: {task_id} reset to open, checkpoint written")
+
+
+def filter_cap_out_candidates(
+    candidates: list,
+    cap_out_pending_skip: set,
+) -> tuple:
+    """
+    Prefer candidates not in cap_out_pending_skip.
+    Falls back to all candidates when every candidate is in the skip set
+    (i.e. it is the only ready bead).
+
+    Returns (filtered_candidates, skip_entries_consumed).
+    """
+    non_skipped = [c for c in candidates if c not in cap_out_pending_skip]
+    result = non_skipped if non_skipped else candidates
+    consumed = set(candidates) & cap_out_pending_skip
+    return result, consumed
+
+
 def find_resumable_task(agent_id: str) -> str:
     """
     Find a task this agent previously claimed that is still in_progress.
@@ -1484,6 +1522,10 @@ def dev_loop(args, log: Logger):
     lock_path = SCRIPT_DIR / ".agent-claim.lock"
     lock_fd = open(lock_path, "w")
 
+    # Cap-out tracking: consecutive cap-outs per bead and one-iteration skip list.
+    cap_out_streak: dict = {}      # task_id → consecutive cap-out count
+    cap_out_pending_skip: set = set()  # task_ids to skip on the next selection pass
+
     while True:
         if stop_requested():
             log.log("STOP signal detected (.stop file exists). Exiting.")
@@ -1586,7 +1628,16 @@ def dev_loop(args, log: Logger):
                 time.sleep(DEV_SLEEP_NO_WORK)
                 continue
 
-            for candidate in candidates:
+            # Prefer candidates not recently cap-outed; fall back to all if necessary.
+            prioritized, skip_consumed = filter_cap_out_candidates(candidates, cap_out_pending_skip)
+            cap_out_pending_skip.difference_update(skip_consumed)
+            if skip_consumed and len(prioritized) < len(candidates):
+                log.log(
+                    f"CAP-OUT skip: deferring {skip_consumed} for 1 iteration"
+                    f" — {len(prioritized)} other candidate(s) available"
+                )
+
+            for candidate in prioritized:
                 if issue_status_from_jsonl(candidate) == "in_progress":
                     log.log(f"Skipping candidate already in_progress in JSONL: {candidate}")
                     continue
@@ -1820,11 +1871,14 @@ Start directly with understanding the task and implementing it.
             commit_beads_if_dirty(f"post-lite-qa sweep for {next_id} [{agent_id}]", log)
 
         final_status = issue_status_from_jsonl(next_id)
-        if final_status == "in_progress":
+        if final_status == "in_progress" and not max_turns_hit:
             log.log(
                 f"Task {next_id} still in_progress after agent ran"
                 f" — will resume on next iteration"
             )
+        elif final_status not in ("in_progress", "open") and not max_turns_hit:
+            # Bead was closed or moved to a terminal state — reset any cap-out streak.
+            cap_out_streak.pop(next_id, None)
 
         log.log("========================LOOP=========================")
 
@@ -1835,9 +1889,21 @@ Start directly with understanding the task and implementing it.
             clean_tmp_cargo_targets(log)
 
         if max_turns_hit:
-            log.log(f"Max turns ({DEV_MAX_TURNS}) reached — resuming task {next_id} immediately")
-            # No sleep: resume on the very next iteration. find_resumable_task will
-            # pick up the still-in_progress task and the WIP commit provides context.
+            checkpoint = extract_cap_out_checkpoint(output, summary)
+            release_cap_out_bead(next_id, checkpoint, agent_id, log)
+            streak = cap_out_streak.get(next_id, 0) + 1
+            cap_out_streak[next_id] = streak
+            cap_out_pending_skip.add(next_id)
+            log.log(
+                f"CAP-OUT [{next_id}] streak={streak}: bead released to open,"
+                f" skip 1 iteration"
+            )
+            if streak >= MAX_CONSECUTIVE_CAP_OUTS:
+                log.log(
+                    f"ESCALATE [{next_id}]: {streak} consecutive cap-outs —"
+                    f" issue likely needs refinement before next attempt"
+                )
+            # No sleep: immediately proceed to the next task (a different one due to skip).
         elif token_limit_hit:
             log.log(f"Token limit hit — sleeping {DEV_SLEEP_TOKEN_LIMIT}s before next iteration")
             time.sleep(DEV_SLEEP_TOKEN_LIMIT)

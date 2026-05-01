@@ -371,3 +371,232 @@ pub(super) const DEFAULT_FAKE_404_BODY: &str =
     "<html><head><title>404 Not Found</title></head><body>404 Not Found</body></html>";
 const DEFAULT_HTTP_METHOD: &str = "POST";
 const HEADER_VALIDATION_IGNORES: [&str; 2] = ["connection", "accept-encoding"];
+
+#[cfg(test)]
+mod tests {
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use axum::Router;
+    use axum::body::Body;
+    use axum::extract::ConnectInfo;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::any;
+    use red_cell_common::HttpListenerConfig;
+    use red_cell_common::corpus::CorpusAgentType;
+    use red_cell_common::crypto::ecdh::{ListenerKeypair, build_registration_packet};
+    use serde_json::Value;
+    use tempfile::TempDir;
+    use tower::ServiceExt as _;
+
+    use crate::demon::INIT_EXT_MONOTONIC_CTR;
+    use crate::{
+        AgentRegistry, CorpusCapture, Database, DemonInitSecretConfig, ShutdownController,
+        SocketRelayManager,
+        dispatch::DownloadTracker,
+        events::EventBus,
+        listeners::{
+            DemonInitRateLimiter, EcdhRegistrationRateLimiter, ReconnectProbeRateLimiter,
+            UnknownCallbackProbeAuditLimiter,
+        },
+    };
+
+    // ── metadata helpers (mirror ecdh_dispatch/tests.rs layout) ──────────────
+
+    fn put_u32_be(buf: &mut Vec<u8>, v: u32) {
+        buf.extend_from_slice(&v.to_be_bytes());
+    }
+
+    fn put_u64_be(buf: &mut Vec<u8>, v: u64) {
+        buf.extend_from_slice(&v.to_be_bytes());
+    }
+
+    fn put_str_be(buf: &mut Vec<u8>, s: &str) {
+        let b = s.as_bytes();
+        put_u32_be(buf, b.len() as u32);
+        buf.extend_from_slice(b);
+    }
+
+    fn put_utf16_be(buf: &mut Vec<u8>, s: &str) {
+        let u: Vec<u16> = s.encode_utf16().collect();
+        put_u32_be(buf, (u.len() * 2) as u32);
+        for c in u {
+            buf.extend_from_slice(&c.to_be_bytes());
+        }
+    }
+
+    /// Build a minimal but valid ECDH init metadata blob for `agent_id`.
+    fn ecdh_reg_metadata(agent_id: u32) -> Vec<u8> {
+        let mut m = Vec::new();
+        put_u32_be(&mut m, agent_id);
+        put_str_be(&mut m, "wkstn-test");
+        put_str_be(&mut m, "operator");
+        put_str_be(&mut m, "REDCELL");
+        put_str_be(&mut m, "10.0.0.1");
+        put_utf16_be(&mut m, "C:\\Windows\\explorer.exe");
+        put_u32_be(&mut m, 4242); // pid
+        put_u32_be(&mut m, 4243); // tid
+        put_u32_be(&mut m, 512); // ppid
+        put_u32_be(&mut m, 2); // arch
+        put_u32_be(&mut m, 0); // elevated
+        put_u64_be(&mut m, 0x0040_1000_u64); // base_address
+        put_u32_be(&mut m, 10); // os_major
+        put_u32_be(&mut m, 0); // os_minor
+        put_u32_be(&mut m, 1); // os_product_type
+        put_u32_be(&mut m, 0); // os_service_pack
+        put_u32_be(&mut m, 22000); // os_build
+        put_u32_be(&mut m, 9); // os_arch
+        put_u32_be(&mut m, 15); // sleep_delay
+        put_u32_be(&mut m, 20); // sleep_jitter
+        put_u64_be(&mut m, 1_893_456_000_u64); // kill_date
+        m.extend_from_slice(&0_i32.to_be_bytes()); // working_hours
+        put_u32_be(&mut m, INIT_EXT_MONOTONIC_CTR); // ext_flags
+        m
+    }
+
+    fn ecdh_listener_config() -> HttpListenerConfig {
+        HttpListenerConfig {
+            name: "test-handler-corpus".to_owned(),
+            kill_date: None,
+            working_hours: None,
+            hosts: vec!["127.0.0.1".to_owned()],
+            host_bind: "127.0.0.1".to_owned(),
+            host_rotation: "round-robin".to_owned(),
+            port_bind: 0,
+            port_conn: None,
+            method: Some("POST".to_owned()),
+            behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
+            user_agent: None,
+            headers: Vec::new(),
+            uris: vec!["/".to_owned()],
+            host_header: None,
+            secure: false,
+            cert: None,
+            response: None,
+            proxy: None,
+            ja3_randomize: None,
+            doh_domain: None,
+            doh_provider: None,
+            legacy_mode: false,
+            suppress_opsec_warnings: true,
+        }
+    }
+
+    async fn build_state_with_corpus(
+        keypair: ListenerKeypair,
+        corpus: CorpusCapture,
+    ) -> Arc<super::super::HttpListenerState> {
+        let db = Database::connect_in_memory().await.expect("db");
+        let registry = AgentRegistry::new(db.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let downloads = DownloadTracker::new(16 * 1024 * 1024);
+        let config = ecdh_listener_config();
+        Arc::new(
+            super::super::HttpListenerState::build(
+                &config,
+                registry,
+                events,
+                db,
+                sockets,
+                None,
+                downloads,
+                DemonInitRateLimiter::new(),
+                UnknownCallbackProbeAuditLimiter::new(),
+                ReconnectProbeRateLimiter::new(),
+                EcdhRegistrationRateLimiter::new(),
+                ShutdownController::new(),
+                DemonInitSecretConfig::None,
+                8,
+                false,
+                Some(keypair),
+                Some(corpus),
+            )
+            .expect("HttpListenerState::build"),
+        )
+    }
+
+    /// Fires a valid ECDH registration packet through `http_listener_handler` end-to-end
+    /// and verifies that the handler's `if let Some(corpus) = &state.corpus_capture` branch
+    /// writes the expected RX, TX, and session.keys.json corpus files.
+    ///
+    /// This test closes the gap identified in red-cell-c2-17iz4: the existing
+    /// `ecdh_handled_path_writes_corpus_files` test called `CorpusCapture` methods directly
+    /// without routing through the handler, leaving the handler's corpus conditional
+    /// untested and able to regress silently.
+    #[tokio::test]
+    async fn handler_ecdh_corpus_write_path_is_exercised_end_to_end() {
+        let keypair = ListenerKeypair::generate().expect("keypair");
+        let tmp = TempDir::new().expect("tempdir");
+        let corpus = CorpusCapture::new(tmp.path().to_path_buf(), CorpusAgentType::Archon);
+        let agent_id: u32 = 0xFE_ED_CA_FE;
+
+        let state = build_state_with_corpus(keypair.clone(), corpus).await;
+        let router = Router::new().fallback(any(super::http_listener_handler)).with_state(state);
+
+        let metadata = ecdh_reg_metadata(agent_id);
+        let (packet, _session_key) = build_registration_packet(&keypair.public_bytes, &metadata)
+            .expect("build registration packet");
+
+        let peer = SocketAddr::from(([198, 51, 100, 1], 12345));
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/")
+                    .extension(ConnectInfo(peer))
+                    .body(Body::from(packet))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "handler must return 200 for a valid ECDH registration"
+        );
+
+        let agent_dir = tmp.path().join("archon").join(format!("{agent_id:08x}"));
+        assert!(
+            agent_dir.join("0000.bin").exists(),
+            "handler must write RX corpus packet (0000.bin)"
+        );
+        assert!(
+            agent_dir.join("0000.meta.json").exists(),
+            "handler must write RX corpus meta (0000.meta.json)"
+        );
+        assert!(
+            agent_dir.join("0001.bin").exists(),
+            "handler must write TX corpus packet (0001.bin)"
+        );
+        assert!(
+            agent_dir.join("0001.meta.json").exists(),
+            "handler must write TX corpus meta (0001.meta.json)"
+        );
+        assert!(
+            agent_dir.join("session.keys.json").exists(),
+            "handler must write session.keys.json"
+        );
+
+        let keys_json =
+            std::fs::read_to_string(agent_dir.join("session.keys.json")).expect("read keys");
+        let parsed: Value = serde_json::from_str(&keys_json).expect("valid JSON");
+        assert_eq!(
+            parsed["encryption_scheme"].as_str().expect("encryption_scheme"),
+            "aes-256-gcm",
+            "handler corpus must record aes-256-gcm for ECDH agents"
+        );
+        assert_eq!(
+            parsed["agent_id_hex"].as_str().expect("agent_id_hex"),
+            format!("0x{agent_id:08x}"),
+            "session.keys.json must embed the correct agent_id"
+        );
+        assert!(
+            parsed["aes_iv_hex"].is_null(),
+            "GCM sessions must have null aes_iv_hex (nonce is per-packet)"
+        );
+        assert!(parsed["monotonic_ctr"].is_null(), "GCM sessions must have null monotonic_ctr");
+    }
+}

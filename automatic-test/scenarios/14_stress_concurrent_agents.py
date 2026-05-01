@@ -208,7 +208,7 @@ def _run_stress_for_agent(
         agent_list,
         log_list,
     )
-    from lib.deploy import cleanup_windows_harness_work_dir, ensure_work_dir, execute_background, run_remote, upload
+    from lib.deploy import cleanup_windows_harness_work_dir, defender_add_exclusion, ensure_work_dir, execute_background, run_remote, upload
 
     cli = ctx.cli
     co = int(ctx.timeouts.command_output)
@@ -239,6 +239,15 @@ def _run_stress_for_agent(
         # ── Step 1: Upload agent_count copies and launch each ─────────────
         print(f"  [{agent_type}][deploy] ensuring work dir on target")
         ensure_work_dir(target)
+
+        # Prevent Defender from quarantining the payload before WinHTTP connects.
+        if _win:
+            try:
+                print(f"  [{agent_type}][deploy] adding Defender AV exclusion for {target.work_dir!r}")
+                defender_add_exclusion(target, target.work_dir)
+                print(f"  [{agent_type}][deploy] exclusion added (or Defender is disabled — both are fine)")
+            except Exception as exc:
+                print(f"  [{agent_type}][deploy] Defender exclusion failed (non-fatal): {exc}")
 
         _sep = "\\" if _win else "/"
         for i in range(agent_count):

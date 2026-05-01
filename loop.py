@@ -1640,6 +1640,9 @@ def dev_loop(args, log: Logger):
     # Cap-out tracking: consecutive cap-outs per bead and one-iteration skip list.
     cap_out_streak: dict = {}      # task_id → consecutive cap-out count
     cap_out_pending_skip: set = set()  # task_ids to skip on the next selection pass
+    # Pre-claim QA tracking: beads that failed the QA gate this session.
+    # Reset when the entire candidate pool is exhausted so reformulated beads can be re-evaluated.
+    pre_claim_blocked_skip: set = set()
 
     while True:
         if stop_requested():
@@ -1752,6 +1755,22 @@ def dev_loop(args, log: Logger):
                     f" — {len(prioritized)} other candidate(s) available"
                 )
 
+            # Skip beads that already received a BLOCKED pre-claim verdict this session.
+            # Falls back to all candidates when every candidate is blocked, then resets the
+            # skip set so reformulated beads can be re-evaluated next iteration.
+            non_blocked = [c for c in prioritized if c not in pre_claim_blocked_skip]
+            if non_blocked:
+                prioritized = non_blocked
+            else:
+                # Pool exhausted: every candidate has been BLOCKED this session.
+                # Reset so the loop can re-evaluate in case beads were reformulated.
+                blocked_consumed = set(prioritized) & pre_claim_blocked_skip
+                pre_claim_blocked_skip.difference_update(blocked_consumed)
+                log.log(
+                    f"PRE-CLAIM BLOCKED skip reset: all {len(candidates)} candidate(s)"
+                    f" were blocked — re-evaluating pool"
+                )
+
             for candidate in prioritized:
                 if issue_status_from_jsonl(candidate) == "in_progress":
                     log.log(f"Skipping candidate already in_progress in JSONL: {candidate}")
@@ -1770,9 +1789,10 @@ def dev_loop(args, log: Logger):
                         f"pre-claim-qa refine {candidate} [{agent_id}]", log
                     )
                     if pq_verdict == "BLOCKED":
+                        pre_claim_blocked_skip.add(candidate)
                         log.log(
                             f"PRE-CLAIM BLOCKED [{candidate}]: {pq_reason}"
-                            f" — skipping this candidate"
+                            f" — skipping this candidate (added to session skip set)"
                         )
                         continue
 

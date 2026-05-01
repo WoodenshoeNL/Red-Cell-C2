@@ -824,3 +824,191 @@ fn agent_crypto_material_zeroizes_on_drop() {
     assert_eq!(material.key, [0u8; AGENT_KEY_LENGTH], "key must be zeroed after zeroize()");
     assert_eq!(material.iv, [0u8; AGENT_IV_LENGTH], "iv must be zeroed after zeroize()");
 }
+
+// ── CTR direction & continuity conformance tests ──────────────────────────────
+//
+// These tests verify the properties that distinguish correct Rust/C interop:
+//
+// 1. Counter is BIG-ENDIAN: Demon source (AesCrypt.c:230-239) increments the
+//    highest-index byte first (index 15 = LSB of a 128-bit big-endian integer).
+//    Rust uses Ctr128BE<Aes256> which matches this exactly.
+//
+// 2. Archon's AdvanceIvByBlocks (Package.c:238-271) treats the IV as two
+//    big-endian 64-bit halves (bytes 0-7 = high, bytes 8-15 = low) and adds
+//    the block count to the low half with carry to the high half. This is
+//    identical to `cipher.seek(block_offset * 16)` on a Ctr128BE cipher.
+//
+// 3. Legacy CTR (Demon): each packet resets to offset 0 — produce the same
+//    keystream regardless of how many prior packets were sent.
+//
+// 4. Monotonic CTR (Archon/Phantom/Specter): the counter advances across
+//    packets; the N-th packet starts where the (N-1)-th left off.
+
+/// Helper: compute what AdvanceIvByBlocks(iv, blocks) produces.
+/// Replicates the C logic from agent/archon/src/core/Package.c:238-271
+/// in order to verify the Rust `seek()` path produces the same result.
+fn advance_iv_by_blocks_ref(iv: &[u8; AGENT_IV_LENGTH], blocks: u64) -> [u8; AGENT_IV_LENGTH] {
+    if blocks == 0 {
+        return *iv;
+    }
+    let lo = u64::from_be_bytes(iv[8..16].try_into().unwrap());
+    let hi = u64::from_be_bytes(iv[0..8].try_into().unwrap());
+    let new_lo = lo.wrapping_add(blocks);
+    let new_hi = if new_lo < lo { hi.wrapping_add(1) } else { hi };
+    let mut out = [0u8; AGENT_IV_LENGTH];
+    out[0..8].copy_from_slice(&new_hi.to_be_bytes());
+    out[8..16].copy_from_slice(&new_lo.to_be_bytes());
+    out
+}
+
+#[test]
+fn legacy_ctr_resets_keystream_per_call() {
+    // Demon AesCrypt.c: AesInit is called before every AesXCryptBuffer, so
+    // every packet starts from the same CTR counter value. Two identical
+    // encrypt_agent_data calls with the same key/IV must produce the same
+    // ciphertext — confirming that `encrypt_agent_data` is stateless/reset.
+    let key = [0x11_u8; AGENT_KEY_LENGTH];
+    let iv = [0x22_u8; AGENT_IV_LENGTH];
+    let plaintext = b"demon-protocol-packet-payload-xx";
+
+    let ct1 = encrypt_agent_data(&key, &iv, plaintext).expect("first encrypt");
+    let ct2 = encrypt_agent_data(&key, &iv, plaintext).expect("second encrypt");
+
+    assert_eq!(
+        ct1, ct2,
+        "legacy CTR must produce the same ciphertext on repeated calls (reset per packet)"
+    );
+}
+
+#[test]
+fn advance_iv_by_blocks_ref_matches_rust_seek() {
+    // Archon Package.c AdvanceIvByBlocks must match Rust Ctr128BE seek().
+    // For N offset blocks: encrypt_agent_data_at_offset(key, iv, N, pt) must
+    // equal encrypt_agent_data(key, advance_iv_by_blocks_ref(iv, N), pt).
+    let key = [0x33_u8; AGENT_KEY_LENGTH];
+    let plaintext = b"conformance-test-payload-padding";
+
+    for n in [0u64, 1, 2, 5, 10, 255, 256, 1000] {
+        let iv: [u8; AGENT_IV_LENGTH] = {
+            let mut v = [0x44_u8; AGENT_IV_LENGTH];
+            v[15] = n.wrapping_mul(7) as u8; // vary IV to avoid trivial matches
+            v
+        };
+        let advanced_iv = advance_iv_by_blocks_ref(&iv, n);
+
+        let via_seek = encrypt_agent_data_at_offset(&key, &iv, n, plaintext)
+            .unwrap_or_else(|e| panic!("seek encrypt at offset {n} failed: {e}"));
+        let via_advance =
+            encrypt_agent_data(&key, &advanced_iv, plaintext).expect("advance IV then encrypt");
+
+        assert_eq!(
+            via_seek, via_advance,
+            "encrypt_at_offset({n}) and AdvanceIvByBlocks({n})+encrypt must produce the same ciphertext"
+        );
+    }
+}
+
+#[test]
+fn ctr_counter_carries_into_high_half_on_low_half_overflow() {
+    // Verify the big-endian carry: when the low 64 bits (bytes 8-15) overflow,
+    // the carry propagates into the high 64 bits (bytes 0-7).
+    // This exercises the `if new_lo < lo { hi++ }` branch in AdvanceIvByBlocks.
+    let iv: [u8; AGENT_IV_LENGTH] = {
+        let mut v = [0u8; AGENT_IV_LENGTH];
+        // Set low half to u64::MAX so adding 1 causes overflow.
+        v[8..16].copy_from_slice(&u64::MAX.to_be_bytes());
+        v
+    };
+    let advanced = advance_iv_by_blocks_ref(&iv, 1);
+
+    // Low half wraps to 0; high half increments from 0 to 1.
+    assert_eq!(&advanced[0..8], &1u64.to_be_bytes(), "high half must increment on carry");
+    assert_eq!(&advanced[8..16], &0u64.to_be_bytes(), "low half must wrap to 0 on overflow");
+
+    // Rust `encrypt_agent_data_at_offset` with seek through the carry must match.
+    let key = [0x55_u8; AGENT_KEY_LENGTH];
+    let plaintext = b"carry-test-payload-padding-xx-xx";
+    let via_seek = encrypt_agent_data_at_offset(&key, &iv, 1, plaintext).expect("seek encrypt");
+    let via_advance = encrypt_agent_data(&key, &advanced, plaintext).expect("advance encrypt");
+    assert_eq!(via_seek, via_advance, "carry path: seek and advance must produce same ciphertext");
+}
+
+#[test]
+fn big_endian_counter_direction_is_not_little_endian() {
+    // If the counter were little-endian, a value of [0xFF, 0x00, ...] would
+    // wrap byte 0 (LE LSB) and carry into byte 1.
+    // With big-endian, [0x00, ..., 0xFF] wraps byte 15 (BE LSB) and carries
+    // into byte 14. This test verifies the Rust implementation is BE by showing
+    // that `encrypt_at_offset(1)` on an IV with byte 15 = 0xFF matches the
+    // big-endian carry result, NOT the little-endian carry result.
+
+    // IV with last byte = 0xFF: BE counter at offset 0.
+    let iv_be_carry: [u8; AGENT_IV_LENGTH] = {
+        let mut v = [0u8; AGENT_IV_LENGTH];
+        v[15] = 0xFF;
+        v
+    };
+    // Expected advanced IV (BE): byte 15 wraps to 0x00, byte 14 becomes 0x01.
+    let be_advanced = advance_iv_by_blocks_ref(&iv_be_carry, 1);
+    assert_eq!(be_advanced[14], 0x01, "BE carry: byte 14 must be 0x01");
+    assert_eq!(be_advanced[15], 0x00, "BE carry: byte 15 must wrap to 0x00");
+
+    let key = [0x66_u8; AGENT_KEY_LENGTH];
+    let plaintext = b"be-direction-test-payload-xxxxxx";
+    let via_seek =
+        encrypt_agent_data_at_offset(&key, &iv_be_carry, 1, plaintext).expect("BE seek encrypt");
+    let via_be_advance =
+        encrypt_agent_data(&key, &be_advanced, plaintext).expect("BE advance encrypt");
+
+    // Must match BE.
+    assert_eq!(via_seek, via_be_advance, "CTR must match big-endian advance (BE carry)");
+
+    // Must NOT match what a little-endian advance would produce.
+    // LE advance of [0x00,...,0xFF, 0x00,...]: byte 0 = 0xFF → 0x00, byte 1 += 1.
+    let mut le_advanced = iv_be_carry;
+    // Simulate LE increment: start at index 0, carry up.
+    for i in 0..AGENT_IV_LENGTH {
+        if le_advanced[i] < 255 {
+            le_advanced[i] += 1;
+            break;
+        }
+        le_advanced[i] = 0;
+    }
+    let via_le_advance =
+        encrypt_agent_data(&key, &le_advanced, plaintext).expect("LE advance encrypt");
+    assert_ne!(
+        via_seek, via_le_advance,
+        "CTR must NOT match a little-endian advance — confirms Rust uses Ctr128BE, not Ctr128LE"
+    );
+}
+
+#[test]
+fn monotonic_ctr_two_packets_form_contiguous_keystream() {
+    // When two packets are sent with the monotonic CTR protocol (Archon/Phantom),
+    // packet 2 starts exactly where packet 1 left off. This means:
+    //   encrypt_at_offset(0, pt1) || encrypt_at_offset(blocks(pt1), pt2)
+    // must equal the corresponding slices of a single encrypt call:
+    //   encrypt_at_offset(0, pt1 || pt2)[len(pt1)..]
+    //
+    // This is the core continuity invariant that prevents keystream overlap.
+    let key = [0x77_u8; AGENT_KEY_LENGTH];
+    let iv = [0x88_u8; AGENT_IV_LENGTH];
+
+    let pt1 = b"first-packet-payload-xxxxxxxxxxx"; // 32 bytes = 2 blocks
+    let pt2 = b"second-packet-payload-xxxxxxxxxx"; // 32 bytes = 2 blocks
+
+    let pt1_blocks = ctr_blocks_for_len(pt1.len());
+    assert_eq!(pt1_blocks, 2, "test setup: pt1 must consume exactly 2 blocks");
+
+    let ct1 = encrypt_agent_data_at_offset(&key, &iv, 0, pt1).expect("packet 1");
+    let ct2 = encrypt_agent_data_at_offset(&key, &iv, pt1_blocks, pt2).expect("packet 2");
+
+    // Combined plaintext encrypted in one shot.
+    let mut combined_pt = pt1.to_vec();
+    combined_pt.extend_from_slice(pt2);
+    let ct_combined =
+        encrypt_agent_data_at_offset(&key, &iv, 0, &combined_pt).expect("combined encrypt");
+
+    assert_eq!(&ct_combined[..pt1.len()], &ct1[..], "packet 1 ciphertext must equal combined[..N]");
+    assert_eq!(&ct_combined[pt1.len()..], &ct2[..], "packet 2 ciphertext must equal combined[N..]");
+}

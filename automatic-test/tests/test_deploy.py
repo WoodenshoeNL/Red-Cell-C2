@@ -640,6 +640,7 @@ class TestDeployErrorPaths(unittest.TestCase):
         self.assertEqual(m.call_count, 1)
         remote_cmd = m.call_args[0][0][-1]
         self.assertIn("nohup", remote_cmd)
+        self.assertIn("/tmp/rc/agent", remote_cmd)
         self.assertNotIn("--sleep", remote_cmd)
         self.assertNotIn("--port", remote_cmd)
         self.assertNotIn("8443", remote_cmd)

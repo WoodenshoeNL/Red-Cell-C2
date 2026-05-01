@@ -134,11 +134,12 @@ class TestReleaseCapOutBead(unittest.TestCase):
              patch("loop.commit_beads_if_dirty", return_value=True):
             release_cap_out_bead("abc-123", long_checkpoint, "agent1", log)
 
-        for c in calls:
-            if "--notes" in c:
-                note_idx = c.index("--notes")
-                note_val = c[note_idx + 1]
-                self.assertLessEqual(len(note_val), 4000, "note must be ≤ 4000 chars")
+        notes_calls = [c for c in calls if "--notes" in c]
+        self.assertTrue(notes_calls, "expected at least one br call with --notes")
+        for c in notes_calls:
+            note_idx = c.index("--notes")
+            note_val = c[note_idx + 1]
+            self.assertLessEqual(len(note_val), 4000, "note must be ≤ 4000 chars")
 
     def test_empty_checkpoint_writes_fallback_message(self):
         calls = []
@@ -147,11 +148,12 @@ class TestReleaseCapOutBead(unittest.TestCase):
              patch("loop.commit_beads_if_dirty", return_value=True):
             release_cap_out_bead("abc-123", "", "agent1", log)
 
-        for c in calls:
-            if "--notes" in c:
-                note_idx = c.index("--notes")
-                note_val = c[note_idx + 1]
-                self.assertIn("turn limit", note_val)
+        notes_calls = [c for c in calls if "--notes" in c]
+        self.assertTrue(notes_calls, "expected at least one br call with --notes")
+        for c in notes_calls:
+            note_idx = c.index("--notes")
+            note_val = c[note_idx + 1]
+            self.assertIn("turn limit", note_val)
 
     def test_empty_checkpoint_writes_token_limit_fallback(self):
         calls = []
@@ -160,12 +162,13 @@ class TestReleaseCapOutBead(unittest.TestCase):
              patch("loop.commit_beads_if_dirty", return_value=True):
             release_cap_out_bead("abc-123", "", "agent1", log, cause="token_limit")
 
-        for c in calls:
-            if "--notes" in c:
-                note_idx = c.index("--notes")
-                note_val = c[note_idx + 1]
-                self.assertIn("token limit", note_val)
-                self.assertNotIn("turn limit", note_val)
+        notes_calls = [c for c in calls if "--notes" in c]
+        self.assertTrue(notes_calls, "expected at least one br call with --notes")
+        for c in notes_calls:
+            note_idx = c.index("--notes")
+            note_val = c[note_idx + 1]
+            self.assertIn("token limit", note_val)
+            self.assertNotIn("turn limit", note_val)
 
     def test_calls_commit_beads_if_dirty(self):
         log = _FakeLogger()

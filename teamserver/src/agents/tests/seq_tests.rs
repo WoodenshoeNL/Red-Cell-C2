@@ -343,6 +343,40 @@ async fn replay_lockout_triggers_after_threshold() -> Result<(), TeamserverError
     Ok(())
 }
 
+/// Triggering the replay lockout must persist an audit-log row with the expected fields.
+#[tokio::test]
+async fn replay_lockout_emits_audit_log_entry() -> Result<(), TeamserverError> {
+    use red_cell_common::callback_seq::REPLAY_LOCKOUT_THRESHOLD;
+
+    let database = test_database().await?;
+    let registry = AgentRegistry::new(database.clone());
+    let agent = sample_agent_with_crypto(0x200B_0003, test_key(0xB3), test_iv(0xC3));
+    registry.insert(agent.clone()).await?;
+
+    registry.check_and_advance_callback_seq(agent.agent_id, 10).await?;
+
+    // Drive K replay attempts — the K-th triggers lockout and writes the audit entry.
+    for _ in 0..REPLAY_LOCKOUT_THRESHOLD {
+        let _ = registry.check_and_advance_callback_seq(agent.agent_id, 5).await;
+    }
+
+    let entries = database.audit_log().list().await?;
+    let lockout_entries: Vec<_> = entries.iter().filter(|e| e.action == "replay_lockout").collect();
+
+    assert_eq!(lockout_entries.len(), 1, "exactly one replay_lockout audit entry expected");
+
+    let entry = &lockout_entries[0];
+    assert_eq!(entry.actor, "teamserver");
+    assert_eq!(entry.target_kind, "agent");
+    assert_eq!(
+        entry.target_id,
+        Some(format!("0x{:08X}", agent.agent_id)),
+        "target_id must be the hex agent_id"
+    );
+
+    Ok(())
+}
+
 /// While locked out, even a valid (non-replay) seq must be refused.
 #[tokio::test]
 async fn replay_lockout_blocks_valid_seq_while_active() -> Result<(), TeamserverError> {

@@ -99,69 +99,7 @@ fn corpus_dir(agent: &str, scenario: &str) -> PathBuf {
 /// the replay begins rather than producing a confusing parse failure.
 fn load_corpus(agent: &str, scenario: &str) -> Result<Vec<CorpusEntry>, ReplayError> {
     let dir = corpus_dir(agent, scenario);
-    if !dir.exists() {
-        return Err(ReplayError::CorpusNotFound(dir));
-    }
-
-    // Collect and sort *.bin files lexicographically (0000.bin < 0001.bin …).
-    let mut bin_files: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .map_err(|e| ReplayError::Io { path: dir.clone(), inner: e })?
-        .filter_map(|entry| entry.ok())
-        .map(|e| e.path())
-        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("bin"))
-        .collect();
-    bin_files.sort();
-
-    if bin_files.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut entries = Vec::new();
-    for bin_path in bin_files {
-        let meta_path = bin_path.with_extension("meta.json");
-
-        // Load raw binary data.
-        let bin_bytes = std::fs::read(&bin_path)
-            .map_err(|e| ReplayError::Io { path: bin_path.clone(), inner: e })?;
-
-        // Load and parse sidecar.
-        let meta_json = std::fs::read_to_string(&meta_path)
-            .map_err(|e| ReplayError::Io { path: meta_path.clone(), inner: e })?;
-        let meta: CorpusPacketMeta = serde_json::from_str(&meta_json)
-            .map_err(|e| ReplayError::Json { path: meta_path.clone(), inner: e })?;
-
-        // Validate format version before using any other fields.
-        if meta.version != CORPUS_FORMAT_VERSION {
-            return Err(ReplayError::FormatVersionMismatch {
-                path: meta_path,
-                expected: CORPUS_FORMAT_VERSION,
-                actual: meta.version,
-            });
-        }
-
-        // Validate byte length first (cheap).
-        if bin_bytes.len() != meta.byte_len {
-            return Err(ReplayError::SizeMismatch {
-                path: bin_path,
-                expected: meta.byte_len,
-                actual: bin_bytes.len(),
-            });
-        }
-
-        // Validate SHA-256 digest (catches file corruption and sidecar/binary mismatches).
-        let actual_digest = sha256_hex(&bin_bytes);
-        if actual_digest != meta.bytes_sha256 {
-            return Err(ReplayError::DigestMismatch {
-                path: bin_path,
-                expected: meta.bytes_sha256.clone(),
-                actual: actual_digest,
-            });
-        }
-
-        entries.push(CorpusEntry { dir: meta.direction, bytes: bin_bytes, meta });
-    }
-
-    Ok(entries)
+    load_corpus_from_dir(&dir)
 }
 
 /// Load session key material from `<corpus_dir>/session.keys.json`.

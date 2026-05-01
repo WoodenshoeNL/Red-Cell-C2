@@ -51,7 +51,7 @@ fn compile_c_replay_harness() {
     let harness_bin = std::path::Path::new(&out_dir).join("demon_replay_harness");
 
     let result = std::process::Command::new("gcc")
-        .args(["-std=c11", "-Wall", "-Wextra", "-O2"])
+        .args(["-std=c11", "-Wall", "-Wextra", "-Werror", "-O2"])
         .arg(&harness_src)
         .arg("-o")
         .arg(&harness_bin)

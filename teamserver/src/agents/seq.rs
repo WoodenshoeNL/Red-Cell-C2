@@ -3,10 +3,13 @@
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use tracing::instrument;
 
 use red_cell_common::callback_seq::{REPLAY_LOCKOUT_DURATION_SECS, REPLAY_LOCKOUT_THRESHOLD};
 
+use crate::database::audit::AuditLogEntry;
 use crate::database::{DeferredWrite, TeamserverError};
 
 use super::AgentRegistry;
@@ -238,6 +241,31 @@ impl AgentRegistry {
                         move || async move {
                             repo.set_replay_lockout(agent_id, new_count, Some(expiry_unix)).await
                         },
+                    )
+                    .await?;
+
+                    let occurred_at = OffsetDateTime::now_utc()
+                        .format(&Rfc3339)
+                        .unwrap_or_else(|_| String::from("unknown"));
+                    let lockout_details = format!(
+                        "agent 0x{:08X} replay-locked until unix={}",
+                        agent_id, expiry_unix
+                    );
+                    let audit_repo = self.audit_log_repository.clone();
+                    let audit_entry = AuditLogEntry {
+                        id: None,
+                        actor: "teamserver".to_owned(),
+                        action: "replay_lockout".to_owned(),
+                        target_kind: "agent".to_owned(),
+                        target_id: Some(format!("0x{:08X}", agent_id)),
+                        details: Some(
+                            serde_json::json!({ "message": lockout_details, "lockout_until_unix": expiry_unix, "attempt_count": new_count }),
+                        ),
+                        occurred_at,
+                    };
+                    self.persist_or_queue(
+                        DeferredWrite::AuditLogCreate { entry: audit_entry.clone() },
+                        move || async move { audit_repo.create(&audit_entry).await.map(|_| ()) },
                     )
                     .await?;
 

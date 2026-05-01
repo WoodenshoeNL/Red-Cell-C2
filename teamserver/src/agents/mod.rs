@@ -26,7 +26,9 @@ use tokio::sync::{Mutex, RwLock};
 use tracing::error;
 use tracing::{instrument, warn};
 
-use crate::database::{Database, DatabaseHealthState, DeferredWrite, TeamserverError, WriteQueue};
+use crate::database::{
+    AuditLogRepository, Database, DatabaseHealthState, DeferredWrite, TeamserverError, WriteQueue,
+};
 
 #[derive(Debug)]
 struct AgentEntry {
@@ -131,6 +133,7 @@ fn unix_secs_to_lockout_instant(unix_secs: Option<i64>) -> Option<Instant> {
 pub struct AgentRegistry {
     repository: crate::database::AgentRepository,
     link_repository: crate::database::LinkRepository,
+    audit_log_repository: AuditLogRepository,
     entries: Arc<RwLock<HashMap<u32, Arc<AgentEntry>>>>,
     parent_links: Arc<RwLock<HashMap<u32, u32>>>,
     child_links: Arc<RwLock<HashMap<u32, BTreeSet<u32>>>>,
@@ -171,6 +174,7 @@ impl AgentRegistry {
         Self {
             repository: database.agents(),
             link_repository: database.links(),
+            audit_log_repository: database.audit_log(),
             entries: Arc::new(RwLock::new(HashMap::new())),
             parent_links: Arc::new(RwLock::new(HashMap::new())),
             child_links: Arc::new(RwLock::new(HashMap::new())),

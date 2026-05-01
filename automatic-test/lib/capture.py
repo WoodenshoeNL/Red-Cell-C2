@@ -354,14 +354,14 @@ class CorpusCapturePatch:
             tx_body: bytes = b""
             if isinstance(req, urllib.request.Request):
                 tx_body = req.data or b""
-                is_post = req.get_method() == "POST"
+                record_rx = req.data is not None
             elif data is not None:
                 tx_body = data
-                is_post = True
+                record_rx = True
             else:
-                is_post = False
+                record_rx = False
 
-            if is_post:
+            if record_rx:
                 capture.record_packet("rx", tx_body)
 
             call_kw: dict[str, Any] = {}

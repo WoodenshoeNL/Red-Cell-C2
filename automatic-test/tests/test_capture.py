@@ -255,6 +255,14 @@ class _EchoHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_PUT(self) -> None:  # noqa: N802
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length)
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def log_message(self, *_: object) -> None:
         pass  # suppress test output
 
@@ -394,6 +402,20 @@ class TestCorpusCapturePatch(unittest.TestCase):
         self.assertEqual(cap.packet_count(), 1)
         meta = json.loads((cap.output_dir / "0000.meta.json").read_text())
         self.assertEqual(meta["direction"], "tx")
+
+    def test_patch_put_request_with_body_records_rx(self) -> None:
+        """PUT Request with a body must record an RX packet — not be silently dropped."""
+        cap = CorpusCapture(self.corpus_dir, "demon", "17")
+        payload = b"put-body-data"
+        with CorpusCapturePatch(cap):
+            req = urllib.request.Request(self._url(), data=payload, method="PUT")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                resp.read()
+
+        self.assertEqual(cap.packet_count(), 2)
+        rx_meta = json.loads((cap.output_dir / "0000.meta.json").read_text())
+        self.assertEqual(rx_meta["direction"], "rx")
+        self.assertEqual((cap.output_dir / "0000.bin").read_bytes(), payload)
 
 
 # ── CapturingSession tests ────────────────────────────────────────────────────

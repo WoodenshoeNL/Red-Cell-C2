@@ -1770,6 +1770,7 @@ def dev_loop(args, log: Logger):
                     f"PRE-CLAIM BLOCKED skip reset: all {len(candidates)} candidate(s)"
                     f" were blocked — re-evaluating pool"
                 )
+                prioritized = []  # defer re-evaluation to next iteration; avoid burning QA turns on reset iteration
 
             for candidate in prioritized:
                 if issue_status_from_jsonl(candidate) == "in_progress":

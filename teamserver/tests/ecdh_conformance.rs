@@ -16,8 +16,6 @@
 //! ensures deterministic test data, and the replay tests feed that data
 //! through the same library functions the teamserver uses in production.
 
-mod common;
-
 use red_cell_common::crypto::ecdh::{
     ConnectionId, ListenerKeypair, build_registration_packet_from_parts,
     build_registration_response, open_registration_packet, open_session_packet,

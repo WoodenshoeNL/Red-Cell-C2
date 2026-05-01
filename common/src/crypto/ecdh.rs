@@ -193,7 +193,9 @@ impl AsRef<[u8]> for ConnectionId {
 }
 
 /// Derive the AES-256-GCM session key from a shared X25519 secret.
-fn derive_session_key_from_secret(shared_secret: &[u8; 32]) -> Result<[u8; 32], EcdhError> {
+pub(crate) fn derive_session_key_from_secret(
+    shared_secret: &[u8; 32],
+) -> Result<[u8; 32], EcdhError> {
     let hkdf = Hkdf::<Sha256>::new(None, shared_secret);
     let mut session_key = [0u8; 32];
     hkdf.expand(HKDF_INFO_SESSION_KEY, &mut session_key).map_err(|_| EcdhError::HkdfExpand)?;
@@ -227,6 +229,48 @@ fn aes_gcm_open(key: &[u8; 32], sealed: &[u8]) -> Result<Vec<u8>, EcdhError> {
 
 // ─── Agent-side helpers ───────────────────────────────────────────────────────
 
+/// Build a registration packet from caller-supplied ephemeral secret and timestamp.
+///
+/// Returns `(packet_bytes, session_key)`.  Use this variant when deterministic
+/// output is required — for example when generating corpus fixtures for replay
+/// tests.  The caller must ensure `ephemeral_secret_bytes` are freshly generated
+/// and never reused across registrations in production code.
+///
+/// For normal agent use, prefer [`build_registration_packet`] which generates
+/// both the ephemeral secret and timestamp automatically.
+///
+/// # Arguments
+/// - `listener_public_key` — 32-byte X25519 public key compiled into the agent.
+/// - `ephemeral_secret_bytes` — caller-supplied ephemeral X25519 secret.
+/// - `timestamp_unix_secs` — Unix timestamp to embed in the plaintext.
+/// - `metadata` — arbitrary agent metadata bytes.
+pub fn build_registration_packet_from_parts(
+    listener_public_key: &[u8; 32],
+    ephemeral_secret_bytes: [u8; 32],
+    timestamp_unix_secs: u64,
+    metadata: &[u8],
+) -> Result<(Vec<u8>, [u8; 32]), EcdhError> {
+    let ephemeral_secret = StaticSecret::from(ephemeral_secret_bytes);
+    let ephemeral_public = PublicKey::from(&ephemeral_secret);
+
+    let listener_pub = PublicKey::from(*listener_public_key);
+    let mut shared = ephemeral_secret.diffie_hellman(&listener_pub).to_bytes();
+    let session_key = derive_session_key_from_secret(&shared)?;
+    shared.zeroize();
+
+    let mut plaintext = Vec::with_capacity(8 + metadata.len());
+    plaintext.extend_from_slice(&timestamp_unix_secs.to_be_bytes());
+    plaintext.extend_from_slice(metadata);
+
+    let sealed = aes_gcm_seal(&session_key, &plaintext)?;
+
+    let mut packet = Vec::with_capacity(32 + sealed.len());
+    packet.extend_from_slice(ephemeral_public.as_bytes());
+    packet.extend_from_slice(&sealed);
+
+    Ok((packet, session_key))
+}
+
 /// Build a registration packet to send to the teamserver.
 ///
 /// Returns `(packet_bytes, session_key)`. The session key must be stored for
@@ -246,30 +290,12 @@ pub fn build_registration_packet(
     // discard the secret after the ECDH step.
     let mut ephemeral_secret_bytes = [0u8; 32];
     getrandom_fill(&mut ephemeral_secret_bytes).map_err(|e| EcdhError::Rng(e.to_string()))?;
-    let ephemeral_secret = StaticSecret::from(ephemeral_secret_bytes);
-    let ephemeral_public = PublicKey::from(&ephemeral_secret);
-
-    // Perform ECDH with the listener's static public key.
-    let listener_pub = PublicKey::from(*listener_public_key);
-    let mut shared = ephemeral_secret.diffie_hellman(&listener_pub).to_bytes();
-    let session_key = derive_session_key_from_secret(&shared)?;
-    shared.zeroize();
-
-    // Build plaintext: timestamp(8 BE) | metadata.
-    let timestamp = current_unix_secs();
-    let mut plaintext = Vec::with_capacity(8 + metadata.len());
-    plaintext.extend_from_slice(&timestamp.to_be_bytes());
-    plaintext.extend_from_slice(metadata);
-
-    // Encrypt with the session key.
-    let sealed = aes_gcm_seal(&session_key, &plaintext)?;
-
-    // Wire format: ephemeral_pubkey(32) | nonce(12) | ciphertext | tag(16).
-    let mut packet = Vec::with_capacity(32 + sealed.len());
-    packet.extend_from_slice(ephemeral_public.as_bytes());
-    packet.extend_from_slice(&sealed);
-
-    Ok((packet, session_key))
+    build_registration_packet_from_parts(
+        listener_public_key,
+        ephemeral_secret_bytes,
+        current_unix_secs(),
+        metadata,
+    )
 }
 
 /// Parse a registration response from the teamserver.
@@ -721,6 +747,58 @@ mod tests {
 
         let result = open_registration_packet(&kp, 300, &packet);
         assert!(matches!(result, Err(EcdhError::ReplayDetected)));
+    }
+
+    /// Golden vector: known X25519 shared secret → HKDF-SHA256 session key.
+    ///
+    /// Uses the RFC 7748 §6.1 shared secret as HKDF input and verifies
+    /// `derive_session_key_from_secret` against an independent reference that
+    /// manually steps through RFC 5869 using raw HMAC-SHA256 (without the
+    /// `hkdf` crate's API), catching any mismatch in the info string, salt, or
+    /// expand logic.
+    ///
+    /// Expected output computed with this reference and independently verified
+    /// against Python's `cryptography` library:
+    ///   `1b3fc6e8d68f2ef35a497116cc09ed333874052611804a8d80460b6317bc5279`
+    #[test]
+    fn ecdh_hkdf_session_key_derivation_golden_vector() {
+        use hmac::Mac as HmacMac;
+
+        // RFC 7748 §6.1 shared secret (verified by x25519_cross_implementation_rfc7748).
+        let shared_secret: [u8; 32] = [
+            0x4a, 0x5d, 0x9d, 0x5b, 0xa4, 0xce, 0x2d, 0xe1, 0x72, 0x8e, 0x3b, 0xf4, 0x80, 0x35,
+            0x0f, 0x25, 0xe0, 0x7e, 0x21, 0xc9, 0x47, 0xd1, 0x9e, 0x33, 0x76, 0xf0, 0x9b, 0x3c,
+            0x1e, 0x16, 0x17, 0x42,
+        ];
+
+        // Independent RFC 5869 HKDF reference using raw HMAC-SHA256.
+        // Extract: PRK = HMAC-SHA256(salt=zeros(32), IKM=shared_secret)
+        type HmacSha256 = hmac::Hmac<sha2::Sha256>;
+        let salt = [0u8; 32];
+        let mut mac = <HmacSha256 as HmacMac>::new_from_slice(&salt).expect("hmac init");
+        mac.update(&shared_secret);
+        let prk = mac.finalize().into_bytes();
+        // Expand: T(1) = HMAC-SHA256(PRK, info || 0x01)
+        let info = b"red-cell-ecdh-session-key-v1";
+        let mut mac2 = <HmacSha256 as HmacMac>::new_from_slice(&prk).expect("hmac init");
+        mac2.update(info);
+        mac2.update(&[0x01u8]);
+        let reference_key: [u8; 32] = mac2.finalize().into_bytes().into();
+
+        let derived = derive_session_key_from_secret(&shared_secret).expect("derive");
+
+        assert_eq!(
+            derived, reference_key,
+            "derive_session_key_from_secret must match RFC 5869 HKDF-SHA256 reference"
+        );
+
+        // Also compare against the pre-computed expected value (independent Python verification).
+        let expected: [u8; 32] =
+            hex::decode("1b3fc6e8d68f2ef35a497116cc09ed333874052611804a8d80460b6317bc5279")
+                .expect("hex")
+                .try_into()
+                .expect("32 bytes");
+        assert_eq!(derived, expected, "HKDF session key must match Python reference vector");
     }
 
     #[test]

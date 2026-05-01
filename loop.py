@@ -1391,7 +1391,6 @@ def run_pre_claim_qa(
     agent_id: str,
     max_turns: int,
     log: Logger,
-    extra_env: dict | None = None,
 ) -> tuple:
     """
     Run the pre-claim quality gate for a candidate bead.
@@ -1418,7 +1417,6 @@ def run_pre_claim_qa(
     _exit, output, _ = run_agent(
         agent, model, prompt, log,
         max_turns=max_turns if agent == "claude" else 0,
-        extra_env=extra_env,
     )
 
     verdict, reason = extract_pre_claim_verdict(output)

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "seq": 0,
+  "direction": "rx",
+  "agent_type": "demon",
+  "scenario": "checkin",
+  "captured_at_unix": 1746057600,
+  "bytes_sha256": "08a76c66670e619bf2ddb3934fc347970ff3fa9ed2b0de6aa1a1d9d290dd99b0",
+  "byte_len": 248,
+  "expected_handler": "DEMON_INIT"
+}

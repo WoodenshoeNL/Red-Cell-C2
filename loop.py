@@ -1322,13 +1322,31 @@ def extract_cap_out_checkpoint(output: str, summary: list) -> str:
 
 
 def release_cap_out_bead(task_id: str, checkpoint: str, agent_id: str, log: Logger) -> None:
-    """Reset a cap-out bead to open and write a checkpoint note to the bead."""
-    note = (
-        f"CAP-OUT CHECKPOINT (auto-reset by {agent_id}):\n\n{checkpoint}"
+    """Reset a cap-out bead to open and prepend a checkpoint note, preserving prior checkpoints."""
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    new_entry = (
+        f"--- CAP-OUT CHECKPOINT {ts} (auto-reset by {agent_id}) ---\n\n{checkpoint}"
         if checkpoint
-        else f"CAP-OUT: session hit turn limit. Auto-reset by {agent_id}."
+        else f"--- CAP-OUT {ts}: session hit turn limit. Auto-reset by {agent_id}. ---"
     )
-    note = note[:2000]
+
+    # Read existing notes so we can prepend rather than overwrite.
+    existing_notes = ""
+    show_r = br(["show", task_id, "--json"])
+    if show_r.returncode == 0:
+        try:
+            data = json.loads(show_r.stdout)
+            existing_notes = (data[0].get("notes") or "") if data else ""
+        except (json.JSONDecodeError, IndexError, KeyError):
+            pass
+
+    if existing_notes:
+        combined = f"{new_entry}\n\n{existing_notes}"
+    else:
+        combined = new_entry
+
+    # Cap total note length so br update never rejects an oversized payload.
+    note = combined[:4000]
     r = br(["update", task_id, "--notes", note, "--status=open", "--owner", ""])
     if r.returncode != 0:
         log.log(

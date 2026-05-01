@@ -32,10 +32,6 @@ row to *Resolved* and add the closing commit / fix description.
 
 | Signature (substring of error / stderr) | Scenario | Bead | First seen | Last seen | Status |
 |----------------------------------------|----------|------|------------|-----------|--------|
-| `[TIMEOUT] timeout: timed out waiting for output from task` | 04, 07 | red-cell-c2-vk3xs | 2026-04-28 | 2026-05-01 | P1, task-output timeout regression after 5dggm seq_num fix (sc21 now passes) |
-| `Timed out after 30s waiting for remote upload` | 06 | red-cell-c2-vk3xs | 2026-04-29 | 2026-05-01 | (cascade — upload command accepted, file never appears on target) |
-| `Timed out after 30s waiting for screenshot loot entry` | 08 | red-cell-c2-vk3xs | 2026-04-29 | 2026-05-01 | (cascade — screenshot command queued, loot entry never appears) |
-| `[SUBPROCESS_TIMEOUT] CLI subprocess did not exit within expected timeout` | 11 | red-cell-c2-vk3xs | 2026-04-28 | 2026-05-01 | (cascade — CLI hangs waiting for task output that never arrives) |
 | `Process could not be started: Path:[]` | 05, 14, 19 | red-cell-c2-qaru8 | 2026-04-30 | 2026-05-01 | P1, Demon ProcessCreate on Windows still returns empty PATH after CreateEnvironmentBlock fix (regression of red-cell-c2-z1hl9) |
 | `Timed out after 60s waiting for agent checkin` | 17 | red-cell-c2-jv15n | 2026-04-29 | 2026-05-01 | P2, Archon ECDH checkin still fails — X25519.c fix was interrupted (regression of red-cell-c2-al4eo) |
 
@@ -53,6 +49,7 @@ than a new bug.
 | `Process could not be started: Path:[]` (CreateEnvironmentBlock fix) | 05, 14, 19 | red-cell-c2-z1hl9 | 2026-04-30 | Commits bfbf64fd/cbb0353d/481dd7be added CreateEnvironmentBlock. **REGRESSED** — fix ineffective, see red-cell-c2-qaru8. |
 | `Timed out after 60s waiting for agent checkin` (X25519 fix attempt) | 17 | red-cell-c2-al4eo | 2026-04-30 | X25519.c fix was interrupted (WIP commits). **REGRESSED** — see red-cell-c2-jv15n. |
 | `[TIMEOUT] timeout: timed out waiting for output from task` (seq_num desync fix) | 04, 06, 07, 11, 21 | red-cell-c2-5dggm | 2026-04-29 | ECDH seq_num desync: always increment callback_seq after send attempt. **REGRESSED** — see red-cell-c2-vk3xs |
+| `[TIMEOUT] timeout: timed out waiting for output from task` (mprotect SIGSEGV fix) | 04, 06, 07, 08, 11, 19, 21 | red-cell-c2-vk3xs | 2026-04-28 | reqwest connection pool kept a background Tokio task that accessed heap during mprotect_sleep PROT_NONE window → SIGSEGV. Fixed with pool_max_idle_per_host(0) in Phantom transport. Commit 20f2d6d4. |
 | `WMI Win32_Process.Create failed: ReturnValue=21` | 05, 08, 14, 17, 19 | red-cell-c2-irxsr | 2026-04-29 | PureWindowsPath fix for WMI CurrentDirectory extraction. WMI deploys now work. Downstream issues exposed: sc17 Archon checkin (red-cell-c2-al4eo), sc14 stress checkin (red-cell-c2-8ss6q). |
 | `GET_JOB accepted (HTTP 200): got HTTP 404` | 13 | red-cell-c2-irlsn | 2026-04-29 | Fixed GET_JOB heartbeat packet: removed spurious u32be(0) length prefix. sc13 passes. |
 | `DoH uplink chunk 0/1 expected NXDOMAIN (rcode=3), got rcode=5` | 20 | red-cell-c2-qb8gw | 2026-04-29 | Fixed by commit 1de06fac (irlsn fix). sc20 now skips for DNS resolution issue, not REFUSED. |

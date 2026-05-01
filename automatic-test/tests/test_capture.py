@@ -238,7 +238,7 @@ class TestBufferedHTTPResponse(unittest.TestCase):
 # ── CorpusCapturePatch tests ──────────────────────────────────────────────────
 
 class _EchoHandler(http.server.BaseHTTPRequestHandler):
-    """HTTP server that echoes the POST body back to the client."""
+    """Test HTTP server: echoes POST body; returns b"get-response" for GET."""
 
     def do_POST(self) -> None:  # noqa: N802
         length = int(self.headers.get("Content-Length", 0))

@@ -106,6 +106,10 @@ fn load_corpus(agent: &str, scenario: &str) -> Result<Vec<CorpusEntry>, ReplayEr
 ///
 /// Returns a typed [`ReplayError`] instead of panicking when any key field
 /// is `None` (stub file written before a real capture run).
+///
+/// On success, **all five fields** (`aes_key_hex`, `aes_iv_hex`, `monotonic_ctr`,
+/// `initial_ctr_block_offset`, `agent_id_hex`) are guaranteed to be `Some`.
+/// Callers may safely call `.expect()` on any field of the returned value.
 fn load_session_keys(corpus_dir: &Path) -> Result<CorpusSessionKeys, ReplayError> {
     let keys_path = corpus_dir.join("session.keys.json");
     let json = std::fs::read_to_string(&keys_path)
@@ -359,11 +363,13 @@ async fn replay_demon_init_from_corpus() -> Result<(), Box<dyn std::error::Error
     let dir = corpus_dir("demon", "checkin");
     let session_keys = load_session_keys(&dir)?;
 
+    // All fields guaranteed Some by load_session_keys — it returns Err for any None field.
     let aes_key_hex =
-        session_keys.aes_key_hex.ok_or(ReplayError::KeyFieldMissing("aes_key_hex"))?;
-    let aes_iv_hex = session_keys.aes_iv_hex.ok_or(ReplayError::KeyFieldMissing("aes_iv_hex"))?;
+        session_keys.aes_key_hex.expect("aes_key_hex guaranteed Some by load_session_keys");
+    let aes_iv_hex =
+        session_keys.aes_iv_hex.expect("aes_iv_hex guaranteed Some by load_session_keys");
     let agent_id_hex =
-        session_keys.agent_id_hex.ok_or(ReplayError::KeyFieldMissing("agent_id_hex"))?;
+        session_keys.agent_id_hex.expect("agent_id_hex guaranteed Some by load_session_keys");
 
     let expected_key = hex_decode("aes_key_hex", &aes_key_hex)?;
     let expected_iv = hex_decode("aes_iv_hex", &aes_iv_hex)?;

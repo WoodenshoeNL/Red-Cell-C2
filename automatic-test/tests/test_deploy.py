@@ -28,6 +28,8 @@ from lib.deploy import (
     _scp_args,
     _ssh_args,
     _windows_wmi_create_script,
+    _windows_schtask_script,
+    defender_add_exclusion,
     ensure_work_dir,
     execute_background,
     inject_hosts_entry,
@@ -550,8 +552,8 @@ class TestDeployErrorPaths(unittest.TestCase):
         self.assertIn("nohup", remote_cmd)
         self.assertIn("&", remote_cmd)
 
-    def test_execute_background_windows_uses_wmi(self) -> None:
-        """Windows deploy must use WMI Win32_Process.Create to escape SSH job objects."""
+    def test_execute_background_windows_uses_schtask(self) -> None:
+        """Windows deploy must use Task Scheduler (S4U) to run as user, not SYSTEM."""
         ok = self._completed(0)
         t = _make_target(work_dir="C:\\Temp\\rc-test", key=self.key_path)
         with patch("subprocess.run", return_value=ok) as m:
@@ -560,29 +562,27 @@ class TestDeployErrorPaths(unittest.TestCase):
         remote_cmd = m.call_args[0][0][-1]
         self.assertIn("-EncodedCommand", remote_cmd)
         script = _decoded_windows_launch_script(remote_cmd)
-        self.assertIn("Invoke-WmiMethod", script)
-        self.assertIn("Win32_Process", script)
-        self.assertIn("ReturnValue", script)
+        self.assertIn("Register-ScheduledTask", script)
+        self.assertIn("Start-ScheduledTask", script)
+        self.assertIn("New-ScheduledTaskPrincipal", script)
+        self.assertIn("S4U", script)
         self.assertIn("C:\\Temp\\rc-test\\agent.exe", script)
-        self.assertIn("C:\\Temp\\rc-test", script)
-        self.assertIn("-ArgumentList", script)
-        self.assertIn(",", script)
+        self.assertNotIn("Invoke-WmiMethod", script)
         self.assertNotIn("Start-Process", script)
 
     def test_execute_background_windows_quotes_paths_with_spaces(self) -> None:
-        """Paths with spaces must be double-quoted for CreateProcess."""
+        """Paths with spaces must be single-quoted for PowerShell New-ScheduledTaskAction."""
         ok = self._completed(0)
         t = _make_target(work_dir="C:\\Program Files\\rc", key=self.key_path)
         with patch("subprocess.run", return_value=ok) as m:
             execute_background(t, "C:\\Program Files\\rc\\agent.exe")
         remote_cmd = m.call_args[0][0][-1]
         script = _decoded_windows_launch_script(remote_cmd)
-        self.assertIn("Invoke-WmiMethod", script)
-        self.assertIn('"C:\\Program Files\\rc\\agent.exe"', script)
-        self.assertIn("C:\\Program Files\\rc", script)
+        self.assertIn("Register-ScheduledTask", script)
+        self.assertIn("'C:\\Program Files\\rc\\agent.exe'", script)
 
     def test_execute_background_windows_escapes_single_quotes(self) -> None:
-        """Single quotes in the command must be doubled for PS single-quote string."""
+        """Single quotes in the path must be doubled for PS single-quote string."""
         ok = self._completed(0)
         t = _make_target(work_dir="C:\\Temp", key=self.key_path)
         with patch("subprocess.run", return_value=ok) as m:
@@ -624,6 +624,123 @@ class TestDeployErrorPaths(unittest.TestCase):
         cwd_arg = cwd_arg.strip()
         self.assertNotEqual(cwd_arg, "''")
         self.assertIn("C:\\", cwd_arg)
+
+
+class TestWindowsSchedTaskScript(unittest.TestCase):
+    """Unit tests for _windows_schtask_script."""
+
+    def test_contains_register_scheduled_task(self) -> None:
+        script = _windows_schtask_script("C:\\Temp\\rc-test\\agent.exe")
+        self.assertIn("Register-ScheduledTask", script)
+
+    def test_contains_start_scheduled_task(self) -> None:
+        script = _windows_schtask_script("C:\\Temp\\rc-test\\agent.exe")
+        self.assertIn("Start-ScheduledTask", script)
+
+    def test_contains_s4u_logon_type(self) -> None:
+        """Must use S4U (service for user) — runs as the named user without stored password."""
+        script = _windows_schtask_script("C:\\Temp\\rc-test\\agent.exe")
+        self.assertIn("S4U", script)
+
+    def test_contains_exe_path_single_quoted(self) -> None:
+        script = _windows_schtask_script("C:\\Temp\\rc-test\\agent.exe")
+        self.assertIn("'C:\\Temp\\rc-test\\agent.exe'", script)
+
+    def test_path_with_spaces_single_quoted(self) -> None:
+        script = _windows_schtask_script("C:\\Program Files\\rc\\agent.exe")
+        self.assertIn("'C:\\Program Files\\rc\\agent.exe'", script)
+
+    def test_embedded_single_quote_is_doubled(self) -> None:
+        script = _windows_schtask_script("C:\\it's here\\agent.exe")
+        self.assertIn("it''s here", script)
+
+    def test_unique_task_name_uses_guid(self) -> None:
+        """Task name must be derived from a GUID to avoid collisions."""
+        script = _windows_schtask_script("C:\\Temp\\agent.exe")
+        self.assertIn("NewGuid", script)
+
+    def test_does_not_use_wmi(self) -> None:
+        script = _windows_schtask_script("C:\\Temp\\agent.exe")
+        self.assertNotIn("Invoke-WmiMethod", script)
+        self.assertNotIn("Win32_Process", script)
+
+    def test_unregisters_task_after_start(self) -> None:
+        """Task definition must be removed after launch to avoid accumulation."""
+        script = _windows_schtask_script("C:\\Temp\\agent.exe")
+        self.assertIn("Unregister-ScheduledTask", script)
+        start_idx = script.index("Start-ScheduledTask")
+        unreg_idx = script.index("Unregister-ScheduledTask")
+        self.assertLess(start_idx, unreg_idx, "Unregister must come after Start")
+
+    def test_uses_windows_identity_for_user(self) -> None:
+        """Must resolve current user via WindowsIdentity, not $env:USERNAME."""
+        script = _windows_schtask_script("C:\\Temp\\agent.exe")
+        self.assertIn("WindowsIdentity", script)
+
+    def test_unlimited_execution_time(self) -> None:
+        """ExecutionTimeLimit must be zero so long-running agents are not killed."""
+        script = _windows_schtask_script("C:\\Temp\\agent.exe")
+        self.assertIn("ExecutionTimeLimit", script)
+        self.assertIn("TimeSpan]::Zero", script)
+
+
+class TestDefenderAddExclusion(unittest.TestCase):
+    """Unit tests for defender_add_exclusion."""
+
+    def setUp(self) -> None:
+        self.key_path = _module_key_path()
+
+    def _completed(
+        self, returncode: int, stderr: str = "", stdout: str = ""
+    ) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(
+            args=[], returncode=returncode, stdout=stdout, stderr=stderr
+        )
+
+    def test_windows_target_runs_add_mppreference(self) -> None:
+        ok = self._completed(0)
+        t = _make_target(work_dir="C:\\Temp\\rc-test", key=self.key_path)
+        with patch("subprocess.run", return_value=ok) as m:
+            defender_add_exclusion(t, "C:\\Temp\\rc-test")
+        self.assertEqual(m.call_count, 1)
+        remote_cmd = m.call_args[0][0][-1]
+        script = _decoded_windows_launch_script(remote_cmd)
+        self.assertIn("Add-MpPreference", script)
+        self.assertIn("ExclusionPath", script)
+        self.assertIn("C:\\Temp\\rc-test", script)
+
+    def test_path_is_single_quoted(self) -> None:
+        ok = self._completed(0)
+        t = _make_target(work_dir="C:\\Temp\\rc-test", key=self.key_path)
+        with patch("subprocess.run", return_value=ok) as m:
+            defender_add_exclusion(t, "C:\\Temp\\rc-test")
+        remote_cmd = m.call_args[0][0][-1]
+        script = _decoded_windows_launch_script(remote_cmd)
+        self.assertIn("'C:\\Temp\\rc-test'", script)
+
+    def test_uses_silent_continue_so_disabled_defender_does_not_fail(self) -> None:
+        ok = self._completed(0)
+        t = _make_target(work_dir="C:\\Temp\\rc-test", key=self.key_path)
+        with patch("subprocess.run", return_value=ok) as m:
+            defender_add_exclusion(t, "C:\\Temp\\rc-test")
+        remote_cmd = m.call_args[0][0][-1]
+        script = _decoded_windows_launch_script(remote_cmd)
+        self.assertIn("SilentlyContinue", script)
+
+    def test_linux_target_raises_value_error(self) -> None:
+        t = _make_target(work_dir="/tmp/rc-test", key=self.key_path)
+        with self.assertRaises(ValueError) as ctx:
+            defender_add_exclusion(t, "/tmp/rc-test")
+        self.assertIn("Windows", str(ctx.exception))
+
+    def test_path_with_spaces_quoted(self) -> None:
+        ok = self._completed(0)
+        t = _make_target(work_dir="C:\\Program Files\\rc", key=self.key_path)
+        with patch("subprocess.run", return_value=ok) as m:
+            defender_add_exclusion(t, "C:\\Program Files\\rc")
+        remote_cmd = m.call_args[0][0][-1]
+        script = _decoded_windows_launch_script(remote_cmd)
+        self.assertIn("'C:\\Program Files\\rc'", script)
 
 
 class TestInjectHostsEntry(unittest.TestCase):

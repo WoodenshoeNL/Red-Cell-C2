@@ -121,7 +121,7 @@ def run(ctx) -> None:
         listener_start,
         listener_stop,
     )
-    from lib.deploy import run_remote
+    from lib.deploy import defender_add_exclusion, run_remote
     from lib.listeners import http_listener_kwargs
 
     cli = ctx.cli
@@ -138,6 +138,17 @@ def run(ctx) -> None:
     archon_extensions: list[dict] = (
         [_ext_raw] if isinstance(_ext_raw, dict) else list(_ext_raw)
     )
+
+    # ── Pre-step: Defender AV exclusion ─────────────────────────────────────
+    # Prevent Windows Defender from scanning/quarantining agent payloads in the
+    # work directory (H2 hypothesis: AV detects archon.exe and suspends/quarantines
+    # before WinHTTP can establish any TCP connection).
+    try:
+        print(f"  [archon][setup] adding Defender AV exclusion for {target.work_dir!r}")
+        defender_add_exclusion(target, target.work_dir)
+        print("  [archon][setup] exclusion added (or Defender is disabled — both are fine)")
+    except Exception as exc:
+        print(f"  [archon][setup] Defender exclusion failed (non-fatal): {exc}")
 
     # ── Step 1: Create + start HTTP listener ────────────────────────────────
     print(f"  [archon][listener] creating HTTP listener {listener_name!r} on port {listener_port}")

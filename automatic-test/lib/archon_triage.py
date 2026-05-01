@@ -61,6 +61,48 @@ def log_archon_ecdh_prelude(ctx: Any, listener_name: str, port: int) -> None:
     )
 
 
+def _try_windows_netstat(target: Any, run_remote: Any) -> str:
+    """Capture active/pending TCP connections on the Windows target (triage probe).
+
+    Returns a summary string suitable for embedding in the triage report.
+    Never raises — any error is returned as a descriptive message.
+    """
+    try:
+        # Show ESTABLISHED and SYN_SENT rows (the ones archon.exe should produce).
+        # /n = numeric, /o = owner PID.
+        cmd = (
+            "powershell -NoProfile -Command \""
+            "netstat -n -o | Where-Object { $_ -match 'ESTAB|SYN_SENT|SYN_RCVD' }"
+            "\""
+        )
+        out = run_remote(target, cmd, timeout=20)
+        return out.strip() if out.strip() else "(no ESTABLISHED/SYN connections visible)"
+    except Exception as e:  # noqa: BLE001
+        return f"netstat probe failed: {e}"
+
+
+def _try_windows_defender_events(target: Any, run_remote: Any) -> str:
+    """Check Windows Defender event log for recent AV threat/quarantine events.
+
+    Event IDs 1116/1117/1118 indicate Defender detected, quarantined, or removed
+    a threat.  Any of these near the sc17 run window confirms H2 (Defender AV).
+
+    Returns a summary string.  Never raises.
+    """
+    try:
+        script = (
+            "Get-WinEvent -ProviderName 'Microsoft-Windows-Windows Defender' "
+            "-MaxEvents 20 -ErrorAction SilentlyContinue | "
+            "Where-Object { $_.Id -in @(1116, 1117, 1118) } | "
+            "ForEach-Object { $_.TimeCreated.ToString('o') + ' [' + $_.Id + '] ' + $_.Message.Split([Environment]::NewLine)[0] }"
+        )
+        cmd = f"powershell -NoProfile -Command \"{script}\""
+        out = run_remote(target, cmd, timeout=30)
+        return out.strip() if out.strip() else "(no Defender threat events in last 20 entries)"
+    except Exception as e:  # noqa: BLE001
+        return f"Defender event log probe failed: {e}"
+
+
 def format_archon_checkin_timeout_diagnostics(
     ctx: Any,
     target: Any,
@@ -88,7 +130,7 @@ def format_archon_checkin_timeout_diagnostics(
         lines.append("Could not determine callback/teamserver host for connectivity hints.")
 
     try:
-        from lib.deploy import DeployError, run_remote
+        from lib.deploy import run_remote
 
         win_utc = run_remote(
             target,
@@ -113,5 +155,25 @@ def format_archon_checkin_timeout_diagnostics(
             lines.append(f"Test-NetConnection (TCP reachable): {tnc_out}")
         except Exception as e:  # noqa: BLE001
             lines.append(f"Test-NetConnection failed: {e}")
+
+    # Netstat: shows whether archon.exe is attempting TCP connections at all.
+    # If ESTABLISHED/SYN rows appear → traffic leaving host but server not receiving.
+    # If no rows → H1 (Firewall) or H2 (AV suspended process) or H3 (WinHTTP init fail).
+    try:
+        from lib.deploy import run_remote as _run_remote
+
+        lines.append("--- netstat (active/pending TCP) ---")
+        lines.append(_try_windows_netstat(target, _run_remote))
+    except Exception as e:  # noqa: BLE001
+        lines.append(f"netstat section failed: {e}")
+
+    # Defender event log: IDs 1116/1117/1118 confirm H2 (AV quarantine).
+    try:
+        from lib.deploy import run_remote as _run_remote2
+
+        lines.append("--- Windows Defender threat events (last 20 entries) ---")
+        lines.append(_try_windows_defender_events(target, _run_remote2))
+    except Exception as e:  # noqa: BLE001
+        lines.append(f"Defender event section failed: {e}")
 
     return "\n".join(lines) + "\n"

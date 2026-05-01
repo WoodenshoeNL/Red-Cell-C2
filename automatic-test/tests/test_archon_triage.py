@@ -53,7 +53,10 @@ class TestFormatArchonCheckinTimeoutDiagnostics(unittest.TestCase):
             text = format_archon_checkin_timeout_diagnostics(ctx, target, 1, exc)
 
         self.assertIn("Could not determine", text)
-        self.assertEqual(m.call_count, 1)
+        # TNC is skipped when no probe host, but UTC + netstat + Defender are still called.
+        self.assertNotIn("Test-NetConnection", text)
+        # Exactly: UTC probe (1) + netstat (1) + Defender events (1) = 3 calls.
+        self.assertEqual(m.call_count, 3)
 
 
 class TestLogArchonEcdhPrelude(unittest.TestCase):

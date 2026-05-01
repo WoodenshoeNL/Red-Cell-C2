@@ -479,19 +479,83 @@ def _windows_wmi_create_script(command_line: str) -> str:
     )
 
 
+def _windows_schtask_script(exe_path: str) -> str:
+    """Build PowerShell that uses Task Scheduler (S4U) to run *exe_path* as the current user.
+
+    Unlike ``WMI Win32_Process.Create`` (which runs as SYSTEM), this approach
+    launches the process under the SSH session user's identity, which prevents
+    Windows Defender Network Protection from blocking outbound TCP connections
+    from untrusted SYSTEM-context processes (H1), and avoids WinHTTP session
+    isolation that occurs in the SYSTEM-only session stack (H3).
+
+    The task survives SSH session close because Task Scheduler is independent
+    of the SSH job object (unlike ``Start-Process``, which is killed when
+    OpenSSH tears down the session).  The task registration is removed after
+    launch; the child process keeps running as an independent process.
+    """
+    exe_q = _quote_powershell(exe_path)
+    return (
+        "$name = 'RCTest-' + [System.Guid]::NewGuid().ToString('N').Substring(0, 12); "
+        f"$action = New-ScheduledTaskAction -Execute {exe_q}; "
+        "$settings = New-ScheduledTaskSettingsSet "
+        "-ExecutionTimeLimit ([TimeSpan]::Zero) -StartWhenAvailable; "
+        "$me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name; "
+        "$principal = New-ScheduledTaskPrincipal -UserId $me "
+        "-LogonType S4U -RunLevel Highest; "
+        "Register-ScheduledTask -TaskName $name -Action $action "
+        "-Settings $settings -Principal $principal -Force -ErrorAction Stop | Out-Null; "
+        "Start-ScheduledTask -TaskName $name -ErrorAction Stop; "
+        "Start-Sleep -Milliseconds 1000; "
+        "Unregister-ScheduledTask -TaskName $name -Confirm:$false "
+        "-ErrorAction SilentlyContinue; "
+        "exit 0"
+    )
+
+
+def defender_add_exclusion(target: TargetConfig, path: str) -> None:
+    """Add a Windows Defender AV exclusion for *path* on a Windows target.
+
+    Prevents Defender real-time protection from scanning, quarantining, or
+    holding file handles on executables under *path*.  Call this before
+    deploying agent payloads to test VMs where Defender is active.
+
+    Errors from ``Add-MpPreference`` are silently suppressed (Defender may be
+    disabled or the cmdlet absent on some Windows editions); the function only
+    raises ``DeployError`` when the SSH connection itself fails.
+
+    Args:
+        target: Windows SSH target.  Raises ``ValueError`` for Linux targets.
+        path:   Path to add as an AV exclusion (directory or file).
+
+    Raises:
+        ValueError: when *target* is not a Windows target.
+        DeployError: when the remote SSH command fails at the transport level.
+    """
+    if not (target.work_dir.startswith("C:\\") or "\\" in target.work_dir):
+        raise ValueError("defender_add_exclusion is only supported on Windows targets")
+    path_q = _quote_powershell(path)
+    script = (
+        f"Add-MpPreference -ExclusionPath {path_q} -ErrorAction SilentlyContinue; "
+        "exit 0"
+    )
+    enc = _powershell_encoded_command(script)
+    run_remote(target, f"powershell -NoProfile -EncodedCommand {enc}")
+
+
 def execute_background(target: TargetConfig, command: str) -> None:
     """Run a command on the target in the background (fire-and-forget).
 
-    On Windows, uses WMI ``Win32_Process.Create`` (with the payload directory
-    as *CurrentDirectory*) so the child process is outside the SSH session's
-    job object and survives session close. ``Start-Process`` children are killed
+    On Windows, uses Task Scheduler (``Register-ScheduledTask`` with S4U logon)
+    so the child process runs under the SSH session user's identity rather than
+    SYSTEM.  The task survives SSH session close because Task Scheduler is
+    independent of the SSH job object.  ``Start-Process`` children are killed
     when OpenSSH tears down the session.
 
     On Linux, the standard ``nohup … &`` detach works because POSIX SSH does
     not use job objects.
     """
     if target.work_dir.startswith("C:\\") or "\\" in target.work_dir:
-        script = _windows_wmi_create_script(command)
+        script = _windows_schtask_script(command)
         enc = _powershell_encoded_command(script)
         bg_cmd = f"powershell -NoProfile -EncodedCommand {enc}"
     else:

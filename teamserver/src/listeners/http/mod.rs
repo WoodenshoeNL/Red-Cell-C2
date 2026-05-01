@@ -47,9 +47,9 @@ use base64::Engine as _;
 use red_cell_common::crypto::ecdh::ListenerKeypair;
 
 use crate::{
-    AgentRegistry, CommandDispatcher, Database, DemonInitSecretConfig, DemonPacketParser,
-    PluginRuntime, ShutdownController, SocketRelayManager, dispatch::DownloadTracker,
-    events::EventBus,
+    AgentRegistry, CommandDispatcher, CorpusCapture, Database, DemonInitSecretConfig,
+    DemonPacketParser, PluginRuntime, ShutdownController, SocketRelayManager,
+    dispatch::DownloadTracker, events::EventBus,
 };
 
 use handler::{
@@ -80,6 +80,8 @@ pub(super) struct HttpListenerState {
     pub(super) shutdown: ShutdownController,
     /// X25519 keypair for ECDH new-protocol listeners. `None` for legacy listeners.
     pub(super) listener_keypair: Option<ListenerKeypair>,
+    /// Optional corpus capture state. `None` when `--capture-corpus` is not set.
+    pub(super) corpus_capture: Option<CorpusCapture>,
 }
 
 pub(super) struct ExpectedHeader {
@@ -108,6 +110,7 @@ impl HttpListenerState {
         max_pivot_chain_depth: usize,
         allow_legacy_ctr: bool,
         listener_keypair: Option<ListenerKeypair>,
+        corpus_capture: Option<CorpusCapture>,
     ) -> Result<Self, ListenerManagerError> {
         let method = parse_method(config)?;
         let trusted_proxy_peers = parse_trusted_proxy_peers(config)?;
@@ -163,6 +166,7 @@ impl HttpListenerState {
             default_fake_404_body: DEFAULT_FAKE_404_BODY.as_bytes().to_vec().into(),
             shutdown,
             listener_keypair,
+            corpus_capture,
         })
     }
 
@@ -211,6 +215,7 @@ pub(super) async fn spawn_http_listener_runtime(
     allow_legacy_ctr: bool,
     tls_configs: Arc<RwLock<HashMap<String, RustlsConfig>>>,
     watcher_handles: Arc<RwLock<HashMap<String, JoinHandle<()>>>>,
+    corpus_capture: Option<CorpusCapture>,
 ) -> Result<ListenerRuntimeFuture, ListenerManagerError> {
     // For non-legacy listeners, load (or generate) the ECDH keypair so Phantom/Specter
     // agents can use the new-protocol encrypted transport.
@@ -250,6 +255,7 @@ pub(super) async fn spawn_http_listener_runtime(
         max_pivot_chain_depth,
         allow_legacy_ctr,
         listener_keypair,
+        corpus_capture,
     )?);
     let address = format!("{}:{}", config.host_bind, config.port_bind);
     let listener = TcpListener::bind(address.as_str()).await.map_err(|error| {

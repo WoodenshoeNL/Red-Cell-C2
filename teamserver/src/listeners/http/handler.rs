@@ -9,6 +9,9 @@ use axum::response::{IntoResponse, Response};
 use red_cell_common::HttpListenerConfig;
 use tracing::{debug, warn};
 
+use red_cell_common::corpus::{CorpusPacketDir, CorpusSessionKeys};
+
+use crate::corpus_capture::bytes_to_hex;
 use crate::MAX_AGENT_MESSAGE_LEN;
 use crate::listeners::ListenerManagerError;
 
@@ -112,6 +115,11 @@ pub(super) async fn http_listener_handler(
         return state.fake_404_response();
     }
 
+    // Snapshot the encrypted request bytes before dispatch so the corpus RX
+    // entry can be written after we know the agent_id from the parsed result.
+    let corpus_rx_snapshot: Option<axum::body::Bytes> =
+        state.corpus_capture.as_ref().map(|_| body.clone());
+
     match process_demon_transport(
         &state.config.name,
         &state.registry,
@@ -133,8 +141,43 @@ pub(super) async fn http_listener_handler(
         Ok(response) if response.http_disposition == DemonHttpDisposition::Fake404 => {
             state.fake_404_response()
         }
-        Ok(response) if response.payload.is_empty() => state.callback_empty_response(),
-        Ok(response) => state.callback_bytes_response(&response.payload),
+        Ok(response) => {
+            // Write corpus RX + TX and session keys when capture is active.
+            if let (Some(corpus), Some(rx_bytes)) =
+                (&state.corpus_capture, corpus_rx_snapshot)
+            {
+                let agent_id = response.agent_id;
+                corpus
+                    .record_packet(agent_id, CorpusPacketDir::Rx, rx_bytes.as_ref(), None)
+                    .await;
+                corpus
+                    .record_packet(agent_id, CorpusPacketDir::Tx, &response.payload, None)
+                    .await;
+
+                // Write session keys the first time we see this agent.
+                if let Ok(enc) = state.registry.encryption(agent_id).await {
+                    let is_legacy = state
+                        .registry
+                        .legacy_ctr(agent_id)
+                        .await
+                        .unwrap_or(true);
+                    let keys = CorpusSessionKeys::new(
+                        bytes_to_hex(enc.aes_key.as_slice()),
+                        bytes_to_hex(enc.aes_iv.as_slice()),
+                        !is_legacy,
+                        0,
+                        format!("0x{agent_id:08x}"),
+                    );
+                    corpus.write_session_keys_once(agent_id, keys).await;
+                }
+            }
+
+            if response.payload.is_empty() {
+                state.callback_empty_response()
+            } else {
+                state.callback_bytes_response(&response.payload)
+            }
+        }
         Err(error) => {
             warn!(listener = %state.config.name, %error, "failed to process demon callback");
             state.fake_404_response()

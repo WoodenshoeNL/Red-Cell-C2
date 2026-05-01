@@ -182,6 +182,7 @@ impl ListenerManager {
                     self.demon_allow_legacy_ctr,
                     self.tls_configs.clone(),
                     self.watcher_handles.clone(),
+                    self.corpus_capture.clone(),
                 )
                 .await
             }

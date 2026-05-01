@@ -3,6 +3,7 @@
 mod agent_events;
 mod agent_liveness;
 pub mod agents;
+pub mod corpus_capture;
 pub mod api;
 pub mod app;
 pub mod audit;
@@ -94,6 +95,7 @@ pub use rbac::{
     ReadAccess, TaskAgentAccess, authorize_agent_group_access, authorize_listener_access,
     authorize_permission, authorize_websocket_command,
 };
+pub use corpus_capture::CorpusCapture;
 pub use red_cell_common::crypto::hash_password_sha3;
 pub use service::{ServiceBridge, ServiceBridgeError, service_routes};
 pub use shutdown::{ActiveCallbackGuard, ShutdownController};

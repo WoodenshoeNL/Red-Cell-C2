@@ -31,9 +31,9 @@ use super::rate_limiters::{
 };
 use super::summary::ListenerSummary;
 use crate::{
-    AgentRegistry, DEFAULT_MAX_DOWNLOAD_BYTES, Database, DemonInitSecretConfig, ListenerRepository,
-    ListenerStatus, PluginRuntime, ShutdownController, SocketRelayManager, TeamserverError,
-    dispatch::DownloadTracker, events::EventBus, json_error_response,
+    AgentRegistry, CorpusCapture, DEFAULT_MAX_DOWNLOAD_BYTES, Database, DemonInitSecretConfig,
+    ListenerRepository, ListenerStatus, PluginRuntime, ShutdownController, SocketRelayManager,
+    TeamserverError, dispatch::DownloadTracker, events::EventBus, json_error_response,
 };
 
 mod lifecycle;
@@ -162,6 +162,11 @@ pub struct ListenerManager {
     /// Sourced from `TeamserverConfig.max_pivot_chain_depth`; defaults to
     /// [`crate::dispatch::DEFAULT_MAX_PIVOT_CHAIN_DEPTH`] when absent.
     pub(super) max_pivot_chain_depth: usize,
+    /// Optional corpus capture state shared across all HTTP listener runtimes.
+    ///
+    /// `None` in normal operation.  Set to `Some(capture)` when the teamserver
+    /// is started with `--capture-corpus <dir>`.
+    pub(super) corpus_capture: Option<CorpusCapture>,
 }
 
 impl ListenerManager {
@@ -236,6 +241,7 @@ impl ListenerManager {
             demon_init_secrets: None,
             demon_allow_legacy_ctr: false,
             max_pivot_chain_depth: crate::dispatch::DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
+            corpus_capture: None,
         }
     }
 
@@ -337,6 +343,17 @@ impl ListenerManager {
     #[must_use]
     pub fn with_reconnect_probe_limit(mut self, max_probes: u32) -> Self {
         self.reconnect_probe_rate_limiter = ReconnectProbeRateLimiter::with_max_probes(max_probes);
+        self
+    }
+
+    /// Enable corpus capture mode for all HTTP listeners spawned by this manager.
+    ///
+    /// When set, every agent HTTP request and response is written to `capture`
+    /// alongside a `session.keys.json` sidecar.  Has no effect on normal
+    /// (non-debug) agent traffic.
+    #[must_use]
+    pub fn with_corpus_capture(mut self, capture: CorpusCapture) -> Self {
+        self.corpus_capture = Some(capture);
         self
     }
 

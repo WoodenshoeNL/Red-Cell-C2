@@ -249,4 +249,99 @@ mod tests {
         assert_eq!(extracted_seq, 1);
         assert!(remainder.is_empty(), "remainder should be empty for 8-byte payload");
     }
+
+    // ── little-endian byte-order conformance (C agent interop) ────────────────
+    //
+    // These tests use hardcoded byte sequences rather than Rust's to_le_bytes() so
+    // that a future endianness regression is caught at the byte level, matching
+    // what the C Demon/Archon agent actually writes to the wire.
+
+    #[test]
+    fn extract_seq_le_byte_order_known_vector() {
+        // C agent writes seq=42 as [0x2A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00] (little-endian).
+        let payload: [u8; 8] = [0x2A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let (seq, remainder) =
+            extract_and_validate_seq(AGENT_ID, &payload, 41).expect("seq=42 must be accepted");
+        assert_eq!(seq, 42, "seq=42 must be parsed from known LE bytes");
+        assert!(remainder.is_empty());
+    }
+
+    #[test]
+    fn extract_seq_le_byte_order_big_value() {
+        // C agent writes seq=0x0102_0304_0506_0708 as LE: lowest byte first.
+        // Use last_seen one below the expected value so gap=1 and GapTooLarge does not fire.
+        const EXPECTED: u64 = 0x0102_0304_0506_0708;
+        let payload: [u8; 8] = [0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01];
+        let (seq, _) = extract_and_validate_seq(AGENT_ID, &payload, EXPECTED - 1)
+            .expect("seq must be accepted");
+        assert_eq!(seq, EXPECTED, "multi-byte LE parsing must match C agent byte order");
+    }
+
+    #[test]
+    fn extract_seq_not_big_endian() {
+        // Verify the raw LE byte interpretation without running through the gap check
+        // (which would reject a large number relative to last_seen=0 as GapTooLarge).
+        // [0x00, ..., 0x2A] in LE = 0x2A00_0000_0000_0000, NOT 0x2A (big-endian).
+        let be_42: [u8; 8] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2A];
+        let seq = u64::from_le_bytes(be_42);
+        assert_eq!(
+            seq, 0x2A00_0000_0000_0000,
+            "LE parse of [0x00...0x2A] must yield 0x2A00_0000_0000_0000, not 42 (big-endian)"
+        );
+        // Confirm the inverse: 42 in LE requires the 0x2A byte at offset 0.
+        let le_42: [u8; 8] = [0x2A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        assert_eq!(u64::from_le_bytes(le_42), 42);
+    }
+
+    // ── u64::MAX wraparound (session exhaustion) ──────────────────────────────
+    //
+    // When the sequence counter reaches u64::MAX there is no valid next value
+    // (u64 cannot exceed MAX). This is a permanent session-death condition.
+    // Recovery requires re-registration (reregister_full resets last_seen_seq to 0).
+    // These tests document the expected behaviour so a future implementation of
+    // counter wraparound or session expiry does not silently regress the invariant.
+
+    #[test]
+    fn validate_seq_accepts_u64_max_when_last_seen_is_max_minus_one() {
+        // seq=u64::MAX with last_seen=u64::MAX-1: gap=1, must be accepted.
+        validate_seq(AGENT_ID, u64::MAX, u64::MAX - 1)
+            .expect("seq=u64::MAX must be accepted when last_seen=u64::MAX-1");
+    }
+
+    #[test]
+    fn validate_seq_rejects_all_values_when_last_seen_is_u64_max() {
+        // Once last_seen_seq == u64::MAX, no incoming_seq can be > MAX (u64 overflow).
+        // Any attempt must be rejected as Replay (incoming_seq <= last_seen_seq for all u64).
+        let err = validate_seq(AGENT_ID, u64::MAX, u64::MAX)
+            .expect_err("seq=MAX when last_seen=MAX must be rejected as replay");
+        assert!(
+            matches!(err, CallbackSeqError::Replay { .. }),
+            "expected Replay at u64::MAX boundary, got: {err:?}"
+        );
+
+        // Also verify that 0 (which would be a wraparound) is rejected — not silently accepted.
+        let err = validate_seq(AGENT_ID, 0, u64::MAX)
+            .expect_err("seq=0 when last_seen=u64::MAX must be rejected (no wraparound)");
+        assert!(
+            matches!(err, CallbackSeqError::Replay { .. }),
+            "expected Replay for seq=0 after u64::MAX, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_seq_near_u64_max_gap_boundary() {
+        // last_seen = u64::MAX - MAX_SEQ_GAP: incoming = u64::MAX should be accepted (gap = MAX_SEQ_GAP).
+        let last_seen = u64::MAX - MAX_SEQ_GAP;
+        validate_seq(AGENT_ID, u64::MAX, last_seen)
+            .expect("gap=MAX_SEQ_GAP near u64::MAX must be accepted");
+
+        // one step further back: gap would be MAX_SEQ_GAP + 1, must be rejected.
+        let last_seen_one_back = u64::MAX - MAX_SEQ_GAP - 1;
+        let err = validate_seq(AGENT_ID, u64::MAX, last_seen_one_back)
+            .expect_err("gap=MAX_SEQ_GAP+1 near u64::MAX must be rejected");
+        assert!(
+            matches!(err, CallbackSeqError::GapTooLarge { .. }),
+            "expected GapTooLarge near u64::MAX boundary, got: {err:?}"
+        );
+    }
 }

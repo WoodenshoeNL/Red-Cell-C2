@@ -282,7 +282,7 @@ class TestCorpusCapturePatch(unittest.TestCase):
     def _url(self) -> str:
         return f"http://127.0.0.1:{self._port}/demon"
 
-    def test_patch_captures_tx_and_rx(self) -> None:
+    def test_patch_captures_rx_then_tx(self) -> None:
         cap = CorpusCapture(self.corpus_dir, "demon", "13")
         payload = b"\xde\xad\xbe\xef" * 4
 
@@ -416,7 +416,7 @@ class TestCapturingSession(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body, payload)
 
-    def test_post_writes_tx_and_rx(self) -> None:
+    def test_post_writes_rx_then_tx(self) -> None:
         cap = CorpusCapture(self.corpus_dir, "demon", "13")
         session = CapturingSession(cap, timeout=5)
         session.post(self._url(), data=b"pkt", expected_handler="DEMON_CHECKIN")
@@ -437,8 +437,8 @@ class TestCapturingSession(unittest.TestCase):
         raw = b"sha256-check"
         session.post(self._url(), data=raw)
 
-        tx_meta = json.loads((cap.output_dir / "0000.meta.json").read_text())
-        self.assertEqual(tx_meta["bytes_sha256"], _sha256(raw))
+        req_meta = json.loads((cap.output_dir / "0000.meta.json").read_text())
+        self.assertEqual(req_meta["bytes_sha256"], _sha256(raw))
 
     def test_get_returns_status_and_body(self) -> None:
         cap = CorpusCapture(self.corpus_dir, "demon", "14")

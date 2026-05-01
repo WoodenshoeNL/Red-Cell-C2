@@ -613,6 +613,19 @@ class TestDeployErrorPaths(unittest.TestCase):
         self.assertIn("-ItemType Directory", remote_cmd)
         self.assertIn("D:\\Workdir\\rc-test", remote_cmd)
 
+    def test_ensure_work_dir_windows_error_raises_deploy_error(self) -> None:
+        """Non-zero PowerShell exit on Windows must raise DeployError."""
+        bad = self._completed(
+            1,
+            "New-Item : Access to the path 'C:\\Temp\\rc-test' is denied.",
+        )
+        t = _make_target(work_dir="C:\\Temp\\rc-test", platform="windows", key=self.key_path)
+        with patch("subprocess.run", return_value=bad):
+            with self.assertRaises(DeployError) as ctx:
+                ensure_work_dir(t)
+        msg = str(ctx.exception)
+        self.assertIn("Remote command failed", msg)
+
     def test_execute_background_returns_immediately(self) -> None:
         """Local subprocess.run must return quickly; remote command uses nohup … &."""
         ok = self._completed(0)

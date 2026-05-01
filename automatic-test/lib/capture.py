@@ -354,10 +354,15 @@ class CorpusCapturePatch:
             tx_body: bytes = b""
             if isinstance(req, urllib.request.Request):
                 tx_body = req.data or b""
+                is_post = req.get_method() == "POST"
             elif data is not None:
                 tx_body = data
+                is_post = True
+            else:
+                is_post = False
 
-            capture.record_packet("rx", tx_body)
+            if is_post:
+                capture.record_packet("rx", tx_body)
 
             call_kw: dict[str, Any] = {}
             if timeout is not None:

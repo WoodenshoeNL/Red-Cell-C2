@@ -382,6 +382,19 @@ class TestCorpusCapturePatch(unittest.TestCase):
         self.assertEqual(patch_rx_meta["direction"], sess_rx_meta["direction"])
         self.assertEqual(patch_tx_meta["direction"], sess_tx_meta["direction"])
 
+    def test_patch_get_produces_one_tx_packet(self) -> None:
+        """GET through CorpusCapturePatch must record exactly 1 packet (TX only),
+        matching CapturingSession.get behaviour — no spurious empty RX packet."""
+        cap = CorpusCapture(self.corpus_dir, "demon", "16")
+        with CorpusCapturePatch(cap):
+            req = urllib.request.Request(self._url(), method="GET")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                resp.read()
+
+        self.assertEqual(cap.packet_count(), 1)
+        meta = json.loads((cap.output_dir / "0000.meta.json").read_text())
+        self.assertEqual(meta["direction"], "tx")
+
 
 # ── CapturingSession tests ────────────────────────────────────────────────────
 

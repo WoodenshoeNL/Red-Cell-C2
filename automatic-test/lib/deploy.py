@@ -137,6 +137,8 @@ class TargetConfig:
     platform: str = "linux"  # "linux" or "windows"
 
     def __post_init__(self) -> None:
+        if self.platform not in ("linux", "windows"):
+            raise ValueError(f"platform must be 'linux' or 'windows', got {self.platform!r}")
         if not self.key:
             raise ValueError(
                 f"SSH target {self.user}@{self.host}: 'key' is required — "

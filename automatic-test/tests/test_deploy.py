@@ -137,6 +137,14 @@ class TestTargetConfigValidation(unittest.TestCase):
         t = _make_target(platform="windows")
         self.assertEqual(t.platform, "windows")
 
+    def test_invalid_platform_raises(self) -> None:
+        """Invalid platform values must raise ValueError with a clear message."""
+        for bad in ("macos", "Windows", "Linux", "darwin", ""):
+            with self.subTest(platform=bad):
+                with self.assertRaises(ValueError) as ctx:
+                    _make_target(platform=bad)
+                self.assertIn("platform must be", str(ctx.exception))
+
     def test_non_c_drive_windows_target_uses_platform_field(self) -> None:
         """D:\\ work_dir must work as Windows when platform='windows' is set."""
         ok_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")

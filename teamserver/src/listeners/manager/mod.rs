@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,9 +32,9 @@ use super::rate_limiters::{
 };
 use super::summary::ListenerSummary;
 use crate::{
-    AgentRegistry, CorpusCapture, DEFAULT_MAX_DOWNLOAD_BYTES, Database, DemonInitSecretConfig,
-    ListenerRepository, ListenerStatus, PluginRuntime, ShutdownController, SocketRelayManager,
-    TeamserverError, dispatch::DownloadTracker, events::EventBus, json_error_response,
+    AgentRegistry, DEFAULT_MAX_DOWNLOAD_BYTES, Database, DemonInitSecretConfig, ListenerRepository,
+    ListenerStatus, PluginRuntime, ShutdownController, SocketRelayManager, TeamserverError,
+    dispatch::DownloadTracker, events::EventBus, json_error_response,
 };
 
 mod lifecycle;
@@ -162,11 +163,12 @@ pub struct ListenerManager {
     /// Sourced from `TeamserverConfig.max_pivot_chain_depth`; defaults to
     /// [`crate::dispatch::DEFAULT_MAX_PIVOT_CHAIN_DEPTH`] when absent.
     pub(super) max_pivot_chain_depth: usize,
-    /// Optional corpus capture state shared across all HTTP listener runtimes.
+    /// Root corpus directory for packet capture.
     ///
-    /// `None` in normal operation.  Set to `Some(capture)` when the teamserver
-    /// is started with `--capture-corpus <dir>`.
-    pub(super) corpus_capture: Option<CorpusCapture>,
+    /// `None` in normal operation.  When `Some`, each spawned HTTP listener
+    /// creates a [`CorpusCapture`] for its specific agent type so that legacy
+    /// (Demon) and new-protocol (Archon) traffic land in separate subdirectories.
+    pub(super) corpus_dir: Option<PathBuf>,
 }
 
 impl ListenerManager {
@@ -241,7 +243,7 @@ impl ListenerManager {
             demon_init_secrets: None,
             demon_allow_legacy_ctr: false,
             max_pivot_chain_depth: crate::dispatch::DEFAULT_MAX_PIVOT_CHAIN_DEPTH,
-            corpus_capture: None,
+            corpus_dir: None,
         }
     }
 
@@ -348,12 +350,12 @@ impl ListenerManager {
 
     /// Enable corpus capture mode for all HTTP listeners spawned by this manager.
     ///
-    /// When set, every agent HTTP request and response is written to `capture`
-    /// alongside a `session.keys.json` sidecar.  Has no effect on normal
-    /// (non-debug) agent traffic.
+    /// When set, each spawned HTTP listener creates a [`CorpusCapture`] rooted
+    /// at `dir`, using the appropriate agent type for its protocol mode.  The
+    /// `/debug/corpus-keys` REST endpoint becomes active.
     #[must_use]
-    pub fn with_corpus_capture(mut self, capture: CorpusCapture) -> Self {
-        self.corpus_capture = Some(capture);
+    pub fn with_corpus_dir(mut self, dir: PathBuf) -> Self {
+        self.corpus_dir = Some(dir);
         self
     }
 

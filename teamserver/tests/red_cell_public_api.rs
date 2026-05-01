@@ -108,6 +108,7 @@ async fn crate_root_reexports_support_minimal_teamserver_bootstrap() {
         plugins_loaded: 0,
         plugins_failed: 0,
         metrics: red_cell::metrics::standalone_metrics_handle(),
+        corpus_dir: None,
     };
 
     let response = build_router(state)
@@ -179,6 +180,7 @@ async fn build_state(profile: Profile) -> TeamserverState {
         plugins_loaded: 0,
         plugins_failed: 0,
         metrics: red_cell::metrics::standalone_metrics_handle(),
+        corpus_dir: None,
     }
 }
 

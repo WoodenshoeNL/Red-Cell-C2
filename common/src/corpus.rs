@@ -38,6 +38,7 @@
 //! tests can exercise the full decryption pipeline.
 
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 /// Format version embedded in all corpus sidecar files.
 ///
@@ -148,7 +149,7 @@ impl CorpusPacketMeta {
 /// `tests/wire-corpus/**/*.keys.json` prevents accidental commits.
 /// Only hand-crafted golden fixtures (with **test-only, non-secret** key
 /// material) are safe to commit.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct CorpusSessionKeys {
     /// Format version; must equal [`CORPUS_FORMAT_VERSION`].
     pub version: u32,

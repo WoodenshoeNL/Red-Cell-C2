@@ -3,11 +3,11 @@
 mod agent_events;
 mod agent_liveness;
 pub mod agents;
-pub mod corpus_capture;
 pub mod api;
 pub mod app;
 pub mod audit;
 pub mod auth;
+pub mod corpus_capture;
 pub mod database;
 pub mod demon;
 pub mod dispatch;
@@ -76,6 +76,7 @@ pub const DEFAULT_MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
 /// so operators never saw matching loot rows.
 pub const MAX_AGENT_MESSAGE_LEN: usize = 100 * 1024 * 1024; // 100 MiB
 
+pub use corpus_capture::CorpusCapture;
 pub use dispatch::{CommandDispatchError, CommandDispatcher};
 pub use events::{EventBus, EventReceiver};
 pub use listeners::{
@@ -95,7 +96,6 @@ pub use rbac::{
     ReadAccess, TaskAgentAccess, authorize_agent_group_access, authorize_listener_access,
     authorize_permission, authorize_websocket_command,
 };
-pub use corpus_capture::CorpusCapture;
 pub use red_cell_common::crypto::hash_password_sha3;
 pub use service::{ServiceBridge, ServiceBridgeError, service_routes};
 pub use shutdown::{ActiveCallbackGuard, ShutdownController};

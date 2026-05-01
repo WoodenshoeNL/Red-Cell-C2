@@ -1364,6 +1364,7 @@ async fn analyst_key_can_get_individual_listener() {
         plugins_loaded: 0,
         plugins_failed: 0,
         metrics: crate::metrics::standalone_metrics_handle(),
+        corpus_dir: None,
     });
 
     // Admin creates a listener.

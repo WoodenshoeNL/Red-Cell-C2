@@ -96,8 +96,16 @@ impl CorpusCapture {
     ) {
         let dir = self.agent_dir(agent_id);
         let seq = self.next_seq(agent_id).await;
-        if let Err(e) =
-            write_packet_files(&dir, seq, direction, self.inner.agent_type, agent_id, raw_bytes, expected_handler).await
+        if let Err(e) = write_packet_files(
+            &dir,
+            seq,
+            direction,
+            self.inner.agent_type,
+            agent_id,
+            raw_bytes,
+            expected_handler,
+        )
+        .await
         {
             warn!(
                 agent_id = format_args!("{agent_id:08x}"),
@@ -254,12 +262,14 @@ mod tests {
         assert!(dir.join("0000.bin").exists());
         assert!(dir.join("0001.bin").exists());
 
-        let meta0: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(dir.join("0000.meta.json")).expect("read"))
-                .expect("parse");
-        let meta1: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(dir.join("0001.meta.json")).expect("read"))
-                .expect("parse");
+        let meta0: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("0000.meta.json")).expect("read"),
+        )
+        .expect("parse");
+        let meta1: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("0001.meta.json")).expect("read"),
+        )
+        .expect("parse");
 
         assert_eq!(meta0["seq"], 0);
         assert_eq!(meta0["direction"], "rx");

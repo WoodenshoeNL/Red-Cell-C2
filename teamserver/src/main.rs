@@ -39,6 +39,13 @@ struct Cli {
     /// Enable debug-level logging.
     #[arg(long, default_value_t = false)]
     debug: bool,
+    /// Enable wire-corpus capture.  Every agent HTTP request and response is
+    /// written to `<DIR>/<agent_type>/<agent_id>/` in the CorpusPacketMeta
+    /// format (see `common/src/corpus.rs`).  Session keys are exported to
+    /// `session.keys.json`.  Requires `--capture-corpus` to be set on the
+    /// Python test harness as well for the directories to match.
+    #[arg(long, value_name = "DIR")]
+    capture_corpus: Option<PathBuf>,
     /// Subcommand to run. If omitted, starts the teamserver.
     #[command(subcommand)]
     command: Option<CliCommand>,
@@ -214,6 +221,17 @@ async fn main() -> Result<()> {
     if let Some(depth) = profile.teamserver.max_pivot_chain_depth {
         listeners = listeners.with_max_pivot_chain_depth(depth);
     }
+
+    // Wire corpus capture when --capture-corpus is set.
+    let corpus_dir = cli.capture_corpus.as_ref().map(|p| {
+        let resolved = p.canonicalize().unwrap_or_else(|_| p.clone());
+        info!(dir = %resolved.display(), "wire corpus capture enabled");
+        resolved
+    });
+    if let Some(ref dir) = corpus_dir {
+        listeners = listeners.with_corpus_dir(dir.clone());
+    }
+
     plugins.attach_listener_manager(listeners.clone()).await;
     let payload_builder = PayloadBuilderService::from_profile(&profile)
         .context("failed to validate Demon build toolchain")?;
@@ -271,6 +289,7 @@ async fn main() -> Result<()> {
         plugins_loaded,
         plugins_failed,
         metrics: metrics_handle,
+        corpus_dir,
     };
     let router = build_router(state.clone());
     let handle = Handle::new();

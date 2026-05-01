@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use red_cell_common::ListenerConfig;
+use red_cell_common::corpus::CorpusAgentType;
 use red_cell_common::operator::{
     EventCode, Message, MessageHead, OperatorMessage, TeamserverLogInfo,
 };
@@ -21,7 +22,7 @@ use tracing::{info, instrument, warn};
 use super::ListenerManager;
 use super::ListenerManagerError;
 use super::ListenerRuntimeFuture;
-use crate::{AuditLogEntry, ListenerRepository, ListenerStatus};
+use crate::{AuditLogEntry, CorpusCapture, ListenerRepository, ListenerStatus};
 
 impl ListenerManager {
     /// Start the named listener runtime.
@@ -164,6 +165,16 @@ impl ListenerManager {
     ) -> Result<JoinHandle<()>, ListenerManagerError> {
         let runtime = match config {
             ListenerConfig::Http(config) => {
+                // Create a per-listener CorpusCapture so that legacy (Demon) and
+                // new-protocol (Archon) listeners write to separate type directories.
+                let corpus_capture = self.corpus_dir.as_ref().map(|dir| {
+                    let agent_type = if config.legacy_mode {
+                        CorpusAgentType::Demon
+                    } else {
+                        CorpusAgentType::Archon
+                    };
+                    CorpusCapture::new(dir.clone(), agent_type)
+                });
                 super::super::http::spawn_http_listener_runtime(
                     config,
                     self.agent_registry.clone(),
@@ -182,7 +193,7 @@ impl ListenerManager {
                     self.demon_allow_legacy_ctr,
                     self.tls_configs.clone(),
                     self.watcher_handles.clone(),
-                    self.corpus_capture.clone(),
+                    corpus_capture,
                 )
                 .await
             }

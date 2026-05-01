@@ -10,6 +10,7 @@
 pub mod agents;
 pub mod audit;
 pub mod auth;
+mod debug;
 mod docs;
 pub mod errors;
 mod health;
@@ -114,6 +115,7 @@ pub fn api_routes(api: ApiRuntime) -> Router<TeamserverState> {
         .route("/payload-cache", post(payload::flush_payload_cache))
         .route("/ws", get(crate::session_ws::session_ws_handler))
         .route("/debug/server-logs", get(server_logs::get_server_logs))
+        .route("/debug/corpus-keys", get(debug::get_corpus_keys))
         .route("/health", get(health::get_health))
         .route("/profile", get(profile::get_profile))
         .route("/metrics", get(crate::metrics::get_metrics))

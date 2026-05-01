@@ -63,6 +63,7 @@ async fn spawn_service_server(
         plugins_loaded: 0,
         plugins_failed: 0,
         metrics: red_cell::metrics::standalone_metrics_handle(),
+        corpus_dir: None,
     };
 
     let tcp = TcpListener::bind("127.0.0.1:0").await?;

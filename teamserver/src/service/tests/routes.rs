@@ -55,6 +55,7 @@ async fn test_state_with_bridge(bridge: ServiceBridge) -> crate::TeamserverState
         plugins_loaded: 0,
         plugins_failed: 0,
         metrics: crate::metrics::standalone_metrics_handle(),
+        corpus_dir: None,
     }
 }
 

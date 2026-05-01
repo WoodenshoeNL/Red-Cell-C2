@@ -149,6 +149,7 @@ async fn get_webhook_stats_returns_discord_failures_when_configured() {
         plugins_loaded: 0,
         plugins_failed: 0,
         metrics: crate::metrics::standalone_metrics_handle(),
+        corpus_dir: None,
     });
 
     let response = app

@@ -70,11 +70,7 @@ struct AgentEntryState {
 }
 
 impl AgentEntry {
-    fn new(
-        info: AgentRecord,
-        listener_name: String,
-        state: AgentEntryState,
-    ) -> Self {
+    fn new(info: AgentRecord, listener_name: String, state: AgentEntryState) -> Self {
         Self {
             info: RwLock::new(info),
             listener_name: RwLock::new(listener_name),

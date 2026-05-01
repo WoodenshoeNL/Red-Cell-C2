@@ -1,6 +1,7 @@
 //! Shared application state for the Red Cell teamserver.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::time::Instant;
 
 use axum::{
@@ -62,6 +63,11 @@ pub struct TeamserverState {
     pub plugins_failed: u32,
     /// Prometheus metrics exporter handle.
     pub metrics: MetricsHandle,
+    /// Root corpus directory set by `--capture-corpus`.
+    ///
+    /// `None` in normal operation.  When `Some`, the `/debug/corpus-keys`
+    /// endpoint is active and every HTTP listener writes packet corpus files.
+    pub corpus_dir: Option<PathBuf>,
 }
 
 impl FromRef<TeamserverState> for AuthService {
@@ -267,6 +273,7 @@ mod tests {
             plugins_loaded: 0,
             plugins_failed: 0,
             metrics: crate::metrics::standalone_metrics_handle(),
+            corpus_dir: None,
         }
     }
 

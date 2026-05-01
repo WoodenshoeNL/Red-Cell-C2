@@ -11,8 +11,8 @@ use tracing::{debug, warn};
 
 use red_cell_common::corpus::{CorpusPacketDir, CorpusSessionKeys};
 
-use crate::corpus_capture::bytes_to_hex;
 use crate::MAX_AGENT_MESSAGE_LEN;
+use crate::corpus_capture::bytes_to_hex;
 use crate::listeners::ListenerManagerError;
 
 use super::HttpListenerState;
@@ -143,24 +143,14 @@ pub(super) async fn http_listener_handler(
         }
         Ok(response) => {
             // Write corpus RX + TX and session keys when capture is active.
-            if let (Some(corpus), Some(rx_bytes)) =
-                (&state.corpus_capture, corpus_rx_snapshot)
-            {
+            if let (Some(corpus), Some(rx_bytes)) = (&state.corpus_capture, corpus_rx_snapshot) {
                 let agent_id = response.agent_id;
-                corpus
-                    .record_packet(agent_id, CorpusPacketDir::Rx, rx_bytes.as_ref(), None)
-                    .await;
-                corpus
-                    .record_packet(agent_id, CorpusPacketDir::Tx, &response.payload, None)
-                    .await;
+                corpus.record_packet(agent_id, CorpusPacketDir::Rx, rx_bytes.as_ref(), None).await;
+                corpus.record_packet(agent_id, CorpusPacketDir::Tx, &response.payload, None).await;
 
                 // Write session keys the first time we see this agent.
                 if let Ok(enc) = state.registry.encryption(agent_id).await {
-                    let is_legacy = state
-                        .registry
-                        .legacy_ctr(agent_id)
-                        .await
-                        .unwrap_or(true);
+                    let is_legacy = state.registry.legacy_ctr(agent_id).await.unwrap_or(true);
                     let keys = CorpusSessionKeys::new(
                         bytes_to_hex(enc.aes_key.as_slice()),
                         bytes_to_hex(enc.aes_iv.as_slice()),

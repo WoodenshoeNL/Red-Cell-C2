@@ -100,6 +100,7 @@ async fn two_operator_router() -> (Router, Database, AgentRegistry) {
         plugins_loaded: 0,
         plugins_failed: 0,
         metrics: crate::metrics::standalone_metrics_handle(),
+        corpus_dir: None,
     };
 
     let router = api_routes(api).with_state(state);

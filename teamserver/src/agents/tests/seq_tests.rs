@@ -672,3 +672,80 @@ async fn gap_too_large_does_not_count_toward_lockout() -> Result<(), TeamserverE
 
     Ok(())
 }
+
+// ── Degenerate set_replay_lockout_params inputs ───────────────────────────────
+
+/// `set_replay_lockout_params(0, T)` must be rejected: threshold=0 is invalid.
+/// The stored threshold must remain at the compile-time default.
+#[tokio::test]
+async fn set_replay_lockout_params_rejects_zero_threshold() -> Result<(), TeamserverError> {
+    use red_cell_common::callback_seq::REPLAY_LOCKOUT_THRESHOLD;
+
+    let mut registry = AgentRegistry::new(test_database().await?);
+
+    // Attempt to set a degenerate threshold of 0.
+    registry.set_replay_lockout_params(0, 60);
+
+    // The threshold must remain the compile-time default (not 0).
+    let agent = sample_agent_with_crypto(0x200D_0001, test_key(0xD4), test_iv(0xE4));
+    registry.insert(agent.clone()).await?;
+
+    // Advance to a known seq so replays are deterministic.
+    registry.check_and_advance_callback_seq(agent.agent_id, 10).await?;
+
+    // Trigger K+1 replay attempts. If threshold=0 had been stored, the first
+    // attempt would produce CallbackSeqReplayLockout instead of CallbackSeqReplay.
+    // The default K=5 means attempts 1..4 must yield CallbackSeqReplay.
+    for attempt in 1..REPLAY_LOCKOUT_THRESHOLD {
+        let err = registry
+            .check_and_advance_callback_seq(agent.agent_id, 5)
+            .await
+            .expect_err("replay must be rejected");
+        assert!(
+            matches!(err, TeamserverError::CallbackSeqReplay { .. }),
+            "attempt {attempt}: expected CallbackSeqReplay (threshold not 0), got: {err:?}"
+        );
+    }
+
+    Ok(())
+}
+
+/// `set_replay_lockout_params(K, 0)` must be rejected: duration_secs=0 would
+/// make every lockout expire immediately. The stored duration must remain the
+/// compile-time default (not 0).
+#[tokio::test]
+async fn set_replay_lockout_params_rejects_zero_duration() -> Result<(), TeamserverError> {
+    use red_cell_common::callback_seq::{REPLAY_LOCKOUT_DURATION_SECS, REPLAY_LOCKOUT_THRESHOLD};
+
+    let mut registry = AgentRegistry::new(test_database().await?);
+
+    // Attempt to set a degenerate duration of 0.
+    registry.set_replay_lockout_params(REPLAY_LOCKOUT_THRESHOLD, 0);
+
+    let agent = sample_agent_with_crypto(0x200D_0002, test_key(0xD5), test_iv(0xE5));
+    registry.insert(agent.clone()).await?;
+
+    registry.check_and_advance_callback_seq(agent.agent_id, 10).await?;
+
+    // Trigger a lockout by reaching the default threshold.
+    for _ in 0..REPLAY_LOCKOUT_THRESHOLD {
+        let _ = registry.check_and_advance_callback_seq(agent.agent_id, 5).await;
+    }
+
+    // The agent must now be locked out. If duration=0 had been stored the lockout
+    // would have expired immediately and this call would succeed (wrong).
+    let err = registry
+        .check_and_advance_callback_seq(agent.agent_id, 11)
+        .await
+        .expect_err("agent must be locked out after threshold replays");
+    assert!(
+        matches!(err, TeamserverError::CallbackSeqReplayLockout { .. }),
+        "expected CallbackSeqReplayLockout (duration not 0, lockout still active), got: {err:?}"
+    );
+
+    // Sanity-check: the default duration is positive, so the lockout must last at
+    // least a few seconds.
+    assert!(REPLAY_LOCKOUT_DURATION_SECS > 0, "compile-time default must be positive");
+
+    Ok(())
+}

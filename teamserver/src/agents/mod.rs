@@ -197,7 +197,20 @@ impl AgentRegistry {
     ///
     /// Call this after construction when the HCL profile provides custom values.
     /// Falls back to compile-time constants when not called.
+    ///
+    /// Degenerate values are rejected with a warning and the existing defaults are kept:
+    /// - `threshold == 0` would make K=0 behave identically to K=1 (confusing edge case)
+    /// - `duration_secs == 0` would make every lockout expire immediately, silently
+    ///   disabling the replay-lockout mechanism entirely
     pub fn set_replay_lockout_params(&mut self, threshold: u32, duration_secs: u64) {
+        if threshold == 0 {
+            warn!("ReplayLockoutThreshold=0 is invalid (minimum 1); ignoring");
+            return;
+        }
+        if duration_secs == 0 {
+            warn!("ReplayLockoutDurationSecs=0 would disable lockout; ignoring");
+            return;
+        }
         self.replay_lockout_threshold = threshold;
         self.replay_lockout_duration_secs = duration_secs;
     }

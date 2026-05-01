@@ -1329,7 +1329,13 @@ def release_cap_out_bead(task_id: str, checkpoint: str, agent_id: str, log: Logg
         else f"CAP-OUT: session hit turn limit. Auto-reset by {agent_id}."
     )
     note = note[:2000]
-    br(["update", task_id, "--notes", note, "--status=open", "--owner", ""])
+    r = br(["update", task_id, "--notes", note, "--status=open", "--owner", ""])
+    if r.returncode != 0:
+        log.log(
+            f"WARNING: br update {task_id} failed (rc={r.returncode}) — "
+            "skipping checkpoint commit to avoid false-positive"
+        )
+        return
     commit_beads_if_dirty(f"release {task_id} after cap-out [{agent_id}]", log)
     log.log(f"CAP-OUT: {task_id} reset to open, checkpoint written")
 

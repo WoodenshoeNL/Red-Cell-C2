@@ -160,17 +160,20 @@ pub struct CorpusSessionKeys {
     pub aes_key_hex: Option<String>,
 
     /// AES-CTR IV as a lowercase hex string (32 hex chars = 16 bytes).
+    /// `None` for AES-256-GCM sessions (nonce is per-packet, not stored here).
     /// `None` in stub files written before key material is available.
     #[serde(default)]
     pub aes_iv_hex: Option<String>,
 
     /// Whether this session uses monotonic CTR (Archon/Phantom/Specter) or
     /// legacy per-packet reset CTR (Demon).
+    /// `None` for AES-256-GCM sessions (concept does not apply).
     /// `None` in stub files written before key material is available.
     #[serde(default)]
     pub monotonic_ctr: Option<bool>,
 
     /// CTR block offset at the start of the captured scenario (usually 0).
+    /// `None` for AES-256-GCM sessions (concept does not apply).
     /// `None` in stub files written before key material is available.
     #[serde(default)]
     pub initial_ctr_block_offset: Option<u64>,
@@ -179,10 +182,15 @@ pub struct CorpusSessionKeys {
     /// `None` in stub files written before key material is available.
     #[serde(default)]
     pub agent_id_hex: Option<String>,
+
+    /// Encryption scheme used by this session: `"aes-256-ctr"` or `"aes-256-gcm"`.
+    /// `None` in legacy stub files that predate this field.
+    #[serde(default)]
+    pub encryption_scheme: Option<String>,
 }
 
 impl CorpusSessionKeys {
-    /// Construct a [`CorpusSessionKeys`] with real key material.
+    /// Construct a [`CorpusSessionKeys`] for an AES-256-CTR session with real key material.
     pub fn new(
         aes_key_hex: String,
         aes_iv_hex: String,
@@ -197,6 +205,23 @@ impl CorpusSessionKeys {
             monotonic_ctr: Some(monotonic_ctr),
             initial_ctr_block_offset: Some(initial_ctr_block_offset),
             agent_id_hex: Some(agent_id_hex),
+            encryption_scheme: Some("aes-256-ctr".to_string()),
+        }
+    }
+
+    /// Construct a [`CorpusSessionKeys`] for an AES-256-GCM (ECDH) session.
+    ///
+    /// GCM uses a per-packet random 12-byte nonce embedded in each ciphertext,
+    /// so `aes_iv_hex`, `monotonic_ctr`, and `initial_ctr_block_offset` are `None`.
+    pub fn new_gcm(aes_key_hex: String, agent_id_hex: String) -> Self {
+        Self {
+            version: CORPUS_FORMAT_VERSION,
+            aes_key_hex: Some(aes_key_hex),
+            aes_iv_hex: None,
+            monotonic_ctr: None,
+            initial_ctr_block_offset: None,
+            agent_id_hex: Some(agent_id_hex),
+            encryption_scheme: Some("aes-256-gcm".to_string()),
         }
     }
 }
@@ -256,6 +281,26 @@ mod tests {
         assert_eq!(decoded.monotonic_ctr, Some(false));
         assert_eq!(decoded.initial_ctr_block_offset, Some(0));
         assert_eq!(decoded.agent_id_hex.as_deref(), Some("0x12345678"));
+        assert_eq!(decoded.encryption_scheme.as_deref(), Some("aes-256-ctr"));
+    }
+
+    #[test]
+    fn corpus_session_keys_gcm_has_null_ctr_fields() {
+        let keys = CorpusSessionKeys::new_gcm("c".repeat(64), "0xDEADBEEF".to_string());
+        assert!(keys.aes_iv_hex.is_none(), "GCM keys must have null aes_iv_hex");
+        assert!(keys.monotonic_ctr.is_none(), "GCM keys must have null monotonic_ctr");
+        assert!(
+            keys.initial_ctr_block_offset.is_none(),
+            "GCM keys must have null initial_ctr_block_offset"
+        );
+        assert_eq!(keys.encryption_scheme.as_deref(), Some("aes-256-gcm"));
+
+        let json = serde_json::to_string(&keys).expect("serialize");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");
+        assert!(parsed["aes_iv_hex"].is_null());
+        assert!(parsed["monotonic_ctr"].is_null());
+        assert!(parsed["initial_ctr_block_offset"].is_null());
+        assert_eq!(parsed["encryption_scheme"].as_str(), Some("aes-256-gcm"));
     }
 
     #[test]

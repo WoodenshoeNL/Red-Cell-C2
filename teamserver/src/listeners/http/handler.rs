@@ -89,11 +89,8 @@ pub(super) async fn http_listener_handler(
                     corpus
                         .record_packet(agent_id, CorpusPacketDir::Tx, &ecdh_resp.payload, None)
                         .await;
-                    let keys = CorpusSessionKeys::new(
+                    let keys = CorpusSessionKeys::new_gcm(
                         bytes_to_hex(&ecdh_resp.session_key),
-                        String::new(),
-                        false,
-                        0,
                         format!("0x{agent_id:08x}"),
                     );
                     corpus.write_session_keys_once(agent_id, keys).await;

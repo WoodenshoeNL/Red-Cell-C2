@@ -915,11 +915,8 @@ async fn ecdh_handled_path_writes_corpus_files() {
     corpus.record_packet(resp.agent_id, CorpusPacketDir::Rx, fake_rx, None).await;
     corpus.record_packet(resp.agent_id, CorpusPacketDir::Tx, &resp.payload, None).await;
 
-    let keys = CorpusSessionKeys::new(
+    let keys = CorpusSessionKeys::new_gcm(
         bytes_to_hex(&resp.session_key),
-        String::new(),
-        false,
-        0,
         format!("0x{:08x}", resp.agent_id),
     );
     corpus.write_session_keys_once(resp.agent_id, keys).await;
@@ -951,5 +948,22 @@ async fn ecdh_handled_path_writes_corpus_files() {
         parsed["agent_id_hex"].as_str().expect("agent_id_hex"),
         format!("0x{agent_id:08x}"),
         "session.keys.json must embed the correct agent_id"
+    );
+    assert!(
+        parsed["aes_iv_hex"].is_null(),
+        "ECDH (GCM) session must have null aes_iv_hex — nonce is per-packet"
+    );
+    assert!(
+        parsed["monotonic_ctr"].is_null(),
+        "ECDH (GCM) session must have null monotonic_ctr — concept does not apply to GCM"
+    );
+    assert!(
+        parsed["initial_ctr_block_offset"].is_null(),
+        "ECDH (GCM) session must have null initial_ctr_block_offset — concept does not apply to GCM"
+    );
+    assert_eq!(
+        parsed["encryption_scheme"].as_str().expect("encryption_scheme"),
+        "aes-256-gcm",
+        "ECDH session must identify as aes-256-gcm"
     );
 }

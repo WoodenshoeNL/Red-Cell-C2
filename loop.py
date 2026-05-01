@@ -2067,12 +2067,13 @@ Start directly with understanding the task and implementing it.
             commit_beads_if_dirty(f"post-capout-qa sweep for {next_id} [{agent_id}]", log)
 
         final_status = issue_status_from_jsonl(next_id)
-        if final_status == "in_progress" and not max_turns_hit:
+        cap_out = max_turns_hit or token_limit_hit
+        if final_status == "in_progress" and not cap_out:
             log.log(
                 f"Task {next_id} still in_progress after agent ran"
                 f" — will resume on next iteration"
             )
-        elif final_status not in ("in_progress", "open") and not max_turns_hit:
+        elif final_status not in ("in_progress", "open") and not cap_out:
             # Bead was closed or moved to a terminal state — reset any cap-out streak.
             cap_out_streak.pop(next_id, None)
 
@@ -2101,6 +2102,20 @@ Start directly with understanding the task and implementing it.
                 )
             # No sleep: immediately proceed to the next task (a different one due to skip).
         elif token_limit_hit:
+            checkpoint = extract_cap_out_checkpoint(output, summary)
+            release_cap_out_bead(next_id, checkpoint, agent_id, log)
+            streak = cap_out_streak.get(next_id, 0) + 1
+            cap_out_streak[next_id] = streak
+            cap_out_pending_skip.add(next_id)
+            log.log(
+                f"TOKEN-LIMIT [{next_id}] streak={streak}: bead released to open,"
+                f" skip 1 iteration"
+            )
+            if streak >= MAX_CONSECUTIVE_CAP_OUTS:
+                log.log(
+                    f"ESCALATE [{next_id}]: {streak} consecutive cap-outs (token limit) —"
+                    f" issue likely needs refinement before next attempt"
+                )
             log.log(f"Token limit hit — sleeping {DEV_SLEEP_TOKEN_LIMIT}s before next iteration")
             time.sleep(DEV_SLEEP_TOKEN_LIMIT)
         else:

@@ -53,6 +53,8 @@ pub(super) struct AgentRow {
     pub(super) last_seen_seq: i64,
     pub(super) seq_protected: i64,
     pub(super) archon_magic: Option<i64>,
+    pub(super) replay_attempt_count: i64,
+    pub(super) replay_lockout_until: Option<i64>,
 }
 
 pub(super) async fn update_agent_ctr_block_offset(
@@ -164,6 +166,9 @@ pub(super) fn row_to_persisted_agent(
     let legacy_ctr = super::super::bool_from_i64("legacy_ctr", row.legacy_ctr)?;
     let last_seen_seq = super::super::u64_from_i64("last_seen_seq", row.last_seen_seq)?;
     let seq_protected = super::super::bool_from_i64("seq_protected", row.seq_protected)?;
+    let replay_attempt_count =
+        super::super::u32_from_i64("replay_attempt_count", row.replay_attempt_count)?;
+    let replay_lockout_until = row.replay_lockout_until;
     let listener_name = row.listener_name.clone();
     let info = row_to_agent_record(&row, master_key)?;
     Ok(PersistedAgent {
@@ -173,5 +178,7 @@ pub(super) fn row_to_persisted_agent(
         legacy_ctr,
         last_seen_seq,
         seq_protected,
+        replay_attempt_count,
+        replay_lockout_until,
     })
 }

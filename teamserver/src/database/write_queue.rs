@@ -69,6 +69,15 @@ pub enum DeferredWrite {
         /// New sequence number.
         seq: u64,
     },
+    /// Persist the replay lockout state (attempt counter + optional expiry) for an agent.
+    AgentSetReplayLockout {
+        /// Agent identifier.
+        agent_id: u32,
+        /// New consecutive-replay attempt counter.
+        attempt_count: u32,
+        /// Unix timestamp (seconds) when the lockout expires, or `None` to clear.
+        lockout_until: Option<i64>,
+    },
     /// Persist an audit-log entry.
     AuditLogCreate {
         /// The audit-log row to insert.
@@ -208,6 +217,9 @@ async fn replay_write(database: &Database, write: &DeferredWrite) -> Result<(), 
         }
         DeferredWrite::AgentSetLastSeenSeq { agent_id, seq } => {
             database.agents().set_last_seen_seq(*agent_id, *seq).await
+        }
+        DeferredWrite::AgentSetReplayLockout { agent_id, attempt_count, lockout_until } => {
+            database.agents().set_replay_lockout(*agent_id, *attempt_count, *lockout_until).await
         }
         DeferredWrite::AuditLogCreate { entry } => {
             database.audit_log().create(entry).await.map(|_id| ())

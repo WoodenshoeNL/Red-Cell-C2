@@ -32,6 +32,11 @@ pub struct PersistedAgent {
     /// When `true`, the teamserver enforces monotonic sequence numbers on incoming callbacks.
     /// Demon and Archon agents (frozen wire format) are exempt (`false`).
     pub seq_protected: bool,
+    /// Number of consecutive replay rejections since the last successful callback.
+    /// Reset to 0 on any successful seq advance or agent re-registration.
+    pub replay_attempt_count: u32,
+    /// Unix timestamp (seconds) when the replay lockout expires, or `None` if not locked.
+    pub replay_lockout_until: Option<i64>,
 }
 
 /// CRUD operations for persisted agents.
@@ -388,6 +393,32 @@ impl AgentRepository {
             .bind(i64::from(agent_id))
             .execute(&self.pool)
             .await?;
+        if result.rows_affected() == 0 {
+            return Err(TeamserverError::AgentNotFound { agent_id });
+        }
+        Ok(())
+    }
+
+    /// Persist the replay lockout state for an agent.
+    ///
+    /// `attempt_count` is the new consecutive-replay counter value and
+    /// `lockout_until` is the Unix timestamp (seconds) when the lockout expires,
+    /// or `None` to clear the lockout.
+    pub async fn set_replay_lockout(
+        &self,
+        agent_id: u32,
+        attempt_count: u32,
+        lockout_until: Option<i64>,
+    ) -> Result<(), TeamserverError> {
+        let result = sqlx::query(
+            "UPDATE ts_agents SET replay_attempt_count = ?, replay_lockout_until = ? \
+             WHERE agent_id = ?",
+        )
+        .bind(i64::from(attempt_count))
+        .bind(lockout_until)
+        .bind(i64::from(agent_id))
+        .execute(&self.pool)
+        .await?;
         if result.rows_affected() == 0 {
             return Err(TeamserverError::AgentNotFound { agent_id });
         }

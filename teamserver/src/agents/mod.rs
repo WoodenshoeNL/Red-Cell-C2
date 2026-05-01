@@ -18,6 +18,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::AtomicBool;
+use std::time::Instant;
 
 use red_cell_common::AgentRecord;
 use red_cell_common::demon::DemonCommand;
@@ -46,6 +47,12 @@ struct AgentEntry {
     /// ECDH agents have no AES session key — job payloads must be returned unencrypted
     /// because the outer AES-256-GCM in the ECDH session provides confidentiality.
     ecdh_transport: AtomicBool,
+    /// Number of consecutive replay rejections since the last accepted callback.
+    /// Reset to 0 after any successful seq advance or agent re-registration.
+    replay_attempt_count: Mutex<u32>,
+    /// When `Some(instant)`, all callbacks are refused until that instant has passed.
+    /// Lazily cleared on the first request after expiry.
+    lockout_until: Mutex<Option<Instant>>,
 }
 
 impl AgentEntry {
@@ -57,6 +64,8 @@ impl AgentEntry {
         last_seen_seq: u64,
         seq_protected: bool,
         ecdh_transport: bool,
+        replay_attempt_count: u32,
+        lockout_until: Option<Instant>,
     ) -> Self {
         Self {
             info: RwLock::new(info),
@@ -67,6 +76,8 @@ impl AgentEntry {
             last_seen_seq: Mutex::new(last_seen_seq),
             seq_protected: AtomicBool::new(seq_protected),
             ecdh_transport: AtomicBool::new(ecdh_transport),
+            replay_attempt_count: Mutex::new(replay_attempt_count),
+            lockout_until: Mutex::new(lockout_until),
         }
     }
 }
@@ -95,6 +106,21 @@ pub const MAX_PIVOT_CHAIN_DEPTH: usize = 16;
 
 type AgentCleanupFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 type AgentCleanupHook = Arc<dyn Fn(u32) -> AgentCleanupFuture + Send + Sync + 'static>;
+
+/// Convert a persisted Unix timestamp (seconds) to an in-memory [`Instant`] deadline.
+///
+/// Returns `None` when the timestamp is `None`, zero/negative, or already in the past —
+/// in all those cases there is no active lockout to restore.
+fn unix_secs_to_lockout_instant(unix_secs: Option<i64>) -> Option<Instant> {
+    let unix_secs = unix_secs?;
+    if unix_secs <= 0 {
+        return None;
+    }
+    let lockout_systime = std::time::UNIX_EPOCH + std::time::Duration::from_secs(unix_secs as u64);
+    let now_systime = std::time::SystemTime::now();
+    let remaining = lockout_systime.duration_since(now_systime).ok()?;
+    Some(Instant::now() + remaining)
+}
 
 /// Thread-safe in-memory registry of active and historical agents.
 #[derive(Clone)]
@@ -188,6 +214,7 @@ impl AgentRegistry {
 
         for agent in agents {
             let ecdh_transport = ecdh_agent_ids.contains(&agent.info.agent_id);
+            let lockout_until = unix_secs_to_lockout_instant(agent.replay_lockout_until);
             entries.insert(
                 agent.info.agent_id,
                 Arc::new(AgentEntry::new(
@@ -198,6 +225,8 @@ impl AgentRegistry {
                     agent.last_seen_seq,
                     agent.seq_protected,
                     ecdh_transport,
+                    agent.replay_attempt_count,
+                    lockout_until,
                 )),
             );
         }

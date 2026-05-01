@@ -28,6 +28,14 @@ pub const MAX_SEQ_GAP: u64 = 10;
 /// payload.
 pub const SEQ_PREFIX_BYTES: usize = 8;
 
+/// Number of consecutive [`CallbackSeqError::Replay`] rejections that trigger
+/// a replay lockout for the agent.  After this many consecutive replays the
+/// registry will refuse all callbacks until the lockout expires.
+pub const REPLAY_LOCKOUT_THRESHOLD: u32 = 5;
+
+/// Duration of a replay lockout in seconds.
+pub const REPLAY_LOCKOUT_DURATION_SECS: u64 = 60;
+
 /// Error returned when a callback sequence number is rejected.
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum CallbackSeqError {
@@ -75,6 +83,20 @@ pub enum CallbackSeqError {
         agent_id: u32,
         /// Actual payload length in bytes.
         actual: usize,
+    },
+
+    /// The agent is temporarily locked out after [`REPLAY_LOCKOUT_THRESHOLD`]
+    /// consecutive replay rejections.  All callbacks are refused until
+    /// `lockout_until` (Unix seconds) has passed.
+    #[error(
+        "agent 0x{agent_id:08X} is replay-locked until Unix time {lockout_until}s \
+         after {REPLAY_LOCKOUT_THRESHOLD} consecutive replay rejections"
+    )]
+    ReplayLockout {
+        /// Agent that is locked out.
+        agent_id: u32,
+        /// Unix timestamp (seconds since epoch) when the lockout expires.
+        lockout_until: u64,
     },
 }
 

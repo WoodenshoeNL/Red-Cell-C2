@@ -299,3 +299,206 @@ async fn check_and_advance_callback_seq_is_atomic_under_concurrency() -> Result<
     );
     Ok(())
 }
+
+// ── Replay lockout ─────────────────────────────────────────────────────────────
+
+/// K consecutive replay rejections must trigger a lockout and return
+/// `CallbackSeqReplayLockout` on the K-th attempt and all subsequent calls.
+#[tokio::test]
+async fn replay_lockout_triggers_after_threshold() -> Result<(), TeamserverError> {
+    use red_cell_common::callback_seq::REPLAY_LOCKOUT_THRESHOLD;
+
+    let registry = AgentRegistry::new(test_database().await?);
+    let agent = sample_agent_with_crypto(0x200B_0001, test_key(0xB1), test_iv(0xC1));
+    registry.insert(agent.clone()).await?;
+
+    // Advance to seq=10 so replays at seq ≤ 10 are well-defined.
+    registry.check_and_advance_callback_seq(agent.agent_id, 10).await?;
+
+    // Send K-1 replay attempts — must be rejected as Replay, not yet locked out.
+    for _ in 0..(REPLAY_LOCKOUT_THRESHOLD - 1) {
+        let err = registry
+            .check_and_advance_callback_seq(agent.agent_id, 5)
+            .await
+            .expect_err("replay must be rejected");
+        assert!(
+            matches!(err, TeamserverError::CallbackSeqReplay { .. }),
+            "before threshold: expected CallbackSeqReplay, got: {err:?}"
+        );
+    }
+
+    // K-th replay attempt must trigger the lockout.
+    let err = registry
+        .check_and_advance_callback_seq(agent.agent_id, 5)
+        .await
+        .expect_err("K-th replay must trigger lockout");
+    assert!(
+        matches!(err, TeamserverError::CallbackSeqReplayLockout { .. }),
+        "K-th attempt: expected CallbackSeqReplayLockout, got: {err:?}"
+    );
+
+    Ok(())
+}
+
+/// While locked out, even a valid (non-replay) seq must be refused.
+#[tokio::test]
+async fn replay_lockout_blocks_valid_seq_while_active() -> Result<(), TeamserverError> {
+    use red_cell_common::callback_seq::REPLAY_LOCKOUT_THRESHOLD;
+
+    let registry = AgentRegistry::new(test_database().await?);
+    let agent = sample_agent_with_crypto(0x200B_0002, test_key(0xB2), test_iv(0xC2));
+    registry.insert(agent.clone()).await?;
+
+    registry.check_and_advance_callback_seq(agent.agent_id, 10).await?;
+
+    // Trigger lockout.
+    for _ in 0..REPLAY_LOCKOUT_THRESHOLD {
+        let _ = registry.check_and_advance_callback_seq(agent.agent_id, 5).await;
+    }
+
+    // A forward-progressing seq must be rejected while locked.
+    let err = registry
+        .check_and_advance_callback_seq(agent.agent_id, 11)
+        .await
+        .expect_err("valid seq must be rejected during lockout");
+    assert!(
+        matches!(err, TeamserverError::CallbackSeqReplayLockout { .. }),
+        "expected CallbackSeqReplayLockout during active lockout, got: {err:?}"
+    );
+
+    Ok(())
+}
+
+/// After the lockout window expires, the agent must be accepted again.
+#[tokio::test]
+async fn replay_lockout_clears_after_expiry() -> Result<(), TeamserverError> {
+    use red_cell_common::callback_seq::REPLAY_LOCKOUT_THRESHOLD;
+    use std::time::{Duration, Instant};
+
+    let registry = AgentRegistry::new(test_database().await?);
+    let agent = sample_agent_with_crypto(0x200B_0003, test_key(0xB3), test_iv(0xC3));
+    registry.insert(agent.clone()).await?;
+
+    registry.check_and_advance_callback_seq(agent.agent_id, 10).await?;
+
+    // Trigger lockout.
+    for _ in 0..REPLAY_LOCKOUT_THRESHOLD {
+        let _ = registry.check_and_advance_callback_seq(agent.agent_id, 5).await;
+    }
+
+    // Manually expire the lockout by writing a past instant via the test helper.
+    let past = Instant::now() - Duration::from_secs(1);
+    registry.set_lockout_until(agent.agent_id, Some(past)).await;
+
+    // After expiry a valid seq must succeed.
+    registry
+        .check_and_advance_callback_seq(agent.agent_id, 11)
+        .await
+        .expect("valid seq must be accepted after lockout expiry");
+
+    Ok(())
+}
+
+/// A successful callback resets the consecutive replay counter to zero.
+#[tokio::test]
+async fn successful_seq_resets_replay_counter() -> Result<(), TeamserverError> {
+    use red_cell_common::callback_seq::REPLAY_LOCKOUT_THRESHOLD;
+
+    let database = test_database().await?;
+    let registry = AgentRegistry::new(database.clone());
+    let agent = sample_agent_with_crypto(0x200B_0004, test_key(0xB4), test_iv(0xC4));
+    registry.insert(agent.clone()).await?;
+
+    registry.check_and_advance_callback_seq(agent.agent_id, 10).await?;
+
+    // Send K-1 replay attempts (below the lockout threshold).
+    for _ in 0..(REPLAY_LOCKOUT_THRESHOLD - 1) {
+        let _ = registry.check_and_advance_callback_seq(agent.agent_id, 5).await;
+    }
+
+    // Now send a valid seq — must succeed and reset the counter.
+    registry
+        .check_and_advance_callback_seq(agent.agent_id, 11)
+        .await
+        .expect("valid seq must be accepted after sub-threshold replays");
+
+    // Verify counter is reset in-memory.
+    let count = registry.replay_attempt_count(agent.agent_id).await.expect("agent must exist");
+    assert_eq!(count, 0, "replay_attempt_count must be reset to 0 after a successful seq advance");
+
+    // Verify counter is reset in the DB.
+    let persisted = database.agents().get_persisted(agent.agent_id).await?.expect("must exist");
+    assert_eq!(
+        persisted.replay_attempt_count, 0,
+        "replay_attempt_count must be persisted as 0 after a successful seq advance"
+    );
+
+    Ok(())
+}
+
+/// The replay lockout state (attempt count + expiry) must survive a registry
+/// reload from the database.
+#[tokio::test]
+async fn replay_lockout_persists_and_survives_reload() -> Result<(), TeamserverError> {
+    use red_cell_common::callback_seq::REPLAY_LOCKOUT_THRESHOLD;
+
+    let database = test_database().await?;
+
+    {
+        let registry = AgentRegistry::new(database.clone());
+        let agent = sample_agent_with_crypto(0x200B_0005, test_key(0xB5), test_iv(0xC5));
+        registry.insert(agent.clone()).await?;
+
+        registry.check_and_advance_callback_seq(agent.agent_id, 10).await?;
+
+        // Trigger lockout.
+        for _ in 0..REPLAY_LOCKOUT_THRESHOLD {
+            let _ = registry.check_and_advance_callback_seq(agent.agent_id, 5).await;
+        }
+    }
+
+    // Reload registry — lockout must be restored.
+    let registry = AgentRegistry::load(database.clone()).await?;
+
+    let err = registry
+        .check_and_advance_callback_seq(0x200B_0005, 11)
+        .await
+        .expect_err("lockout must still be active after reload");
+    assert!(
+        matches!(err, TeamserverError::CallbackSeqReplayLockout { .. }),
+        "expected CallbackSeqReplayLockout after reload, got: {err:?}"
+    );
+
+    Ok(())
+}
+
+/// `GapTooLarge` rejections must NOT count toward the replay lockout counter.
+#[tokio::test]
+async fn gap_too_large_does_not_count_toward_lockout() -> Result<(), TeamserverError> {
+    use red_cell_common::callback_seq::{MAX_SEQ_GAP, REPLAY_LOCKOUT_THRESHOLD};
+
+    let registry = AgentRegistry::new(test_database().await?);
+    let agent = sample_agent_with_crypto(0x200B_0006, test_key(0xB6), test_iv(0xC6));
+    registry.insert(agent.clone()).await?;
+
+    // Send more than K gap-too-large attempts; none should trigger a lockout.
+    for i in 0..=REPLAY_LOCKOUT_THRESHOLD {
+        let far_future = (MAX_SEQ_GAP + 2) * u64::from(i + 1);
+        let err = registry
+            .check_and_advance_callback_seq(agent.agent_id, far_future)
+            .await
+            .expect_err("gap-too-large must be rejected");
+        assert!(
+            matches!(err, TeamserverError::CallbackSeqGapTooLarge { .. }),
+            "expected CallbackSeqGapTooLarge, got: {err:?}"
+        );
+    }
+
+    // A valid seq right after must still succeed (no lockout triggered).
+    registry
+        .check_and_advance_callback_seq(agent.agent_id, 1)
+        .await
+        .expect("valid seq must be accepted — gap-too-large must not trigger lockout");
+
+    Ok(())
+}

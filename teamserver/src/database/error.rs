@@ -140,4 +140,13 @@ pub enum TeamserverError {
         /// Computed gap (`incoming_seq - last_seen_seq`).
         gap: u64,
     },
+    /// Returned when the agent is temporarily locked out after too many consecutive
+    /// replay rejections.  The lock lasts until `lockout_until` (Unix seconds).
+    #[error("agent 0x{agent_id:08X} is replay-locked until Unix time {lockout_until}s")]
+    CallbackSeqReplayLockout {
+        /// Locked-out agent identifier.
+        agent_id: u32,
+        /// Unix timestamp (seconds since epoch) when the lockout expires.
+        lockout_until: u64,
+    },
 }

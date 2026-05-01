@@ -127,6 +127,8 @@ impl AgentRegistry {
                 0, // last_seen_seq starts at 0 for new agents
                 seq_protected,
                 ecdh_transport,
+                0,    // replay_attempt_count starts at 0
+                None, // no lockout for new agents
             )),
         );
         self.update_active_agent_gauge(&entries).await;
@@ -191,6 +193,9 @@ impl AgentRegistry {
         entry.seq_protected.store(seq_protected, Ordering::Relaxed);
         // Reset last_seen_seq to 0 so the fresh session begins at seq=1.
         *entry.last_seen_seq.lock().await = 0;
+        // Clear any replay lockout — a fresh registration proves the agent is legitimate.
+        *entry.replay_attempt_count.lock().await = 0;
+        *entry.lockout_until.lock().await = None;
 
         Ok(())
     }

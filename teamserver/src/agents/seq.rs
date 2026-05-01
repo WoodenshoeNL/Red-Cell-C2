@@ -1,8 +1,11 @@
 //! Sequence number tracking for callback replay protection.
 
 use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tracing::instrument;
+
+use red_cell_common::callback_seq::{REPLAY_LOCKOUT_DURATION_SECS, REPLAY_LOCKOUT_THRESHOLD};
 
 use crate::database::{DeferredWrite, TeamserverError};
 
@@ -30,7 +33,20 @@ fn map_seq_error(
                 message: format!("payload too short: {actual} bytes"),
             }
         }
+        red_cell_common::callback_seq::CallbackSeqError::ReplayLockout {
+            lockout_until, ..
+        } => TeamserverError::CallbackSeqReplayLockout { agent_id, lockout_until },
     }
+}
+
+/// Compute the Unix-seconds timestamp for a lockout that expires in
+/// [`REPLAY_LOCKOUT_DURATION_SECS`] from now.
+fn lockout_expiry_unix_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_secs()
+        .saturating_add(REPLAY_LOCKOUT_DURATION_SECS) as i64
 }
 
 impl AgentRegistry {
@@ -108,6 +124,13 @@ impl AgentRegistry {
     /// where a concurrent callback with the same seq could pass validation
     /// before the first call advances the stored value.
     ///
+    /// Before validating the sequence number, this method checks whether the agent
+    /// is currently replay-locked.  If so, it returns
+    /// [`TeamserverError::CallbackSeqReplayLockout`] immediately.  After
+    /// [`red_cell_common::callback_seq::REPLAY_LOCKOUT_THRESHOLD`] consecutive
+    /// replay rejections the agent is locked for
+    /// [`red_cell_common::callback_seq::REPLAY_LOCKOUT_DURATION_SECS`] seconds.
+    ///
     /// Callers must only invoke this after successful AES-CTR decryption so the
     /// payload is already authenticated. A successful return consumes the seq
     /// slot even if subsequent parsing fails — a genuine agent will not resend
@@ -123,18 +146,140 @@ impl AgentRegistry {
             self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
         let mut last_seen = entry.last_seen_seq.lock().await;
 
-        red_cell_common::callback_seq::validate_seq(agent_id, incoming_seq, *last_seen)
-            .map_err(|e| map_seq_error(agent_id, e))?;
+        // ── Lockout check ─────────────────────────────────────────────────────
+        {
+            let mut lockout_guard = entry.lockout_until.lock().await;
+            if let Some(until) = *lockout_guard {
+                if Instant::now() < until {
+                    // Still locked — compute expiry as a Unix timestamp for the error.
+                    let remaining = until.saturating_duration_since(Instant::now());
+                    let lockout_until = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or(Duration::ZERO)
+                        .as_secs()
+                        .saturating_add(remaining.as_secs());
+                    return Err(map_seq_error(
+                        agent_id,
+                        red_cell_common::callback_seq::CallbackSeqError::ReplayLockout {
+                            agent_id,
+                            lockout_until,
+                        },
+                    ));
+                }
+                // Lockout expired — lazily clear it.
+                *lockout_guard = None;
+                *entry.replay_attempt_count.lock().await = 0;
+                let repo = self.repository.clone();
+                self.persist_or_queue(
+                    DeferredWrite::AgentSetReplayLockout {
+                        agent_id,
+                        attempt_count: 0,
+                        lockout_until: None,
+                    },
+                    move || async move { repo.set_replay_lockout(agent_id, 0, None).await },
+                )
+                .await?;
+            }
+        }
 
-        let deferred = DeferredWrite::AgentSetLastSeenSeq { agent_id, seq: incoming_seq };
-        let repo = self.repository.clone();
-        self.persist_or_queue(deferred, || async move {
-            repo.set_last_seen_seq(agent_id, incoming_seq).await
-        })
-        .await?;
+        // ── Sequence validation ───────────────────────────────────────────────
+        match red_cell_common::callback_seq::validate_seq(agent_id, incoming_seq, *last_seen) {
+            Ok(()) => {
+                // Success — advance seq and reset replay counter.
+                let deferred = DeferredWrite::AgentSetLastSeenSeq { agent_id, seq: incoming_seq };
+                let repo = self.repository.clone();
+                self.persist_or_queue(deferred, || async move {
+                    repo.set_last_seen_seq(agent_id, incoming_seq).await
+                })
+                .await?;
+                *last_seen = incoming_seq;
 
-        *last_seen = incoming_seq;
-        Ok(())
+                // Reset attempt counter if it was non-zero.
+                let mut count = entry.replay_attempt_count.lock().await;
+                if *count > 0 {
+                    *count = 0;
+                    let repo2 = self.repository.clone();
+                    self.persist_or_queue(
+                        DeferredWrite::AgentSetReplayLockout {
+                            agent_id,
+                            attempt_count: 0,
+                            lockout_until: None,
+                        },
+                        move || async move { repo2.set_replay_lockout(agent_id, 0, None).await },
+                    )
+                    .await?;
+                }
+                Ok(())
+            }
+            Err(e @ red_cell_common::callback_seq::CallbackSeqError::Replay { .. }) => {
+                // Increment the consecutive-replay counter and possibly trigger lockout.
+                let mut count = entry.replay_attempt_count.lock().await;
+                *count = count.saturating_add(1);
+
+                if *count >= REPLAY_LOCKOUT_THRESHOLD {
+                    let expiry_unix = lockout_expiry_unix_secs();
+                    let until = Instant::now() + Duration::from_secs(REPLAY_LOCKOUT_DURATION_SECS);
+                    *entry.lockout_until.lock().await = Some(until);
+
+                    let new_count = *count;
+                    let repo = self.repository.clone();
+                    self.persist_or_queue(
+                        DeferredWrite::AgentSetReplayLockout {
+                            agent_id,
+                            attempt_count: new_count,
+                            lockout_until: Some(expiry_unix),
+                        },
+                        move || async move {
+                            repo.set_replay_lockout(agent_id, new_count, Some(expiry_unix)).await
+                        },
+                    )
+                    .await?;
+                } else {
+                    let new_count = *count;
+                    let repo = self.repository.clone();
+                    self.persist_or_queue(
+                        DeferredWrite::AgentSetReplayLockout {
+                            agent_id,
+                            attempt_count: new_count,
+                            lockout_until: None,
+                        },
+                        move || async move {
+                            repo.set_replay_lockout(agent_id, new_count, None).await
+                        },
+                    )
+                    .await?;
+                }
+
+                Err(map_seq_error(agent_id, e))
+            }
+            Err(e) => {
+                // GapTooLarge or other errors do not count toward lockout.
+                Err(map_seq_error(agent_id, e))
+            }
+        }
+    }
+
+    /// Return the current in-memory replay attempt counter for `agent_id`.
+    ///
+    /// Retained for unit tests that verify the counter is reset correctly.
+    #[cfg(test)]
+    pub(crate) async fn replay_attempt_count(&self, agent_id: u32) -> Option<u32> {
+        let entry = self.entry(agent_id).await?;
+        Some(*entry.replay_attempt_count.lock().await)
+    }
+
+    /// Manually set the in-memory `lockout_until` instant for `agent_id`.
+    ///
+    /// Used by tests to fast-forward past the lockout window without sleeping.
+    #[cfg(test)]
+    pub(crate) async fn set_lockout_until(
+        &self,
+        agent_id: u32,
+        instant: Option<std::time::Instant>,
+    ) {
+        if let Some(entry) = self.entry(agent_id).await {
+            *entry.lockout_until.lock().await = instant;
+        }
     }
 
     /// Enable or disable seq-protection for `agent_id` and persist the flag.

@@ -70,6 +70,7 @@ async fn build_test_state() -> TeamserverState {
         login_rate_limiter: LoginRateLimiter::new(),
         shutdown: ShutdownController::new(),
         service_bridge: None,
+        corpus_dir: None,
         started_at: std::time::Instant::now(),
         plugins_loaded: 0,
         plugins_failed: 0,

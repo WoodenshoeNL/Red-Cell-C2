@@ -155,24 +155,29 @@ pub struct CorpusSessionKeys {
     pub version: u32,
 
     /// AES-256 session key as a lowercase hex string (64 hex chars = 32 bytes).
-    pub aes_key_hex: String,
+    /// `None` in stub files written before key material is available.
+    pub aes_key_hex: Option<String>,
 
     /// AES-CTR IV as a lowercase hex string (32 hex chars = 16 bytes).
-    pub aes_iv_hex: String,
+    /// `None` in stub files written before key material is available.
+    pub aes_iv_hex: Option<String>,
 
     /// Whether this session uses monotonic CTR (Archon/Phantom/Specter) or
     /// legacy per-packet reset CTR (Demon).
-    pub monotonic_ctr: bool,
+    /// `None` in stub files written before key material is available.
+    pub monotonic_ctr: Option<bool>,
 
     /// CTR block offset at the start of the captured scenario (usually 0).
-    pub initial_ctr_block_offset: u64,
+    /// `None` in stub files written before key material is available.
+    pub initial_ctr_block_offset: Option<u64>,
 
     /// Agent ID assigned during INIT handshake, as a hex string (e.g. `"0x12345678"`).
-    pub agent_id_hex: String,
+    /// `None` in stub files written before key material is available.
+    pub agent_id_hex: Option<String>,
 }
 
 impl CorpusSessionKeys {
-    /// Construct a [`CorpusSessionKeys`] with the current format version.
+    /// Construct a [`CorpusSessionKeys`] with real key material.
     pub fn new(
         aes_key_hex: String,
         aes_iv_hex: String,
@@ -182,11 +187,11 @@ impl CorpusSessionKeys {
     ) -> Self {
         Self {
             version: CORPUS_FORMAT_VERSION,
-            aes_key_hex,
-            aes_iv_hex,
-            monotonic_ctr,
-            initial_ctr_block_offset,
-            agent_id_hex,
+            aes_key_hex: Some(aes_key_hex),
+            aes_iv_hex: Some(aes_iv_hex),
+            monotonic_ctr: Some(monotonic_ctr),
+            initial_ctr_block_offset: Some(initial_ctr_block_offset),
+            agent_id_hex: Some(agent_id_hex),
         }
     }
 }
@@ -243,9 +248,21 @@ mod tests {
         let json = serde_json::to_string(&keys).expect("serialize");
         let decoded: CorpusSessionKeys = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(decoded.version, CORPUS_FORMAT_VERSION);
-        assert!(!decoded.monotonic_ctr);
-        assert_eq!(decoded.initial_ctr_block_offset, 0);
-        assert_eq!(decoded.agent_id_hex, "0x12345678");
+        assert_eq!(decoded.monotonic_ctr, Some(false));
+        assert_eq!(decoded.initial_ctr_block_offset, Some(0));
+        assert_eq!(decoded.agent_id_hex.as_deref(), Some("0x12345678"));
+    }
+
+    #[test]
+    fn corpus_session_keys_null_stub_round_trips_json() {
+        let stub = r#"{"version":1,"aes_key_hex":null,"aes_iv_hex":null,"monotonic_ctr":null,"initial_ctr_block_offset":null,"agent_id_hex":null}"#;
+        let decoded: CorpusSessionKeys = serde_json::from_str(stub).expect("deserialize stub");
+        assert_eq!(decoded.version, CORPUS_FORMAT_VERSION);
+        assert!(decoded.aes_key_hex.is_none());
+        assert!(decoded.aes_iv_hex.is_none());
+        assert!(decoded.monotonic_ctr.is_none());
+        assert!(decoded.initial_ctr_block_offset.is_none());
+        assert!(decoded.agent_id_hex.is_none());
     }
 
     #[test]
@@ -313,7 +330,7 @@ mod tests {
             42,
             "0xDEADBEEF".to_string(),
         );
-        assert!(keys.monotonic_ctr);
-        assert_eq!(keys.initial_ctr_block_offset, 42);
+        assert_eq!(keys.monotonic_ctr, Some(true));
+        assert_eq!(keys.initial_ctr_block_offset, Some(42));
     }
 }

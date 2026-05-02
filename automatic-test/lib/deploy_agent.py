@@ -169,6 +169,23 @@ def deploy_and_checkin(
                 if cb_host:
                     print(f"  [{tag}][deploy] Defender Network Protection IP exclusion ({cb_host})")
                     defender_network_protection_exclusion(target, cb_host)
+                    # Verify exclusion took effect — ABSENT means NP will still block
+                    # WinHTTP connections from S4U processes (no TCP SYN generated).
+                    try:
+                        cb_q = cb_host.replace("'", "''")
+                        verify_script = (
+                            f"$excl = (Get-MpPreference -EA SilentlyContinue).ExclusionIpAddress; "
+                            f"if ($excl -contains '{cb_q}') {{ Write-Output 'NP_EXCL:PRESENT' }} "
+                            f"else {{ Write-Output ('NP_EXCL:ABSENT — list: ' + ($excl -join ',')) }}"
+                        )
+                        verify_out = run_remote(
+                            target,
+                            f"powershell -NoProfile -Command \"{verify_script}\"",
+                            timeout=15,
+                        )
+                        print(f"  [{tag}][deploy] NP exclusion verify: {verify_out.strip()}")
+                    except Exception as vexc:
+                        print(f"  [{tag}][deploy] NP exclusion verify failed (non-fatal): {vexc}")
             except Exception as exc:
                 print(f"  [{tag}][deploy] Network Protection exclusion failed (non-fatal): {exc}")
 

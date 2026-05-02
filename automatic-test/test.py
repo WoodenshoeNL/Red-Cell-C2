@@ -950,12 +950,15 @@ def main():
             print("  (no Windows work_dir targets — skipped)")
         else:
             win_cleanup_timeout = max(90, int(tmo.command_output))
+            _cb_host = ctx.env.get("server", {}).get("callback_host")
+            _ip_excl = [_cb_host] if _cb_host else None
             for wlabel, wtgt in w_cleanup_targets:
                 print(f"  Target {wlabel!r} ({wtgt.host}) {wtgt.work_dir!r}")
                 cleanup_windows_harness_work_dir(
                     wtgt,
                     log_prefix="  [win-workdir]",
                     timeout=win_cleanup_timeout,
+                    ip_exclusions_to_remove=_ip_excl,
                 )
 
     automatic_test_root = Path(__file__).resolve().parent
@@ -977,11 +980,14 @@ def main():
 
         if not ctx.dry_run:
             win_cleanup_timeout = max(90, int(tmo.command_output))
+            _cb_host_bs = ctx.env.get("server", {}).get("callback_host")
+            _ip_excl_bs = [_cb_host_bs] if _cb_host_bs else None
             for _, wtgt in _windows_harness_cleanup_targets(windows_target, windows2_target):
                 cleanup_windows_harness_work_dir(
                     wtgt,
                     log_prefix="  [between-scenarios]",
                     timeout=win_cleanup_timeout,
+                    ip_exclusions_to_remove=_ip_excl_bs,
                 )
 
     total = passed + failed + skipped

@@ -824,6 +824,7 @@ def cleanup_windows_harness_work_dir(
     *,
     log_prefix: str = "  [win-workdir]",
     timeout: int | None = None,
+    ip_exclusions_to_remove: list[str] | None = None,
 ) -> None:
     """Stop processes running from *target.work_dir*, then delete harness-owned files.
 
@@ -840,6 +841,9 @@ def cleanup_windows_harness_work_dir(
       (the stable prefix used by :func:`firewall_allow_program`).
     - Removes all ``ExclusionProcess`` entries matching ``agent-*.exe`` or
       ``stress-agent-*.exe`` (the basename patterns used by harness payloads).
+    - Removes ``ExclusionIpAddress`` entries for IPs in *ip_exclusions_to_remove* (when
+      supplied) — these are added by :func:`defender_network_protection_exclusion` and
+      would otherwise accumulate across runs on long-lived VMs.
 
     This sweep always executes before the work-dir file removal so it runs even when
     the work directory does not yet exist (e.g. pre-run cleanup on a fresh VM).
@@ -850,6 +854,9 @@ def cleanup_windows_harness_work_dir(
         target: Windows SSH target (no-op when ``work_dir`` is a POSIX path).
         log_prefix: Prefix for diagnostic lines printed to the harness log.
         timeout: SSH wait ceiling; defaults to ``max(90, configured remote cmd timeout)``.
+        ip_exclusions_to_remove: Optional list of IPs to remove from
+            ``ExclusionIpAddress`` (e.g. the C2 callback host added by
+            :func:`defender_network_protection_exclusion`).
     """
 
     is_windows = target.platform == "windows"
@@ -860,6 +867,17 @@ def cleanup_windows_harness_work_dir(
         timeout = max(90, _DEFAULT_REMOTE_CMD_SECS)
 
     wd = target.work_dir.replace("'", "''")
+    # Build the optional ExclusionIpAddress sweep block (for harness-added NP exclusions).
+    ip_sweep_block = ""
+    if ip_exclusions_to_remove:
+        safe_ips = [ip.replace("'", "''") for ip in ip_exclusions_to_remove if ip.strip()]
+        if safe_ips:
+            ip_array_ps = ",".join(f"'{ip}'" for ip in safe_ips)
+            ip_sweep_block = (
+                f"foreach ($_ip in @({ip_array_ps})) {{\n"
+                "  Remove-MpPreference -ExclusionIpAddress $_ip -ErrorAction SilentlyContinue\n"
+                "}\n"
+            )
     script = (
         # Revert Defender/firewall exceptions — runs unconditionally (even without work dir).
         "Remove-NetFirewallRule -DisplayName 'RC-Harness-*' -ErrorAction SilentlyContinue\n"
@@ -871,8 +889,9 @@ def cleanup_windows_harness_work_dir(
         "    }\n"
         "  }\n"
         "}\n"
+        + ip_sweep_block
         # Work-dir file cleanup.
-        f"$wd = '{wd}'\n"
+        + f"$wd = '{wd}'\n"
         "if (-not (Test-Path -LiteralPath $wd)) { exit 0 }\n"
         "Get-Process -ErrorAction SilentlyContinue | ForEach-Object {\n"
         "  $proc = $_\n"

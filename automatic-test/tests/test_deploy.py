@@ -1357,6 +1357,32 @@ class TestCleanupWindowsHarnessWorkDir(unittest.TestCase):
         wd_pos = decoded.index("Test-Path")
         self.assertLess(fw_pos, wd_pos)
 
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_ip_exclusions_to_remove_adds_np_sweep(self, mock_ssh: object) -> None:
+        """Passing ip_exclusions_to_remove must add Remove-MpPreference -ExclusionIpAddress."""
+        mock_ssh.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
+        cleanup_windows_harness_work_dir(
+            t, timeout=100, ip_exclusions_to_remove=["192.168.1.10"]
+        )
+        decoded = _decoded_windows_launch_script(mock_ssh.call_args[0][0][-1])
+        self.assertIn("Remove-MpPreference", decoded)
+        self.assertIn("ExclusionIpAddress", decoded)
+        self.assertIn("192.168.1.10", decoded)
+
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_no_ip_exclusions_omits_np_sweep(self, mock_ssh: object) -> None:
+        """Without ip_exclusions_to_remove, ExclusionIpAddress must not appear."""
+        mock_ssh.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
+        cleanup_windows_harness_work_dir(t, timeout=100)
+        decoded = _decoded_windows_launch_script(mock_ssh.call_args[0][0][-1])
+        self.assertNotIn("ExclusionIpAddress", decoded)
+
 
 if __name__ == "__main__":
     unittest.main()

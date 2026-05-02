@@ -12,6 +12,7 @@ fn stub_agent(agent_id: u32) -> AgentRecord {
         encryption: AgentEncryptionInfo {
             aes_key: Zeroizing::new(b"k".to_vec()),
             aes_iv: Zeroizing::new(b"i".to_vec()),
+            monotonic_ctr: false,
         },
         hostname: String::new(),
         username: String::new(),
@@ -108,6 +109,7 @@ async fn session_keys_survive_create_then_read_roundtrip() {
         encryption: AgentEncryptionInfo {
             aes_key: Zeroizing::new(vec![0xAA; 32]),
             aes_iv: Zeroizing::new(vec![0xBB; 16]),
+            monotonic_ctr: false,
         },
         ..stub_agent(0x1234)
     };
@@ -127,6 +129,7 @@ async fn session_keys_survive_update_then_read_roundtrip() {
         encryption: AgentEncryptionInfo {
             aes_key: Zeroizing::new(vec![0xCC; 32]),
             aes_iv: Zeroizing::new(vec![0xDD; 16]),
+            monotonic_ctr: false,
         },
         ..original
     };
@@ -144,6 +147,7 @@ async fn session_keys_survive_reregister_roundtrip() {
         encryption: AgentEncryptionInfo {
             aes_key: Zeroizing::new(vec![0xEE; 32]),
             aes_iv: Zeroizing::new(vec![0xFF; 16]),
+            monotonic_ctr: false,
         },
         ..stub_agent(0x9ABC)
     };

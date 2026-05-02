@@ -41,6 +41,7 @@ fn sample_agent(agent_id: u32) -> AgentRecord {
         encryption: AgentEncryptionInfo {
             aes_key: Zeroizing::new(key.to_vec()),
             aes_iv: Zeroizing::new(iv.to_vec()),
+            monotonic_ctr: false,
         },
         hostname: "phantom-host".to_owned(),
         username: "phantom-user".to_owned(),

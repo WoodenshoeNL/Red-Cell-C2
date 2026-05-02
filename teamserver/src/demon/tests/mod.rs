@@ -244,6 +244,7 @@ fn agent_with_raw_crypto(agent_id: u32, aes_key: Vec<u8>, aes_iv: Vec<u8>) -> Ag
         encryption: AgentEncryptionInfo {
             aes_key: Zeroizing::new(aes_key),
             aes_iv: Zeroizing::new(aes_iv),
+            monotonic_ctr: false,
         },
         hostname: "wkstn-corrupt".to_owned(),
         username: "operator".to_owned(),

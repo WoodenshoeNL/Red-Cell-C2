@@ -35,6 +35,7 @@ fn sample_agent_with_crypto(
         encryption: AgentEncryptionInfo {
             aes_key: Zeroizing::new(key.to_vec()),
             aes_iv: Zeroizing::new(iv.to_vec()),
+            monotonic_ctr: false,
         },
         hostname: "wkstn-test".to_owned(),
         username: "testuser".to_owned(),

@@ -120,6 +120,7 @@ async fn build_init_ack_rejects_zero_key_agent() {
         encryption: AgentEncryptionInfo {
             aes_key: Zeroizing::new(vec![0; AGENT_KEY_LENGTH]),
             aes_iv: Zeroizing::new(vec![0; AGENT_IV_LENGTH]),
+            monotonic_ctr: false,
         },
         hostname: "wkstn-01".to_owned(),
         username: "operator".to_owned(),

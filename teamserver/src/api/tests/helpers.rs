@@ -215,6 +215,7 @@ pub(super) fn sample_agent(agent_id: u32) -> AgentRecord {
         encryption: red_cell_common::AgentEncryptionInfo {
             aes_key: Zeroizing::new(vec![0u8; 32]),
             aes_iv: Zeroizing::new(vec![0u8; 16]),
+            monotonic_ctr: false,
         },
         hostname: "workstation".to_owned(),
         username: "neo".to_owned(),

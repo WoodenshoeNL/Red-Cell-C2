@@ -206,6 +206,7 @@ fn crate_root_exports_round_trip_agent_encryption_info() -> Result<(), Box<dyn s
     let original = AgentEncryptionInfo {
         aes_key: Zeroizing::new(vec![0x11; 32]),
         aes_iv: Zeroizing::new(vec![0x22; 16]),
+        monotonic_ctr: false,
     };
 
     let encoded = serde_json::to_value(&original)?;

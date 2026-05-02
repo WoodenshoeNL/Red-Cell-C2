@@ -16,6 +16,7 @@ async fn encryption_round_trips() -> Result<(), TeamserverError> {
     let updated = AgentEncryptionInfo {
         aes_key: Zeroizing::new(b"new-key".to_vec()),
         aes_iv: Zeroizing::new(b"new-iv".to_vec()),
+        monotonic_ctr: false,
     };
     registry.insert(agent.clone()).await?;
 
@@ -376,6 +377,7 @@ async fn set_encryption_no_partial_mutation_on_db_failure() -> Result<(), Teamse
     let new_enc = AgentEncryptionInfo {
         aes_key: Zeroizing::new(vec![0xCC; AGENT_KEY_LENGTH]),
         aes_iv: Zeroizing::new(vec![0xDD; AGENT_IV_LENGTH]),
+        monotonic_ctr: false,
     };
     let result = registry.set_encryption(agent.agent_id, new_enc).await;
     assert!(result.is_err(), "expected DB write to fail after pool close");
@@ -519,6 +521,7 @@ async fn encrypt_decrypt_reject_truncated_key_material() -> Result<(), Teamserve
     agent.encryption = AgentEncryptionInfo {
         aes_key: Zeroizing::new(vec![0xAA; 16]),
         aes_iv: Zeroizing::new(vec![0xBB; AGENT_IV_LENGTH]),
+        monotonic_ctr: false,
     };
     registry.insert(agent.clone()).await?;
 
@@ -553,7 +556,8 @@ async fn encrypt_decrypt_reject_truncated_iv_material() -> Result<(), Teamserver
     let mut agent = sample_agent(0x1000_0D02);
     agent.encryption = AgentEncryptionInfo {
         aes_key: Zeroizing::new(vec![0xAA; AGENT_KEY_LENGTH]),
-        aes_iv: Zeroizing::new(vec![0xBB; 8]), // 8 bytes instead of AGENT_IV_LENGTH (16)
+        aes_iv: Zeroizing::new(vec![0xBB; 8]), // 8 bytes instead of AGENT_IV_LENGTH (16),
+        monotonic_ctr: false,
     };
     registry.insert(agent.clone()).await?;
 
@@ -593,6 +597,7 @@ async fn set_encryption_updates_both_memory_and_database() -> Result<(), Teamser
     let new_enc = AgentEncryptionInfo {
         aes_key: Zeroizing::new(vec![0xCC; AGENT_KEY_LENGTH]),
         aes_iv: Zeroizing::new(vec![0xDD; AGENT_IV_LENGTH]),
+        monotonic_ctr: false,
     };
     registry.set_encryption(agent.agent_id, new_enc.clone()).await?;
 

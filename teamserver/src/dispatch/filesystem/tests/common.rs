@@ -25,6 +25,7 @@ pub(in crate::dispatch::filesystem) fn stub_agent(agent_id: u32) -> AgentRecord 
         encryption: AgentEncryptionInfo {
             aes_key: Zeroizing::new(vec![0; 32]),
             aes_iv: Zeroizing::new(vec![0; 16]),
+            monotonic_ctr: false,
         },
         hostname: "test".to_owned(),
         username: "user".to_owned(),

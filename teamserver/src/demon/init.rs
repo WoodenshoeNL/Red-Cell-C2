@@ -158,6 +158,7 @@ pub(crate) fn parse_init_agent(
         DemonInitSecretConfig::None => AgentEncryptionInfo {
             aes_key: Zeroizing::new(key.to_vec()),
             aes_iv: Zeroizing::new(iv.to_vec()),
+            monotonic_ctr: !legacy_ctr,
         },
         DemonInitSecretConfig::Unversioned(secret) => {
             let derived = derive_session_keys(&key, &iv, secret)
@@ -169,6 +170,7 @@ pub(crate) fn parse_init_agent(
             AgentEncryptionInfo {
                 aes_key: Zeroizing::new(derived.key.to_vec()),
                 aes_iv: Zeroizing::new(derived.iv.to_vec()),
+                monotonic_ctr: !legacy_ctr,
             }
         }
         DemonInitSecretConfig::Versioned(secrets) => {
@@ -202,6 +204,7 @@ pub(crate) fn parse_init_agent(
             AgentEncryptionInfo {
                 aes_key: Zeroizing::new(derived.key.to_vec()),
                 aes_iv: Zeroizing::new(derived.iv.to_vec()),
+                monotonic_ctr: !legacy_ctr,
             }
         }
     };

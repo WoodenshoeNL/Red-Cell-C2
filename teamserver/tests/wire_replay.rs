@@ -370,6 +370,8 @@ async fn replay_demon_init_from_corpus() -> Result<(), Box<dyn std::error::Error
         session_keys.aes_iv_hex.expect("aes_iv_hex guaranteed Some by load_session_keys");
     let agent_id_hex =
         session_keys.agent_id_hex.expect("agent_id_hex guaranteed Some by load_session_keys");
+    let expected_monotonic_ctr =
+        session_keys.monotonic_ctr.expect("monotonic_ctr guaranteed Some by load_session_keys");
 
     let expected_key = hex_decode("aes_key_hex", &aes_key_hex)?;
     let expected_iv = hex_decode("aes_iv_hex", &aes_iv_hex)?;
@@ -424,6 +426,10 @@ async fn replay_demon_init_from_corpus() -> Result<(), Box<dyn std::error::Error
         init.agent.encryption.aes_iv.as_slice(),
         &expected_iv,
         "stored AES IV must match session.keys.json"
+    );
+    assert_eq!(
+        init.agent.encryption.monotonic_ctr, expected_monotonic_ctr,
+        "monotonic_ctr must match corpus session.keys.json"
     );
 
     // Assert the agent record is present in the registry.

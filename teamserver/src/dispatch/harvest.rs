@@ -139,6 +139,7 @@ mod tests {
             encryption: red_cell_common::AgentEncryptionInfo {
                 aes_key: Zeroizing::new(vec![0u8; 32]),
                 aes_iv: Zeroizing::new(vec![0u8; 16]),
+                monotonic_ctr: false,
             },
             hostname: "linux-host".to_owned(),
             username: "root".to_owned(),

@@ -127,7 +127,7 @@ pub(super) fn row_to_agent_record(
         active: super::super::bool_from_i64("active", row.active)?,
         reason: row.reason.clone(),
         note: row.note.clone(),
-        encryption: AgentEncryptionInfo { aes_key, aes_iv },
+        encryption: AgentEncryptionInfo { aes_key, aes_iv, monotonic_ctr: false },
         hostname: row.hostname.clone(),
         username: row.username.clone(),
         domain_name: row.domain_name.clone(),

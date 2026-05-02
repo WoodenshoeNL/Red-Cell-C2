@@ -37,6 +37,7 @@ pub(super) fn sample_agent(agent_id: u32) -> AgentRecord {
         encryption: AgentEncryptionInfo {
             aes_key: Zeroizing::new(b"aes-key".to_vec()),
             aes_iv: Zeroizing::new(b"aes-iv".to_vec()),
+            monotonic_ctr: false,
         },
         hostname: "wkstn-01".to_owned(),
         username: "operator".to_owned(),

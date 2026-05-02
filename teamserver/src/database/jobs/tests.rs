@@ -14,6 +14,7 @@ fn stub_agent(agent_id: u32) -> AgentRecord {
         encryption: AgentEncryptionInfo {
             aes_key: Zeroizing::new(b"k".to_vec()),
             aes_iv: Zeroizing::new(b"i".to_vec()),
+            monotonic_ctr: false,
         },
         hostname: String::new(),
         username: String::new(),

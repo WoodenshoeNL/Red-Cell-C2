@@ -295,6 +295,7 @@ fn sample_agent_info(
         encryption: AgentEncryptionInfo {
             aes_key: Zeroizing::new(key.to_vec()),
             aes_iv: Zeroizing::new(iv.to_vec()),
+            monotonic_ctr: false,
         },
         hostname: "wkstn-01".to_owned(),
         username: "operator".to_owned(),

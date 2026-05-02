@@ -46,6 +46,7 @@ pub(super) fn sample_agent() -> red_cell_common::AgentRecord {
         encryption: red_cell_common::AgentEncryptionInfo {
             aes_key: Zeroizing::new(vec![0u8; 32]),
             aes_iv: Zeroizing::new(vec![0u8; 16]),
+            monotonic_ctr: false,
         },
         hostname: "wkstn-01".to_owned(),
         username: "operator".to_owned(),

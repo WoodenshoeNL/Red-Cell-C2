@@ -56,6 +56,7 @@ fn sample_agent(agent_id: u32) -> red_cell_common::AgentRecord {
         encryption: AgentEncryptionInfo {
             aes_key: Zeroizing::new(b"0123456789abcdef0123456789abcdef".to_vec()),
             aes_iv: Zeroizing::new(b"0123456789abcdef".to_vec()),
+            monotonic_ctr: false,
         },
         hostname: "wkstn-01".to_owned(),
         username: "operator".to_owned(),

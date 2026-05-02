@@ -40,6 +40,12 @@ pub struct AgentEncryptionInfo {
     )]
     #[schema(value_type = String)]
     pub aes_iv: Zeroizing<Vec<u8>>,
+    /// Whether the agent requested monotonic-CTR mode (`INIT_EXT_MONOTONIC_CTR`).
+    ///
+    /// `true` → monotonic (per-message counter); `false` → legacy (IV reset each call).
+    /// Defaults to `false` for records loaded from the database or pre-extension agents.
+    #[serde(rename = "MonotonicCtr", default)]
+    pub monotonic_ctr: bool,
 }
 
 impl fmt::Debug for AgentEncryptionInfo {
@@ -47,6 +53,7 @@ impl fmt::Debug for AgentEncryptionInfo {
         f.debug_struct("AgentEncryptionInfo")
             .field("aes_key", &"[redacted]")
             .field("aes_iv", &"[redacted]")
+            .field("monotonic_ctr", &self.monotonic_ctr)
             .finish()
     }
 }
@@ -244,6 +251,7 @@ mod tests {
             encryption: AgentEncryptionInfo {
                 aes_key: Zeroizing::new(vec![0xAA; 32]),
                 aes_iv: Zeroizing::new(vec![0xBB; 16]),
+                monotonic_ctr: false,
             },
             hostname: "wkstn-1".to_string(),
             username: "operator".to_string(),

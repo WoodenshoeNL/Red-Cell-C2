@@ -31,6 +31,7 @@ async fn register_test_agent(
             encryption: red_cell_common::AgentEncryptionInfo {
                 aes_key: Zeroizing::new(key.to_vec()),
                 aes_iv: Zeroizing::new(iv.to_vec()),
+                monotonic_ctr: false,
             },
             hostname: "test-host".to_owned(),
             username: "test-user".to_owned(),
@@ -131,6 +132,7 @@ async fn beacon_output_callback_persists_credential_loot() -> Result<(), Box<dyn
             encryption: red_cell_common::AgentEncryptionInfo {
                 aes_key: Zeroizing::new(key.to_vec()),
                 aes_iv: Zeroizing::new(iv.to_vec()),
+                monotonic_ctr: false,
             },
             hostname: "test-host".to_owned(),
             username: "test-user".to_owned(),

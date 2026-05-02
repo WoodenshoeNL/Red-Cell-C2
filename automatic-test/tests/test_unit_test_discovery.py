@@ -69,6 +69,7 @@ class TestLoadRepoRootTestSuite(unittest.TestCase):
         error entry inside the returned suite so the harness can report them
         cleanly without an unhandled traceback.
         """
+        self.addCleanup(sys.modules.pop, "test_bad", None)
         with tempfile.TemporaryDirectory() as tmp:
             bad = Path(tmp) / "test_bad.py"
             bad.write_text(textwrap.dedent("x = ("), encoding="utf-8")

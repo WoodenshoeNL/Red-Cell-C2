@@ -257,6 +257,7 @@ def _load_repo_root_test_suite(loader: unittest.TestLoader) -> unittest.TestSuit
             spec.loader.exec_module(module)
             suite.addTests(loader.loadTestsFromModule(module))
         except Exception as exc:
+            sys.modules.pop(path.stem, None)
             suite.addTest(_ModuleImportFailure(path.stem, exc))
 
     return suite

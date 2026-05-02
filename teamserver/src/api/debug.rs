@@ -145,8 +145,6 @@ mod tests {
     use red_cell_common::{AgentEncryptionInfo, AgentRecord};
     use zeroize::Zeroizing;
 
-    use crate::app::TeamserverState;
-
     use super::*;
 
     const LOOPBACK: &str = "127.0.0.1:1234";
@@ -394,5 +392,45 @@ mod tests {
             Some(bytes_to_hex(&aes_iv).as_str()),
             "aes_iv_hex must match the registry IV"
         );
+    }
+
+    /// ECDH agent registered but no row in `ts_ecdh_sessions`: handler must
+    /// return `NoEcdhSession` and the response status must be 404.
+    #[tokio::test]
+    async fn get_corpus_keys_ecdh_missing_session_returns_404() {
+        let agent_id: u32 = 0xBEEF_DEADu32;
+
+        let mut state = crate::app::build_test_state().await;
+        state.corpus_dir = Some(PathBuf::from("/tmp"));
+
+        // Insert an ECDH agent, but deliberately skip store_session so the
+        // ts_ecdh_sessions table has no row for this agent.
+        state
+            .agent_registry
+            .insert_full(
+                zero_key_agent(agent_id),
+                "test-listener",
+                0u64,
+                false,
+                true, // ecdh_transport = true
+                false,
+            )
+            .await
+            .expect("insert agent");
+
+        let result = get_corpus_keys(
+            State(state),
+            ConnectInfo(loopback_addr()),
+            Query(CorpusKeysQuery { agent_id: format!("0x{agent_id:08x}") }),
+        )
+        .await;
+
+        let err = result.expect_err("handler must fail when ECDH session row is absent");
+        assert!(
+            matches!(err, CorpusKeysError::NoEcdhSession),
+            "error must be NoEcdhSession, got {err:?}"
+        );
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }

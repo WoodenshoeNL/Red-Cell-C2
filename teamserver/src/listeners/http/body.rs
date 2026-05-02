@@ -41,9 +41,11 @@ pub(crate) const NONLEGACY_PRECHECK_HEADER_LEN: usize = ArchonHeader::SERIALIZED
 ///   [`NONLEGACY_PRECHECK_HEADER_LEN`] bytes, the Archon `size` field is
 ///   interpreted as an **exclusive** total byte count (`4 + size`, matching
 ///   [`ArchonEnvelope::from_bytes`]): further buffering is capped to that value
-///   (and never beyond `max_len`).  If `4 + size` is below 12, the prefix cannot
-///   be Archon-framed (it is treated as ECDH key material or noise), and the
-///   stream keeps using the caller's `max_len` cap only.  This closes a
+///   (and never beyond `max_len`).  If `4 + size` is below 12, or **strictly
+///   exceeds** `max_len`, the prefix cannot be a legitimate Archon frame under
+///   this cap (ECDH registration begins with 32 bytes of key material whose
+///   first four bytes are uniformly random and often mimic a huge Archon size),
+///   and the stream keeps using the caller's `max_len` cap only.  This closes a
 ///   pre-auth memory DoS where a client matched the listener but sent a huge
 ///   body whose header claimed a small packet.  Legitimate Archon payloads and
 ///   ECDH registration/session packets retain prior behaviour.
@@ -109,14 +111,12 @@ pub(crate) async fn collect_body_with_magic_precheck(
             } else {
                 let declared = u32::from_be_bytes(hdr[0..4].try_into().ok()?);
                 let archon_claim = 4usize.checked_add(declared as usize)?;
-                if archon_claim > max_len {
-                    return None;
-                }
-                effective_max = if archon_claim < NONLEGACY_PRECHECK_HEADER_LEN {
-                    max_len
-                } else {
-                    archon_claim
-                };
+                effective_max =
+                    if archon_claim < NONLEGACY_PRECHECK_HEADER_LEN || archon_claim > max_len {
+                        max_len
+                    } else {
+                        archon_claim
+                    };
             }
 
             if next_len > effective_max || next_len > max_len {
@@ -239,9 +239,13 @@ pub(crate) async fn allow_demon_init_for_ip(
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
+    use red_cell_common::crypto::ecdh::{
+        ECDH_REG_MIN_LEN, ListenerKeypair, build_registration_packet_from_parts,
+    };
     use red_cell_common::demon::{ArchonEnvelope, DemonCommand, DemonEnvelope};
 
     use super::*;
+    use crate::MAX_AGENT_MESSAGE_LEN;
     use crate::listeners::{DemonInitRateLimiter, MAX_DEMON_INIT_ATTEMPTS_PER_IP};
 
     /// Build a minimal DEMON_INIT payload (command_id + request_id + 1 extra byte).
@@ -513,5 +517,55 @@ mod tests {
         let result =
             collect_body_with_magic_precheck(Body::from_stream(stream), usize::MAX, false).await;
         assert!(result.is_none());
+    }
+
+    /// Regression (red-cell-c2-5jut2): ECDH registration starts with a 32-byte X25519 pubkey;
+    /// the first four bytes are uniformly random. Interpreting them as a big-endian Archon
+    /// `size` field usually yields `4 + size > MAX_AGENT_MESSAGE_LEN`, which must **not**
+    /// cause `collect_body_with_magic_precheck` to return `None` before the handler can run
+    /// `process_ecdh_packet`.
+    #[tokio::test]
+    async fn nonlegacy_ecdh_registration_passes_precheck_when_pubkey_prefix_mimics_huge_archon_len()
+    {
+        let kp =
+            ListenerKeypair::from_bytes(core::array::from_fn(|i| 0xA1u8.wrapping_add(i as u8)));
+        let base_ephemeral = core::array::from_fn(|i| 0xB2u8.wrapping_add(i as u8));
+
+        let mut chosen = None;
+        for tweak in 0u32..65_536 {
+            let mut ephemeral = base_ephemeral;
+            ephemeral[0..4].copy_from_slice(&tweak.to_le_bytes());
+            let Ok((pkt, _session_key)) = build_registration_packet_from_parts(
+                &kp.public_bytes,
+                ephemeral,
+                1_700_000_000,
+                b"reg-meta",
+            ) else {
+                continue;
+            };
+            let declared = u32::from_be_bytes(pkt[..4].try_into().unwrap());
+            let Some(archon_claim) = 4usize.checked_add(declared as usize) else {
+                continue;
+            };
+            if archon_claim > MAX_AGENT_MESSAGE_LEN {
+                chosen = Some(pkt);
+                break;
+            }
+        }
+
+        let packet = chosen.expect(
+            "expected some ephemeral key to yield a pubkey whose first 4 bytes imply archon_claim > max_len",
+        );
+        assert!(
+            packet.len() >= ECDH_REG_MIN_LEN,
+            "fixture must be a plausible registration packet"
+        );
+
+        let result =
+            collect_body_with_magic_precheck(make_body(packet), MAX_AGENT_MESSAGE_LEN, false).await;
+        assert!(
+            result.is_some(),
+            "ECDH registration must not be rejected during body precheck when Archon length heuristic is ambiguous"
+        );
     }
 }

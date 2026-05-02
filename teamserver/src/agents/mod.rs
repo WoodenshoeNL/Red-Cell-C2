@@ -3,6 +3,7 @@
 mod crypto;
 mod jobs;
 mod lifecycle;
+mod packet_ring;
 mod pivot;
 mod query;
 mod seq;
@@ -56,6 +57,8 @@ struct AgentEntry {
     /// When `Some(instant)`, all callbacks are refused until that instant has passed.
     /// Lazily cleared on the first request after expiry.
     lockout_until: Mutex<Option<Instant>>,
+    /// Last raw HTTP / listener transport frames for operator debug (`packet-ring` API).
+    packet_ring: Mutex<packet_ring::PacketRingBuffer>,
 }
 
 /// Transport and session state passed to [`AgentEntry::new`].
@@ -85,6 +88,7 @@ impl AgentEntry {
             ecdh_transport: AtomicBool::new(state.ecdh_transport),
             replay_attempt_count: Mutex::new(state.replay_attempt_count),
             lockout_until: Mutex::new(state.lockout_until),
+            packet_ring: Mutex::new(packet_ring::PacketRingBuffer::new()),
         }
     }
 }

@@ -198,6 +198,7 @@ impl AgentRegistry {
         // Clear any replay lockout — a fresh registration proves the agent is legitimate.
         *entry.replay_attempt_count.lock().await = 0;
         *entry.lockout_until.lock().await = None;
+        entry.packet_ring.lock().await.clear();
 
         Ok(())
     }

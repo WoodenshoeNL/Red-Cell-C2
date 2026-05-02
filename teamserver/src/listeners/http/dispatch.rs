@@ -132,6 +132,7 @@ pub(crate) async fn process_demon_transport(
                     );
                 }
             }
+            registry.record_packet_ring_exchange(agent_id, body, response.as_slice(), None).await;
             Ok(ProcessedDemonResponse {
                 agent_id,
                 payload: response,
@@ -193,6 +194,7 @@ pub(crate) async fn process_demon_transport(
                     );
                 }
             }
+            registry.record_packet_ring_exchange(agent_id, body, response.as_slice(), None).await;
             Ok(ProcessedDemonResponse {
                 agent_id,
                 payload: response,
@@ -226,6 +228,9 @@ pub(crate) async fn process_demon_transport(
                             message: format!("failed to build reconnect ack: {error}"),
                         }
                     })?;
+                registry
+                    .record_packet_ring_exchange(header.agent_id, body, payload.as_slice(), None)
+                    .await;
                 Ok(ProcessedDemonResponse {
                     agent_id: header.agent_id,
                     payload,
@@ -290,6 +295,9 @@ pub(crate) async fn process_demon_transport(
             )
             .await?;
 
+            registry
+                .record_packet_ring_exchange(header.agent_id, body, payload.as_slice(), None)
+                .await;
             Ok(ProcessedDemonResponse {
                 agent_id: header.agent_id,
                 payload,

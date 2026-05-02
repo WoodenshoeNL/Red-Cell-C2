@@ -3,6 +3,7 @@ mod crypto_tests;
 mod degraded_tests;
 mod jobs_tests;
 mod lifecycle_tests;
+mod packet_ring_tests;
 mod pivot_tests;
 mod query_tests;
 mod seq_tests;

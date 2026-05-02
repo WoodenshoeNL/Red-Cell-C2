@@ -18,6 +18,7 @@ use red_cell_common::demon::DemonCommand;
 use red_cell_common::operator::{AgentTaskInfo, EventCode, Message, MessageHead};
 
 use crate::app::TeamserverState;
+use crate::corpus_capture::bytes_to_hex;
 use crate::events::broadcast_teamserver_warning;
 use crate::websocket::{AgentCommandError, execute_agent_task};
 use crate::{
@@ -770,7 +771,7 @@ pub(super) struct PacketRingQuery {
     n: Option<u8>,
 }
 
-/// A single captured packet frame (placeholder for future ring-buffer data).
+/// A single captured raw transport frame from the per-agent ring-buffer.
 #[derive(Debug, Serialize, ToSchema)]
 pub(super) struct PacketRingFrame {
     /// Direction of the frame: `"rx"` (agent → teamserver) or `"tx"` (teamserver → agent).
@@ -788,9 +789,9 @@ pub(super) struct PacketRingResponse {
     pub agent_id: String,
     /// Requested frame count per direction.
     pub n: u8,
-    /// Captured frames (may be empty when the ring-buffer is not yet populated).
+    /// Captured frames (last *n* per direction, oldest-first among the selection).
     pub frames: Vec<PacketRingFrame>,
-    /// Human-readable note when the ring-buffer is unavailable.
+    /// Optional human-readable note (reserved for future partial-capture cases).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<&'static str>,
 }
@@ -806,7 +807,7 @@ pub(super) struct PacketRingResponse {
         PacketRingQuery,
     ),
     responses(
-        (status = 200, description = "Last N raw frames per direction (empty when ring-buffer not yet implemented)", body = PacketRingResponse),
+        (status = 200, description = "Last N raw frames per direction from the in-memory ring-buffer", body = PacketRingResponse),
         (status = 400, description = "Invalid agent id", body = ApiErrorBody),
         (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
         (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
@@ -830,15 +831,15 @@ pub(super) async fn get_agent_packet_ring(
 
     let n = query.n.unwrap_or(5).min(20);
 
-    // The in-memory packet ring-buffer is not yet implemented.  Return an empty
-    // frame list with a note so callers know the endpoint is wired up but the
-    // backing store is not yet populated.  When a ring-buffer is added to the
-    // agent registry this handler will fill `frames` without any CLI / Python
-    // changes.
-    Ok(Json(PacketRingResponse {
-        agent_id: format!("{agent_id:08X}"),
-        n,
-        frames: vec![],
-        note: Some("packet ring-buffer not yet implemented; frames will appear here once added"),
-    }))
+    let captured = state.agent_registry.packet_ring_snapshot(agent_id, n).await;
+    let frames: Vec<PacketRingFrame> = captured
+        .into_iter()
+        .map(|f| PacketRingFrame {
+            direction: f.direction.as_str().to_owned(),
+            seq: f.seq,
+            bytes_hex: bytes_to_hex(&f.bytes),
+        })
+        .collect();
+
+    Ok(Json(PacketRingResponse { agent_id: format!("{agent_id:08X}"), n, frames, note: None }))
 }

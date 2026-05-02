@@ -82,9 +82,13 @@ pub(super) async fn http_listener_handler(
         .await
         {
             Ok(EcdhOutcome::Handled(ecdh_resp)) => {
+                let agent_id = ecdh_resp.agent_id;
+                state
+                    .registry
+                    .record_packet_ring_exchange(agent_id, body.as_ref(), &ecdh_resp.payload, None)
+                    .await;
                 // Write corpus RX + TX and session keys for ECDH agents.
                 if let Some(corpus) = &state.corpus_capture {
-                    let agent_id = ecdh_resp.agent_id;
                     corpus.record_packet(agent_id, CorpusPacketDir::Rx, body.as_ref(), None).await;
                     corpus
                         .record_packet(agent_id, CorpusPacketDir::Tx, &ecdh_resp.payload, None)

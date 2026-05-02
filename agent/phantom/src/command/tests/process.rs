@@ -120,6 +120,50 @@ async fn proc_create_with_pipe_returns_structured_and_output_callbacks() {
     assert_eq!(read_u32(payload, &mut offset), 0);
 }
 
+/// Empty process path + `cmd.exe /c …` args is what the teamserver sends (see
+/// `format_proc_create_args`).  Phantom must translate that to `/bin/sh -c <inner>` on
+/// Linux (bead 1f7q1 / regression: `cmd.exe: not found`).
+#[tokio::test]
+async fn proc_create_havoc_empty_process_cmd_exe_c_wraps_to_sh() {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&(DemonProcessCommand::Create as i32).to_le_bytes());
+    payload.extend_from_slice(&0_i32.to_le_bytes());
+    payload.extend_from_slice(&utf16_payload(""));
+    payload.extend_from_slice(&utf16_payload("cmd.exe /c echo rc-havoc-wrap"));
+    payload.extend_from_slice(&1_i32.to_le_bytes());
+    payload.extend_from_slice(&0_i32.to_le_bytes());
+    let package = DemonPackage::new(DemonCommand::CommandProc, 401, payload);
+    let mut state = PhantomState::default();
+
+    execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
+
+    let callbacks = state.drain_callbacks();
+    let [
+        PendingCallback::Structured { payload, .. },
+        PendingCallback::Structured { payload: output_payload, .. },
+    ] = callbacks.as_slice()
+    else {
+        panic!("unexpected callbacks: {callbacks:?}");
+    };
+
+    let mut offset = 0;
+    assert_eq!(read_u32(payload, &mut offset), u32::from(DemonProcessCommand::Create));
+    assert_eq!(read_utf16(payload, &mut offset), "/bin/sh");
+
+    let mut out_offset = 0;
+    let text_len = read_u32(output_payload, &mut out_offset) as usize;
+    let text = std::str::from_utf8(&output_payload[out_offset..out_offset + text_len])
+        .expect("valid utf8");
+    assert!(
+        text.contains("rc-havoc-wrap"),
+        "expected inner echo output in captured stdout, got {text:?}"
+    );
+    out_offset += text_len;
+    let exit_code =
+        i32::from_le_bytes(output_payload[out_offset..out_offset + 4].try_into().expect("4 bytes"));
+    assert_eq!(exit_code, 0);
+}
+
 #[tokio::test]
 #[cfg(unix)]
 async fn proc_create_with_pipe_reports_minus_one_when_shell_sigkilled() {

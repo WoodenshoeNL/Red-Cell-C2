@@ -9,4 +9,5 @@
 /test_module_stomp
 /test_ja3
 /test_ecdh_init
+/test_transport_http_helpers
 /archon_replay_harness

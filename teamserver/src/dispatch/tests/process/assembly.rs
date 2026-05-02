@@ -591,6 +591,9 @@ async fn process_create_verbose_success_broadcasts_info_with_path_and_pid() {
         message.contains("C:\\cmd.exe") && message.contains("1234"),
         "expected path and pid in message, got: {message}"
     );
+
+    let entries = database.agent_responses().list_for_agent(0xAA).await.expect("db query");
+    assert_eq!(entries.len(), 1, "verbose+success+unpiped must persist to DB");
 }
 
 #[tokio::test]
@@ -734,11 +737,7 @@ async fn process_create_verbose_success_piped_broadcasts_but_does_not_persist() 
     assert!(message.contains("C:\\cmd.exe") && message.contains("9999"), "got: {message}");
 
     // NOT persisted — database must have no entries for this agent
-    let entries = database
-        .agent_responses()
-        .list_for_agent(0xA1)
-        .await
-        .expect("db query");
+    let entries = database.agent_responses().list_for_agent(0xA1).await.expect("db query");
     assert!(entries.is_empty(), "verbose+piped+success must not persist to DB");
 }
 

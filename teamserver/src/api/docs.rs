@@ -74,6 +74,8 @@ pub(super) struct ApiInfoResponse {
             super::health::HealthListenerCounts,
             super::health::HealthPluginCounts,
             super::health::HealthPluginEntry,
+            super::health::HealthFailedSubsystem,
+            super::health::HealthSubsystemError,
             super::payload::WebhookStats,
             super::payload::DiscordWebhookStats,
             super::payload::FlushPayloadCacheResponse,

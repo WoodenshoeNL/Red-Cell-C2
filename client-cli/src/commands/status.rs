@@ -34,6 +34,14 @@ struct HealthResponse {
     plugins: HealthPluginCounts,
     #[serde(default)]
     plugin_health: Vec<HealthPluginEntryWire>,
+    #[serde(default)]
+    subsystem_errors: Vec<HealthSubsystemErrorWire>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HealthSubsystemErrorWire {
+    subsystem: String,
+    message: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -95,6 +103,15 @@ pub struct StatusPluginCounts {
     pub disabled: u32,
 }
 
+/// A subsystem that failed while the teamserver assembled the health snapshot.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct StatusSubsystemError {
+    /// Subsystem identifier (`listeners`, `plugins`, …).
+    pub subsystem: String,
+    /// Human-readable error from the teamserver.
+    pub message: String,
+}
+
 /// Per-plugin runtime health entry (mirrors the REST health payload).
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct StatusPluginHealthEntry {
@@ -126,6 +143,9 @@ pub struct StatusData {
     /// Per-plugin runtime health (empty when no plugins are loaded).
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub plugin_health: Vec<StatusPluginHealthEntry>,
+    /// Subsystem probe failures reported by the teamserver (empty when all probes succeeded).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub subsystem_errors: Vec<StatusSubsystemError>,
 }
 
 impl TextRender for StatusData {
@@ -164,6 +184,14 @@ impl TextRender for StatusData {
                 ]);
             }
         }
+        if !self.subsystem_errors.is_empty() {
+            for err in &self.subsystem_errors {
+                table.add_row([
+                    Cell::new(format!("subsystem_error: {}", err.subsystem)),
+                    Cell::new(&err.message),
+                ]);
+            }
+        }
         table.to_string()
     }
 }
@@ -190,6 +218,12 @@ pub async fn run(client: &ApiClient) -> Result<StatusData, CliError> {
         })
         .collect();
 
+    let subsystem_errors = health
+        .subsystem_errors
+        .into_iter()
+        .map(|e| StatusSubsystemError { subsystem: e.subsystem, message: e.message })
+        .collect();
+
     Ok(StatusData {
         version: root.version,
         uptime_secs: health.uptime_secs,
@@ -206,6 +240,7 @@ pub async fn run(client: &ApiClient) -> Result<StatusData, CliError> {
             disabled: health.plugins.disabled,
         },
         plugin_health,
+        subsystem_errors,
     })
 }
 
@@ -236,6 +271,7 @@ mod tests {
             listeners: StatusListenerCounts { running: 0, stopped: 1 },
             plugins: StatusPluginCounts { loaded: 0, failed: 0, disabled: 0 },
             plugin_health: vec![],
+            subsystem_errors: vec![],
         }
     }
 
@@ -483,5 +519,49 @@ mod tests {
         assert_eq!(data.listeners, StatusListenerCounts { running: 0, stopped: 2 });
         assert_eq!(data.plugins, StatusPluginCounts { loaded: 1, failed: 0, disabled: 0 });
         assert!(data.plugin_health.is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_success_degraded_when_subsystem_probe_fails() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"version": "v1"})),
+            )
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/health"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "degraded",
+                "uptime_secs": 12u64,
+                "active_operators": 0u64,
+                "agents": { "active": 1, "total": 1 },
+                "listeners": { "running": 0, "stopped": 0 },
+                "database": "ok",
+                "plugins": { "loaded": 0, "failed": 0, "disabled": 0 },
+                "plugin_health": [],
+                "subsystem_errors": [
+                    { "subsystem": "listeners", "message": "listener inventory failed: database locked" },
+                ],
+            })))
+            .mount(&server)
+            .await;
+
+        let client = crate::client::ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
+        let data = run(&client).await.expect("status run");
+
+        assert_eq!(data.status, "degraded");
+        assert_eq!(data.database, "ok");
+        assert_eq!(
+            data.subsystem_errors,
+            vec![StatusSubsystemError {
+                subsystem: "listeners".to_owned(),
+                message: "listener inventory failed: database locked".to_owned(),
+            }]
+        );
     }
 }

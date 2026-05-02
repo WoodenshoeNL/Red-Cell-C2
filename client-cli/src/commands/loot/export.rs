@@ -134,6 +134,7 @@ mod tests {
                 captured_at: "2026-01-01T12:00:00Z".to_owned(),
                 has_data: true,
                 operator: Some("alice".to_owned()),
+                task_id: None,
             },
             LootEntry {
                 id: 2,
@@ -145,6 +146,7 @@ mod tests {
                 captured_at: "2026-01-02T08:30:00Z".to_owned(),
                 has_data: false,
                 operator: None,
+                task_id: None,
             },
         ]
     }

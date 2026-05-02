@@ -1,10 +1,15 @@
 //! `agent upload` / `agent download` — file transfer tasks.
 
+use std::time::{Duration, Instant};
+
+use tokio::time::sleep;
 use tracing::instrument;
 
 use crate::AgentId;
+use crate::backoff::Backoff;
 use crate::client::ApiClient;
 use crate::error::CliError;
+use crate::util::percent_encode;
 
 use super::types::TransferResult;
 use super::wire::TaskQueuedResponse;
@@ -68,16 +73,17 @@ pub(crate) async fn upload(
     })
 }
 
-/// `agent download <id> --src <remote> --dst <local>` — queue a file
-/// download task on the agent via the REST API.
+/// `agent download <id> --src <remote> --dst <local>` — download a remote file
+/// to local disk via the agent.
 ///
-/// POSTs to `POST /agents/{id}/download` with `{ remote_path }`.  The
-/// actual file content will arrive asynchronously via agent callbacks;
-/// the CLI returns the task ID so the caller can poll for completion.
+/// POSTs to `POST /agents/{id}/download` with `{ remote_path }`, then polls
+/// `GET /loot` until the loot entry with the matching task_id appears, fetches
+/// the loot bytes, and writes them to `dst`.
 ///
 /// # Errors
 ///
-/// Propagates HTTP errors from the server.
+/// Returns [`CliError::Timeout`] if the loot entry does not appear within 120 s.
+/// Propagates HTTP errors and filesystem errors.
 #[instrument(skip(client))]
 pub(crate) async fn download(
     client: &ApiClient,
@@ -89,9 +95,53 @@ pub(crate) async fn download(
     struct Body<'a> {
         remote_path: &'a str,
     }
+    #[derive(serde::Deserialize)]
+    struct RawLootSummary {
+        id: i64,
+        task_id: Option<String>,
+        has_data: bool,
+    }
+    #[derive(serde::Deserialize)]
+    struct RawLootPage {
+        items: Vec<RawLootSummary>,
+    }
 
     let resp: TaskQueuedResponse =
         client.post(&format!("/agents/{id}/download"), &Body { remote_path: src }).await?;
+    let task_id = resp.task_id.clone();
+
+    // Poll for the loot entry created by this download task (up to 120 s).
+    const TIMEOUT_SECS: u64 = 120;
+    let deadline = Instant::now() + Duration::from_secs(TIMEOUT_SECS);
+    let mut backoff = Backoff::new();
+    let loot_id = loop {
+        if Instant::now() >= deadline {
+            return Err(CliError::Timeout(format!(
+                "timed out waiting for download loot entry for task {task_id} after {TIMEOUT_SECS}s"
+            )));
+        }
+        let agent_str = id.to_string();
+        let path = format!(
+            "/loot?kind=download&agent_id={}",
+            percent_encode(&agent_str)
+        );
+        let page: RawLootPage = client.get(&path).await?;
+        if let Some(entry) = page
+            .items
+            .iter()
+            .find(|e| e.task_id.as_deref() == Some(&task_id) && e.has_data)
+        {
+            break entry.id;
+        }
+        backoff.record_empty();
+        sleep(backoff.delay()).await;
+    };
+
+    // Fetch the loot bytes and write to dst.
+    let bytes = client.get_raw_bytes(&format!("/loot/{loot_id}")).await?;
+    tokio::fs::write(dst, &bytes)
+        .await
+        .map_err(|e| CliError::General(format!("failed to write download to {dst:?}: {e}")))?;
 
     Ok(TransferResult {
         agent_id: id,

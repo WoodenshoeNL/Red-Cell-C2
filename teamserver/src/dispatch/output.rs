@@ -30,9 +30,6 @@ pub(super) async fn handle_command_output_callback(
 ) -> Result<Option<Vec<u8>>, CommandDispatchError> {
     let mut parser = CallbackParser::new(payload, u32::from(DemonCommand::CommandOutput));
     let output = parser.read_string("command output text")?;
-    if output.is_empty() {
-        return Ok(None);
-    }
     // The Red Cell Specter agent appends a trailing i32 (LE) exit code after
     // the length-prefixed output string.  Original Havoc demons do not send
     // this field, so we read it only when bytes remain in the payload.
@@ -44,6 +41,13 @@ pub(super) async fn handle_command_output_callback(
         }
     }
     let context = loot_context(registry, agent_id, request_id).await;
+    // Persist even when output is empty if we have a task context — the CLI polls
+    // the database by task_id and will time out if no entry is ever created.
+    // Commands like `kill <pid>` produce no output (exit code only) and previously
+    // caused exec_wait to hang until timeout.
+    if output.is_empty() && context.task_id.is_empty() {
+        return Ok(None);
+    }
     broadcast_and_persist_agent_response(
         database,
         events,

@@ -22,6 +22,7 @@ pub(super) struct RawLootSummary {
     pub captured_at: String,
     pub has_data: bool,
     pub operator: Option<String>,
+    pub task_id: Option<String>,
 }
 
 /// Mirrors the `LootPage` wrapper returned by `GET /api/v1/loot`.
@@ -53,6 +54,9 @@ pub struct LootEntry {
     pub has_data: bool,
     /// Operator who triggered the capture, if known.
     pub operator: Option<String>,
+    /// Task identifier that produced this entry, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
 }
 
 impl TextRow for LootEntry {
@@ -119,6 +123,7 @@ pub(super) fn loot_entry_from_raw(raw: RawLootSummary) -> LootEntry {
         captured_at: raw.captured_at,
         has_data: raw.has_data,
         operator: raw.operator,
+        task_id: raw.task_id,
     }
 }
 
@@ -137,6 +142,7 @@ mod tests {
             captured_at: "2026-01-01T12:00:00Z".to_owned(),
             has_data: true,
             operator: Some("alice".to_owned()),
+            task_id: None,
         }
     }
 

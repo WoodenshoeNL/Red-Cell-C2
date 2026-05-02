@@ -118,8 +118,10 @@ def assert_operator_attribution(
     """Assert each row's operator is either the expected API key actor or an allowed system actor."""
 
     allowed: set[tuple[str, str]] = set(extra_allowed_actor_actions or ())
-    # Default: agent checkin callbacks are attributed to the teamserver itself.
+    # Lifecycle events emitted by the teamserver on behalf of the system, not an operator.
     allowed.add(("teamserver", "agent.checkin"))
+    allowed.add(("teamserver", "agent.registered"))
+    allowed.add(("teamserver", "agent.dead"))
 
     for e in entries:
         op = (e.get("operator") or "").strip()

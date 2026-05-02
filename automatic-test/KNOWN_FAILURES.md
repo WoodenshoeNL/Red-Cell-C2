@@ -32,8 +32,10 @@ row to *Resolved* and add the closing commit / fix description.
 
 | Signature (substring of error / stderr) | Scenario | Bead | First seen | Last seen | Status |
 |----------------------------------------|----------|------|------------|-----------|--------|
-| `[TIMEOUT] timeout: timed out waiting for output from task` | 04, 06, 07, 08, 11, 21 | red-cell-c2-1f7q1 | 2026-04-24 | 2026-05-02 | P1, Phantom crashes ~1s after first task dispatch; agent.dead event within 1s of task; all prior fixes (vk3xs etc.) are resolved — new crash site |
-| `Path:[]` | 05, 14, 19 | red-cell-c2-2u0hw | 2026-04-30 | 2026-05-02 | P1, Demon Windows PATH still empty after qaru8 encode_utf16 fix — direct exes start (`Process started: Path:[]`) but cmd builtins (echo) still fail (`Process could not be started: Path:[]`), regression of red-cell-c2-qaru8 |
+| `[TIMEOUT] timeout: timed out waiting for output from task` | 04, 06, 07, 08, 11, 14, 19, 21 | red-cell-c2-1f7q1 | 2026-04-24 | 2026-05-02 | P1, Phantom crashes ~1s after first task dispatch (Phantom fix landed in de6599bd but not compiled yet); signature also seen for Demon in sc14/19 — see red-cell-c2-gscsb |
+| `[TIMEOUT] timeout: timed out waiting for output from task` | 14, 19 | red-cell-c2-gscsb | 2026-05-02 | 2026-05-02 | P1, Demon task exec times out after cmd.exe /c wrapping fix (d42dfead); regression of red-cell-c2-2u0hw |
+| `undefined reference to '__mingw_vsnprintf'` | 05, 06, 07, 08, 17 | red-cell-c2-cgzoo | 2026-05-02 | 2026-05-02 | P1, Archon build fails — snprintf + OutputDebugStringA added to TransportHttp.c in 1d3ba119 but agent uses -nostdlib (no CRT) and -lbcrypt only |
+| `audit operator mismatch: expected` | 11 | *(fixed inline)* | 2026-05-02 | 2026-05-02 | audit_checks.py assert_operator_attribution now allows agent.registered and agent.dead for teamserver |
 | `Timed out after 60s waiting for agent checkin` | 17 | red-cell-c2-vudj9 | 2026-04-29 | 2026-05-02 | P2, Archon Windows checkin still times out after S4U schtask fix — agent runs but makes zero TCP connections, regression of red-cell-c2-550gu |
 | `No space left on device` | 22, 23 | red-cell-c2-sb5bm | 2026-05-02 | 2026-05-02 | P3, sccache grew to 8.3 GB filling root FS — environment issue, not product; workaround: rm -rf ~/.cache/sccache |
 
@@ -47,6 +49,7 @@ than a new bug.
 
 | Signature (substring of error / stderr) | Scenario | Bead | Resolved at | Notes |
 |----------------------------------------|----------|------|-------------|-------|
+| `Process could not be started: Path:[]` (cmd.exe /c wrapping fix) | 05, 14, 19 | red-cell-c2-2u0hw | 2026-05-02 | d42dfead wraps all shell commands in cmd.exe /c; DB notification not persisted for piped+success; bead closed. Path:[] symptom gone. **REGRESSED** — command output still doesn't return, see red-cell-c2-gscsb (timeout). |
 | `Process could not be started: Path:[]` (qaru8 encode_utf16 fix) | 05, 14, 19 | red-cell-c2-qaru8 | 2026-05-01 | encode_utf16("") now emits length=0; CreateProcessW no longer fails for direct exes. PATH still empty → cmd builtins still fail. **REGRESSED** — see red-cell-c2-2u0hw. |
 | `Timed out after 60s waiting for agent checkin` (S4U schtask fix) | 17 | red-cell-c2-jv15n, red-cell-c2-550gu | 2026-05-01 | jv15n bisected to "no TCP connection"; 550gu switched execute_background to S4U — agent now runs as user, not SYSTEM. Agent still makes zero TCP connections. **REGRESSED** — see red-cell-c2-vudj9. |
 | `Timed out after 30s waiting for 10 new agent checkins` | 14 | red-cell-c2-8ss6q | 2026-04-30 | 10/10 Demon agents now check in (was 0/10). Checkin fixed by stale-process cleanup + listener-name filtering. Command execution now blocked by new PATH bug (red-cell-c2-z1hl9). |

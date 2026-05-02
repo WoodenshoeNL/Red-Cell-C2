@@ -564,4 +564,44 @@ mod tests {
             "re-registration after expiry must be accepted"
         );
     }
+
+    #[tokio::test]
+    async fn get_session_key_by_agent_id_returns_none_when_no_session() {
+        let (db, master_key) = test_db().await;
+        let repo = EcdhRepository::new(db.pool().clone(), master_key);
+
+        let result = repo.get_session_key_by_agent_id(0xDEAD_BEEF).await.expect("query");
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_session_key_by_agent_id_returns_most_recent_when_multiple_sessions() {
+        let (db, master_key) = test_db().await;
+        let repo = EcdhRepository::new(db.pool().clone(), master_key);
+
+        let agent_id = 0x1111_2222_u32;
+        let older_key = [0x11_u8; 32];
+        let newer_key = [0x22_u8; 32];
+
+        let conn_id1 = ConnectionId::generate().expect("conn1");
+        repo.store_session(&conn_id1, agent_id, &older_key).await.expect("store older");
+
+        // Wait a tick so created_at differs; SQLite stores seconds so we poke
+        // the row directly with a later timestamp instead.
+        let conn_id2 = ConnectionId::generate().expect("conn2");
+        repo.store_session(&conn_id2, agent_id, &newer_key).await.expect("store newer");
+
+        // Advance the second row's created_at past the first so ordering is deterministic.
+        sqlx::query(
+            "UPDATE ts_ecdh_sessions SET created_at = created_at + 1 WHERE connection_id = ?",
+        )
+        .bind(conn_id2.0.as_slice())
+        .execute(db.pool())
+        .await
+        .expect("advance timestamp");
+
+        let result =
+            repo.get_session_key_by_agent_id(agent_id).await.expect("query").expect("Some");
+        assert_eq!(result, newer_key, "must return key from most-recent session");
+    }
 }

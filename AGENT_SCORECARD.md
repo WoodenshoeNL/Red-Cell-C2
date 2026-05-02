@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1746 | 296 | 148 |
-| Bugs filed against | 284 | 50 | 18 |
-| Bug rate (bugs/task) | 0.16 | 0.17 | 0.12 |
-| Quality score | 84% | 83% | 88% |
+| Tasks closed | 1746 | 297 | 148 |
+| Bugs filed against | 285 | 50 | 19 |
+| Bug rate (bugs/task) | 0.16 | 0.17 | 0.13 |
+| Quality score | 84% | 83% | 87% |
 
-*Bug rates: Claude 284/1746=0.1627→0.16, Codex 50/296=0.1689→0.17, Cursor 18/148=0.1216→0.12*
+*Bug rates: Claude 285/1746=0.1632→0.16, Codex 50/297=0.1684→0.17, Cursor 19/148=0.1284→0.13*
 
 ## Violation Breakdown
 
@@ -26,9 +26,9 @@ Each loop run updates the running totals and appends a review entry.
 | Protocol errors | 32 | 32 | 4 |
 | Security issues | 75 | 40 | 0 |
 | Architecture drift | 67 | 25 | 9 |
-| Memory / resource leaks | 16 | 11 | 1 |
+| Memory / resource leaks | 16 | 11 | 2 |
 | Startup / lifecycle regressions | 5 | 10 | 0 |
-| Test infrastructure / flakiness | 67 | 6 | 1 |
+| Test infrastructure / flakiness | 68 | 6 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 6 | 5 | 1 |
 | Correctness / pagination | 72 | 9 | 2 |
@@ -7489,3 +7489,13 @@ Build: **cargo check --workspace** — passed (clean). **cargo clippy --workspac
 | Cursor | 23 | 2 | Heavy feature/fix cycle across `teamserver`, `client-cli`, `automatic-test`, `phantom`, `specter`, and `common`. Two regressions were filed against the new task-correlation work: `red-cell-c2-wua47` (`session_exec_wait` can return stale historical output by matching raw `request_id` before establishing a post-submission cursor boundary) and `red-cell-c2-cokjz` (`task-status` mixes rows/context from other tasks via `task_id = ? OR request_id = ?`). |
 
 Build: cargo check passed; cargo clippy passed; workspace test run did not complete before report deadline.
+
+### QA Review — 2026-05-02 19:23 — 97e5ae3f..d2a8d3bd
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 1 | No task-closing commits in this range. Filed `red-cell-c2-kvufd` against the older C replay harness wrapper after `cargo nextest` failed at `red-cell::c_agent_replay::c_demon_replay_harness_checkin` because the repo contains `0000.meta.json` but no `0000.bin`, and the test only checks that the corpus directory exists before spawning the C harness. |
+| Codex | 1 | 0 | Closed `red-cell-c2-92w66` and refactored `common/src/crypto/ecdh.rs` into focused submodules with regression coverage. No new QA findings filed against Codex in this review range. |
+| Cursor | 0 | 1 | Heavy feature/fix cycle across `teamserver`, `common`, `client-cli`, `automatic-test`, `phantom`, and `archon`. Filed `red-cell-c2-rkm9u` for the new Windows autotest launch path persisting Defender `-ExclusionProcess` entries and per-exe firewall allow rules without teardown, which will accumulate on long-lived QA VMs. |
+
+Build: `cargo check --workspace` passed; `cargo nextest run --workspace` failed at `red-cell::c_agent_replay::c_demon_replay_harness_checkin` (missing `tests/wire-corpus/demon/checkin/0000.bin`); `cargo clippy --workspace -- -D warnings` passed.

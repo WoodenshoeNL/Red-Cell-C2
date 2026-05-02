@@ -89,9 +89,12 @@ pub(super) async fn http_listener_handler(
                     corpus
                         .record_packet(agent_id, CorpusPacketDir::Tx, &ecdh_resp.payload, None)
                         .await;
+                    let listener_secret_hex =
+                        ecdh_resp.listener_secret_bytes.as_ref().map(|b| bytes_to_hex(b));
                     let keys = CorpusSessionKeys::new_gcm(
                         bytes_to_hex(&ecdh_resp.session_key),
                         format!("0x{agent_id:08x}"),
+                        listener_secret_hex,
                     );
                     corpus.write_session_keys_once(agent_id, keys).await;
                 }

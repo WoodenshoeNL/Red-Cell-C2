@@ -187,6 +187,17 @@ pub struct CorpusSessionKeys {
     /// `None` in legacy stub files that predate this field.
     #[serde(default)]
     pub encryption_scheme: Option<String>,
+
+    /// Listener X25519 private key (32 bytes) as a lowercase hex string (64 hex chars).
+    ///
+    /// Present only for ECDH sessions (`encryption_scheme = "aes-256-gcm"`).  Stored
+    /// alongside the session key so that corpus-replay tests can call
+    /// `open_registration_packet` with the same keypair the teamserver used during
+    /// capture, enabling full round-trip verification.
+    ///
+    /// `None` for AES-256-CTR sessions and in stub files that predate this field.
+    #[serde(default)]
+    pub listener_secret_key_hex: Option<String>,
 }
 
 impl CorpusSessionKeys {
@@ -206,6 +217,7 @@ impl CorpusSessionKeys {
             initial_ctr_block_offset: Some(initial_ctr_block_offset),
             agent_id_hex: Some(agent_id_hex),
             encryption_scheme: Some("aes-256-ctr".to_string()),
+            listener_secret_key_hex: None,
         }
     }
 
@@ -213,7 +225,14 @@ impl CorpusSessionKeys {
     ///
     /// GCM uses a per-packet random 12-byte nonce embedded in each ciphertext,
     /// so `aes_iv_hex`, `monotonic_ctr`, and `initial_ctr_block_offset` are `None`.
-    pub fn new_gcm(aes_key_hex: String, agent_id_hex: String) -> Self {
+    ///
+    /// `listener_secret_key_hex` should be provided when the listener's private key
+    /// is available, enabling corpus-replay tests to call `open_registration_packet`.
+    pub fn new_gcm(
+        aes_key_hex: String,
+        agent_id_hex: String,
+        listener_secret_key_hex: Option<String>,
+    ) -> Self {
         Self {
             version: CORPUS_FORMAT_VERSION,
             aes_key_hex: Some(aes_key_hex),
@@ -222,6 +241,7 @@ impl CorpusSessionKeys {
             initial_ctr_block_offset: None,
             agent_id_hex: Some(agent_id_hex),
             encryption_scheme: Some("aes-256-gcm".to_string()),
+            listener_secret_key_hex,
         }
     }
 }
@@ -286,7 +306,7 @@ mod tests {
 
     #[test]
     fn corpus_session_keys_gcm_has_null_ctr_fields() {
-        let keys = CorpusSessionKeys::new_gcm("c".repeat(64), "0xDEADBEEF".to_string());
+        let keys = CorpusSessionKeys::new_gcm("c".repeat(64), "0xDEADBEEF".to_string(), None);
         assert!(keys.aes_iv_hex.is_none(), "GCM keys must have null aes_iv_hex");
         assert!(keys.monotonic_ctr.is_none(), "GCM keys must have null monotonic_ctr");
         assert!(
@@ -382,5 +402,40 @@ mod tests {
         );
         assert_eq!(keys.monotonic_ctr, Some(true));
         assert_eq!(keys.initial_ctr_block_offset, Some(42));
+    }
+
+    #[test]
+    fn corpus_session_keys_gcm_with_listener_secret_round_trips() {
+        let secret_hex = "f".repeat(64);
+        let keys = CorpusSessionKeys::new_gcm(
+            "c".repeat(64),
+            "0x00112233".to_string(),
+            Some(secret_hex.clone()),
+        );
+        assert_eq!(keys.listener_secret_key_hex.as_deref(), Some(secret_hex.as_str()));
+        let json = serde_json::to_string(&keys).expect("serialize");
+        let decoded: CorpusSessionKeys = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded.listener_secret_key_hex.as_deref(), Some(secret_hex.as_str()));
+    }
+
+    #[test]
+    fn corpus_session_keys_gcm_without_listener_secret_has_null_field() {
+        let keys = CorpusSessionKeys::new_gcm("c".repeat(64), "0xDEADBEEF".to_string(), None);
+        assert!(keys.listener_secret_key_hex.is_none());
+        let json = serde_json::to_string(&keys).expect("serialize");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");
+        assert!(parsed["listener_secret_key_hex"].is_null());
+    }
+
+    #[test]
+    fn corpus_session_keys_ctr_has_null_listener_secret() {
+        let keys = CorpusSessionKeys::new(
+            "a".repeat(64),
+            "b".repeat(32),
+            false,
+            0,
+            "0x12345678".to_string(),
+        );
+        assert!(keys.listener_secret_key_hex.is_none(), "CTR keys must not carry listener secret");
     }
 }

@@ -775,3 +775,59 @@ pub fn add_length_prefixed_utf16_le(buffer: &mut Vec<u8>, value: &str) {
     encoded.extend_from_slice(&[0, 0]);
     add_length_prefixed_bytes_be(buffer, &encoded);
 }
+
+// ──────────────────────────────────── shared corpus helpers ──
+
+/// Resolve the on-disk path for a corpus scenario directory.
+///
+/// `CARGO_MANIFEST_DIR` points to `teamserver/` at compile time; the corpus
+/// lives one level up at `<workspace-root>/tests/wire-corpus/`.
+pub fn corpus_scenario_dir(agent: &str, scenario: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("tests")
+        .join("wire-corpus")
+        .join(agent)
+        .join(scenario)
+}
+
+/// Return `true` when `<corpus_dir>/<agent>/<scenario>/` contains at least one `.bin` file.
+///
+/// Use this at the start of corpus-replay tests to gate execution: if the corpus has not
+/// been captured yet, the test should return early (or rely on `#[ignore]`).
+pub fn corpus_has_real_data(agent: &str, scenario: &str) -> bool {
+    let dir = corpus_scenario_dir(agent, scenario);
+    if !dir.exists() {
+        return false;
+    }
+    std::fs::read_dir(&dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .any(|e| e.path().extension().and_then(|x| x.to_str()) == Some("bin"))
+        })
+        .unwrap_or(false)
+}
+
+/// Load the first `.bin` file from a corpus scenario directory.
+///
+/// Returns the raw bytes of the first (sequence-0) packet, or `None` if the
+/// directory is empty or does not exist.
+pub fn load_first_corpus_packet(agent: &str, scenario: &str) -> Option<Vec<u8>> {
+    let dir = corpus_scenario_dir(agent, scenario);
+    if !dir.exists() {
+        return None;
+    }
+    let path = dir.join("0000.bin");
+    std::fs::read(&path).ok()
+}
+
+/// Load `session.keys.json` from a corpus scenario directory.
+pub fn load_corpus_session_keys(
+    agent: &str,
+    scenario: &str,
+) -> Option<red_cell_common::corpus::CorpusSessionKeys> {
+    let dir = corpus_scenario_dir(agent, scenario);
+    let path = dir.join("session.keys.json");
+    let json = std::fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&json).ok()
+}

@@ -26,6 +26,7 @@ pub(crate) async fn process_ecdh_registration(
     database: &Database,
     events: &EventBus,
     external_ip: IpAddr,
+    listener_secret_bytes: Option<[u8; 32]>,
 ) -> Result<EcdhResponse, ListenerManagerError> {
     let now = OffsetDateTime::now_utc();
     let external_ip_str = external_ip.to_string();
@@ -125,5 +126,5 @@ pub(crate) async fn process_ecdh_registration(
         }
     }
 
-    Ok(EcdhResponse { payload: response, agent_id, session_key })
+    Ok(EcdhResponse { payload: response, agent_id, session_key, listener_secret_bytes })
 }

@@ -187,6 +187,7 @@ pub(crate) async fn process_ecdh_packet(
             database,
             events,
             external_ip,
+            Some(kp.secret_bytes),
         )
         .await?,
     ))

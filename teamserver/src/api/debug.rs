@@ -104,7 +104,7 @@ pub(super) async fn get_corpus_keys(
             .map_err(|_| CorpusKeysError::Internal)?
             .ok_or(CorpusKeysError::NoEcdhSession)?;
 
-        let keys = CorpusSessionKeys::new_gcm(bytes_to_hex(&session_key), agent_id_hex);
+        let keys = CorpusSessionKeys::new_gcm(bytes_to_hex(&session_key), agent_id_hex, None);
         return Ok(Json(keys));
     }
 

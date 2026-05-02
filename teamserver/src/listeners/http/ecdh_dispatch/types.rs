@@ -12,6 +12,11 @@ pub(crate) struct EcdhResponse {
     /// ECDH session key; the registry stores zeros for ECDH agents, so we
     /// carry the real key here for corpus `session.keys.json` sidecars.
     pub(crate) session_key: [u8; 32],
+    /// Listener X25519 private key used during registration.  Stored in
+    /// corpus `session.keys.json` so replay tests can call
+    /// `open_registration_packet` with the exact same keypair.
+    /// `None` for session packets (no registration occurred).
+    pub(crate) listener_secret_bytes: Option<[u8; 32]>,
 }
 
 /// Outcome of an ECDH packet dispatch attempt.

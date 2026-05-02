@@ -588,6 +588,7 @@ async fn duplicate_registration_does_not_leak_session_row() {
         &db,
         &events,
         ip,
+        None,
     )
     .await;
     assert!(result.is_ok(), "first registration must succeed; got: {result:?}");
@@ -604,6 +605,7 @@ async fn duplicate_registration_does_not_leak_session_row() {
         &db,
         &events,
         ip,
+        None,
     )
     .await;
     assert!(dup_result.is_err(), "duplicate registration must fail");
@@ -775,6 +777,7 @@ async fn successful_registration_commits_agent_and_session() {
         &db,
         &events,
         ip,
+        None,
     )
     .await;
     assert!(result.is_ok(), "registration must succeed; got: {result:?}");
@@ -814,6 +817,7 @@ async fn ecdh_registration_response_carries_agent_id_and_session_key() {
         &db,
         &events,
         ip,
+        None,
     )
     .await
     .expect("registration must succeed");
@@ -855,6 +859,7 @@ async fn ecdh_handled_path_writes_corpus_files() {
         &db,
         &events,
         ip,
+        None,
     )
     .await
     .expect("registration must succeed");
@@ -869,6 +874,7 @@ async fn ecdh_handled_path_writes_corpus_files() {
     let keys = CorpusSessionKeys::new_gcm(
         bytes_to_hex(&resp.session_key),
         format!("0x{:08x}", resp.agent_id),
+        None,
     );
     corpus.write_session_keys_once(resp.agent_id, keys).await;
 

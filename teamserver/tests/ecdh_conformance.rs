@@ -15,7 +15,24 @@
 //! The test structure mirrors `wire_replay.rs`: a fixture-generation helper
 //! ensures deterministic test data, and the replay tests feed that data
 //! through the same library functions the teamserver uses in production.
+//!
+//! # Corpus-replay test (`replay_ecdh_registration_from_real_corpus`)
+//!
+//! The `replay_ecdh_registration_from_real_corpus` test is marked `#[ignore]`
+//! until a real Specter/Phantom ECDH corpus has been captured via:
+//!
+//! ```text
+//! cd automatic-test && python test.py --scenario 05 --capture-corpus ../tests/wire-corpus
+//! ```
+//!
+//! Once the corpus is present in `tests/wire-corpus/specter/checkin/` (or
+//! `phantom/checkin/`) with a `session.keys.json` that includes
+//! `listener_secret_key_hex`, remove the `#[ignore]` attribute so CI exercises
+//! the real cross-implementation round-trip on every run.
 
+mod common;
+
+use red_cell_common::corpus::CORPUS_FORMAT_VERSION;
 use red_cell_common::crypto::ecdh::{
     ConnectionId, ListenerKeypair, build_registration_packet_from_parts,
     build_registration_response, open_registration_packet, open_session_packet,
@@ -202,6 +219,118 @@ fn replay_ecdh_tampered_session_packet_is_rejected() {
 
     let result = open_session_packet(&FIXTURE_SESSION_KEY, &packet[16..]);
     assert!(result.is_err(), "tampered session packet must be rejected by open_session_packet");
+}
+
+/// Corpus-replay test: verify that a real Specter/Phantom ECDH registration packet
+/// captured from a live agent decrypts correctly with the listener keypair that was
+/// active during the capture.
+///
+/// # Why this test exists
+///
+/// The synthetic tests above only verify Rust→Rust round-trips.  This test feeds
+/// a packet produced by a real C/Rust agent through `open_registration_packet` and
+/// checks that the derived session key matches the value the teamserver recorded in
+/// `session.keys.json` during the capture.  Any cross-implementation drift in the
+/// X25519 or HKDF implementations (e.g. the class of bugs in red-cell-c2-5dggm)
+/// will cause this test to fail.
+///
+/// # Capturing the corpus
+///
+/// ```text
+/// cd automatic-test
+/// python test.py --scenario 05 --capture-corpus ../tests/wire-corpus
+/// ```
+///
+/// The capture lands in `tests/wire-corpus/specter/checkin/` with a
+/// `session.keys.json` that includes `listener_secret_key_hex`.
+///
+/// # Enabling in CI
+///
+/// Once the corpus is committed, remove the `#[ignore]` attribute so this test
+/// runs on every CI pass.
+#[test]
+#[ignore = "requires a live corpus captured via `python test.py --scenario 05 --capture-corpus ../tests/wire-corpus`"]
+fn replay_ecdh_registration_from_real_corpus() {
+    // Try specter first, then phantom — whichever has a real corpus.
+    let (agent, scenario) = if common::corpus_has_real_data("specter", "checkin") {
+        ("specter", "checkin")
+    } else if common::corpus_has_real_data("phantom", "checkin") {
+        ("phantom", "checkin")
+    } else {
+        panic!(
+            "no real ECDH corpus found — capture one first:\n\
+             cd automatic-test && python test.py --scenario 05 --capture-corpus ../tests/wire-corpus"
+        );
+    };
+
+    let packet_bytes = common::load_first_corpus_packet(agent, scenario)
+        .unwrap_or_else(|| panic!("corpus/{agent}/{scenario}/0000.bin must exist"));
+
+    let keys = common::load_corpus_session_keys(agent, scenario)
+        .unwrap_or_else(|| panic!("corpus/{agent}/{scenario}/session.keys.json must exist"));
+
+    assert_eq!(
+        keys.version, CORPUS_FORMAT_VERSION,
+        "session.keys.json version mismatch — re-capture the corpus"
+    );
+
+    let listener_secret_hex = keys.listener_secret_key_hex.as_deref().unwrap_or_else(|| {
+        panic!(
+            "session.keys.json is missing listener_secret_key_hex — \
+             re-capture with an updated teamserver that stores the listener private key"
+        )
+    });
+
+    let expected_session_key_hex = keys
+        .aes_key_hex
+        .as_deref()
+        .unwrap_or_else(|| panic!("session.keys.json is missing aes_key_hex"));
+
+    // Decode listener private key.
+    let listener_secret_bytes: Vec<u8> = listener_secret_hex
+        .as_bytes()
+        .chunks(2)
+        .map(|chunk| {
+            let s = std::str::from_utf8(chunk).expect("valid utf8 hex pairs");
+            u8::from_str_radix(s, 16).expect("valid hex digits in listener_secret_key_hex")
+        })
+        .collect();
+    assert_eq!(
+        listener_secret_bytes.len(),
+        32,
+        "listener_secret_key_hex must decode to exactly 32 bytes"
+    );
+    let listener_secret_arr: [u8; 32] = listener_secret_bytes.try_into().expect("32-byte slice");
+    let kp = ListenerKeypair::from_bytes(listener_secret_arr);
+
+    // Decode expected session key.
+    let expected_key_bytes: Vec<u8> = expected_session_key_hex
+        .as_bytes()
+        .chunks(2)
+        .map(|chunk| {
+            let s = std::str::from_utf8(chunk).expect("valid utf8 hex pairs");
+            u8::from_str_radix(s, 16).expect("valid hex digits in aes_key_hex")
+        })
+        .collect();
+    assert_eq!(expected_key_bytes.len(), 32, "aes_key_hex must decode to exactly 32 bytes");
+    let expected_session_key: [u8; 32] = expected_key_bytes.try_into().expect("32-byte slice");
+
+    // Open the registration packet.  Use u64::MAX as the replay window so the
+    // test does not fail on a packet captured days earlier — the goal is to
+    // verify the cryptographic derivation, not the freshness check.
+    let parsed = open_registration_packet(&kp, u64::MAX, &packet_bytes).unwrap_or_else(|e| {
+        panic!(
+            "open_registration_packet failed on real {agent} corpus packet: {e}\n\
+             This indicates cross-implementation drift in X25519 or HKDF-SHA256."
+        )
+    });
+
+    assert_eq!(
+        parsed.session_key, expected_session_key,
+        "session key derived from real {agent} corpus packet must match session.keys.json;\n\
+         a mismatch indicates X25519 or HKDF-SHA256 drift between the C/Rust agent and \
+         the Rust teamserver"
+    );
 }
 
 /// Verify that `FIXTURE_SHARED_SECRET_HEX` encodes the expected X25519 result

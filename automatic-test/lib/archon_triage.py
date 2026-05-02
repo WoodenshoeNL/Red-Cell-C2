@@ -148,6 +148,53 @@ def _try_windows_workdir_processes(target: Any, run_remote: Any) -> str:
         return f"work_dir process probe failed: {e}"
 
 
+def _try_windows_appcrash_events(target: Any, run_remote: Any, exe_leaf: str) -> str:
+    """Check Windows Application event log for APPCRASH events for *exe_leaf* (EventID 1000).
+
+    An Application Error entry confirms the agent process crashed (unhandled exception)
+    rather than simply failing to make network connections.  The exit-code field inside
+    the crash record often points to the faulting module.
+
+    Returns a summary string.  Never raises.
+    """
+    try:
+        leaf_q = exe_leaf.replace("'", "''")
+        script = (
+            "Get-WinEvent -LogName 'Application' -MaxEvents 30 "
+            "-ErrorAction SilentlyContinue | "
+            f"Where-Object {{ $_.Id -eq 1000 -and $_.Message -match '{leaf_q}' }} | "
+            "ForEach-Object { $_.TimeCreated.ToString('o') + ' [1000] ' + $_.Message.Split([Environment]::NewLine)[0] }"
+        )
+        cmd = f"powershell -NoProfile -Command \"{script}\""
+        out = run_remote(target, cmd, timeout=30)
+        return out.strip() if out.strip() else f"(no APPCRASH entries for {exe_leaf!r} in last 30 Application events)"
+    except Exception as e:  # noqa: BLE001
+        return f"APPCRASH event probe failed: {e}"
+
+
+def _try_verify_np_exclusion(target: Any, run_remote: Any, ip_address: str) -> str:
+    """Verify that *ip_address* is present in Defender's ExclusionIpAddress list.
+
+    Confirms that ``defender_network_protection_exclusion`` actually took effect before
+    the agent was launched.  An absent entry means the Network Protection block is still
+    active and WinHTTP connections from S4U processes will be silently dropped.
+
+    Returns a summary string.  Never raises.
+    """
+    try:
+        ip_q = ip_address.replace("'", "''")
+        script = (
+            "$excl = (Get-MpPreference -ErrorAction SilentlyContinue).ExclusionIpAddress; "
+            f"if ($excl -contains '{ip_q}') {{ Write-Output 'PRESENT' }} "
+            f"else {{ Write-Output ('ABSENT — current list: ' + ($excl -join ', ')) }}"
+        )
+        cmd = f"powershell -NoProfile -Command \"{script}\""
+        out = run_remote(target, cmd, timeout=20)
+        return out.strip() if out.strip() else "(Get-MpPreference returned no output)"
+    except Exception as e:  # noqa: BLE001
+        return f"MpPreference ExclusionIpAddress probe failed: {e}"
+
+
 def _try_windows_network_protection_events(target: Any, run_remote: Any) -> str:
     """Check Windows Defender Network Protection block events (IDs 1125/1127/1128).
 
@@ -288,5 +335,31 @@ def format_archon_checkin_timeout_diagnostics(
         lines.append(_try_windows_workdir_processes(target, _run_remote3))
     except Exception as e:  # noqa: BLE001
         lines.append(f"work_dir process section failed: {e}")
+
+    # APPCRASH events: EventID 1000 for the agent exe confirms a crash (unhandled
+    # exception) as opposed to a clean-exit or network-block scenario.
+    if probe_host:
+        try:
+            from lib.deploy import run_remote as _run_remote5
+
+            work_dir = str(getattr(target, "work_dir", "") or "")
+            # Best-effort: extract the exe leaf that was last run from work_dir path.
+            # The exe name pattern is "agent-<hex>.exe" — just probe all of them.
+            exe_leaf = "agent-"
+            lines.append("--- APPCRASH events for agent-*.exe (Application EventID 1000) ---")
+            lines.append(_try_windows_appcrash_events(target, _run_remote5, exe_leaf))
+        except Exception as e:  # noqa: BLE001
+            lines.append(f"APPCRASH event section failed: {e}")
+
+    # MpPreference ExclusionIpAddress verification: confirms the Network Protection
+    # IP exclusion was applied before launch.  ABSENT means NP is still blocking.
+    if probe_host:
+        try:
+            from lib.deploy import run_remote as _run_remote6
+
+            lines.append(f"--- MpPreference ExclusionIpAddress ({probe_host}) ---")
+            lines.append(_try_verify_np_exclusion(target, _run_remote6, probe_host))
+        except Exception as e:  # noqa: BLE001
+            lines.append(f"MpPreference exclusion verification failed: {e}")
 
     return "\n".join(lines) + "\n"

@@ -39,7 +39,11 @@ class TestFormatArchonCheckinTimeoutDiagnostics(unittest.TestCase):
         self.assertIn("Windows target UTC", text)
         self.assertIn("Test-NetConnection", text)
         self.assertIn("live processes from target.work_dir", text)
-        self.assertGreaterEqual(m.call_count, 3)
+        self.assertIn("APPCRASH", text)
+        self.assertIn("MpPreference ExclusionIpAddress", text)
+        # UTC (1) + TNC (1) + netstat (1) + Defender AV (1) + NP events (1)
+        # + process probe (1) + APPCRASH (1) + MpPreference (1).
+        self.assertGreaterEqual(m.call_count, 8)
 
     def test_skips_tnc_when_no_host(self) -> None:
         from lib.archon_triage import format_archon_checkin_timeout_diagnostics
@@ -57,7 +61,9 @@ class TestFormatArchonCheckinTimeoutDiagnostics(unittest.TestCase):
         # TNC is skipped when no probe host, but UTC + netstat + Defender are still called.
         self.assertNotIn("Test-NetConnection", text)
         self.assertIn("live processes from target.work_dir", text)
-        # UTC (1) + netstat (1) + Defender AV events (1) + Network Protection events (1) + process probe (1).
+        # UTC (1) + netstat (1) + Defender AV events (1) + Network Protection events (1)
+        # + process probe (1).  APPCRASH and MpPreference probes are probe_host-gated →
+        # skipped when probe_host is None (ctx.env={}, ctx.cli=None).
         self.assertEqual(m.call_count, 5)
 
 

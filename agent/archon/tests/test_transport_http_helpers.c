@@ -171,6 +171,14 @@ TEST(test_ipv6_reject_duplicate_double_colon)
     ASSERT( ! HttpIsLiteralIpv6Host( L"::1::2" ) );
 }
 
+TEST(test_ipv6_reject_ipv4_suffix_overflow)
+{
+    /* HexLen overflows (5 hex digits) before the first dot — must be rejected */
+    ASSERT( ! HttpIsLiteralIpv6Host( L"::ffff:12345.0.0.1" ) );
+    /* Five IPv4 octets (DotCount == 4, not 3) — must be rejected */
+    ASSERT( ! HttpIsLiteralIpv6Host( L"::ffff:1.2.3.4.5" ) );
+}
+
 int main(void)
 {
     setlocale(LC_ALL, "C.UTF-8");
@@ -188,6 +196,7 @@ int main(void)
     run_test_ipv6_reject_overlong_hextet();
     run_test_ipv6_reject_too_many_groups();
     run_test_ipv6_reject_duplicate_double_colon();
+    run_test_ipv6_reject_ipv4_suffix_overflow();
 
     printf("\nSummary: %d/%d tests passed\n", tests_passed, tests_run);
     return 0;

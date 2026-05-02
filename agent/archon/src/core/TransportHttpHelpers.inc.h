@@ -49,6 +49,7 @@ static BOOL HttpIsLiteralIpv6Host(
     BOOL    HasDc;
     BOOL    InGroup;
     BOOL    HasDot;
+    DWORD   DotCount;
 
     if ( ! Host || ! Host[ 0 ] ) {
         return FALSE;
@@ -125,6 +126,7 @@ static BOOL HttpIsLiteralIpv6Host(
     HasDc      = FALSE;
     InGroup    = FALSE;
     HasDot     = FALSE;
+    DotCount   = 0;
 
     for ( i = 0; i <= Len; i++ ) {
         WCHAR Ch = ( i < Len ) ? Scan[ i ] : L'\0';
@@ -132,15 +134,16 @@ static BOOL HttpIsLiteralIpv6Host(
         if ( Ch == L':' || Ch == L'\0' ) {
             /* Close the current group */
             if ( InGroup ) {
+                if ( HexLen > 4 ) { return FALSE; }
                 if ( HasDot ) {
-                    GroupCount++; /* IPv4 suffix accounts for two groups */
-                } else if ( HexLen > 4 ) {
-                    return FALSE;
+                    if ( DotCount != 3 ) { return FALSE; }
+                    GroupCount++; /* IPv4 suffix counts as two groups */
                 }
                 GroupCount++;
-                InGroup = FALSE;
-                HexLen  = 0;
-                HasDot  = FALSE;
+                InGroup  = FALSE;
+                HexLen   = 0;
+                HasDot   = FALSE;
+                DotCount = 0;
             }
 
             if ( Ch == L'\0' ) {
@@ -161,6 +164,7 @@ static BOOL HttpIsLiteralIpv6Host(
                 return FALSE;
             }
             HasDot = TRUE;
+            DotCount++;
 
         } else if ( HttpIsHexDigitW( Ch ) ) {
             InGroup = TRUE;

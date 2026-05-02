@@ -95,9 +95,12 @@ COMMON_PKGS=(
 # Teamserver-only packages:
 #   nasm          — assembler used by the Demon payload builder
 #   libsqlite3-0  — SQLite runtime (sqlx)
+#   sqlite3       — SQLite CLI for ops (WAL checkpoint of .beads/beads.db,
+#                   ad-hoc schema inspection of profiles/*.sqlite)
 TEAMSERVER_PKGS=(
     nasm
     libsqlite3-0
+    sqlite3
 )
 
 # Client-only packages (eframe GUI + rfd file dialog on Linux):

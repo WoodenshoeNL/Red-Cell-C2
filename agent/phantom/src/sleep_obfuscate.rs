@@ -10,12 +10,24 @@
 //! # Safety requirements
 //!
 //! `mprotect(PROT_NONE)` on heap pages must only happen while no other thread is
-//! accessing heap-allocated data.  This is safe for Phantom's single-checkin
-//! loop because Tokio worker threads are blocked on `epoll` (no pending futures)
-//! during the sleep interval between callbacks.  Any inflight network I/O that
-//! wakes a worker thread during the sleep window could fault.  The HTTP transport
-//! uses `pool_max_idle_per_host(0)` so connections are closed after each response
-//! and no background socket tasks exist between checkins.
+//! accessing heap-allocated data.
+//!
+//! **This module requires two invariants to hold together:**
+//!
+//! 1. **`current_thread` Tokio runtime** — Phantom's `main.rs` uses
+//!    `#[tokio::main(flavor = "current_thread")]`.  A multi-thread runtime
+//!    keeps async worker threads alive during sleep; those threads access
+//!    heap-allocated Tokio internals (task queues, timer wheel, signal driver)
+//!    and will SIGSEGV during the PROT_NONE window regardless of `epoll` state.
+//!
+//! 2. **`blocking_sleep` called directly, not via `spawn_blocking`** — The
+//!    run loop calls `blocking_sleep(delay, mode)` as a plain blocking call on
+//!    the executor thread.  Using `spawn_blocking` would allow the Tokio
+//!    scheduler to run other tasks (timers, spawned cleanup tasks, I/O events)
+//!    on the main thread while a separate blocking thread holds PROT_NONE,
+//!    creating the same race.  With a direct blocking call on the single
+//!    executor thread, the thread blocks in `nanosleep` — no concurrent
+//!    userspace code runs and no heap access is possible.
 //!
 //! All storage used between the `mprotect(PROT_NONE)` and `mprotect` restore
 //! calls is stack-allocated — no heap access occurs in that window.

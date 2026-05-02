@@ -5,7 +5,7 @@ use phantom::{PhantomAgent, PhantomConfig};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     if std::env::args().any(|argument| matches!(argument.as_str(), "-h" | "--help")) {
         println!("{}", PhantomConfig::usage());

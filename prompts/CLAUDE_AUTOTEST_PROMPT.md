@@ -351,7 +351,7 @@ Sample beads from prior runs to imitate in style/depth:
 
 - `br show red-cell-c2-yde2a` — Phantom exec output never returned (P1 product)
 - `br show red-cell-c2-noq9i` — failure diagnostic listener-request count (P2 autotest)
-- `br show red-cell-c2-jbj2o` — `agent shell <id>` REPL (P2 cli)
+- `red-cell-cli agent exec <id> --cmd <cmd> --wait` or `red-cell-cli session --agent <id>` — current agent interaction paths (P2 cli; `agent shell` was removed in red-cell-c2-ld40r)
 - `br show red-cell-c2-rc48g` — cert-fingerprint UX (P3 cli)
 
 ---

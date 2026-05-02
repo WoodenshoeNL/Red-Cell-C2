@@ -213,18 +213,39 @@ def check_ssh_targets(
 # ── Unit tests ───────────────────────────────────────────────────────────────
 
 TESTS_DIR = Path(__file__).parent / "tests"
+REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_TESTS_DIR = REPO_ROOT / "tests"
+REPO_TEST_PATTERN = "test_*.py"
+
+
+def _load_repo_root_test_suite(loader: unittest.TestLoader) -> unittest.TestSuite:
+    """Load repo-root ``tests/test_*.py`` modules into a single test suite."""
+    suite = unittest.TestSuite()
+
+    for path in sorted(REPO_TESTS_DIR.glob(REPO_TEST_PATTERN)):
+        spec = importlib.util.spec_from_file_location(path.stem, path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"could not load test module from {path}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[path.stem] = module
+        spec.loader.exec_module(module)
+        suite.addTests(loader.loadTestsFromModule(module))
+
+    return suite
 
 
 def run_unit_tests() -> bool:
-    """Discover and run unit tests under ``tests/``.
+    """Discover and run unit tests under autotest and repo-root ``tests/``.
 
     Returns ``True`` if all tests passed, ``False`` otherwise.
     """
     loader = unittest.TestLoader()
-    suite = loader.discover(start_dir=str(TESTS_DIR), pattern="test_*.py")
+    suite = unittest.TestSuite()
+    suite.addTests(loader.discover(start_dir=str(TESTS_DIR), pattern="test_*.py"))
+    suite.addTests(_load_repo_root_test_suite(loader))
 
     print(f"\n{'─' * 60}")
-    print("  Unit tests (tests/)")
+    print("  Unit tests (automatic-test/tests + repo-root tests/)")
     print(f"{'─' * 60}")
 
     runner = unittest.TextTestRunner(verbosity=2, stream=sys.stdout)

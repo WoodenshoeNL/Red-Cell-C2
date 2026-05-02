@@ -218,18 +218,46 @@ REPO_TESTS_DIR = REPO_ROOT / "tests"
 REPO_TEST_PATTERN = "test_*.py"
 
 
+class _ModuleImportFailure(unittest.TestCase):
+    """Proxy test case that records a module import error as a test failure.
+
+    This mirrors how ``unittest.TestLoader`` handles import failures during
+    discovery, ensuring that a broken repo-root test file surfaces as a failed
+    test rather than an unhandled exception that aborts the harness.
+    """
+
+    def __init__(self, module_name: str, exc: BaseException) -> None:
+        super().__init__("runTest")
+        self._module_name = module_name
+        self._exc = exc
+
+    def runTest(self) -> None:  # noqa: N802
+        raise self._exc
+
+    def __str__(self) -> str:
+        return f"LoadTestsFromModule ({self._module_name})"
+
+
 def _load_repo_root_test_suite(loader: unittest.TestLoader) -> unittest.TestSuite:
-    """Load repo-root ``tests/test_*.py`` modules into a single test suite."""
+    """Load repo-root ``tests/test_*.py`` modules into a single test suite.
+
+    Import failures are caught and converted into failing ``TestCase`` entries
+    so that the unit-test preflight returns a normal failed result instead of
+    raising out of ``run_unit_tests()``.
+    """
     suite = unittest.TestSuite()
 
     for path in sorted(REPO_TESTS_DIR.glob(REPO_TEST_PATTERN)):
-        spec = importlib.util.spec_from_file_location(path.stem, path)
-        if spec is None or spec.loader is None:
-            raise ImportError(f"could not load test module from {path}")
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[path.stem] = module
-        spec.loader.exec_module(module)
-        suite.addTests(loader.loadTestsFromModule(module))
+        try:
+            spec = importlib.util.spec_from_file_location(path.stem, path)
+            if spec is None or spec.loader is None:
+                raise ImportError(f"could not load test module from {path}")
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[path.stem] = module
+            spec.loader.exec_module(module)
+            suite.addTests(loader.loadTestsFromModule(module))
+        except Exception as exc:
+            suite.addTest(_ModuleImportFailure(path.stem, exc))
 
     return suite
 

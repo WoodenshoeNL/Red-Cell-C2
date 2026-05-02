@@ -372,6 +372,9 @@ async fn replay_demon_init_from_corpus() -> Result<(), Box<dyn std::error::Error
         session_keys.agent_id_hex.expect("agent_id_hex guaranteed Some by load_session_keys");
     let expected_monotonic_ctr =
         session_keys.monotonic_ctr.expect("monotonic_ctr guaranteed Some by load_session_keys");
+    let expected_ctr_block_offset = session_keys
+        .initial_ctr_block_offset
+        .expect("initial_ctr_block_offset guaranteed Some by load_session_keys");
 
     let expected_key = hex_decode("aes_key_hex", &aes_key_hex)?;
     let expected_iv = hex_decode("aes_iv_hex", &aes_iv_hex)?;
@@ -394,7 +397,10 @@ async fn replay_demon_init_from_corpus() -> Result<(), Box<dyn std::error::Error
         .map_err(|e| ReplayError::InvalidHex { field: "agent_id_hex", inner: e.to_string() })?;
 
     // Build in-memory registry + parser — no OS listener socket.
+    // Clone the database handle so we can query persisted state after INIT without
+    // going through the registry's (intentionally limited) public API.
     let database = Database::connect_in_memory().await?;
+    let db_handle = database.clone();
     let registry = AgentRegistry::new(database);
     let parser = DemonPacketParser::new(registry.clone());
 
@@ -438,6 +444,22 @@ async fn replay_demon_init_from_corpus() -> Result<(), Box<dyn std::error::Error
         .await
         .expect("agent must be inserted into registry after DEMON_INIT replay");
     assert_eq!(registered.agent_id, expected_agent_id);
+
+    // Assert that the persisted ctr_block_offset matches the corpus fixture value.
+    // This catches regressions where initial_ctr_block_offset is recorded incorrectly
+    // (e.g. null instead of 0) at the value level, not just the field-presence level.
+    let persisted = db_handle
+        .agents()
+        .get_persisted(expected_agent_id)
+        .await
+        .map_err(|e| format!("database error querying persisted agent: {e}"))?
+        .ok_or_else(|| {
+            format!("persisted agent {expected_agent_id:#010x} not found in database after INIT")
+        })?;
+    assert_eq!(
+        persisted.ctr_block_offset, expected_ctr_block_offset,
+        "persisted ctr_block_offset must match session.keys.json initial_ctr_block_offset"
+    );
 
     Ok(())
 }

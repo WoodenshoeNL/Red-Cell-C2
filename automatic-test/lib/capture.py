@@ -148,6 +148,7 @@ class CorpusCapture:
         monotonic_ctr: bool | None = None,
         initial_ctr_block_offset: int | None = None,
         agent_id_hex: str | None = None,
+        encryption_scheme: str | None = None,
     ) -> Path:
         """Write ``session.keys.json`` with the given key material.
 
@@ -165,6 +166,7 @@ class CorpusCapture:
             "monotonic_ctr": monotonic_ctr,
             "initial_ctr_block_offset": initial_ctr_block_offset,
             "agent_id_hex": agent_id_hex,
+            "encryption_scheme": encryption_scheme,
         }
         path = self._output_dir / "session.keys.json"
         path.write_text(json.dumps(keys, indent=2), encoding="utf-8")

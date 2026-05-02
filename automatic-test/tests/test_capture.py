@@ -151,6 +151,7 @@ class TestCorpusCapture(unittest.TestCase):
             monotonic_ctr=False,
             initial_ctr_block_offset=0,
             agent_id_hex="0x12345678",
+            encryption_scheme="aes-256-ctr",
         )
         keys = json.loads((cap.output_dir / "session.keys.json").read_text())
         self.assertEqual(keys["version"], CORPUS_FORMAT_VERSION)
@@ -159,6 +160,7 @@ class TestCorpusCapture(unittest.TestCase):
         self.assertFalse(keys["monotonic_ctr"])
         self.assertEqual(keys["initial_ctr_block_offset"], 0)
         self.assertEqual(keys["agent_id_hex"], "0x12345678")
+        self.assertEqual(keys["encryption_scheme"], "aes-256-ctr")
 
     def test_session_keys_schema_matches_corpus_session_keys(self) -> None:
         """Field names must match CorpusSessionKeys in common/src/corpus.rs."""
@@ -169,15 +171,18 @@ class TestCorpusCapture(unittest.TestCase):
             monotonic_ctr=True,
             initial_ctr_block_offset=42,
             agent_id_hex="0xDEADBEEF",
+            encryption_scheme="aes-256-gcm",
         )
         keys = json.loads((cap.output_dir / "session.keys.json").read_text())
         required_fields = {
             "version", "aes_key_hex", "aes_iv_hex",
             "monotonic_ctr", "initial_ctr_block_offset", "agent_id_hex",
+            "encryption_scheme",
         }
         self.assertEqual(set(keys.keys()), required_fields)
         self.assertTrue(keys["monotonic_ctr"])
         self.assertEqual(keys["initial_ctr_block_offset"], 42)
+        self.assertEqual(keys["encryption_scheme"], "aes-256-gcm")
 
     def test_scenario_directory_layout(self) -> None:
         """Verify the on-disk layout matches the corpus format spec."""

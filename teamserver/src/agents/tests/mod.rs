@@ -77,7 +77,7 @@ fn sample_agent_with_crypto(
     agent.encryption = AgentEncryptionInfo {
         aes_key: Zeroizing::new(key.to_vec()),
         aes_iv: Zeroizing::new(iv.to_vec()),
-        monotonic_ctr: false,
+        monotonic_ctr: true,
     };
     agent
 }

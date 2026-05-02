@@ -42,8 +42,8 @@ test_ja3: test_ja3.c
 test_ecdh_init: test_ecdh_init.c
 	$(CC) $(CFLAGS) -I../include -o $@ $<
 
-test_transport_http_helpers: test_transport_http_helpers.c
-	$(CC) $(CFLAGS) -o $@ $<
+test_transport_http_helpers: test_transport_http_helpers.c ../src/core/TransportHttpHelpers.inc.h
+	$(CC) $(CFLAGS) -o $@ test_transport_http_helpers.c
 
 archon_replay_harness: replay_harness.c
 	$(CC) $(CFLAGS) -o $@ $<

@@ -13,7 +13,8 @@
  *   cd agent/archon/tests && make test_transport_http_helpers && ./test_transport_http_helpers
  *
  * Compiled for Linux with GCC — no Windows SDK required.
- * The pure helper logic is copied from agent/archon/src/core/TransportHttp.c.
+ * Helper implementations live in agent/archon/src/core/TransportHttpHelpers.inc.h;
+ * this file exercises the production code directly via textual inclusion.
  */
 
 #include <stdint.h>
@@ -36,316 +37,7 @@ typedef size_t SIZE_T;
 #define TRUE  1
 #define FALSE 0
 
-typedef struct _HOST_DATA {
-    LPCWSTR Host;
-    DWORD   Port;
-} HOST_DATA, *PHOST_DATA;
-
-static SIZE_T StringLengthW(LPCWSTR String)
-{
-    SIZE_T Len = 0;
-    while (String && String[Len]) {
-        Len++;
-    }
-    return Len;
-}
-
-static BOOL HttpIsHexDigitW(
-    WCHAR Ch
-)
-{
-    return ( Ch >= L'0' && Ch <= L'9' )
-        || ( Ch >= L'a' && Ch <= L'f' )
-        || ( Ch >= L'A' && Ch <= L'F' );
-}
-
-static BOOL HttpIsLiteralIpv6Host(
-    LPCWSTR Host
-)
-{
-    LPCWSTR Scan;
-    SIZE_T  Len;
-    SIZE_T  i;
-    DWORD   HexLen;
-    DWORD   GroupCount;
-    BOOL    HasDc;
-    BOOL    InGroup;
-    BOOL    HasDot;
-
-    if ( ! Host || ! Host[ 0 ] ) {
-        return FALSE;
-    }
-
-    Scan = Host;
-    Len  = StringLengthW( Host );
-
-    /* Strip optional bracket wrapping: [addr] */
-    if ( Host[ 0 ] == L'[' ) {
-        SIZE_T End = 1;
-
-        while ( Host[ End ] && Host[ End ] != L']' ) {
-            End++;
-        }
-
-        if ( End == 1 || Host[ End ] != L']' || Host[ End + 1 ] != L'\0' ) {
-            return FALSE;
-        }
-
-        Scan = Host + 1;
-        Len  = End - 1;
-    }
-
-    /* Strip and validate zone ID (%...) */
-    for ( i = 0; i < Len; i++ ) {
-        if ( Scan[ i ] == L'%' ) {
-            if ( i == 0 || i + 1 >= Len ) {
-                return FALSE;
-            }
-            for ( SIZE_T j = i + 1; j < Len; j++ ) {
-                WCHAR ZoneCh = Scan[ j ];
-                if ( ! (
-                    ( ZoneCh >= L'0' && ZoneCh <= L'9' )
-                    || ( ZoneCh >= L'a' && ZoneCh <= L'z' )
-                    || ( ZoneCh >= L'A' && ZoneCh <= L'Z' )
-                    || ZoneCh == L'.'
-                    || ZoneCh == L'-'
-                    || ZoneCh == L'_'
-                ) ) {
-                    return FALSE;
-                }
-            }
-            Len = i; /* trim to IPv6 portion only */
-            break;
-        }
-    }
-
-    if ( Len == 0 ) {
-        return FALSE;
-    }
-
-    /* Reject a leading lone colon (single ':', not '::') */
-    if ( Scan[ 0 ] == L':' && ( Len < 2 || Scan[ 1 ] != L':' ) ) {
-        return FALSE;
-    }
-
-    /* Reject a trailing lone colon */
-    if ( Scan[ Len - 1 ] == L':' && ( Len < 2 || Scan[ Len - 2 ] != L':' ) ) {
-        return FALSE;
-    }
-
-    /* Reject triple or more consecutive colons (:::) */
-    for ( i = 0; i + 2 < Len; i++ ) {
-        if ( Scan[ i ] == L':' && Scan[ i + 1 ] == L':' && Scan[ i + 2 ] == L':' ) {
-            return FALSE;
-        }
-    }
-
-    /* Parse groups — each hextet must be 1–4 hex digits; an embedded
-     * IPv4 suffix (dots present) counts as two groups toward the total. */
-    HexLen     = 0;
-    GroupCount = 0;
-    HasDc      = FALSE;
-    InGroup    = FALSE;
-    HasDot     = FALSE;
-
-    for ( i = 0; i <= Len; i++ ) {
-        WCHAR Ch = ( i < Len ) ? Scan[ i ] : L'\0';
-
-        if ( Ch == L':' || Ch == L'\0' ) {
-            /* Close the current group */
-            if ( InGroup ) {
-                if ( HasDot ) {
-                    GroupCount++; /* IPv4 suffix accounts for two groups */
-                } else if ( HexLen > 4 ) {
-                    return FALSE;
-                }
-                GroupCount++;
-                InGroup = FALSE;
-                HexLen  = 0;
-                HasDot  = FALSE;
-            }
-
-            if ( Ch == L'\0' ) {
-                break;
-            }
-
-            /* Detect '::' (triple-colon already rejected above) */
-            if ( i + 1 < Len && Scan[ i + 1 ] == L':' ) {
-                if ( HasDc ) {
-                    return FALSE; /* a second '::' is not valid */
-                }
-                HasDc = TRUE;
-                i++;
-            }
-
-        } else if ( Ch == L'.' ) {
-            if ( ! InGroup ) {
-                return FALSE;
-            }
-            HasDot = TRUE;
-
-        } else if ( HttpIsHexDigitW( Ch ) ) {
-            InGroup = TRUE;
-            if ( ! HasDot ) {
-                HexLen++;
-                /* Overflow check deferred to group close; catches >4 there */
-            }
-
-        } else {
-            return FALSE;
-        }
-    }
-
-    /* Validate total group count:
-     *   with    '::' — explicit groups must be ≤ 7 (one or more implicit zeros)
-     *   without '::' — must have exactly 8 groups */
-    if ( HasDc ) {
-        return GroupCount <= 7;
-    }
-
-    return GroupCount == 8;
-}
-
-static BOOL HttpIsLiteralIpv4Host(
-    LPCWSTR Host
-)
-{
-    DWORD Parts   = 0;
-    DWORD Val     = 0;
-    BOOL  HasDigs = FALSE;
-
-    if ( ! Host || ! Host[ 0 ] ) {
-        return FALSE;
-    }
-
-    for ( SIZE_T i = 0; ; i++ ) {
-        WCHAR Ch = Host[ i ];
-
-        if ( Ch >= L'0' && Ch <= L'9' ) {
-            Val = Val * 10 + ( DWORD )( Ch - L'0' );
-            if ( Val > 255 ) {
-                return FALSE;
-            }
-            HasDigs = TRUE;
-        } else if ( Ch == L'.' || Ch == L'\0' ) {
-            if ( ! HasDigs ) {
-                return FALSE;
-            }
-            Parts++;
-            Val     = 0;
-            HasDigs = FALSE;
-            if ( Ch == L'\0' ) {
-                break;
-            }
-            if ( Parts >= 4 ) {
-                if ( Host[ i + 1 ] != L'\0' ) {
-                    return FALSE;
-                }
-            }
-        } else {
-            return FALSE;
-        }
-    }
-
-    return Parts == 4;
-}
-
-static BOOL HttpHostSkipsWinHttpAutoproxy(
-    LPCWSTR Host
-)
-{
-    if ( ! Host || ! Host[ 0 ] ) {
-        return FALSE;
-    }
-
-    if ( HttpIsLiteralIpv4Host( Host ) ) {
-        return TRUE;
-    }
-
-    if ( HttpIsLiteralIpv6Host( Host ) ) {
-        return TRUE;
-    }
-
-    return FALSE;
-}
-
-static LPWSTR HttpComposeUrlForProxyLookup(
-    WCHAR *    Buf,
-    SIZE_T     CchBuf,
-    PHOST_DATA H,
-    BOOL       Secure,
-    LPWSTR     RelativePath
-)
-{
-    LPCWSTR scheme;
-    LPCWSTR hostUse;
-    INT     nw;
-    WCHAR   HostNz[ 128 ] = { 0 };
-    SIZE_T  zi;
-
-    if ( ! Buf || CchBuf < 16 || ! RelativePath || ! H || ! H->Host ) {
-        return RelativePath;
-    }
-
-    scheme  = Secure ? L"https://" : L"http://";
-    hostUse = H->Host;
-
-    if ( hostUse[ 0 ] == L'[' && HttpIsLiteralIpv6Host( hostUse ) ) {
-        nw = swprintf(
-            Buf,
-            CchBuf,
-            L"%ls%ls:%lu%ls",
-            scheme,
-            hostUse,
-            ( ULONG ) H->Port,
-            RelativePath
-        );
-    } else if ( hostUse[ 0 ] == L'[' ) {
-        return RelativePath;
-    } else if ( HttpIsLiteralIpv6Host( H->Host ) ) {
-        zi = 0;
-        while (
-            zi < ( sizeof( HostNz ) / sizeof( HostNz[ 0 ] ) ) - 1
-            && hostUse[ zi ]
-        ) {
-            if ( hostUse[ zi ] == L'%' ) {
-                break;
-            }
-            HostNz[ zi ] = hostUse[ zi ];
-            zi++;
-        }
-        if ( hostUse[ zi ] != L'\0' && hostUse[ zi ] != L'%' ) {
-            return RelativePath;
-        }
-        HostNz[ zi ] = L'\0';
-
-        nw = swprintf(
-            Buf,
-            CchBuf,
-            L"%ls[%ls]:%lu%ls",
-            scheme,
-            HostNz,
-            ( ULONG ) H->Port,
-            RelativePath
-        );
-    } else {
-        nw = swprintf(
-            Buf,
-            CchBuf,
-            L"%ls%ls:%lu%ls",
-            scheme,
-            hostUse,
-            ( ULONG ) H->Port,
-            RelativePath
-        );
-    }
-
-    if ( nw < 0 || ( SIZE_T ) nw >= CchBuf ) {
-        return RelativePath;
-    }
-
-    return Buf;
-}
+#include "../src/core/TransportHttpHelpers.inc.h"
 
 static int tests_run = 0;
 static int tests_passed = 0;
@@ -403,9 +95,8 @@ TEST(test_skip_autoproxy_treats_ipv4_mapped_ipv6_as_literal)
 
 TEST(test_compose_url_brackets_unbracketed_ipv6_and_strips_zone)
 {
-    HOST_DATA Host = { L"fe80::1%eth0", 8443 };
-    WCHAR     Buf[ 256 ];
-    LPWSTR    Out = HttpComposeUrlForProxyLookup( Buf, 256, &Host, TRUE, L"/checkin" );
+    WCHAR  Buf[ 256 ];
+    LPWSTR Out = HttpBuildProxyUrl( Buf, 256, L"fe80::1%eth0", 8443, TRUE, L"/checkin" );
 
     ASSERT( Out == Buf );
     ASSERT_WSTR_EQ( Buf, L"https://[fe80::1]:8443/checkin" );
@@ -413,9 +104,8 @@ TEST(test_compose_url_brackets_unbracketed_ipv6_and_strips_zone)
 
 TEST(test_compose_url_keeps_valid_bracketed_ipv6)
 {
-    HOST_DATA Host = { L"[2001:db8::5]", 80 };
-    WCHAR     Buf[ 256 ];
-    LPWSTR    Out = HttpComposeUrlForProxyLookup( Buf, 256, &Host, FALSE, L"/stage" );
+    WCHAR  Buf[ 256 ];
+    LPWSTR Out = HttpBuildProxyUrl( Buf, 256, L"[2001:db8::5]", 80, FALSE, L"/stage" );
 
     ASSERT( Out == Buf );
     ASSERT_WSTR_EQ( Buf, L"http://[2001:db8::5]:80/stage" );
@@ -423,21 +113,19 @@ TEST(test_compose_url_keeps_valid_bracketed_ipv6)
 
 TEST(test_compose_url_falls_back_for_invalid_bracketed_host)
 {
-    HOST_DATA Host = { L"[2001:db8::5", 80 };
-    WCHAR     Buf[ 256 ];
-    WCHAR     Rel[] = L"/stage";
-    LPWSTR    Out = HttpComposeUrlForProxyLookup( Buf, 256, &Host, FALSE, Rel );
+    WCHAR  Buf[ 256 ];
+    WCHAR  Rel[] = L"/stage";
+    LPWSTR Out = HttpBuildProxyUrl( Buf, 256, L"[2001:db8::5", 80, FALSE, Rel );
 
     ASSERT( Out == Rel );
 }
 
 TEST(test_compose_url_falls_back_for_overlong_ipv6_literal)
 {
-    WCHAR     LongHost[ 256 ];
-    HOST_DATA Host;
-    WCHAR     Buf[ 256 ];
-    WCHAR     Rel[] = L"/x";
-    SIZE_T    Pos = 0;
+    WCHAR  LongHost[ 256 ];
+    WCHAR  Buf[ 256 ];
+    WCHAR  Rel[] = L"/x";
+    SIZE_T Pos = 0;
 
     for (int i = 0; i < 26; i++) {
         const WCHAR *Chunk = L"2001:";
@@ -449,13 +137,10 @@ TEST(test_compose_url_falls_back_for_overlong_ipv6_literal)
     LongHost[Pos++] = L'1';
     LongHost[Pos] = L'\0';
 
-    Host.Host = LongHost;
-    Host.Port = 443;
-
     /* The overlong form (26+ groups) is now correctly rejected as an IPv6 literal. */
     ASSERT( ! HttpIsLiteralIpv6Host( LongHost ) );
     /* compose treats it as a plain host and produces a URL rather than falling back */
-    ASSERT( HttpComposeUrlForProxyLookup( Buf, 256, &Host, TRUE, Rel ) == Buf );
+    ASSERT( HttpBuildProxyUrl( Buf, 256, LongHost, 443, TRUE, Rel ) == Buf );
 }
 
 TEST(test_ipv6_reject_triple_colon)

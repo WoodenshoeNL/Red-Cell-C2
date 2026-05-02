@@ -10,161 +10,10 @@
 #define WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3 0x00002000
 #endif
 
-static BOOL HttpIsHexDigitW(
-    WCHAR Ch
-)
-{
-    return ( Ch >= L'0' && Ch <= L'9' )
-        || ( Ch >= L'a' && Ch <= L'f' )
-        || ( Ch >= L'A' && Ch <= L'F' );
-}
-
-static BOOL HttpIsLiteralIpv6Host(
-    LPCWSTR Host
-)
-{
-    LPCWSTR Scan;
-    SIZE_T  Len;
-    SIZE_T  i;
-    DWORD   HexLen;
-    DWORD   GroupCount;
-    BOOL    HasDc;
-    BOOL    InGroup;
-    BOOL    HasDot;
-
-    if ( ! Host || ! Host[ 0 ] ) {
-        return FALSE;
-    }
-
-    Scan = Host;
-    Len  = StringLengthW( Host );
-
-    /* Strip optional bracket wrapping: [addr] */
-    if ( Host[ 0 ] == L'[' ) {
-        SIZE_T End = 1;
-
-        while ( Host[ End ] && Host[ End ] != L']' ) {
-            End++;
-        }
-
-        if ( End == 1 || Host[ End ] != L']' || Host[ End + 1 ] != L'\0' ) {
-            return FALSE;
-        }
-
-        Scan = Host + 1;
-        Len  = End - 1;
-    }
-
-    /* Strip and validate zone ID (%...) */
-    for ( i = 0; i < Len; i++ ) {
-        if ( Scan[ i ] == L'%' ) {
-            if ( i == 0 || i + 1 >= Len ) {
-                return FALSE;
-            }
-            for ( SIZE_T j = i + 1; j < Len; j++ ) {
-                WCHAR ZoneCh = Scan[ j ];
-                if ( ! (
-                    ( ZoneCh >= L'0' && ZoneCh <= L'9' )
-                    || ( ZoneCh >= L'a' && ZoneCh <= L'z' )
-                    || ( ZoneCh >= L'A' && ZoneCh <= L'Z' )
-                    || ZoneCh == L'.'
-                    || ZoneCh == L'-'
-                    || ZoneCh == L'_'
-                ) ) {
-                    return FALSE;
-                }
-            }
-            Len = i; /* trim to IPv6 portion only */
-            break;
-        }
-    }
-
-    if ( Len == 0 ) {
-        return FALSE;
-    }
-
-    /* Reject a leading lone colon (single ':', not '::') */
-    if ( Scan[ 0 ] == L':' && ( Len < 2 || Scan[ 1 ] != L':' ) ) {
-        return FALSE;
-    }
-
-    /* Reject a trailing lone colon */
-    if ( Scan[ Len - 1 ] == L':' && ( Len < 2 || Scan[ Len - 2 ] != L':' ) ) {
-        return FALSE;
-    }
-
-    /* Reject triple or more consecutive colons (:::) */
-    for ( i = 0; i + 2 < Len; i++ ) {
-        if ( Scan[ i ] == L':' && Scan[ i + 1 ] == L':' && Scan[ i + 2 ] == L':' ) {
-            return FALSE;
-        }
-    }
-
-    /* Parse groups — each hextet must be 1–4 hex digits; an embedded
-     * IPv4 suffix (dots present) counts as two groups toward the total. */
-    HexLen     = 0;
-    GroupCount = 0;
-    HasDc      = FALSE;
-    InGroup    = FALSE;
-    HasDot     = FALSE;
-
-    for ( i = 0; i <= Len; i++ ) {
-        WCHAR Ch = ( i < Len ) ? Scan[ i ] : L'\0';
-
-        if ( Ch == L':' || Ch == L'\0' ) {
-            /* Close the current group */
-            if ( InGroup ) {
-                if ( HasDot ) {
-                    GroupCount++; /* IPv4 suffix accounts for two groups */
-                } else if ( HexLen > 4 ) {
-                    return FALSE;
-                }
-                GroupCount++;
-                InGroup = FALSE;
-                HexLen  = 0;
-                HasDot  = FALSE;
-            }
-
-            if ( Ch == L'\0' ) {
-                break;
-            }
-
-            /* Detect '::' (triple-colon already rejected above) */
-            if ( i + 1 < Len && Scan[ i + 1 ] == L':' ) {
-                if ( HasDc ) {
-                    return FALSE; /* a second '::' is not valid */
-                }
-                HasDc = TRUE;
-                i++;
-            }
-
-        } else if ( Ch == L'.' ) {
-            if ( ! InGroup ) {
-                return FALSE;
-            }
-            HasDot = TRUE;
-
-        } else if ( HttpIsHexDigitW( Ch ) ) {
-            InGroup = TRUE;
-            if ( ! HasDot ) {
-                HexLen++;
-                /* Overflow check deferred to group close; catches >4 there */
-            }
-
-        } else {
-            return FALSE;
-        }
-    }
-
-    /* Validate total group count:
-     *   with    '::' — explicit groups must be ≤ 7 (one or more implicit zeros)
-     *   without '::' — must have exactly 8 groups */
-    if ( HasDc ) {
-        return GroupCount <= 7;
-    }
-
-    return GroupCount == 8;
-}
+/* Route HttpBuildProxyUrl's swprintf call through the Win32 dispatch table. */
+#define HTTP_HELPER_SWPRINTF Instance->Win32.swprintf_s
+#include "TransportHttpHelpers.inc.h"
+#undef HTTP_HELPER_SWPRINTF
 
 /*!
  * @brief
@@ -242,7 +91,9 @@ VOID HttpJa3Randomize( VOID )
 }
 
 /*!
- * Build a full http(s)://host[:port]/path URL for WinHttpGetProxyForUrl.
+ * Thin wrapper: reads Host/Port/Secure from the Instance config and delegates
+ * to HttpBuildProxyUrl (defined in TransportHttpHelpers.inc.h) which contains
+ * the testable pure logic.
  *
  * MSDN expects a URL including the scheme for WinHttpGetProxyForUrl. Demon/Havoc
  * historically passed only the relative URI segment (see HttpEndpoint inside
@@ -256,18 +107,8 @@ static LPWSTR HttpComposeUrlForProxyLookup(
     LPWSTR  RelativePath
 )
 {
-    PHOST_DATA H;
-    LPCWSTR    scheme;
-    LPCWSTR    hostUse;
-    INT        nw;
-    WCHAR      HostNz[ 128 ] = { 0 };
-    SIZE_T     zi;
+    PHOST_DATA H = Instance->Config.Transport.Host;
 
-    if ( ! Buf || CchBuf < 16 || ! RelativePath ) {
-        return RelativePath;
-    }
-
-    H = Instance->Config.Transport.Host;
     if ( ! H || ! H->Host ) {
         return RelativePath;
     }
@@ -276,138 +117,12 @@ static LPWSTR HttpComposeUrlForProxyLookup(
         return RelativePath;
     }
 
-    scheme  = Instance->Config.Transport.Secure ? L"https://" : L"http://";
-    hostUse = H->Host;
-
-    /* RFC 3986 / WinHTTP: accept bracketed IPv6 only when the closing ']' is present. */
-    if ( hostUse[ 0 ] == L'[' && HttpIsLiteralIpv6Host( hostUse ) ) {
-        nw = Instance->Win32.swprintf_s(
-            Buf,
-            CchBuf,
-            L"%ls%ls:%lu%ls",
-            scheme,
-            hostUse,
-            ( ULONG ) H->Port,
-            RelativePath
-        );
-    } else if ( hostUse[ 0 ] == L'[' ) {
-        return RelativePath;
-    } else if ( HttpIsLiteralIpv6Host( H->Host ) ) {
-        /* Unbracketed IPv6: strip zone id (%scope) so WinHttpGetProxyForUrl sees a valid host. */
-        zi = 0;
-        while (
-            zi < ( sizeof( HostNz ) / sizeof( HostNz[ 0 ] ) ) - 1
-            && hostUse[ zi ]
-        ) {
-            if ( hostUse[ zi ] == L'%' ) {
-                break;
-            }
-            HostNz[ zi ] = hostUse[ zi ];
-            zi++;
-        }
-        if ( hostUse[ zi ] != L'\0' && hostUse[ zi ] != L'%' ) {
-            return RelativePath;
-        }
-        HostNz[ zi ] = L'\0';
-
-        nw = Instance->Win32.swprintf_s(
-            Buf,
-            CchBuf,
-            L"%ls[%ls]:%lu%ls",
-            scheme,
-            HostNz,
-            ( ULONG ) H->Port,
-            RelativePath
-        );
-    } else {
-        nw = Instance->Win32.swprintf_s(
-            Buf,
-            CchBuf,
-            L"%ls%ls:%lu%ls",
-            scheme,
-            hostUse,
-            ( ULONG ) H->Port,
-            RelativePath
-        );
-    }
-
-    if ( nw < 0 || ( SIZE_T ) nw >= CchBuf ) {
-        return RelativePath;
-    }
-
-    return Buf;
-}
-
-/*!
- * Strict dotted-decimal IPv4 check for the WinHTTP transport Host field (no port).
- */
-static BOOL HttpIsLiteralIpv4Host(
-    LPCWSTR Host
-)
-{
-    DWORD Parts   = 0;
-    DWORD Val     = 0;
-    BOOL  HasDigs = FALSE;
-
-    if ( ! Host || ! Host[ 0 ] ) {
-        return FALSE;
-    }
-
-    for ( SIZE_T i = 0; ; i++ ) {
-        WCHAR Ch = Host[ i ];
-
-        if ( Ch >= L'0' && Ch <= L'9' ) {
-            Val = Val * 10 + ( DWORD )( Ch - L'0' );
-            if ( Val > 255 ) {
-                return FALSE;
-            }
-            HasDigs = TRUE;
-        } else if ( Ch == L'.' || Ch == L'\0' ) {
-            if ( ! HasDigs ) {
-                return FALSE;
-            }
-            Parts++;
-            Val     = 0;
-            HasDigs = FALSE;
-            if ( Ch == L'\0' ) {
-                break;
-            }
-            if ( Parts >= 4 ) {
-                /* Only four octets allowed; reject 1.2.3.4.trailing */
-                if ( Host[ i + 1 ] != L'\0' ) {
-                    return FALSE;
-                }
-            }
-        } else {
-            return FALSE;
-        }
-    }
-
-    return Parts == 4;
-}
-
-/*!
- * When the C2 host is a literal address, PAC / WPAD / IE auto-proxy cannot help and
- * can stall WinHttpSendRequest long enough that check-in never opens TCP (vudj9).
- * Skip all WinHttpGetProxyForUrl / IE-config work for these hosts.
- */
-static BOOL HttpHostSkipsWinHttpAutoproxy(
-    LPCWSTR Host
-)
-{
-    if ( ! Host || ! Host[ 0 ] ) {
-        return FALSE;
-    }
-
-    if ( HttpIsLiteralIpv4Host( Host ) ) {
-        return TRUE;
-    }
-
-    if ( HttpIsLiteralIpv6Host( Host ) ) {
-        return TRUE;
-    }
-
-    return FALSE;
+    return HttpBuildProxyUrl(
+        Buf, CchBuf,
+        H->Host, H->Port,
+        Instance->Config.Transport.Secure,
+        RelativePath
+    );
 }
 
 /*!

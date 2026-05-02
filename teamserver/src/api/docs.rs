@@ -62,7 +62,8 @@ pub(super) struct ApiInfoResponse {
         super::payload::submit_payload_build,
         super::payload::get_payload_job,
         super::payload::download_payload,
-        super::payload::flush_payload_cache
+        super::payload::flush_payload_cache,
+        super::agents::debug::get_agent_packet_ring
     ),
     components(
         schemas(
@@ -129,7 +130,9 @@ pub(super) struct ApiInfoResponse {
             red_cell_common::ListenerTlsConfig,
             red_cell_common::HttpListenerResponseConfig,
             red_cell_common::HttpListenerProxyConfig,
-            super::listeners::TlsCertReloadRequest
+            super::listeners::TlsCertReloadRequest,
+            super::agents::debug::PacketRingFrame,
+            super::agents::debug::PacketRingResponse
         )
     ),
     modifiers(&ApiSecurity),

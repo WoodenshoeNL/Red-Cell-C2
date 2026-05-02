@@ -761,6 +761,20 @@ class TestWindowsSchedTaskScript(unittest.TestCase):
         self.assertIn("RCTEST_SCHTASK_STATE:", script)
         self.assertIn("Get-ScheduledTask", script)
 
+    def test_emits_schtask_identity_and_result_markers(self) -> None:
+        script = _windows_schtask_script("C:\\Temp\\agent.exe")
+        self.assertIn("RCTEST_SCHTASK_NAME:", script)
+        self.assertIn("RCTEST_SCHTASK_USER:", script)
+        self.assertIn("RCTEST_SCHTASK_LOGON:", script)
+        self.assertIn("RCTEST_SCHTASK_LASTTASKRESULT:", script)
+        self.assertIn("RCTEST_SCHTASK_LASTRUNTIME:", script)
+
+    def test_emits_schtask_process_probe(self) -> None:
+        script = _windows_schtask_script("C:\\Temp\\agent.exe")
+        self.assertIn("RCTEST_SCHTASK_PROCESS:", script)
+        self.assertIn("Get-CimInstance Win32_Process", script)
+        self.assertIn("Invoke-CimMethod", script)
+
     def test_contains_exe_path_single_quoted(self) -> None:
         script = _windows_schtask_script("C:\\Temp\\rc-test\\agent.exe")
         self.assertIn("'C:\\Temp\\rc-test\\agent.exe'", script)
@@ -781,7 +795,7 @@ class TestWindowsSchedTaskScript(unittest.TestCase):
     def test_does_not_use_wmi(self) -> None:
         script = _windows_schtask_script("C:\\Temp\\agent.exe")
         self.assertNotIn("Invoke-WmiMethod", script)
-        self.assertNotIn("Win32_Process", script)
+        self.assertNotIn("Win32_Process.Create", script)
 
     def test_unregisters_task_after_start(self) -> None:
         """Task definition must be removed after launch to avoid accumulation."""

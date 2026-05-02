@@ -104,6 +104,33 @@ def _try_windows_defender_events(target: Any, run_remote: Any) -> str:
         return f"Defender event log probe failed: {e}"
 
 
+def _try_windows_workdir_processes(target: Any, run_remote: Any) -> str:
+    """List live processes launched from *target.work_dir* (best-effort)."""
+    work_dir = str(getattr(target, "work_dir", "") or "").strip()
+    if not work_dir:
+        return "(target.work_dir unavailable)"
+    escaped = work_dir.replace("'", "''").replace("\\", "\\\\")
+    try:
+        script = (
+            "$wd = '"
+            + escaped
+            + "'; "
+            "$rows = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | "
+            "Where-Object { $_.ExecutablePath -like ($wd + '\\\\*') } | "
+            "ForEach-Object { "
+            "  $owner = Invoke-CimMethod -InputObject $_ -MethodName GetOwner -ErrorAction SilentlyContinue; "
+            "  $ownerText = if ($owner -and $owner.User) { $owner.Domain + '\\\\' + $owner.User } else { '(owner unavailable)' }; "
+            "  '{0}|{1}|{2}|{3}' -f $_.ProcessId, $_.Name, $ownerText, $_.ExecutablePath "
+            "}; "
+            "if ($rows) { $rows }"
+        )
+        cmd = f"powershell -NoProfile -Command \"{script}\""
+        out = run_remote(target, cmd, timeout=30)
+        return out.strip() if out.strip() else "(no live processes from target.work_dir)"
+    except Exception as e:  # noqa: BLE001
+        return f"work_dir process probe failed: {e}"
+
+
 def log_archon_checkin_wait_netstat(target: Any, c2_port: int, tag: str = "mid-wait") -> None:
     """Print netstat lines mentioning *c2_port* during agent check-in wait (best-effort).
 
@@ -199,5 +226,13 @@ def format_archon_checkin_timeout_diagnostics(
         lines.append(_try_windows_defender_events(target, _run_remote2))
     except Exception as e:  # noqa: BLE001
         lines.append(f"Defender event section failed: {e}")
+
+    try:
+        from lib.deploy import run_remote as _run_remote3
+
+        lines.append("--- live processes from target.work_dir ---")
+        lines.append(_try_windows_workdir_processes(target, _run_remote3))
+    except Exception as e:  # noqa: BLE001
+        lines.append(f"work_dir process section failed: {e}")
 
     return "\n".join(lines) + "\n"

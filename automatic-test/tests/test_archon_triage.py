@@ -38,7 +38,8 @@ class TestFormatArchonCheckinTimeoutDiagnostics(unittest.TestCase):
         self.assertIn("19082", text)
         self.assertIn("Windows target UTC", text)
         self.assertIn("Test-NetConnection", text)
-        self.assertGreaterEqual(m.call_count, 2)
+        self.assertIn("live processes from target.work_dir", text)
+        self.assertGreaterEqual(m.call_count, 3)
 
     def test_skips_tnc_when_no_host(self) -> None:
         from lib.archon_triage import format_archon_checkin_timeout_diagnostics
@@ -55,8 +56,9 @@ class TestFormatArchonCheckinTimeoutDiagnostics(unittest.TestCase):
         self.assertIn("Could not determine", text)
         # TNC is skipped when no probe host, but UTC + netstat + Defender are still called.
         self.assertNotIn("Test-NetConnection", text)
-        # Exactly: UTC probe (1) + netstat (1) + Defender events (1) = 3 calls.
-        self.assertEqual(m.call_count, 3)
+        self.assertIn("live processes from target.work_dir", text)
+        # Exactly: UTC probe (1) + netstat (1) + Defender events (1) + process probe (1) = 4 calls.
+        self.assertEqual(m.call_count, 4)
 
 
 class TestLogArchonEcdhPrelude(unittest.TestCase):

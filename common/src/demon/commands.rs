@@ -10,6 +10,15 @@ use super::DemonProtocolError;
 /// Used as the `CommandID` field in the agent task JSON wire format.
 pub const COMMAND_PROC_CREATE_ID: &str = "4112";
 
+/// Default full path to `cmd.exe` in `CommandProc` create tasks (`program` field).
+///
+/// Matches the Havoc operator split: executable path here, and
+/// [`format_proc_create_args`] supplies quoted `"<this path>" /c …` in the
+/// base64 args. Demon resolves this reliably for piped stdout even when
+/// `PATH` is empty; a bare `cmd.exe` token in a null-application `CreateProcess`
+/// line is less dependable for the real Demon agent.
+pub const WINDOWS_CMD_EXE_PATH: &str = r"C:\Windows\System32\cmd.exe";
+
 /// Decimal string representation of `DemonCommand::CommandScreenshot` (2510).
 pub const COMMAND_SCREENSHOT_ID: &str = "2510";
 
@@ -31,25 +40,30 @@ pub fn format_sleep_payload_base64(delay_secs: u32, jitter_percent: u32) -> Stri
 ///
 /// Wire format: `{state};{verbose};{piped};{program};{base64_args}`
 ///
-/// The current Havoc protocol always sends `state=0`, `verbose=TRUE`,
-/// `piped=TRUE`, and an empty program field, with the command line
-/// base64-encoded in the final position.
+/// Uses Havoc’s split: [`WINDOWS_CMD_EXE_PATH`] as `program`, and
+/// base64-encoded UTF-8 args shaped like
+/// `"C:\Windows\System32\cmd.exe" /c <command_line>` so Demon’s
+/// `CreateProcessW(lpApplication, lpCommandLine, …)` sees an explicit image
+/// path while builtins still run under CMD.
 ///
-/// The command is wrapped in `cmd.exe /c <command_line>` so that CMD builtins
-/// (echo, dir, set, cls, etc.) work correctly.  `CreateProcessW(NULL,
-/// "cmd.exe /c ...")` locates `cmd.exe` via the Windows system-directory search
-/// (which always includes System32) even when `PATH` is empty or minimal.
-///
-/// If the line already begins with `cmd.exe /c` (ASCII case-insensitive), it is
-/// passed through unchanged to avoid nesting an extra `cmd.exe` process.
+/// If the operator line already begins with `cmd.exe /c` (ASCII case-insensitive),
+/// that prefix is replaced by the quoted full path so we do not nest extra
+/// `cmd.exe` processes.
 pub fn format_proc_create_args(command_line: &str) -> String {
-    let shell_cmd = if command_line.to_ascii_lowercase().starts_with("cmd.exe /c") {
-        command_line.to_owned()
+    const CMD_EXE_C: &[u8] = b"cmd.exe /c";
+    let trimmed = command_line.trim_start();
+    let inner = if trimmed
+        .as_bytes()
+        .get(..CMD_EXE_C.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(CMD_EXE_C))
+    {
+        trimmed.get(CMD_EXE_C.len()..).unwrap_or("").trim_start()
     } else {
-        format!("cmd.exe /c {command_line}")
+        trimmed
     };
-    let encoded = BASE64_STANDARD.encode(shell_cmd.as_bytes());
-    format!("0;TRUE;TRUE;;{encoded}")
+    let quoted_cmd = format!(r#""{}" /c {}"#, WINDOWS_CMD_EXE_PATH, inner);
+    let encoded = BASE64_STANDARD.encode(quoted_cmd.as_bytes());
+    format!("0;TRUE;TRUE;{};{encoded}", WINDOWS_CMD_EXE_PATH)
 }
 
 macro_rules! protocol_enum {
@@ -411,38 +425,41 @@ mod tests {
     #[test]
     fn format_proc_create_args_wraps_in_cmd_exe() {
         let args = format_proc_create_args("whoami");
-        let encoded = BASE64_STANDARD.encode("cmd.exe /c whoami");
-        assert_eq!(args, format!("0;TRUE;TRUE;;{encoded}"));
+        let q = format!(r#""{WINDOWS_CMD_EXE_PATH}" /c whoami"#);
+        let encoded = BASE64_STANDARD.encode(q.as_bytes());
+        assert_eq!(args, format!("0;TRUE;TRUE;{WINDOWS_CMD_EXE_PATH};{encoded}"));
     }
 
     #[test]
     fn format_proc_create_args_wraps_builtins() {
         let args = format_proc_create_args("echo hello");
-        let encoded = BASE64_STANDARD.encode("cmd.exe /c echo hello");
-        assert_eq!(args, format!("0;TRUE;TRUE;;{encoded}"));
+        let q = format!(r#""{WINDOWS_CMD_EXE_PATH}" /c echo hello"#);
+        let encoded = BASE64_STANDARD.encode(q.as_bytes());
+        assert_eq!(args, format!("0;TRUE;TRUE;{WINDOWS_CMD_EXE_PATH};{encoded}"));
     }
 
     #[test]
     fn format_proc_create_args_empty_command() {
         let args = format_proc_create_args("");
-        let encoded = BASE64_STANDARD.encode("cmd.exe /c ");
-        assert_eq!(args, format!("0;TRUE;TRUE;;{encoded}"));
+        let q = format!(r#""{WINDOWS_CMD_EXE_PATH}" /c "#);
+        let encoded = BASE64_STANDARD.encode(q.as_bytes());
+        assert_eq!(args, format!("0;TRUE;TRUE;{WINDOWS_CMD_EXE_PATH};{encoded}"));
     }
 
     #[test]
-    fn format_proc_create_args_skips_wrap_when_already_cmd_exe_prefixed() {
-        let raw = "cmd.exe /c dir /s";
-        let args = format_proc_create_args(raw);
-        let encoded = BASE64_STANDARD.encode(raw);
-        assert_eq!(args, format!("0;TRUE;TRUE;;{encoded}"));
+    fn format_proc_create_args_normalizes_existing_cmd_exe_c_prefix() {
+        let args = format_proc_create_args("cmd.exe /c dir /s");
+        let q = format!(r#""{WINDOWS_CMD_EXE_PATH}" /c dir /s"#);
+        let encoded = BASE64_STANDARD.encode(q.as_bytes());
+        assert_eq!(args, format!("0;TRUE;TRUE;{WINDOWS_CMD_EXE_PATH};{encoded}"));
     }
 
     #[test]
-    fn format_proc_create_args_skips_wrap_case_insensitive_cmd_prefix() {
-        let raw = "CMD.EXE /c whoami";
-        let args = format_proc_create_args(raw);
-        let encoded = BASE64_STANDARD.encode(raw);
-        assert_eq!(args, format!("0;TRUE;TRUE;;{encoded}"));
+    fn format_proc_create_args_normalizes_cmd_prefix_case_insensitive() {
+        let args = format_proc_create_args("CMD.EXE /c whoami");
+        let q = format!(r#""{WINDOWS_CMD_EXE_PATH}" /c whoami"#);
+        let encoded = BASE64_STANDARD.encode(q.as_bytes());
+        assert_eq!(args, format!("0;TRUE;TRUE;{WINDOWS_CMD_EXE_PATH};{encoded}"));
     }
 
     #[test]

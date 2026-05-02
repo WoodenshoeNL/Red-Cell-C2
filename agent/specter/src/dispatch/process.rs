@@ -213,16 +213,49 @@ fn spawn_shell_command(process_path: &str, process_args: &str) -> (bool, u32, Ve
 /// run the remainder with `/bin/sh`.  For any other invocation we fall back to
 /// running the path directly with the given arguments.
 pub(super) fn translate_to_shell_cmd(path: &str, args: &str) -> String {
-    let args_lower = args.to_ascii_lowercase();
+    let args_trim = args.trim_start();
+    let args_lower = args_trim.to_ascii_lowercase();
+
+    if args_lower.starts_with("cmd.exe /c") {
+        return args_trim["cmd.exe /c".len()..].trim_start().to_string();
+    }
+
+    let path_lower = path.to_ascii_lowercase();
+    let is_cmd_path = !path.is_empty()
+        && (path_lower.ends_with("cmd.exe")
+            || path_lower.ends_with("\\cmd")
+            || path_lower == "cmd.exe"
+            || path_lower == "cmd");
+
+    if is_cmd_path {
+        let rest = strip_leading_quoted_cmd_executable(args_trim);
+        let rest_lower = rest.to_ascii_lowercase();
+        if rest_lower.starts_with("/c ") {
+            return rest[3..].trim_start().to_string();
+        }
+        if rest_lower.starts_with("/c") && rest.len() > 2 {
+            return rest[2..].trim_start().to_string();
+        }
+    }
+
     if args_lower.starts_with("/c ") {
-        // Typical cmd.exe /c <shell command> path
         return args[3..].to_string();
     }
     if args_lower.starts_with("/c") && args.len() > 2 {
         return args[2..].trim_start().to_string();
     }
-    // Not a cmd.exe style invocation: run path with args directly.
+
     if args.is_empty() { path.to_string() } else { format!("{path} {args}") }
+}
+
+fn strip_leading_quoted_cmd_executable(args_trim: &str) -> &str {
+    if !args_trim.starts_with('"') {
+        return args_trim;
+    }
+    if let Some(end) = args_trim[1..].find('"') {
+        return args_trim[1 + end + 1..].trim_start();
+    }
+    args_trim
 }
 
 // ─── Internal data types ─────────────────────────────────────────────────────

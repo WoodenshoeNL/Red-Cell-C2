@@ -25,13 +25,25 @@ use super::sysinfo::{
     PAGE_WRITECOPY,
 };
 
+/// Strip a leading `"C:\…\cmd.exe"` segment from args (Havoc `CommandProc` create).
+fn strip_leading_quoted_windows_cmd(args_trim: &str) -> &str {
+    if !args_trim.starts_with('"') {
+        return args_trim;
+    }
+    if let Some(end) = args_trim[1..].find('"') {
+        return args_trim[1 + end + 1..].trim_start();
+    }
+    args_trim
+}
+
 /// Strip Havoc/Red Cell Windows shell wrapping so the inner command can run on Linux.
 ///
 /// The teamserver's [`red_cell_common::demon::format_proc_create_args`] base64-encodes
-/// `cmd.exe /c <command>` in the args field while leaving the process path empty.  Phantom
-/// must not spawn `/bin/sh -c "cmd.exe /c whoami"` (which tries to execute `cmd.exe` as a
-/// POSIX binary).  When the process path is a Windows `cmd.exe` location and args begin
-/// with `/c`, we strip that prefix (same idea as Specter's `translate_to_shell_cmd`).
+/// a quoted `"C:\Windows\System32\cmd.exe" /c …` line in the args field (and may set
+/// `program` to the same `cmd.exe` path).  Phantom must not spawn
+/// `/bin/sh -c "…cmd.exe…"` as a POSIX binary.  When the process path targets
+/// `cmd.exe` and args begin with `/c` (optionally after a quoted executable), we strip
+/// to the inner script (same idea as Specter's `translate_to_shell_cmd`).
 fn extract_havoc_posix_shell_inner(process: &str, args: &str) -> Option<String> {
     if args.is_empty() {
         return None;
@@ -51,13 +63,15 @@ fn extract_havoc_posix_shell_inner(process: &str, args: &str) -> Option<String> 
             || proc_lower == "cmd");
 
     if is_cmd_path {
-        if args_lower.starts_with("/c ") {
-            let rest = args_trim[3..].trim_start();
-            return Some(if rest.is_empty() { String::from("true") } else { rest.to_string() });
+        let rest = strip_leading_quoted_windows_cmd(args_trim);
+        let rest_lower = rest.to_ascii_lowercase();
+        if rest_lower.starts_with("/c ") {
+            let inner = rest[3..].trim_start();
+            return Some(if inner.is_empty() { String::from("true") } else { inner.to_string() });
         }
-        if args_lower.starts_with("/c") && args_trim.len() > 2 {
-            let rest = args_trim[2..].trim_start();
-            return Some(if rest.is_empty() { String::from("true") } else { rest.to_string() });
+        if rest_lower.starts_with("/c") && rest.len() > 2 {
+            let inner = rest[2..].trim_start();
+            return Some(if inner.is_empty() { String::from("true") } else { inner.to_string() });
         }
     }
 
@@ -437,6 +451,13 @@ mod havoc_shell_extract_tests {
                 .as_deref(),
             Some("hostname")
         );
+    }
+
+    #[test]
+    fn windows_cmd_path_with_quoted_executable_and_slash_c() {
+        let path = r"C:\Windows\System32\cmd.exe";
+        let args = r#""C:\Windows\System32\cmd.exe" /c whoami"#;
+        assert_eq!(extract_havoc_posix_shell_inner(path, args).as_deref(), Some("whoami"));
     }
 
     #[test]

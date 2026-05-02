@@ -350,6 +350,17 @@ fn translate_to_shell_cmd_strips_cmd_exe_prefix() {
 }
 
 #[test]
+fn translate_to_shell_cmd_strips_quoted_cmd_path_prefix() {
+    assert_eq!(
+        translate_to_shell_cmd(
+            r"c:\windows\system32\cmd.exe",
+            r#""c:\windows\system32\cmd.exe" /c whoami"#
+        ),
+        "whoami"
+    );
+}
+
+#[test]
 fn translate_to_shell_cmd_non_cmd_exe_uses_path_and_args() {
     assert_eq!(translate_to_shell_cmd("/usr/bin/ls", "-la /tmp"), "/usr/bin/ls -la /tmp");
 }

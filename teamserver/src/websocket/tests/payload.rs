@@ -10,7 +10,7 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use red_cell_common::{
     demon::{
         DemonCommand, DemonFilesystemCommand, DemonInjectWay, DemonProcessCommand,
-        DemonTokenCommand,
+        DemonTokenCommand, WINDOWS_CMD_EXE_PATH,
     },
     operator::AgentTaskInfo,
 };
@@ -69,10 +69,10 @@ fn build_job_encodes_process_create_payload() {
     assert_eq!(read_u32_le(&job.payload, &mut offset), 1);
 }
 
-/// Empty program must encode as length=0 so Demon sets Process=NULL (not L"" which fails CreateProcessW).
-/// Args must be wrapped in "cmd.exe /c " so CMD builtins and executables without full paths work.
+/// Havoc-style split: explicit `cmd.exe` path as program, quoted full path + `/c`
+/// in args so Demon/CreateProcessW get a reliable image and piped stdout works.
 #[test]
-fn build_job_encodes_process_create_empty_program_as_length_zero() {
+fn build_job_encodes_process_create_with_system_cmd_exe_path() {
     use red_cell_common::demon::format_proc_create_args;
 
     let args = format_proc_create_args("whoami");
@@ -85,23 +85,17 @@ fn build_job_encodes_process_create_empty_program_as_length_zero() {
         extra: BTreeMap::from([(String::from("Args"), Value::String(args))]),
         ..AgentTaskInfo::default()
     })
-    .expect("process create (empty program) job should build");
+    .expect("process create (explicit cmd path) job should build");
 
     let mut offset = 0usize;
     assert_eq!(read_u32_le(&job.payload, &mut offset), u32::from(DemonProcessCommand::Create));
     assert_eq!(read_u32_le(&job.payload, &mut offset), 0); // state
-    // Program field must be length=0 (no bytes), not length=2 (null-terminator only)
-    let program_bytes = read_len_prefixed_bytes(&job.payload, &mut offset);
-    assert_eq!(
-        program_bytes.len(),
-        0,
-        "empty program must encode as 0 bytes so Demon sets Process=NULL"
-    );
-    // Args field must decode to the cmd.exe-wrapped command so CMD builtins work
     assert_eq!(
         decode_utf16(read_len_prefixed_bytes(&job.payload, &mut offset)),
-        "cmd.exe /c whoami"
+        WINDOWS_CMD_EXE_PATH
     );
+    let want_args = format!(r#""{WINDOWS_CMD_EXE_PATH}" /c whoami"#);
+    assert_eq!(decode_utf16(read_len_prefixed_bytes(&job.payload, &mut offset)), want_args);
     assert_eq!(read_u32_le(&job.payload, &mut offset), 1); // piped
     assert_eq!(read_u32_le(&job.payload, &mut offset), 1); // verbose
 }

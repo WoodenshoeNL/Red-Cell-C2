@@ -13,6 +13,7 @@ import json
 import os
 import random
 import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -2763,6 +2764,72 @@ AUTOTEST_PORT = 40156
 AUTOTEST_CONFIG_DIR = "automatic-test/config-autotest"
 AUTOTEST_BUILD_TIMEOUT = 30 * 60     # 30 min — covers cold full release build
 AUTOTEST_TEAMSERVER_READY_TIMEOUT = 30
+# Cap sccache disk use during autotest release builds (avoids unbounded ~/.cache/sccache growth).
+AUTOTEST_SCCACHE_CACHE_SIZE_DEFAULT = "5G"
+AUTOTEST_SCCACHE_PREP_TIMEOUT_SECS = 120
+
+
+def _autotest_cargo_compile_env(
+    base: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Environment for autotest ``cargo build --release`` invocations.
+
+    Sets ``SCCACHE_CACHE_SIZE`` when not already present so the sccache daemon
+    LRU-evicts instead of filling the filesystem. Respect a pre-set
+    ``SCCACHE_CACHE_SIZE``; otherwise use ``RC_AUTOTEST_SCCACHE_CACHE_SIZE`` or
+    :data:`AUTOTEST_SCCACHE_CACHE_SIZE_DEFAULT`.
+    """
+    out = dict(base if base is not None else os.environ)
+    if "SCCACHE_CACHE_SIZE" not in out:
+        out["SCCACHE_CACHE_SIZE"] = os.environ.get(
+            "RC_AUTOTEST_SCCACHE_CACHE_SIZE",
+            AUTOTEST_SCCACHE_CACHE_SIZE_DEFAULT,
+        )
+    return out
+
+
+def autotest_sccache_prep(log: Logger, compile_env: dict[str, str]) -> None:
+    """Stop the sccache daemon before a heavy compile.
+
+    Lets the subsequent build spawn a fresh server that reads ``SCCACHE_CACHE_SIZE``
+    from *compile_env* (so an older long-lived daemon cannot ignore the cap).
+    Best-effort only: failures are logged and ignored. Skip when
+    ``RC_AUTOTEST_SKIP_SCCACHE_PREP=1`` or ``sccache`` is not in ``PATH``.
+    """
+    if os.environ.get("RC_AUTOTEST_SKIP_SCCACHE_PREP") == "1":
+        log.log("autotest sccache prep: skipped (RC_AUTOTEST_SKIP_SCCACHE_PREP=1)")
+        return
+    if not shutil.which("sccache"):
+        log.log("autotest sccache prep: sccache not in PATH, skipping")
+        return
+    for phase, argv in (("stop-server", ["sccache", "--stop-server"]),):
+        try:
+            proc = subprocess.run(
+                argv,
+                cwd=str(SCRIPT_DIR),
+                env=compile_env,
+                capture_output=True,
+                text=True,
+                timeout=AUTOTEST_SCCACHE_PREP_TIMEOUT_SECS,
+            )
+            if proc.returncode != 0:
+                tail = (proc.stderr or proc.stdout or "").strip()
+                excerpt = tail[:400] + ("..." if len(tail) > 400 else "")
+                log.log(
+                    f"autotest sccache {phase}: non-zero exit {proc.returncode}"
+                    + (f" — {excerpt}" if excerpt else "")
+                )
+        except subprocess.TimeoutExpired:
+            log.log(
+                f"autotest sccache {phase}: timed out after "
+                f"{AUTOTEST_SCCACHE_PREP_TIMEOUT_SECS}s"
+            )
+        except OSError as exc:
+            log.log(f"autotest sccache {phase}: {exc}")
+    log.log(
+        "autotest sccache prep: done "
+        f"(SCCACHE_CACHE_SIZE={compile_env.get('SCCACHE_CACHE_SIZE', '')})"
+    )
 
 
 def autotest_safety_banner(log: Logger, no_confirm: bool):
@@ -2798,12 +2865,15 @@ def autotest_compile_release(log: Logger) -> tuple[bool, Path]:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_path = LOG_DIR / f"autotest_build_{ts}.log"
     LOG_DIR.mkdir(parents=True, exist_ok=True)
+    compile_env = _autotest_cargo_compile_env()
     log.log(f"compiling: cargo build --release --workspace -> {log_path.name}")
+    autotest_sccache_prep(log, compile_env)
     try:
         with open(log_path, "w") as fh:
             proc = subprocess.run(
                 ["cargo", "build", "--release", "--workspace"],
                 cwd=str(SCRIPT_DIR),
+                env=compile_env,
                 stdout=fh,
                 stderr=subprocess.STDOUT,
                 timeout=AUTOTEST_BUILD_TIMEOUT,

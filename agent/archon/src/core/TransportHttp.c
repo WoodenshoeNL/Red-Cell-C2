@@ -451,7 +451,14 @@ BOOL HttpSend(
                     if ( ! RespBuffer ) {
                         RespBuffer = Instance->Win32.LocalAlloc( LPTR, BufRead );
                     } else {
+                        PVOID PrevBuf = RespBuffer;
                         RespBuffer = Instance->Win32.LocalReAlloc( RespBuffer, RespSize + BufRead, LMEM_MOVEABLE | LMEM_ZEROINIT );
+                        if ( ! RespBuffer ) {
+                            /* LocalReAlloc does not free the input block on failure; free it here to avoid leak */
+                            Instance->Win32.LocalFree( PrevBuf );
+                            Successful = FALSE;
+                            goto LEAVE;
+                        }
                     }
 
                     if ( ! RespBuffer ) {

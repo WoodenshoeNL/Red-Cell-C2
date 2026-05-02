@@ -187,6 +187,12 @@ TEST(test_ipv6_reject_non_decimal_ipv4_suffix)
     /* Octet value out of range 0-255 */
     ASSERT( ! HttpIsLiteralIpv6Host( L"::ffff:256.0.0.1" ) );
     ASSERT( ! HttpIsLiteralIpv6Host( L"::ffff:192.300.2.1" ) );
+    /* Too few octets: only three dot-separated groups (DotCount==2 at group close) */
+    ASSERT( ! HttpIsLiteralIpv6Host( L"::ffff:1.2.3" ) );
+    /* Empty middle octet: consecutive dots with no digits between them */
+    ASSERT( ! HttpIsLiteralIpv6Host( L"::ffff:1..2.3" ) );
+    /* Hex letter immediately after a valid last octet (HasDot==TRUE path) */
+    ASSERT( ! HttpIsLiteralIpv6Host( L"::ffff:1.2.3.4f" ) );
     /* Valid IPv4-mapped address must still be accepted */
     ASSERT(   HttpIsLiteralIpv6Host( L"::ffff:192.0.2.1" ) );
     ASSERT(   HttpIsLiteralIpv6Host( L"::ffff:0.0.0.0" ) );

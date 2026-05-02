@@ -209,6 +209,8 @@ class TestValidateTargetsDict(unittest.TestCase):
         cfg = parse_targets_config(_minimal_valid_targets())
         assert cfg.linux is not None
         self.assertEqual(cfg.linux.host, "10.0.0.1")
+        assert cfg.windows is not None
+        self.assertEqual(cfg.windows.platform, "windows")
 
     def test_optional_windows2(self) -> None:
         raw = _minimal_valid_targets()
@@ -220,6 +222,9 @@ class TestValidateTargetsDict(unittest.TestCase):
             "key": "/k",
         }
         validate_targets_dict(raw)
+        cfg = parse_targets_config(raw)
+        assert cfg.windows2 is not None
+        self.assertEqual(cfg.windows2.platform, "windows")
 
     def test_platform_defaults_to_linux(self) -> None:
         cfg = parse_targets_config(_minimal_valid_targets())
@@ -232,6 +237,21 @@ class TestValidateTargetsDict(unittest.TestCase):
         cfg = parse_targets_config(raw)
         assert cfg.windows is not None
         self.assertEqual(cfg.windows.platform, "windows")
+
+    def test_windows_stanza_defaults_platform_windows_when_key_omitted(self) -> None:
+        raw = _minimal_valid_targets()
+        assert "platform" not in raw["windows"]
+        cfg = parse_targets_config(raw)
+        assert cfg.windows is not None
+        self.assertEqual(cfg.windows.platform, "windows")
+
+    def test_linux_stanza_unc_work_dir_infer_windows_when_platform_omitted(self) -> None:
+        raw = _minimal_valid_targets()
+        raw["linux"]["work_dir"] = "\\\\srv\\share\\rc"
+        del raw["windows"]
+        cfg = parse_targets_config(raw)
+        assert cfg.linux is not None
+        self.assertEqual(cfg.linux.platform, "windows")
 
     def test_platform_linux_explicit(self) -> None:
         raw = _minimal_valid_targets()

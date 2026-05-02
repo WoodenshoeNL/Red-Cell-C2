@@ -706,6 +706,26 @@ def validate_env_dict(raw: dict[str, Any]) -> None:
     parse_env_config(raw)
 
 
+def _looks_like_windows_work_dir(path: str) -> bool:
+    """Heuristic for omitting ``platform``: ``X:\\``/``X:/`` roots or UNC ``\\\\`` prefixes."""
+    if len(path) >= 3 and path[1] == ":" and path[2] in ("/", "\\"):
+        return True
+    return path.startswith("\\\\")
+
+
+def _infer_platform_when_absent(stanza_name: str, work_dir: str | None) -> str:
+    """Default ``platform`` when the key is missing (backward compatible with older targets.toml).
+
+    Preferred rule: derive from stanza (`windows` / `windows2` → ``windows``, ``linux`` → ``linux``).
+    For ``[linux]`` only, paths that resemble Windows filesystem roots retain Windows handling.
+    """
+    if stanza_name in ("windows", "windows2"):
+        return "windows"
+    if stanza_name == "linux" and work_dir is not None and _looks_like_windows_work_dir(work_dir):
+        return "windows"
+    return "linux"
+
+
 def _parse_target_section(
     name: str,
     d: dict[str, Any],
@@ -730,9 +750,12 @@ def _parse_target_section(
             errors.append(f"{label}.display: expected string, got {type(disp_raw).__name__}")
         else:
             display = disp_raw
-    platform_raw = d.get("platform", "linux")
-    platform: str = "linux"
-    if platform_raw is not None:
+    platform_raw = d.get("platform")
+    platform: str
+    if platform_raw is None:
+        platform = _infer_platform_when_absent(name, work_dir)
+    else:
+        platform = "linux"
         if not isinstance(platform_raw, str):
             errors.append(f"{label}.platform: expected string, got {type(platform_raw).__name__}")
         elif platform_raw not in ("linux", "windows"):

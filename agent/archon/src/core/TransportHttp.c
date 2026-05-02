@@ -552,7 +552,11 @@ BOOL HttpSend(
 
                     Instance->SizeOfProxyForUrl = sizeof( WINHTTP_PROXY_INFO );
                     Instance->ProxyForUrl       = Instance->Win32.LocalAlloc( LPTR, Instance->SizeOfProxyForUrl );
-                    MemCopy( Instance->ProxyForUrl, &ProxyInfo, Instance->SizeOfProxyForUrl );
+                    if ( Instance->ProxyForUrl ) {
+                        MemCopy( Instance->ProxyForUrl, &ProxyInfo, Instance->SizeOfProxyForUrl );
+                    } else {
+                        Instance->SizeOfProxyForUrl = 0;
+                    }
 
                     ProxyConfig.lpszProxy       = NULL;
                     ProxyConfig.lpszProxyBypass = NULL;
@@ -573,7 +577,11 @@ BOOL HttpSend(
 
                         Instance->SizeOfProxyForUrl = sizeof( WINHTTP_PROXY_INFO );
                         Instance->ProxyForUrl       = Instance->Win32.LocalAlloc( LPTR, Instance->SizeOfProxyForUrl );
-                        MemCopy( Instance->ProxyForUrl, &ProxyInfo, Instance->SizeOfProxyForUrl );
+                        if ( Instance->ProxyForUrl ) {
+                            MemCopy( Instance->ProxyForUrl, &ProxyInfo, Instance->SizeOfProxyForUrl );
+                        } else {
+                            Instance->SizeOfProxyForUrl = 0;
+                        }
                     }
                 } else if ( ProxyConfig.fAutoDetect ) {
                     AutoProxyOptions.dwFlags                = WINHTTP_AUTOPROXY_AUTO_DETECT;
@@ -590,7 +598,11 @@ BOOL HttpSend(
 
                         Instance->SizeOfProxyForUrl = sizeof( WINHTTP_PROXY_INFO );
                         Instance->ProxyForUrl       = Instance->Win32.LocalAlloc( LPTR, Instance->SizeOfProxyForUrl );
-                        MemCopy( Instance->ProxyForUrl, &ProxyInfo, Instance->SizeOfProxyForUrl );
+                        if ( Instance->ProxyForUrl ) {
+                            MemCopy( Instance->ProxyForUrl, &ProxyInfo, Instance->SizeOfProxyForUrl );
+                        } else {
+                            Instance->SizeOfProxyForUrl = 0;
+                        }
                     }
                 }
             } else {
@@ -608,7 +620,11 @@ BOOL HttpSend(
 
                     Instance->SizeOfProxyForUrl = sizeof( WINHTTP_PROXY_INFO );
                     Instance->ProxyForUrl       = Instance->Win32.LocalAlloc( LPTR, Instance->SizeOfProxyForUrl );
-                    MemCopy( Instance->ProxyForUrl, &ProxyInfo, Instance->SizeOfProxyForUrl );
+                    if ( Instance->ProxyForUrl ) {
+                        MemCopy( Instance->ProxyForUrl, &ProxyInfo, Instance->SizeOfProxyForUrl );
+                    } else {
+                        Instance->SizeOfProxyForUrl = 0;
+                    }
                 }
             }
 
@@ -648,6 +664,11 @@ BOOL HttpSend(
                         RespBuffer = Instance->Win32.LocalAlloc( LPTR, BufRead );
                     } else {
                         RespBuffer = Instance->Win32.LocalReAlloc( RespBuffer, RespSize + BufRead, LMEM_MOVEABLE | LMEM_ZEROINIT );
+                    }
+
+                    if ( ! RespBuffer ) {
+                        Successful = FALSE;
+                        goto LEAVE;
                     }
 
                     RespSize += BufRead;

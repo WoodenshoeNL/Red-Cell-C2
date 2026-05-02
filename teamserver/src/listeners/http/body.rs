@@ -17,9 +17,11 @@ pub(crate) const MINIMUM_DEMON_CALLBACK_BYTES: usize = DemonHeader::SERIALIZED_L
 /// Minimum bytes buffered before the non-legacy shape precheck fires.
 ///
 /// Equals the full Archon header length (size | agent_id | magic = 12 bytes).
-/// This is the unauthenticated buffering ceiling for non-legacy listeners:
-/// bodies that fail the precheck are rejected after at most this many bytes
-/// instead of after the full `MAX_AGENT_MESSAGE_LEN` cap.
+/// For **`legacy_mode = false`**, once these bytes are available the declared
+/// Archon frame length (`4 + size` with `size` from the first four bytes) is
+/// used as a streaming cap whenever it is at least this many bytes, so garbage
+/// that claims a short frame cannot drive buffering up to the global agent
+/// message cap (`crate::MAX_AGENT_MESSAGE_LEN`).
 pub(crate) const NONLEGACY_PRECHECK_HEADER_LEN: usize = ArchonHeader::SERIALIZED_LEN; // 12
 
 /// Buffers an HTTP request body while performing an early pre-screen on the
@@ -34,12 +36,17 @@ pub(crate) const NONLEGACY_PRECHECK_HEADER_LEN: usize = ArchonHeader::SERIALIZED
 ///   network chunk (~16 KiB).
 ///
 /// - **`legacy_mode = false`** (new-protocol listeners): bytes 4–7 are the
-///   Archon `agent_id` (not fixed) and bytes 0–15 are a random ECDH
-///   `connection_id` or ephemeral public key, so no magic-byte check is
-///   possible at this stage.  The function only enforces the minimum body
-///   length ([`NONLEGACY_PRECHECK_HEADER_LEN`] bytes); actual packet-type
-///   classification and magic validation are deferred to the downstream
-///   `process_ecdh_packet` / Archon parser, which have full context.
+///   Archon `agent_id` (not fixed) and bytes 8–11 are the per-build magic, so
+///   there is no fixed prefix to compare against like legacy Demon.  After
+///   [`NONLEGACY_PRECHECK_HEADER_LEN`] bytes, the Archon `size` field is
+///   interpreted as an **exclusive** total byte count (`4 + size`, matching
+///   [`ArchonEnvelope::from_bytes`]): further buffering is capped to that value
+///   (and never beyond `max_len`).  If `4 + size` is below 12, the prefix cannot
+///   be Archon-framed (it is treated as ECDH key material or noise), and the
+///   stream keeps using the caller's `max_len` cap only.  This closes a
+///   pre-auth memory DoS where a client matched the listener but sent a huge
+///   body whose header claimed a small packet.  Legitimate Archon payloads and
+///   ECDH registration/session packets retain prior behaviour.
 ///
 /// Returns `None` if the body exceeds `max_len`, contains a read error, or
 /// fails the appropriate magic check.
@@ -51,12 +58,13 @@ pub(crate) async fn collect_body_with_magic_precheck(
     use http_body_util::BodyExt as _;
 
     // Precheck fires after this many bytes: 8 for legacy (bytes 4–7),
-    // 12 for non-legacy (bytes 8–11 = Archon magic field).
+    // 12 for non-legacy (full Archon header).
     let precheck_threshold = if legacy_mode { 8 } else { NONLEGACY_PRECHECK_HEADER_LEN };
 
     let mut body = body;
     let mut buf: Vec<u8> = Vec::new();
     let mut magic_checked = false;
+    let mut effective_max = max_len;
 
     while let Some(frame) = body.frame().await {
         let frame = frame.ok()?;
@@ -64,23 +72,63 @@ pub(crate) async fn collect_body_with_magic_precheck(
             // Trailers and other non-data frames are skipped.
             continue;
         };
-        if buf.len() + data.len() > max_len {
-            return None;
-        }
-        buf.extend_from_slice(&data);
+        let data = data.as_ref();
+        let next_len = buf.len().checked_add(data.len())?;
 
-        if !magic_checked && buf.len() >= precheck_threshold {
+        if magic_checked {
+            if next_len > effective_max || next_len > max_len {
+                return None;
+            }
+            buf.extend_from_slice(data);
+            continue;
+        }
+
+        if next_len < precheck_threshold {
+            if next_len > max_len {
+                return None;
+            }
+            buf.extend_from_slice(data);
+            continue;
+        }
+
+        if buf.len() < precheck_threshold {
+            // First frame that crosses the threshold: peek the fixed header
+            // and apply the non-legacy Archon declared-length cap **before**
+            // accepting bodies larger than the claimed frame (or rejecting
+            // invalid legacy magic) without buffering the overrun in `buf`.
+            let mut hdr = [0_u8; NONLEGACY_PRECHECK_HEADER_LEN];
+            hdr[..buf.len()].copy_from_slice(&buf);
+            let from_data = precheck_threshold - buf.len();
+            let hdr_tail = hdr.get_mut(buf.len()..precheck_threshold)?;
+            hdr_tail.copy_from_slice(data.get(..from_data)?);
+
             if legacy_mode {
-                // Legacy: bytes 4–7 must be 0xDEADBEEF.
-                if buf[4..8] != DEMON_MAGIC_VALUE.to_be_bytes() {
+                if hdr[4..8] != DEMON_MAGIC_VALUE.to_be_bytes() {
                     return None;
                 }
+            } else {
+                let declared = u32::from_be_bytes(hdr[0..4].try_into().ok()?);
+                let archon_claim = 4usize.checked_add(declared as usize)?;
+                if archon_claim > max_len {
+                    return None;
+                }
+                effective_max = if archon_claim < NONLEGACY_PRECHECK_HEADER_LEN {
+                    max_len
+                } else {
+                    archon_claim
+                };
             }
-            // Non-legacy: no magic check here — bytes 8–11 may be part of a
-            // random ECDH key or connection_id and must not be compared to
-            // DEMON_MAGIC_VALUE.  Downstream parsers classify and validate.
+
+            if next_len > effective_max || next_len > max_len {
+                return None;
+            }
+            buf.extend_from_slice(data);
             magic_checked = true;
+            continue;
         }
+
+        // Unreachable unless `precheck_threshold == 0` (it is not).
+        return None;
     }
 
     // Bodies shorter than 8 (legacy) or 12 (non-legacy) bytes cannot carry
@@ -446,5 +494,24 @@ mod tests {
         let result =
             collect_body_with_magic_precheck(body, NONLEGACY_PRECHECK_HEADER_LEN, false).await;
         assert!(result.is_none(), "non-legacy body exceeding max_len must be rejected");
+    }
+
+    /// Regression (red-cell-c2-8mp6v): declared Archon frame length is smaller than
+    /// the bytes the client sends — reject without buffering to `max_len`.
+    #[tokio::test]
+    async fn nonlegacy_rejects_oversize_stream_against_archon_declared_total() {
+        use axum::body::Body;
+        use futures_util::stream;
+
+        // `4 + u32_be(size_field) == 100` → size field = 96.
+        let mut hdr = vec![0u8; 12];
+        hdr[0..4].copy_from_slice(&96u32.to_be_bytes());
+        let stream = stream::iter([
+            Ok::<Bytes, std::convert::Infallible>(Bytes::from(hdr)),
+            Ok::<Bytes, std::convert::Infallible>(Bytes::from(vec![0xABu8; 500])),
+        ]);
+        let result =
+            collect_body_with_magic_precheck(Body::from_stream(stream), usize::MAX, false).await;
+        assert!(result.is_none());
     }
 }

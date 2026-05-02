@@ -84,98 +84,27 @@ fn agent_exec_help_mentions_default_wait_timeout() {
     assert!(help.contains("--wait-timeout"), "agent exec help must mention the override flag");
 }
 
-// ── agent shell ──────────────────────────────────────────────────────────
+// ── machine-consumable CLI: no interactive agent shell ─────────────────────
 
 #[test]
-fn agent_shell_without_unsafe_tty_fails() {
+fn agent_shell_subcommand_removed() {
     let err = Cli::try_parse_from(["red-cell-cli", "agent", "shell", "abc123"])
-        .expect("agent shell without --unsafe-tty must parse (gate is at dispatch)");
-    match err.command {
-        Some(Commands::Agent { action: AgentCommands::Shell { unsafe_tty, .. } }) => {
-            assert!(!unsafe_tty, "omitting --unsafe-tty must default to false");
-        }
-        other => panic!("expected Agent::Shell, got {other:?}"),
-    }
+        .expect_err("shell removed");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("shell") && (msg.contains("unrecognized") || msg.contains("subcommand")),
+        "expected parse error for removed subcommand; got: {msg}"
+    );
 }
 
 #[test]
-fn agent_shell_with_unsafe_tty_parses() {
-    let cli = Cli::try_parse_from(["red-cell-cli", "agent", "shell", "abc123", "--unsafe-tty"])
-        .expect("agent shell --unsafe-tty must parse");
-    match cli.command {
-        Some(Commands::Agent { action: AgentCommands::Shell { unsafe_tty, .. } }) => {
-            assert!(unsafe_tty, "--unsafe-tty must be true when passed");
-        }
-        other => panic!("expected Agent::Shell, got {other:?}"),
-    }
-}
-
-#[test]
-fn agent_shell_help_mentions_unsafe_tty() {
+fn agent_help_has_exec_not_shell() {
     let mut cmd = Cli::command();
-    let help = cmd
-        .find_subcommand_mut("agent")
-        .expect("agent subcommand")
-        .find_subcommand_mut("shell")
-        .expect("agent shell subcommand")
-        .render_long_help()
-        .to_string();
-
-    assert!(help.contains("--unsafe-tty"), "agent shell help must mention --unsafe-tty");
+    let agent = cmd.find_subcommand_mut("agent").expect("agent subcommand");
+    let names: Vec<_> = agent.get_subcommands().map(|s| s.get_name().to_owned()).collect();
     assert!(
-        help.contains("session --agent"),
-        "agent shell help must point to session as alternative"
+        !names.iter().any(|n| n == "shell"),
+        "agent shell must not appear in help (machine-consumable CLI contract)"
     );
-}
-
-#[test]
-fn agent_shell_enable_local_shell_defaults_to_false() {
-    let cli = Cli::try_parse_from(["red-cell-cli", "agent", "shell", "abc123", "--unsafe-tty"])
-        .expect("must parse");
-    match cli.command {
-        Some(Commands::Agent { action: AgentCommands::Shell { enable_local_shell, .. } }) => {
-            assert!(!enable_local_shell, "--enable-local-shell must default to false");
-        }
-        other => panic!("expected Agent::Shell, got {other:?}"),
-    }
-}
-
-#[test]
-fn agent_shell_enable_local_shell_flag_parses() {
-    let cli = Cli::try_parse_from([
-        "red-cell-cli",
-        "agent",
-        "shell",
-        "abc123",
-        "--unsafe-tty",
-        "--enable-local-shell",
-    ])
-    .expect("must parse");
-    match cli.command {
-        Some(Commands::Agent { action: AgentCommands::Shell { enable_local_shell, .. } }) => {
-            assert!(enable_local_shell, "--enable-local-shell must be true when passed");
-        }
-        other => panic!("expected Agent::Shell, got {other:?}"),
-    }
-}
-
-#[test]
-fn agent_shell_help_mentions_operator_host() {
-    let mut cmd = Cli::command();
-    let help = cmd
-        .find_subcommand_mut("agent")
-        .expect("agent subcommand")
-        .find_subcommand_mut("shell")
-        .expect("agent shell subcommand")
-        .render_long_help()
-        .to_string();
-
-    assert!(
-        help.contains("OPERATOR HOST"),
-        "agent shell help must warn that ! runs on the operator host"
-    );
-    assert!(
-        help.contains("--enable-local-shell"),
-        "agent shell help must mention --enable-local-shell"
-    );
+    assert!(names.iter().any(|n| n == "exec"), "expected agent exec subcommand; got {names:?}");
 }

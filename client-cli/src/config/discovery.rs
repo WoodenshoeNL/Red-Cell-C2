@@ -44,19 +44,6 @@ pub fn global_config_path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("red-cell-cli").join("config.toml"))
 }
 
-/// Check whether `enable_local_shell` is set in any config file.
-///
-/// Resolution: env var `RC_ENABLE_LOCAL_SHELL` (truthy = `1`/`true`/`yes`)
-/// → config file → `false`.
-pub fn resolve_enable_local_shell() -> bool {
-    if let Ok(val) = std::env::var("RC_ENABLE_LOCAL_SHELL") {
-        return matches!(val.as_str(), "1" | "true" | "yes");
-    }
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let path = find_config_file(&cwd).or_else(global_config_path);
-    path.and_then(|p| load_config_file(&p).ok()).and_then(|c| c.enable_local_shell).unwrap_or(false)
-}
-
 /// Returns `true` when the CLI has no configuration from any source:
 /// no `RC_SERVER`/`RC_TOKEN` env vars and no config file on disk.
 pub fn is_unconfigured() -> bool {

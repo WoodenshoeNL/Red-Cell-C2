@@ -12,9 +12,7 @@ mod permissions;
 mod resolve;
 mod types;
 
-pub use discovery::{
-    global_config_path, is_unconfigured, resolve_enable_local_shell, resolve_server_only,
-};
+pub use discovery::{global_config_path, is_unconfigured, resolve_server_only};
 
 // `find_config_file` / `load_config_file` are the stable `crate::config::*` entry points; some
 // call sites are only in `#[cfg(test)]` modules in other files, so the re-export is not always

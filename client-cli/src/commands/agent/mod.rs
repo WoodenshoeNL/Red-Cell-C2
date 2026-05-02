@@ -8,7 +8,6 @@
 //! | `agent show <id>` | `GET /agents/{id}` | full agent record |
 //! | `agent exec <id> --cmd <cmd>` | `POST /agents/{id}/task` | submit task |
 //! | `agent exec --wait` | `POST /agents/{id}/task` then poll `/output` | block |
-//! | `agent shell <id> --unsafe-tty` | repeated `exec --wait` via rustyline REPL | interactive, raw stdout |
 //! | `agent output <id>` | `GET /agents/{id}/output` | persisted output |
 //! | `agent kill <id>` | `DELETE /agents/{id}` | queue kill task |
 //! | `agent kill --wait` | kill then poll `GET /agents/{id}` until dead | block |
@@ -27,7 +26,6 @@ pub(crate) mod kill;
 pub(crate) mod list;
 pub(crate) mod output_cmd;
 pub(crate) mod packet_ring;
-pub(crate) mod shell;
 pub(crate) mod show;
 pub(crate) mod task;
 pub(crate) mod transfer;
@@ -124,28 +122,6 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) 
                     }
                 }
             }
-        }
-
-        AgentCommands::Shell { id, timeout, unsafe_tty, enable_local_shell } => {
-            if !unsafe_tty {
-                let err = CliError::InvalidArgs(
-                    "agent shell requires --unsafe-tty because it uses interactive I/O \
-                     and raw stdout (not the JSON envelope). For machine-consumable \
-                     interaction, use `session --agent <id>` instead."
-                        .to_owned(),
-                );
-                print_error(&err).ok();
-                return err.exit_code();
-            }
-            let local_shell = enable_local_shell || crate::config::resolve_enable_local_shell();
-            let operator = match resolve_operator_name(client).await {
-                Ok(name) => name,
-                Err(e) => {
-                    print_error(&e).ok();
-                    return e.exit_code();
-                }
-            };
-            shell::run(client, id, timeout, local_shell, &operator).await
         }
 
         AgentCommands::Output { id, watch, since } => {
@@ -293,18 +269,4 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) 
             }
         },
     }
-}
-
-// ── helpers ──────────────────────────────────────────────────────────────────
-
-/// Minimal wire type for `GET /operators/whoami` — only the `name` field.
-#[derive(serde::Deserialize)]
-struct WhoamiName {
-    name: String,
-}
-
-/// Resolve the operator name for the current API token via the whoami endpoint.
-async fn resolve_operator_name(client: &ApiClient) -> Result<String, CliError> {
-    let resp: WhoamiName = client.get("/operators/whoami").await?;
-    Ok(resp.name)
 }

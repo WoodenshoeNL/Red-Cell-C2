@@ -168,43 +168,6 @@ pub enum AgentCommands {
         id: AgentId,
     },
 
-    /// Open an interactive shell against a connected agent.
-    ///
-    /// Each input line is dispatched as `agent exec --wait`. Output is printed
-    /// as plain text (no JSON envelope). Requires `--unsafe-tty` because stdout
-    /// is unstructured and the REPL is interactive — violating the CLI output
-    /// contract. For machine-consumable agent interaction, use `session --agent`.
-    ///
-    /// Built-in commands: `help`, `exit`, `upload <src> <dst>`,
-    /// `download <src> <dst>`, `sleep <secs> [jitter%]`.
-    ///
-    /// The `!<cmd>` built-in executes `<cmd>` on the OPERATOR HOST (not the
-    /// remote agent). It is disabled by default; pass `--enable-local-shell`
-    /// or set `enable_local_shell = true` in the config file to opt in.
-    /// Every invocation is logged for audit purposes.
-    ///
-    /// Examples:
-    ///   red-cell-cli agent shell abc123 --unsafe-tty
-    ///   red-cell-cli agent shell abc123 --unsafe-tty --timeout 120
-    ///   red-cell-cli agent shell abc123 --unsafe-tty --enable-local-shell
-    #[command(verbatim_doc_comment)]
-    Shell {
-        /// Agent ID
-        id: AgentId,
-        /// Per-command timeout in seconds (default: 60)
-        #[arg(long)]
-        timeout: Option<u64>,
-        /// Acknowledge that this command uses interactive I/O and raw stdout
-        /// (not the standard JSON envelope).
-        #[arg(long)]
-        unsafe_tty: bool,
-        /// Allow `!<cmd>` to execute commands on the local operator host.
-        /// Disabled by default. Also settable via `enable_local_shell = true`
-        /// in the config file or `RC_ENABLE_LOCAL_SHELL=1` env var.
-        #[arg(long)]
-        enable_local_shell: bool,
-    },
-
     /// Replace the agent's RBAC group membership (`PUT /agents/{id}/groups`).
     ///
     /// Pass `--group` multiple times or omit it to clear all groups (unrestricted).

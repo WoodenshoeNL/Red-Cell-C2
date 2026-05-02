@@ -144,7 +144,6 @@ async fn run_to(
         token: Some(token.to_owned()),
         timeout: None,
         cert_fingerprint: cert_fingerprint.map(str::to_owned),
-        enable_local_shell: None,
     };
 
     if let Err(e) = config::write_config_file(config_path, &file_config) {

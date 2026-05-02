@@ -58,8 +58,6 @@ pub struct FileConfig {
     pub timeout: Option<u64>,
     /// SHA-256 certificate fingerprint for TLS pinning (lowercase hex, 64 chars).
     pub cert_fingerprint: Option<String>,
-    /// Allow `!` local shell execution inside `agent shell`. Defaults to `false`.
-    pub enable_local_shell: Option<bool>,
 }
 
 /// Final resolved configuration ready for use by command handlers.

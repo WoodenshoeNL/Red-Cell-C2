@@ -431,7 +431,6 @@ fn write_config_creates_file_with_restrictive_permissions() {
         token: Some("secret-tok".to_owned()),
         timeout: None,
         cert_fingerprint: None,
-        enable_local_shell: None,
     };
     write_config_file(&path, &config).unwrap();
 
@@ -461,7 +460,6 @@ fn write_config_tightens_permissions_on_existing_file() {
         token: None,
         timeout: None,
         cert_fingerprint: None,
-        enable_local_shell: None,
     };
     write_config_file(&path, &config).unwrap();
 
@@ -548,20 +546,13 @@ fn no_config_on_disk_false_when_global_config_exists() {
 }
 
 #[test]
-fn load_config_parses_enable_local_shell() {
+fn load_config_ignores_unknown_enable_local_shell_key() {
     let tmp = TempDir::new().unwrap();
     let path = write_config(
         tmp.path(),
         "server = \"https://ts:40056\"\ntoken = \"t\"\nenable_local_shell = true",
     );
     let cfg = load_config_file(&path).unwrap();
-    assert_eq!(cfg.enable_local_shell, Some(true));
-}
-
-#[test]
-fn load_config_enable_local_shell_defaults_to_none() {
-    let tmp = TempDir::new().unwrap();
-    let path = write_config(tmp.path(), "server = \"https://ts:40056\"\ntoken = \"t\"");
-    let cfg = load_config_file(&path).unwrap();
-    assert_eq!(cfg.enable_local_shell, None);
+    assert_eq!(cfg.server.as_deref(), Some("https://ts:40056"));
+    assert_eq!(cfg.token.as_deref(), Some("t"));
 }

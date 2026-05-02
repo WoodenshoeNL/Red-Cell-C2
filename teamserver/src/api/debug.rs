@@ -394,8 +394,7 @@ mod tests {
         );
     }
 
-    /// ECDH agent registered but no row in `ts_ecdh_sessions`: handler must
-    /// return `NoEcdhSession` and the response status must be 404.
+    /// ECDH agent registered without a session row: asserts handler returns NoEcdhSession + 404.
     #[tokio::test]
     async fn get_corpus_keys_ecdh_missing_session_returns_404() {
         let agent_id: u32 = 0xBEEF_DEADu32;

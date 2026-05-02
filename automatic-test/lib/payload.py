@@ -17,6 +17,7 @@ from typing import Any, Sequence
 from lib.cli import (
     PAYLOAD_BUILD_WAIT_TIMEOUT_SECS,
     CliConfig,
+    maybe_flush_payload_cache_for_rust_agent,
     payload_build,
     payload_build_wait,
     payload_download,
@@ -108,6 +109,11 @@ def build_parallel(
     if not cells:
         return []
     row: list[MatrixCell] = [_normalize_cell(c) for c in cells]
+
+    # Parallel builds bypass deploy_agent's per-build flush; stale Phantom/Specter
+    # ELF/EXE artifacts otherwise satisfy the cache key after source fixes (bead 1f7q1).
+    if any(cell.agent in ("phantom", "specter") for cell in row):
+        maybe_flush_payload_cache_for_rust_agent(cfg, "phantom")
 
     if not parallel:
         from lib.cli import payload_build_and_fetch

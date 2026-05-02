@@ -2,7 +2,7 @@ use super::super::super::{
     AuditQuery, SessionActivityQuery, query_audit_log, query_session_activity,
 };
 use super::{seed_diverse_audit_rows, seed_timestamped_audit_rows};
-use crate::{AuditLogEntry, Database};
+use crate::{AuditLogEntry, AuditResultStatus, Database, audit_details};
 
 #[tokio::test]
 async fn query_audit_log_since_filter_excludes_older_rows() {
@@ -399,4 +399,29 @@ async fn query_session_activity_invalid_since_and_until_combined_returns_unfilte
         page.total, baseline.total,
         "invalid since+until should be ignored, returning full session activity set"
     );
+}
+
+#[tokio::test]
+async fn query_audit_log_since_coarse_includes_fractional_same_second_row() {
+    let database = Database::connect_in_memory().await.expect("database should initialize");
+    let repo = database.audit_log();
+    let details = audit_details(AuditResultStatus::Success, None, Some("test"), None);
+    repo.create(&AuditLogEntry {
+        id: None,
+        actor: "op".to_owned(),
+        action: "listener.create".to_owned(),
+        target_kind: "listener".to_owned(),
+        target_id: None,
+        details: Some(serde_json::to_value(&details).expect("serialize")),
+        occurred_at: "2026-05-02T14:41:54.639287358Z".to_owned(),
+    })
+    .await
+    .expect("seed");
+
+    let query =
+        AuditQuery { since: Some("2026-05-02T14:41:54Z".to_owned()), ..AuditQuery::default() };
+    let page = query_audit_log(&database, &query).await.expect("query should succeed");
+
+    assert_eq!(page.total, 1, "fractional occurred_at in same UTC second must match coarse since");
+    assert_eq!(page.items[0].action.as_str(), "listener.create");
 }

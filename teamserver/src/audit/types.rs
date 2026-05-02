@@ -343,6 +343,23 @@ fn parse_timestamp_filter(value: &str) -> Option<OffsetDateTime> {
     OffsetDateTime::parse(value, &Rfc3339).ok()
 }
 
+/// Normalize a UTC RFC 3339 bound for SQLite `occurred_at >= ?` when `occurred_at` is compared as TEXT.
+///
+/// A coarse bound such as `2026-05-02T12:00:00Z` sorts **after**
+/// `2026-05-02T12:00:00.001Z` lexicographically (`'.'` sorts before `'Z'`), which wrongly excludes
+/// rows in the same calendar second. Replacing the trailing `Z` with `'.'` yields a prefix
+/// that sorts before any sub-second continuation at that second, restoring inclusive-lower-bound semantics.
+#[must_use]
+pub(super) fn audit_since_sql_lower_bound(normalized_utc_rfc3339: &str) -> String {
+    let s = normalized_utc_rfc3339.trim();
+    if let Some(body) = s.strip_suffix('Z') {
+        if !body.contains('.') {
+            return format!("{body}.");
+        }
+    }
+    s.to_owned()
+}
+
 /// Parse a query-string agent-id value as **hexadecimal** and normalise it to
 /// an 8-digit uppercase hex string (e.g. `"0xCAFE"` → `"0000CAFE"`).
 ///

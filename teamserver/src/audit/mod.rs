@@ -92,7 +92,8 @@ pub async fn query_audit_log(
         agent_id: query.normalized_agent_id(),
         command_contains: query.command.clone(),
         result_status: query.result_status.map(|s| s.as_str().to_owned()),
-        since: normalize_timestamp_utc(query.since_timestamp())?,
+        since: normalize_timestamp_utc(query.since_timestamp())?
+            .map(|s| types::audit_since_sql_lower_bound(&s)),
         until: normalize_timestamp_utc(query.until_timestamp())?,
         action_in: None,
     };
@@ -146,7 +147,8 @@ pub async fn query_session_activity(
     let filter = AuditLogFilter {
         actor_contains: query.operator.clone(),
         action_in: Some(actions.iter().cloned().collect()),
-        since: normalize_timestamp_utc(query.since_timestamp())?,
+        since: normalize_timestamp_utc(query.since_timestamp())?
+            .map(|s| types::audit_since_sql_lower_bound(&s)),
         until: normalize_timestamp_utc(query.until_timestamp())?,
         ..AuditLogFilter::default()
     };

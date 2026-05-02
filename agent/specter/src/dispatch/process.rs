@@ -239,10 +239,10 @@ pub(super) fn translate_to_shell_cmd(path: &str, args: &str) -> String {
     }
 
     if args_lower.starts_with("/c ") {
-        return args[3..].to_string();
+        return args_trim[3..].to_string();
     }
-    if args_lower.starts_with("/c") && args.len() > 2 {
-        return args[2..].trim_start().to_string();
+    if args_lower.starts_with("/c") && args_trim.len() > 2 {
+        return args_trim[2..].trim_start().to_string();
     }
 
     if args.is_empty() { path.to_string() } else { format!("{path} {args}") }

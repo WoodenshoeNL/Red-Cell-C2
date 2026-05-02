@@ -390,6 +390,7 @@ mod tests {
     use tower::ServiceExt as _;
 
     use crate::demon::INIT_EXT_MONOTONIC_CTR;
+    use crate::listeners::http::test_helpers::build_ecdh_metadata;
     use crate::{
         AgentRegistry, CorpusCapture, Database, DemonInitSecretConfig, ShutdownController,
         SocketRelayManager,
@@ -401,57 +402,16 @@ mod tests {
         },
     };
 
-    // ── metadata helpers (mirror ecdh_dispatch/tests.rs layout) ──────────────
-
-    fn put_u32_be(buf: &mut Vec<u8>, v: u32) {
-        buf.extend_from_slice(&v.to_be_bytes());
-    }
-
-    fn put_u64_be(buf: &mut Vec<u8>, v: u64) {
-        buf.extend_from_slice(&v.to_be_bytes());
-    }
-
-    fn put_str_be(buf: &mut Vec<u8>, s: &str) {
-        let b = s.as_bytes();
-        put_u32_be(buf, b.len() as u32);
-        buf.extend_from_slice(b);
-    }
-
-    fn put_utf16_be(buf: &mut Vec<u8>, s: &str) {
-        let u: Vec<u16> = s.encode_utf16().collect();
-        put_u32_be(buf, (u.len() * 2) as u32);
-        for c in u {
-            buf.extend_from_slice(&c.to_be_bytes());
-        }
-    }
-
-    /// Build a minimal but valid ECDH init metadata blob for `agent_id`.
     fn ecdh_reg_metadata(agent_id: u32) -> Vec<u8> {
-        let mut m = Vec::new();
-        put_u32_be(&mut m, agent_id);
-        put_str_be(&mut m, "wkstn-test");
-        put_str_be(&mut m, "operator");
-        put_str_be(&mut m, "REDCELL");
-        put_str_be(&mut m, "10.0.0.1");
-        put_utf16_be(&mut m, "C:\\Windows\\explorer.exe");
-        put_u32_be(&mut m, 4242); // pid
-        put_u32_be(&mut m, 4243); // tid
-        put_u32_be(&mut m, 512); // ppid
-        put_u32_be(&mut m, 2); // arch
-        put_u32_be(&mut m, 0); // elevated
-        put_u64_be(&mut m, 0x0040_1000_u64); // base_address
-        put_u32_be(&mut m, 10); // os_major
-        put_u32_be(&mut m, 0); // os_minor
-        put_u32_be(&mut m, 1); // os_product_type
-        put_u32_be(&mut m, 0); // os_service_pack
-        put_u32_be(&mut m, 22000); // os_build
-        put_u32_be(&mut m, 9); // os_arch
-        put_u32_be(&mut m, 15); // sleep_delay
-        put_u32_be(&mut m, 20); // sleep_jitter
-        put_u64_be(&mut m, 1_893_456_000_u64); // kill_date
-        m.extend_from_slice(&0_i32.to_be_bytes()); // working_hours
-        put_u32_be(&mut m, INIT_EXT_MONOTONIC_CTR); // ext_flags
-        m
+        build_ecdh_metadata(
+            agent_id,
+            "wkstn-test",
+            "10.0.0.1",
+            4242,
+            4243,
+            0,
+            INIT_EXT_MONOTONIC_CTR,
+        )
     }
 
     fn ecdh_listener_config() -> HttpListenerConfig {

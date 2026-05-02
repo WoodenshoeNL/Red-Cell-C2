@@ -17,6 +17,7 @@ use super::registration::process_ecdh_registration;
 use super::session::{EcdhSessionContext, process_ecdh_session};
 use super::types::EcdhOutcome;
 use crate::listeners::EcdhRegistrationRateLimiter;
+use crate::listeners::http::test_helpers::build_ecdh_metadata;
 
 async fn test_ecdh_db() -> (Database, EcdhRepository) {
     let db = Database::connect_in_memory().await.expect("db");
@@ -461,59 +462,9 @@ async fn process_ecdh_packet_archon_body_does_not_consume_budget() {
 }
 
 // ── ECDH registration seq_protected persistence ─────────────────────
-//
-// Helpers for building valid ECDH init metadata inline — the demon
-// test module is private, so we reconstruct the payload layout here.
-
-fn put_u32_be(buf: &mut Vec<u8>, v: u32) {
-    buf.extend_from_slice(&v.to_be_bytes());
-}
-
-fn put_u64_be(buf: &mut Vec<u8>, v: u64) {
-    buf.extend_from_slice(&v.to_be_bytes());
-}
-
-fn put_str_be(buf: &mut Vec<u8>, s: &str) {
-    let bytes = s.as_bytes();
-    put_u32_be(buf, u32::try_from(bytes.len()).expect("str len fits in u32"));
-    buf.extend_from_slice(bytes);
-}
-
-fn put_utf16_be(buf: &mut Vec<u8>, s: &str) {
-    let utf16: Vec<u16> = s.encode_utf16().collect();
-    let nbytes = utf16.len() * 2;
-    put_u32_be(buf, u32::try_from(nbytes).expect("utf16 len fits in u32"));
-    for unit in utf16 {
-        buf.extend_from_slice(&unit.to_be_bytes());
-    }
-}
 
 fn build_ecdh_init_metadata(agent_id: u32, ext_flags: u32) -> Vec<u8> {
-    let mut m = Vec::new();
-    put_u32_be(&mut m, agent_id);
-    put_str_be(&mut m, "wkstn-01");
-    put_str_be(&mut m, "operator");
-    put_str_be(&mut m, "REDCELL");
-    put_str_be(&mut m, "10.0.0.25");
-    put_utf16_be(&mut m, "C:\\Windows\\explorer.exe");
-    put_u32_be(&mut m, 1337); // process_pid
-    put_u32_be(&mut m, 1338); // process_tid
-    put_u32_be(&mut m, 512); // process_ppid
-    put_u32_be(&mut m, 2); // process_arch
-    put_u32_be(&mut m, 1); // elevated
-    put_u64_be(&mut m, 0x0040_1000); // base_address
-    put_u32_be(&mut m, 10); // os major
-    put_u32_be(&mut m, 0); // os minor
-    put_u32_be(&mut m, 1); // os product type
-    put_u32_be(&mut m, 0); // os service pack
-    put_u32_be(&mut m, 22000); // os build
-    put_u32_be(&mut m, 9); // os arch
-    put_u32_be(&mut m, 15); // sleep delay
-    put_u32_be(&mut m, 20); // sleep jitter
-    put_u64_be(&mut m, 1_893_456_000); // kill date
-    m.extend_from_slice(&0_i32.to_be_bytes()); // working hours
-    put_u32_be(&mut m, ext_flags);
-    m
+    build_ecdh_metadata(agent_id, "wkstn-01", "10.0.0.25", 1337, 1338, 1, ext_flags)
 }
 
 /// Regression for red-cell-c2-pivna: an ECDH registration that sets

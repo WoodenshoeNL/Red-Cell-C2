@@ -17,6 +17,8 @@ pub(crate) use dispatch::{DemonHttpDisposition, process_demon_transport};
 pub(crate) use handler::is_past_kill_date;
 #[cfg(test)]
 pub(crate) use proxy::{TrustedProxyPeer, extract_external_ip, parse_trusted_proxy_peer};
+#[cfg(test)]
+mod test_helpers;
 
 use std::net::IpAddr;
 use std::path::PathBuf;

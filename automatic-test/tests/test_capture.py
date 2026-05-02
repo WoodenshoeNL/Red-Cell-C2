@@ -141,6 +141,7 @@ class TestCorpusCapture(unittest.TestCase):
         self.assertIsNone(keys["monotonic_ctr"])
         self.assertIsNone(keys["initial_ctr_block_offset"])
         self.assertIsNone(keys["agent_id_hex"])
+        self.assertIsNone(keys["encryption_scheme"])
 
     def test_write_session_keys_populated(self) -> None:
         """When key material is available (post-red-cell-c2-00hf1), fields are non-null."""

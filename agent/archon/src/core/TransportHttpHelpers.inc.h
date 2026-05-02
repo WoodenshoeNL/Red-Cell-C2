@@ -128,6 +128,11 @@ static BOOL HttpIsLiteralIpv6Host(
     HasDot     = FALSE;
     DotCount   = 0;
 
+    /* Per-octet state for the IPv4-mapped dotted tail. */
+    DWORD OctetVal         = 0;    /* decimal value of the current octet or pre-dot portion */
+    BOOL  OctetHasDig      = FALSE;/* final octet has at least one digit */
+    BOOL  GroupOnlyDecimal = TRUE; /* no hex-only chars seen in current group */
+
     for ( i = 0; i <= Len; i++ ) {
         WCHAR Ch = ( i < Len ) ? Scan[ i ] : L'\0';
 
@@ -136,14 +141,18 @@ static BOOL HttpIsLiteralIpv6Host(
             if ( InGroup ) {
                 if ( HexLen > 4 ) { return FALSE; }
                 if ( HasDot ) {
-                    if ( DotCount != 3 ) { return FALSE; }
+                    if ( DotCount != 3 )  { return FALSE; }
+                    if ( ! OctetHasDig )  { return FALSE; } /* last octet must have digits */
                     GroupCount++; /* IPv4 suffix counts as two groups */
                 }
                 GroupCount++;
-                InGroup  = FALSE;
-                HexLen   = 0;
-                HasDot   = FALSE;
-                DotCount = 0;
+                InGroup          = FALSE;
+                HexLen           = 0;
+                HasDot           = FALSE;
+                DotCount         = 0;
+                OctetVal         = 0;
+                OctetHasDig      = FALSE;
+                GroupOnlyDecimal = TRUE;
             }
 
             if ( Ch == L'\0' ) {
@@ -160,18 +169,41 @@ static BOOL HttpIsLiteralIpv6Host(
             }
 
         } else if ( Ch == L'.' ) {
-            if ( ! InGroup ) {
-                return FALSE;
+            if ( ! InGroup ) { return FALSE; }
+            if ( HasDot ) {
+                /* Subsequent dots: each octet needs at least one digit. */
+                if ( ! OctetHasDig ) { return FALSE; }
+                OctetVal    = 0;
+                OctetHasDig = FALSE;
+            } else {
+                /* First dot: the pre-dot portion must be decimal-only and 0-255. */
+                if ( ! GroupOnlyDecimal ) { return FALSE; }
+                if ( OctetVal > 255 )     { return FALSE; }
+                OctetVal    = 0;
+                OctetHasDig = FALSE;
             }
             HasDot = TRUE;
             DotCount++;
 
-        } else if ( HttpIsHexDigitW( Ch ) ) {
+        } else if ( Ch >= L'0' && Ch <= L'9' ) {
+            /* Decimal digit — valid in both hex hextets and dotted IPv4 tails. */
             InGroup = TRUE;
-            if ( ! HasDot ) {
+            if ( HasDot ) {
+                OctetVal = OctetVal * 10 + (DWORD)( Ch - L'0' );
+                if ( OctetVal > 255 ) { return FALSE; }
+                OctetHasDig = TRUE;
+            } else {
                 HexLen++;
-                /* Overflow check deferred to group close; catches >4 there */
+                /* Accumulate for range check at the first dot, if one follows. */
+                OctetVal = OctetVal * 10 + (DWORD)( Ch - L'0' );
             }
+
+        } else if ( HttpIsHexDigitW( Ch ) ) {
+            /* Hex-only digit (a-f / A-F) — not allowed inside a dotted IPv4 tail. */
+            if ( HasDot ) { return FALSE; }
+            InGroup          = TRUE;
+            HexLen++;
+            GroupOnlyDecimal = FALSE;
 
         } else {
             return FALSE;

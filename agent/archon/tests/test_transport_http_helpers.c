@@ -179,6 +179,20 @@ TEST(test_ipv6_reject_ipv4_suffix_overflow)
     ASSERT( ! HttpIsLiteralIpv6Host( L"::ffff:1.2.3.4.5" ) );
 }
 
+TEST(test_ipv6_reject_non_decimal_ipv4_suffix)
+{
+    /* Hex letters in the dotted tail are not valid decimal octets */
+    ASSERT( ! HttpIsLiteralIpv6Host( L"::ffff:a.b.c.d" ) );
+    ASSERT( ! HttpIsLiteralIpv6Host( L"::ffff:1a.2.3.4" ) );
+    /* Octet value out of range 0-255 */
+    ASSERT( ! HttpIsLiteralIpv6Host( L"::ffff:256.0.0.1" ) );
+    ASSERT( ! HttpIsLiteralIpv6Host( L"::ffff:192.300.2.1" ) );
+    /* Valid IPv4-mapped address must still be accepted */
+    ASSERT(   HttpIsLiteralIpv6Host( L"::ffff:192.0.2.1" ) );
+    ASSERT(   HttpIsLiteralIpv6Host( L"::ffff:0.0.0.0" ) );
+    ASSERT(   HttpIsLiteralIpv6Host( L"::ffff:255.255.255.255" ) );
+}
+
 int main(void)
 {
     setlocale(LC_ALL, "C.UTF-8");
@@ -197,6 +211,7 @@ int main(void)
     run_test_ipv6_reject_too_many_groups();
     run_test_ipv6_reject_duplicate_double_colon();
     run_test_ipv6_reject_ipv4_suffix_overflow();
+    run_test_ipv6_reject_non_decimal_ipv4_suffix();
 
     printf("\nSummary: %d/%d tests passed\n", tests_passed, tests_run);
     return 0;

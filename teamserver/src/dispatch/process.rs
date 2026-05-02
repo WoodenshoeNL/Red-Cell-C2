@@ -149,21 +149,37 @@ pub(super) async fn handle_process_command_callback(
                 } else {
                     ("Error", format!("Process could not be started: Path:[{path}]"))
                 };
-                persist_process_agent_response(
-                    registry,
-                    database,
-                    events,
-                    AgentResponseEntry {
+                if success != 0 && piped != 0 {
+                    // Piped process started: broadcast the start notification so the
+                    // real-time UI receives it, but do NOT persist it to the database.
+                    // exec_wait polls the database; persisting here would cause it to
+                    // return this notification before the piped output (CommandOutput)
+                    // actually arrives.
+                    events.broadcast(agent_response_event(
                         agent_id,
-                        command_id: u32::from(DemonCommand::CommandProc),
+                        u32::from(DemonCommand::CommandProc),
                         request_id,
-                        kind: kind.to_owned(),
-                        message: message.clone(),
-                        extra: BTreeMap::new(),
-                        output: message,
-                    },
-                )
-                .await?;
+                        kind,
+                        &message,
+                        None,
+                    )?);
+                } else {
+                    persist_process_agent_response(
+                        registry,
+                        database,
+                        events,
+                        AgentResponseEntry {
+                            agent_id,
+                            command_id: u32::from(DemonCommand::CommandProc),
+                            request_id,
+                            kind: kind.to_owned(),
+                            message: message.clone(),
+                            extra: BTreeMap::new(),
+                            output: message,
+                        },
+                    )
+                    .await?;
+                }
             } else if success == 0 || piped == 0 {
                 let message = "Process create completed".to_owned();
                 persist_process_agent_response(

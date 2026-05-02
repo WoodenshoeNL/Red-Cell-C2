@@ -70,6 +70,7 @@ fn build_job_encodes_process_create_payload() {
 }
 
 /// Empty program must encode as length=0 so Demon sets Process=NULL (not L"" which fails CreateProcessW).
+/// Args must be wrapped in "cmd.exe /c " so CMD builtins and executables without full paths work.
 #[test]
 fn build_job_encodes_process_create_empty_program_as_length_zero() {
     use red_cell_common::demon::format_proc_create_args;
@@ -96,8 +97,11 @@ fn build_job_encodes_process_create_empty_program_as_length_zero() {
         0,
         "empty program must encode as 0 bytes so Demon sets Process=NULL"
     );
-    // Args field must decode to the original command
-    assert_eq!(decode_utf16(read_len_prefixed_bytes(&job.payload, &mut offset)), "whoami");
+    // Args field must decode to the cmd.exe-wrapped command so CMD builtins work
+    assert_eq!(
+        decode_utf16(read_len_prefixed_bytes(&job.payload, &mut offset)),
+        "cmd.exe /c whoami"
+    );
     assert_eq!(read_u32_le(&job.payload, &mut offset), 1); // piped
     assert_eq!(read_u32_le(&job.payload, &mut offset), 1); // verbose
 }

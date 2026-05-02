@@ -706,6 +706,42 @@ async fn process_create_non_verbose_success_piped_does_not_broadcast() {
     assert!(result.is_err(), "expected no broadcast when verbose=0, success=1, piped=1");
 }
 
+#[tokio::test]
+async fn process_create_verbose_success_piped_broadcasts_but_does_not_persist() {
+    // When piped=TRUE and success=TRUE the real output arrives later via CommandOutput.
+    // The verbose "Process started" notification must be broadcast (so the UI sees it)
+    // but NOT persisted to the database so that exec_wait waits for the actual piped
+    // output instead of returning this notification prematurely.
+    let database = Database::connect_in_memory().await.expect("db");
+    let registry = AgentRegistry::new(database.clone());
+    registry.insert(sample_agent_info(0xA1, test_key(0x11), test_iv(0x22))).await.expect("insert");
+    let events = EventBus::default();
+    let mut rx = events.subscribe();
+    // verbose=1, success=1, piped=1
+    let payload = build_process_create_payload("C:\\cmd.exe", 9999, 1, 1, 1);
+
+    handle_process_command_callback(&registry, &database, &events, 0xA1, 7, &payload)
+        .await
+        .expect("handler should succeed");
+
+    // Event IS broadcast for real-time UI
+    let event = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+        .await
+        .expect("should receive broadcast event")
+        .expect("should have an event");
+    let (kind, message) = extract_response_kind_and_message(&event);
+    assert_eq!(kind, "Info");
+    assert!(message.contains("C:\\cmd.exe") && message.contains("9999"), "got: {message}");
+
+    // NOT persisted — database must have no entries for this agent
+    let entries = database
+        .agent_responses()
+        .list_for_agent(0xA1)
+        .await
+        .expect("db query");
+    assert!(entries.is_empty(), "verbose+piped+success must not persist to DB");
+}
+
 // ── Unicode / non-ASCII process name formatting ─────────────────────────
 //
 // Note on alignment: `format_process_table` and `format_grep_table` compute

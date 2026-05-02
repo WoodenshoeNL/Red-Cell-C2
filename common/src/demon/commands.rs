@@ -34,8 +34,14 @@ pub fn format_sleep_payload_base64(delay_secs: u32, jitter_percent: u32) -> Stri
 /// The current Havoc protocol always sends `state=0`, `verbose=TRUE`,
 /// `piped=TRUE`, and an empty program field, with the command line
 /// base64-encoded in the final position.
+///
+/// The command is wrapped in `cmd.exe /c <command_line>` so that CMD builtins
+/// (echo, dir, set, cls, etc.) work correctly.  `CreateProcessW(NULL,
+/// "cmd.exe /c ...")` locates `cmd.exe` via the Windows system-directory search
+/// (which always includes System32) even when `PATH` is empty or minimal.
 pub fn format_proc_create_args(command_line: &str) -> String {
-    let encoded = BASE64_STANDARD.encode(command_line);
+    let shell_cmd = format!("cmd.exe /c {command_line}");
+    let encoded = BASE64_STANDARD.encode(shell_cmd.as_bytes());
     format!("0;TRUE;TRUE;;{encoded}")
 }
 
@@ -396,16 +402,23 @@ mod tests {
     }
 
     #[test]
-    fn format_proc_create_args_encodes_correctly() {
+    fn format_proc_create_args_wraps_in_cmd_exe() {
         let args = format_proc_create_args("whoami");
-        let encoded = BASE64_STANDARD.encode("whoami");
+        let encoded = BASE64_STANDARD.encode("cmd.exe /c whoami");
+        assert_eq!(args, format!("0;TRUE;TRUE;;{encoded}"));
+    }
+
+    #[test]
+    fn format_proc_create_args_wraps_builtins() {
+        let args = format_proc_create_args("echo hello");
+        let encoded = BASE64_STANDARD.encode("cmd.exe /c echo hello");
         assert_eq!(args, format!("0;TRUE;TRUE;;{encoded}"));
     }
 
     #[test]
     fn format_proc_create_args_empty_command() {
         let args = format_proc_create_args("");
-        let encoded = BASE64_STANDARD.encode("");
+        let encoded = BASE64_STANDARD.encode("cmd.exe /c ");
         assert_eq!(args, format!("0;TRUE;TRUE;;{encoded}"));
     }
 

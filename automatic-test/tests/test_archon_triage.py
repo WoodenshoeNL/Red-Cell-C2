@@ -57,8 +57,8 @@ class TestFormatArchonCheckinTimeoutDiagnostics(unittest.TestCase):
         # TNC is skipped when no probe host, but UTC + netstat + Defender are still called.
         self.assertNotIn("Test-NetConnection", text)
         self.assertIn("live processes from target.work_dir", text)
-        # Exactly: UTC probe (1) + netstat (1) + Defender events (1) + process probe (1) = 4 calls.
-        self.assertEqual(m.call_count, 4)
+        # UTC (1) + netstat (1) + Defender AV events (1) + Network Protection events (1) + process probe (1).
+        self.assertEqual(m.call_count, 5)
 
 
 class TestLogArchonEcdhPrelude(unittest.TestCase):

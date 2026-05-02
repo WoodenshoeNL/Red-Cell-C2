@@ -40,6 +40,9 @@ Skip conditions:
 
 DESCRIPTION = "Loot and audit log"
 
+# Match teamserver GET /api/v1/audit maximum page size (AuditQuery::MAX_LIMIT).
+AUDIT_LIST_LIMIT = 500
+
 import csv
 import io
 import os
@@ -118,6 +121,7 @@ def run(ctx):
         listener_stop,
         log_list,
         loot_list,
+        maybe_flush_payload_cache_for_rust_agent,
         payload_build_and_fetch,
     )
     from lib.deploy import defender_add_exclusion, ensure_work_dir, execute_background, run_remote, upload
@@ -174,6 +178,7 @@ def run(ctx):
     agent_id = None
     try:
         # ── Step 3: Build agent payload ───────────────────────────────────────
+        maybe_flush_payload_cache_for_rust_agent(cli, agent_name)
         print(f"  [payload] building {agent_name} {actual_fmt} x64 for {target_label} target")
         raw = payload_build_and_fetch(
             cli, listener=listener_name, arch="x64", fmt=actual_fmt, agent=agent_name
@@ -272,7 +277,7 @@ def run(ctx):
         # window should be <= audit_window_end (server clock).
         audit_window_end = _utc_now_iso()
         print(f"  [audit] querying audit log since {test_start} (window ends {audit_window_end})")
-        audit_entries = log_list(cli, since=test_start, limit=200)
+        audit_entries = log_list(cli, since=test_start, limit=AUDIT_LIST_LIMIT)
         print(f"  [audit] {len(audit_entries)} entries in baseline (since={test_start!r})")
 
         actions_seen = {e["action"] for e in audit_entries}
@@ -300,22 +305,22 @@ def run(ctx):
 
         # ── Filter coverage (CLI substring semantics + CLI date range) ──────
         exp_op = expected_subset_operator_substring(audit_entries, expected_operator)
-        got_op = log_list(cli, since=test_start, operator=expected_operator, limit=200)
+        got_op = log_list(cli, since=test_start, operator=expected_operator, limit=AUDIT_LIST_LIMIT)
         assert_multiset_equal(got_op, exp_op, label="audit filter --operator")
         print("  [audit] filter --operator matches expected subset ✓")
 
         exp_task = expected_subset_action_substring(audit_entries, "agent.task")
-        got_task = log_list(cli, since=test_start, action="agent.task", limit=200)
+        got_task = log_list(cli, since=test_start, action="agent.task", limit=AUDIT_LIST_LIMIT)
         assert_multiset_equal(got_task, exp_task, label="audit filter --action agent.task")
         print("  [audit] filter --action agent.task matches expected subset ✓")
 
         exp_agent = expected_subset_agent_id(audit_entries, agent_id)
-        got_agent = log_list(cli, since=test_start, agent_id=agent_id, limit=200)
+        got_agent = log_list(cli, since=test_start, agent_id=agent_id, limit=AUDIT_LIST_LIMIT)
         assert_multiset_equal(got_agent, exp_agent, label="audit filter --agent")
         print("  [audit] filter --agent matches expected subset ✓")
 
         exp_until = expected_subset_until_window(audit_entries, until_ts=audit_window_end)
-        cli_until = log_list(cli, since=test_start, until=audit_window_end, limit=200)
+        cli_until = log_list(cli, since=test_start, until=audit_window_end, limit=AUDIT_LIST_LIMIT)
         assert_multiset_equal(cli_until, exp_until, label="CLI log list since+until")
         print("  [audit] CLI since+until window matches expected subset ✓")
 

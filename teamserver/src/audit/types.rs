@@ -151,7 +151,7 @@ pub struct AuditQuery {
 
 impl AuditQuery {
     pub(crate) const DEFAULT_LIMIT: usize = 50;
-    pub(crate) const MAX_LIMIT: usize = 200;
+    pub(crate) const MAX_LIMIT: usize = 500;
 
     /// Return the validated page size.
     #[must_use]

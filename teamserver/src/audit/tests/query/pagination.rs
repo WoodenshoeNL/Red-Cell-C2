@@ -11,7 +11,7 @@ fn query_validates_limit_and_offset_defaults() {
     assert_eq!(query.offset(), 0);
 
     let clamped = AuditQuery { limit: Some(500), offset: Some(4), ..AuditQuery::default() };
-    assert_eq!(clamped.limit(), 200);
+    assert_eq!(clamped.limit(), 500);
     assert_eq!(clamped.offset(), 4);
 }
 
@@ -25,7 +25,7 @@ fn session_activity_query_default_limit_and_offset() {
 #[test]
 fn session_activity_query_oversized_limit_is_clamped() {
     let q = SessionActivityQuery { limit: Some(9999), ..Default::default() };
-    assert_eq!(q.limit(), 200);
+    assert_eq!(q.limit(), 500);
 }
 
 #[test]
@@ -46,7 +46,7 @@ fn session_activity_query_validates_limit_and_offset_defaults() {
         offset: Some(7),
         ..SessionActivityQuery::default()
     };
-    assert_eq!(clamped.limit(), 200);
+    assert_eq!(clamped.limit(), 500);
     assert_eq!(clamped.offset(), 7);
 }
 

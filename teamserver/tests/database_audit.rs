@@ -497,7 +497,7 @@ async fn audit_query_limit_zero_clamps_to_one() -> Result<(), TeamserverError> {
     let page =
         query_audit_log(&database, &AuditQuery { limit: Some(0), ..AuditQuery::default() }).await?;
 
-    // AuditQuery::limit() clamps to 1..=200, so limit=0 → 1.
+    // AuditQuery::limit() clamps to 1..=500, so limit=0 → 1.
     assert_eq!(page.limit, 1);
     assert_eq!(page.items.len(), 1, "clamped limit should return exactly 1 item");
     assert_eq!(page.total, 5);

@@ -262,6 +262,30 @@ def payload_cache_flush(cfg: CliConfig) -> dict:
     return _run(cfg, "payload", "cache-flush")
 
 
+def maybe_flush_payload_cache_for_rust_agent(cfg: CliConfig, agent_type: str) -> None:
+    """Flush the teamserver artifact cache before Phantom/Specter builds when possible.
+
+    Reuses cached ELF/EXE blobs when build parameters match; after agent source
+    changes the cache can still satisfy the key and serve an obsolete binary.
+    Autotest scenarios then observe phantom regressions until the cache is
+    cleared (red-cell-c2-1f7q1).
+
+    Non-fatal if the API token lacks admin (cache flush returns 403): callers
+    continue with a best-effort build.
+    """
+    if agent_type not in ("phantom", "specter"):
+        return
+    try:
+        payload_cache_flush(cfg)
+    except CliError as exc:
+        print(
+            f"  [payload] warning: cache flush failed for {agent_type} "
+            f"(continuing; possible stale artifact): {exc}"
+        )
+        return
+    print(f"  [payload] flushed server build cache before {agent_type} build")
+
+
 def payload_download(cfg: CliConfig, payload_id: str | int, dst: str) -> dict:
     """Download a built payload to a local file."""
     return _run(cfg, "payload", "download", str(payload_id), "--dst", dst)

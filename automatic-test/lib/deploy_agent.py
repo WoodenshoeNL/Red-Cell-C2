@@ -12,7 +12,7 @@ import tempfile
 import uuid
 from typing import Callable
 
-from lib.cli import CliConfig, agent_list, payload_build_and_fetch
+from lib.cli import CliConfig, agent_list, maybe_flush_payload_cache_for_rust_agent, payload_build_and_fetch
 from lib.deploy import (
     TargetConfig,
     defender_add_process_exclusion,
@@ -124,6 +124,7 @@ def deploy_and_checkin(
             raw = pre_built_payload
             print(f"  [{tag}][payload] using pre-built {agent_type} {fmt} {arch} ({len(raw)} bytes)")
         else:
+            maybe_flush_payload_cache_for_rust_agent(cli, agent_type)
             print(f"  [{tag}][payload] building {agent_type} {fmt} {arch}")
             raw = payload_build_and_fetch(
                 cli,

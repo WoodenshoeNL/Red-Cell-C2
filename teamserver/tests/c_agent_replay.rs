@@ -51,6 +51,11 @@ fn c_demon_replay_harness_checkin() {
         println!("corpus not found at {dir:?} — skipping");
         return;
     }
+    let fixture = dir.join("0000.bin");
+    if !fixture.exists() {
+        println!("corpus fixture {fixture:?} absent (placeholder-only dir) — skipping");
+        return;
+    }
 
     let status = Command::new(harness)
         .arg(&dir)

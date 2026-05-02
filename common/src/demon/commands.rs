@@ -39,8 +39,15 @@ pub fn format_sleep_payload_base64(delay_secs: u32, jitter_percent: u32) -> Stri
 /// (echo, dir, set, cls, etc.) work correctly.  `CreateProcessW(NULL,
 /// "cmd.exe /c ...")` locates `cmd.exe` via the Windows system-directory search
 /// (which always includes System32) even when `PATH` is empty or minimal.
+///
+/// If the line already begins with `cmd.exe /c` (ASCII case-insensitive), it is
+/// passed through unchanged to avoid nesting an extra `cmd.exe` process.
 pub fn format_proc_create_args(command_line: &str) -> String {
-    let shell_cmd = format!("cmd.exe /c {command_line}");
+    let shell_cmd = if command_line.to_ascii_lowercase().starts_with("cmd.exe /c") {
+        command_line.to_owned()
+    } else {
+        format!("cmd.exe /c {command_line}")
+    };
     let encoded = BASE64_STANDARD.encode(shell_cmd.as_bytes());
     format!("0;TRUE;TRUE;;{encoded}")
 }
@@ -419,6 +426,22 @@ mod tests {
     fn format_proc_create_args_empty_command() {
         let args = format_proc_create_args("");
         let encoded = BASE64_STANDARD.encode("cmd.exe /c ");
+        assert_eq!(args, format!("0;TRUE;TRUE;;{encoded}"));
+    }
+
+    #[test]
+    fn format_proc_create_args_skips_wrap_when_already_cmd_exe_prefixed() {
+        let raw = "cmd.exe /c dir /s";
+        let args = format_proc_create_args(raw);
+        let encoded = BASE64_STANDARD.encode(raw);
+        assert_eq!(args, format!("0;TRUE;TRUE;;{encoded}"));
+    }
+
+    #[test]
+    fn format_proc_create_args_skips_wrap_case_insensitive_cmd_prefix() {
+        let raw = "CMD.EXE /c whoami";
+        let args = format_proc_create_args(raw);
+        let encoded = BASE64_STANDARD.encode(raw);
         assert_eq!(args, format!("0;TRUE;TRUE;;{encoded}"));
     }
 

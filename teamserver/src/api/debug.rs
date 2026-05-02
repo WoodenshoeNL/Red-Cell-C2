@@ -18,6 +18,7 @@ use utoipa::IntoParams;
 use crate::app::TeamserverState;
 use crate::corpus_capture::bytes_to_hex;
 
+use super::auth::AdminApiAccess;
 use super::parse_api_agent_id;
 
 /// Query parameters for `GET /debug/corpus-keys`.
@@ -64,7 +65,7 @@ impl IntoResponse for CorpusKeysError {
     responses(
         (status = 200, description = "AES session key material for the agent", body = CorpusSessionKeys),
         (status = 400, description = "Invalid agent_id parameter"),
-        (status = 403, description = "Not a loopback connection"),
+        (status = 403, description = "Administrative API role required, or caller is not on loopback"),
         (status = 404, description = "Corpus capture inactive, agent not found, or no ECDH session"),
         (status = 401, description = "Missing or invalid API key", body = super::errors::ApiErrorBody),
         (status = 500, description = "Internal error retrieving ECDH session key"),
@@ -72,6 +73,7 @@ impl IntoResponse for CorpusKeysError {
 )]
 pub(super) async fn get_corpus_keys(
     State(state): State<TeamserverState>,
+    _identity: AdminApiAccess,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Query(query): Query<CorpusKeysQuery>,
 ) -> Result<Json<CorpusSessionKeys>, CorpusKeysError> {
@@ -140,7 +142,9 @@ fn is_loopback(ip: IpAddr) -> bool {
 mod tests {
     use std::path::PathBuf;
 
+    use crate::api::auth::{AdminApiAccess, ApiIdentity, ApiPermissionGuard, AuthMethod};
     use axum::extract::{ConnectInfo, Query, State};
+    use red_cell_common::config::OperatorRole;
     use red_cell_common::crypto::ecdh::ConnectionId;
     use red_cell_common::{AgentEncryptionInfo, AgentRecord};
     use zeroize::Zeroizing;
@@ -148,6 +152,14 @@ mod tests {
     use super::*;
 
     const LOOPBACK: &str = "127.0.0.1:1234";
+
+    fn admin_api_access_fixture() -> AdminApiAccess {
+        ApiPermissionGuard::from_identity_for_test(ApiIdentity {
+            key_id: "test-key".into(),
+            role: OperatorRole::Admin,
+            auth_method: AuthMethod::ApiKey,
+        })
+    }
 
     fn loopback_addr() -> std::net::SocketAddr {
         LOOPBACK.parse().expect("parse loopback")
@@ -286,6 +298,7 @@ mod tests {
 
         let result = get_corpus_keys(
             State(state),
+            admin_api_access_fixture(),
             ConnectInfo(loopback_addr()),
             Query(CorpusKeysQuery { agent_id: format!("0x{agent_id:08x}") }),
         )
@@ -370,6 +383,7 @@ mod tests {
 
         let result = get_corpus_keys(
             State(state),
+            admin_api_access_fixture(),
             ConnectInfo(loopback_addr()),
             Query(CorpusKeysQuery { agent_id: format!("0x{agent_id:08x}") }),
         )
@@ -419,6 +433,7 @@ mod tests {
 
         let result = get_corpus_keys(
             State(state),
+            admin_api_access_fixture(),
             ConnectInfo(loopback_addr()),
             Query(CorpusKeysQuery { agent_id: format!("0x{agent_id:08x}") }),
         )

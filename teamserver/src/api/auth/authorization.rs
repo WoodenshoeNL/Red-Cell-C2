@@ -31,6 +31,17 @@ impl<P> Deref for ApiPermissionGuard<P> {
     }
 }
 
+#[cfg(test)]
+impl<P> ApiPermissionGuard<P> {
+    /// Construct a guard directly from `identity`, bypassing permission checks.
+    ///
+    /// For handler unit tests that invoke Axum handlers out-of-band; integration
+    /// tests should exercise real auth + RBAC instead.
+    pub(crate) fn from_identity_for_test(identity: ApiIdentity) -> Self {
+        Self { identity, _marker: PhantomData }
+    }
+}
+
 impl<P> FromRequestParts<TeamserverState> for ApiPermissionGuard<P>
 where
     P: PermissionMarker + Send + Sync,

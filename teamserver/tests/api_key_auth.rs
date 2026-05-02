@@ -6,16 +6,21 @@
 
 mod common;
 
+use std::path::PathBuf;
+
 use red_cell::{
     AgentRegistry, ApiRuntime, AuditWebhookNotifier, AuthService, Database, EventBus,
     ListenerManager, OperatorConnectionManager, PayloadBuilderService, SocketRelayManager,
     TeamserverState,
 };
 use red_cell_common::config::Profile;
+use red_cell_common::corpus::CorpusSessionKeys;
+use red_cell_common::{AgentEncryptionInfo, AgentRecord};
 use reqwest::{Client, StatusCode};
 use tokio::net::TcpListener;
+use zeroize::Zeroizing;
 
-/// Build a profile with an Admin key and an Analyst key.
+/// Build a profile with Admin / Analyst / Operator REST API keys.
 fn profile_with_api_keys() -> Profile {
     Profile::parse(
         r#"
@@ -43,6 +48,11 @@ fn profile_with_api_keys() -> Profile {
             Value = "secret-analyst-value"
             Role  = "Analyst"
           }
+
+          key "operator-rest-key" {
+            Value = "secret-operator-rest-value"
+            Role  = "Operator"
+          }
         }
 
         Demon {}
@@ -54,6 +64,16 @@ fn profile_with_api_keys() -> Profile {
 /// Spawn a teamserver with the full router (including `/api/v1`) on a random
 /// port and return the base URL.
 async fn spawn_api_server(profile: Profile) -> String {
+    spawn_api_server_with_options(profile, None, None).await
+}
+
+/// Like [`spawn_api_server`], with optional corpus capture directory and optional
+/// pre-registered CTR agent fixture (for `/debug/corpus-keys` scenarios).
+async fn spawn_api_server_with_options(
+    profile: Profile,
+    corpus_dir: Option<PathBuf>,
+    pre_registered_ctr_agent: Option<AgentRecord>,
+) -> String {
     let database = Database::connect_in_memory().await.expect("database");
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
@@ -68,10 +88,17 @@ async fn spawn_api_server(profile: Profile) -> String {
     .with_demon_allow_legacy_ctr(true);
     let webhooks = AuditWebhookNotifier::from_profile(&profile);
 
+    if let Some(agent) = pre_registered_ctr_agent {
+        registry
+            .insert_full(agent, "test-listener", 0, false, false, false)
+            .await
+            .expect("register corpus-keys fixture agent");
+    }
+
     let state = TeamserverState {
         profile: profile.clone(),
         profile_path: "test.yaotl".to_owned(),
-        database: database.clone(),
+        database,
         auth: AuthService::from_profile(&profile).expect("auth"),
         api: ApiRuntime::from_profile(&profile).expect("api"),
         events,
@@ -88,7 +115,7 @@ async fn spawn_api_server(profile: Profile) -> String {
         plugins_loaded: 0,
         plugins_failed: 0,
         metrics: red_cell::metrics::standalone_metrics_handle(),
-        corpus_dir: None,
+        corpus_dir,
     };
 
     let tcp = TcpListener::bind("127.0.0.1:0").await.expect("bind");
@@ -101,6 +128,46 @@ async fn spawn_api_server(profile: Profile) -> String {
     });
 
     format!("http://127.0.0.1:{}", addr.port())
+}
+
+/// CTR (non-ECDH) [`AgentRecord`] fixture for corpus-keys integration tests (`0xcafebabE`).
+fn corpus_ctr_agent_fixture(agent_id: u32) -> AgentRecord {
+    let aes_key: Vec<u8> = (0u8..32).collect();
+    let aes_iv: Vec<u8> = (0u8..16).collect();
+    AgentRecord {
+        agent_id,
+        active: true,
+        reason: String::new(),
+        note: String::new(),
+        encryption: AgentEncryptionInfo {
+            aes_key: Zeroizing::new(aes_key),
+            aes_iv: Zeroizing::new(aes_iv),
+            monotonic_ctr: true,
+        },
+        hostname: "test-host".to_owned(),
+        username: "user".to_owned(),
+        domain_name: "DOMAIN".to_owned(),
+        external_ip: "1.2.3.4".to_owned(),
+        internal_ip: "10.0.0.1".to_owned(),
+        process_name: "test.exe".to_owned(),
+        process_path: "C:\\test.exe".to_owned(),
+        base_address: 0,
+        process_pid: 1,
+        process_tid: 1,
+        process_ppid: 0,
+        process_arch: "x64".to_owned(),
+        elevated: false,
+        os_version: "Windows 10".to_owned(),
+        os_build: 0,
+        os_arch: "x64".to_owned(),
+        sleep_delay: 5,
+        sleep_jitter: 0,
+        kill_date: None,
+        working_hours: None,
+        first_call_in: "2026-01-01T00:00:00Z".to_owned(),
+        last_call_in: "2026-01-01T00:00:00Z".to_owned(),
+        archon_magic: None,
+    }
 }
 
 /// GET /api/v1/agents — the simplest protected endpoint (ReadApiAccess).
@@ -173,6 +240,68 @@ async fn valid_analyst_key_can_read() {
 
     let resp = get_agents(&client, &base, Some("secret-analyst-value")).await;
     assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn analyst_key_denied_debug_corpus_keys() {
+    let base = spawn_api_server(profile_with_api_keys()).await;
+    let client = Client::new();
+
+    let resp = client
+        .get(format!("{base}/api/v1/debug/corpus-keys?agent_id=0xcafebabE"))
+        .header("x-api-key", "secret-analyst-value")
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    let body: serde_json::Value = resp.json().await.expect("json body");
+    assert_eq!(body["error"]["code"], "forbidden");
+}
+
+#[tokio::test]
+async fn operator_rest_api_key_denied_debug_corpus_keys() {
+    let base = spawn_api_server(profile_with_api_keys()).await;
+    let client = Client::new();
+
+    let resp = client
+        .get(format!("{base}/api/v1/debug/corpus-keys?agent_id=0xcafebabE"))
+        .header("x-api-key", "secret-operator-rest-value")
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    let body: serde_json::Value = resp.json().await.expect("json body");
+    assert_eq!(body["error"]["code"], "forbidden");
+}
+
+#[tokio::test]
+async fn admin_rest_api_key_succeeds_on_debug_corpus_keys_when_capture_enabled() {
+    let agent_id = 0xcafebabEu32;
+    let agent = corpus_ctr_agent_fixture(agent_id);
+    let base = spawn_api_server_with_options(
+        profile_with_api_keys(),
+        Some(std::env::temp_dir()),
+        Some(agent),
+    )
+    .await;
+    let client = Client::new();
+
+    let resp = client
+        .get(format!("{base}/api/v1/debug/corpus-keys?agent_id=0xcafebabE"))
+        .header("x-api-key", "secret-admin-value")
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let keys: CorpusSessionKeys = resp.json().await.expect("corpus-keys json");
+    let expected_aes_hex: String = (0u8..32).map(|b| format!("{b:02x}")).collect();
+    let expected_iv_hex: String = (0u8..16).map(|b| format!("{b:02x}")).collect();
+    assert_eq!(keys.aes_key_hex.as_deref(), Some(expected_aes_hex.as_str()));
+    assert_eq!(keys.aes_iv_hex.as_deref(), Some(expected_iv_hex.as_str()));
+    assert_eq!(keys.encryption_scheme.as_deref(), Some("aes-256-ctr"));
 }
 
 #[tokio::test]

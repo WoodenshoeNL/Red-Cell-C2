@@ -132,6 +132,7 @@ static BOOL HttpIsLiteralIpv6Host(
     DWORD OctetVal         = 0;    /* decimal value of the current octet or pre-dot portion */
     BOOL  OctetHasDig      = FALSE;/* final octet has at least one digit */
     BOOL  GroupOnlyDecimal = TRUE; /* no hex-only chars seen in current group */
+    BOOL  OctetLeadZero    = FALSE;/* first digit of the pre-dot portion was '0' */
 
     for ( i = 0; i <= Len; i++ ) {
         WCHAR Ch = ( i < Len ) ? Scan[ i ] : L'\0';
@@ -153,6 +154,7 @@ static BOOL HttpIsLiteralIpv6Host(
                 OctetVal         = 0;
                 OctetHasDig      = FALSE;
                 GroupOnlyDecimal = TRUE;
+                OctetLeadZero    = FALSE;
             }
 
             if ( Ch == L'\0' ) {
@@ -177,10 +179,13 @@ static BOOL HttpIsLiteralIpv6Host(
                 OctetHasDig = FALSE;
             } else {
                 /* First dot: the pre-dot portion must be decimal-only and 0-255. */
-                if ( ! GroupOnlyDecimal ) { return FALSE; }
-                if ( OctetVal > 255 )     { return FALSE; }
-                OctetVal    = 0;
-                OctetHasDig = FALSE;
+                if ( ! GroupOnlyDecimal )          { return FALSE; }
+                if ( OctetVal > 255 )              { return FALSE; }
+                /* Reject leading zeros in the first octet (e.g. "01"). */
+                if ( OctetLeadZero && HexLen > 1 ) { return FALSE; }
+                OctetVal      = 0;
+                OctetHasDig   = FALSE;
+                OctetLeadZero = FALSE;
             }
             HasDot = TRUE;
             DotCount++;
@@ -189,10 +194,15 @@ static BOOL HttpIsLiteralIpv6Host(
             /* Decimal digit — valid in both hex hextets and dotted IPv4 tails. */
             InGroup = TRUE;
             if ( HasDot ) {
+                /* Reject leading zeros: "01" is ambiguous (octal in many parsers).
+                   OctetHasDig==TRUE && OctetVal==0 means the octet opened with '0'. */
+                if ( OctetHasDig && OctetVal == 0 ) { return FALSE; }
                 OctetVal = OctetVal * 10 + (DWORD)( Ch - L'0' );
                 if ( OctetVal > 255 ) { return FALSE; }
                 OctetHasDig = TRUE;
             } else {
+                /* Track leading zero: if first digit is '0' and a dot follows, reject. */
+                if ( HexLen == 0 && Ch == L'0' ) { OctetLeadZero = TRUE; }
                 HexLen++;
                 /* Accumulate for range check at the first dot, if one follows. */
                 OctetVal = OctetVal * 10 + (DWORD)( Ch - L'0' );

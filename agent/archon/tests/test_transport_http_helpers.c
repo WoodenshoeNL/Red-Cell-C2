@@ -199,6 +199,19 @@ TEST(test_ipv6_reject_non_decimal_ipv4_suffix)
     ASSERT(   HttpIsLiteralIpv6Host( L"::ffff:255.255.255.255" ) );
 }
 
+TEST(test_ipv6_reject_leading_zeros_in_ipv4_suffix)
+{
+    /* Leading zeros are ambiguous (octal in many parsers) — RFC 3986 §3.2.2 forbids them. */
+    ASSERT( ! HttpIsLiteralIpv6Host( L"::ffff:01.0.0.1"  ) );   /* leading zero in first octet */
+    ASSERT( ! HttpIsLiteralIpv6Host( L"::ffff:1.02.3.4"  ) );   /* leading zero in second octet */
+    ASSERT( ! HttpIsLiteralIpv6Host( L"::ffff:1.2.03.4"  ) );   /* leading zero in third octet */
+    ASSERT( ! HttpIsLiteralIpv6Host( L"::ffff:1.2.3.04"  ) );   /* leading zero in fourth octet */
+    ASSERT( ! HttpIsLiteralIpv6Host( L"::ffff:00.0.0.0"  ) );   /* double zero in first octet */
+    /* A single '0' per octet is valid — not a leading zero */
+    ASSERT(   HttpIsLiteralIpv6Host( L"::ffff:0.0.0.0"   ) );
+    ASSERT(   HttpIsLiteralIpv6Host( L"::ffff:0.0.0.1"   ) );
+}
+
 int main(void)
 {
     setlocale(LC_ALL, "C.UTF-8");
@@ -218,6 +231,7 @@ int main(void)
     run_test_ipv6_reject_duplicate_double_colon();
     run_test_ipv6_reject_ipv4_suffix_overflow();
     run_test_ipv6_reject_non_decimal_ipv4_suffix();
+    run_test_ipv6_reject_leading_zeros_in_ipv4_suffix();
 
     printf("\nSummary: %d/%d tests passed\n", tests_passed, tests_run);
     return 0;

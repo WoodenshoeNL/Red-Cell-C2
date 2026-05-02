@@ -65,8 +65,12 @@ static BOOL HttpIsLiteralIpv6Host(
 {
     LPCWSTR Scan;
     SIZE_T  Len;
-    DWORD   ColonCount = 0;
-    BOOL    InZone     = FALSE;
+    SIZE_T  i;
+    DWORD   HexLen;
+    DWORD   GroupCount;
+    BOOL    HasDc;
+    BOOL    InGroup;
+    BOOL    HasDot;
 
     if ( ! Host || ! Host[ 0 ] ) {
         return FALSE;
@@ -75,6 +79,7 @@ static BOOL HttpIsLiteralIpv6Host(
     Scan = Host;
     Len  = StringLengthW( Host );
 
+    /* Strip optional bracket wrapping: [addr] */
     if ( Host[ 0 ] == L'[' ) {
         SIZE_T End = 1;
 
@@ -90,47 +95,115 @@ static BOOL HttpIsLiteralIpv6Host(
         Len  = End - 1;
     }
 
-    for ( SIZE_T i = 0; i < Len; i++ ) {
-        WCHAR Ch = Scan[ i ];
-
-        if ( Ch == L':' ) {
-            if ( InZone ) {
+    /* Strip and validate zone ID (%...) */
+    for ( i = 0; i < Len; i++ ) {
+        if ( Scan[ i ] == L'%' ) {
+            if ( i == 0 || i + 1 >= Len ) {
                 return FALSE;
             }
-            ColonCount++;
-            continue;
-        }
-
-        if ( Ch == L'%' ) {
-            if ( InZone || i == 0 || i + 1 >= Len ) {
-                return FALSE;
+            for ( SIZE_T j = i + 1; j < Len; j++ ) {
+                WCHAR ZoneCh = Scan[ j ];
+                if ( ! (
+                    ( ZoneCh >= L'0' && ZoneCh <= L'9' )
+                    || ( ZoneCh >= L'a' && ZoneCh <= L'z' )
+                    || ( ZoneCh >= L'A' && ZoneCh <= L'Z' )
+                    || ZoneCh == L'.'
+                    || ZoneCh == L'-'
+                    || ZoneCh == L'_'
+                ) ) {
+                    return FALSE;
+                }
             }
-            InZone = TRUE;
-            continue;
+            Len = i; /* trim to IPv6 portion only */
+            break;
         }
+    }
 
-        if ( InZone ) {
-            if (
-                ( Ch >= L'0' && Ch <= L'9' )
-                || ( Ch >= L'a' && Ch <= L'z' )
-                || ( Ch >= L'A' && Ch <= L'Z' )
-                || Ch == L'.'
-                || Ch == L'-'
-                || Ch == L'_'
-            ) {
-                continue;
-            }
-            return FALSE;
-        }
-
-        if ( HttpIsHexDigitW( Ch ) || Ch == L'.' ) {
-            continue;
-        }
-
+    if ( Len == 0 ) {
         return FALSE;
     }
 
-    return ColonCount >= 2;
+    /* Reject a leading lone colon (single ':', not '::') */
+    if ( Scan[ 0 ] == L':' && ( Len < 2 || Scan[ 1 ] != L':' ) ) {
+        return FALSE;
+    }
+
+    /* Reject a trailing lone colon */
+    if ( Scan[ Len - 1 ] == L':' && ( Len < 2 || Scan[ Len - 2 ] != L':' ) ) {
+        return FALSE;
+    }
+
+    /* Reject triple or more consecutive colons (:::) */
+    for ( i = 0; i + 2 < Len; i++ ) {
+        if ( Scan[ i ] == L':' && Scan[ i + 1 ] == L':' && Scan[ i + 2 ] == L':' ) {
+            return FALSE;
+        }
+    }
+
+    /* Parse groups — each hextet must be 1–4 hex digits; an embedded
+     * IPv4 suffix (dots present) counts as two groups toward the total. */
+    HexLen     = 0;
+    GroupCount = 0;
+    HasDc      = FALSE;
+    InGroup    = FALSE;
+    HasDot     = FALSE;
+
+    for ( i = 0; i <= Len; i++ ) {
+        WCHAR Ch = ( i < Len ) ? Scan[ i ] : L'\0';
+
+        if ( Ch == L':' || Ch == L'\0' ) {
+            /* Close the current group */
+            if ( InGroup ) {
+                if ( HasDot ) {
+                    GroupCount++; /* IPv4 suffix accounts for two groups */
+                } else if ( HexLen > 4 ) {
+                    return FALSE;
+                }
+                GroupCount++;
+                InGroup = FALSE;
+                HexLen  = 0;
+                HasDot  = FALSE;
+            }
+
+            if ( Ch == L'\0' ) {
+                break;
+            }
+
+            /* Detect '::' (triple-colon already rejected above) */
+            if ( i + 1 < Len && Scan[ i + 1 ] == L':' ) {
+                if ( HasDc ) {
+                    return FALSE; /* a second '::' is not valid */
+                }
+                HasDc = TRUE;
+                i++;
+            }
+
+        } else if ( Ch == L'.' ) {
+            if ( ! InGroup ) {
+                return FALSE;
+            }
+            HasDot = TRUE;
+
+        } else if ( HttpIsHexDigitW( Ch ) ) {
+            InGroup = TRUE;
+            if ( ! HasDot ) {
+                HexLen++;
+                /* Overflow check deferred to group close; catches >4 there */
+            }
+
+        } else {
+            return FALSE;
+        }
+    }
+
+    /* Validate total group count:
+     *   with    '::' — explicit groups must be ≤ 7 (one or more implicit zeros)
+     *   without '::' — must have exactly 8 groups */
+    if ( HasDc ) {
+        return GroupCount <= 7;
+    }
+
+    return GroupCount == 8;
 }
 
 static BOOL HttpIsLiteralIpv4Host(
@@ -379,8 +452,38 @@ TEST(test_compose_url_falls_back_for_overlong_ipv6_literal)
     Host.Host = LongHost;
     Host.Port = 443;
 
-    ASSERT( HttpIsLiteralIpv6Host( LongHost ) );
-    ASSERT( HttpComposeUrlForProxyLookup( Buf, 256, &Host, TRUE, Rel ) == Rel );
+    /* The overlong form (26+ groups) is now correctly rejected as an IPv6 literal. */
+    ASSERT( ! HttpIsLiteralIpv6Host( LongHost ) );
+    /* compose treats it as a plain host and produces a URL rather than falling back */
+    ASSERT( HttpComposeUrlForProxyLookup( Buf, 256, &Host, TRUE, Rel ) == Buf );
+}
+
+TEST(test_ipv6_reject_triple_colon)
+{
+    ASSERT( ! HttpIsLiteralIpv6Host( L"2001:::1" ) );
+    ASSERT( ! HttpIsLiteralIpv6Host( L":::1" ) );
+    ASSERT( ! HttpIsLiteralIpv6Host( L"fe80:::1%eth0" ) );
+}
+
+TEST(test_ipv6_reject_overlong_hextet)
+{
+    ASSERT( ! HttpIsLiteralIpv6Host( L"12345::1" ) );
+    ASSERT( ! HttpIsLiteralIpv6Host( L"2001:db8:00000::1" ) );
+    ASSERT( ! HttpIsLiteralIpv6Host( L"[fffff::1]" ) );
+}
+
+TEST(test_ipv6_reject_too_many_groups)
+{
+    /* 9 explicit groups, no :: */
+    ASSERT( ! HttpIsLiteralIpv6Host( L"1:2:3:4:5:6:7:8:9" ) );
+    /* 8 explicit groups with a :: — total would exceed 8 */
+    ASSERT( ! HttpIsLiteralIpv6Host( L"1:2:3:4::5:6:7:8" ) );
+}
+
+TEST(test_ipv6_reject_duplicate_double_colon)
+{
+    ASSERT( ! HttpIsLiteralIpv6Host( L"1::2::3" ) );
+    ASSERT( ! HttpIsLiteralIpv6Host( L"::1::2" ) );
 }
 
 int main(void)
@@ -396,6 +499,10 @@ int main(void)
     run_test_compose_url_keeps_valid_bracketed_ipv6();
     run_test_compose_url_falls_back_for_invalid_bracketed_host();
     run_test_compose_url_falls_back_for_overlong_ipv6_literal();
+    run_test_ipv6_reject_triple_colon();
+    run_test_ipv6_reject_overlong_hextet();
+    run_test_ipv6_reject_too_many_groups();
+    run_test_ipv6_reject_duplicate_double_colon();
 
     printf("\nSummary: %d/%d tests passed\n", tests_passed, tests_run);
     return 0;

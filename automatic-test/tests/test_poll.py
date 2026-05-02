@@ -125,5 +125,43 @@ class TestPoll(unittest.TestCase):
         self.assertEqual(sleeps, [1.15])
 
 
+class TestPollPeriodicCallback(unittest.TestCase):
+    def test_periodic_callback_runs_during_wait(self) -> None:
+        n = 0
+
+        def fn() -> int:
+            nonlocal n
+            n += 1
+            return n
+
+        saw: list[int] = []
+
+        def tick() -> None:
+            saw.append(n)
+
+        clock = [0.0]
+
+        def mono() -> float:
+            return clock[0]
+
+        def sleep_adv(d: float) -> None:
+            clock[0] += d
+
+        with patch("lib.wait.time.monotonic", side_effect=mono):
+            with patch("lib.wait.time.sleep", side_effect=sleep_adv):
+                r = poll(
+                    fn,
+                    lambda x: x >= 5,
+                    timeout=60,
+                    interval=1.0,
+                    backoff=1.0,
+                    jitter=0.0,
+                    periodic_interval=2.0,
+                    periodic_callback=tick,
+                )
+        self.assertEqual(r, 5)
+        self.assertGreaterEqual(len(saw), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

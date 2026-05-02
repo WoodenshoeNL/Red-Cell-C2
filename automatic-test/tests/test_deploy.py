@@ -22,6 +22,8 @@ from lib.deploy import (
     DeployError,
     TargetConfig,
     cleanup_windows_harness_work_dir,
+    defender_add_process_exclusion,
+    firewall_allow_program,
     _is_transient_ssh_failure,
     _quote_posix,
     _quote_powershell,
@@ -686,6 +688,7 @@ class TestDeployErrorPaths(unittest.TestCase):
         script = _decoded_windows_launch_script(remote_cmd)
         self.assertIn("Register-ScheduledTask", script)
         self.assertIn("'C:\\Program Files\\rc\\agent.exe'", script)
+        self.assertIn("-Execute $exePath", script)
 
     def test_execute_background_windows_escapes_single_quotes(self) -> None:
         """Single quotes in the path must be doubled for PS single-quote string."""
@@ -748,6 +751,16 @@ class TestWindowsSchedTaskScript(unittest.TestCase):
         script = _windows_schtask_script("C:\\Temp\\rc-test\\agent.exe")
         self.assertIn("S4U", script)
 
+    def test_contains_working_directory(self) -> None:
+        script = _windows_schtask_script("C:\\Temp\\rc-test\\agent.exe")
+        self.assertIn("-WorkingDirectory $workDir", script)
+        self.assertIn("Split-Path -Parent -LiteralPath $exePath", script)
+
+    def test_emits_schtask_state_marker(self) -> None:
+        script = _windows_schtask_script("C:\\Temp\\agent.exe")
+        self.assertIn("RCTEST_SCHTASK_STATE:", script)
+        self.assertIn("Get-ScheduledTask", script)
+
     def test_contains_exe_path_single_quoted(self) -> None:
         script = _windows_schtask_script("C:\\Temp\\rc-test\\agent.exe")
         self.assertIn("'C:\\Temp\\rc-test\\agent.exe'", script)
@@ -801,14 +814,14 @@ class TestWindowsSchedTaskScript(unittest.TestCase):
         self.assertIn("--sleep 5", script)
 
     def test_arguments_do_not_appear_in_execute(self) -> None:
-        """-Execute must contain only the exe path, not the arguments."""
+        """-Execute must reference $exePath only, not embed arguments."""
         script = _windows_schtask_script("C:\\Temp\\agent.exe", "--sleep 5")
         execute_idx = script.index("-Execute")
         argument_idx = script.index("-Argument")
-        # -Execute comes before -Argument in the action definition
         self.assertLess(execute_idx, argument_idx)
-        # The exe path is correctly single-quoted without arguments
-        self.assertIn("-Execute 'C:\\Temp\\agent.exe'", script)
+        self.assertIn("-Execute $exePath", script)
+        self.assertIn("'C:\\Temp\\agent.exe'", script)
+        self.assertIn("-WorkingDirectory $workDir", script)
 
     def test_arguments_with_spaces_single_quoted(self) -> None:
         """Argument values containing spaces must be single-quoted."""
@@ -847,7 +860,7 @@ class TestExecuteBackgroundWindowsArguments(unittest.TestCase):
         with patch("subprocess.run", return_value=ok) as m:
             execute_background(t, "C:\\Temp\\rc-test\\agent.exe", "--sleep 5 --port 8443")
         script = _decoded_windows_launch_script(m.call_args[0][0][-1])
-        self.assertIn("-Execute 'C:\\Temp\\rc-test\\agent.exe'", script)
+        self.assertIn("-Execute $exePath", script)
         self.assertIn("-Argument", script)
         self.assertIn("--sleep 5 --port 8443", script)
 
@@ -858,7 +871,7 @@ class TestExecuteBackgroundWindowsArguments(unittest.TestCase):
         with patch("subprocess.run", return_value=ok) as m:
             execute_background(t, "C:\\Program Files\\rc\\agent.exe", "--flag")
         script = _decoded_windows_launch_script(m.call_args[0][0][-1])
-        self.assertIn("-Execute 'C:\\Program Files\\rc\\agent.exe'", script)
+        self.assertIn("-Execute $exePath", script)
         self.assertIn("-Argument", script)
         self.assertIn("--flag", script)
 
@@ -920,6 +933,64 @@ class TestDefenderAddExclusion(unittest.TestCase):
         remote_cmd = m.call_args[0][0][-1]
         script = _decoded_windows_launch_script(remote_cmd)
         self.assertIn("'C:\\Program Files\\rc'", script)
+
+
+class TestDefenderProcessExclusion(unittest.TestCase):
+    """defender_add_process_exclusion uses ExclusionProcess (basename only)."""
+
+    def setUp(self) -> None:
+        self.key_path = _module_key_path()
+
+    def _completed(
+        self, returncode: int, stderr: str = "", stdout: str = ""
+    ) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(
+            args=[], returncode=returncode, stdout=stdout, stderr=stderr
+        )
+
+    def test_windows_sends_exclusion_process(self) -> None:
+        ok = self._completed(0)
+        t = _make_target(work_dir="C:\\Temp\\rc-test", platform="windows", key=self.key_path)
+        with patch("subprocess.run", return_value=ok) as m:
+            defender_add_process_exclusion(t, "C:\\Temp\\rc-test\\agent-abcd1234.exe")
+        script = _decoded_windows_launch_script(m.call_args[0][0][-1])
+        self.assertIn("ExclusionProcess", script)
+        self.assertIn("'agent-abcd1234.exe'", script)
+
+    def test_linux_raises(self) -> None:
+        t = _make_target(work_dir="/tmp/x", key=self.key_path)
+        with self.assertRaises(ValueError):
+            defender_add_process_exclusion(t, "/tmp/x/a.exe")
+
+
+class TestFirewallAllowProgram(unittest.TestCase):
+    """firewall_allow_program adds outbound allow rule for a full exe path."""
+
+    def setUp(self) -> None:
+        self.key_path = _module_key_path()
+
+    def _completed(
+        self, returncode: int, stderr: str = "", stdout: str = ""
+    ) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(
+            args=[], returncode=returncode, stdout=stdout, stderr=stderr
+        )
+
+    def test_windows_new_net_firewall_rule(self) -> None:
+        ok = self._completed(0)
+        t = _make_target(work_dir="C:\\Temp\\rc-test", platform="windows", key=self.key_path)
+        with patch("subprocess.run", return_value=ok) as m:
+            firewall_allow_program(t, "C:\\Temp\\rc-test\\agent-abcd1234.exe")
+        script = _decoded_windows_launch_script(m.call_args[0][0][-1])
+        self.assertIn("New-NetFirewallRule", script)
+        self.assertIn("-Direction Outbound", script)
+        self.assertIn("agent-abcd1234.exe", script)
+        self.assertIn("Remove-NetFirewallRule", script)
+
+    def test_linux_raises(self) -> None:
+        t = _make_target(work_dir="/tmp/x", key=self.key_path)
+        with self.assertRaises(ValueError):
+            firewall_allow_program(t, "/tmp/x/a.exe")
 
 
 class TestInjectHostsEntry(unittest.TestCase):

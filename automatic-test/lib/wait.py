@@ -87,6 +87,8 @@ def poll(
     backoff: float = 1.0,
     max_interval: float = 10.0,
     jitter: float = 0.0,
+    periodic_interval: float | None = None,
+    periodic_callback: Callable[[], None] | None = None,
 ) -> T:
     """Call *fn* until *predicate*(result) is true or *timeout* seconds elapse.
 
@@ -95,12 +97,20 @@ def poll(
     With ``backoff`` greater than 1, the delay grows exponentially up to
     *max_interval*. Each sleep adds uniform random jitter in ``[0, jitter]``.
 
+    When *periodic_interval* and *periodic_callback* are both set, *callback*
+    runs (best-effort, failures swallowed) at least every *periodic_interval*
+    seconds while polling --- useful for mid-wait diagnostics (e.g. netstat).
+
     ``poll_until`` in older docs refers to this function.
     """
     eff_interval = interval if interval is not None else _POLL_INTERVAL_SECS
     deadline = time.monotonic() + timeout
     last_exc: Exception | None = None
     current_interval = eff_interval
+    p_iv = periodic_interval
+    p_cb = periodic_callback
+    periodic_on = p_iv is not None and p_cb is not None and p_iv > 0
+    next_periodic_at = time.monotonic() + p_iv if periodic_on else None
     while time.monotonic() < deadline:
         try:
             result = fn()
@@ -108,6 +118,12 @@ def poll(
                 return result
         except Exception as exc:
             last_exc = exc
+        if periodic_on and next_periodic_at is not None and time.monotonic() >= next_periodic_at:
+            next_periodic_at = time.monotonic() + p_iv
+            try:
+                p_cb()
+            except Exception:
+                pass
         sleep_time = current_interval + random.uniform(0.0, jitter)
         time.sleep(min(sleep_time, max_interval))
         current_interval = min(current_interval * backoff, max_interval)
@@ -125,6 +141,8 @@ def wait_for_agent(
     cfg: CliConfig,
     timeout: int | None = None,
     pre_existing_ids: set[str] | None = None,
+    periodic_interval: float | None = None,
+    periodic_callback: Callable[[], None] | None = None,
 ) -> dict:
     """Wait until a *new* agent appears in the agent list.
 
@@ -148,6 +166,8 @@ def wait_for_agent(
         backoff=1.5,
         max_interval=10.0,
         jitter=0.2,
+        periodic_interval=periodic_interval,
+        periodic_callback=periodic_callback,
     )
     return next(a for a in agents if a["id"] not in _skip)
 

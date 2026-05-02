@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 
 __all__ = [
     "format_archon_checkin_timeout_diagnostics",
+    "log_archon_checkin_wait_netstat",
     "log_archon_ecdh_prelude",
 ]
 
@@ -101,6 +102,29 @@ def _try_windows_defender_events(target: Any, run_remote: Any) -> str:
         return out.strip() if out.strip() else "(no Defender threat events in last 20 entries)"
     except Exception as e:  # noqa: BLE001
         return f"Defender event log probe failed: {e}"
+
+
+def log_archon_checkin_wait_netstat(target: Any, c2_port: int, tag: str = "mid-wait") -> None:
+    """Print netstat lines mentioning *c2_port* during agent check-in wait (best-effort).
+
+    Filters remote output so transient ``SYN_SENT`` rows to the listener are visible
+    without dumping the full netstat table each tick.
+    """
+    try:
+        from lib.deploy import run_remote
+
+        cmd = (
+            "powershell -NoProfile -Command \""
+            f"netstat -n -o | Where-Object {{ $_ -match ':{int(c2_port)}' }}"
+            "\""
+        )
+        out = run_remote(target, cmd, timeout=15)
+        body = out.strip() if out.strip() else f"(no rows mentioning :{c2_port})"
+        print(f"  [archon][netstat][{tag}] port {c2_port}:")
+        for line in body.splitlines()[:30]:
+            print(f"    {line.strip()}")
+    except Exception as e:  # noqa: BLE001
+        print(f"  [archon][netstat][{tag}] probe failed: {e}")
 
 
 def format_archon_checkin_timeout_diagnostics(

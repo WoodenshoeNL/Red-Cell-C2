@@ -10,9 +10,18 @@ from __future__ import annotations
 import os
 import tempfile
 import uuid
+from typing import Callable
 
 from lib.cli import CliConfig, agent_list, payload_build_and_fetch
-from lib.deploy import TargetConfig, ensure_work_dir, execute_background, run_remote, upload
+from lib.deploy import (
+    TargetConfig,
+    defender_add_process_exclusion,
+    ensure_work_dir,
+    execute_background,
+    firewall_allow_program,
+    run_remote,
+    upload,
+)
 from lib.wait import TimeoutError as WaitTimeoutError, wait_for_agent
 
 
@@ -31,6 +40,8 @@ def deploy_and_checkin(
     expect_checkin: bool = True,
     no_checkin_timeout: int | None = None,
     pre_built_payload: bytes | None = None,
+    checkin_periodic_interval: float | None = None,
+    checkin_periodic_callback: Callable[[], None] | None = None,
 ) -> dict | None:
     """Build, deploy, execute, and wait for a single agent checkin.
 
@@ -72,6 +83,9 @@ def deploy_and_checkin(
         pre_built_payload: When provided, skip the build step and use these raw
                           bytes directly.  Useful when payloads have already been
                           compiled in parallel via :func:`~lib.payload.build_parallel`.
+        checkin_periodic_interval: If set with *checkin_periodic_callback*, invoked
+                          every N seconds while waiting for check-in (diagnostics).
+        checkin_periodic_callback: Callable run on that interval; must not raise.
 
     Returns:
         The agent dict from :func:`~lib.wait.wait_for_agent`, or ``None`` when
@@ -134,6 +148,18 @@ def deploy_and_checkin(
             run_remote(target, f"chmod +x {remote_payload}")
         print(f"  [{tag}][deploy] uploaded")
 
+        if is_windows:
+            try:
+                print(f"  [{tag}][deploy] Defender process exclusion (payload basename)")
+                defender_add_process_exclusion(target, remote_payload)
+            except Exception as exc:
+                print(f"  [{tag}][deploy] Defender process exclusion failed (non-fatal): {exc}")
+            try:
+                print(f"  [{tag}][deploy] outbound firewall allow rule for payload exe")
+                firewall_allow_program(target, remote_payload)
+            except Exception as exc:
+                print(f"  [{tag}][deploy] firewall allow rule failed (non-fatal): {exc}")
+
         # Step 4 — execute payload in background.
         print(f"  [{tag}][exec] launching payload in background on target")
         execute_background(target, remote_payload)
@@ -164,6 +190,12 @@ def deploy_and_checkin(
         )
 
     print(f"  [{tag}][wait] waiting up to {timeout}s for agent checkin")
-    agent = wait_for_agent(cli, timeout=timeout, pre_existing_ids=pre_existing_ids)
+    agent = wait_for_agent(
+        cli,
+        timeout=timeout,
+        pre_existing_ids=pre_existing_ids,
+        periodic_interval=checkin_periodic_interval,
+        periodic_callback=checkin_periodic_callback,
+    )
     print(f"  [{tag}][wait] agent checked in: {agent['id']}")
     return agent

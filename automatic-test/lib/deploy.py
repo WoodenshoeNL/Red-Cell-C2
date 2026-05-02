@@ -9,6 +9,7 @@ are needed. Both Linux and Windows targets are accessed via SSH
 from __future__ import annotations
 
 import base64
+import hashlib
 import logging
 import shlex
 import subprocess
@@ -495,6 +496,10 @@ def _windows_schtask_script(exe_path: str, arguments: str = "") -> str:
     OpenSSH tears down the session).  The task registration is removed after
     launch; the child process keeps running as an independent process.
 
+    ``-WorkingDirectory`` is set to the executable's parent folder (same idea
+    as the WMI *CurrentDirectory* argument) so payloads do not inherit an
+    unexpected CWD such as ``System32``.
+
     Args:
         exe_path:  Path to the executable (no arguments).
         arguments: Optional arguments string passed via ``-Argument`` to
@@ -504,7 +509,11 @@ def _windows_schtask_script(exe_path: str, arguments: str = "") -> str:
     arg_clause = f" -Argument {_quote_powershell(arguments)}" if arguments else ""
     return (
         "$name = 'RCTest-' + [System.Guid]::NewGuid().ToString('N').Substring(0, 12); "
-        f"$action = New-ScheduledTaskAction -Execute {exe_q}{arg_clause}; "
+        f"$exePath = {exe_q}; "
+        "$workDir = Split-Path -Parent -LiteralPath $exePath; "
+        "if (-not $workDir) { $workDir = $env:SystemRoot }; "
+        f"$action = New-ScheduledTaskAction -Execute $exePath{arg_clause} "
+        "-WorkingDirectory $workDir; "
         "$settings = New-ScheduledTaskSettingsSet "
         "-ExecutionTimeLimit ([TimeSpan]::Zero) -StartWhenAvailable; "
         "$me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name; "
@@ -513,11 +522,66 @@ def _windows_schtask_script(exe_path: str, arguments: str = "") -> str:
         "Register-ScheduledTask -TaskName $name -Action $action "
         "-Settings $settings -Principal $principal -Force -ErrorAction Stop | Out-Null; "
         "Start-ScheduledTask -TaskName $name -ErrorAction Stop; "
-        "Start-Sleep -Milliseconds 1000; "
+        "Start-Sleep -Milliseconds 1500; "
+        "$st = (Get-ScheduledTask -TaskName $name -ErrorAction Stop).State; "
+        "Write-Output ('RCTEST_SCHTASK_STATE:' + $st); "
         "Unregister-ScheduledTask -TaskName $name -Confirm:$false "
         "-ErrorAction SilentlyContinue; "
         "exit 0"
     )
+
+
+def defender_add_process_exclusion(target: TargetConfig, exe_path: str) -> None:
+    """Best-effort Defender process exclusion for the payload *basename* (Windows only).
+
+    ``-ExclusionPath`` on a directory does not always stop real-time inspection
+    of a freshly dropped ``.exe``; adding the process name covers H2 gaps where
+    the binary is allowed on disk but still blocked at launch.
+
+    Args:
+        target:   Windows SSH target.  No-op (raises ``ValueError``) on Linux.
+        exe_path: Full remote path; only the final ``.exe`` name is forwarded.
+    """
+    if target.platform != "windows":
+        raise ValueError("defender_add_process_exclusion is only supported on Windows targets")
+    leaf = PureWindowsPath(exe_path.strip().strip('"')).name
+    if not leaf:
+        return
+    leaf_q = _quote_powershell(leaf)
+    script = (
+        f"Add-MpPreference -ExclusionProcess {leaf_q} -ErrorAction SilentlyContinue; "
+        "exit 0"
+    )
+    enc = _powershell_encoded_command(script)
+    run_remote(target, f"powershell -NoProfile -EncodedCommand {enc}")
+
+
+def firewall_allow_program(target: TargetConfig, program_path: str) -> None:
+    """Add a best-effort outbound Windows Firewall allow rule for *program_path*.
+
+    Blocks at the *application* layer (per-exe rules) are a common cause of
+    ``Test-NetConnection`` succeeding from PowerShell while an unsigned agent
+    binary cannot open TCP (scenario 17 triage).  Failures are swallowed where
+    the cmdlet is absent or insufficient privilege (same pattern as Defender).
+
+    Args:
+        target:        Windows SSH target.
+        program_path:  Full path to the executable on the remote machine.
+    """
+    if target.platform != "windows":
+        raise ValueError("firewall_allow_program is only supported on Windows targets")
+    digest = hashlib.sha256(program_path.encode("utf-8", errors="replace")).hexdigest()[:12]
+    name = f"RC-Harness-{digest}"[:96]
+    name_q = _quote_powershell(name)
+    prog_q = _quote_powershell(program_path.strip().strip('"'))
+    script = (
+        f"Remove-NetFirewallRule -DisplayName {name_q} -ErrorAction SilentlyContinue; "
+        f"New-NetFirewallRule -DisplayName {name_q} -Direction Outbound -Action Allow "
+        f"-Program {prog_q} -ErrorAction SilentlyContinue; "
+        "exit 0"
+    )
+    enc = _powershell_encoded_command(script)
+    run_remote(target, f"powershell -NoProfile -EncodedCommand {enc}")
 
 
 def defender_add_exclusion(target: TargetConfig, path: str) -> None:
@@ -598,6 +662,13 @@ def execute_background(target: TargetConfig, command: str, arguments: str = "") 
             f"Background remote command failed (exit {result.returncode}):\n"
             f"  {detail}"
         )
+    if target.platform == "windows":
+        win_out = (result.stdout or "").strip()
+        if win_out:
+            for raw_line in win_out.splitlines():
+                line = raw_line.strip()
+                if line:
+                    print(f"  [deploy][schtask] {line}")
 
 
 def cleanup_windows_harness_work_dir(

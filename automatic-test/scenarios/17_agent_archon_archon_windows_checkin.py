@@ -35,6 +35,7 @@ import uuid
 from lib import ScenarioSkipped
 from lib.archon_triage import (
     format_archon_checkin_timeout_diagnostics,
+    log_archon_checkin_wait_netstat,
     log_archon_ecdh_prelude,
 )
 from lib.deploy_agent import deploy_and_checkin
@@ -161,11 +162,16 @@ def run(ctx) -> None:
     try:
         # ── Steps 2-5: Build, deploy, exec, wait for checkin ─────────────────
         try:
+            def _archon_netstat_tick() -> None:
+                log_archon_checkin_wait_netstat(target, listener_port, "mid-wait")
+
             agent = deploy_and_checkin(
                 ctx, cli, target,
                 agent_type="archon", fmt="exe",
                 listener_name=listener_name,
                 label="archon",
+                checkin_periodic_interval=15.0,
+                checkin_periodic_callback=_archon_netstat_tick,
             )
         except WaitTimeoutError as exc:
             print(

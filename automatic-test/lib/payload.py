@@ -112,8 +112,10 @@ def build_parallel(
 
     # Parallel builds bypass deploy_agent's per-build flush; stale Phantom/Specter
     # ELF/EXE artifacts otherwise satisfy the cache key after source fixes (bead 1f7q1).
-    if any(cell.agent in ("phantom", "specter") for cell in row):
-        maybe_flush_payload_cache_for_rust_agent(cfg, "phantom")
+    rust_agents = {cell.agent for cell in row if cell.agent in ("phantom", "specter")}
+    if rust_agents:
+        flush_label = "phantom" if "phantom" in rust_agents else "specter"
+        maybe_flush_payload_cache_for_rust_agent(cfg, flush_label)
 
     if not parallel:
         from lib.cli import payload_build_and_fetch

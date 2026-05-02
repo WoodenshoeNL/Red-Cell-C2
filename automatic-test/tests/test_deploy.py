@@ -23,7 +23,11 @@ from lib.deploy import (
     TargetConfig,
     cleanup_windows_harness_work_dir,
     defender_add_process_exclusion,
+    defender_remove_process_exclusion,
+    defender_network_protection_exclusion,
+    defender_remove_network_protection_exclusion,
     firewall_allow_program,
+    firewall_remove_program,
     _is_transient_ssh_failure,
     _quote_posix,
     _quote_powershell,
@@ -1007,6 +1011,114 @@ class TestFirewallAllowProgram(unittest.TestCase):
             firewall_allow_program(t, "/tmp/x/a.exe")
 
 
+class TestDefenderRemoveProcessExclusion(unittest.TestCase):
+    """defender_remove_process_exclusion uses Remove-MpPreference -ExclusionProcess (basename only)."""
+
+    def setUp(self) -> None:
+        self.key_path = _module_key_path()
+
+    def _completed(
+        self, returncode: int, stderr: str = "", stdout: str = ""
+    ) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(
+            args=[], returncode=returncode, stdout=stdout, stderr=stderr
+        )
+
+    def test_windows_sends_remove_exclusion_process(self) -> None:
+        ok = self._completed(0)
+        t = _make_target(work_dir="C:\\Temp\\rc-test", platform="windows", key=self.key_path)
+        with patch("subprocess.run", return_value=ok) as m:
+            defender_remove_process_exclusion(t, "C:\\Temp\\rc-test\\agent-abcd1234.exe")
+        script = _decoded_windows_launch_script(m.call_args[0][0][-1])
+        self.assertIn("Remove-MpPreference", script)
+        self.assertIn("ExclusionProcess", script)
+        self.assertIn("'agent-abcd1234.exe'", script)
+        self.assertNotIn("Add-MpPreference", script)
+
+    def test_linux_raises(self) -> None:
+        t = _make_target(work_dir="/tmp/x", key=self.key_path)
+        with self.assertRaises(ValueError):
+            defender_remove_process_exclusion(t, "/tmp/x/a.exe")
+
+    def test_empty_basename_is_noop(self) -> None:
+        t = _make_target(work_dir="C:\\Temp\\rc-test", platform="windows", key=self.key_path)
+        with patch("subprocess.run") as m:
+            defender_remove_process_exclusion(t, "")
+        m.assert_not_called()
+
+
+class TestFirewallRemoveProgram(unittest.TestCase):
+    """firewall_remove_program removes the RC-Harness-<digest> rule (Windows only)."""
+
+    def setUp(self) -> None:
+        self.key_path = _module_key_path()
+
+    def _completed(
+        self, returncode: int, stderr: str = "", stdout: str = ""
+    ) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(
+            args=[], returncode=returncode, stdout=stdout, stderr=stderr
+        )
+
+    def test_windows_removes_harness_rule(self) -> None:
+        ok = self._completed(0)
+        t = _make_target(work_dir="C:\\Temp\\rc-test", platform="windows", key=self.key_path)
+        with patch("subprocess.run", return_value=ok) as m:
+            firewall_remove_program(t, "C:\\Temp\\rc-test\\agent-abcd1234.exe")
+        script = _decoded_windows_launch_script(m.call_args[0][0][-1])
+        self.assertIn("Remove-NetFirewallRule", script)
+        self.assertIn("RC-Harness-", script)
+        self.assertNotIn("New-NetFirewallRule", script)
+
+    def test_rule_name_matches_allow_program_digest(self) -> None:
+        """firewall_remove_program uses the same digest as firewall_allow_program."""
+        import hashlib
+        path = "C:\\Temp\\rc-test\\agent-deadbeef.exe"
+        digest = hashlib.sha256(path.encode("utf-8", errors="replace")).hexdigest()[:12]
+        expected_name = f"RC-Harness-{digest}"
+        ok = self._completed(0)
+        t = _make_target(work_dir="C:\\Temp\\rc-test", platform="windows", key=self.key_path)
+        with patch("subprocess.run", return_value=ok) as m:
+            firewall_remove_program(t, path)
+        script = _decoded_windows_launch_script(m.call_args[0][0][-1])
+        self.assertIn(expected_name, script)
+
+    def test_linux_raises(self) -> None:
+        t = _make_target(work_dir="/tmp/x", key=self.key_path)
+        with self.assertRaises(ValueError):
+            firewall_remove_program(t, "/tmp/x/a.exe")
+
+
+class TestDefenderRemoveNetworkProtectionExclusion(unittest.TestCase):
+    """defender_remove_network_protection_exclusion uses Remove-MpPreference -ExclusionIpAddress."""
+
+    def setUp(self) -> None:
+        self.key_path = _module_key_path()
+
+    def _completed(
+        self, returncode: int, stderr: str = "", stdout: str = ""
+    ) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(
+            args=[], returncode=returncode, stdout=stdout, stderr=stderr
+        )
+
+    def test_windows_removes_ip_exclusion(self) -> None:
+        ok = self._completed(0)
+        t = _make_target(work_dir="C:\\Temp\\rc-test", platform="windows", key=self.key_path)
+        with patch("subprocess.run", return_value=ok) as m:
+            defender_remove_network_protection_exclusion(t, "10.0.0.1")
+        script = _decoded_windows_launch_script(m.call_args[0][0][-1])
+        self.assertIn("Remove-MpPreference", script)
+        self.assertIn("ExclusionIpAddress", script)
+        self.assertIn("10.0.0.1", script)
+        self.assertNotIn("Add-MpPreference", script)
+
+    def test_linux_raises(self) -> None:
+        t = _make_target(work_dir="/tmp/x", key=self.key_path)
+        with self.assertRaises(ValueError):
+            defender_remove_network_protection_exclusion(t, "10.0.0.1")
+
+
 class TestInjectHostsEntry(unittest.TestCase):
     """Tests for inject_hosts_entry — idempotent /etc/hosts injection via SSH."""
 
@@ -1214,6 +1326,36 @@ class TestCleanupWindowsHarnessWorkDir(unittest.TestCase):
         cleanup_windows_harness_work_dir(t, log_prefix="  [tag]")
         printed = [str(c.args[0]) for c in mock_print.call_args_list if c.args]
         self.assertTrue(any("cleanup skipped" in p for p in printed), printed)
+
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_script_includes_defender_firewall_sweep(self, mock_ssh: object) -> None:
+        """Cleanup script must revert RC-Harness-* firewall rules and agent-*.exe exclusions."""
+        mock_ssh.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
+        cleanup_windows_harness_work_dir(t, timeout=100)
+        cmd_list = mock_ssh.call_args[0][0]
+        decoded = _decoded_windows_launch_script(cmd_list[-1])
+        self.assertIn("Remove-NetFirewallRule", decoded)
+        self.assertIn("RC-Harness-*", decoded)
+        self.assertIn("Remove-MpPreference", decoded)
+        self.assertIn("ExclusionProcess", decoded)
+        self.assertIn("agent-", decoded)
+        self.assertIn("stress-agent-", decoded)
+
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_defender_sweep_precedes_work_dir_check(self, mock_ssh: object) -> None:
+        """Defender/firewall cleanup must appear before the work-dir existence check."""
+        mock_ssh.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
+        cleanup_windows_harness_work_dir(t, timeout=100)
+        decoded = _decoded_windows_launch_script(mock_ssh.call_args[0][0][-1])
+        fw_pos = decoded.index("Remove-NetFirewallRule")
+        wd_pos = decoded.index("Test-Path")
+        self.assertLess(fw_pos, wd_pos)
 
 
 if __name__ == "__main__":

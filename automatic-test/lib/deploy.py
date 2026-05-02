@@ -594,6 +594,30 @@ def defender_add_process_exclusion(target: TargetConfig, exe_path: str) -> None:
     run_remote(target, f"powershell -NoProfile -EncodedCommand {enc}")
 
 
+def defender_remove_process_exclusion(target: TargetConfig, exe_path: str) -> None:
+    """Remove a Defender process exclusion for the payload *basename* (Windows only).
+
+    Symmetric counterpart to :func:`defender_add_process_exclusion`.  Call during
+    harness teardown to leave Defender state unchanged after the scenario completes.
+
+    Args:
+        target:   Windows SSH target.  Raises ``ValueError`` on Linux targets.
+        exe_path: Full remote path; only the final ``.exe`` name is used.
+    """
+    if target.platform != "windows":
+        raise ValueError("defender_remove_process_exclusion is only supported on Windows targets")
+    leaf = PureWindowsPath(exe_path.strip().strip('"')).name
+    if not leaf:
+        return
+    leaf_q = _quote_powershell(leaf)
+    script = (
+        f"Remove-MpPreference -ExclusionProcess {leaf_q} -ErrorAction SilentlyContinue; "
+        "exit 0"
+    )
+    enc = _powershell_encoded_command(script)
+    run_remote(target, f"powershell -NoProfile -EncodedCommand {enc}")
+
+
 def firewall_allow_program(target: TargetConfig, program_path: str) -> None:
     """Add a best-effort outbound Windows Firewall allow rule for *program_path*.
 
@@ -616,6 +640,31 @@ def firewall_allow_program(target: TargetConfig, program_path: str) -> None:
         f"Remove-NetFirewallRule -DisplayName {name_q} -ErrorAction SilentlyContinue; "
         f"New-NetFirewallRule -DisplayName {name_q} -Direction Outbound -Action Allow "
         f"-Program {prog_q} -ErrorAction SilentlyContinue; "
+        "exit 0"
+    )
+    enc = _powershell_encoded_command(script)
+    run_remote(target, f"powershell -NoProfile -EncodedCommand {enc}")
+
+
+def firewall_remove_program(target: TargetConfig, program_path: str) -> None:
+    """Remove the harness outbound Windows Firewall rule for *program_path*.
+
+    Symmetric counterpart to :func:`firewall_allow_program`.  Computes the same
+    ``RC-Harness-<digest>`` display name and removes that specific rule.  Call
+    during harness teardown to revert the firewall state added for the payload.
+
+    Args:
+        target:        Windows SSH target.  Raises ``ValueError`` on Linux targets.
+        program_path:  Full path to the executable that was passed to
+                       :func:`firewall_allow_program`.
+    """
+    if target.platform != "windows":
+        raise ValueError("firewall_remove_program is only supported on Windows targets")
+    digest = hashlib.sha256(program_path.encode("utf-8", errors="replace")).hexdigest()[:12]
+    name = f"RC-Harness-{digest}"[:96]
+    name_q = _quote_powershell(name)
+    script = (
+        f"Remove-NetFirewallRule -DisplayName {name_q} -ErrorAction SilentlyContinue; "
         "exit 0"
     )
     enc = _powershell_encoded_command(script)
@@ -650,6 +699,33 @@ def defender_network_protection_exclusion(target: TargetConfig, ip_address: str)
     ip_q = _quote_powershell(ip_address.strip())
     script = (
         f"Add-MpPreference -ExclusionIpAddress {ip_q} -ErrorAction SilentlyContinue; "
+        "exit 0"
+    )
+    enc = _powershell_encoded_command(script)
+    run_remote(target, f"powershell -NoProfile -EncodedCommand {enc}")
+
+
+def defender_remove_network_protection_exclusion(target: TargetConfig, ip_address: str) -> None:
+    """Remove a Defender Network Protection IP exclusion for *ip_address* (Windows only).
+
+    Symmetric counterpart to :func:`defender_network_protection_exclusion`.  Call
+    during harness teardown to revert the IP exclusion added for the C2 callback host.
+
+    Args:
+        target:     Windows SSH target.  Raises ``ValueError`` for Linux targets.
+        ip_address: C2 callback host IP to remove from the Network Protection exclusion list.
+
+    Raises:
+        ValueError: when *target* is not a Windows target.
+        DeployError: when the SSH connection itself fails.
+    """
+    if target.platform != "windows":
+        raise ValueError(
+            "defender_remove_network_protection_exclusion is only supported on Windows targets"
+        )
+    ip_q = _quote_powershell(ip_address.strip())
+    script = (
+        f"Remove-MpPreference -ExclusionIpAddress {ip_q} -ErrorAction SilentlyContinue; "
         "exit 0"
     )
     enc = _powershell_encoded_command(script)
@@ -756,6 +832,18 @@ def cleanup_windows_harness_work_dir(
     ``Access to the path ... is denied`` failures from ``Remove-Item -Recurse`` when
     stale payload binaries are still loaded or scanning-locked.
 
+    Also reverts per-run Defender/firewall exceptions added by
+    :func:`defender_add_process_exclusion`, :func:`firewall_allow_program`, and
+    :func:`defender_network_protection_exclusion`:
+
+    - Removes all Windows Firewall rules whose display name starts with ``RC-Harness-``
+      (the stable prefix used by :func:`firewall_allow_program`).
+    - Removes all ``ExclusionProcess`` entries matching ``agent-*.exe`` or
+      ``stress-agent-*.exe`` (the basename patterns used by harness payloads).
+
+    This sweep always executes before the work-dir file removal so it runs even when
+    the work directory does not yet exist (e.g. pre-run cleanup on a fresh VM).
+
     Never raises: SSH failures, non-zero exit, or locked files are summarized on stdout.
 
     Args:
@@ -773,6 +861,17 @@ def cleanup_windows_harness_work_dir(
 
     wd = target.work_dir.replace("'", "''")
     script = (
+        # Revert Defender/firewall exceptions — runs unconditionally (even without work dir).
+        "Remove-NetFirewallRule -DisplayName 'RC-Harness-*' -ErrorAction SilentlyContinue\n"
+        "$_prefs = Get-MpPreference -ErrorAction SilentlyContinue\n"
+        "if ($_prefs -and $_prefs.ExclusionProcess) {\n"
+        "  foreach ($_exc in @($_prefs.ExclusionProcess)) {\n"
+        "    if ($_exc -match '^(agent-|stress-agent-).*\\.exe$') {\n"
+        "      Remove-MpPreference -ExclusionProcess $_exc -ErrorAction SilentlyContinue\n"
+        "    }\n"
+        "  }\n"
+        "}\n"
+        # Work-dir file cleanup.
         f"$wd = '{wd}'\n"
         "if (-not (Test-Path -LiteralPath $wd)) { exit 0 }\n"
         "Get-Process -ErrorAction SilentlyContinue | ForEach-Object {\n"

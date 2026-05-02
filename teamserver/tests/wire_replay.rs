@@ -397,8 +397,7 @@ async fn replay_demon_init_from_corpus() -> Result<(), Box<dyn std::error::Error
         .map_err(|e| ReplayError::InvalidHex { field: "agent_id_hex", inner: e.to_string() })?;
 
     // Build in-memory registry + parser — no OS listener socket.
-    // Clone the database handle so we can query persisted state after INIT without
-    // going through the registry's (intentionally limited) public API.
+    // clone so we can bypass the registry's limited public API
     let database = Database::connect_in_memory().await?;
     let db_handle = database.clone();
     let registry = AgentRegistry::new(database);
@@ -445,9 +444,7 @@ async fn replay_demon_init_from_corpus() -> Result<(), Box<dyn std::error::Error
         .expect("agent must be inserted into registry after DEMON_INIT replay");
     assert_eq!(registered.agent_id, expected_agent_id);
 
-    // Assert that the persisted ctr_block_offset matches the corpus fixture value.
-    // This catches regressions where initial_ctr_block_offset is recorded incorrectly
-    // (e.g. null instead of 0) at the value level, not just the field-presence level.
+    // value-level check: catches null-vs-0 regressions
     let persisted = db_handle
         .agents()
         .get_persisted(expected_agent_id)

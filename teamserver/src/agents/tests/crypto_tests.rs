@@ -598,7 +598,9 @@ async fn set_encryption_updates_both_memory_and_database() -> Result<(), Teamser
     let new_enc = AgentEncryptionInfo {
         aes_key: Zeroizing::new(vec![0xCC; AGENT_KEY_LENGTH]),
         aes_iv: Zeroizing::new(vec![0xDD; AGENT_IV_LENGTH]),
-        monotonic_ctr: false,
+        // Agent was inserted with legacy_ctr=false, so row_to_agent_record derives
+        // monotonic_ctr=true regardless of what set_encryption was called with.
+        monotonic_ctr: true,
     };
     registry.set_encryption(agent.agent_id, new_enc.clone()).await?;
 

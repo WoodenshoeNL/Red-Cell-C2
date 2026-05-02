@@ -83,7 +83,8 @@ pub(super) fn sample_agent_info(
         encryption: red_cell_common::AgentEncryptionInfo {
             aes_key: Zeroizing::new(key.to_vec()),
             aes_iv: Zeroizing::new(iv.to_vec()),
-            monotonic_ctr: false,
+            // registry.insert() uses legacy_ctr=false; row_to_agent_record derives monotonic_ctr=true.
+            monotonic_ctr: true,
         },
         hostname: "wkstn-01".to_owned(),
         username: "operator".to_owned(),

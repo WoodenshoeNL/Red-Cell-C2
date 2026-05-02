@@ -43,7 +43,7 @@ pub struct AgentEncryptionInfo {
     /// Whether the agent requested monotonic-CTR mode (`INIT_EXT_MONOTONIC_CTR`).
     ///
     /// `true` → monotonic (per-message counter); `false` → legacy (IV reset each call).
-    /// Defaults to `false` for records loaded from the database or pre-extension agents.
+    /// Derived from the `legacy_ctr` DB column: `monotonic_ctr = !legacy_ctr`.
     #[serde(rename = "MonotonicCtr", default)]
     pub monotonic_ctr: bool,
 }

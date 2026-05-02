@@ -342,9 +342,7 @@ def format_archon_checkin_timeout_diagnostics(
         try:
             from lib.deploy import run_remote as _run_remote5
 
-            work_dir = str(getattr(target, "work_dir", "") or "")
-            # Best-effort: extract the exe leaf that was last run from work_dir path.
-            # The exe name pattern is "agent-<hex>.exe" — just probe all of them.
+            # The exe name pattern is "agent-<hex>.exe" — probe all of them.
             exe_leaf = "agent-"
             lines.append("--- APPCRASH events for agent-*.exe (Application EventID 1000) ---")
             lines.append(_try_windows_appcrash_events(target, _run_remote5, exe_leaf))

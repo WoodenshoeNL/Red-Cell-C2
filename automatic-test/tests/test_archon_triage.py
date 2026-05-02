@@ -67,6 +67,42 @@ class TestFormatArchonCheckinTimeoutDiagnostics(unittest.TestCase):
         self.assertEqual(m.call_count, 5)
 
 
+class TestTryWindowsWorkdirProcesses(unittest.TestCase):
+    def _call(self, work_dir: str) -> str:
+        from lib.archon_triage import _try_windows_workdir_processes
+
+        target = MagicMock()
+        target.work_dir = work_dir
+        captured: list[str] = []
+
+        def _fake_run(t: object, cmd: str, timeout: int = 30) -> str:
+            captured.append(cmd)
+            return "1234|agent.exe|(owner unavailable)|" + work_dir + "\\agent.exe"
+
+        _try_windows_workdir_processes(target, _fake_run)
+        self.assertEqual(len(captured), 1)
+        return captured[0]
+
+    def test_standard_path_uses_single_backslashes(self) -> None:
+        """Backslashes in work_dir must not be doubled in the generated PowerShell command."""
+        cmd = self._call("C:\\Temp\\rc-test")
+        # $wd must be assigned with literal single backslashes inside a PS single-quoted string.
+        self.assertIn("$wd = 'C:\\Temp\\rc-test'", cmd)
+        # Double backslashes in $wd assignment indicate the double-escaping bug.
+        self.assertNotIn("C:\\\\Temp", cmd)
+
+    def test_like_pattern_uses_single_backslash_separator(self) -> None:
+        """The -like wildcard separator must be a single backslash, not double."""
+        cmd = self._call("C:\\Work")
+        self.assertIn("'\\*'", cmd)
+        self.assertNotIn("'\\\\*'", cmd)
+
+    def test_single_quote_in_path_is_escaped(self) -> None:
+        """Single quotes in work_dir must be doubled for the PS single-quoted string."""
+        cmd = self._call("C:\\Temp\\it's here")
+        self.assertIn("it''s here", cmd)
+
+
 class TestLogArchonEcdhPrelude(unittest.TestCase):
     def test_warns_when_callback_host_missing(self) -> None:
         from lib.archon_triage import log_archon_ecdh_prelude

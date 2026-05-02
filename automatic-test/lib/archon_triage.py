@@ -116,17 +116,17 @@ def _try_windows_workdir_processes(target: Any, run_remote: Any) -> str:
     work_dir = str(getattr(target, "work_dir", "") or "").strip()
     if not work_dir:
         return "(target.work_dir unavailable)"
-    escaped = work_dir.replace("'", "''").replace("\\", "\\\\")
+    escaped = work_dir.replace("'", "''")
     try:
         script = (
             "$wd = '"
             + escaped
             + "'; "
             "$rows = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | "
-            "Where-Object { $_.ExecutablePath -like ($wd + '\\\\*') } | "
+            "Where-Object { $_.ExecutablePath -like ($wd + '\\*') } | "
             "ForEach-Object { "
             "  $owner = Invoke-CimMethod -InputObject $_ -MethodName GetOwner -ErrorAction SilentlyContinue; "
-            "  $ownerText = if ($owner -and $owner.User) { $owner.Domain + '\\\\' + $owner.User } else { '(owner unavailable)' }; "
+            "  $ownerText = if ($owner -and $owner.User) { $owner.Domain + '\\' + $owner.User } else { '(owner unavailable)' }; "
             "  '{0}|{1}|{2}|{3}' -f $_.ProcessId, $_.Name, $ownerText, $_.ExecutablePath "
             "}; "
             "if ($rows) { $rows } else { "
@@ -135,7 +135,7 @@ def _try_windows_workdir_processes(target: Any, run_remote: Any) -> str:
             "  Where-Object { $_.Name -like 'agent-*.exe' } | "
             "  ForEach-Object { "
             "    $o = Invoke-CimMethod -InputObject $_ -MethodName GetOwner -ErrorAction SilentlyContinue; "
-            "    $ot = if ($o -and $o.User) { $o.Domain + '\\\\' + $o.User } else { '(owner unavailable)' }; "
+            "    $ot = if ($o -and $o.User) { $o.Domain + '\\' + $o.User } else { '(owner unavailable)' }; "
             "    '{0}|{1}|{2}|(fallback/no-ExePath)' -f $_.ProcessId, $_.Name, $ot "
             "  }; "
             "  if ($fb) { $fb } "

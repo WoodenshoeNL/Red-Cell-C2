@@ -32,8 +32,10 @@ row to *Resolved* and add the closing commit / fix description.
 
 | Signature (substring of error / stderr) | Scenario | Bead | First seen | Last seen | Status |
 |----------------------------------------|----------|------|------------|-----------|--------|
-| `Process could not be started: Path:[]` | 05, 14, 19 | red-cell-c2-qaru8 | 2026-04-30 | 2026-05-01 | P1, Demon ProcessCreate on Windows still returns empty PATH after CreateEnvironmentBlock fix (regression of red-cell-c2-z1hl9) |
-| `Timed out after 60s waiting for agent checkin` | 17 | red-cell-c2-jv15n | 2026-04-29 | 2026-05-01 | P2, Archon ECDH checkin still fails — X25519.c fix was interrupted (regression of red-cell-c2-al4eo) |
+| `[TIMEOUT] timeout: timed out waiting for output from task` | 04, 06, 07, 08, 11, 21 | red-cell-c2-1f7q1 | 2026-04-24 | 2026-05-02 | P1, Phantom crashes ~1s after first task dispatch; agent.dead event within 1s of task; all prior fixes (vk3xs etc.) are resolved — new crash site |
+| `Path:[]` | 05, 14, 19 | red-cell-c2-2u0hw | 2026-04-30 | 2026-05-02 | P1, Demon Windows PATH still empty after qaru8 encode_utf16 fix — direct exes start (`Process started: Path:[]`) but cmd builtins (echo) still fail (`Process could not be started: Path:[]`), regression of red-cell-c2-qaru8 |
+| `Timed out after 60s waiting for agent checkin` | 17 | red-cell-c2-vudj9 | 2026-04-29 | 2026-05-02 | P2, Archon Windows checkin still times out after S4U schtask fix — agent runs but makes zero TCP connections, regression of red-cell-c2-550gu |
+| `No space left on device` | 22, 23 | red-cell-c2-sb5bm | 2026-05-02 | 2026-05-02 | P3, sccache grew to 8.3 GB filling root FS — environment issue, not product; workaround: rm -rf ~/.cache/sccache |
 
 ---
 
@@ -45,11 +47,13 @@ than a new bug.
 
 | Signature (substring of error / stderr) | Scenario | Bead | Resolved at | Notes |
 |----------------------------------------|----------|------|-------------|-------|
+| `Process could not be started: Path:[]` (qaru8 encode_utf16 fix) | 05, 14, 19 | red-cell-c2-qaru8 | 2026-05-01 | encode_utf16("") now emits length=0; CreateProcessW no longer fails for direct exes. PATH still empty → cmd builtins still fail. **REGRESSED** — see red-cell-c2-2u0hw. |
+| `Timed out after 60s waiting for agent checkin` (S4U schtask fix) | 17 | red-cell-c2-jv15n, red-cell-c2-550gu | 2026-05-01 | jv15n bisected to "no TCP connection"; 550gu switched execute_background to S4U — agent now runs as user, not SYSTEM. Agent still makes zero TCP connections. **REGRESSED** — see red-cell-c2-vudj9. |
 | `Timed out after 30s waiting for 10 new agent checkins` | 14 | red-cell-c2-8ss6q | 2026-04-30 | 10/10 Demon agents now check in (was 0/10). Checkin fixed by stale-process cleanup + listener-name filtering. Command execution now blocked by new PATH bug (red-cell-c2-z1hl9). |
 | `Process could not be started: Path:[]` (CreateEnvironmentBlock fix) | 05, 14, 19 | red-cell-c2-z1hl9 | 2026-04-30 | Commits bfbf64fd/cbb0353d/481dd7be added CreateEnvironmentBlock. **REGRESSED** — fix ineffective, see red-cell-c2-qaru8. |
 | `Timed out after 60s waiting for agent checkin` (X25519 fix attempt) | 17 | red-cell-c2-al4eo | 2026-04-30 | X25519.c fix was interrupted (WIP commits). **REGRESSED** — see red-cell-c2-jv15n. |
 | `[TIMEOUT] timeout: timed out waiting for output from task` (seq_num desync fix) | 04, 06, 07, 11, 21 | red-cell-c2-5dggm | 2026-04-29 | ECDH seq_num desync: always increment callback_seq after send attempt. **REGRESSED** — see red-cell-c2-vk3xs |
-| `[TIMEOUT] timeout: timed out waiting for output from task` (mprotect SIGSEGV fix) | 04, 06, 07, 08, 11, 19, 21 | red-cell-c2-vk3xs | 2026-04-28 | reqwest connection pool kept a background Tokio task that accessed heap during mprotect_sleep PROT_NONE window → SIGSEGV. Fixed with pool_max_idle_per_host(0) in Phantom transport. Commit 20f2d6d4. |
+| `[TIMEOUT] timeout: timed out waiting for output from task` (mprotect SIGSEGV fix) | 04, 06, 07, 08, 11, 19, 21 | red-cell-c2-vk3xs | 2026-04-28 | reqwest connection pool kept a background Tokio task that accessed heap during mprotect_sleep PROT_NONE window → SIGSEGV. Fixed with pool_max_idle_per_host(0) in Phantom transport. Commit 20f2d6d4. **REGRESSED** — still observed 2026-05-02, new bead red-cell-c2-1f7q1. |
 | `WMI Win32_Process.Create failed: ReturnValue=21` | 05, 08, 14, 17, 19 | red-cell-c2-irxsr | 2026-04-29 | PureWindowsPath fix for WMI CurrentDirectory extraction. WMI deploys now work. Downstream issues exposed: sc17 Archon checkin (red-cell-c2-al4eo), sc14 stress checkin (red-cell-c2-8ss6q). |
 | `GET_JOB accepted (HTTP 200): got HTTP 404` | 13 | red-cell-c2-irlsn | 2026-04-29 | Fixed GET_JOB heartbeat packet: removed spurious u32be(0) length prefix. sc13 passes. |
 | `DoH uplink chunk 0/1 expected NXDOMAIN (rcode=3), got rcode=5` | 20 | red-cell-c2-qb8gw | 2026-04-29 | Fixed by commit 1de06fac (irlsn fix). sc20 now skips for DNS resolution issue, not REFUSED. |

@@ -14,13 +14,11 @@ use red_cell_common::operator::{AgentTaskInfo, EventCode, Message, MessageHead};
 use crate::app::TeamserverState;
 use crate::events::broadcast_teamserver_warning;
 use crate::websocket::{AgentCommandError, execute_agent_task};
-use crate::{
-    AuditResultStatus, audit_details, authorize_agent_group_access, authorize_listener_access,
-    parameter_object,
-};
+use crate::{AuditResultStatus, audit_details, parameter_object};
 
 use crate::api::{TaskAgentApiAccess, next_task_id, parse_api_agent_id, record_audit_entry};
 
+use super::access::authorize_agent_access;
 use super::{AgentApiError, AgentDeregisteredResponse, AgentTaskQueuedResponse};
 
 /// Query parameters for `DELETE /agents/{id}`.
@@ -62,10 +60,7 @@ pub(crate) async fn kill_agent(
     Query(params): Query<DeleteAgentQuery>,
 ) -> Result<Response, AgentApiError> {
     let agent_id = parse_api_agent_id(&id)?;
-    authorize_agent_group_access(&state.database, &identity.key_id, agent_id).await?;
-    if let Some(listener_name) = state.agent_registry.listener_name(agent_id).await {
-        authorize_listener_access(&state.database, &identity.key_id, &listener_name).await?;
-    }
+    authorize_agent_access(&state, &identity.key_id, agent_id).await?;
 
     if params.deregister_only {
         return deregister_agent(&state, &identity.key_id, agent_id).await;
@@ -217,10 +212,7 @@ pub(crate) async fn queue_agent_task(
     Json(mut task): Json<AgentTaskInfo>,
 ) -> Result<(StatusCode, Json<AgentTaskQueuedResponse>), AgentApiError> {
     let agent_id = parse_api_agent_id(&id)?;
-    authorize_agent_group_access(&state.database, &identity.key_id, agent_id).await?;
-    if let Some(listener_name) = state.agent_registry.listener_name(agent_id).await {
-        authorize_listener_access(&state.database, &identity.key_id, &listener_name).await?;
-    }
+    authorize_agent_access(&state, &identity.key_id, agent_id).await?;
     let canonical_id = format!("{agent_id:08X}");
 
     if !task.demon_id.is_empty() && !task.demon_id.eq_ignore_ascii_case(&canonical_id) {

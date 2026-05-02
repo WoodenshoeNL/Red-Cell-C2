@@ -34,6 +34,8 @@ pub(super) enum CorpusKeysError {
     NotLoopback,
     AgentNotFound,
     InvalidAgentId,
+    NoEcdhSession,
+    Internal,
 }
 
 impl IntoResponse for CorpusKeysError {
@@ -45,6 +47,8 @@ impl IntoResponse for CorpusKeysError {
             }
             Self::AgentNotFound => (StatusCode::NOT_FOUND, "agent not found"),
             Self::InvalidAgentId => (StatusCode::BAD_REQUEST, "invalid agent_id"),
+            Self::NoEcdhSession => (StatusCode::NOT_FOUND, "no ECDH session found for agent"),
+            Self::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
         };
         (status, body).into_response()
     }
@@ -61,8 +65,9 @@ impl IntoResponse for CorpusKeysError {
         (status = 200, description = "AES session key material for the agent", body = CorpusSessionKeys),
         (status = 400, description = "Invalid agent_id parameter"),
         (status = 403, description = "Not a loopback connection"),
-        (status = 404, description = "Corpus capture inactive or agent not found"),
+        (status = 404, description = "Corpus capture inactive, agent not found, or no ECDH session"),
         (status = 401, description = "Missing or invalid API key", body = super::errors::ApiErrorBody),
+        (status = 500, description = "Internal error retrieving ECDH session key"),
     )
 )]
 pub(super) async fn get_corpus_keys(
@@ -83,6 +88,26 @@ pub(super) async fn get_corpus_keys(
     let agent_id =
         parse_api_agent_id(&query.agent_id).map_err(|_| CorpusKeysError::InvalidAgentId)?;
 
+    // Verify the agent exists before deciding which key path to use.
+    state.agent_registry.encryption(agent_id).await.map_err(|_| CorpusKeysError::AgentNotFound)?;
+
+    let agent_id_hex = format!("0x{agent_id:08x}");
+
+    if state.agent_registry.is_ecdh_transport(agent_id).await {
+        // ECDH/GCM agent: the AES-CTR key slot in the registry is intentionally
+        // zeroed.  Fetch the real session key from ts_ecdh_sessions instead.
+        let session_key = state
+            .database
+            .ecdh()
+            .get_session_key_by_agent_id(agent_id)
+            .await
+            .map_err(|_| CorpusKeysError::Internal)?
+            .ok_or(CorpusKeysError::NoEcdhSession)?;
+
+        let keys = CorpusSessionKeys::new_gcm(bytes_to_hex(&session_key), agent_id_hex);
+        return Ok(Json(keys));
+    }
+
     let enc = state
         .agent_registry
         .encryption(agent_id)
@@ -96,7 +121,7 @@ pub(super) async fn get_corpus_keys(
         bytes_to_hex(enc.aes_iv.as_slice()),
         !is_legacy,
         0,
-        format!("0x{agent_id:08x}"),
+        agent_id_hex,
     );
 
     Ok(Json(keys))
@@ -113,7 +138,60 @@ fn is_loopback(ip: IpAddr) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    use axum::extract::{ConnectInfo, Query, State};
+    use red_cell_common::crypto::ecdh::ConnectionId;
+    use red_cell_common::{AgentEncryptionInfo, AgentRecord};
+    use zeroize::Zeroizing;
+
+    use crate::app::TeamserverState;
+
     use super::*;
+
+    const LOOPBACK: &str = "127.0.0.1:1234";
+
+    fn loopback_addr() -> std::net::SocketAddr {
+        LOOPBACK.parse().expect("parse loopback")
+    }
+
+    /// Build a minimal AgentRecord with zeroed AES material (as used for ECDH agents).
+    fn zero_key_agent(agent_id: u32) -> AgentRecord {
+        AgentRecord {
+            agent_id,
+            active: true,
+            reason: String::new(),
+            note: String::new(),
+            encryption: AgentEncryptionInfo {
+                aes_key: Zeroizing::new(vec![0u8; 32]),
+                aes_iv: Zeroizing::new(vec![0u8; 16]),
+                monotonic_ctr: false,
+            },
+            hostname: "test-host".to_owned(),
+            username: "user".to_owned(),
+            domain_name: "DOMAIN".to_owned(),
+            external_ip: "1.2.3.4".to_owned(),
+            internal_ip: "10.0.0.1".to_owned(),
+            process_name: "test.exe".to_owned(),
+            process_path: "C:\\test.exe".to_owned(),
+            base_address: 0,
+            process_pid: 1,
+            process_tid: 1,
+            process_ppid: 0,
+            process_arch: "x64".to_owned(),
+            elevated: false,
+            os_version: "Windows 10".to_owned(),
+            os_build: 0,
+            os_arch: "x64".to_owned(),
+            sleep_delay: 5,
+            sleep_jitter: 0,
+            kill_date: None,
+            working_hours: None,
+            first_call_in: "2026-01-01T00:00:00Z".to_owned(),
+            last_call_in: "2026-01-01T00:00:00Z".to_owned(),
+            archon_magic: None,
+        }
+    }
 
     #[test]
     fn loopback_127_0_0_1_is_accepted() {
@@ -154,5 +232,167 @@ mod tests {
     fn corpus_keys_error_invalid_agent_id_is_bad_request() {
         let resp = CorpusKeysError::InvalidAgentId.into_response();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn corpus_keys_error_no_ecdh_session_is_not_found() {
+        let resp = CorpusKeysError::NoEcdhSession.into_response();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn corpus_keys_error_internal_is_server_error() {
+        let resp = CorpusKeysError::Internal.into_response();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    /// ECDH agent: the endpoint must return the real session key from
+    /// `ts_ecdh_sessions`, not the all-zero AES-CTR key from the registry,
+    /// and the encryption scheme must be `aes-256-gcm`.
+    #[tokio::test]
+    async fn get_corpus_keys_ecdh_returns_real_session_key_with_gcm_scheme() {
+        let agent_id: u32 = 0xDEAD_BEEFu32;
+        let real_session_key: [u8; 32] = {
+            let mut k = [0u8; 32];
+            for (i, b) in k.iter_mut().enumerate() {
+                *b = (i as u8).wrapping_mul(7).wrapping_add(13);
+            }
+            k
+        };
+
+        let mut state = crate::app::build_test_state().await;
+        state.corpus_dir = Some(PathBuf::from("/tmp"));
+
+        // Insert an ECDH agent with zeroed AES key (as done in registration.rs).
+        state
+            .agent_registry
+            .insert_full(
+                zero_key_agent(agent_id),
+                "test-listener",
+                0u64,
+                false,
+                true, // ecdh_transport = true
+                false,
+            )
+            .await
+            .expect("insert agent");
+
+        // Persist a real session key in ts_ecdh_sessions.
+        let conn_id = ConnectionId([1u8; 16]);
+        state
+            .database
+            .ecdh()
+            .store_session(&conn_id, agent_id, &real_session_key)
+            .await
+            .expect("store session");
+
+        let result = get_corpus_keys(
+            State(state),
+            ConnectInfo(loopback_addr()),
+            Query(CorpusKeysQuery { agent_id: format!("0x{agent_id:08x}") }),
+        )
+        .await
+        .expect("handler should succeed");
+
+        let keys = result.0;
+        assert_eq!(
+            keys.encryption_scheme.as_deref(),
+            Some("aes-256-gcm"),
+            "ECDH agent must report aes-256-gcm"
+        );
+        let expected_hex = bytes_to_hex(&real_session_key);
+        assert_eq!(
+            keys.aes_key_hex.as_deref(),
+            Some(expected_hex.as_str()),
+            "aes_key_hex must match the stored session key, not zeros"
+        );
+        // GCM has no IV / monotonic-ctr fields.
+        assert!(keys.aes_iv_hex.is_none(), "aes_iv_hex must be None for GCM");
+        assert!(keys.monotonic_ctr.is_none(), "monotonic_ctr must be None for GCM");
+    }
+
+    /// Non-ECDH (AES-CTR) agent: the endpoint must return the registry AES key
+    /// and report `aes-256-ctr` as the scheme.
+    #[tokio::test]
+    async fn get_corpus_keys_ctr_returns_aes_key_with_ctr_scheme() {
+        let agent_id: u32 = 0xCAFE_BABEu32;
+        let aes_key: Vec<u8> = (0u8..32).collect();
+        let aes_iv: Vec<u8> = (0u8..16).collect();
+
+        let mut state = crate::app::build_test_state().await;
+        state.corpus_dir = Some(PathBuf::from("/tmp"));
+
+        let agent = AgentRecord {
+            agent_id,
+            active: true,
+            reason: String::new(),
+            note: String::new(),
+            encryption: AgentEncryptionInfo {
+                aes_key: Zeroizing::new(aes_key.clone()),
+                aes_iv: Zeroizing::new(aes_iv.clone()),
+                monotonic_ctr: true,
+            },
+            hostname: "test-host".to_owned(),
+            username: "user".to_owned(),
+            domain_name: "DOMAIN".to_owned(),
+            external_ip: "1.2.3.4".to_owned(),
+            internal_ip: "10.0.0.1".to_owned(),
+            process_name: "test.exe".to_owned(),
+            process_path: "C:\\test.exe".to_owned(),
+            base_address: 0,
+            process_pid: 1,
+            process_tid: 1,
+            process_ppid: 0,
+            process_arch: "x64".to_owned(),
+            elevated: false,
+            os_version: "Windows 10".to_owned(),
+            os_build: 0,
+            os_arch: "x64".to_owned(),
+            sleep_delay: 5,
+            sleep_jitter: 0,
+            kill_date: None,
+            working_hours: None,
+            first_call_in: "2026-01-01T00:00:00Z".to_owned(),
+            last_call_in: "2026-01-01T00:00:00Z".to_owned(),
+            archon_magic: None,
+        };
+
+        state
+            .agent_registry
+            .insert_full(
+                agent,
+                "test-listener",
+                0u64,
+                false,
+                false, // ecdh_transport = false
+                false,
+            )
+            .await
+            .expect("insert agent");
+
+        let result = get_corpus_keys(
+            State(state),
+            ConnectInfo(loopback_addr()),
+            Query(CorpusKeysQuery { agent_id: format!("0x{agent_id:08x}") }),
+        )
+        .await
+        .expect("handler should succeed");
+
+        let keys = result.0;
+        assert_eq!(
+            keys.encryption_scheme.as_deref(),
+            Some("aes-256-ctr"),
+            "non-ECDH agent must report aes-256-ctr"
+        );
+        assert_eq!(
+            keys.aes_key_hex.as_deref(),
+            Some(bytes_to_hex(&aes_key).as_str()),
+            "aes_key_hex must match the registry AES key"
+        );
+        assert_eq!(
+            keys.aes_iv_hex.as_deref(),
+            Some(bytes_to_hex(&aes_iv).as_str()),
+            "aes_iv_hex must match the registry IV"
+        );
     }
 }

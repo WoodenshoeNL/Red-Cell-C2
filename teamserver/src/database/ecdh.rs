@@ -246,6 +246,40 @@ impl EcdhRepository {
         Ok(ids)
     }
 
+    /// Return the decrypted session key for the most recent ECDH session belonging
+    /// to `agent_id`, or `None` if no session exists for that agent.
+    ///
+    /// Used by `GET /debug/corpus-keys` to retrieve the real GCM session key for
+    /// ECDH agents (whose AES-CTR key slot is intentionally zeroed in the registry).
+    pub async fn get_session_key_by_agent_id(
+        &self,
+        agent_id: u32,
+    ) -> Result<Option<[u8; 32]>, TeamserverError> {
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT session_key_enc FROM ts_ecdh_sessions \
+             WHERE agent_id = ? ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(i64::from(agent_id))
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(TeamserverError::Sqlx)?;
+
+        let Some((key_enc,)) = row else {
+            return Ok(None);
+        };
+
+        let key_bytes = self
+            .master_key
+            .decrypt(&key_enc)
+            .map_err(|e| TeamserverError::Internal(format!("decrypt ECDH session key: {e}")))?;
+
+        let session_key: [u8; 32] = key_bytes.as_slice().try_into().map_err(|_| {
+            TeamserverError::Internal("persisted ECDH session key has wrong length".into())
+        })?;
+
+        Ok(Some(session_key))
+    }
+
     // ─── Registration replay cache ──────────────────────────────────────────────
 
     /// Record a registration-packet fingerprint to prevent replay within the window.

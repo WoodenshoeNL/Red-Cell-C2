@@ -122,12 +122,13 @@ pub(super) fn row_to_agent_record(
 ) -> Result<AgentRecord, TeamserverError> {
     let aes_key = decode_agent_key(master_key, &row.aes_key_enc, &row.aes_key, "aes_key")?;
     let aes_iv = decode_agent_key(master_key, &row.aes_iv_enc, &row.aes_iv, "aes_iv")?;
+    let monotonic_ctr = !super::super::bool_from_i64("legacy_ctr", row.legacy_ctr)?;
     Ok(AgentRecord {
         agent_id: super::super::u32_from_i64("agent_id", row.agent_id)?,
         active: super::super::bool_from_i64("active", row.active)?,
         reason: row.reason.clone(),
         note: row.note.clone(),
-        encryption: AgentEncryptionInfo { aes_key, aes_iv, monotonic_ctr: false },
+        encryption: AgentEncryptionInfo { aes_key, aes_iv, monotonic_ctr },
         hostname: row.hostname.clone(),
         username: row.username.clone(),
         domain_name: row.domain_name.clone(),

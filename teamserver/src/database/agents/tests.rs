@@ -158,6 +158,26 @@ async fn session_keys_survive_reregister_roundtrip() {
 }
 
 #[tokio::test]
+async fn monotonic_ctr_reflects_legacy_ctr_column_on_load() {
+    let db = Database::connect_in_memory().await.expect("db");
+    let repo = db.agents();
+
+    // legacy_ctr = false → monotonic_ctr = true (INIT_EXT_MONOTONIC_CTR agent)
+    repo.create_full(&stub_agent(0xC001), "https-listener", 0, false, false)
+        .await
+        .expect("create monotonic agent");
+    let loaded = repo.get(0xC001).await.expect("get").expect("should exist");
+    assert!(loaded.encryption.monotonic_ctr, "legacy_ctr=false must yield monotonic_ctr=true");
+
+    // legacy_ctr = true → monotonic_ctr = false (classic CTR agent)
+    repo.create_full(&stub_agent(0xC002), "https-listener", 0, true, false)
+        .await
+        .expect("create legacy agent");
+    let loaded = repo.get(0xC002).await.expect("get").expect("should exist");
+    assert!(!loaded.encryption.monotonic_ctr, "legacy_ctr=true must yield monotonic_ctr=false");
+}
+
+#[tokio::test]
 async fn legacy_plaintext_key_fallback_survives_read() {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;

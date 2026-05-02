@@ -16,7 +16,8 @@ async fn encryption_round_trips() -> Result<(), TeamserverError> {
     let updated = AgentEncryptionInfo {
         aes_key: Zeroizing::new(b"new-key".to_vec()),
         aes_iv: Zeroizing::new(b"new-iv".to_vec()),
-        monotonic_ctr: false,
+        // Agent was inserted without legacy_ctr (default: monotonic), so DB always returns true.
+        monotonic_ctr: true,
     };
     registry.insert(agent.clone()).await?;
 

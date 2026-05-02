@@ -688,7 +688,7 @@ class TestDeployErrorPaths(unittest.TestCase):
         script = _decoded_windows_launch_script(remote_cmd)
         self.assertIn("Register-ScheduledTask", script)
         self.assertIn("'C:\\Program Files\\rc\\agent.exe'", script)
-        self.assertIn("-Execute $exePath", script)
+        self.assertIn("-Execute $ep", script)
 
     def test_execute_background_windows_escapes_single_quotes(self) -> None:
         """Single quotes in the path must be doubled for PS single-quote string."""
@@ -753,8 +753,8 @@ class TestWindowsSchedTaskScript(unittest.TestCase):
 
     def test_contains_working_directory(self) -> None:
         script = _windows_schtask_script("C:\\Temp\\rc-test\\agent.exe")
-        self.assertIn("-WorkingDirectory $workDir", script)
-        self.assertIn("Split-Path -Parent -LiteralPath $exePath", script)
+        self.assertIn("-WorkingDirectory $wd", script)
+        self.assertIn("Split-Path -Parent -LiteralPath $ep", script)
 
     def test_emits_schtask_state_marker(self) -> None:
         script = _windows_schtask_script("C:\\Temp\\agent.exe")
@@ -833,9 +833,9 @@ class TestWindowsSchedTaskScript(unittest.TestCase):
         execute_idx = script.index("-Execute")
         argument_idx = script.index("-Argument")
         self.assertLess(execute_idx, argument_idx)
-        self.assertIn("-Execute $exePath", script)
+        self.assertIn("-Execute $ep", script)
         self.assertIn("'C:\\Temp\\agent.exe'", script)
-        self.assertIn("-WorkingDirectory $workDir", script)
+        self.assertIn("-WorkingDirectory $wd", script)
 
     def test_arguments_with_spaces_single_quoted(self) -> None:
         """Argument values containing spaces must be single-quoted."""
@@ -874,7 +874,7 @@ class TestExecuteBackgroundWindowsArguments(unittest.TestCase):
         with patch("subprocess.run", return_value=ok) as m:
             execute_background(t, "C:\\Temp\\rc-test\\agent.exe", "--sleep 5 --port 8443")
         script = _decoded_windows_launch_script(m.call_args[0][0][-1])
-        self.assertIn("-Execute $exePath", script)
+        self.assertIn("-Execute $ep", script)
         self.assertIn("-Argument", script)
         self.assertIn("--sleep 5 --port 8443", script)
 
@@ -885,7 +885,7 @@ class TestExecuteBackgroundWindowsArguments(unittest.TestCase):
         with patch("subprocess.run", return_value=ok) as m:
             execute_background(t, "C:\\Program Files\\rc\\agent.exe", "--flag")
         script = _decoded_windows_launch_script(m.call_args[0][0][-1])
-        self.assertIn("-Execute $exePath", script)
+        self.assertIn("-Execute $ep", script)
         self.assertIn("-Argument", script)
         self.assertIn("--flag", script)
 

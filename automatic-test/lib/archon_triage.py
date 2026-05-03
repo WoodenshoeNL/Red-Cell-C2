@@ -222,6 +222,56 @@ def _try_windows_network_protection_events(target: Any, run_remote: Any) -> str:
         return f"Network Protection event log probe failed: {e}"
 
 
+def _try_windows_firewall_block_events(target: Any, run_remote: Any) -> str:
+    """Check Windows Security audit log for outbound connection-blocked events (ID 5157).
+
+    Event ID 5157: Windows Filtering Platform blocked an outbound network connection.
+    This fires when a firewall rule drops an outbound TCP connection attempt.  The
+    presence of these events (vs. zero rows in netstat) confirms the agent IS calling
+    connect() but the packet is dropped by the firewall before a SYN_SENT state appears.
+
+    Requires auditing to be enabled; silently empty on most default Windows configs.
+
+    Returns a summary string.  Never raises.
+    """
+    try:
+        script = (
+            "Get-WinEvent -FilterHashTable @{LogName='Security'; Id=5157; "
+            "StartTime=(Get-Date).AddMinutes(-10)} -MaxEvents 10 "
+            "-ErrorAction SilentlyContinue | "
+            "Select-Object TimeCreated, @{N='Msg';E={$_.Message.Split([Environment]::NewLine)[0]}} | "
+            "Format-Table -AutoSize | Out-String"
+        )
+        cmd = f"powershell -NoProfile -Command \"{script}\""
+        out = run_remote(target, cmd, timeout=20)
+        return out.strip() if out.strip() else "(no firewall block events in last 10 min — audit may be disabled)"
+    except Exception as e:  # noqa: BLE001
+        return f"Firewall block event probe failed: {e}"
+
+
+def _try_windows_active_firewall_rules(target: Any, run_remote: Any, c2_addr: str) -> str:
+    """List RC-Harness-* Windows Firewall rules and show if outbound to *c2_addr* is blocked.
+
+    Returns a summary string.  Never raises.
+    """
+    try:
+        addr_q = c2_addr.replace("'", "''")
+        script = (
+            "Get-NetFirewallRule | Where-Object { $_.DisplayName -like 'RC-Harness-*' } | "
+            "Select-Object DisplayName, Enabled, Direction, Action | "
+            "Format-Table -AutoSize | Out-String; "
+            f"$addr = '{addr_q}'; "
+            "Write-Host '--- default outbound policy ---'; "
+            "(Get-NetFirewallProfile | Select-Object Name, DefaultOutboundAction | "
+            "Format-Table -AutoSize | Out-String)"
+        )
+        cmd = f"powershell -NoProfile -Command \"{script}\""
+        out = run_remote(target, cmd, timeout=20)
+        return out.strip() if out.strip() else "(no RC-Harness firewall rules found)"
+    except Exception as e:  # noqa: BLE001
+        return f"Firewall rules probe failed: {e}"
+
+
 def log_archon_checkin_wait_netstat(target: Any, c2_port: int, tag: str = "mid-wait") -> None:
     """Print netstat lines mentioning *c2_port* during agent check-in wait (best-effort).
 
@@ -359,5 +409,27 @@ def format_archon_checkin_timeout_diagnostics(
             lines.append(_try_verify_np_exclusion(target, _run_remote6, probe_host))
         except Exception as e:  # noqa: BLE001
             lines.append(f"MpPreference exclusion verification failed: {e}")
+
+    # Windows Firewall block events (Security log ID 5157): fires when a firewall
+    # rule drops an outbound TCP connect() attempt.  Distinguishes "agent calls
+    # WinHttpSendRequest but firewall drops SYN" from "agent never reaches WinHTTP".
+    try:
+        from lib.deploy import run_remote as _run_remote7
+
+        lines.append("--- Windows Firewall outbound block events (Security ID 5157) ---")
+        lines.append(_try_windows_firewall_block_events(target, _run_remote7))
+    except Exception as e:  # noqa: BLE001
+        lines.append(f"Firewall block event section failed: {e}")
+
+    # Active RC-Harness firewall rules: confirms whether the per-exe and IP+port
+    # allow rules were actually created before the agent launched.
+    if probe_host:
+        try:
+            from lib.deploy import run_remote as _run_remote8
+
+            lines.append("--- Active RC-Harness firewall rules + default outbound policy ---")
+            lines.append(_try_windows_active_firewall_rules(target, _run_remote8, probe_host))
+        except Exception as e:  # noqa: BLE001
+            lines.append(f"Firewall rules section failed: {e}")
 
     return "\n".join(lines) + "\n"

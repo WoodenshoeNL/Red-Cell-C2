@@ -122,7 +122,12 @@ def run(ctx) -> None:
         listener_start,
         listener_stop,
     )
-    from lib.deploy import defender_add_exclusion, run_remote
+    from lib.deploy import (
+        defender_add_exclusion,
+        firewall_allow_outbound_tcp,
+        firewall_remove_outbound_tcp,
+        run_remote,
+    )
     from lib.listeners import http_listener_kwargs
 
     cli = ctx.cli
@@ -140,6 +145,8 @@ def run(ctx) -> None:
         [_ext_raw] if isinstance(_ext_raw, dict) else list(_ext_raw)
     )
 
+    callback_host: str | None = ctx.env.get("server", {}).get("callback_host")
+
     # ── Pre-step: Defender AV exclusion ─────────────────────────────────────
     # Prevent Windows Defender from scanning/quarantining agent payloads in the
     # work directory (H2 hypothesis: AV detects archon.exe and suspends/quarantines
@@ -150,6 +157,20 @@ def run(ctx) -> None:
         print("  [archon][setup] exclusion added (or Defender is disabled — both are fine)")
     except Exception as exc:
         print(f"  [archon][setup] Defender exclusion failed (non-fatal): {exc}")
+
+    # ── Pre-step: outbound TCP allow rule (IP+port) ──────────────────────────
+    # Belt-and-suspenders complement to the per-exe firewall rule added by
+    # deploy_and_checkin.  An IP+port rule ensures traffic is allowed even when
+    # the exe-path rule does not fire (normalisation mismatch, propagation lag).
+    # The rule is cleaned up by cleanup_windows_target (RC-Harness-* sweep) and
+    # explicitly below.
+    if callback_host:
+        try:
+            print(f"  [archon][setup] adding outbound TCP allow rule for {callback_host}:{listener_port}")
+            firewall_allow_outbound_tcp(target, callback_host, listener_port)
+            print("  [archon][setup] outbound TCP allow rule added")
+        except Exception as exc:
+            print(f"  [archon][setup] outbound TCP allow rule failed (non-fatal): {exc}")
 
     # ── Step 1: Create + start HTTP listener ────────────────────────────────
     print(f"  [archon][listener] creating HTTP listener {listener_name!r} on port {listener_port}")
@@ -237,6 +258,12 @@ def run(ctx) -> None:
             listener_delete(cli, listener_name)
         except Exception:
             pass
+
+        if callback_host:
+            try:
+                firewall_remove_outbound_tcp(target, callback_host, listener_port)
+            except Exception:
+                pass
 
         print("  [archon][cleanup] removing work_dir on target")
         try:

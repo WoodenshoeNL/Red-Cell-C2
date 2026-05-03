@@ -671,6 +671,68 @@ def firewall_remove_program(target: TargetConfig, program_path: str) -> None:
     run_remote(target, f"powershell -NoProfile -EncodedCommand {enc}")
 
 
+def firewall_allow_outbound_tcp(target: TargetConfig, remote_addr: str, port: int) -> None:
+    """Add a best-effort outbound Windows Firewall allow rule for *remote_addr*:*port*.
+
+    Belt-and-suspenders complement to :func:`firewall_allow_program`: that rule
+    matches by executable path; this one matches by IP+TCP-port.  Using both
+    ensures the traffic is allowed even when the path-based rule does not fire
+    (e.g. path normalisation mismatch, rule not yet propagated).
+
+    The rule is named ``RC-Harness-<sha256[:12]>`` so the bulk cleanup
+    ``Remove-NetFirewallRule -DisplayName 'RC-Harness-*'`` in
+    :func:`cleanup_windows_target` picks it up without extra bookkeeping.
+
+    Args:
+        target:      Windows SSH target.
+        remote_addr: Destination IP address to allow (C2 callback host).
+        port:        Destination TCP port (listener port).
+    """
+    if target.platform != "windows":
+        raise ValueError("firewall_allow_outbound_tcp is only supported on Windows targets")
+    key = f"outbound-tcp-{remote_addr}-{port}"
+    digest = hashlib.sha256(key.encode()).hexdigest()[:12]
+    name = f"RC-Harness-{digest}"[:96]
+    name_q = _quote_powershell(name)
+    addr_q = _quote_powershell(remote_addr.strip())
+    script = (
+        f"Remove-NetFirewallRule -DisplayName {name_q} -ErrorAction SilentlyContinue; "
+        f"New-NetFirewallRule -DisplayName {name_q} -Direction Outbound -Action Allow "
+        f"-Protocol TCP -RemoteAddress {addr_q} -RemotePort {port} "
+        f"-ErrorAction SilentlyContinue; "
+        "exit 0"
+    )
+    enc = _powershell_encoded_command(script)
+    run_remote(target, f"powershell -NoProfile -EncodedCommand {enc}")
+
+
+def firewall_remove_outbound_tcp(target: TargetConfig, remote_addr: str, port: int) -> None:
+    """Remove the harness outbound TCP allow rule for *remote_addr*:*port*.
+
+    Symmetric counterpart to :func:`firewall_allow_outbound_tcp`.  Uses the same
+    ``RC-Harness-<digest>`` display name; also handled automatically by the bulk
+    sweep in :func:`cleanup_windows_target`.
+
+    Args:
+        target:      Windows SSH target.
+        remote_addr: Destination IP address (must match what was passed to
+                     :func:`firewall_allow_outbound_tcp`).
+        port:        Destination TCP port.
+    """
+    if target.platform != "windows":
+        raise ValueError("firewall_remove_outbound_tcp is only supported on Windows targets")
+    key = f"outbound-tcp-{remote_addr}-{port}"
+    digest = hashlib.sha256(key.encode()).hexdigest()[:12]
+    name = f"RC-Harness-{digest}"[:96]
+    name_q = _quote_powershell(name)
+    script = (
+        f"Remove-NetFirewallRule -DisplayName {name_q} -ErrorAction SilentlyContinue; "
+        "exit 0"
+    )
+    enc = _powershell_encoded_command(script)
+    run_remote(target, f"powershell -NoProfile -EncodedCommand {enc}")
+
+
 def defender_network_protection_exclusion(target: TargetConfig, ip_address: str) -> None:
     """Add a Defender Network Protection IP exclusion for *ip_address* (Windows only).
 

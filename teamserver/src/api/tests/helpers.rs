@@ -253,6 +253,12 @@ pub(super) fn http_listener_json(name: &str, port: u16) -> String {
     )
 }
 
+pub(super) fn http_listener_json_with_doh(name: &str, port: u16) -> String {
+    format!(
+        r#"{{"protocol":"http","config":{{"name":"{name}","hosts":["127.0.0.1"],"host_bind":"127.0.0.1","host_rotation":"round-robin","port_bind":{port},"uris":["/"],"secure":false,"doh_domain":"c2.example.com","doh_provider":"cloudflare"}}}}"#
+    )
+}
+
 pub(super) fn free_tcp_port() -> u16 {
     let sock =
         std::net::TcpListener::bind("127.0.0.1:0").expect("failed to bind ephemeral TCP socket");

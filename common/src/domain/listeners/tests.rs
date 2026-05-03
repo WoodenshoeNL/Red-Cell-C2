@@ -405,6 +405,19 @@ fn parse_kill_date_to_epoch_rejects_wrong_datetime_format() {
     assert!(parse_kill_date_to_epoch("2026-03-09T20:00:00").is_err());
 }
 
+#[test]
+fn listener_config_http_json_preserves_doh_fields() -> Result<(), Box<dyn std::error::Error>> {
+    // Matches red-cell-cli `listener create --config-json` envelope + autotest scenario 20 shape.
+    let j = r#"{"protocol":"http","config":{"name":"t","host_bind":"0.0.0.0","port_bind":19182,"host_rotation":"round-robin","secure":false,"hosts":["192.168.1.1"],"uris":["/"],"doh_domain":"c2.test.local","doh_provider":"cloudflare"}}"#;
+    let c: ListenerConfig = serde_json::from_str(j)?;
+    let ListenerConfig::Http(h) = c else {
+        panic!("expected http listener");
+    };
+    assert_eq!(h.doh_domain.as_deref(), Some("c2.test.local"));
+    assert_eq!(h.doh_provider.as_deref(), Some("cloudflare"));
+    Ok(())
+}
+
 // ── validate_kill_date tests ────────────────────────────────────────────
 
 #[test]

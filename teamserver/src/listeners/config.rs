@@ -32,6 +32,10 @@ pub(super) const EXTRA_WORKING_HOURS: &str = "WorkingHours";
 pub(super) const EXTRA_JA3_RANDOMIZE: &str = "Ja3Randomize";
 pub(super) const EXTRA_LEGACY_MODE: &str = "LegacyMode";
 pub(super) const EXTRA_SUPPRESS_OPSEC_WARNINGS: &str = "SuppressOpsecWarnings";
+/// Havoc profile / operator extra field for ARC-08 DoH (`doh_domain` is also accepted).
+pub(super) const EXTRA_DOH_DOMAIN: &str = "DoHDomain";
+/// Havoc profile / operator extra field for DoH provider (`doh_provider` is also accepted).
+pub(super) const EXTRA_DOH_PROVIDER: &str = "DoHProvider";
 
 /// Validate and normalise an optional KillDate string from operator input,
 /// converting it from the raw extra-field value into a unix-timestamp string.
@@ -76,8 +80,10 @@ pub fn listener_config_from_operator(
             response: http_response_from_operator(info),
             proxy: proxy_from_operator(info)?,
             ja3_randomize: parse_optional_extra_bool(info, EXTRA_JA3_RANDOMIZE)?,
-            doh_domain: None,
-            doh_provider: None,
+            doh_domain: optional_extra_string(info, EXTRA_DOH_DOMAIN)
+                .or_else(|| optional_extra_string(info, "doh_domain")),
+            doh_provider: optional_extra_string(info, EXTRA_DOH_PROVIDER)
+                .or_else(|| optional_extra_string(info, "doh_provider")),
             legacy_mode: parse_extra_bool(info, EXTRA_LEGACY_MODE)?,
             suppress_opsec_warnings: parse_extra_bool(info, EXTRA_SUPPRESS_OPSEC_WARNINGS)?,
         })),

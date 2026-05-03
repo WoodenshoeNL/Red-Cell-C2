@@ -75,8 +75,8 @@ fn http_listener_operator_round_trip_preserves_advanced_settings()
             password: Some(Zeroizing::new("pass".to_owned())),
         }),
         ja3_randomize: None,
-        doh_domain: None,
-        doh_provider: None,
+        doh_domain: Some("c2.example.com".to_owned()),
+        doh_provider: Some("cloudflare".to_owned()),
         legacy_mode: true,
         suppress_opsec_warnings: true,
     });
@@ -91,6 +91,64 @@ fn http_listener_operator_round_trip_preserves_advanced_settings()
     let round_tripped = listener_config_from_operator(&info)?;
 
     assert_eq!(round_tripped, original);
+    Ok(())
+}
+
+#[test]
+fn listener_config_from_operator_http_reads_doh_extra_havoc_keys()
+-> Result<(), ListenerManagerError> {
+    let mut info = ListenerInfo {
+        name: Some("t".to_owned()),
+        protocol: Some("Http".to_owned()),
+        hosts: Some("127.0.0.1".to_owned()),
+        host_bind: Some("0.0.0.0".to_owned()),
+        host_rotation: Some("round-robin".to_owned()),
+        port_bind: Some("8080".to_owned()),
+        uris: Some("/".to_owned()),
+        secure: Some("false".to_owned()),
+        ..ListenerInfo::default()
+    };
+    info.extra.insert("DoHDomain".to_owned(), serde_json::Value::String("c2.doh.test".to_owned()));
+    info.extra.insert("DoHProvider".to_owned(), serde_json::Value::String("google".to_owned()));
+
+    let config = listener_config_from_operator(&info)?;
+    match config {
+        ListenerConfig::Http(h) => {
+            assert_eq!(h.doh_domain.as_deref(), Some("c2.doh.test"));
+            assert_eq!(h.doh_provider.as_deref(), Some("google"));
+        }
+        other => panic!("unexpected config: {other:?}"),
+    }
+    Ok(())
+}
+
+#[test]
+fn listener_config_from_operator_http_reads_doh_extra_snake_case()
+-> Result<(), ListenerManagerError> {
+    let mut info = ListenerInfo {
+        name: Some("t".to_owned()),
+        protocol: Some("Http".to_owned()),
+        hosts: Some("127.0.0.1".to_owned()),
+        host_bind: Some("0.0.0.0".to_owned()),
+        host_rotation: Some("round-robin".to_owned()),
+        port_bind: Some("8080".to_owned()),
+        uris: Some("/".to_owned()),
+        secure: Some("false".to_owned()),
+        ..ListenerInfo::default()
+    };
+    info.extra
+        .insert("doh_domain".to_owned(), serde_json::Value::String("snake.example".to_owned()));
+    info.extra
+        .insert("doh_provider".to_owned(), serde_json::Value::String("cloudflare".to_owned()));
+
+    let config = listener_config_from_operator(&info)?;
+    match config {
+        ListenerConfig::Http(h) => {
+            assert_eq!(h.doh_domain.as_deref(), Some("snake.example"));
+            assert_eq!(h.doh_provider.as_deref(), Some("cloudflare"));
+        }
+        other => panic!("unexpected config: {other:?}"),
+    }
     Ok(())
 }
 

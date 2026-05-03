@@ -11,9 +11,10 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use super::config::{
-    EXTRA_BEHIND_REDIRECTOR, EXTRA_CERT_PATH, EXTRA_JA3_RANDOMIZE, EXTRA_KEY_PATH, EXTRA_KILL_DATE,
-    EXTRA_LEGACY_MODE, EXTRA_METHOD, EXTRA_RESPONSE_BODY, EXTRA_SUPPRESS_OPSEC_WARNINGS,
-    EXTRA_TRUSTED_PROXY_PEERS, EXTRA_WORKING_HOURS, insert_optional_extra_string,
+    EXTRA_BEHIND_REDIRECTOR, EXTRA_CERT_PATH, EXTRA_DOH_DOMAIN, EXTRA_DOH_PROVIDER,
+    EXTRA_JA3_RANDOMIZE, EXTRA_KEY_PATH, EXTRA_KILL_DATE, EXTRA_LEGACY_MODE, EXTRA_METHOD,
+    EXTRA_RESPONSE_BODY, EXTRA_SUPPRESS_OPSEC_WARNINGS, EXTRA_TRUSTED_PROXY_PEERS,
+    EXTRA_WORKING_HOURS, insert_optional_extra_string,
 };
 use super::events::{operator_protocol_name, operator_status};
 use crate::{PersistedListener, PersistedListenerState};
@@ -151,6 +152,16 @@ impl ListenerSummary {
                     &mut info.extra,
                     EXTRA_WORKING_HOURS,
                     config.working_hours.as_deref(),
+                );
+                insert_optional_extra_string(
+                    &mut info.extra,
+                    EXTRA_DOH_DOMAIN,
+                    config.doh_domain.as_deref(),
+                );
+                insert_optional_extra_string(
+                    &mut info.extra,
+                    EXTRA_DOH_PROVIDER,
+                    config.doh_provider.as_deref(),
                 );
                 info.extra.insert(
                     EXTRA_LEGACY_MODE.to_owned(),

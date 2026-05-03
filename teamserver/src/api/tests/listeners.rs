@@ -9,6 +9,7 @@ use crate::{
     AgentRegistry, AuthService, Database, EventBus, ListenerManager, OperatorConnectionManager,
     SocketRelayManager,
 };
+use red_cell_common::ListenerConfig;
 use red_cell_common::config::{OperatorRole, Profile};
 
 use super::helpers::*;
@@ -32,6 +33,45 @@ async fn create_listener_returns_created_summary_body() {
     assert_eq!(body["config"]["protocol"], "smb");
     assert_eq!(body["config"]["config"]["name"], "pivot");
     assert_eq!(body["config"]["config"]["pipe_name"], "pipe-a");
+}
+
+#[tokio::test]
+async fn create_http_listener_preserves_doh_fields_on_get() {
+    let port = free_tcp_port();
+    let app = test_router(Some((60, "doh-admin", "secret-doh", OperatorRole::Admin))).await;
+
+    let response = app
+        .clone()
+        .oneshot(create_listener_request(
+            &http_listener_json_with_doh("doh-http", port),
+            "secret-doh",
+        ))
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/listeners/doh-http")
+                .header(API_KEY_HEADER, "secret-doh")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    let config: ListenerConfig =
+        serde_json::from_value(body["config"].clone()).expect("listener config");
+    match config {
+        ListenerConfig::Http(h) => {
+            assert_eq!(h.doh_domain.as_deref(), Some("c2.example.com"));
+            assert_eq!(h.doh_provider.as_deref(), Some("cloudflare"));
+        }
+        other => panic!("expected HTTP listener config, got {other:?}"),
+    }
 }
 
 #[tokio::test]

@@ -110,6 +110,10 @@ impl FallbackTransport {
             Ok(resp) => Ok(resp),
             Err(http_err) => {
                 let Some(domain) = self.doh_domain.as_ref() else {
+                    warn!(
+                        http_error = %http_err,
+                        "HTTP transport failed; DNS-over-HTTPS fallback is disabled (no doh_domain in agent config)"
+                    );
                     return Err(http_err);
                 };
                 let doh = {

@@ -282,6 +282,7 @@ def _maybe_specter_doh_agent_pass(
     )
     from lib.deploy import DeployError, preflight_dns, preflight_ssh
     from lib.deploy_agent import deploy_and_checkin
+    from lib.listeners import normalize_callback_host_for_listener
 
     try:
         preflight_ssh(ctx.windows)
@@ -297,12 +298,19 @@ def _maybe_specter_doh_agent_pass(
     http_name = f"test-doh-http-{uid}"
     win_port = int(listeners_cfg.get("windows_port", 19082))
 
-    # callback_host is the teamserver IP as seen from the Windows VM (e.g.
-    # "192.168.213.157").  teamserver_ip comes from rest_url which uses the
-    # loopback address "127.0.0.1" reachable only from the Linux test host.
-    # Using teamserver_ip here bakes "http://127.0.0.1:…/" into SPECTER_CALLBACK_URL,
-    # which the Windows agent cannot reach, causing immediate ECONNREFUSED → exit 1.
-    callback_host = ctx.env.get("server", {}).get("callback_host") or teamserver_ip
+    # Baked SPECTER_CALLBACK_URL must use [server].callback_host — never rest_url's
+    # loopback host, which is only reachable from the Linux test driver.
+    explicit_cb = ctx.env.get("server", {}).get("callback_host")
+    if not explicit_cb or not str(explicit_cb).strip():
+        raise ScenarioSkipped(
+            "[specter] server.callback_host must be set in env.toml for the Windows DoH agent pass"
+        )
+    callback_host = normalize_callback_host_for_listener(str(explicit_cb))
+    if callback_host in ("127.0.0.1", "127.0.0.1.", "localhost", "::1"):
+        raise ScenarioSkipped(
+            "[specter] server.callback_host must be a routable LAN IP for the Windows target "
+            f"(got {callback_host!r})"
+        )
 
     inner = {
         "name": http_name,
@@ -332,6 +340,7 @@ def _maybe_specter_doh_agent_pass(
             fmt="exe",
             listener_name=http_name,
             label="specter-doh",
+            windows_prelaunch_probe=True,
         )
         agent_id = agent["id"]
 

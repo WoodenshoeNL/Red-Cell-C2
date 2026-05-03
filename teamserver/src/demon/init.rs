@@ -88,6 +88,11 @@ pub(crate) fn parse_init_agent(
     let mut decrypted_offset = 0_usize;
     let parsed_agent_id = read_u32_be(&decrypted, &mut decrypted_offset, "init agent id")?;
     if parsed_agent_id != agent_id {
+        warn!(
+            header_agent_id = format_args!("0x{agent_id:08X}"),
+            metadata_agent_id = format_args!("0x{parsed_agent_id:08X}"),
+            "DEMON_INIT AES metadata agent id does not match transport header (wrong secret, corrupted payload, or mis-parsed header layout)"
+        );
         return Err(DemonParserError::InvalidInit("decrypted agent id does not match header"));
     }
 

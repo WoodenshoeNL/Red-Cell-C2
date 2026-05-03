@@ -493,6 +493,7 @@ BOOL RtWinHttp(
         Instance->Win32.WinHttpQueryHeaders                   = LdrFunctionAddr( Instance->Modules.WinHttp, H_FUNC_WINHTTPQUERYHEADERS );
         Instance->Win32.WinHttpGetIEProxyConfigForCurrentUser = LdrFunctionAddr( Instance->Modules.WinHttp, H_FUNC_WINHTTPGETIEPROXYCONFIGFORCURRENTUSER );
         Instance->Win32.WinHttpGetProxyForUrl                 = LdrFunctionAddr( Instance->Modules.WinHttp, H_FUNC_WINHTTPGETPROXYFORURL );
+        Instance->Win32.WinHttpSetTimeouts                    = LdrFunctionAddr( Instance->Modules.WinHttp, H_FUNC_WINHTTPSETTIMEOUTS );
 
         PUTS( "Loaded WinHttp functions" )
     } else {

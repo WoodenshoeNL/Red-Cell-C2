@@ -350,6 +350,7 @@ typedef struct
         WIN_FUNC( WinHttpQueryHeaders )
         WIN_FUNC( WinHttpGetIEProxyConfigForCurrentUser )
         WIN_FUNC( WinHttpGetProxyForUrl )
+        WIN_FUNC( WinHttpSetTimeouts )
 
         // Mscoree
         HRESULT ( WINAPI *CLRCreateInstance ) ( REFCLSID clsid, REFIID riid, LPVOID* ppInterface );

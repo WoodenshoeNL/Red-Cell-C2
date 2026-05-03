@@ -168,6 +168,7 @@
 #define H_FUNC_WINHTTPCLOSEHANDLE                    0xa7355f15
 #define H_FUNC_WINHTTPGETIEPROXYCONFIGFORCURRENTUSER 0x28197a2
 #define H_FUNC_WINHTTPGETPROXYFORURL                 0xa2cf3c6f
+#define H_FUNC_WINHTTPSETTIMEOUTS                    0x5342bb19
 #define H_FUNC_VIRTUALPROTECTEX                      0x5b6b908a
 #define H_FUNC_LOCALALLOC                            0x72073b5b
 #define H_FUNC_LOCALREALLOC                          0x1c44e892

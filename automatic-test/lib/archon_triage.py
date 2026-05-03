@@ -272,7 +272,11 @@ def _try_windows_active_firewall_rules(target: Any, run_remote: Any, c2_addr: st
         return f"Firewall rules probe failed: {e}"
 
 
-def _try_windows_agent_process_diag(target: Any, run_remote: Any) -> str:
+def _try_windows_agent_process_diag(
+    target: Any,
+    run_remote: Any,
+    preferred_work_dir: str | None = None,
+) -> str:
     """Diagnose agent-*.exe processes: session ID, WinHTTP loaded, per-PID TCP connections.
 
     Runs three lightweight PowerShell queries against each live agent-*.exe process:
@@ -282,21 +286,62 @@ def _try_windows_agent_process_diag(target: Any, run_remote: Any) -> str:
     2. Whether winhttp.dll appears in the process module list.
     3. All TCP connections owned by the process PID (any port, not just the C2 port).
 
+    When ``preferred_work_dir`` is set (e.g. harness ``target.work_dir``), processes are
+    selected via WMI ``ExecutablePath`` under that folder first. ``Get-Process -Name``
+    wildcards have proven misleading when multiple orphaned ``agent-*.exe`` copies exist —
+    labs then showed the PID from ``schtasks`` (under ``work_dir``) while triage sampled
+    a different ``agent-*`` PID with no TCP rows (red-cell-c2-vudj9).
+
     Returns a summary string.  Never raises.
     """
     try:
+        if preferred_work_dir:
+            wd_esc = str(preferred_work_dir).replace("'", "''")
+            wd_lit = f"$wdPref = '{wd_esc}'; "
+        else:
+            wd_lit = "$wdPref = $null; "
         script = (
-            "$procs = Get-Process -Name 'agent-*' -ErrorAction SilentlyContinue; "
-            "if (-not $procs) { Write-Output '(no agent-*.exe processes found)'; exit 0 } "
-            "foreach ($p in $procs) { "
-            "  $pid = $p.Id; "
-            "  $sess = $p.SessionId; "
-            "  $wh = try { ($p.Modules | Where-Object { $_.FileName -like '*winhttp*' }) -ne $null } catch { '(err)' }; "
-            "  $tcp = Get-NetTCPConnection -OwningProcess $pid -ErrorAction SilentlyContinue | "
-            "         Select-Object -ExpandProperty RemoteAddress -First 5; "
-            "  $tcpStr = if ($tcp) { $tcp -join ',' } else { '(none)' }; "
-            "  Write-Output ('PID=' + $pid + ' SessionId=' + $sess + ' WinHTTP=' + $wh + ' TCP-remote=' + $tcpStr); "
-            "} "
+            wd_lit
+            + (
+                "$picks = @(); "
+                "if ($null -ne $wdPref -and $wdPref.Length -gt 0) { "
+                "  $picks = @( Get-CimInstance Win32_Process -ErrorAction SilentlyContinue "
+                "| Where-Object { $_.Name -like 'agent-*.exe' -and $_.ExecutablePath "
+                "-and ($_.ExecutablePath.StartsWith([string]$wdPref, "
+                "[StringComparison]::OrdinalIgnoreCase)) } ); "
+                "} "
+                "if (-not $picks -or $picks.Count -eq 0) { "
+                "  $picks = @( Get-CimInstance Win32_Process -ErrorAction SilentlyContinue "
+                "| Where-Object { $_.Name -like 'agent-*.exe' } ); "
+                "} "
+                "if (-not $picks -or $picks.Count -eq 0) { "
+                "Write-Output '(no agent-*.exe processes found — WMI fallback empty)'; exit 0 } "
+                "$seen = @{}; "
+                "foreach ($row in $picks) { "
+                "  $id = [int]$row.ProcessId; "
+                "  if ($seen[$id]) { continue } "
+                "  $seen[$id] = $true; "
+                "  $epath = ''; "
+                "  if ($null -eq $row.ExecutablePath) { $epath = '?' } else { $epath = $row.ExecutablePath }; "
+                "  try { "
+                "    $p = Get-Process -Id $id -ErrorAction Stop; "
+                "  } catch { "
+                "    Write-Output ('PID=' + $id + ' Path=' + $epath "
+                "+ ' SessionId=? WinHTTP=? TCP-remote=? (Get-Process failed)'); "
+                "    continue; "
+                "  } "
+                "  $procId = $id; "
+                "  $sess = $p.SessionId; "
+                "  $wh = try { ($p.Modules | Where-Object "
+                "{ $_.FileName -like '*winhttp*' }) -ne $null } catch { '(err)' }; "
+                "  $tcp = Get-NetTCPConnection -OwningProcess $procId "
+                "-ErrorAction SilentlyContinue | "
+                "         Select-Object -ExpandProperty RemoteAddress -First 5; "
+                "  $tcpStr = if ($tcp) { $tcp -join ',' } else { '(none)' }; "
+                "  Write-Output ('PID=' + $procId + ' Path=' + $epath "
+                "+ ' SessionId=' + $sess + ' WinHTTP=' + $wh + ' TCP-remote=' + $tcpStr); "
+                "} "
+            )
         )
         cmd = f"powershell -NoProfile -Command \"{script}\""
         out = run_remote(target, cmd, timeout=20)
@@ -309,19 +354,45 @@ def _try_read_agent_http_log(target: Any, run_remote: Any) -> str:
     """Read the agent HTTP debug log written by ARCHON_HTTP_LOG builds.
 
     When the agent is compiled with ``-DARCHON_HTTP_LOG``, it appends one line per
-    WinHTTP API call to ``C:\\Windows\\Temp\\archon-http.txt``.  The file may not
-    exist if the define is not set or the agent exited before reaching HttpSend.
+    WinHTTP API call.  Builds try (in order) ``<work_dir>\\archon-http.txt``
+
+    (agent writes beside the cwd set by scheduled-task WorkingDirectory),
+
+    ``C:\\Temp\\archon-http.txt``, and ``C:\\Windows\\Temp\\archon-http.txt``.
 
     Returns the file contents (last 50 lines) or an informative message.  Never raises.
     """
     try:
+        from pathlib import PureWindowsPath
+
+        choice_literals: list[str] = []
+        wd = getattr(target, "work_dir", None)
+        if wd:
+            try:
+                p = PureWindowsPath(str(wd))
+                if str(p):
+                    fq = str((p / "archon-http.txt").as_posix())
+                    fq_lit = fq.replace("'", "''")
+                    choice_literals.append(f"'{fq_lit}'")
+            except ValueError:
+                pass
+        choice_literals.append("'C:/Temp/archon-http.txt'")
+        choice_literals.append("'C:/Windows/Temp/archon-http.txt'")
+        arr_inner = ",".join(choice_literals)
         script = (
-            "$f = 'C:\\Windows\\Temp\\archon-http.txt'; "
-            "if (Test-Path $f) { "
-            "  Get-Content $f -Tail 50 | Out-String "
-            "} else { "
-            "  Write-Output '(archon-http.txt not found — ARCHON_HTTP_LOG not enabled or agent never reached HttpSend)' "
+            f"$choices = @({arr_inner}); "
+            "$found=$false; $buf=''; "
+            "foreach ($c in $choices) { "
+            "  if (-not (Test-Path -LiteralPath $c)) { continue }; "
+            "  $found=$true; "
+            "  $i = Get-Item -LiteralPath $c; "
+            "  $buf += ('--- {0} len={1} mtime={2}' -f $c, "
+            "$i.Length, $i.LastWriteTime.ToString('o')) + [Environment]::NewLine; "
+            "  $buf += "
+            "((Get-Content -LiteralPath $c -Tail 50 | Out-String).Trim()) + [Environment]::NewLine; "
             "} "
+            "if (-not $found) { '(no candidate archon-http.txt exists)' } "
+            "else { $buf.TrimEnd() } "
         )
         cmd = f"powershell -NoProfile -Command \"{script}\""
         out = run_remote(target, cmd, timeout=15)
@@ -497,7 +568,13 @@ def format_archon_checkin_timeout_diagnostics(
         from lib.deploy import run_remote as _run_remote9
 
         lines.append("--- agent process: SessionId / WinHTTP loaded / TCP connections ---")
-        lines.append(_try_windows_agent_process_diag(target, _run_remote9))
+        lines.append(
+            _try_windows_agent_process_diag(
+                target,
+                _run_remote9,
+                getattr(target, "work_dir", None),
+            )
+        )
     except Exception as e:  # noqa: BLE001
         lines.append(f"Agent process diag section failed: {e}")
 

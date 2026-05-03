@@ -99,12 +99,13 @@ def _wait_for_remote_sha_windows(target, remote_path: str, timeout: int = 30) ->
     from lib.deploy import run_remote
 
     def _probe() -> str:
+        ps_path = remote_path.replace("'", "''")
         certutil_out = run_remote(
             target,
             (
                 f'powershell -NoProfile -Command '
-                f'"if (Test-Path -LiteralPath \'{remote_path}\') '
-                f'{{ certutil -hashfile \'{remote_path}\''"'"' SHA256 }} else {{ exit 1 }}"'
+                f'"if (Test-Path -LiteralPath \'{ps_path}\') '
+                f'{{ certutil -hashfile \'{ps_path}\' SHA256 }} else {{ exit 1 }}"'
             ),
             timeout=15,
         )

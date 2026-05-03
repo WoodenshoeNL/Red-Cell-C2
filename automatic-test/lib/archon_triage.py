@@ -272,6 +272,64 @@ def _try_windows_active_firewall_rules(target: Any, run_remote: Any, c2_addr: st
         return f"Firewall rules probe failed: {e}"
 
 
+def _try_windows_agent_process_diag(target: Any, run_remote: Any) -> str:
+    """Diagnose agent-*.exe processes: session ID, WinHTTP loaded, per-PID TCP connections.
+
+    Runs three lightweight PowerShell queries against each live agent-*.exe process:
+    1. SessionId — non-zero means the process is in an interactive/RDP session; zero
+       means session 0 (service context, no interactive token, WinHTTP may lack network
+       credentials even with an ``Interactive`` Task Scheduler logon type).
+    2. Whether winhttp.dll appears in the process module list.
+    3. All TCP connections owned by the process PID (any port, not just the C2 port).
+
+    Returns a summary string.  Never raises.
+    """
+    try:
+        script = (
+            "$procs = Get-Process -Name 'agent-*' -ErrorAction SilentlyContinue; "
+            "if (-not $procs) { Write-Output '(no agent-*.exe processes found)'; exit 0 } "
+            "foreach ($p in $procs) { "
+            "  $pid = $p.Id; "
+            "  $sess = $p.SessionId; "
+            "  $wh = try { ($p.Modules | Where-Object { $_.FileName -like '*winhttp*' }) -ne $null } catch { '(err)' }; "
+            "  $tcp = Get-NetTCPConnection -OwningProcess $pid -ErrorAction SilentlyContinue | "
+            "         Select-Object -ExpandProperty RemoteAddress -First 5; "
+            "  $tcpStr = if ($tcp) { $tcp -join ',' } else { '(none)' }; "
+            "  Write-Output ('PID=' + $pid + ' SessionId=' + $sess + ' WinHTTP=' + $wh + ' TCP-remote=' + $tcpStr); "
+            "} "
+        )
+        cmd = f"powershell -NoProfile -Command \"{script}\""
+        out = run_remote(target, cmd, timeout=20)
+        return out.strip() if out.strip() else "(agent process diag produced no output)"
+    except Exception as e:  # noqa: BLE001
+        return f"agent process diag probe failed: {e}"
+
+
+def _try_read_agent_http_log(target: Any, run_remote: Any) -> str:
+    """Read the agent HTTP debug log written by ARCHON_HTTP_LOG builds.
+
+    When the agent is compiled with ``-DARCHON_HTTP_LOG``, it appends one line per
+    WinHTTP API call to ``C:\\Windows\\Temp\\archon-http.txt``.  The file may not
+    exist if the define is not set or the agent exited before reaching HttpSend.
+
+    Returns the file contents (last 50 lines) or an informative message.  Never raises.
+    """
+    try:
+        script = (
+            "$f = 'C:\\Windows\\Temp\\archon-http.txt'; "
+            "if (Test-Path $f) { "
+            "  Get-Content $f -Tail 50 | Out-String "
+            "} else { "
+            "  Write-Output '(archon-http.txt not found — ARCHON_HTTP_LOG not enabled or agent never reached HttpSend)' "
+            "} "
+        )
+        cmd = f"powershell -NoProfile -Command \"{script}\""
+        out = run_remote(target, cmd, timeout=15)
+        return out.strip() if out.strip() else "(archon-http.txt empty)"
+    except Exception as e:  # noqa: BLE001
+        return f"agent HTTP log read failed: {e}"
+
+
 def log_archon_checkin_wait_netstat(target: Any, c2_port: int, tag: str = "mid-wait") -> None:
     """Print netstat lines mentioning *c2_port* during agent check-in wait (best-effort).
 
@@ -431,5 +489,26 @@ def format_archon_checkin_timeout_diagnostics(
             lines.append(_try_windows_active_firewall_rules(target, _run_remote8, probe_host))
         except Exception as e:  # noqa: BLE001
             lines.append(f"Firewall rules section failed: {e}")
+
+    # Agent process diagnostics: session ID (0=session-0/no-network-creds, >0=interactive),
+    # winhttp.dll loaded flag, and all TCP connections by the agent PID.
+    # SessionId=0 is the smoking gun for "task runs but has no interactive network token".
+    try:
+        from lib.deploy import run_remote as _run_remote9
+
+        lines.append("--- agent process: SessionId / WinHTTP loaded / TCP connections ---")
+        lines.append(_try_windows_agent_process_diag(target, _run_remote9))
+    except Exception as e:  # noqa: BLE001
+        lines.append(f"Agent process diag section failed: {e}")
+
+    # Agent HTTP debug log (populated when built with -DARCHON_HTTP_LOG).
+    # Shows exactly which WinHTTP call fails and the Win32 error code.
+    try:
+        from lib.deploy import run_remote as _run_remote10
+
+        lines.append("--- agent HTTP debug log (ARCHON_HTTP_LOG) ---")
+        lines.append(_try_read_agent_http_log(target, _run_remote10))
+    except Exception as e:  # noqa: BLE001
+        lines.append(f"Agent HTTP log section failed: {e}")
 
     return "\n".join(lines) + "\n"

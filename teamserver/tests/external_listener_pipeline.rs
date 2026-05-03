@@ -489,7 +489,11 @@ async fn external_listener_no_task_poll_returns_empty_body()
     let body = get_job_resp.bytes().await?;
 
     assert_eq!(status, reqwest::StatusCode::OK, "empty queue poll must return 200 OK");
-    assert!(body.is_empty(), "empty queue poll must return empty body, got {} bytes", body.len());
+    // Server returns DEMON_COMMAND_NO_JOB so the Demon agent's CommandDispatcher
+    // loop keeps running and calls JobCheckList() to drain piped-process output.
+    let msg = DemonMessage::from_bytes(&body)?;
+    assert_eq!(msg.packages.len(), 1, "empty queue must return a single NO_JOB package");
+    assert_eq!(msg.packages[0].command_id, u32::from(DemonCommand::CommandNoJob));
 
     server.listeners.stop("ext-empty-poll").await?;
     Ok(())

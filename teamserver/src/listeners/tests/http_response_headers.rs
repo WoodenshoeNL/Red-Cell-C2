@@ -2,10 +2,10 @@ use super::*;
 use axum::http::StatusCode;
 use red_cell_common::HttpListenerResponseConfig;
 use red_cell_common::crypto::decrypt_agent_data_at_offset;
-use red_cell_common::demon::DemonCommand;
+use red_cell_common::demon::{DemonCommand, DemonMessage};
 
 #[tokio::test]
-async fn http_listener_returns_empty_body_when_agent_has_no_jobs()
+async fn http_listener_returns_no_job_when_agent_has_no_queued_tasks()
 -> Result<(), Box<dyn std::error::Error>> {
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
@@ -37,7 +37,14 @@ async fn http_listener_returns_empty_body_when_agent_has_no_jobs()
         .await?;
 
     assert_eq!(response.status(), StatusCode::OK);
-    assert!(response.bytes().await?.is_empty());
+    let bytes = response.bytes().await?;
+    // Server must always return DEMON_COMMAND_NO_JOB (not empty) so the Demon
+    // agent's CommandDispatcher loop keeps running and reaches JobCheckList().
+    let msg = DemonMessage::from_bytes(&bytes)?;
+    assert_eq!(msg.packages.len(), 1);
+    assert_eq!(msg.packages[0].command_id, u32::from(DemonCommand::CommandNoJob));
+    assert_eq!(msg.packages[0].request_id, 7);
+    assert!(msg.packages[0].payload.is_empty());
 
     manager.stop("edge-http-empty-jobs").await?;
     Ok(())
@@ -109,7 +116,11 @@ async fn http_listener_preserves_headers_but_not_decoy_body_for_empty_successful
         response.headers().get("server").and_then(|value| value.to_str().ok()),
         Some("ExampleFront")
     );
-    assert!(response.bytes().await?.is_empty());
+    // The response body is the DEMON_COMMAND_NO_JOB package, not the decoy body.
+    let bytes = response.bytes().await?;
+    let msg = DemonMessage::from_bytes(&bytes)?;
+    assert_eq!(msg.packages.len(), 1);
+    assert_eq!(msg.packages[0].command_id, u32::from(DemonCommand::CommandNoJob));
 
     manager.stop("edge-http-decoy-success").await?;
     Ok(())

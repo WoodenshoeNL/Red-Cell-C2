@@ -213,8 +213,12 @@ async fn monotonic_ctr_init_and_sequential_callbacks() -> Result<(), Box<dyn std
     let job_bytes = get_job_response.bytes().await?;
 
     // The job queue response uses the DemonMessage wire format (not AES-CTR encrypted).
+    // When no tasks are queued the server returns a single DEMON_COMMAND_NO_JOB package
+    // so the Demon agent's CommandDispatcher loop keeps running to drain JobCheckList.
     let message = DemonMessage::from_bytes(job_bytes.as_ref())?;
-    assert_eq!(message.packages.len(), 0, "job queue must be empty (no tasks queued)");
+    assert_eq!(message.packages.len(), 1, "empty queue must return a single NO_JOB package");
+    assert_eq!(message.packages[0].command_id, u32::from(DemonCommand::CommandNoJob));
+    assert!(message.packages[0].payload.is_empty());
 
     // After the GetJob callback: batched format encrypts 0 bytes → 0 blocks advanced.
     let expected_offset_after_cb1 = offset_cb1 + ctr_blocks_for_len(0); // 1 + 0 = 1
@@ -376,7 +380,8 @@ async fn legacy_ctr_init_callbacks_all_at_offset_zero() -> Result<(), Box<dyn st
         .error_for_status()?;
     let job_bytes = cb1_response.bytes().await?;
     let message = DemonMessage::from_bytes(job_bytes.as_ref())?;
-    assert_eq!(message.packages.len(), 0, "job queue must be empty");
+    assert_eq!(message.packages.len(), 1, "empty queue must return a single NO_JOB package");
+    assert_eq!(message.packages[0].command_id, u32::from(DemonCommand::CommandNoJob));
 
     // Legacy CTR: offset stays at 0 after every callback.
     assert_eq!(

@@ -1,6 +1,7 @@
-use red_cell_common::demon::{DemonMessage, DemonPackage};
+use red_cell_common::demon::{DemonCommand, DemonMessage, DemonPackage};
 
 use super::{AgentRegistry, CommandDispatchError, CommandDispatcher, DemonCallbackPackage};
+use crate::TeamserverError;
 
 impl CommandDispatcher {
     /// Dispatch a single parsed callback package.
@@ -68,10 +69,17 @@ impl CommandDispatcher {
 pub(in crate::dispatch) async fn handle_get_job(
     registry: &AgentRegistry,
     agent_id: u32,
+    request_id: u32,
 ) -> Result<Option<Vec<u8>>, CommandDispatchError> {
     let jobs = registry.dequeue_jobs(agent_id).await?;
     if jobs.is_empty() {
-        return Ok(None);
+        // Send DEMON_COMMAND_NO_JOB so the Demon agent's CommandDispatcher loop
+        // keeps running and calls JobCheckList() to drain piped-process output.
+        // An empty HTTP body causes the Demon to break out of CommandDispatcher
+        // (treating it as a transport failure) before JobCheckList is reached,
+        // leaving piped output queued forever and causing task timeouts.
+        let no_job = DemonPackage::new(DemonCommand::CommandNoJob, request_id, Vec::new());
+        return Ok(Some(no_job.to_bytes().map_err(TeamserverError::from)?));
     }
 
     // ECDH agents have no AES session key; the outer AES-256-GCM seal in

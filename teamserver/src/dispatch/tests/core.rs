@@ -312,7 +312,12 @@ async fn with_builtin_handlers_and_downloads_dispatches_known_builtin_command()
 
     let result =
         dispatcher.dispatch(agent_id, u32::from(DemonCommand::CommandGetJob), 1, &[]).await?;
-    assert!(result.is_none(), "empty job queue should return None");
+    let no_job_bytes = result.expect("empty queue must return a DEMON_COMMAND_NO_JOB response");
+    let no_job_msg = DemonMessage::from_bytes(&no_job_bytes)?;
+    assert_eq!(no_job_msg.packages.len(), 1);
+    assert_eq!(no_job_msg.packages[0].command_id, u32::from(DemonCommand::CommandNoJob));
+    assert_eq!(no_job_msg.packages[0].request_id, 1);
+    assert!(no_job_msg.packages[0].payload.is_empty());
 
     registry
         .enqueue_job(

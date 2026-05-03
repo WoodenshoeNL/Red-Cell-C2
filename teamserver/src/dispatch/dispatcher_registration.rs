@@ -75,12 +75,16 @@ impl CommandDispatcher {
     ) {
         if include_get_job {
             let get_job_registry = registry.clone();
-            self.register_handler(u32::from(DemonCommand::CommandGetJob), move |agent_id, _, _| {
-                let registry = get_job_registry.clone();
-                Box::pin(async move {
-                    super::dispatcher_runtime::handle_get_job(&registry, agent_id).await
-                })
-            });
+            self.register_handler(
+                u32::from(DemonCommand::CommandGetJob),
+                move |agent_id, request_id, _| {
+                    let registry = get_job_registry.clone();
+                    Box::pin(async move {
+                        super::dispatcher_runtime::handle_get_job(&registry, agent_id, request_id)
+                            .await
+                    })
+                },
+            );
         }
 
         let checkin_registry = registry.clone();

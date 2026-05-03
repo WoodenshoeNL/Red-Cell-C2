@@ -297,11 +297,18 @@ def _maybe_specter_doh_agent_pass(
     http_name = f"test-doh-http-{uid}"
     win_port = int(listeners_cfg.get("windows_port", 19082))
 
+    # callback_host is the teamserver IP as seen from the Windows VM (e.g.
+    # "192.168.213.157").  teamserver_ip comes from rest_url which uses the
+    # loopback address "127.0.0.1" reachable only from the Linux test host.
+    # Using teamserver_ip here bakes "http://127.0.0.1:…/" into SPECTER_CALLBACK_URL,
+    # which the Windows agent cannot reach, causing immediate ECONNREFUSED → exit 1.
+    callback_host = ctx.env.get("server", {}).get("callback_host") or teamserver_ip
+
     inner = {
         "name": http_name,
         "host_bind": "0.0.0.0",
         "port_bind": win_port,
-        "hosts": [teamserver_ip],
+        "hosts": [callback_host],
         "host_rotation": "round-robin",
         "secure": False,
         "uris": ["/"],

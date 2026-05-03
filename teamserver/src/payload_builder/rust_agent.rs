@@ -290,6 +290,12 @@ fn rust_agent_env_vars(
         if let Some(pem) = pinned_cert_pem {
             env_vars.push((format!("{env_prefix}_PINNED_CERT_PEM"), pem));
         }
+        if let Some(domain) = &http.doh_domain {
+            env_vars.push((format!("{env_prefix}_DOH_DOMAIN"), domain.clone()));
+        }
+        if let Some(provider) = &http.doh_provider {
+            env_vars.push((format!("{env_prefix}_DOH_PROVIDER"), provider.clone()));
+        }
     }
 
     // Listener ECDH public key.  Encoded as standard base64 (no padding) to
@@ -774,6 +780,63 @@ mod tests {
 
         assert_eq!(find(&env, "PHANTOM_KILL_DATE"), None);
         assert_eq!(find(&env, "PHANTOM_WORKING_HOURS"), None);
+        Ok(())
+    }
+
+    fn http_listener_with_doh(
+        doh_domain: Option<&str>,
+        doh_provider: Option<&str>,
+    ) -> ListenerConfig {
+        ListenerConfig::Http(Box::new(HttpListenerConfig {
+            name: "doh-listener".to_owned(),
+            kill_date: None,
+            working_hours: None,
+            hosts: vec!["c2.example.com".to_owned()],
+            host_bind: "0.0.0.0".to_owned(),
+            host_rotation: "round-robin".to_owned(),
+            port_bind: 443,
+            port_conn: Some(443),
+            method: None,
+            behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
+            user_agent: None,
+            headers: Vec::new(),
+            uris: Vec::new(),
+            host_header: None,
+            secure: true,
+            cert: None,
+            response: None,
+            proxy: None,
+            ja3_randomize: None,
+            doh_domain: doh_domain.map(str::to_owned),
+            doh_provider: doh_provider.map(str::to_owned),
+            legacy_mode: false,
+            suppress_opsec_warnings: true,
+        }))
+    }
+
+    #[test]
+    fn rust_agent_env_vars_bakes_doh_domain_and_provider() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let listener = http_listener_with_doh(Some("c2.test.local"), Some("cloudflare"));
+        let demon = default_demon_config();
+
+        let env = rust_agent_env_vars(&listener, "SPECTER", &demon, None, None)?;
+
+        assert_eq!(find(&env, "SPECTER_DOH_DOMAIN"), Some("c2.test.local".to_owned()));
+        assert_eq!(find(&env, "SPECTER_DOH_PROVIDER"), Some("cloudflare".to_owned()));
+        Ok(())
+    }
+
+    #[test]
+    fn rust_agent_env_vars_omits_doh_vars_when_unset() -> Result<(), Box<dyn std::error::Error>> {
+        let listener = http_listener(None);
+        let demon = default_demon_config();
+
+        let env = rust_agent_env_vars(&listener, "SPECTER", &demon, None, None)?;
+
+        assert_eq!(find(&env, "SPECTER_DOH_DOMAIN"), None);
+        assert_eq!(find(&env, "SPECTER_DOH_PROVIDER"), None);
         Ok(())
     }
 

@@ -121,15 +121,10 @@ pub(crate) async fn download(
             )));
         }
         let agent_str = id.to_string();
-        let path = format!(
-            "/loot?kind=download&agent_id={}",
-            percent_encode(&agent_str)
-        );
+        let path = format!("/loot?kind=download&agent_id={}", percent_encode(&agent_str));
         let page: RawLootPage = client.get(&path).await?;
-        if let Some(entry) = page
-            .items
-            .iter()
-            .find(|e| e.task_id.as_deref() == Some(&task_id) && e.has_data)
+        if let Some(entry) =
+            page.items.iter().find(|e| e.task_id.as_deref() == Some(&task_id) && e.has_data)
         {
             break entry.id;
         }

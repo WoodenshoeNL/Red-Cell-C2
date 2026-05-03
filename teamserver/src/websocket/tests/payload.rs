@@ -69,8 +69,8 @@ fn build_job_encodes_process_create_payload() {
     assert_eq!(read_u32_le(&job.payload, &mut offset), 1);
 }
 
-/// Havoc-style split: explicit `cmd.exe` path as program, quoted full path + `/c`
-/// in args so Demon/CreateProcessW get a reliable image and piped stdout works.
+/// Havoc-style split: explicit `cmd.exe` path as program and `/c …`-only args line
+/// (no duplicate `"…cmd.exe"` in `lpCommandLine`) — see [`format_proc_create_args`].
 #[test]
 fn build_job_encodes_process_create_with_system_cmd_exe_path() {
     use red_cell_common::demon::format_proc_create_args;
@@ -94,8 +94,7 @@ fn build_job_encodes_process_create_with_system_cmd_exe_path() {
         decode_utf16(read_len_prefixed_bytes(&job.payload, &mut offset)),
         WINDOWS_CMD_EXE_PATH
     );
-    let want_args = format!(r#""{WINDOWS_CMD_EXE_PATH}" /c whoami"#);
-    assert_eq!(decode_utf16(read_len_prefixed_bytes(&job.payload, &mut offset)), want_args);
+    assert_eq!(decode_utf16(read_len_prefixed_bytes(&job.payload, &mut offset)), "/c whoami");
     assert_eq!(read_u32_le(&job.payload, &mut offset), 1); // piped
     assert_eq!(read_u32_le(&job.payload, &mut offset), 1); // verbose
 }

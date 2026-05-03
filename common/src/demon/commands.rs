@@ -12,11 +12,9 @@ pub const COMMAND_PROC_CREATE_ID: &str = "4112";
 
 /// Default full path to `cmd.exe` in `CommandProc` create tasks (`program` field).
 ///
-/// Matches the Havoc operator split: executable path here, and
-/// [`format_proc_create_args`] supplies quoted `"<this path>" /c …` in the
-/// base64 args. Demon resolves this reliably for piped stdout even when
-/// `PATH` is empty; a bare `cmd.exe` token in a null-application `CreateProcess`
-/// line is less dependable for the real Demon agent.
+/// [`format_proc_create_args`] sets this as `lpApplicationName` and supplies a
+/// separate `/c …` UTF-8 line (base64) for `lpCommandLine`, so Demon can spawn CMD
+/// with an empty `%PATH%` without duplicating an executable token in both fields.
 pub const WINDOWS_CMD_EXE_PATH: &str = r"C:\Windows\System32\cmd.exe";
 
 /// Decimal string representation of `DemonCommand::CommandScreenshot` (2510).
@@ -40,15 +38,17 @@ pub fn format_sleep_payload_base64(delay_secs: u32, jitter_percent: u32) -> Stri
 ///
 /// Wire format: `{state};{verbose};{piped};{program};{base64_args}`
 ///
-/// Uses Havoc’s split: [`WINDOWS_CMD_EXE_PATH`] as `program`, and
-/// base64-encoded UTF-8 args shaped like
-/// `"C:\Windows\System32\cmd.exe" /c <command_line>` so Demon’s
-/// `CreateProcessW(lpApplication, lpCommandLine, …)` sees an explicit image
-/// path while builtins still run under CMD.
+/// Uses Havoc’s split: [`WINDOWS_CMD_EXE_PATH`] as `program` (`lpApplicationName`)
+/// so `CreateProcessW` resolves `cmd.exe` even when `%PATH%` is empty.
+///
+/// The base64 args are UTF-8 shaped as `/c <command_line>` — the **`/c`** switch
+/// and payload only (`lpCommandLine`, after the executable is fixed by
+/// `lpApplicationName`). Repeating a second quoted `"…\cmd.exe"` in `lpCommandLine`
+/// duplicates the interpreter token and has regressed piping / output capture on
+/// the stock Demon implant on some Windows builds.
 ///
 /// If the operator line already begins with `cmd.exe /c` (ASCII case-insensitive),
-/// that prefix is replaced by the quoted full path so we do not nest extra
-/// `cmd.exe` processes.
+/// that prefix is stripped so we do not nest another CMD instance.
 pub fn format_proc_create_args(command_line: &str) -> String {
     const CMD_EXE_C: &[u8] = b"cmd.exe /c";
     let trimmed = command_line.trim_start();
@@ -61,8 +61,11 @@ pub fn format_proc_create_args(command_line: &str) -> String {
     } else {
         trimmed
     };
-    let quoted_cmd = format!(r#""{}" /c {}"#, WINDOWS_CMD_EXE_PATH, inner);
-    let encoded = BASE64_STANDARD.encode(quoted_cmd.as_bytes());
+    let inner = inner.trim_end();
+    // Always include ASCII space after `/c`; empty remainder → `/c ` so our
+    // Phantom Havoc-compat shim still matches the `/c ` prefix.
+    let cmd_tail = format!("/c {}", inner);
+    let encoded = BASE64_STANDARD.encode(cmd_tail.as_bytes());
     format!("0;TRUE;TRUE;{};{encoded}", WINDOWS_CMD_EXE_PATH)
 }
 
@@ -425,40 +428,35 @@ mod tests {
     #[test]
     fn format_proc_create_args_wraps_in_cmd_exe() {
         let args = format_proc_create_args("whoami");
-        let q = format!(r#""{WINDOWS_CMD_EXE_PATH}" /c whoami"#);
-        let encoded = BASE64_STANDARD.encode(q.as_bytes());
+        let encoded = BASE64_STANDARD.encode("/c whoami".as_bytes());
         assert_eq!(args, format!("0;TRUE;TRUE;{WINDOWS_CMD_EXE_PATH};{encoded}"));
     }
 
     #[test]
     fn format_proc_create_args_wraps_builtins() {
         let args = format_proc_create_args("echo hello");
-        let q = format!(r#""{WINDOWS_CMD_EXE_PATH}" /c echo hello"#);
-        let encoded = BASE64_STANDARD.encode(q.as_bytes());
+        let encoded = BASE64_STANDARD.encode("/c echo hello".as_bytes());
         assert_eq!(args, format!("0;TRUE;TRUE;{WINDOWS_CMD_EXE_PATH};{encoded}"));
     }
 
     #[test]
     fn format_proc_create_args_empty_command() {
         let args = format_proc_create_args("");
-        let q = format!(r#""{WINDOWS_CMD_EXE_PATH}" /c "#);
-        let encoded = BASE64_STANDARD.encode(q.as_bytes());
+        let encoded = BASE64_STANDARD.encode("/c ".as_bytes());
         assert_eq!(args, format!("0;TRUE;TRUE;{WINDOWS_CMD_EXE_PATH};{encoded}"));
     }
 
     #[test]
     fn format_proc_create_args_normalizes_existing_cmd_exe_c_prefix() {
         let args = format_proc_create_args("cmd.exe /c dir /s");
-        let q = format!(r#""{WINDOWS_CMD_EXE_PATH}" /c dir /s"#);
-        let encoded = BASE64_STANDARD.encode(q.as_bytes());
+        let encoded = BASE64_STANDARD.encode("/c dir /s".as_bytes());
         assert_eq!(args, format!("0;TRUE;TRUE;{WINDOWS_CMD_EXE_PATH};{encoded}"));
     }
 
     #[test]
     fn format_proc_create_args_normalizes_cmd_prefix_case_insensitive() {
         let args = format_proc_create_args("CMD.EXE /c whoami");
-        let q = format!(r#""{WINDOWS_CMD_EXE_PATH}" /c whoami"#);
-        let encoded = BASE64_STANDARD.encode(q.as_bytes());
+        let encoded = BASE64_STANDARD.encode("/c whoami".as_bytes());
         assert_eq!(args, format!("0;TRUE;TRUE;{WINDOWS_CMD_EXE_PATH};{encoded}"));
     }
 

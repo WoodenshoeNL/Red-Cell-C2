@@ -330,9 +330,9 @@ async fn mock_demon_checkin_interleaved_output_keeps_task_attribution()
 }
 
 /// When no operator tasks are queued, a `CommandGetJob` callback must return
-/// HTTP 200 with an empty response body.  This is the most common callback
-/// pattern in real deployments (idle polling) and a regression here — e.g.
-/// returning an error or garbage bytes — would cause agents to malfunction.
+/// HTTP 200 with a single `CommandNoJob` package (`handle_get_job` in
+/// `dispatcher_runtime.rs`).  A regression here — e.g. returning an error or
+/// garbage bytes — would cause agents to malfunction.
 #[tokio::test]
 async fn get_job_with_empty_task_queue_returns_empty_response()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -397,10 +397,14 @@ async fn get_job_with_empty_task_queue_returns_empty_response()
         reqwest::StatusCode::OK,
         "empty task queue must return HTTP 200, got {status}"
     );
-    assert!(
-        job_bytes.is_empty(),
-        "expected empty response body when no tasks are queued, got {} bytes",
-        job_bytes.len()
+    // `handle_get_job` returns an explicit `CommandNoJob` package for an empty
+    // queue (see `dispatcher_runtime.rs`) — not a zero-length HTTP body.
+    let msg = DemonMessage::from_bytes(job_bytes.as_ref())?;
+    assert_eq!(msg.packages.len(), 1, "idle GET_JOB must return a single package");
+    assert_eq!(
+        msg.packages[0].command_id,
+        u32::from(DemonCommand::CommandNoJob),
+        "idle queue must surface CommandNoJob"
     );
 
     // --- Verify CTR synchronisation by sending another callback -------------------

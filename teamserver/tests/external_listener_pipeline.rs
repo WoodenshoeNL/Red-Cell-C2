@@ -612,11 +612,16 @@ async fn external_listener_task_consumed_after_download() -> Result<(), Box<dyn 
         .send()
         .await?
         .error_for_status()?;
+    // After the task is dequeued once, subsequent GetJob polls use the same
+    // CommandNoJob path as an empty queue (see `handle_get_job` in
+    // `dispatcher_runtime.rs`) — not a zero-length HTTP body.
     let second_bytes = second_resp.bytes().await?;
-    assert!(
-        second_bytes.is_empty(),
-        "second poll must not re-deliver the consumed task; got {} bytes",
-        second_bytes.len()
+    let second_msg = DemonMessage::from_bytes(second_bytes.as_ref())?;
+    assert_eq!(second_msg.packages.len(), 1, "second poll must return a single package");
+    assert_eq!(
+        second_msg.packages[0].command_id,
+        u32::from(DemonCommand::CommandNoJob),
+        "second poll must not re-deliver the consumed task; expected NO_JOB"
     );
 
     socket.close(None).await?;

@@ -131,7 +131,12 @@ async fn http_listener_checkin_refreshes_metadata_and_rejects_key_rotation()
         .await?;
 
     assert_eq!(response.status(), StatusCode::OK);
-    assert!(response.bytes().await?.is_empty());
+    let body = response.bytes().await?;
+    let ack = DemonMessage::from_bytes(body.as_ref())
+        .map_err(|err| format!("unexpected GET_JOB/checkin multiplex response framing: {err}"))?;
+    assert_eq!(ack.packages.len(), 1, "{ack:?}");
+    assert_eq!(ack.packages[0].command_id, u32::from(DemonCommand::CommandNoJob));
+    assert_eq!(ack.packages[0].request_id, 5);
 
     let updated =
         registry.get(agent_id).await.ok_or_else(|| "agent should still exist".to_owned())?;

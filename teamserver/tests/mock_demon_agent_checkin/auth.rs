@@ -2,7 +2,7 @@
 
 use futures_util::StreamExt;
 use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, decrypt_agent_data_at_offset};
-use red_cell_common::demon::DemonCommand;
+use red_cell_common::demon::{DemonCommand, DemonMessage};
 use red_cell_common::operator::{EventCode, Message, MessageHead, OperatorMessage};
 use tokio::time::{Duration, timeout};
 use tokio_tungstenite::connect_async;
@@ -78,10 +78,13 @@ async fn unauthenticated_operator_cannot_inject_agent_task()
         .await?
         .error_for_status()?;
     let job_bytes = get_job_response.bytes().await?;
-    assert!(
-        job_bytes.is_empty(),
-        "agent must receive no jobs after unauthenticated task injection attempt, got {} bytes",
-        job_bytes.len()
+    let msg = DemonMessage::from_bytes(job_bytes.as_ref())?;
+    assert_eq!(msg.packages.len(), 1);
+    assert_eq!(
+        msg.packages[0].command_id,
+        u32::from(DemonCommand::CommandNoJob),
+        "rejected injection must not queue work; expect NO_JOB only, got command 0x{:X}",
+        msg.packages[0].command_id
     );
 
     // Clean up: close the unauthenticated socket (may already be closed by the
@@ -166,10 +169,13 @@ async fn failed_login_operator_cannot_inject_agent_task() -> Result<(), Box<dyn 
         .await?
         .error_for_status()?;
     let job_bytes = get_job_response.bytes().await?;
-    assert!(
-        job_bytes.is_empty(),
-        "agent must receive no jobs after failed-auth task injection attempt, got {} bytes",
-        job_bytes.len()
+    let msg = DemonMessage::from_bytes(job_bytes.as_ref())?;
+    assert_eq!(msg.packages.len(), 1);
+    assert_eq!(
+        msg.packages[0].command_id,
+        u32::from(DemonCommand::CommandNoJob),
+        "failed auth must not queue work; expect NO_JOB only, got command 0x{:X}",
+        msg.packages[0].command_id
     );
 
     let _ = bad_socket.close(None).await;

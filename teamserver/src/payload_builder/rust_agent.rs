@@ -60,14 +60,9 @@ impl PayloadBuilderService {
 
         // The TLS cert PEM is the only env-var input that requires async I/O.
         // Read it here so rust_agent_env_vars() stays pure/sync and trivially
-        // unit-testable.
-        let pinned_cert_pem = match listener {
-            ListenerConfig::Http(http) => match &http.cert {
-                Some(tls) => tokio::fs::read_to_string(&tls.cert).await.ok(),
-                None => None,
-            },
-            _ => None,
-        };
+        // unit-testable. A configured PEM path must be readable — otherwise the
+        // build fails instead of succeeding with pinning silently omitted.
+        let pinned_cert_pem = pinned_cert_pem_for_rust_listener(listener).await?;
 
         let env_vars =
             rust_agent_env_vars(listener, &env_prefix, demon, listener_pub_key, pinned_cert_pem)?;
@@ -239,6 +234,33 @@ impl PayloadBuilderService {
     }
 }
 
+/// Read the pinned TLS certificate PEM when an HTTP listener has TLS paths configured.
+///
+/// Returns `Ok(None)` when there is no cert to load (non-HTTP listener, or HTTP without TLS).
+/// If a cert path is configured and cannot be read, returns [`PayloadBuildError::Io`]
+/// so Phantom/Specter builds never degrade to “no pinning” due to filesystem errors.
+async fn pinned_cert_pem_for_rust_listener(
+    listener: &ListenerConfig,
+) -> Result<Option<String>, PayloadBuildError> {
+    match listener {
+        ListenerConfig::Http(http) => match &http.cert {
+            Some(tls) => Ok(Some(
+                tokio::fs::read_to_string(&tls.cert).await.map_err(|err| {
+                    PayloadBuildError::Io(std::io::Error::new(
+                        err.kind(),
+                        format!(
+                            "failed to read listener TLS cert PEM at {} for Rust-agent payload build: {err}",
+                            tls.cert
+                        ),
+                    ))
+                })?,
+            )),
+            None => Ok(None),
+        },
+        _ => Ok(None),
+    }
+}
+
 /// Remove compile-time bake variables for `env_prefix` from a `cargo` command
 /// so the parent (teamserver) process cannot leak `PHANTOM_*` / `SPECTER_*`
 /// into `rustc` when this build does not set them in [`rust_agent_env_vars`].
@@ -371,7 +393,7 @@ fn rust_agent_callback_url(listener: &ListenerConfig) -> Result<String, PayloadB
 #[cfg(test)]
 mod tests {
     use super::*;
-    use red_cell_common::HttpListenerConfig;
+    use red_cell_common::{HttpListenerConfig, ListenerTlsConfig};
 
     #[test]
     fn rust_agent_callback_url_builds_https_url() -> Result<(), Box<dyn std::error::Error>> {
@@ -684,6 +706,111 @@ mod tests {
 
         assert_eq!(find(&env, "SPECTER_PINNED_CERT_PEM"), Some(pem.to_owned()));
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn pinned_cert_pem_for_http_listener_reads_configured_pem_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pem_path = dir.path().join("listener.pem");
+        let pem_body = "-----BEGIN CERTIFICATE-----\nABC\n-----END CERTIFICATE-----";
+        tokio::fs::write(&pem_path, pem_body.as_bytes()).await.expect("write pem");
+
+        let listener = ListenerConfig::Http(Box::new(HttpListenerConfig {
+            name: "tls-listener".to_owned(),
+            kill_date: None,
+            working_hours: None,
+            hosts: vec!["c2.example.com".to_owned()],
+            host_bind: "0.0.0.0".to_owned(),
+            host_rotation: "round-robin".to_owned(),
+            port_bind: 443,
+            port_conn: Some(443),
+            method: None,
+            behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
+            user_agent: None,
+            headers: Vec::new(),
+            uris: Vec::new(),
+            host_header: None,
+            secure: true,
+            cert: Some(ListenerTlsConfig {
+                cert: pem_path.display().to_string(),
+                key: dir.path().join("key.pem").display().to_string(),
+            }),
+            response: None,
+            proxy: None,
+            ja3_randomize: None,
+            doh_domain: None,
+            doh_provider: None,
+            legacy_mode: false,
+            suppress_opsec_warnings: true,
+        }));
+
+        let got = pinned_cert_pem_for_rust_listener(&listener).await.expect("read pinned pem");
+        assert_eq!(got.as_deref(), Some(pem_body));
+    }
+
+    #[tokio::test]
+    async fn pinned_cert_pem_for_http_listener_errors_when_pem_missing() {
+        let missing = tempfile::tempdir().expect("tempdir").path().join("nope.pem");
+        let listener = ListenerConfig::Http(Box::new(HttpListenerConfig {
+            name: "tls-listener".to_owned(),
+            kill_date: None,
+            working_hours: None,
+            hosts: vec!["c2.example.com".to_owned()],
+            host_bind: "0.0.0.0".to_owned(),
+            host_rotation: "round-robin".to_owned(),
+            port_bind: 443,
+            port_conn: Some(443),
+            method: None,
+            behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
+            user_agent: None,
+            headers: Vec::new(),
+            uris: Vec::new(),
+            host_header: None,
+            secure: true,
+            cert: Some(ListenerTlsConfig {
+                cert: missing.display().to_string(),
+                key: "/tmp/key-does-not-matter.pem".to_owned(),
+            }),
+            response: None,
+            proxy: None,
+            ja3_randomize: None,
+            doh_domain: None,
+            doh_provider: None,
+            legacy_mode: false,
+            suppress_opsec_warnings: true,
+        }));
+
+        let err = pinned_cert_pem_for_rust_listener(&listener)
+            .await
+            .expect_err("missing pem should fail");
+        assert!(matches!(err, PayloadBuildError::Io(_)), "expected Io error, got {err:?}");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(missing.display().to_string().as_str()),
+            "error should cite cert path: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pinned_cert_pem_is_none_when_http_listener_has_no_tls() {
+        let listener = http_listener(None);
+        let got = pinned_cert_pem_for_rust_listener(&listener).await.expect("listener without tls");
+        assert!(got.is_none());
+    }
+
+    #[tokio::test]
+    async fn pinned_cert_pem_is_none_for_non_http_listener() {
+        let listener = ListenerConfig::Smb(red_cell_common::SmbListenerConfig {
+            name: "smb".to_owned(),
+            pipe_name: "pipe".to_owned(),
+            kill_date: None,
+            working_hours: None,
+        });
+        let got =
+            pinned_cert_pem_for_rust_listener(&listener).await.expect("non-http has no pinning");
+        assert!(got.is_none());
     }
 
     #[test]

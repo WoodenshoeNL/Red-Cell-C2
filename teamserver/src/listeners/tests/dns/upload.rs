@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Instant;
 
+use red_cell_common::demon::{DemonCommand, DemonMessage};
+
 use super::super::*;
 use super::helpers::dns_state;
 
@@ -250,12 +252,14 @@ async fn doh_download_all(
     out
 }
 
-/// The DoH ready-poll must resolve (return Some) even when the server response is empty
-/// (e.g. a GET_JOB with no queued commands).  Prior to the fix, an empty payload was
-/// silently discarded and `handle_doh_ready` would perpetually return `None`, causing
-/// the client to time out waiting for the ready TXT record.
+/// The DoH ready-poll must resolve (return Some) even when `CommandGetJob` has no queued
+/// work: the dispatcher still returns a framed `CommandNoJob` sentinel (matching
+/// `handle_get_job` in `dispatcher_runtime.rs`).
+///
+/// Prior to the DNS fix, **truly empty** payloads were discarded and `handle_doh_ready` could
+/// return `None`; this test asserts the sentinel path clears the rendezvous reliably.
 #[tokio::test]
-async fn doh_empty_response_signals_ready_with_zero_chunks() {
+async fn doh_no_job_response_signals_ready_with_one_download_chunk() {
     let state = dns_state("doh-empty-payload").await;
     let agent_id = 0xBEEF_0001_u32;
     let key = test_key(0xAB);
@@ -274,28 +278,37 @@ async fn doh_empty_response_signals_ready_with_zero_chunks() {
     // Exhaust the "done" sentinel read so the slot is actually removed.
     state.handle_doh_download(init_session, u16::try_from(init_total).unwrap()).await;
 
-    // 2. Send a GET_JOB callback (no commands queued → empty server response).
+    // 2. Send a GET_JOB callback (no commands queued → NO_JOB sentinel).
     let get_job_packet = valid_demon_callback_body(
         agent_id,
         key,
         iv,
-        u32::from(red_cell_common::demon::DemonCommand::CommandGetJob),
+        u32::from(DemonCommand::CommandGetJob),
         1,
         &[],
     );
     let get_job_session = "doh00000getjob01";
     doh_upload_all(&state, get_job_session, &get_job_packet, peer_ip).await;
 
-    // 3. The ready poll must resolve with 0 chunks (not time out / return None).
+    // 3. The ready poll must resolve with at least one chunk (NO_JOB ciphertext).
     let total_chunks = state
         .handle_doh_ready(get_job_session)
         .await
-        .expect("DoH ready must resolve even for an empty server response");
-    assert_eq!(total_chunks, 0, "empty server response must yield 0 download chunks");
+        .expect("DoH ready must resolve after GET_JOB completes");
+    assert_eq!(
+        total_chunks, 1,
+        "NO_JOB response must fit within a single DoH DNS download chunk encoding"
+    );
 
-    // 4. Downloading 0 chunks reconstructs an empty payload.
-    let payload = doh_download_all(&state, get_job_session, total_chunks).await;
-    assert!(payload.is_empty(), "reassembled GET_JOB response must be empty");
+    let ciphertext = doh_download_all(&state, get_job_session, total_chunks).await;
+    let msg = DemonMessage::from_bytes(ciphertext.as_ref())
+        .expect("GET_JOB response payload must decode as DemonMessage");
+    assert_eq!(msg.packages.len(), 1, "idle GET_JOB must use a single package");
+    assert_eq!(
+        msg.packages[0].command_id,
+        u32::from(DemonCommand::CommandNoJob),
+        "idle queue must reply with CommandNoJob"
+    );
 }
 
 /// Full DoH round-trip for a DEMON_INIT packet: upload all chunks, poll ready, download the

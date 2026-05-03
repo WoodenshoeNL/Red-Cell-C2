@@ -824,6 +824,44 @@ def defender_add_exclusion(target: TargetConfig, path: str) -> None:
     run_remote(target, f"powershell -NoProfile -EncodedCommand {enc}")
 
 
+def windows_sync_payload_probe(
+    target: TargetConfig, exe_path: str, *, timeout_ms: int = 8_000
+) -> str:
+    """Run *exe_path* once under the SSH user; return multiline diagnostic (exit + streams).
+
+    Uses ``System.Diagnostics.Process`` with redirected stdout/stderr. Intended
+    for implants that fail fast (exit non-zero before the run loop) so the
+    harness can print ``anyhow`` / tracing output from the binary.
+    """
+    if target.platform != "windows":
+        raise ValueError("windows_sync_payload_probe requires a Windows target")
+    exe_q = _quote_powershell(exe_path)
+    t = int(timeout_ms)
+    script = (
+        f"$ep = {exe_q}; "
+        "$wd = Split-Path -Parent -LiteralPath $ep; if (-not $wd) { $wd = $env:SystemRoot }; "
+        "$psi = New-Object System.Diagnostics.ProcessStartInfo; "
+        "$psi.FileName = $ep; $psi.WorkingDirectory = $wd; "
+        "$psi.UseShellExecute = $false; "
+        "$psi.RedirectStandardError = $true; $psi.RedirectStandardOutput = $true; "
+        "$p = New-Object System.Diagnostics.Process; $p.StartInfo = $psi; "
+        "[void]$p.Start(); "
+        f"if (-not $p.WaitForExit({t})) {{ $p.Kill() | Out-Null; Write-Output 'PROBE_TIMEOUT_MS'; exit 0 }}; "
+        "Write-Output ('PROBE_EXIT:' + $p.ExitCode); "
+        "$e = $p.StandardError.ReadToEnd(); "
+        "if ($e) { $one = $e.Trim() -replace [Environment]::NewLine, ' | '; Write-Output ('PROBE_STDERR:' + $one) }; "
+        "$o = $p.StandardOutput.ReadToEnd(); "
+        "if ($o) { $one = $o.Trim() -replace [Environment]::NewLine, ' | '; Write-Output ('PROBE_STDOUT:' + $one) }; "
+        "exit 0"
+    )
+    enc = _powershell_encoded_command(script)
+    return run_remote(
+        target,
+        f"powershell -NoProfile -EncodedCommand {enc}",
+        timeout=max(30, t // 1000 + 10),
+    )
+
+
 def execute_background(target: TargetConfig, command: str, arguments: str = "") -> None:
     """Run a command on the target in the background (fire-and-forget).
 

@@ -23,10 +23,9 @@ impl SpecterAgent {
         let metadata_bytes = serialize_init_metadata(self.agent_id, &metadata)
             .map_err(|e| SpecterError::Transport(format!("ECDH metadata encode: {e}")))?;
 
-        let session =
-            perform_registration(self.transport.primary(), &listener_pub_key, &metadata_bytes)
-                .await
-                .map_err(|e| SpecterError::Transport(format!("ECDH registration: {e}")))?;
+        let session = perform_registration(&self.transport, &listener_pub_key, &metadata_bytes)
+            .await
+            .map_err(|e| SpecterError::Transport(format!("ECDH registration: {e}")))?;
 
         info!(agent_id = format_args!("0x{:08X}", session.agent_id), "ECDH registration complete");
 
@@ -56,7 +55,7 @@ impl SpecterAgent {
         payload.extend_from_slice(&msg_bytes);
 
         let result = send_session_packet(
-            self.transport.primary(),
+            &self.transport,
             &EcdhSession { connection_id, session_key, agent_id },
             &payload,
         )

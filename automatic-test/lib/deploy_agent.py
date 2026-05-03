@@ -22,6 +22,7 @@ from lib.deploy import (
     firewall_allow_program,
     run_remote,
     upload,
+    windows_sync_payload_probe,
 )
 from lib.wait import TimeoutError as WaitTimeoutError, wait_for_agent
 
@@ -43,6 +44,7 @@ def deploy_and_checkin(
     pre_built_payload: bytes | None = None,
     checkin_periodic_interval: float | None = None,
     checkin_periodic_callback: Callable[[], None] | None = None,
+    windows_prelaunch_probe: bool = False,
 ) -> dict | None:
     """Build, deploy, execute, and wait for a single agent checkin.
 
@@ -87,6 +89,9 @@ def deploy_and_checkin(
         checkin_periodic_interval: If set with *checkin_periodic_callback*, invoked
                           every N seconds while waiting for check-in (diagnostics).
         checkin_periodic_callback: Callable run on that interval; must not raise.
+        windows_prelaunch_probe: When ``True`` (Windows only), run a synchronous
+            one-shot execution of the payload before the background schtask launch,
+            printing captured exit code and stderr/stdout for fast-fail diagnosis.
 
     Returns:
         The agent dict from :func:`~lib.wait.wait_for_agent`, or ``None`` when
@@ -188,6 +193,17 @@ def deploy_and_checkin(
                         print(f"  [{tag}][deploy] NP exclusion verify failed (non-fatal): {vexc}")
             except Exception as exc:
                 print(f"  [{tag}][deploy] Network Protection exclusion failed (non-fatal): {exc}")
+
+        if is_windows and windows_prelaunch_probe:
+            try:
+                print(f"  [{tag}][deploy] synchronous prelaunch probe")
+                probe_out = windows_sync_payload_probe(target, remote_payload, timeout_ms=8_000)
+                for raw in probe_out.splitlines():
+                    line = raw.strip()
+                    if line:
+                        print(f"  [{tag}][probe] {line}")
+            except Exception as exc:
+                print(f"  [{tag}][probe] probe failed (non-fatal): {exc}")
 
         # Step 4 — execute payload in background.
         print(f"  [{tag}][exec] launching payload in background on target")

@@ -118,10 +118,11 @@ async fn command_output_happy_path_broadcasts_response() -> Result<(), Box<dyn s
     Ok(())
 }
 
-/// `handle_command_output_callback` with empty output must return `Ok(None)`
-/// without broadcasting any `AgentResponse`.
+/// Empty `CommandOutput` (e.g. `kill` with no stdout) must still broadcast and persist so
+/// REST `agent exec --wait` and output polling receive a terminal row (`red-cell-c2-1f7q1`).
 #[tokio::test]
-async fn command_output_empty_does_not_broadcast() -> Result<(), Box<dyn std::error::Error>> {
+async fn command_output_empty_broadcasts_agent_response() -> Result<(), Box<dyn std::error::Error>>
+{
     let server = common::spawn_test_server(common::default_test_profile()).await?;
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
@@ -171,11 +172,24 @@ async fn command_output_empty_does_not_broadcast() -> Result<(), Box<dyn std::er
 
     assert!(
         response.status().is_success(),
-        "empty output should succeed silently, got {}",
+        "empty output callback should succeed, got {}",
         response.status()
     );
 
-    common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse for empty CommandOutput, got {event:?}");
+    };
+    assert_eq!(msg.info.demon_id, format!("{agent_id:08X}"));
+    assert_eq!(msg.info.command_id, u32::from(DemonCommand::CommandOutput).to_string());
+    assert!(msg.info.output.is_empty(), "Output field must be empty");
+    let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(message.contains("[0 bytes]"), "message should note zero-byte output: {message:?}");
+    assert_eq!(
+        msg.info.extra.get("TaskID").and_then(|v| v.as_str()),
+        Some("00000071"),
+        "synthetic TaskID must match request_id 0x71 for operator correlation"
+    );
 
     socket.close(None).await?;
     server.listeners.stop("out-output-empty").await?;

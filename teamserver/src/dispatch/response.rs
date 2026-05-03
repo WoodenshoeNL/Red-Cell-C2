@@ -47,6 +47,22 @@ pub(in crate::dispatch) struct AgentResponseEntry {
 
 // ── Loot helpers ──────────────────────────────────────────────────────────────
 
+/// When the in-memory job queue entry was evicted or the callback `request_id`
+/// otherwise has no matching [`JobContext`], we still know the numeric request id
+/// from the wire.  REST clients submit `TaskID` as the same hex string as this
+/// id (`next_task_id`), so synthesizing `{:08X}` preserves `agent exec --wait`
+/// and loot correlation.
+pub(in crate::dispatch) fn enrich_loot_context_with_request_id(
+    context: &LootContext,
+    request_id: u32,
+) -> LootContext {
+    let mut out = context.clone();
+    if out.task_id.is_empty() {
+        out.task_id = format!("{request_id:08X}");
+    }
+    out
+}
+
 pub(in crate::dispatch) async fn loot_context(
     registry: &AgentRegistry,
     agent_id: u32,
@@ -111,7 +127,8 @@ pub(in crate::dispatch) async fn broadcast_and_persist_agent_response(
     response: AgentResponseEntry,
     context: &LootContext,
 ) -> Result<(), CommandDispatchError> {
-    persist_agent_response_record(database, &response, context).await?;
+    let context = enrich_loot_context_with_request_id(context, response.request_id);
+    persist_agent_response_record(database, &response, &context).await?;
     events.broadcast(agent_response_event_with_extra_and_context(
         response.agent_id,
         response.command_id,
@@ -120,7 +137,7 @@ pub(in crate::dispatch) async fn broadcast_and_persist_agent_response(
         &response.message,
         response.extra,
         response.output,
-        Some(context),
+        Some(&context),
     )?);
     Ok(())
 }
@@ -131,6 +148,7 @@ pub(in crate::dispatch) fn loot_new_event(
     request_id: u32,
     context: &LootContext,
 ) -> Result<OperatorMessage, CommandDispatchError> {
+    let context = enrich_loot_context_with_request_id(context, request_id);
     let mut extra = BTreeMap::from([
         ("MiscType".to_owned(), Value::String("loot-new".to_owned())),
         ("LootID".to_owned(), Value::String(loot.id.unwrap_or_default().to_string())),
@@ -169,6 +187,7 @@ pub(in crate::dispatch) fn loot_new_event(
 pub(in crate::dispatch) fn metadata_with_context(
     entries: impl IntoIterator<Item = (String, Value)>,
     context: &LootContext,
+    request_id: u32,
 ) -> Value {
     let mut metadata = serde_json::Map::new();
     for (key, value) in entries {
@@ -182,6 +201,8 @@ pub(in crate::dispatch) fn metadata_with_context(
     }
     if !context.task_id.is_empty() {
         metadata.insert("task_id".to_owned(), Value::String(context.task_id.clone()));
+    } else {
+        metadata.insert("task_id".to_owned(), Value::String(format!("{request_id:08X}")));
     }
     if !context.queued_at.is_empty() {
         metadata.insert("queued_at".to_owned(), Value::String(context.queued_at.clone()));
@@ -194,7 +215,9 @@ pub(in crate::dispatch) fn broadcast_credential_event(
     agent_id: u32,
     credential: &CredentialCapture,
     context: &LootContext,
+    request_id: u32,
 ) -> Result<(), CommandDispatchError> {
+    let context = enrich_loot_context_with_request_id(context, request_id);
     let timestamp = OffsetDateTime::now_utc().format(&Rfc3339)?;
     let mut fields = BTreeMap::from([
         ("DemonID".to_owned(), Value::String(format!("{agent_id:08X}"))),
@@ -394,12 +417,13 @@ pub(in crate::dispatch) async fn persist_credentials_from_output(
                         ("request_id".to_owned(), Value::String(format!("{request_id:X}"))),
                     ],
                     context,
+                    request_id,
                 )),
             },
         )
         .await?;
         events.broadcast(loot_new_event(&record, command_id, request_id, context)?);
-        broadcast_credential_event(events, agent_id, &credential, context)?;
+        broadcast_credential_event(events, agent_id, &credential, context, request_id)?;
         if let Some(plugins) = plugins
             && let Err(error) = plugins.emit_loot_captured(&record).await
         {

@@ -216,6 +216,7 @@ mod tests {
             captured_at: captured_at.to_owned(),
             has_data: true,
             operator: None,
+            task_id: None,
         }
     }
 

@@ -60,6 +60,7 @@ pub(crate) async fn fetch_output(
         .into_iter()
         .map(|e| OutputEntry {
             entry_id: e.id,
+            request_id: e.request_id,
             job_id: e.task_id.unwrap_or_else(|| e.id.to_string()),
             command: e.command_line,
             output: if e.output.is_empty() { e.message } else { e.output },

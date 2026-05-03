@@ -195,6 +195,7 @@ mod tests {
             captured_at: "2026-06-01T00:00:00Z".to_owned(),
             has_data: true,
             operator: None,
+            task_id: None,
         }];
         let mut buf = Vec::new();
         write_csv(&entries, &mut buf).expect("write_csv");

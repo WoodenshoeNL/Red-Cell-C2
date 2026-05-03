@@ -169,6 +169,7 @@ fn exec_result_render_text_contains_output_and_exit() {
 fn output_entry_text_row_headers_match_row_length() {
     let e = OutputEntry {
         entry_id: 1,
+        request_id: 0,
         job_id: "j".to_owned(),
         command: None,
         output: "out".to_owned(),
@@ -183,6 +184,7 @@ fn output_entry_row_79_chars_not_truncated() {
     let output: String = "x".repeat(79);
     let e = OutputEntry {
         entry_id: 1,
+        request_id: 0,
         job_id: "j".to_owned(),
         command: None,
         output: output.clone(),
@@ -199,6 +201,7 @@ fn output_entry_row_80_chars_not_truncated() {
     let output: String = "x".repeat(80);
     let e = OutputEntry {
         entry_id: 1,
+        request_id: 0,
         job_id: "j".to_owned(),
         command: None,
         output: output.clone(),
@@ -215,6 +218,7 @@ fn output_entry_row_81_chars_truncated_to_80() {
     let output: String = "x".repeat(81);
     let e = OutputEntry {
         entry_id: 1,
+        request_id: 0,
         job_id: "j".to_owned(),
         command: None,
         output,
@@ -233,6 +237,7 @@ fn output_entry_row_truncation_counts_unicode_chars_not_bytes() {
     let output: String = "é".repeat(81);
     let e = OutputEntry {
         entry_id: 1,
+        request_id: 0,
         job_id: "j".to_owned(),
         command: None,
         output,
@@ -705,6 +710,7 @@ async fn exec_wait_polls_output_with_numeric_entry_cursor() {
 fn render_output_stream_line_uses_unknown_marker_without_exit_code() {
     let entry = OutputEntry {
         entry_id: 7,
+        request_id: 0,
         job_id: "job_abc".to_owned(),
         command: Some("whoami".to_owned()),
         output: "DOMAIN\\user".to_owned(),
@@ -719,6 +725,7 @@ fn render_output_stream_line_uses_unknown_marker_without_exit_code() {
 fn render_output_stream_line_includes_numeric_exit_code() {
     let entry = OutputEntry {
         entry_id: 8,
+        request_id: 0,
         job_id: "job_def".to_owned(),
         command: Some("id".to_owned()),
         output: "uid=1000(user) gid=1000(user)".to_owned(),
@@ -736,6 +743,7 @@ fn render_output_stream_line_includes_numeric_exit_code() {
 fn output_stream_entry_json_mode_emits_shared_ok_true_envelope() {
     let entry = OutputEntry {
         entry_id: 42,
+        request_id: 0,
         job_id: "job_xyz".to_owned(),
         command: Some("whoami".to_owned()),
         output: "DOMAIN\\user".to_owned(),
@@ -777,6 +785,7 @@ fn output_stream_entry_json_mode_emits_shared_ok_true_envelope() {
 fn output_stream_entry_text_mode_uses_rendered_line_verbatim() {
     let entry = OutputEntry {
         entry_id: 43,
+        request_id: 0,
         job_id: "job_abc".to_owned(),
         command: Some("hostname".to_owned()),
         output: "ubuntu-host".to_owned(),

@@ -85,6 +85,7 @@ pub(super) async fn handle_screenshot_callback(
                 ]
                 .into_iter(),
                 &context,
+                request_id,
             )),
         },
     )

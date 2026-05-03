@@ -334,3 +334,24 @@ fn parse_memory_region_maps_linux_permissions_to_windows_compatible_constants() 
         .expect("writable exec region");
     assert_eq!(writable_exec.protect, PAGE_EXECUTE_READWRITE);
 }
+
+#[tokio::test]
+async fn proc_kill_queues_proc_result_and_empty_command_output_for_exec_wait() {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&(DemonProcessCommand::Kill as i32).to_le_bytes());
+    // Nonexistent PID — `kill` fails; we only need callbacks queued for wire correlation.
+    payload.extend_from_slice(&999_999_i32.to_le_bytes());
+    let package = DemonPackage::new(DemonCommand::CommandProc, 42, payload);
+    let mut state = PhantomState::default();
+
+    execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
+
+    let callbacks = state.drain_callbacks();
+    assert_eq!(callbacks.len(), 2, "expected proc + command output, got {callbacks:?}");
+    assert!(matches!(&callbacks[0], PendingCallback::Structured { .. }));
+    assert!(
+        matches!(&callbacks[1], PendingCallback::Output { request_id, text } if *request_id == 42 && text.is_empty()),
+        "second callback must be empty CommandOutput for REST exec --wait: {:?}",
+        callbacks[1]
+    );
+}

@@ -58,13 +58,21 @@ async fn command_output_happy_path_broadcasts_and_persists() {
     );
     let kind = resp.info.extra.get("Type").and_then(Value::as_str);
     assert_eq!(kind, Some("Good"));
+
+    let records = database.agent_responses().list_for_agent(AGENT_ID).await.expect("list records");
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0].task_id.as_deref(),
+        Some("00000063"),
+        "synthetic TaskID from request_id when queue context is missing"
+    );
 }
 
 #[tokio::test]
-async fn command_output_empty_output_returns_ok_none_without_broadcast() {
+async fn command_output_empty_output_broadcasts_and_persists_with_synthetic_task_id() {
     let (registry, database, events) = setup_with_db().await;
     let mut rx = events.subscribe();
-    // Build a payload whose string content is empty (length-prefix = 0).
+    // Build a payload whose string content is empty (length-prefix = 0) — e.g. `kill` with no stdout.
     let payload = output_payload("");
 
     let result = handle_command_output_callback(
@@ -74,9 +82,16 @@ async fn command_output_empty_output_returns_ok_none_without_broadcast() {
     assert!(result.is_ok());
     assert_eq!(result.expect("unwrap"), None);
 
-    // No broadcast should have occurred.
-    drop(events);
-    assert!(rx.recv().await.is_none(), "no events should be broadcast for empty output");
+    let msg = rx.recv().await.expect("should receive agent response");
+    assert!(
+        matches!(msg, OperatorMessage::AgentResponse(_)),
+        "expected AgentResponse for empty output so exec_wait can correlate"
+    );
+
+    let records = database.agent_responses().list_for_agent(AGENT_ID).await.expect("list records");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].task_id.as_deref(), Some("00000063"));
+    assert!(records[0].output.is_empty());
 }
 
 #[tokio::test]

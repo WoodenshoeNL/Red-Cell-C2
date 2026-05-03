@@ -11,7 +11,7 @@ use red_cell_common::demon::{
 };
 
 use super::output_cmd::fetch_output;
-use super::types::{ExecResult, JobSubmitted};
+use super::types::{ExecResult, JobSubmitted, OutputEntry};
 use super::wire::TaskQueuedResponse;
 use crate::AgentId;
 use crate::backoff::Backoff;
@@ -36,6 +36,25 @@ pub(crate) fn command_id_for(cmd: &str) -> &'static str {
         "screenshot" => COMMAND_SCREENSHOT_ID,
         _ => COMMAND_PROC_CREATE_ID,
     }
+}
+
+/// Returns true when this output row belongs to the submitted task.
+///
+/// Matches the server's `task_id` field when present; otherwise compares
+/// `request_id` to `submitted_job_id` interpreted as hex (same as `next_task_id()`).
+fn output_entry_matches_submitted_job(entry: &OutputEntry, submitted_job_id: &str) -> bool {
+    if entry.job_id == submitted_job_id {
+        return true;
+    }
+    let trimmed = submitted_job_id.trim();
+    let hex_digits =
+        trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")).unwrap_or(trimmed);
+    if let Ok(expected) = u32::from_str_radix(hex_digits, 16) {
+        if entry.request_id == expected {
+            return true;
+        }
+    }
+    false
 }
 
 /// Returns `true` when the command ID maps to `CommandProc` (process create).
@@ -151,9 +170,9 @@ pub(crate) async fn exec_wait(
                     for entry in &entries {
                         // Advance the numeric cursor so next poll is incremental.
                         cursor = Some(entry.entry_id);
-                        if entry.job_id == submitted.job_id {
+                        if output_entry_matches_submitted_job(entry, &submitted.job_id) {
                             return Ok(ExecResult {
-                                job_id: entry.job_id.clone(),
+                                job_id: submitted.job_id.clone(),
                                 output: entry.output.clone(),
                                 exit_code: entry.exit_code,
                             });
@@ -163,5 +182,42 @@ pub(crate) async fn exec_wait(
                 sleep(backoff.delay()).await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod output_match_tests {
+    use super::super::types::OutputEntry;
+    use super::output_entry_matches_submitted_job;
+
+    #[test]
+    fn matches_equal_job_id() {
+        let entry = OutputEntry {
+            entry_id: 1,
+            request_id: 7,
+            job_id: "CUSTOM".to_owned(),
+            command: None,
+            output: String::new(),
+            exit_code: None,
+            created_at: String::new(),
+        };
+        assert!(output_entry_matches_submitted_job(&entry, "CUSTOM"));
+        assert!(!output_entry_matches_submitted_job(&entry, "OTHER"));
+    }
+
+    #[test]
+    fn matches_request_id_when_job_id_is_row_fallback() {
+        let entry = OutputEntry {
+            entry_id: 100,
+            request_id: 0xDEAD_BEEF,
+            job_id: "100".to_owned(),
+            command: None,
+            output: "ok".to_owned(),
+            exit_code: None,
+            created_at: String::new(),
+        };
+        assert!(output_entry_matches_submitted_job(&entry, "DEADBEEF"));
+        assert!(output_entry_matches_submitted_job(&entry, "deadbeef"));
+        assert!(output_entry_matches_submitted_job(&entry, "0xDEADBEEF"));
     }
 }

@@ -74,6 +74,7 @@ pub(super) async fn handle_harvest_callback(
                     ]
                     .into_iter(),
                     &context,
+                    request_id,
                 )),
             },
         )

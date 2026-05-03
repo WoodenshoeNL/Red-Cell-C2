@@ -129,6 +129,8 @@ pub struct OutputEntry {
     /// `AgentOutputEntry` and the `AgentOutputQuery::since: Option<i64>`
     /// parameter.
     pub entry_id: i64,
+    /// Correlates with REST `TaskID` / Demon request id on the wire.
+    pub request_id: u32,
     pub job_id: String,
     pub command: Option<String>,
     pub output: String,

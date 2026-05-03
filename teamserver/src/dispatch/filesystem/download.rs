@@ -353,6 +353,7 @@ pub(in crate::dispatch) async fn persist_download(
                 ]
                 .into_iter(),
                 context,
+                state.request_id,
             )),
         },
     )

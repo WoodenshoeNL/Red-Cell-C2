@@ -15,12 +15,15 @@ pub(crate) struct OutputPage {
 
 /// Single entry in the `OutputPage.entries` array.
 ///
-/// The server also sends `command_id`, `request_id`, `response_type`, and
-/// `operator` which are silently ignored by serde.
+/// The server also sends `command_id`, `response_type`, and `operator` which
+/// are silently ignored by serde.
 #[derive(Debug, Deserialize)]
 pub(crate) struct OutputWireEntry {
     pub(crate) id: i64,
     pub(crate) task_id: Option<String>,
+    /// Demon / queue request id (matches `TaskID` from `next_task_id()` when hex).
+    #[serde(default)]
+    pub(crate) request_id: u32,
     pub(crate) message: String,
     pub(crate) output: String,
     pub(crate) command_line: Option<String>,
@@ -40,6 +43,7 @@ mod tests {
         let json = serde_json::json!({
             "id": 42,
             "task_id": "t1",
+            "request_id": 17,
             "message": "Received Output [3 bytes]:",
             "output": "err",
             "command_line": "exit 1",
@@ -48,6 +52,7 @@ mod tests {
         });
         let entry: OutputWireEntry = serde_json::from_value(json).expect("deserialise");
         assert_eq!(entry.exit_code, Some(1));
+        assert_eq!(entry.request_id, 17);
     }
 
     /// `OutputWireEntry` sets `exit_code` to `None` when the field is absent
@@ -64,6 +69,7 @@ mod tests {
         });
         let entry: OutputWireEntry = serde_json::from_value(json).expect("deserialise");
         assert_eq!(entry.exit_code, None);
+        assert_eq!(entry.request_id, 0);
     }
 }
 

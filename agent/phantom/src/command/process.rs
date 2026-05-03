@@ -196,6 +196,8 @@ pub(super) async fn execute_process(
                 request_id,
                 payload: encode_proc_kill(success, pid),
             });
+            // REST `exec --wait` correlates on `CommandOutput` rows; mirror piped create (proc + output).
+            state.queue_callback(PendingCallback::Output { request_id, text: String::new() });
         }
         DemonProcessCommand::Grep => {
             let needle = parser.wstring()?.to_lowercase();

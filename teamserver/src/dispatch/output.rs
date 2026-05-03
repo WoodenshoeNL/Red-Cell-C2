@@ -41,13 +41,9 @@ pub(super) async fn handle_command_output_callback(
         }
     }
     let context = loot_context(registry, agent_id, request_id).await;
-    // Persist even when output is empty if we have a task context — the CLI polls
-    // the database by task_id and will time out if no entry is ever created.
-    // Commands like `kill <pid>` produce no output (exit code only) and previously
-    // caused exec_wait to hang until timeout.
-    if output.is_empty() && context.task_id.is_empty() {
-        return Ok(None);
-    }
+    // Empty body is normal for some tasks (`kill`, etc.).  `broadcast_and_persist_agent_response`
+    // synthesizes a TaskID from `request_id` when queue metadata is missing so REST
+    // `exec --wait` and output polling still see a terminal row (red-cell-c2-1f7q1).
     broadcast_and_persist_agent_response(
         database,
         events,

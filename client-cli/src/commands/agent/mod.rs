@@ -28,6 +28,7 @@ pub(crate) mod output_cmd;
 pub(crate) mod packet_ring;
 pub(crate) mod show;
 pub(crate) mod task;
+pub(crate) mod task_correlation;
 pub(crate) mod transfer;
 pub(crate) mod types;
 pub(crate) mod wire;

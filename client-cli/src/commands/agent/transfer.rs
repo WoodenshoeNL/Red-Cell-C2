@@ -5,12 +5,15 @@ use std::time::{Duration, Instant};
 use tokio::time::sleep;
 use tracing::instrument;
 
+use serde_json::Value;
+
 use crate::AgentId;
 use crate::backoff::Backoff;
 use crate::client::ApiClient;
 use crate::error::CliError;
 use crate::util::percent_encode;
 
+use super::task_correlation::loot_matches_expected_task_id;
 use super::types::TransferResult;
 use super::wire::TaskQueuedResponse;
 
@@ -100,6 +103,8 @@ pub(crate) async fn download(
         id: i64,
         task_id: Option<String>,
         has_data: bool,
+        #[serde(default)]
+        metadata: Option<Value>,
     }
     #[derive(serde::Deserialize)]
     struct RawLootPage {
@@ -123,9 +128,14 @@ pub(crate) async fn download(
         let agent_str = id.to_string();
         let path = format!("/loot?kind=download&agent_id={}", percent_encode(&agent_str));
         let page: RawLootPage = client.get(&path).await?;
-        if let Some(entry) =
-            page.items.iter().find(|e| e.task_id.as_deref() == Some(&task_id) && e.has_data)
-        {
+        if let Some(entry) = page.items.iter().find(|e| {
+            e.has_data
+                && loot_matches_expected_task_id(
+                    &task_id,
+                    e.task_id.as_deref(),
+                    e.metadata.as_ref(),
+                )
+        }) {
             break entry.id;
         }
         backoff.record_empty();

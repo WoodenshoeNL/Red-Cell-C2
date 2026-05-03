@@ -60,8 +60,12 @@ def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _wait_for_local_file(path: str, timeout: int = 30) -> None:
-    """Poll until a local file exists and has non-zero size."""
+def _wait_for_local_file(path: str, timeout: int = 135) -> None:
+    """Poll until a local file exists and has non-zero size.
+
+    Default timeout exceeds `red-cell-cli agent download`'s 120 s loot poll so the
+    harness does not give up while the CLI is still waiting on the teamserver.
+    """
 
     poll(
         fn=lambda: os.path.exists(path) and os.path.getsize(path) > 0,

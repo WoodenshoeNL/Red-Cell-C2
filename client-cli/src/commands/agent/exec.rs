@@ -11,6 +11,7 @@ use red_cell_common::demon::{
 };
 
 use super::output_cmd::fetch_output;
+use super::task_correlation::hex_correlation_tokens_equal;
 use super::types::{ExecResult, JobSubmitted, OutputEntry};
 use super::wire::TaskQueuedResponse;
 use crate::AgentId;
@@ -43,7 +44,7 @@ pub(crate) fn command_id_for(cmd: &str) -> &'static str {
 /// Matches the server's `task_id` field when present; otherwise compares
 /// `request_id` to `submitted_job_id` interpreted as hex (same as `next_task_id()`).
 fn output_entry_matches_submitted_job(entry: &OutputEntry, submitted_job_id: &str) -> bool {
-    if entry.job_id == submitted_job_id {
+    if hex_correlation_tokens_equal(&entry.job_id, submitted_job_id) {
         return true;
     }
     let trimmed = submitted_job_id.trim();
@@ -189,6 +190,21 @@ pub(crate) async fn exec_wait(
 mod output_match_tests {
     use super::super::types::OutputEntry;
     use super::output_entry_matches_submitted_job;
+
+    #[test]
+    fn matches_padded_job_id_against_unpadded_submitted_token() {
+        let entry = OutputEntry {
+            entry_id: 1,
+            request_id: 0x2A,
+            job_id: "0000002A".to_owned(),
+            command: None,
+            output: String::new(),
+            exit_code: None,
+            created_at: String::new(),
+        };
+        assert!(output_entry_matches_submitted_job(&entry, "2A"));
+        assert!(output_entry_matches_submitted_job(&entry, "0x2a"));
+    }
 
     #[test]
     fn matches_equal_job_id() {

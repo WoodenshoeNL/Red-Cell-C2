@@ -62,9 +62,10 @@ class TestFormatArchonCheckinTimeoutDiagnostics(unittest.TestCase):
         self.assertNotIn("Test-NetConnection", text)
         self.assertIn("live processes from target.work_dir", text)
         # UTC (1) + netstat (1) + Defender AV events (1) + Network Protection events (1)
-        # + process probe (1).  APPCRASH and MpPreference probes are probe_host-gated →
+        # + process probe (1) + Firewall block events (1).
+        # APPCRASH, MpPreference, and active firewall rules are probe_host-gated →
         # skipped when probe_host is None (ctx.env={}, ctx.cli=None).
-        self.assertEqual(m.call_count, 5)
+        self.assertEqual(m.call_count, 6)
 
 
 class TestTryWindowsWorkdirProcesses(unittest.TestCase):

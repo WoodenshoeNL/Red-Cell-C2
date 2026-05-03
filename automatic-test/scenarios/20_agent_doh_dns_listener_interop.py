@@ -362,7 +362,7 @@ def run(ctx):
     from urllib.parse import urlparse
 
     from lib.cli import agent_kill, listener_create, listener_delete, listener_start, listener_stop
-    from lib.deploy import DeployError, inject_hosts_entry, preflight_dns
+    from lib.deploy import DeployError, inject_hosts_entry, preflight_dns, preflight_ssh
 
     cli = ctx.cli
     listeners_cfg = ctx.env.get("listeners", {})
@@ -382,6 +382,20 @@ def run(ctx):
         except DeployError as exc:
             raise ScenarioSkipped(f"cannot inject /etc/hosts entry: {exc}") from exc
         preflight_dns(ctx.linux, dns_domain, teamserver_ip)
+
+    if ctx.windows is not None:
+        try:
+            preflight_ssh(ctx.windows)
+        except DeployError as exc:
+            print(f"  [preflight] Windows SSH unreachable — skipping Windows hosts inject: {exc}")
+        else:
+            try:
+                inject_hosts_entry(ctx.windows, dns_domain, teamserver_ip)
+            except DeployError as exc:
+                raise ScenarioSkipped(f"[windows] cannot inject hosts entry: {exc}") from exc
+            preflight_dns(ctx.windows, dns_domain, teamserver_ip)
+            print(f"  [preflight] Windows hosts entry for {dns_domain!r} → {teamserver_ip} verified")
+
     listener_name = f"test-doh-dns-{_short_id()}"
     scenario13 = _load_protocol_probe_module()
 

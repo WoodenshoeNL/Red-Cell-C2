@@ -366,11 +366,13 @@ def wait_for_agent_id(
 def agent_exec(cfg: CliConfig, agent_id: str, cmd: str,
                wait: bool = True, timeout: int | None = None) -> dict:
     args = ["agent", "exec", agent_id, "--cmd", cmd]
+    run_cfg = cfg
     if wait:
         args.append("--wait")
     if timeout is not None:
         args += ["--wait-timeout", str(timeout)]
-    return _run(cfg, *args)
+        run_cfg = cfg.with_timeout(timeout)
+    return _run(run_cfg, *args)
 
 
 def agent_upload(cfg: CliConfig, agent_id: str, src: str, dst: str) -> dict:

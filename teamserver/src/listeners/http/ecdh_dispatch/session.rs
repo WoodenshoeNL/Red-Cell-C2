@@ -100,13 +100,57 @@ pub(crate) async fn process_ecdh_session(
     };
 
     // Packet is authenticated and seq-validated — now it is safe to refresh liveness.
-    let _ = ecdh_db.touch_session(connection_id).await;
+    // Log and broadcast on failure so operators can distinguish callback success
+    // from liveness-state drift (stale last_seen / last_call_in timestamps).
+    // We do not return an error here because the seq_num has already been advanced;
+    // propagating an error would cause the agent to retry with the same seq_num,
+    // which would be rejected as a replay.
+    if let Err(e) = ecdh_db.touch_session(connection_id).await {
+        let text = format!(
+            "[listener={listener_name}] agent={agent_id:08X} ECDH liveness drift: \
+             touch_session failed — agent is alive but last_seen is stale: {e}"
+        );
+        broadcast_teamserver_line(events, "teamserver", &text);
+        warn!(
+            listener = listener_name,
+            agent_id = format_args!("{agent_id:08X}"),
+            %e,
+            "ECDH liveness drift: touch_session failed — last_seen not updated"
+        );
+    }
 
     // Refresh the agent's last_call_in so the liveness monitor does not mark the
     // agent dead while it is actively communicating via ECDH callback packets
     // (which do not contain CommandCheckin).
-    if let Ok(ts) = OffsetDateTime::now_utc().format(&Rfc3339) {
-        let _ = registry.set_last_call_in(agent_id, ts).await;
+    match OffsetDateTime::now_utc().format(&Rfc3339) {
+        Err(e) => {
+            let text = format!(
+                "[listener={listener_name}] agent={agent_id:08X} ECDH liveness drift: \
+                 timestamp format failed — set_last_call_in skipped: {e}"
+            );
+            broadcast_teamserver_line(events, "teamserver", &text);
+            warn!(
+                listener = listener_name,
+                agent_id = format_args!("{agent_id:08X}"),
+                %e,
+                "ECDH liveness drift: timestamp format failed — set_last_call_in skipped"
+            );
+        }
+        Ok(ts) => {
+            if let Err(e) = registry.set_last_call_in(agent_id, ts).await {
+                let text = format!(
+                    "[listener={listener_name}] agent={agent_id:08X} ECDH liveness drift: \
+                     set_last_call_in failed — agent is alive but last_call_in is stale: {e}"
+                );
+                broadcast_teamserver_line(events, "teamserver", &text);
+                warn!(
+                    listener = listener_name,
+                    agent_id = format_args!("{agent_id:08X}"),
+                    %e,
+                    "ECDH liveness drift: set_last_call_in failed — last_call_in not updated"
+                );
+            }
+        }
     }
 
     let response_bytes = match dispatcher

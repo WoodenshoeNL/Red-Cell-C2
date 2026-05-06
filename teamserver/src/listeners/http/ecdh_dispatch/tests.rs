@@ -924,3 +924,122 @@ async fn ecdh_handled_path_writes_corpus_files() {
         "ECDH session must identify as aes-256-gcm"
     );
 }
+
+// ── ECDH liveness drift tests ─────────────────────────────────────────
+
+/// When `touch_session` fails because the DB pool is closed after the session
+/// row is stored but before the liveness update, `process_ecdh_session` must
+/// still return `Ok` (the agent gets a response) and must broadcast a warning
+/// message describing the liveness drift.
+///
+/// We induce the failure by calling `process_ecdh_session` with a valid empty
+/// session packet after closing the pool — `advance_seq_num` is skipped for
+/// empty payloads, so the first DB call that fires is `touch_session`.
+#[tokio::test]
+async fn touch_session_failure_broadcasts_liveness_drift_warning() {
+    use red_cell_common::crypto::ecdh::seal_session_packet;
+
+    let (db, repo) = test_ecdh_db().await;
+    let conn_id = red_cell_common::crypto::ecdh::ConnectionId::generate().expect("conn_id");
+    let session_key = [0x11u8; 32];
+    let agent_id: u32 = 0xCAFE_0001;
+
+    repo.store_session(&conn_id, agent_id, &session_key).await.expect("store");
+
+    // Do not register the agent — the pool will be closed before any DB access,
+    // so set_last_call_in will fail via AgentNotFound (registry is empty).
+    let registry = AgentRegistry::new(db.clone());
+    // Use non-zero capacity so broadcast_teamserver_line retains log entries.
+    let events = EventBus::new(64);
+    let dispatcher = CommandDispatcher::new();
+
+    // Build a valid empty session packet: connection_id | sealed("").
+    // An empty plaintext skips seq_num advance, so touch_session is the
+    // first DB write after the auth/decrypt step.
+    let body = seal_session_packet(&conn_id, &session_key, b"").expect("seal");
+
+    // Close the pool — touch_session will fail, set_last_call_in will also
+    // fail (AgentNotFound), but the function must still return Ok and broadcast.
+    db.close().await;
+
+    let result = process_ecdh_session(
+        &body,
+        &session_key,
+        agent_id,
+        &conn_id.0,
+        EcdhSessionContext {
+            ecdh_db: repo,
+            registry: &registry,
+            dispatcher: &dispatcher,
+            events: &events,
+            listener_name: "test-listener",
+        },
+    )
+    .await;
+
+    assert!(result.is_ok(), "liveness update failure must not abort the session; got: {result:?}");
+
+    // At least one liveness-drift broadcast must appear in the retained log.
+    let logs = events.recent_teamserver_logs();
+    let got_drift_warning = logs.iter().any(|msg| {
+        if let red_cell_common::operator::OperatorMessage::TeamserverLog(m) = msg {
+            m.info.text.contains("ECDH liveness drift")
+        } else {
+            false
+        }
+    });
+    assert!(got_drift_warning, "at least one 'ECDH liveness drift' message must be broadcast");
+}
+
+/// When `set_last_call_in` fails because the agent is not in the in-memory
+/// registry, `process_ecdh_session` must still return `Ok` (the agent gets
+/// a valid response) and must broadcast a warning describing the drift.
+#[tokio::test]
+async fn set_last_call_in_failure_broadcasts_liveness_drift_warning() {
+    use red_cell_common::crypto::ecdh::seal_session_packet;
+
+    let (db, repo) = test_ecdh_db().await;
+    let conn_id = red_cell_common::crypto::ecdh::ConnectionId::generate().expect("conn_id");
+    let session_key = [0x22u8; 32];
+    let agent_id: u32 = 0xCAFE_0002;
+
+    repo.store_session(&conn_id, agent_id, &session_key).await.expect("store");
+
+    // Do NOT register agent_id in the registry — set_last_call_in will return
+    // AgentNotFound.  touch_session will succeed because the DB is still open.
+    let registry = AgentRegistry::new(db.clone());
+    let events = EventBus::new(64);
+    let dispatcher = CommandDispatcher::new();
+
+    let body = seal_session_packet(&conn_id, &session_key, b"").expect("seal");
+
+    let result = process_ecdh_session(
+        &body,
+        &session_key,
+        agent_id,
+        &conn_id.0,
+        EcdhSessionContext {
+            ecdh_db: repo,
+            registry: &registry,
+            dispatcher: &dispatcher,
+            events: &events,
+            listener_name: "test-listener",
+        },
+    )
+    .await;
+
+    assert!(result.is_ok(), "set_last_call_in failure must not abort the session; got: {result:?}");
+
+    let logs = events.recent_teamserver_logs();
+    let got_drift_warning = logs.iter().any(|msg| {
+        if let red_cell_common::operator::OperatorMessage::TeamserverLog(m) = msg {
+            m.info.text.contains("ECDH liveness drift") && m.info.text.contains("set_last_call_in")
+        } else {
+            false
+        }
+    });
+    assert!(
+        got_drift_warning,
+        "a 'ECDH liveness drift: set_last_call_in' warning must be broadcast"
+    );
+}

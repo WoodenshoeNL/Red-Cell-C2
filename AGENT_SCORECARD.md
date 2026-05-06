@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1746 | 297 | 148 |
+| Tasks closed | 1747 | 297 | 148 |
 | Bugs filed against | 285 | 50 | 19 |
 | Bug rate (bugs/task) | 0.16 | 0.17 | 0.13 |
 | Quality score | 84% | 83% | 87% |
 
-*Bug rates: Claude 285/1746=0.1632→0.16, Codex 50/297=0.1684→0.17, Cursor 19/148=0.1284→0.13*
+*Bug rates: Claude 285/1747=0.1631→0.16, Codex 50/297=0.1684→0.17, Cursor 19/148=0.1284→0.13*
 
 ## Violation Breakdown
 
@@ -41,6 +41,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-05-06 23:22 — d2a8d3bd..af970233
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 0 | Dominant activity in this range across Archon transport hardening, autotest Windows launch/cleanup/triage, teamserver listener/NO_JOB behavior, and follow-up beads management. One close commit landed: `4db0b651` closed `red-cell-c2-yiu3h`. I did not file new bugs against Claude this run. |
+| Codex | 0 | 0 | Only beads/QA sweep commits in range (`4529b961`, `8fee8dbd`, `8ba4205a`) and no closed-task commit. No new findings attributed. |
+| Cursor | 0 | 0 | Substantive fixes in `client-cli`, `teamserver`, `phantom`, `specter`, and `archon`, but no close commit in this range. The client-cli defects I found from these changes were already covered by open beads (`red-cell-c2-88cnx`, `red-cell-c2-auci4`, `red-cell-c2-cvikq`, `red-cell-c2-p8nvb`), so I did not file duplicates. |
+
+Build: passed (`cargo check --workspace` in 1m14s; `cargo nextest run --workspace` 6231/6231 PASS, 1 skipped, in 236.568s after a 10m20s test build; `cargo clippy --workspace -- -D warnings` clean in 6m45s).
 
 ### QA Review — 2026-04-30 10:00 — c6e3a61c..84995d70
 

@@ -985,6 +985,91 @@ async fn download_succeeds_when_loot_available_immediately() {
     assert_eq!(content, b"file contents");
 }
 
+/// `download` must skip loot entries whose `task_id` does not match the
+/// submitted task and keep polling until a matching entry appears.
+///
+/// The first poll returns one entry with a mismatched `task_id`; the second
+/// poll returns the correct entry.  We assert that the file is written from
+/// the second (matching) entry and not the first.
+#[tokio::test]
+async fn download_skips_non_matching_loot_and_succeeds_on_second_poll() {
+    use tempfile::NamedTempFile;
+    use wiremock::matchers::{method, path_regex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path_regex(r"^/api/v1/agents/[^/]+/download$"))
+        .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
+            "agent_id": "0000A004",
+            "task_id": "task-dl-skip",
+            "queued_jobs": 1
+        })))
+        .mount(&server)
+        .await;
+
+    // First poll: one entry with the wrong task_id — must be skipped.
+    // The regex must end with `$` so it does not match /loot/{id} fetch paths.
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/api/v1/loot$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "total": 1,
+            "offset": 0,
+            "limit": 100,
+            "items": [{
+                "id": 11,
+                "task_id": "unrelated-task",
+                "has_data": true,
+                "metadata": null
+            }]
+        })))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+
+    // Second poll: the matching entry.
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/api/v1/loot$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "total": 1,
+            "offset": 0,
+            "limit": 100,
+            "items": [{
+                "id": 12,
+                "task_id": "task-dl-skip",
+                "has_data": true,
+                "metadata": null
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/api/v1/loot/12$"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"correct contents".to_vec()))
+        .mount(&server)
+        .await;
+
+    let dst = NamedTempFile::new().expect("tempfile");
+    let dst_path = dst.path().to_str().expect("utf-8 path").to_owned();
+
+    let cfg = mock_cfg(&server.uri());
+    let client = crate::client::ApiClient::new(&cfg).expect("build client");
+
+    let result = download(&client, agent_id(0xA004), "/etc/secret", &dst_path, 10).await;
+
+    assert!(
+        result.is_ok(),
+        "download must succeed after skipping non-matching loot; got: {result:?}"
+    );
+    let content = std::fs::read(&dst_path).expect("read dst");
+    assert_eq!(
+        content, b"correct contents",
+        "file must be written from the matching loot entry, not the skipped one"
+    );
+}
+
 // ── AgentGroupsInfo / RawAgentGroupsResponse ──────────────────────────────
 
 #[test]

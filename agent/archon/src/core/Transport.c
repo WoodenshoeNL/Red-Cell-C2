@@ -18,6 +18,13 @@ BOOL TransportInit( )
     SIZE_T Size    = 0;
     BOOL   Success = FALSE;
 
+#ifdef ARCHON_HTTP_LOG
+    HttpWriteDebugLog( "TransportInit enter", 0 );
+#ifdef ARCHON_ECDH_MODE
+    HttpWriteDebugLog( Instance->ECDH.RegPacket ? "TransportInit ECDH pkt OK" : "TransportInit ECDH pkt NULL", 0 );
+#endif
+#endif
+
 #ifdef ARCHON_ECDH_MODE
     /* ECDH registration: send the pre-built registration packet and parse the
      * response to obtain the connection_id and confirm the session key.

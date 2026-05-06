@@ -25,7 +25,7 @@
  * Uses CreateFileW/WriteFile/NtClose via the Win32 dispatch table so it works
  * in any execution context without libc.  No-op on I/O failure.
  */
-static void HttpWriteDebugLog( LPCSTR Msg, DWORD ErrCode ) {
+void HttpWriteDebugLog( LPCSTR Msg, DWORD ErrCode ) {
     HANDLE hFile;
     DWORD  Written;
     char   Buf[ 256 ];
@@ -86,10 +86,21 @@ static void HttpWriteDebugLog( LPCSTR Msg, DWORD ErrCode ) {
         FILE_ATTRIBUTE_NORMAL,
         NULL
     );
-    /* If cwd-relative path rejected, retry the coarse C:\\Temp fall-back exactly once. */
+    /* If cwd-relative path rejected, retry C:\\Temp, then C:\\Windows\\Temp. */
     if ( LogPathPrepared && ( ! hFile || hFile == INVALID_HANDLE_VALUE ) ) {
         hFile = Instance->Win32.CreateFileW(
             L"C:\\Temp\\archon-http.txt",
+            FILE_APPEND_DATA,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            NULL,
+            OPEN_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL,
+            NULL
+        );
+    }
+    if ( ! hFile || hFile == INVALID_HANDLE_VALUE ) {
+        hFile = Instance->Win32.CreateFileW(
+            L"C:\\Windows\\Temp\\archon-http.txt",
             FILE_APPEND_DATA,
             FILE_SHARE_READ | FILE_SHARE_WRITE,
             NULL,

@@ -67,6 +67,11 @@ PHOST_DATA HostRandom();
  */
 BOOL HostCheckup();
 
+#ifdef ARCHON_HTTP_LOG
+/* Write one ASCII diagnostic line to the debug log (see TransportHttp.c). */
+void HttpWriteDebugLog( LPCSTR Msg, DWORD ErrCode );
+#endif
+
 
 DWORD HttpQueryStatus( HANDLE hRequest );
 

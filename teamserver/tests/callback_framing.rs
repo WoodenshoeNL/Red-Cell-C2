@@ -8,10 +8,14 @@
 //! - `38svz`: batched GET_JOB framing — multiple callbacks packed in one encrypted body
 //! - `pa1wi`: Phantom ECDH callback batching — `DemonMessage` little-endian multi-package
 //! - endianness: Demon/Archon wire format uses big-endian for the outer callback command_id
+//! - `lkkaq`: Phantom ECDH session packet reaching the Demon decoder — size-field mismatch
 
-use red_cell::{AgentRegistry, Database, DemonPacketParser, ParsedDemonPacket};
+use red_cell::{AgentRegistry, Database, DemonPacketParser, DemonParserError, ParsedDemonPacket};
+use red_cell_common::crypto::ecdh::{ConnectionId, seal_session_packet};
 use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, encrypt_agent_data_at_offset};
-use red_cell_common::demon::{DemonCommand, DemonEnvelope, DemonMessage, DemonPackage};
+use red_cell_common::demon::{
+    DemonCommand, DemonEnvelope, DemonMessage, DemonPackage, DemonProtocolError,
+};
 use red_cell_common::{AgentEncryptionInfo, AgentRecord};
 use zeroize::Zeroizing;
 
@@ -333,4 +337,94 @@ async fn callback_command_id_wire_format_is_big_endian_matching_c_agent() {
         packages[0].payload, payload_body,
         "packages[0].payload: body bytes must survive encrypt/decrypt round-trip"
     );
+}
+
+// ── test 6 — lkkaq: Phantom ECDH session packet size-field mismatch ─
+
+/// Regression test for red-cell-c2-lkkaq: when a Phantom ECDH session packet
+/// (whose first 16 bytes are the random `connection_id`) reaches the Demon
+/// decoder instead of the ECDH handler, the non-legacy `ArchonEnvelope::from_bytes`
+/// reads `connection_id[0..4]` as a big-endian size field and immediately
+/// produces `DemonProtocolError::SizeMismatch`.
+///
+/// Failure signature observed in run_191850_ee8da1eb (sc04):
+///   `demon packet decode failed: invalid demon protocol data: invalid Demon
+///    packet size: declared 4283406928 bytes, actual 121 bytes`
+///
+/// The packet is exactly 125 bytes:
+///   `connection_id(16) | nonce(12) | ciphertext(81) | tag(16)`
+///
+/// The Archon decoder reads `bytes[0..4]` = `connection_id[0..4]` as the
+/// declared size → 0xFF4F9A50 = 4283406928.  The actual remaining payload
+/// after the 4-byte size field is `125 - 4 = 121` bytes → mismatch.
+///
+/// Root cause candidate: `03af86e3` — `agent/phantom/src/agent/transport.rs`
+/// `get_job()`. Advancing `ctr_offset` and `callback_seq` only on POST success
+/// can desync the non-ECDH keystream; combined with a listener restart or
+/// reconnect, a stale shared state causes the ECDH session lookup to return
+/// `NotEcdh`, routing the session packet to the Demon decoder.
+///
+/// The fix lives in sibling issue red-cell-c2-0xpyf.
+#[tokio::test]
+async fn phantom_ecdh_session_packet_produces_size_mismatch_in_demon_decoder() {
+    // Build a Phantom ECDH session packet with the exact connection_id prefix
+    // that appeared in the sc04 failure: 0xFF4F9A50 big-endian at bytes [0..4].
+    //
+    // Packet layout: [connection_id: 16] | [nonce: 12] | [ciphertext: 81] | [tag: 16] = 125 bytes
+    // When the Demon decoder reads bytes[0..4] as big-endian u32:
+    //   0xFF_4F_9A_50 = 4_283_406_928   ← the "declared" size in the error
+    //   actual = 125 - 4 = 121          ← the "actual" size in the error
+    let connection_id = ConnectionId([
+        0xFF, 0x4F, 0x9A, 0x50, // bytes[0..4] read as big-endian size by Archon decoder
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // padding
+        0x09, 0x0A, 0x0B, 0x0C, // bytes[8..12]: must not equal 0xDEAD_BEEF
+    ]);
+    let session_key = [0xBB_u8; 32];
+    // 81-byte payload → sealed packet = 16 + 12 + 81 + 16 = 125 bytes, matching sc04 failure.
+    // (seq_num: 8) + (DemonMessage with [CommandCheckin+CommandGetJob]+piped-proc callbacks: ~73)
+    let payload = [0x42_u8; 81];
+    let packet = seal_session_packet(&connection_id, &session_key, &payload)
+        .expect("AES-GCM seal must succeed with valid key");
+
+    assert_eq!(
+        packet.len(),
+        125,
+        "ECDH session packet must be exactly 125 bytes (connection_id:16 + nonce:12 + \
+         ciphertext:81 + tag:16); got {} — payload size calculation is wrong",
+        packet.len()
+    );
+
+    // The Demon decoder (non-legacy path) is reached when the ECDH session
+    // lookup returns NotEcdh (e.g. connection_id not in DB, or DB error silently
+    // swallowed in the if-let Ok(Some(...)) guard in classify.rs).
+    let db = Database::connect_in_memory().await.expect("in-memory DB");
+    let registry = AgentRegistry::new(db);
+    // No ECDH session registered — simulates the failure condition.
+    let parser = DemonPacketParser::new(registry).with_legacy_mode(false);
+
+    let err = parser.parse_for_listener(&packet, "127.0.0.1", "test-listener").await.expect_err(
+        "ECDH session packet must fail when it reaches the Demon decoder \
+             instead of the ECDH handler",
+    );
+
+    // Confirm the exact failure signature from the sc04 run report.
+    match err {
+        DemonParserError::Protocol(DemonProtocolError::SizeMismatch { declared, actual }) => {
+            assert_eq!(
+                declared, 4_283_406_928,
+                "declared size must equal connection_id[0..4] read as big-endian u32 \
+                 (0xFF4F9A50); got {declared} — bytes[0..4] of the packet have shifted"
+            );
+            assert_eq!(
+                actual, 121,
+                "actual size must be packet.len()-4 = 125-4 = 121; got {actual}"
+            );
+        }
+        other => panic!(
+            "expected DemonParserError::Protocol(SizeMismatch {{ declared: 4283406928, \
+             actual: 121 }}), got: {other:?}\n\
+             This is the sc04 failure signature — the wrong error variant means the \
+             regression has a different root cause than bisected"
+        ),
+    }
 }

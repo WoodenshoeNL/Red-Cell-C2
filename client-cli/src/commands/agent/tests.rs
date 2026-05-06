@@ -10,7 +10,7 @@ use super::output_cmd::{
     fetch_output, render_output_stream_line, take_cursor_reset_warning, watch_output,
 };
 use super::show::agent_detail_from_raw;
-use super::transfer::upload;
+use super::transfer::{download, upload};
 use super::types::RawAgentGroupsResponse;
 use super::types::{
     AgentDetail, AgentGroupsInfo, AgentSummary, ExecResult, JobSubmitted, KillResult, OutputEntry,
@@ -877,6 +877,112 @@ async fn upload_accepts_file_at_or_below_size_limit() {
         !matches!(err, CliError::InvalidArgs(_)),
         "should not reject file within size limit, got {err:?}"
     );
+}
+
+// ── download — timeout plumbing ───────────────────────────────────────────
+
+/// `download` must honour the caller-supplied `timeout_secs` rather than any
+/// internal constant.  We configure a mock server that successfully accepts
+/// the POST and then returns an empty loot page on every poll, and we set
+/// `timeout_secs = 1`.  The function must return `CliError::Timeout` before
+/// waiting 120 seconds.
+#[tokio::test]
+async fn download_exits_with_timeout_error_when_loot_never_appears() {
+    use wiremock::matchers::{method, path_regex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+
+    // Accept the initial POST /agents/{id}/download.
+    Mock::given(method("POST"))
+        .and(path_regex(r"^/api/v1/agents/[^/]+/download$"))
+        .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
+            "agent_id": "0000A002",
+            "task_id": "task-dl-timeout",
+            "queued_jobs": 1
+        })))
+        .mount(&server)
+        .await;
+
+    // Always return an empty loot page so the poll loop never resolves.
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/api/v1/loot"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "total": 0,
+            "offset": 0,
+            "limit": 100,
+            "items": []
+        })))
+        .mount(&server)
+        .await;
+
+    let cfg = mock_cfg(&server.uri());
+    let client = crate::client::ApiClient::new(&cfg).expect("build client");
+
+    let result = download(&client, agent_id(0xA002), "/etc/passwd", "/tmp/out.txt", 1).await;
+
+    assert!(
+        matches!(result, Err(CliError::Timeout(_))),
+        "download must return CliError::Timeout when loot never appears; got: {result:?}"
+    );
+}
+
+/// `download` must NOT time out immediately: when the loot entry is present
+/// on the first poll, it should succeed regardless of the `timeout_secs` value.
+#[tokio::test]
+async fn download_succeeds_when_loot_available_immediately() {
+    use tempfile::NamedTempFile;
+    use wiremock::matchers::{method, path_regex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path_regex(r"^/api/v1/agents/[^/]+/download$"))
+        .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
+            "agent_id": "0000A003",
+            "task_id": "task-dl-ok",
+            "queued_jobs": 1
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/api/v1/loot$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "total": 1,
+            "offset": 0,
+            "limit": 100,
+            "items": [{
+                "id": 7,
+                "task_id": "task-dl-ok",
+                "has_data": true,
+                "metadata": null
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/api/v1/loot/7$"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"file contents".to_vec()))
+        .mount(&server)
+        .await;
+
+    let dst = NamedTempFile::new().expect("tempfile");
+    let dst_path = dst.path().to_str().expect("utf-8 path").to_owned();
+
+    let cfg = mock_cfg(&server.uri());
+    let client = crate::client::ApiClient::new(&cfg).expect("build client");
+
+    let result = download(&client, agent_id(0xA003), "/etc/passwd", &dst_path, 30).await;
+
+    assert!(
+        result.is_ok(),
+        "download must succeed when loot is immediately available; got: {result:?}"
+    );
+    let content = std::fs::read(&dst_path).expect("read dst");
+    assert_eq!(content, b"file contents");
 }
 
 // ── AgentGroupsInfo / RawAgentGroupsResponse ──────────────────────────────

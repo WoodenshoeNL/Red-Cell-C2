@@ -54,9 +54,19 @@ use self::transfer::{download, upload};
 
 /// Dispatch an [`AgentCommands`] variant and return a process exit code.
 ///
+/// `timeout_secs` is the resolved CLI timeout (from `--timeout` / env /
+/// config file / default).  Commands that perform long polling — such as
+/// `agent download` — use this value as their deadline so the caller-
+/// controlled timeout contract is honoured uniformly.
+///
 /// All output (success and error) is written inside this function so that the
 /// caller in `main.rs` only needs to propagate the exit code.
-pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) -> i32 {
+pub async fn run(
+    client: &ApiClient,
+    fmt: &OutputFormat,
+    action: AgentCommands,
+    timeout_secs: u64,
+) -> i32 {
     match action {
         AgentCommands::List { watch, max_failures } => {
             if watch {
@@ -199,19 +209,21 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) 
             }
         }
 
-        AgentCommands::Download { id, src, dst } => match download(client, id, &src, &dst).await {
-            Ok(data) => match print_success(fmt, &data) {
-                Ok(()) => EXIT_SUCCESS,
+        AgentCommands::Download { id, src, dst } => {
+            match download(client, id, &src, &dst, timeout_secs).await {
+                Ok(data) => match print_success(fmt, &data) {
+                    Ok(()) => EXIT_SUCCESS,
+                    Err(e) => {
+                        print_error(&e).ok();
+                        e.exit_code()
+                    }
+                },
                 Err(e) => {
                     print_error(&e).ok();
                     e.exit_code()
                 }
-            },
-            Err(e) => {
-                print_error(&e).ok();
-                e.exit_code()
             }
-        },
+        }
 
         AgentCommands::Groups { id } => match get_groups(client, id).await {
             Ok(data) => match print_success(fmt, &data) {

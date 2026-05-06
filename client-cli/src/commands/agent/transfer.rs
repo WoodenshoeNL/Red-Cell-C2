@@ -83,16 +83,22 @@ pub(crate) async fn upload(
 /// `GET /loot` until the loot entry with the matching task_id appears, fetches
 /// the loot bytes, and writes them to `dst`.
 ///
+/// `timeout_secs` controls how long the loot-poll loop waits before returning
+/// [`CliError::Timeout`] (exit code 5).  Pass the resolved CLI timeout so that
+/// `--timeout N` / the config file value / the 30 s default all take effect
+/// here — exactly the same contract as `agent exec --wait`.
+///
 /// # Errors
 ///
-/// Returns [`CliError::Timeout`] if the loot entry does not appear within 120 s.
-/// Propagates HTTP errors and filesystem errors.
+/// Returns [`CliError::Timeout`] if the loot entry does not appear within
+/// `timeout_secs`.  Propagates HTTP errors and filesystem errors.
 #[instrument(skip(client))]
 pub(crate) async fn download(
     client: &ApiClient,
     id: AgentId,
     src: &str,
     dst: &str,
+    timeout_secs: u64,
 ) -> Result<TransferResult, CliError> {
     #[derive(serde::Serialize)]
     struct Body<'a> {
@@ -115,14 +121,13 @@ pub(crate) async fn download(
         client.post(&format!("/agents/{id}/download"), &Body { remote_path: src }).await?;
     let task_id = resp.task_id.clone();
 
-    // Poll for the loot entry created by this download task (up to 120 s).
-    const TIMEOUT_SECS: u64 = 120;
-    let deadline = Instant::now() + Duration::from_secs(TIMEOUT_SECS);
+    // Poll for the loot entry created by this download task.
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     let mut backoff = Backoff::new();
     let loot_id = loop {
         if Instant::now() >= deadline {
             return Err(CliError::Timeout(format!(
-                "timed out waiting for download loot entry for task {task_id} after {TIMEOUT_SECS}s"
+                "timed out waiting for download loot entry for task {task_id} after {timeout_secs}s"
             )));
         }
         let agent_str = id.to_string();

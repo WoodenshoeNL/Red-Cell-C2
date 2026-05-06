@@ -18,6 +18,19 @@ pub(in super::super) fn archon_ecdh_defines(
     Ok(vec![mode_define, key_define])
 }
 
+/// Returns `Some("ARCHON_HTTP_LOG")` when the `ARCHON_HTTP_LOG` environment
+/// variable is set to a non-empty value, signalling that the operator wants
+/// WinHTTP step logging enabled in this build.  Returns `None` by default so
+/// production payloads do not write forensic artifacts (`archon-http.txt`) to
+/// disk on the target.
+///
+/// To enable: `ARCHON_HTTP_LOG=1 red-cell …` (or export it in the shell).
+pub(in super::super) fn archon_http_log_define() -> Option<String> {
+    std::env::var_os("ARCHON_HTTP_LOG")
+        .filter(|v| !v.is_empty())
+        .map(|_| "ARCHON_HTTP_LOG".to_owned())
+}
+
 /// Generate a random 4-byte Archon magic value and return the corresponding
 /// `-D` define string together with the raw `u32` value.
 ///
@@ -161,6 +174,21 @@ mod tests {
         for _ in 0..100 {
             let (_define, name) = generate_archon_export_name().expect("should not fail");
             assert_ne!(name, "Start", "export name must not be the well-known 'Start' identifier");
+        }
+    }
+
+    #[test]
+    fn archon_http_log_define_off_by_default() {
+        // When the env var is not set the define must be absent so that
+        // production payloads do not ship with diagnostic disk I/O enabled.
+        // Note: set_var/remove_var are unsafe in Rust 2024 (data-race risk),
+        // so we only verify the default-off path here.  The on-path is
+        // exercised by setting ARCHON_HTTP_LOG=1 in the environment manually.
+        if std::env::var_os("ARCHON_HTTP_LOG").is_none() {
+            assert!(
+                archon_http_log_define().is_none(),
+                "ARCHON_HTTP_LOG define must be absent when env var is unset"
+            );
         }
     }
 }

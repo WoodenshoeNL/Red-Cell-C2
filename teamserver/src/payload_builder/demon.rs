@@ -13,8 +13,9 @@ use tempfile::TempDir;
 use red_cell_common::ListenerConfig;
 
 use super::build_defs::{
-    archon_ecdh_defines, build_defines, build_stager_defines, default_compiler_flags,
-    generate_archon_export_name, generate_archon_magic, main_args, stager_cache_bytes,
+    archon_ecdh_defines, archon_http_log_define, build_defines, build_stager_defines,
+    default_compiler_flags, generate_archon_export_name, generate_archon_magic, main_args,
+    stager_cache_bytes,
 };
 use super::cache::compute_cache_key;
 use super::compiler::{asm_sources, c_sources, run_command};
@@ -185,10 +186,12 @@ impl PayloadBuilderService {
         if agent.name == "archon" {
             let (magic_define, _magic_value) = generate_archon_magic()?;
             defines.push(magic_define);
-            // Temporary: enable file-based WinHTTP step logging (red-cell-c2-vudj9 debug).
-            // Writes WinHTTP breadcrumbs to %CD%\\archon-http.txt then C:\\Temp\\
-            // (TransportHttp.c::HttpWriteDebugLog).  Remove once sc17 is consistently passing.
-            defines.push("ARCHON_HTTP_LOG".to_owned());
+            // ARCHON_HTTP_LOG activates WinHTTP step logging to archon-http.txt on the target
+            // (TransportHttp.c::HttpWriteDebugLog). Off by default; set ARCHON_HTTP_LOG=1 in
+            // the teamserver environment to enable for diagnostic builds only.
+            if let Some(http_log_define) = archon_http_log_define() {
+                defines.push(http_log_define);
+            }
             // Randomize the DLL export name for every Archon DLL/ReflectiveDll build so
             // that no two binaries share the known "Start" Havoc fingerprint.
             if matches!(format, OutputFormat::Dll | OutputFormat::ReflectiveDll) {

@@ -113,7 +113,6 @@ def run(ctx):
     listener_start(cli, listener_open)
 
     agent_id = None
-    wfp_cleanup = None
     try:
         agent = deploy_and_checkin(
             ctx,
@@ -124,11 +123,9 @@ def run(ctx):
             listener_name=listener_open,
             sleep_secs=sleep_interval,
             label="23b",
-            defer_wfp_cleanup=True,
         )
         assert agent is not None
         agent_id = agent["id"]
-        wfp_cleanup = agent.pop("_wfp_cleanup", None)
         print(f"  [23][phase2] agent checked in: {agent_id}")
         result = agent_exec(cli, agent_id, "whoami", wait=True, timeout=co)
         assert result.get("output", "").strip(), "whoami returned empty output after open-window deploy"
@@ -140,8 +137,6 @@ def run(ctx):
             except Exception as exc:
                 print(f"  [23][cleanup] agent kill failed (non-fatal): {exc}")
 
-        if wfp_cleanup is not None:
-            wfp_cleanup()
         try:
             listener_stop(cli, listener_open)
         except Exception:

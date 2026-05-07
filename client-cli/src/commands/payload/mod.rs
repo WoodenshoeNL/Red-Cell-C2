@@ -49,6 +49,7 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: PayloadCommands
             format,
             agent,
             sleep: sleep_secs,
+            amsi_etw,
             wait,
             wait_timeout,
             detach,
@@ -62,6 +63,7 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: PayloadCommands
                 &format,
                 &agent,
                 sleep_secs,
+                amsi_etw.as_deref(),
                 effective_wait,
                 build_timeout_secs,
             )

@@ -61,7 +61,9 @@ pub(super) async fn list(client: &ApiClient) -> Result<Vec<PayloadRow>, CliError
 /// red-cell-cli payload build --listener http1 --arch x86_64 --format exe
 /// red-cell-cli payload build --listener http1 --arch x86_64 --format exe --wait
 /// red-cell-cli payload build --listener http1 --arch x86_64 --format bin --agent phantom
+/// red-cell-cli payload build --listener http1 --arch x86_64 --format exe --amsi-etw none
 /// ```
+#[allow(clippy::too_many_arguments)]
 #[instrument(skip(client))]
 pub(super) async fn build(
     client: &ApiClient,
@@ -70,6 +72,7 @@ pub(super) async fn build(
     format: &str,
     agent: &str,
     sleep_secs: Option<u64>,
+    amsi_etw: Option<&str>,
     wait: bool,
     timeout_secs: u64,
 ) -> Result<BuildOutcome, CliError> {
@@ -84,6 +87,10 @@ pub(super) async fn build(
 
     if let Some(s) = sleep_secs {
         body["sleep"] = serde_json::json!(s);
+    }
+
+    if let Some(mode) = amsi_etw {
+        body["amsi_etw"] = serde_json::json!(mode);
     }
 
     let submitted: BuildSubmitResponse = client.post("/payloads/build", &body).await?;

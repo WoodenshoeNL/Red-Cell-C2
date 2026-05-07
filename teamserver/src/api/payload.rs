@@ -98,6 +98,9 @@ pub(super) struct PayloadBuildRequest {
     agent: String,
     /// Optional agent sleep interval in seconds.
     sleep: Option<u64>,
+    /// AMSI/ETW bypass mode: `"hwbp"` (hardware breakpoints), `"patch"` (memory
+    /// patch), or `"none"`.  When omitted, the profile default is used.
+    amsi_etw: Option<String>,
 }
 
 fn default_agent_type() -> String {
@@ -403,14 +406,19 @@ pub(super) async fn submit_payload_build(
     let format_cli = request.format.clone();
     let build_job_id = job_id.clone();
 
+    let mut config_map = serde_json::Map::new();
+    if let Some(s) = request.sleep {
+        config_map.insert("Sleep".to_owned(), serde_json::json!(s));
+    }
+    if let Some(ref mode) = request.amsi_etw {
+        config_map.insert("Amsi/Etw Patch".to_owned(), serde_json::json!(mode));
+    }
     let build_request = red_cell_common::operator::BuildPayloadRequestInfo {
         agent_type: agent_type.to_owned(),
         listener: request.listener.clone(),
         arch: request.arch.clone(),
         format: havoc_format.to_owned(),
-        config: request
-            .sleep
-            .map_or_else(|| "{}".to_owned(), |s| serde_json::json!({"Sleep": s}).to_string()),
+        config: serde_json::Value::Object(config_map).to_string(),
     };
 
     tokio::spawn(async move {

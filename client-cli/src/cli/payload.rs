@@ -14,6 +14,7 @@ pub enum PayloadCommands {
     ///   red-cell-cli payload build --listener dns1  --arch aarch64 --format bin --sleep 5 --wait
     ///   red-cell-cli payload build --listener http1 --arch x86_64 --format bin --agent phantom
     ///   red-cell-cli payload build --detach --listener http1 --arch x86_64 --format exe
+    ///   red-cell-cli payload build --listener http1 --arch x86_64 --format exe --amsi-etw none
     #[command(verbatim_doc_comment)]
     Build {
         /// Listener name the payload connects back to
@@ -31,6 +32,9 @@ pub enum PayloadCommands {
         /// Agent sleep interval in seconds
         #[arg(long)]
         sleep: Option<u64>,
+        /// AMSI/ETW bypass mode: hwbp (hardware breakpoints), patch (memory patch), or none
+        #[arg(long, value_parser = ["hwbp", "patch", "none"])]
+        amsi_etw: Option<String>,
         /// Block until the build finishes (polls for completion)
         #[arg(long)]
         wait: bool,

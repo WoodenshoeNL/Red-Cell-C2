@@ -47,6 +47,7 @@ def deploy_and_checkin(
     checkin_periodic_interval: float | None = None,
     checkin_periodic_callback: Callable[[], None] | None = None,
     windows_prelaunch_probe: bool = False,
+    amsi_etw: str | None = None,
 ) -> dict | None:
     """Build, deploy, execute, and wait for a single agent checkin.
 
@@ -80,6 +81,8 @@ def deploy_and_checkin(
         label:            Print-tag prefix, e.g. ``"demon"`` → ``[demon][payload]``.
                           Defaults to *agent_type* when *None*.
         sleep_secs:       Passed to ``payload build --sleep`` (agent callback interval).
+        amsi_etw:         Optional AMSI/ETW bypass mode — ``"hwbp"``, ``"patch"``, or
+                          ``"none"``.  Passed to ``payload build --amsi-etw``.
         expect_checkin:   When ``False``, wait up to *no_checkin_timeout* and expect
                           **no** new agent (working-hours / blocked scenarios).
         no_checkin_timeout: Seconds to wait for absence of checkin when *expect_checkin*
@@ -147,6 +150,7 @@ def deploy_and_checkin(
                     fmt=fmt,
                     agent=agent_type,
                     sleep_secs=sleep_secs,
+                    amsi_etw=amsi_etw,
                 )
                 print(f"  [{tag}][payload] built ({len(raw)} bytes)")
             assert len(raw) > 0, f"{agent_type} payload is empty"

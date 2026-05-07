@@ -72,6 +72,7 @@ async fn build_sends_agent_field_in_request_body() {
         "exe",
         "phantom",
         None,
+        None,
         false,
         PAYLOAD_BUILD_WAIT_TIMEOUT_SECS,
     )
@@ -117,6 +118,7 @@ async fn build_sends_default_demon_agent() {
         "exe",
         "demon",
         None,
+        None,
         false,
         PAYLOAD_BUILD_WAIT_TIMEOUT_SECS,
     )
@@ -125,6 +127,95 @@ async fn build_sends_default_demon_agent() {
     let requests = server.received_requests().await.expect("requests");
     let body: serde_json::Value = serde_json::from_slice(&requests[0].body).expect("parse body");
     assert_eq!(body["agent"], "demon", "default agent must be 'demon'");
+}
+
+// ── amsi_etw field ───────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn build_sends_amsi_etw_field_when_specified() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/payloads/build"))
+        .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
+            "job_id": "test-amsi-job"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let cfg = crate::config::ResolvedConfig {
+        server: server.uri(),
+        token: "tok".to_owned(),
+        timeout: 5,
+        tls_mode: crate::config::TlsMode::SystemRoots,
+    };
+    let client = crate::client::ApiClient::new(&cfg).expect("client");
+
+    let result = build::build(
+        &client,
+        "http1",
+        "x64",
+        "exe",
+        "archon",
+        None,
+        Some("none"),
+        false,
+        PAYLOAD_BUILD_WAIT_TIMEOUT_SECS,
+    )
+    .await;
+    assert!(result.is_ok(), "build must succeed: {result:?}");
+
+    let requests = server.received_requests().await.expect("requests");
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).expect("parse body");
+    assert_eq!(body["amsi_etw"], "none", "request body must include amsi_etw field");
+}
+
+#[tokio::test]
+async fn build_omits_amsi_etw_field_when_not_specified() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/payloads/build"))
+        .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
+            "job_id": "test-no-amsi-job"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let cfg = crate::config::ResolvedConfig {
+        server: server.uri(),
+        token: "tok".to_owned(),
+        timeout: 5,
+        tls_mode: crate::config::TlsMode::SystemRoots,
+    };
+    let client = crate::client::ApiClient::new(&cfg).expect("client");
+
+    let result = build::build(
+        &client,
+        "http1",
+        "x64",
+        "exe",
+        "demon",
+        None,
+        None,
+        false,
+        PAYLOAD_BUILD_WAIT_TIMEOUT_SECS,
+    )
+    .await;
+    assert!(result.is_ok(), "build must succeed: {result:?}");
+
+    let requests = server.received_requests().await.expect("requests");
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).expect("parse body");
+    assert!(
+        body.get("amsi_etw").is_none() || body["amsi_etw"].is_null(),
+        "amsi_etw must be absent when not specified"
+    );
 }
 
 // ── format validation ─────────────────────────────────────────────────────────

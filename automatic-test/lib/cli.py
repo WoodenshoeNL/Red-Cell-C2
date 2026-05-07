@@ -198,7 +198,8 @@ def payload_build(cfg: CliConfig, listener: str,
                   agent: str = "demon",
                   sleep_secs: int | None = None,
                   wait: bool = False,
-                  detach: bool = False) -> dict:
+                  detach: bool = False,
+                  amsi_etw: str | None = None) -> dict:
     """Submit a payload build job.
 
     ``detach=True`` returns immediately with ``{"job_id": ...}`` (``payload build
@@ -212,6 +213,9 @@ def payload_build(cfg: CliConfig, listener: str,
     With ``wait=True`` and ``detach=False``: blocks until the build finishes,
     returns ``{"id": <payload_id>, "size_bytes": N}``.
 
+    ``amsi_etw``: optional AMSI/ETW bypass mode — ``"hwbp"``, ``"patch"``, or
+    ``"none"``.  When omitted the teamserver profile default is used.
+
     """
     args = ["payload", "build",
             "--listener", listener,
@@ -220,6 +224,8 @@ def payload_build(cfg: CliConfig, listener: str,
             "--agent", agent]
     if sleep_secs is not None:
         args += ["--sleep", str(sleep_secs)]
+    if amsi_etw is not None:
+        args += ["--amsi-etw", amsi_etw]
     if detach:
         args.append("--detach")
     if wait and not detach:
@@ -294,17 +300,22 @@ def payload_download(cfg: CliConfig, payload_id: str | int, dst: str) -> dict:
 def payload_build_and_fetch(cfg: CliConfig, listener: str,
                             arch: str = "x64", fmt: str = "exe",
                             agent: str = "demon",
-                            sleep_secs: int | None = None) -> bytes:
+                            sleep_secs: int | None = None,
+                            amsi_etw: str | None = None) -> bytes:
     """Build a payload (blocking) and return the raw bytes.
 
     Combines ``payload build --wait`` with ``payload download`` into a
     single call.  A temporary file is used to receive the download and
     is deleted before returning.
 
+    ``amsi_etw``: optional AMSI/ETW bypass mode — ``"hwbp"``, ``"patch"``, or
+    ``"none"``.  Passed through to :func:`payload_build`.
+
     """
     result = payload_build(
         cfg, listener=listener, arch=arch, fmt=fmt,
         agent=agent, sleep_secs=sleep_secs, wait=True, detach=False,
+        amsi_etw=amsi_etw,
     )
     payload_id = result["id"]
 

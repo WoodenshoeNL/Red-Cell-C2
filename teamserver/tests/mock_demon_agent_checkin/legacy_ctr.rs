@@ -288,3 +288,133 @@ async fn legacy_ctr_proc_create_task_and_output_round_trip()
     harness.shutdown().await?;
     Ok(())
 }
+
+/// Large piped output round-trip — mirrors what `netstat -ano` sends back on a busy
+/// Windows machine.  Verifies the teamserver-side pipeline handles large DEMON_OUTPUT
+/// packets without truncation, parse error, or task-id correlation failure.
+///
+/// If this test passes but sc05 still times out, the bottleneck is in the Demon binary
+/// (agent/demon/src/core/Win32.c:AnonPipesRead) not the teamserver.
+#[tokio::test]
+async fn legacy_ctr_large_command_output_round_trip()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut harness =
+        spawn_server_with_http_listener("edge-http-legacy-large-output").await?;
+    let listener_port = harness.listener_port;
+
+    let agent_id = 0xABCD_EF01_u32;
+    let key: [u8; AGENT_KEY_LENGTH] = [
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D,
+        0x1E, 0x1F, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B,
+        0x2C, 0x2D, 0x2E, 0x2F,
+    ];
+    let iv: [u8; AGENT_IV_LENGTH] = [
+        0xA0, 0xB1, 0xC2, 0xD3, 0xE4, 0xF5, 0x06, 0x17, 0x28, 0x39, 0x4A, 0x5B, 0x6C, 0x7D,
+        0x8E, 0x9F,
+    ];
+    const CTR: u64 = 0;
+
+    harness
+        .client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_init_body(agent_id, key, iv))
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?;
+
+    let _agent_new =
+        timeout(Duration::from_secs(10), common::read_operator_message(&mut harness.socket))
+            .await
+            .map_err(|_| "timed out waiting for AgentNew")??;
+
+    // task_id must be a valid hex string: the websocket handler parses it as
+    // u32::from_str_radix(task_id, 16) to derive the Demon protocol request_id.
+    let task_id = "A501";
+    let task_id_u32: u32 = u32::from_str_radix(task_id, 16).expect("task_id is valid hex");
+    let proc_task = serde_json::to_string(&OperatorMessage::AgentTask(Message {
+        head: MessageHead {
+            event: EventCode::Session,
+            user: "operator".to_owned(),
+            timestamp: String::new(),
+            one_time: String::new(),
+        },
+        info: AgentTaskInfo {
+            task_id: task_id.to_owned(),
+            command_line: "netstat -ano".to_owned(),
+            demon_id: format!("{agent_id:08X}"),
+            command_id: u32::from(DemonCommand::CommandProc).to_string(),
+            sub_command: Some("create".to_owned()),
+            extra: BTreeMap::from([(
+                "Args".to_owned(),
+                Value::String(format_proc_create_args("netstat -ano")),
+            )]),
+            ..AgentTaskInfo::default()
+        },
+    }))?;
+    harness.socket.send_text(proc_task).await?;
+    let _echo =
+        timeout(Duration::from_secs(10), common::read_operator_message(&mut harness.socket))
+            .await
+            .map_err(|_| "timed out waiting for task echo")??;
+
+    // Simulate what Demon's AnonPipesRead sends for netstat -ano on a machine with
+    // ~300 TCP/UDP connections — approximately 40 KB of plain-text lines.
+    let netstat_line =
+        "  TCP    192.168.213.160:12345   192.168.213.157:19083  TIME_WAIT       0\r\n";
+    let output_text: String = std::iter::repeat(netstat_line).take(512).collect();
+    assert!(output_text.len() > 40_000, "output must be large enough to surface size bugs");
+
+    let large_output_cb = harness
+        .client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            CTR,
+            u32::from(DemonCommand::CommandOutput),
+            task_id_u32,
+            &{
+                let mut p = Vec::new();
+                p.extend_from_slice(&(output_text.len() as u32).to_be_bytes());
+                p.extend_from_slice(output_text.as_bytes());
+                p
+            },
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+    assert!(
+        large_output_cb.bytes().await?.is_empty(),
+        "teamserver must return empty ACK for CommandOutput"
+    );
+
+    let output_event =
+        timeout(Duration::from_secs(10), common::read_operator_message(&mut harness.socket))
+            .await
+            .map_err(|_| "timed out waiting for large CommandOutput event")??;
+    let OperatorMessage::AgentResponse(resp) = output_event else {
+        panic!("expected AgentResponse, got something else");
+    };
+    assert_eq!(resp.info.output, output_text, "large output must be stored verbatim");
+    assert_eq!(
+        resp.info.extra.get("TaskID").and_then(serde_json::Value::as_str),
+        Some(task_id),
+        "TaskID must correlate back to the submitted task token"
+    );
+    assert_eq!(
+        resp.info.command_line.as_deref(),
+        Some("netstat -ano"),
+        "command_line must match the original task"
+    );
+    assert_eq!(
+        harness.server.agent_registry.ctr_offset(agent_id).await?,
+        0,
+        "legacy CTR must stay at 0 regardless of output size"
+    );
+
+    harness.shutdown().await?;
+    Ok(())
+}

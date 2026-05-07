@@ -109,7 +109,12 @@ impl DohTransport {
             .resolve("dns.google", goog_addr)
             .timeout(Duration::from_secs(10))
             .build()
-            .map_err(|e| SpecterError::Transport(format!("DoH client build failed: {e}")))?;
+            .map_err(|e| {
+                SpecterError::Transport(format!(
+                    "DoH client build failed: {}",
+                    format_reqwest_error(&e)
+                ))
+            })?;
 
         Ok(Self { client, provider_url: provider.url(), c2_domain })
     }
@@ -270,10 +275,12 @@ impl DohTransport {
             )));
         }
 
-        let body = response
-            .text()
-            .await
-            .map_err(|e| SpecterError::Transport(format!("DoH response read error: {e}")))?;
+        let body = response.text().await.map_err(|e| {
+            SpecterError::Transport(format!(
+                "DoH response read error: {}",
+                format_reqwest_error(&e)
+            ))
+        })?;
 
         parse_doh_txt_records(&body).map_err(SpecterError::Transport)
     }

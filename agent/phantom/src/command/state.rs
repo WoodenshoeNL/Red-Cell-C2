@@ -23,6 +23,7 @@ use super::pivot::pivot_read_frame;
 
 impl PhantomState {
     pub(crate) async fn poll(&mut self) -> Result<(), PhantomError> {
+        self.reap_injected_pids();
         self.accept_reverse_port_forward_clients().await?;
         self.accept_socks_proxy_clients()?;
         self.poll_sockets().await?;
@@ -31,6 +32,29 @@ impl PhantomState {
         self.push_download_chunks();
         self.poll_pivots();
         Ok(())
+    }
+
+    /// Register a spawned child PID for deferred zombie reaping.
+    pub(crate) fn track_injected_pid(&mut self, pid: u32) {
+        self.injected_pids.push(pid);
+    }
+
+    /// Non-blocking reap pass: call `waitpid(WNOHANG)` for each tracked injected PID.
+    ///
+    /// Removes PIDs that have exited.  PIDs that are still running stay in the list
+    /// for the next poll cycle.
+    fn reap_injected_pids(&mut self) {
+        self.injected_pids.retain(|&pid| {
+            let mut status: i32 = 0;
+            // SAFETY: pid is a valid child PID we spawned; WNOHANG returns immediately.
+            let ret = unsafe { libc::waitpid(pid as i32, &mut status, libc::WNOHANG) };
+            if ret > 0 {
+                tracing::debug!(pid, "reaped injected child process");
+                false
+            } else {
+                true
+            }
+        });
     }
 
     pub(crate) fn drain_callbacks(&mut self) -> Vec<PendingCallback> {

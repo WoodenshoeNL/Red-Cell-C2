@@ -39,6 +39,7 @@ use std::time::Duration;
 use tracing::{debug, trace, warn};
 
 use crate::error::SpecterError;
+use crate::transport::format_reqwest_error;
 
 /// Maximum base32 characters per DNS data label.
 ///
@@ -258,7 +259,9 @@ impl DohTransport {
             .header("Accept", "application/dns-json")
             .send()
             .await
-            .map_err(|e| SpecterError::Transport(format!("DoH HTTP error: {e}")))?;
+            .map_err(|e| {
+                SpecterError::Transport(format!("DoH HTTP error: {}", format_reqwest_error(&e)))
+            })?;
 
         if !response.status().is_success() {
             return Err(SpecterError::Transport(format!(

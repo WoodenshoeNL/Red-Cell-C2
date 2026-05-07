@@ -22,7 +22,7 @@ use crate::error::SpecterError;
 ///
 /// `reqwest::Error::to_string()` (Display) may omit intermediate causes; traversing
 /// `std::error::Error::source()` manually surfaces the root OS error.
-fn format_reqwest_error(e: &reqwest::Error) -> String {
+pub(crate) fn format_reqwest_error(e: &reqwest::Error) -> String {
     use std::error::Error as StdError;
     let mut msg = e.to_string();
     let mut src: Option<&dyn StdError> = e.source();

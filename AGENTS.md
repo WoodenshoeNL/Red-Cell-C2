@@ -208,7 +208,7 @@ Teamserver profiles live in `./profiles/` (`.yaotl` config files + TLS certs). T
 
 | Directory | Name | Language | Status | Policy |
 |-----------|------|----------|--------|--------|
-| `agent/demon/` | **Demon** | C/ASM | ✅ Production | **Frozen** — pristine Havoc Demon copy. Do not modify. Replace with upstream to update. |
+| `agent/demon/` | **Demon** | C/ASM | ✅ Production | **Patched Havoc Demon copy.** Carries a small set of documented local patches (see *Demon Local Patches* section below). Replace with upstream during a refresh, then re-apply patches from the log. |
 | `agent/archon/` | **Archon** | C/ASM | ✅ Production | **Fork of Demon with 9 enhancements (ARC-01 through ARC-09). Wire-compatible. Same toolchain (`mingw-w64` + `nasm`).** Parity milestone complete; all enhancements implemented and tested (191 tests pass). Teamserver integration complete. |
 | `agent/phantom/` | **Phantom** | Rust | ✅ Production | **Linux Rust agent.** Demon-compatible transport (ECDH, INIT_EXT_SEQ_PROTECTED, monotonic CTR). Linux-specific capabilities: persist (cron/systemd), harvest (`/proc`), kerberos (ccache/keytab), screenshot, ptrace injection. Cargo lints enforce no `todo!`/`unimplemented!`. Build: `cargo build --target x86_64-unknown-linux-musl`. |
 | `agent/specter/` | **Specter** | Rust | ✅ Production | **Windows Rust agent.** Full Demon command parity (token ops, .NET assembly exec, BOF loader, DPAPI harvest, kerberos LSA) with ECDH transport, INIT_EXT_SEQ_PROTECTED, and monotonic CTR. Build: `cargo build --target x86_64-pc-windows-gnu`. |
@@ -228,6 +228,28 @@ cargo build --release --target x86_64-unknown-linux-musl
 cd agent/specter
 cargo build --release --target x86_64-pc-windows-gnu
 ```
+
+### Demon Local Patches (`agent/demon/`)
+
+`agent/demon/` is the base Havoc Demon source with a small set of local patches applied
+on top.  Patches are listed here so that upstream refreshes can be re-applied after
+replacing the tree.
+
+#### Upstream-refresh process
+
+1. Copy the new Havoc Demon source over `agent/demon/` (keep `HAVOC_ATTRIBUTION.md`).
+2. Re-apply each patch in the table below in order.
+3. Build and run the autotest suite to verify no regression.
+4. Commit with a message like `chore(demon): refresh to upstream <commit-sha>, re-apply local patches`.
+
+#### Patch log
+
+| ID | File(s) | Issue | Description |
+|----|---------|-------|-------------|
+| DEM-P01 | `src/core/Win32.c` | red-cell-c2-f1c32 | **AnonPipesInit — non-inheritable read end.** After `CreatePipe`, call `DuplicateHandle` with `bInheritHandle=FALSE` to recreate the read end as non-inheritable, then close the original. Prevents cmd.exe/conhost.exe from inheriting the read end and blocking `ReadFile` after cmd.exe exits. |
+| DEM-P02 | `src/core/Win32.c` | red-cell-c2-f1c32 | **ProcessCreate — close write end after spawn.** After any `CreateProcess*` call succeeds for the `Piped` branch, close the parent's copy of `AnonPipe->StdOutWrite` immediately. The child has already inherited its copy; keeping the parent copy open prevents EOF from being signalled to `AnonPipesRead`. |
+
+---
 
 ## Large Task Policy
 

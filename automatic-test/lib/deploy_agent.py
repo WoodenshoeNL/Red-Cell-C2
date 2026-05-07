@@ -17,9 +17,11 @@ from lib.deploy import (
     TargetConfig,
     defender_add_process_exclusion,
     defender_network_protection_exclusion,
+    defender_remove_network_protection_exclusion,
     ensure_work_dir,
     execute_background,
     firewall_allow_program,
+    firewall_remove_program,
     run_remote,
     upload,
     windows_sync_payload_probe,
@@ -122,125 +124,149 @@ def deploy_and_checkin(
     sep = "\\" if is_windows else "/"
     remote_payload = f"{target.work_dir}{sep}agent-{uid}.{fmt}"
 
+    # Track Windows WFP/NP state so we can clean up on every exit path.
+    _wfp_program_path: str | None = None
+    _wfp_np_host: str | None = None
+
     _fd, local_payload = tempfile.mkstemp(suffix=f".{fmt}")
     os.close(_fd)
+
     try:
-        # Step 2 — build payload (or use pre-built bytes).
-        if pre_built_payload is not None:
-            raw = pre_built_payload
-            print(f"  [{tag}][payload] using pre-built {agent_type} {fmt} {arch} ({len(raw)} bytes)")
-        else:
-            maybe_flush_payload_cache_for_rust_agent(cli, agent_type)
-            print(f"  [{tag}][payload] building {agent_type} {fmt} {arch}")
-            raw = payload_build_and_fetch(
-                cli,
-                listener=listener_name,
-                arch=arch,
-                fmt=fmt,
-                agent=agent_type,
-                sleep_secs=sleep_secs,
-            )
-            print(f"  [{tag}][payload] built ({len(raw)} bytes)")
-        assert len(raw) > 0, f"{agent_type} payload is empty"
-
-        with open(local_payload, "wb") as fh:
-            fh.write(raw)
-
-        # Step 3 — deploy via SCP.
-        print(f"  [{tag}][deploy] ensuring work dir {target.work_dir!r} on target")
-        ensure_work_dir(target)
-        print(f"  [{tag}][deploy] uploading payload → {remote_payload}")
-        upload(target, local_payload, remote_payload)
-        if not is_windows:
-            run_remote(target, f"chmod +x {remote_payload}")
-        print(f"  [{tag}][deploy] uploaded")
-
-        if is_windows:
-            try:
-                print(f"  [{tag}][deploy] Defender process exclusion (payload basename)")
-                defender_add_process_exclusion(target, remote_payload)
-            except Exception as exc:
-                print(f"  [{tag}][deploy] Defender process exclusion failed (non-fatal): {exc}")
-            try:
-                print(f"  [{tag}][deploy] outbound firewall allow rule for payload exe")
-                firewall_allow_program(target, remote_payload)
-            except Exception as exc:
-                print(f"  [{tag}][deploy] firewall allow rule failed (non-fatal): {exc}")
-            try:
-                cb_host = (
-                    getattr(ctx, "env", {}).get("server", {}).get("callback_host")
-                    if ctx is not None else None
+        try:
+            # Step 2 — build payload (or use pre-built bytes).
+            if pre_built_payload is not None:
+                raw = pre_built_payload
+                print(f"  [{tag}][payload] using pre-built {agent_type} {fmt} {arch} ({len(raw)} bytes)")
+            else:
+                maybe_flush_payload_cache_for_rust_agent(cli, agent_type)
+                print(f"  [{tag}][payload] building {agent_type} {fmt} {arch}")
+                raw = payload_build_and_fetch(
+                    cli,
+                    listener=listener_name,
+                    arch=arch,
+                    fmt=fmt,
+                    agent=agent_type,
+                    sleep_secs=sleep_secs,
                 )
-                if cb_host:
-                    print(f"  [{tag}][deploy] Defender Network Protection IP exclusion ({cb_host})")
-                    defender_network_protection_exclusion(target, cb_host)
-                    # Verify exclusion took effect — ABSENT means NP will still block
-                    # WinHTTP connections from S4U processes (no TCP SYN generated).
-                    try:
-                        cb_q = cb_host.replace("'", "''")
-                        verify_script = (
-                            f"$excl = (Get-MpPreference -EA SilentlyContinue).ExclusionIpAddress; "
-                            f"if ($excl -contains '{cb_q}') {{ Write-Output 'NP_EXCL:PRESENT' }} "
-                            f"else {{ Write-Output ('NP_EXCL:ABSENT — list: ' + ($excl -join ',')) }}"
-                        )
-                        verify_out = run_remote(
-                            target,
-                            f"powershell -NoProfile -Command \"{verify_script}\"",
-                            timeout=15,
-                        )
-                        print(f"  [{tag}][deploy] NP exclusion verify: {verify_out.strip()}")
-                    except Exception as vexc:
-                        print(f"  [{tag}][deploy] NP exclusion verify failed (non-fatal): {vexc}")
-            except Exception as exc:
-                print(f"  [{tag}][deploy] Network Protection exclusion failed (non-fatal): {exc}")
+                print(f"  [{tag}][payload] built ({len(raw)} bytes)")
+            assert len(raw) > 0, f"{agent_type} payload is empty"
 
-        if is_windows and windows_prelaunch_probe:
+            with open(local_payload, "wb") as fh:
+                fh.write(raw)
+
+            # Step 3 — deploy via SCP.
+            print(f"  [{tag}][deploy] ensuring work dir {target.work_dir!r} on target")
+            ensure_work_dir(target)
+            print(f"  [{tag}][deploy] uploading payload → {remote_payload}")
+            upload(target, local_payload, remote_payload)
+            if not is_windows:
+                run_remote(target, f"chmod +x {remote_payload}")
+            print(f"  [{tag}][deploy] uploaded")
+
+            if is_windows:
+                try:
+                    print(f"  [{tag}][deploy] Defender process exclusion (payload basename)")
+                    defender_add_process_exclusion(target, remote_payload)
+                except Exception as exc:
+                    print(f"  [{tag}][deploy] Defender process exclusion failed (non-fatal): {exc}")
+                try:
+                    print(f"  [{tag}][deploy] outbound firewall allow rule for payload exe")
+                    firewall_allow_program(target, remote_payload)
+                    _wfp_program_path = remote_payload
+                except Exception as exc:
+                    print(f"  [{tag}][deploy] firewall allow rule failed (non-fatal): {exc}")
+                try:
+                    cb_host = (
+                        getattr(ctx, "env", {}).get("server", {}).get("callback_host")
+                        if ctx is not None else None
+                    )
+                    if cb_host:
+                        print(f"  [{tag}][deploy] Defender Network Protection IP exclusion ({cb_host})")
+                        defender_network_protection_exclusion(target, cb_host)
+                        _wfp_np_host = cb_host
+                        # Verify exclusion took effect — ABSENT means NP will still block
+                        # WinHTTP connections from S4U processes (no TCP SYN generated).
+                        try:
+                            cb_q = cb_host.replace("'", "''")
+                            verify_script = (
+                                f"$excl = (Get-MpPreference -EA SilentlyContinue).ExclusionIpAddress; "
+                                f"if ($excl -contains '{cb_q}') {{ Write-Output 'NP_EXCL:PRESENT' }} "
+                                f"else {{ Write-Output ('NP_EXCL:ABSENT — list: ' + ($excl -join ',')) }}"
+                            )
+                            verify_out = run_remote(
+                                target,
+                                f"powershell -NoProfile -Command \"{verify_script}\"",
+                                timeout=15,
+                            )
+                            print(f"  [{tag}][deploy] NP exclusion verify: {verify_out.strip()}")
+                        except Exception as vexc:
+                            print(f"  [{tag}][deploy] NP exclusion verify failed (non-fatal): {vexc}")
+                except Exception as exc:
+                    print(f"  [{tag}][deploy] Network Protection exclusion failed (non-fatal): {exc}")
+
+            if is_windows and windows_prelaunch_probe:
+                try:
+                    print(f"  [{tag}][deploy] synchronous prelaunch probe")
+                    probe_out = windows_sync_payload_probe(target, remote_payload, timeout_ms=8_000)
+                    for raw in probe_out.splitlines():
+                        line = raw.strip()
+                        if line:
+                            print(f"  [{tag}][probe] {line}")
+                except Exception as exc:
+                    print(f"  [{tag}][probe] probe failed (non-fatal): {exc}")
+
+            # Step 4 — execute payload in background.
+            print(f"  [{tag}][exec] launching payload in background on target")
+            execute_background(target, remote_payload)
+
+        finally:
             try:
-                print(f"  [{tag}][deploy] synchronous prelaunch probe")
-                probe_out = windows_sync_payload_probe(target, remote_payload, timeout_ms=8_000)
-                for raw in probe_out.splitlines():
-                    line = raw.strip()
-                    if line:
-                        print(f"  [{tag}][probe] {line}")
-            except Exception as exc:
-                print(f"  [{tag}][probe] probe failed (non-fatal): {exc}")
+                os.unlink(local_payload)
+            except OSError:
+                pass
 
-        # Step 4 — execute payload in background.
-        print(f"  [{tag}][exec] launching payload in background on target")
-        execute_background(target, remote_payload)
+        # Step 5 — wait for agent checkin.
+        if not expect_checkin:
+            probe = no_checkin_timeout
+            if probe is None:
+                tw = getattr(ctx, "timeouts", None)
+                if tw is not None and tw.working_hours_probe is not None:
+                    probe = int(tw.working_hours_probe)
+                else:
+                    probe = int(ctx.env.get("timeouts", {}).get("working_hours_probe", 45))
+            print(f"  [{tag}][wait] expecting NO checkin within {probe}s (working-hours probe)")
+            try:
+                agent = wait_for_agent(cli, timeout=probe, pre_existing_ids=pre_existing_ids)
+            except WaitTimeoutError:
+                print(f"  [{tag}][wait] no checkin (expected)")
+                return None
+            raise AssertionError(
+                f"agent {agent.get('id')!r} checked in unexpectedly — outside working hours"
+            )
+
+        print(f"  [{tag}][wait] waiting up to {timeout}s for agent checkin")
+        agent = wait_for_agent(
+            cli,
+            timeout=timeout,
+            pre_existing_ids=pre_existing_ids,
+            periodic_interval=checkin_periodic_interval,
+            periodic_callback=checkin_periodic_callback,
+        )
+        print(f"  [{tag}][wait] agent checked in: {agent['id']}")
+        return agent
 
     finally:
-        try:
-            os.unlink(local_payload)
-        except OSError:
-            pass
-
-    # Step 5 — wait for agent checkin (outside the finally so failure propagates cleanly).
-    if not expect_checkin:
-        probe = no_checkin_timeout
-        if probe is None:
-            tw = getattr(ctx, "timeouts", None)
-            if tw is not None and tw.working_hours_probe is not None:
-                probe = int(tw.working_hours_probe)
-            else:
-                probe = int(ctx.env.get("timeouts", {}).get("working_hours_probe", 45))
-        print(f"  [{tag}][wait] expecting NO checkin within {probe}s (working-hours probe)")
-        try:
-            agent = wait_for_agent(cli, timeout=probe, pre_existing_ids=pre_existing_ids)
-        except WaitTimeoutError:
-            print(f"  [{tag}][wait] no checkin (expected)")
-            return None
-        raise AssertionError(
-            f"agent {agent.get('id')!r} checked in unexpectedly — outside working hours"
-        )
-
-    print(f"  [{tag}][wait] waiting up to {timeout}s for agent checkin")
-    agent = wait_for_agent(
-        cli,
-        timeout=timeout,
-        pre_existing_ids=pre_existing_ids,
-        periodic_interval=checkin_periodic_interval,
-        periodic_callback=checkin_periodic_callback,
-    )
-    print(f"  [{tag}][wait] agent checked in: {agent['id']}")
-    return agent
+        # Remove WFP state added during deploy so rules don't accumulate across runs.
+        # Both operations are non-paged-pool consumers; leaking them causes WSAENOBUFS.
+        if _wfp_program_path:
+            try:
+                print(f"  [{tag}][cleanup] removing firewall rule for {_wfp_program_path}")
+                firewall_remove_program(target, _wfp_program_path)
+            except Exception as exc:
+                print(f"  [{tag}][cleanup] firewall rule removal failed (non-fatal): {exc}")
+        if _wfp_np_host:
+            try:
+                print(f"  [{tag}][cleanup] removing NP exclusion for {_wfp_np_host}")
+                defender_remove_network_protection_exclusion(target, _wfp_np_host)
+            except Exception as exc:
+                print(f"  [{tag}][cleanup] NP exclusion removal failed (non-fatal): {exc}")

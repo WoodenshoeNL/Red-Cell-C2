@@ -109,15 +109,12 @@ fn persist_cron(op: PhantomPersistOp, command: &str) -> Result<String, String> {
         .map_err(|e| format!("crontab - spawn failed: {e}"))?;
 
     {
-        // take() moves ChildStdin out so it is dropped here, closing the write-end of
-        // the pipe and sending EOF to crontab before we call wait().  Using as_mut()
-        // instead would leave the pipe open, causing crontab to block waiting for more
-        // input and deadlocking wait().
+        // take() drops ChildStdin at block end, sending EOF before wait().
         let mut stdin = child.stdin.take().ok_or_else(|| "crontab stdin unavailable".to_owned())?;
         stdin
             .write_all(new_crontab.as_bytes())
             .map_err(|e| format!("crontab write failed: {e}"))?;
-    } // ChildStdin dropped here → write-end closed → crontab gets EOF
+    }
 
     let status = child.wait().map_err(|e| format!("crontab wait failed: {e}"))?;
     if !status.success() {

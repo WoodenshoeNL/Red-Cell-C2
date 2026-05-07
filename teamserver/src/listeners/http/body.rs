@@ -24,6 +24,22 @@ pub(crate) const MINIMUM_DEMON_CALLBACK_BYTES: usize = DemonHeader::SERIALIZED_L
 /// message cap (`crate::MAX_AGENT_MESSAGE_LEN`).
 pub(crate) const NONLEGACY_PRECHECK_HEADER_LEN: usize = ArchonHeader::SERIALIZED_LEN; // 12
 
+/// Pre-auth buffer ceiling for unauthenticated non-legacy (ECDH-shaped) traffic.
+///
+/// Applied when the first four bytes of a non-legacy body cannot be interpreted
+/// as a valid in-range Archon declared-length (i.e. they claim a frame larger
+/// than `max_len` or smaller than [`NONLEGACY_PRECHECK_HEADER_LEN`]).  The
+/// overwhelming majority (~97.6 %) of ECDH registration and session packets hit
+/// this path because their leading bytes are uniformly random X25519
+/// key/connection-id material, which almost always encodes an Archon size well
+/// above 100 MiB.  Without an explicit cap the fallback was `max_len`
+/// (100 MiB), letting unauthenticated clients with X25519-prefixed bodies force
+/// 100 MiB per-request allocations — a pre-auth memory DoS.
+///
+/// Legitimate ECDH traffic is orders of magnitude smaller (registration ≤ a few
+/// KiB, session ≤ a few MiB for typical payloads), so 4 MiB is an ample bound.
+pub(crate) const MAX_NONLEGACY_PREAUTH_BODY_LEN: usize = 4 * 1024 * 1024; // 4 MiB
+
 /// Buffers an HTTP request body while performing an early pre-screen on the
 /// Demon transport magic value.
 ///
@@ -42,13 +58,11 @@ pub(crate) const NONLEGACY_PRECHECK_HEADER_LEN: usize = ArchonHeader::SERIALIZED
 ///   interpreted as an **exclusive** total byte count (`4 + size`, matching
 ///   [`ArchonEnvelope::from_bytes`]): further buffering is capped to that value
 ///   (and never beyond `max_len`).  If `4 + size` is below 12, or **strictly
-///   exceeds** `max_len`, the prefix cannot be a legitimate Archon frame under
-///   this cap (ECDH registration begins with 32 bytes of key material whose
-///   first four bytes are uniformly random and often mimic a huge Archon size),
-///   and the stream keeps using the caller's `max_len` cap only.  This closes a
-///   pre-auth memory DoS where a client matched the listener but sent a huge
-///   body whose header claimed a small packet.  Legitimate Archon payloads and
-///   ECDH registration/session packets retain prior behaviour.
+///   exceeds** `max_len`, the prefix is ECDH-shaped (random key/id material)
+///   and buffering is limited to [`MAX_NONLEGACY_PREAUTH_BODY_LEN`] — well
+///   below `max_len` — to prevent a pre-auth memory-exhaustion attack.
+///   Legitimate Archon payloads and ECDH registration/session packets stay
+///   within this bound.
 ///
 /// Returns `None` if the body exceeds `max_len`, contains a read error, or
 /// fails the appropriate magic check.
@@ -113,7 +127,12 @@ pub(crate) async fn collect_body_with_magic_precheck(
                 let archon_claim = 4usize.checked_add(declared as usize)?;
                 effective_max =
                     if archon_claim < NONLEGACY_PRECHECK_HEADER_LEN || archon_claim > max_len {
-                        max_len
+                        // ECDH-shaped traffic: first 4 bytes are random key/id
+                        // material, not an Archon declared-length.  Cap
+                        // pre-auth buffering to MAX_NONLEGACY_PREAUTH_BODY_LEN
+                        // to bound the DoS amplification (previously fell back
+                        // to max_len = 100 MiB).
+                        MAX_NONLEGACY_PREAUTH_BODY_LEN.min(max_len)
                     } else {
                         archon_claim
                     };
@@ -519,11 +538,49 @@ mod tests {
         assert!(result.is_none());
     }
 
+    /// Regression (red-cell-c2-4001m): bodies whose first four bytes claim an Archon size
+    /// exceeding `max_len` (ECDH-shaped traffic — random X25519 key/connection-id bytes as
+    /// the leading octets) must be buffered only up to `MAX_NONLEGACY_PREAUTH_BODY_LEN`, not
+    /// up to the caller's `max_len` (100 MiB). Without this cap, unauthenticated clients
+    /// can force a 100 MiB allocation per request.
+    #[tokio::test]
+    async fn nonlegacy_ecdh_shaped_body_rejected_when_over_preauth_limit() {
+        use axum::body::Body;
+        use futures_util::stream;
+
+        // First 4 bytes claim archon_claim = MAX_AGENT_MESSAGE_LEN + 4 > max_len.
+        let mut hdr = vec![0u8; NONLEGACY_PRECHECK_HEADER_LEN];
+        let declared = MAX_AGENT_MESSAGE_LEN as u32; // archon_claim = MAX_AGENT_MESSAGE_LEN + 4
+        hdr[0..4].copy_from_slice(&declared.to_be_bytes());
+
+        // Total = header (12 B) + MAX_NONLEGACY_PREAUTH_BODY_LEN.
+        // next_len at frame 2 = 12 + MAX_NONLEGACY_PREAUTH_BODY_LEN > effective_max (4 MiB).
+        let stream = stream::iter([
+            Ok::<Bytes, std::convert::Infallible>(Bytes::from(hdr)),
+            Ok::<Bytes, std::convert::Infallible>(Bytes::from(vec![
+                0u8;
+                MAX_NONLEGACY_PREAUTH_BODY_LEN
+            ])),
+        ]);
+
+        let result = collect_body_with_magic_precheck(
+            Body::from_stream(stream),
+            MAX_AGENT_MESSAGE_LEN,
+            false,
+        )
+        .await;
+        assert!(
+            result.is_none(),
+            "ECDH-shaped body exceeding MAX_NONLEGACY_PREAUTH_BODY_LEN must be rejected \
+             before auth (pre-auth DoS cap)"
+        );
+    }
+
     /// Regression (red-cell-c2-5jut2): ECDH registration starts with a 32-byte X25519 pubkey;
     /// the first four bytes are uniformly random. Interpreting them as a big-endian Archon
-    /// `size` field usually yields `4 + size > MAX_AGENT_MESSAGE_LEN`, which must **not**
-    /// cause `collect_body_with_magic_precheck` to return `None` before the handler can run
-    /// `process_ecdh_packet`.
+    /// `size` field usually yields `4 + size > MAX_AGENT_MESSAGE_LEN`, which falls back to
+    /// `MAX_NONLEGACY_PREAUTH_BODY_LEN` as the effective cap.  The actual registration packet
+    /// is orders of magnitude smaller, so it must still pass through.
     #[tokio::test]
     async fn nonlegacy_ecdh_registration_passes_precheck_when_pubkey_prefix_mimics_huge_archon_len()
     {

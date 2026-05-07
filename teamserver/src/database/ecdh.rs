@@ -188,7 +188,8 @@ impl EcdhRepository {
                 .map_err(TeamserverError::Sqlx)?;
 
         let Some((last_i64,)) = row else {
-            tx.rollback().await.map_err(TeamserverError::Sqlx)?;
+            // Only a SELECT has run; rollback failure cannot lose any write.
+            let _ = tx.rollback().await;
             return Ok(false);
         };
 
@@ -197,13 +198,13 @@ impl EcdhRepository {
         let last_seq = last_i64 as u64;
 
         if candidate_seq <= last_seq {
-            tx.rollback().await.map_err(TeamserverError::Sqlx)?;
+            let _ = tx.rollback().await;
             return Ok(false);
         }
 
         let gap = candidate_seq - last_seq;
         if gap > MAX_SEQ_GAP {
-            tx.rollback().await.map_err(TeamserverError::Sqlx)?;
+            let _ = tx.rollback().await;
             return Err(TeamserverError::CallbackSeqGapTooLarge {
                 agent_id,
                 incoming_seq: candidate_seq,

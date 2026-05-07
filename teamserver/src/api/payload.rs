@@ -325,6 +325,17 @@ pub(super) async fn submit_payload_build(
         );
     }
 
+    // Validate amsi_etw bypass mode.
+    if let Some(ref mode) = request.amsi_etw {
+        if !matches!(mode.as_str(), "hwbp" | "patch" | "none") {
+            return json_error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_amsi_etw",
+                format!("invalid amsi_etw value '{}': expected hwbp, patch, or none", mode),
+            );
+        }
+    }
+
     // Look up the listener.
     let listener_summary = match state.listeners.summary(&request.listener).await {
         Ok(s) => s,

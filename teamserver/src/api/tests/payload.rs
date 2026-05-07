@@ -330,6 +330,30 @@ async fn submit_payload_build_rejects_invalid_arch() {
 }
 
 #[tokio::test]
+async fn submit_payload_build_rejects_invalid_amsi_etw() {
+    let app = test_router(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/payloads/build")
+                .header(API_KEY_HEADER, "secret-admin")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"listener":"http1","arch":"x64","format":"exe","amsi_etw":"garbage"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = read_json(response).await;
+    assert_eq!(body["error"]["code"], "invalid_amsi_etw");
+}
+
+#[tokio::test]
 async fn submit_payload_build_rejects_missing_listener() {
     let app = test_router(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
 

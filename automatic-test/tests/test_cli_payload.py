@@ -167,6 +167,7 @@ class TestPayloadBuildAndFetch(unittest.TestCase):
             sleep_secs=None,
             wait=True,
             detach=False,
+            amsi_etw=None,
         )
         mock_mkstemp.assert_called_once_with(suffix=".exe")
         mock_close.assert_called_once_with(17)

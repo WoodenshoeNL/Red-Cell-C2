@@ -241,6 +241,14 @@
 #define H_FUNC_GETSYSTEMMETRICS                      0x287c6401
 #define H_FUNC_GETDC                                 0xd2b106c
 #define H_FUNC_RELEASEDC                             0x6fbc050d
+#define H_FUNC_OPENWINDOWSTATION                     0x47468331
+#define H_FUNC_GETPROCESSWINDOWSTATION               0xa19df17e
+#define H_FUNC_SETPROCESSWINDOWSTATION               0x421628a
+#define H_FUNC_CLOSEWINDOWSTATION                    0x92609475
+#define H_FUNC_OPENDESKTOPA                          0xfd807632
+#define H_FUNC_GETTHREADDESKTOP                      0xa092e257
+#define H_FUNC_SETTHREADDESKTOP                      0x3310a8e3
+#define H_FUNC_CLOSEDESKTOP                          0x8aa86a15
 #define H_FUNC_GETCURRENTOBJECT                      0xfe6f663f
 #define H_FUNC_GETOBJECTW                            0xa04fbb33
 #define H_FUNC_CREATECOMPATIBLEDC                    0xd0b24920

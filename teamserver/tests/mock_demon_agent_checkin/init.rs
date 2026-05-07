@@ -334,7 +334,7 @@ async fn mock_demon_checkin_interleaved_output_keeps_task_attribution()
 /// `dispatcher_runtime.rs`).  A regression here — e.g. returning an error or
 /// garbage bytes — would cause agents to malfunction.
 #[tokio::test]
-async fn get_job_with_empty_task_queue_returns_empty_response()
+async fn get_job_with_empty_task_queue_returns_command_no_job()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut harness = spawn_server_with_http_listener("edge-http-empty-queue").await?;
     let listener_port = harness.listener_port;

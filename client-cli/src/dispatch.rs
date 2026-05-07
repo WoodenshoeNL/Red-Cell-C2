@@ -191,9 +191,7 @@ pub(crate) async fn dispatch_with_global(cli: Cli, global_path: Option<std::path
             }
         },
 
-        Commands::Agent { action } => {
-            commands::agent::run(&api_client, &fmt, action, resolved.timeout).await
-        }
+        Commands::Agent { action } => commands::agent::run(&api_client, &fmt, action).await,
 
         Commands::Listener { action } => commands::listener::run(&api_client, &fmt, action).await,
 

@@ -5,6 +5,9 @@ use std::sync::OnceLock;
 /// Default end-to-end polling timeout for `agent exec --wait`, in seconds.
 pub const AGENT_EXEC_WAIT_TIMEOUT_SECS: u64 = 60;
 
+/// Default end-to-end polling timeout for `agent download --wait-timeout`, in seconds.
+pub const AGENT_DOWNLOAD_WAIT_TIMEOUT_SECS: u64 = 120;
+
 /// Default end-to-end polling timeout for `payload build --wait`, in seconds.
 pub const PAYLOAD_BUILD_WAIT_TIMEOUT_SECS: u64 = 300;
 
@@ -33,6 +36,7 @@ pub const LOOT_LIST_WATCH_POLL_INTERVAL_SECS: u64 = 2;
 pub const AUDIT_LIST_FOLLOW_POLL_INTERVAL_SECS: u64 = 1;
 
 static AGENT_EXEC_WAIT_TIMEOUT_HELP: OnceLock<String> = OnceLock::new();
+static AGENT_DOWNLOAD_WAIT_TIMEOUT_HELP: OnceLock<String> = OnceLock::new();
 static PAYLOAD_BUILD_WAIT_TIMEOUT_HELP: OnceLock<String> = OnceLock::new();
 static AUDIT_TAIL_FOLLOW_HELP: OnceLock<String> = OnceLock::new();
 static AGENT_LIST_WATCH_HELP: OnceLock<String> = OnceLock::new();
@@ -45,6 +49,16 @@ pub fn agent_exec_wait_timeout_help() -> &'static str {
         format!(
             "Poll for up to {secs} seconds (default: {secs}; override with --wait-timeout). Controls the polling loop budget, not the per-request HTTP timeout (--timeout).",
             secs = AGENT_EXEC_WAIT_TIMEOUT_SECS
+        )
+    })
+}
+
+/// Return the `--wait-timeout` help text for `agent download`.
+pub fn agent_download_wait_timeout_help() -> &'static str {
+    AGENT_DOWNLOAD_WAIT_TIMEOUT_HELP.get_or_init(|| {
+        format!(
+            "Poll for up to {secs} seconds (default: {secs}; override with --wait-timeout). Controls the polling loop budget, not the per-request HTTP timeout (--timeout).",
+            secs = AGENT_DOWNLOAD_WAIT_TIMEOUT_SECS
         )
     })
 }
@@ -106,6 +120,11 @@ mod tests {
     #[test]
     fn agent_exec_help_mentions_default_timeout() {
         assert!(agent_exec_wait_timeout_help().contains("default: 60"));
+    }
+
+    #[test]
+    fn agent_download_help_mentions_default_timeout() {
+        assert!(agent_download_wait_timeout_help().contains("default: 120"));
     }
 
     #[test]

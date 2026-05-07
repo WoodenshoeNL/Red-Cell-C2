@@ -156,6 +156,8 @@ pub enum AgentCommands {
         /// Local path to write the downloaded file
         #[arg(long)]
         dst: String,
+        #[arg(long, help = crate::defaults::agent_download_wait_timeout_help())]
+        wait_timeout: Option<u64>,
     },
 
     /// List RBAC group tags assigned to an agent (`GET /agents/{id}/groups`).

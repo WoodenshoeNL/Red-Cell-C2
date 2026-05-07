@@ -38,7 +38,7 @@ mod tests;
 
 use crate::AgentCommands;
 use crate::client::ApiClient;
-use crate::defaults::AGENT_EXEC_WAIT_TIMEOUT_SECS;
+use crate::defaults::{AGENT_DOWNLOAD_WAIT_TIMEOUT_SECS, AGENT_EXEC_WAIT_TIMEOUT_SECS};
 use crate::error::{CliError, EXIT_GENERAL, EXIT_SUCCESS};
 use crate::output::{OutputFormat, print_cursor_reset_warning, print_error, print_success};
 
@@ -54,19 +54,13 @@ use self::transfer::{download, upload};
 
 /// Dispatch an [`AgentCommands`] variant and return a process exit code.
 ///
-/// `timeout_secs` is the resolved CLI timeout (from `--timeout` / env /
-/// config file / default).  Commands that perform long polling — such as
-/// `agent download` — use this value as their deadline so the caller-
-/// controlled timeout contract is honoured uniformly.
+/// Long-polling commands (`agent exec --wait`, `agent download`) resolve their
+/// own `--wait-timeout` inside each arm, independently from the per-request
+/// HTTP connection timeout (`--timeout`) which is set on the [`ApiClient`].
 ///
 /// All output (success and error) is written inside this function so that the
 /// caller in `main.rs` only needs to propagate the exit code.
-pub async fn run(
-    client: &ApiClient,
-    fmt: &OutputFormat,
-    action: AgentCommands,
-    timeout_secs: u64,
-) -> i32 {
+pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) -> i32 {
     match action {
         AgentCommands::List { watch, max_failures } => {
             if watch {
@@ -209,8 +203,9 @@ pub async fn run(
             }
         }
 
-        AgentCommands::Download { id, src, dst } => {
-            match download(client, id, &src, &dst, timeout_secs).await {
+        AgentCommands::Download { id, src, dst, wait_timeout } => {
+            let download_timeout_secs = wait_timeout.unwrap_or(AGENT_DOWNLOAD_WAIT_TIMEOUT_SECS);
+            match download(client, id, &src, &dst, download_timeout_secs).await {
                 Ok(data) => match print_success(fmt, &data) {
                     Ok(()) => EXIT_SUCCESS,
                     Err(e) => {

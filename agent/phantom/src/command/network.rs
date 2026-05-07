@@ -402,7 +402,7 @@ pub(super) fn execute_transfer(
             });
         }
         DemonTransferCommand::Stop => {
-            let file_id = parser.int32()? as u32;
+            let file_id = parser.uint32()?;
             let found = if let Some(dl) = state.downloads.iter_mut().find(|d| d.file_id == file_id)
             {
                 dl.state = DownloadTransferState::Stopped;
@@ -417,7 +417,7 @@ pub(super) fn execute_transfer(
             });
         }
         DemonTransferCommand::Resume => {
-            let file_id = parser.int32()? as u32;
+            let file_id = parser.uint32()?;
             let found = if let Some(dl) = state.downloads.iter_mut().find(|d| d.file_id == file_id)
             {
                 dl.state = DownloadTransferState::Running;
@@ -432,7 +432,7 @@ pub(super) fn execute_transfer(
             });
         }
         DemonTransferCommand::Remove => {
-            let file_id = parser.int32()? as u32;
+            let file_id = parser.uint32()?;
             let found = if let Some(dl) = state.downloads.iter_mut().find(|d| d.file_id == file_id)
             {
                 dl.state = DownloadTransferState::Remove;

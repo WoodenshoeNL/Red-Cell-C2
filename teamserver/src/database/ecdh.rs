@@ -563,6 +563,8 @@ mod tests {
         );
     }
 
+    // Covers the exact boundary (gap == MAX_SEQ_GAP accepted; gap == MAX_SEQ_GAP + 1 rejected)
+    // as well as recovery after a rejected packet — no separate boundary test is needed.
     #[tokio::test]
     async fn advance_seq_num_rejects_gap_too_large() {
         use red_cell_common::callback_seq::MAX_SEQ_GAP;
@@ -599,31 +601,6 @@ mod tests {
                 .await
                 .expect("advance after gap rejection"),
             "in-range packet after rejected gap must be accepted"
-        );
-    }
-
-    #[tokio::test]
-    async fn advance_seq_num_gap_boundary() {
-        use red_cell_common::callback_seq::MAX_SEQ_GAP;
-
-        let (db, master_key) = test_db().await;
-        let repo = EcdhRepository::new(db.pool().clone(), master_key);
-
-        let conn_id = ConnectionId::generate().expect("conn_id");
-        repo.store_session(&conn_id, 8, &[0u8; 32]).await.expect("store");
-
-        // Exact boundary: gap == MAX_SEQ_GAP from 0 → must accept.
-        assert!(
-            repo.advance_seq_num(&conn_id.0, 8, MAX_SEQ_GAP).await.expect("advance at boundary"),
-            "gap == MAX_SEQ_GAP from 0 must be accepted"
-        );
-
-        // One past boundary: gap == MAX_SEQ_GAP + 1 from MAX_SEQ_GAP → must reject.
-        let one_past = MAX_SEQ_GAP + (MAX_SEQ_GAP + 1);
-        let err = repo.advance_seq_num(&conn_id.0, 8, one_past).await.unwrap_err();
-        assert!(
-            matches!(err, TeamserverError::CallbackSeqGapTooLarge { gap, .. } if gap == MAX_SEQ_GAP + 1),
-            "gap == MAX_SEQ_GAP + 1 must be rejected, got {err:?}"
         );
     }
 

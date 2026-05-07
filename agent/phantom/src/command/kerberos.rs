@@ -29,8 +29,7 @@ pub(super) fn execute_kerberos(
     use crate::kerberos;
 
     let mut parser = TaskParser::new(payload);
-    let sub_raw = u32::try_from(parser.int32()?)
-        .map_err(|_| PhantomError::TaskParse("negative kerberos subcommand"))?;
+    let sub_raw = parser.uint32()?;
     let sub = DemonKerberosCommand::try_from(sub_raw)
         .map_err(|_| PhantomError::TaskParse("unknown kerberos subcommand"))?;
 

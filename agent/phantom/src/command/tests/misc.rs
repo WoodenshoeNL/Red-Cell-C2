@@ -65,17 +65,23 @@ async fn command_sleep_missing_jitter_returns_error() {
 }
 
 #[tokio::test]
-async fn command_sleep_negative_delay_clamps_to_zero() {
+async fn command_sleep_high_bit_delay_reads_as_u32() {
+    // The server encodes sleep delay as a u32 via write_u32().  Values with the
+    // high bit set (> i32::MAX) must be parsed correctly via uint32(), not
+    // silently clamped to 0 as the old int32() + try_from() path would do.
+    // In practice the server never sends astronomically large delays, but the
+    // wire format is u32 and must be read as u32.
+    let delay_ms: u32 = 0x8000_0001; // > i32::MAX
     let mut payload = Vec::new();
-    payload.extend_from_slice(&(-1_i32).to_le_bytes());
-    payload.extend_from_slice(&5_i32.to_le_bytes());
+    payload.extend_from_slice(&delay_ms.to_le_bytes());
+    payload.extend_from_slice(&5_u32.to_le_bytes());
     let package = DemonPackage::new(DemonCommand::CommandSleep, 3, payload);
     let mut config = PhantomConfig::default();
     let mut state = PhantomState::default();
 
     execute(&package, &mut config, &mut state).await.expect("execute");
 
-    assert_eq!(config.sleep_delay_ms, 0);
+    assert_eq!(config.sleep_delay_ms, delay_ms);
     assert_eq!(config.sleep_jitter, 5);
 }
 

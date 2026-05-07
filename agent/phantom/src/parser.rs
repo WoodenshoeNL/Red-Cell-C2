@@ -24,6 +24,18 @@ impl<'a> TaskParser<'a> {
         Ok(i32::from_le_bytes(array))
     }
 
+    /// Read a 32-bit unsigned integer from the payload.
+    ///
+    /// Unlike `int32()`, this never fails on values > `i32::MAX`.  Use this
+    /// whenever the field is encoded by `write_u32` on the teamserver side
+    /// (IDs, addresses, random nonces, Windows error codes, etc.).
+    pub fn uint32(&mut self) -> Result<u32, PhantomError> {
+        let bytes = self.read_exact(4)?;
+        let array: [u8; 4] =
+            bytes.try_into().map_err(|_| PhantomError::TaskParse("failed to read uint32"))?;
+        Ok(u32::from_le_bytes(array))
+    }
+
     /// Read a 16-bit signed integer from the payload.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn int16(&mut self) -> Result<i16, PhantomError> {
@@ -114,6 +126,21 @@ mod tests {
         assert_eq!(parser.int64().expect("int64"), 0x0102_0304_0506_0708);
         assert_eq!(parser.byte().expect("byte"), 0xAB);
         assert!(parser.bool32().expect("bool32"));
+    }
+
+    #[test]
+    fn uint32_reads_high_bit_values_without_error() {
+        // 0xDEADBEEF > i32::MAX — int32() would fail, uint32() must succeed.
+        let mut parser = TaskParser::new(&[0xEF, 0xBE, 0xAD, 0xDE]);
+        assert_eq!(parser.uint32().expect("uint32"), 0xDEAD_BEEF);
+    }
+
+    #[test]
+    fn uint32_round_trips_random_u32() {
+        let value: u32 = 0xFF80_0001;
+        let bytes = value.to_le_bytes();
+        let mut parser = TaskParser::new(&bytes);
+        assert_eq!(parser.uint32().expect("uint32"), value);
     }
 
     #[test]

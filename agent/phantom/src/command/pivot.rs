@@ -24,8 +24,7 @@ pub(super) fn execute_pivot(
     state: &mut PhantomState,
 ) -> Result<(), PhantomError> {
     let mut parser = TaskParser::new(payload);
-    let raw_sub = u32::try_from(parser.int32()?)
-        .map_err(|_| PhantomError::TaskParse("negative pivot subcommand"))?;
+    let raw_sub = parser.uint32()?;
 
     let subcommand = match DemonPivotCommand::try_from(raw_sub) {
         Ok(sub) => sub,

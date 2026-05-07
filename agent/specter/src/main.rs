@@ -8,7 +8,12 @@ use tracing_subscriber::EnvFilter;
 
 use specter::{SpecterAgent, SpecterConfig};
 
-#[tokio::main]
+// A single-threaded async executor is sufficient for a C2 agent: all I/O is
+// sequential (init → loop: checkin, get-job, dispatch).  The multi-thread
+// default creates several OS threads and opens many overlapped-I/O contexts at
+// startup, which on resource-constrained Windows VMs can exhaust the
+// non-paged-pool TCP send-buffer quota (WSAENOBUFS / os error 10055).
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(

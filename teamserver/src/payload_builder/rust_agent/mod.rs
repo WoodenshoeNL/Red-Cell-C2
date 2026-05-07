@@ -205,13 +205,7 @@ impl PayloadBuilderService {
             message: format!("{agent_name} binary [{} bytes]", bytes.len()),
         });
 
-        let agent_type_pascal = {
-            let mut chars = agent_name.chars();
-            match chars.next() {
-                Some(c) => c.to_ascii_uppercase().to_string() + chars.as_str(),
-                None => String::new(),
-            }
-        };
+        let agent_type_pascal = to_pascal(agent_name);
         let format_label = if file_extension == ".exe" {
             "exe"
         } else if file_extension.is_empty() {
@@ -239,17 +233,17 @@ impl PayloadBuilderService {
     }
 }
 
+fn to_pascal(name: &str) -> String {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) => c.to_ascii_uppercase().to_string() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    // Mirrors the pascal-case conversion embedded in build_rust_agent so the
-    // logic stays tested even though it is not a named function.
-    fn to_pascal(name: &str) -> String {
-        let mut chars = name.chars();
-        match chars.next() {
-            Some(c) => c.to_ascii_uppercase().to_string() + chars.as_str(),
-            None => String::new(),
-        }
-    }
+    use super::to_pascal;
 
     #[test]
     fn pascal_case_known_agents() {

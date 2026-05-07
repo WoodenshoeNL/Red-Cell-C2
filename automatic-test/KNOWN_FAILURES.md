@@ -41,6 +41,7 @@ row to *Resolved* and add the closing commit / fix description.
 | `invalid Demon packet size: declared 2286763818 bytes, actual 72 bytes` | 21, 22 | red-cell-c2-ya2cm | 2026-05-03 | 2026-05-03 | P2, Phantom resilience-path callbacks become malformed after listener restart / kill-date transitions; same signature also appears during sc23 off-hours phase |
 | `RCTEST_SCHTASK_LASTTASKRESULT:1` | 20 | red-cell-c2-idu5z | 2026-05-03 | 2026-05-03 | P2, Specter DoH-enabled scheduled task stays `Ready`, spawns no process, and never checks in once the Windows hosts-entry precondition is fixed |
 | `No space left on device` | 22, 23 | red-cell-c2-sb5bm | 2026-05-02 | 2026-05-02 | P3, sccache grew to 8.3 GB filling root FS — environment issue, not product; workaround: rm -rf ~/.cache/sccache |
+| `CLI log list since+until: filtered result multiset mismatch` | 11 | red-cell-c2-ycm9d | 2026-05-07 | 2026-05-07 | P2, one extra `teamserver agent.checkin` in actual vs expected; off-by-one at `until` boundary; exposed after CTR/seq fix (4a87b01d) lets sc11 progress past checkin |
 
 ---
 

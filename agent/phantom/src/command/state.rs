@@ -48,11 +48,18 @@ impl PhantomState {
             let mut status: i32 = 0;
             // SAFETY: pid is a valid child PID we spawned; WNOHANG returns immediately.
             let ret = unsafe { libc::waitpid(pid as i32, &mut status, libc::WNOHANG) };
-            if ret > 0 {
-                tracing::debug!(pid, "reaped injected child process");
-                false
-            } else {
-                true
+            match ret.cmp(&0) {
+                std::cmp::Ordering::Greater => {
+                    tracing::debug!(pid, "reaped injected child process");
+                    false
+                }
+                std::cmp::Ordering::Equal => true,
+                std::cmp::Ordering::Less => {
+                    // ECHILD or other error — not our child or already reaped; evict
+                    let errno = std::io::Error::last_os_error();
+                    tracing::warn!(pid, %errno, "waitpid error evicting injected PID");
+                    false
+                }
             }
         });
     }

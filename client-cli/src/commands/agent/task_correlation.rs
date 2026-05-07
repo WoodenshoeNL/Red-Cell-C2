@@ -70,11 +70,18 @@ pub(crate) fn loot_matches_expected_task_id(
         return false;
     };
     for key in ["task_id", "request_id"] {
-        let Some(Value::String(s)) = obj.get(key) else {
-            continue;
+        let candidate: Option<String> = match obj.get(key) {
+            Some(Value::String(s)) => Some(s.clone()),
+            Some(Value::Number(n)) => n.as_u64().and_then(|v| {
+                // Only coerce numbers that fit in a u32 Demon request id.
+                if v <= u32::MAX as u64 { Some(format!("{v:x}")) } else { None }
+            }),
+            _ => None,
         };
-        if hex_correlation_tokens_equal(expected, s) {
-            return true;
+        if let Some(s) = candidate {
+            if hex_correlation_tokens_equal(expected, &s) {
+                return true;
+            }
         }
     }
     false
@@ -132,5 +139,36 @@ mod tests {
         let meta_tid = json!({"task_id": "0000002A"});
         assert!(loot_matches_expected_task_id("2a", None, Some(&meta_tid)));
         assert!(loot_matches_expected_task_id("2a", Some("0000002A"), None));
+    }
+
+    #[test]
+    fn loot_match_numeric_request_id() {
+        // Numeric 42 (0x2A) should match string "0000002A".
+        let meta = json!({"request_id": 42u32});
+        assert!(loot_matches_expected_task_id("0000002A", None, Some(&meta)));
+        // Numeric task_id variant.
+        let meta_tid = json!({"task_id": 42u32});
+        assert!(loot_matches_expected_task_id("2a", None, Some(&meta_tid)));
+    }
+
+    #[test]
+    fn loot_match_numeric_padded_task_id() {
+        // 0xDEADBEEF as a number should match the padded hex string.
+        let meta = json!({"task_id": 0xDEAD_BEEFu32});
+        assert!(loot_matches_expected_task_id("DEADBEEF", None, Some(&meta)));
+    }
+
+    #[test]
+    fn loot_match_numeric_too_large_ignored() {
+        // Values that exceed u32::MAX must not match anything.
+        let meta = json!({"request_id": 0x1_0000_0000u64});
+        assert!(!loot_matches_expected_task_id("00000001", None, Some(&meta)));
+    }
+
+    #[test]
+    fn loot_match_numeric_mismatch_does_not_false_positive() {
+        // Numeric 0x10 should not match 0x11.
+        let meta = json!({"request_id": 0x10u32});
+        assert!(!loot_matches_expected_task_id("00000011", None, Some(&meta)));
     }
 }

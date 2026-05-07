@@ -920,6 +920,126 @@ def execute_background(target: TargetConfig, command: str, arguments: str = "") 
                     print(f"  [deploy][schtask] {line}")
 
 
+def wfp_preflight_cleanup(
+    target: TargetConfig,
+    *,
+    log_prefix: str = "  [wfp-preflight]",
+    timeout: int | None = None,
+    c2_hosts: list[str] | None = None,
+) -> None:
+    """Sweep leftover WFP firewall rules and Defender NP exclusions before a test run.
+
+    Runs once at the start of each test session, before any scenarios execute.
+    More diagnostic than :func:`cleanup_windows_harness_work_dir`: reports rule counts
+    before and after so pool-exhaustion events can be correlated with rule accumulation.
+
+    Removes:
+    - All ``RC-Harness-*`` display-name rules (harness-created firewall rules).
+    - All ``agent-*`` display-name rules (Windows-auto-created or old-harness-created
+      rules from prior agent binaries; accumulate across runs if not swept).
+    - ``ExclusionProcess`` entries matching ``agent-*.exe`` / ``stress-agent-*.exe``.
+    - ``ExclusionIpAddress`` entries for every IP in *c2_hosts*, using a repeat-remove
+      loop to drain duplicates added when prior runs called
+      :func:`defender_network_protection_exclusion` more than once without cleanup.
+
+    Never raises: SSH/PowerShell failures are printed and silently swallowed.
+
+    Args:
+        target:    Windows SSH target (no-op on Linux targets).
+        log_prefix: Prefix for diagnostic lines printed to the harness log.
+        timeout:   SSH wait ceiling; defaults to ``max(90, configured remote cmd timeout)``.
+        c2_hosts:  C2 callback host IPs to remove from ``ExclusionIpAddress``.
+                   Pass ``[callback_host]`` from env.toml.
+    """
+    if target.platform != "windows":
+        return
+
+    if timeout is None:
+        timeout = max(90, _DEFAULT_REMOTE_CMD_SECS)
+
+    # Build repeat-remove NP IP block (handles duplicate ExclusionIpAddress entries).
+    ip_removal_block = ""
+    if c2_hosts:
+        safe_ips = [ip.replace("'", "''") for ip in c2_hosts if ip.strip()]
+        if safe_ips:
+            ip_array_ps = ",".join(f"'{ip}'" for ip in safe_ips)
+            ip_removal_block = (
+                f"foreach ($_ip in @({ip_array_ps})) {{\n"
+                "  for ($_i = 0; $_i -lt 30; $_i++) {\n"
+                "    $_cur = (Get-MpPreference -EA SilentlyContinue).ExclusionIpAddress\n"
+                "    if (-not ($_cur -contains $_ip)) { break }\n"
+                "    Remove-MpPreference -ExclusionIpAddress $_ip -ErrorAction SilentlyContinue\n"
+                "  }\n"
+                "}\n"
+            )
+
+    script = (
+        # Snapshot rule counts before sweep for diagnostics.
+        "$_allrules = @(Get-NetFirewallRule -ErrorAction SilentlyContinue)\n"
+        "$_rc_rules = @($_allrules | Where-Object { $_.DisplayName -like 'RC-Harness-*' })\n"
+        "$_ag_rules = @($_allrules | Where-Object { $_.DisplayName -like 'agent-*' })\n"
+        "$_np_ips = @((Get-MpPreference -EA SilentlyContinue).ExclusionIpAddress)\n"
+        "Write-Output ('WFP_BEFORE:rc=' + $_rc_rules.Count + ',agent=' + $_ag_rules.Count + ',npip=' + $_np_ips.Count)\n"
+        # Remove RC-Harness-* rules (harness-created via firewall_allow_program).
+        "Remove-NetFirewallRule -DisplayName 'RC-Harness-*' -ErrorAction SilentlyContinue\n"
+        # Remove agent-* display-name rules (Windows-auto-created or old-harness-created).
+        "$_ag_rules | Remove-NetFirewallRule -ErrorAction SilentlyContinue\n"
+        # Remove ExclusionProcess entries matching agent basename patterns.
+        "$_prefs = Get-MpPreference -ErrorAction SilentlyContinue\n"
+        "if ($_prefs -and $_prefs.ExclusionProcess) {\n"
+        "  foreach ($_exc in @($_prefs.ExclusionProcess)) {\n"
+        "    if ($_exc -match '^(agent-|stress-agent-).*\\.exe$') {\n"
+        "      Remove-MpPreference -ExclusionProcess $_exc -ErrorAction SilentlyContinue\n"
+        "    }\n"
+        "  }\n"
+        "}\n"
+        + ip_removal_block
+        # Snapshot after sweep.
+        + "$_allrules_after = @(Get-NetFirewallRule -ErrorAction SilentlyContinue)\n"
+        "$_rc_after = @($_allrules_after | Where-Object { $_.DisplayName -like 'RC-Harness-*' }).Count\n"
+        "$_ag_after = @($_allrules_after | Where-Object { $_.DisplayName -like 'agent-*' }).Count\n"
+        "Write-Output ('WFP_AFTER:rc=' + $_rc_after + ',agent=' + $_ag_after)\n"
+        "exit 0\n"
+    )
+    enc = _powershell_encoded_command(script)
+    remote = f"powershell -NoProfile -EncodedCommand {enc}"
+    cmd = _ssh_args(target) + [remote]
+    try:
+        result = _run_ssh_cli_with_retry(cmd, target.host, timeout=timeout, tool="ssh")
+    except Exception as exc:
+        print(f"{log_prefix} skipped ({target.host}): {exc}")
+        return
+
+    if result.returncode != 0:
+        err = (result.stderr or "").strip()
+        tail = err[-240:] if len(err) > 240 else err
+        print(
+            f"{log_prefix} remote sweep failed ({target.host}): "
+            f"exit {result.returncode} stderr_tail={tail!r}"
+        )
+        return
+
+    for line in (result.stdout or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("WFP_BEFORE:") or stripped.startswith("WFP_AFTER:"):
+            label = "before" if stripped.startswith("WFP_BEFORE:") else "after"
+            info = stripped.split(":", 1)[1]
+            print(f"{log_prefix} rule counts {label} sweep ({target.host}): {info}")
+            if stripped.startswith("WFP_AFTER:"):
+                try:
+                    parts = dict(kv.split("=") for kv in info.split(","))
+                    remaining = int(parts.get("rc", 0)) + int(parts.get("agent", 0))
+                    if remaining > 0:
+                        print(
+                            f"{log_prefix} WARNING: {remaining} leftover harness "
+                            f"firewall rule(s) still present after sweep on {target.host}"
+                        )
+                except (ValueError, KeyError):
+                    pass
+
+
 def cleanup_windows_harness_work_dir(
     target: TargetConfig,
     *,
@@ -969,6 +1089,9 @@ def cleanup_windows_harness_work_dir(
 
     wd = target.work_dir.replace("'", "''")
     # Build the optional ExclusionIpAddress sweep block (for harness-added NP exclusions).
+    # Uses a repeat-remove loop to handle duplicates: Add-MpPreference appends a new entry
+    # each call, so after N runs the same IP may appear N times; one Remove-MpPreference
+    # call removes only one instance.  The loop exits as soon as the IP is absent.
     ip_sweep_block = ""
     if ip_exclusions_to_remove:
         safe_ips = [ip.replace("'", "''") for ip in ip_exclusions_to_remove if ip.strip()]
@@ -976,12 +1099,21 @@ def cleanup_windows_harness_work_dir(
             ip_array_ps = ",".join(f"'{ip}'" for ip in safe_ips)
             ip_sweep_block = (
                 f"foreach ($_ip in @({ip_array_ps})) {{\n"
-                "  Remove-MpPreference -ExclusionIpAddress $_ip -ErrorAction SilentlyContinue\n"
+                "  for ($_i = 0; $_i -lt 30; $_i++) {\n"
+                "    $_cur = (Get-MpPreference -EA SilentlyContinue).ExclusionIpAddress\n"
+                "    if (-not ($_cur -contains $_ip)) { break }\n"
+                "    Remove-MpPreference -ExclusionIpAddress $_ip -ErrorAction SilentlyContinue\n"
+                "  }\n"
                 "}\n"
             )
     script = (
         # Revert Defender/firewall exceptions — runs unconditionally (even without work dir).
+        # RC-Harness-* rules: added by firewall_allow_program / firewall_allow_outbound_tcp.
         "Remove-NetFirewallRule -DisplayName 'RC-Harness-*' -ErrorAction SilentlyContinue\n"
+        # agent-* rules: Windows may auto-create rules using the exe basename as DisplayName.
+        "Get-NetFirewallRule -ErrorAction SilentlyContinue | "
+        "Where-Object { $_.DisplayName -like 'agent-*' } | "
+        "Remove-NetFirewallRule -ErrorAction SilentlyContinue\n"
         "$_prefs = Get-MpPreference -ErrorAction SilentlyContinue\n"
         "if ($_prefs -and $_prefs.ExclusionProcess) {\n"
         "  foreach ($_exc in @($_prefs.ExclusionProcess)) {\n"

@@ -46,7 +46,7 @@ from lib.config import (
     TimeoutsConfig,
     timeouts_to_env_dict,
 )
-from lib.deploy import TargetConfig, cleanup_windows_harness_work_dir, configure_deploy_timeouts
+from lib.deploy import TargetConfig, cleanup_windows_harness_work_dir, configure_deploy_timeouts, wfp_preflight_cleanup
 from lib.teamserver_monitor import configure_teamserver_ssh_connect_timeout
 from lib.wait import configure_wait_defaults
 from lib.failure_diagnostics import (
@@ -865,6 +865,28 @@ def main():
             ],
             selected_ids,
         )
+
+    # Pre-flight: sweep leftover WFP firewall rules and Defender NP exclusions
+    # from prior test runs.  After many runs (14+ in a day) the Windows VM can
+    # exhaust its non-paged pool via accumulated RC-Harness-* and agent-* rules,
+    # causing WSAENOBUFS (os error 10055) on all socket operations.
+    if not ctx.dry_run:
+        _wfp_targets = _windows_harness_cleanup_targets(windows_target, windows2_target)
+        if _wfp_targets:
+            print(f"\n{'─' * 60}")
+            print("  WFP preflight cleanup (leftover firewall rules from prior runs)")
+            print(f"{'─' * 60}")
+            _cb_host_wfp = ctx.env.get("server", {}).get("callback_host")
+            _c2_hosts_wfp = [_cb_host_wfp] if _cb_host_wfp else None
+            _wfp_timeout = max(120, int(tmo.command_output))
+            for _wlabel, _wtgt in _wfp_targets:
+                print(f"  Target {_wlabel!r} ({_wtgt.host})")
+                wfp_preflight_cleanup(
+                    _wtgt,
+                    log_prefix="  [wfp-preflight]",
+                    timeout=_wfp_timeout,
+                    c2_hosts=_c2_hosts_wfp,
+                )
 
     # Pre-flight: clean up leftover listeners from prior runs.  Listeners
     # persisted in the teamserver's SQLite DB may still be bound to ports

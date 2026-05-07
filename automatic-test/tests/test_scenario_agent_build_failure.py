@@ -502,7 +502,7 @@ class TestScenario20(unittest.TestCase):
              patch.object(
                  self.mod,
                  "_download_response_via_doh_grammar",
-                 side_effect=[b"encrypted_ack", b""],
+                 side_effect=[b"encrypted_ack", b"\x0a\x00\x00\x00\x03\x00\x00\x00\x00\x00\x00\x00"],
              ), \
              patch.object(self.mod, "_maybe_specter_doh_agent_pass"):
             self.mod.run(ctx)
@@ -530,7 +530,7 @@ class TestScenario20(unittest.TestCase):
              patch.object(
                  self.mod,
                  "_download_response_via_doh_grammar",
-                 side_effect=[b"encrypted_ack", b""],
+                 side_effect=[b"encrypted_ack", b"\x0a\x00\x00\x00\x03\x00\x00\x00\x00\x00\x00\x00"],
              ), \
              patch.object(self.mod, "_maybe_specter_doh_agent_pass"):
             self.mod.run(ctx)

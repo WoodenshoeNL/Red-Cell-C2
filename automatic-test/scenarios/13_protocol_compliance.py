@@ -57,7 +57,10 @@ Every Demon packet consists of a 12-byte header followed by a payload:
                 u32be(0))   # length-prefixed empty payload
 
   GET_JOB server response (no jobs queued):
-    empty body (HTTP 200, Content-Length: 0)
+    CommandNoJob sentinel — 12-byte LE DemonPackage:
+      [0:4]   command_id = 10 (CommandNoJob, LE u32)
+      [4:8]   request_id (echoed from request, LE u32)
+      [8:12]  payload_len = 0 (LE u32)
 
 AES note
 --------
@@ -505,15 +508,35 @@ def _run_reconnect_check(
     )
 
 
+COMMAND_NO_JOB = 10
+
+
 def _run_get_job_check(
     base_url: str, agent_id: int
 ) -> None:
-    """Verify that a GET_JOB poll with no queued jobs returns an empty 200."""
-    print(f"  [check] GET_JOB poll (no jobs queued) → 200 + empty body")
+    """Verify that a GET_JOB poll with no queued jobs returns a CommandNoJob sentinel."""
+    print(f"  [check] GET_JOB poll (no jobs queued) → 200 + CommandNoJob sentinel")
     packet = _build_get_job_packet(agent_id)
     status, body = _post_raw(base_url, packet)
     _check("GET_JOB accepted (HTTP 200)", status == 200, f"got HTTP {status}")
-    _check("GET_JOB response empty (no jobs)", len(body) == 0, f"body has {len(body)} bytes")
+    _check(
+        "GET_JOB no-job response is 12 bytes (CommandNoJob sentinel)",
+        len(body) == 12,
+        f"body has {len(body)} bytes",
+    )
+    if len(body) == 12:
+        import struct as _struct
+        cmd_id, _req_id, payload_len = _struct.unpack_from("<III", body)
+        _check(
+            "GET_JOB no-job command_id is CommandNoJob (10)",
+            cmd_id == COMMAND_NO_JOB,
+            f"got command_id={cmd_id}",
+        )
+        _check(
+            "GET_JOB no-job payload is empty",
+            payload_len == 0,
+            f"payload_len={payload_len}",
+        )
 
 
 def _run_wrong_endian_check(base_url: str) -> int:
@@ -593,8 +616,8 @@ def run(ctx):
         print("  [phase 3] reconnect probe")
         _run_reconnect_check(base_url, agent_id, key, iv, post_init_offset)
 
-        # Phase 4: GET_JOB poll (no jobs queued).  Encrypted at the post-init
-        # offset; the empty response means no further offset advance.
+        # Phase 4: GET_JOB poll (no jobs queued).  Server returns CommandNoJob (12
+        # bytes) — the encrypted body is empty so the CTR offset does not advance.
         print("  [phase 4] GET_JOB poll")
         _run_get_job_check(base_url, agent_id)
 

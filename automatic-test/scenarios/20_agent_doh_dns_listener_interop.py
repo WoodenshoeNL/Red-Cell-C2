@@ -12,7 +12,7 @@ Flow:
      (multi-chunk — validates chunked reassembly on the teamserver)
   3. Poll `rdy.<session>.d.<domain>` until the init ACK is ready
   4. Download the ACK using DoH-style chunk-fetch names
-  5. Upload a synthetic GET_JOB callback and verify the empty response path
+  5. Upload a synthetic GET_JOB callback and verify the CommandNoJob sentinel response
   6. Optional: deploy Specter on Windows with an HTTP listener that has
      `doh_domain` / `doh_provider` set (ARC-08) while this DNS listener serves
      the same zone — primary traffic is still HTTP; DoH fallback is compiled in.
@@ -467,8 +467,20 @@ def run(ctx):
         get_job_response = _download_response_via_doh_grammar(
             server_host, dns_port, dns_domain, get_job_session, get_job_total
         )
-        assert get_job_response == b"", f"GET_JOB with no queued work should return empty response, got {len(get_job_response)} bytes"
-        print("  [get-job] empty response path verified")
+        # The DNS listener always returns a CommandNoJob sentinel (command_id=10, 12 bytes LE)
+        # instead of an empty payload so the Demon agent's dispatcher loop keeps running.
+        assert len(get_job_response) == 12, (
+            f"GET_JOB with no queued work should return 12-byte CommandNoJob sentinel, "
+            f"got {len(get_job_response)} bytes"
+        )
+        _cmd_id, _req_id, _payload_len = struct.unpack_from("<III", get_job_response)
+        assert _cmd_id == 10, (
+            f"GET_JOB no-job response should have CommandNoJob (command_id=10), got {_cmd_id}"
+        )
+        assert _payload_len == 0, (
+            f"CommandNoJob payload should be empty, got {_payload_len} bytes"
+        )
+        print("  [get-job] CommandNoJob sentinel verified")
 
         _maybe_specter_doh_agent_pass(ctx, cli, dns_domain, teamserver_ip, listeners_cfg)
 

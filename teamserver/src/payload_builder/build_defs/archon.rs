@@ -178,17 +178,30 @@ mod tests {
     }
 
     #[test]
-    fn archon_http_log_define_off_by_default() {
-        // When the env var is not set the define must be absent so that
-        // production payloads do not ship with diagnostic disk I/O enabled.
-        // Note: set_var/remove_var are unsafe in Rust 2024 (data-race risk),
-        // so we only verify the default-off path here.  The on-path is
-        // exercised by setting ARCHON_HTTP_LOG=1 in the environment manually.
-        if std::env::var_os("ARCHON_HTTP_LOG").is_none() {
+    fn archon_http_log_define_off_when_var_absent() {
+        temp_env::with_var_unset("ARCHON_HTTP_LOG", || {
             assert!(
                 archon_http_log_define().is_none(),
                 "ARCHON_HTTP_LOG define must be absent when env var is unset"
             );
-        }
+        });
+    }
+
+    #[test]
+    fn archon_http_log_define_on_when_var_set() {
+        temp_env::with_var("ARCHON_HTTP_LOG", Some("1"), || {
+            assert_eq!(
+                archon_http_log_define().as_deref(),
+                Some("ARCHON_HTTP_LOG"),
+                "ARCHON_HTTP_LOG define must be present when env var is non-empty"
+            );
+        });
+    }
+
+    #[test]
+    fn archon_http_log_define_off_when_var_empty() {
+        temp_env::with_var("ARCHON_HTTP_LOG", Some(""), || {
+            assert!(archon_http_log_define().is_none(), "empty string must be treated as unset");
+        });
     }
 }

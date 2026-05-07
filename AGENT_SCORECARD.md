@@ -7509,3 +7509,13 @@ Build: cargo check passed; cargo clippy passed; workspace test run did not compl
 | Cursor | 0 | 1 | Heavy feature/fix cycle across `teamserver`, `common`, `client-cli`, `automatic-test`, `phantom`, and `archon`. Filed `red-cell-c2-rkm9u` for the new Windows autotest launch path persisting Defender `-ExclusionProcess` entries and per-exe firewall allow rules without teardown, which will accumulate on long-lived QA VMs. |
 
 Build: `cargo check --workspace` passed; `cargo nextest run --workspace` failed at `red-cell::c_agent_replay::c_demon_replay_harness_checkin` (missing `tests/wire-corpus/demon/checkin/0000.bin`); `cargo clippy --workspace -- -D warnings` passed.
+
+### QA Review — 2026-05-07 07:30 — af970233..c46a47f9
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | Dominant activity in this range across `client-cli`, `teamserver`, `phantom`, `specter`, and autotest. No close commit landed in this window. The concrete defects I confirmed from the changed files were already tracked as open beads: `red-cell-c2-vp9qu`, `red-cell-c2-v0czg`, `red-cell-c2-7d4k8`, `red-cell-c2-wyv2v`, `red-cell-c2-bjxwi`, `red-cell-c2-uxjvt`, and `red-cell-c2-jlu4r`, so I did not file duplicates. |
+| Codex | 0 | 0 | No attributed activity in this review range. |
+| Cursor | 0 | 0 | No attributed activity in this review range. |
+
+Build: passed (`cargo check --workspace`; `cargo nextest run --workspace`; `cargo clippy --workspace -- -D warnings`).

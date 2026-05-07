@@ -87,6 +87,12 @@ pub(super) fn execute_process_list(payload: &[u8]) -> Result<Vec<u8>, PhantomErr
 }
 
 /// Handle `CommandProc` subcommands: create, kill, grep, modules, memory.
+///
+/// **Subprocess policy**: all subprocess spawning in `agent/phantom/` uses
+/// `std::process::Command` with blocking wait (`wait_with_output` / `status`),
+/// never `tokio::process::Command`.  Phantom runs on a `current_thread` runtime
+/// and uses `mprotect`/sleep obfuscation between check-ins; Tokio's global
+/// SIGCHLD reaper can interact with that machinery (red-cell-c2-1f7q1).
 pub(super) async fn execute_process(
     request_id: u32,
     payload: &[u8],

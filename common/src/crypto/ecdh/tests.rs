@@ -182,6 +182,43 @@ fn registration_response_round_trip() {
 }
 
 #[test]
+fn tampered_response_connection_id_fails_authentication() {
+    let kp = test_listener_keypair();
+    let (_, session_key) = build_registration_packet(&kp.public_bytes, b"meta").expect("build");
+
+    let conn_id = ConnectionId::generate().expect("conn_id");
+    let mut response = build_registration_response(&conn_id, &session_key, 42).expect("response");
+
+    // Flip a bit in the cleartext connection_id prefix — the AEAD tag must reject this.
+    response[7] ^= 0xFF;
+
+    let result = parse_registration_response(&session_key, &response);
+    assert!(
+        matches!(result, Err(EcdhError::AeadFailure)),
+        "expected AeadFailure for tampered connection_id, got {result:?}"
+    );
+}
+
+#[test]
+fn tampered_response_ciphertext_fails_authentication() {
+    let kp = test_listener_keypair();
+    let (_, session_key) = build_registration_packet(&kp.public_bytes, b"meta").expect("build");
+
+    let conn_id = ConnectionId::generate().expect("conn_id");
+    let mut response = build_registration_response(&conn_id, &session_key, 42).expect("response");
+
+    // Flip a bit in the ciphertext (beyond the 16-byte connection_id prefix + 12-byte nonce).
+    let ct_start = 16 + 12;
+    response[ct_start] ^= 0xFF;
+
+    let result = parse_registration_response(&session_key, &response);
+    assert!(
+        matches!(result, Err(EcdhError::AeadFailure)),
+        "expected AeadFailure for tampered ciphertext, got {result:?}"
+    );
+}
+
+#[test]
 fn session_packet_round_trip() {
     let kp = test_listener_keypair();
     let (_, session_key) = build_registration_packet(&kp.public_bytes, b"meta").expect("build");

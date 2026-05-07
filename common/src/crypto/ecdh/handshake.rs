@@ -3,8 +3,8 @@ use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroize;
 
 use super::{
-    ConnectionId, ECDH_REG_MIN_LEN, EcdhError, ListenerKeypair, aes_gcm_open, aes_gcm_seal,
-    current_unix_secs, derive_session_key_from_secret,
+    ConnectionId, ECDH_REG_MIN_LEN, EcdhError, ListenerKeypair, aes_gcm_open, aes_gcm_open_aad,
+    aes_gcm_seal, aes_gcm_seal_aad, current_unix_secs, derive_session_key_from_secret,
 };
 
 fn build_registration_packet_from_parts_impl(
@@ -100,6 +100,10 @@ pub fn build_registration_packet(
 /// Returns `(connection_id, agent_id_le)`.
 ///
 /// Response format: `[connection_id: 16] | [nonce: 12] | [ciphertext] | [tag: 16]`
+///
+/// The cleartext `connection_id` prefix is authenticated as AES-GCM AAD.
+/// Any in-path mutation of the routing token causes tag verification to fail,
+/// returning [`EcdhError::AeadFailure`].
 pub fn parse_registration_response(
     session_key: &[u8; 32],
     response: &[u8],
@@ -109,7 +113,7 @@ pub fn parse_registration_response(
     }
     let connection_id =
         ConnectionId(response[..16].try_into().map_err(|_| EcdhError::PacketTooShort)?);
-    let plaintext = aes_gcm_open(session_key, &response[16..])?;
+    let plaintext = aes_gcm_open_aad(session_key, &connection_id.0, &response[16..])?;
     if plaintext.len() < 4 {
         return Err(EcdhError::PacketTooShort);
     }
@@ -171,12 +175,16 @@ pub fn open_registration_packet(
 /// Build a registration response to send to the agent.
 ///
 /// Returns `[connection_id: 16] | [nonce: 12] | [ciphertext] | [tag: 16]`.
+///
+/// `connection_id` is bound as AES-GCM AAD so the tag covers both the routing
+/// token and the encrypted `agent_id`.  An in-path attacker cannot alter the
+/// cleartext prefix without invalidating the tag.
 pub fn build_registration_response(
     connection_id: &ConnectionId,
     session_key: &[u8; 32],
     agent_id: u32,
 ) -> Result<Vec<u8>, EcdhError> {
-    let sealed = aes_gcm_seal(session_key, &agent_id.to_le_bytes())?;
+    let sealed = aes_gcm_seal_aad(session_key, &connection_id.0, &agent_id.to_le_bytes())?;
     let mut out = Vec::with_capacity(super::CONNECTION_ID_LEN + sealed.len());
     out.extend_from_slice(&connection_id.0);
     out.extend_from_slice(&sealed);

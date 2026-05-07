@@ -9,8 +9,11 @@ use super::hex_short;
 pub const ECDH_REG_MIN_LEN: usize = 32 + 12 + 8 + 16;
 /// Minimum bytes for a valid session packet.
 pub const ECDH_SESSION_MIN_LEN: usize = 16 + 12 + 1 + 16;
-/// Minimum bytes for a valid session response.
-pub const ECDH_RESP_MIN_LEN: usize = 12 + 16;
+/// Minimum bytes for a valid session response (`[nonce: 12] | [ciphertext] | [tag: 16]`).
+pub const ECDH_SESSION_RESP_MIN_LEN: usize = 12 + 16;
+/// Minimum bytes for a valid registration response
+/// (`[connection_id: 16] | [nonce: 12] | [agent_id: 4] | [tag: 16]`).
+pub const ECDH_REG_RESP_MIN_LEN: usize = 16 + 12 + 4 + 16;
 /// Length of a connection ID (random token returned at registration).
 pub const CONNECTION_ID_LEN: usize = 16;
 /// Length of the replay-detection fingerprint for a registration packet.

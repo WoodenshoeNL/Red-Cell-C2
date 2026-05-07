@@ -22,10 +22,10 @@ pub use agent_transport::{
 #[cfg(feature = "test-utils")]
 pub use ecdh::build_registration_packet_from_parts;
 pub use ecdh::{
-    CONNECTION_ID_LEN, ConnectionId, ECDH_REG_FINGERPRINT_LEN, ECDH_REG_MIN_LEN, ECDH_RESP_MIN_LEN,
-    ECDH_SESSION_MIN_LEN, EcdhError, EcdhSession, ListenerKeypair, build_registration_packet,
-    build_registration_response, extract_connection_id_candidate, open_registration_packet,
-    open_session_packet, open_session_response, parse_registration_response, seal_session_packet,
-    seal_session_response,
+    CONNECTION_ID_LEN, ConnectionId, ECDH_REG_FINGERPRINT_LEN, ECDH_REG_MIN_LEN,
+    ECDH_REG_RESP_MIN_LEN, ECDH_SESSION_MIN_LEN, ECDH_SESSION_RESP_MIN_LEN, EcdhError, EcdhSession,
+    ListenerKeypair, build_registration_packet, build_registration_response,
+    extract_connection_id_candidate, open_registration_packet, open_session_packet,
+    open_session_response, parse_registration_response, seal_session_packet, seal_session_response,
 };
 pub use ws_hmac::{WsEnvelope, WsHmacError, derive_ws_hmac_key, open_ws_frame, seal_ws_frame};

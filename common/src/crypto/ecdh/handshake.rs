@@ -3,8 +3,9 @@ use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroize;
 
 use super::{
-    ConnectionId, ECDH_REG_MIN_LEN, EcdhError, ListenerKeypair, aes_gcm_open, aes_gcm_open_aad,
-    aes_gcm_seal, aes_gcm_seal_aad, current_unix_secs, derive_session_key_from_secret,
+    ConnectionId, ECDH_REG_MIN_LEN, ECDH_REG_RESP_MIN_LEN, EcdhError, ListenerKeypair,
+    aes_gcm_open, aes_gcm_open_aad, aes_gcm_seal, aes_gcm_seal_aad, current_unix_secs,
+    derive_session_key_from_secret,
 };
 
 fn build_registration_packet_from_parts_impl(
@@ -108,7 +109,7 @@ pub fn parse_registration_response(
     session_key: &[u8; 32],
     response: &[u8],
 ) -> Result<(ConnectionId, u32), EcdhError> {
-    if response.len() < 16 + 12 + 4 + 16 {
+    if response.len() < ECDH_REG_RESP_MIN_LEN {
         return Err(EcdhError::PacketTooShort);
     }
     let connection_id =

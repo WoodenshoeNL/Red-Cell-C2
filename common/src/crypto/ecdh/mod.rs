@@ -53,8 +53,8 @@ pub use session::{
 };
 pub use types::{
     AgentTransport, CONNECTION_ID_LEN, ConnectionId, ECDH_REG_FINGERPRINT_LEN, ECDH_REG_MIN_LEN,
-    ECDH_RESP_MIN_LEN, ECDH_SESSION_MIN_LEN, EcdhError, EcdhSession, ListenerKeypair,
-    decode_listener_pub_key,
+    ECDH_REG_RESP_MIN_LEN, ECDH_SESSION_MIN_LEN, ECDH_SESSION_RESP_MIN_LEN, EcdhError, EcdhSession,
+    ListenerKeypair, decode_listener_pub_key,
 };
 
 #[cfg(feature = "test-utils")]

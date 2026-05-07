@@ -511,12 +511,18 @@ fn trigger_fetch(
     panel.result_rx = Some(rx);
     panel.fetch_status = AuditFetchStatus::Fetching;
 
+    let Some(client) = panel.http_client.clone() else {
+        panel.result_rx = None;
+        panel.fetch_status =
+            AuditFetchStatus::Error("HTTP client unavailable (TLS init failed)".to_owned());
+        return;
+    };
+
     let actor = panel.filter_actor.trim().to_owned();
     let action = panel.filter_action.trim().to_owned();
     let agent_id = panel.filter_agent_id.trim().to_owned();
     let offset = panel.offset;
     let limit = panel.limit;
-    let client = panel.http_client.clone();
 
     tokio::spawn(async move {
         fetch_audit_page(

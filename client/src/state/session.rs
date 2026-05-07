@@ -65,7 +65,8 @@ pub(crate) struct AuditLogPanelState {
     /// Result channel: the background fetch task writes here when done.
     pub(crate) result_rx: Option<tokio::sync::oneshot::Receiver<FetchResult>>,
     /// Shared HTTP client — reused across page fetches to keep the connection pool alive.
-    pub(crate) http_client: reqwest::Client,
+    /// `None` when the client could not be constructed (TLS/system error at startup).
+    pub(crate) http_client: Option<reqwest::Client>,
 }
 
 impl Default for AuditLogPanelState {
@@ -85,7 +86,7 @@ impl Default for AuditLogPanelState {
             http_client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(15))
                 .build()
-                .expect("reqwest client init failed"),
+                .ok(),
         }
     }
 }

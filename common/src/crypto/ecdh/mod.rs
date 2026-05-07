@@ -87,7 +87,7 @@ fn aes_gcm_seal(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, EcdhError> 
 
 /// Open an AES-256-GCM sealed blob of the form `nonce(12) | ciphertext | tag(16)`.
 fn aes_gcm_open(key: &[u8; 32], sealed: &[u8]) -> Result<Vec<u8>, EcdhError> {
-    if sealed.len() < 12 + 16 {
+    if sealed.len() < ECDH_SESSION_RESP_MIN_LEN {
         return Err(EcdhError::PacketTooShort);
     }
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
@@ -117,7 +117,7 @@ fn aes_gcm_seal_aad(key: &[u8; 32], aad: &[u8], plaintext: &[u8]) -> Result<Vec<
 /// with caller-supplied AAD.  Fails with [`EcdhError::AeadFailure`] if either the
 /// ciphertext or the AAD has been tampered with.
 fn aes_gcm_open_aad(key: &[u8; 32], aad: &[u8], sealed: &[u8]) -> Result<Vec<u8>, EcdhError> {
-    if sealed.len() < 12 + 16 {
+    if sealed.len() < ECDH_SESSION_RESP_MIN_LEN {
         return Err(EcdhError::PacketTooShort);
     }
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));

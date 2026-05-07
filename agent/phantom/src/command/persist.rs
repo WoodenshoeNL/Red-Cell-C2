@@ -300,6 +300,11 @@ mod tests {
         let install_result = persist_cron(PhantomPersistOp::Install, cmd);
         assert!(install_result.is_ok(), "install failed: {:?}", install_result);
 
+        // Ensure the entry is removed even if a later assertion panics.
+        scopeguard::defer! {
+            let _ = persist_cron(PhantomPersistOp::Remove, cmd);
+        }
+
         // Verify the entry appears in the live crontab.
         let list =
             std::process::Command::new("crontab").arg("-l").output().expect("crontab -l failed");

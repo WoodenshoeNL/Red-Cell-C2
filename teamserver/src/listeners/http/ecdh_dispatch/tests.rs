@@ -949,8 +949,8 @@ async fn touch_session_failure_broadcasts_liveness_drift_warning() {
 
     repo.store_session(&conn_id, agent_id, &session_key).await.expect("store");
 
-    // Do not register the agent — the pool will be closed before any DB access,
-    // so set_last_call_in will fail via AgentNotFound (registry is empty).
+    // The registry is intentionally left empty so that after the pool is closed,
+    // both `touch_session` and `set_last_call_in` will fail.
     let registry = AgentRegistry::new(db.clone());
     // Use non-zero capacity so broadcast_teamserver_line retains log entries.
     let events = EventBus::new(64);
@@ -982,16 +982,17 @@ async fn touch_session_failure_broadcasts_liveness_drift_warning() {
 
     assert!(result.is_ok(), "liveness update failure must not abort the session; got: {result:?}");
 
-    // At least one liveness-drift broadcast must appear in the retained log.
+    // The broadcast must specifically name touch_session so the assertion fails
+    // if only the set_last_call_in path fires.
     let logs = events.recent_teamserver_logs();
     let got_drift_warning = logs.iter().any(|msg| {
         if let red_cell_common::operator::OperatorMessage::TeamserverLog(m) = msg {
-            m.info.text.contains("ECDH liveness drift")
+            m.info.text.contains("ECDH liveness drift") && m.info.text.contains("touch_session")
         } else {
             false
         }
     });
-    assert!(got_drift_warning, "at least one 'ECDH liveness drift' message must be broadcast");
+    assert!(got_drift_warning, "a 'ECDH liveness drift: touch_session' warning must be broadcast");
 }
 
 /// When `set_last_call_in` fails because the agent is not in the in-memory

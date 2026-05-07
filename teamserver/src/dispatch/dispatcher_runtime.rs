@@ -191,12 +191,7 @@ mod tests {
     async fn get_job_refreshes_last_call_in() {
         let (registry, _db) = setup().await;
 
-        let before = registry
-            .get(AGENT_ID)
-            .await
-            .expect("agent must exist")
-            .last_call_in
-            .clone();
+        let before = registry.get(AGENT_ID).await.expect("agent must exist").last_call_in.clone();
 
         // Small delay so that `now_utc()` inside handle_get_job is guaranteed to be
         // strictly later than the seeded timestamp.
@@ -204,12 +199,7 @@ mod tests {
 
         handle_get_job(&registry, AGENT_ID, 0x01).await.expect("handle_get_job must succeed");
 
-        let after = registry
-            .get(AGENT_ID)
-            .await
-            .expect("agent must exist")
-            .last_call_in
-            .clone();
+        let after = registry.get(AGENT_ID).await.expect("agent must exist").last_call_in.clone();
 
         assert_ne!(
             before, after,

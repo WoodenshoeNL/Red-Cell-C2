@@ -266,11 +266,18 @@ def _run_for_agent_windows(ctx, agent_type: str, fmt: str,
         print(f"  [{agent_type}][spawn] sleep process started, PID={sleep_pid}")
 
         # Verify it's actually running (sanity check via SSH).
-        ps_check = run_remote(
-            target,
-            f'tasklist /FI "PID eq {sleep_pid}" /FO CSV /NH 2>NUL',
-            timeout=ssh,
-        )
+        # Start-Process returns the PID before the child is fully registered in
+        # the Windows process table, so retry a few times to handle this race.
+        ps_check = ""
+        for _attempt in range(5):
+            ps_check = run_remote(
+                target,
+                f'tasklist /FI "PID eq {sleep_pid}" /FO CSV /NH 2>NUL',
+                timeout=ssh,
+            )
+            if str(sleep_pid) in ps_check:
+                break
+            time.sleep(0.5)
         assert str(sleep_pid) in ps_check, (
             f"sleep process PID {sleep_pid} not found in tasklist immediately after spawn;\n"
             f"  tasklist output: {ps_check!r}"

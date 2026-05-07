@@ -279,8 +279,8 @@ def _run_for_agent_windows(ctx, agent_type: str, fmt: str,
                 break
             time.sleep(0.5)
         assert str(sleep_pid) in ps_check, (
-            f"sleep process PID {sleep_pid} not found in tasklist immediately after spawn;\n"
-            f"  tasklist output: {ps_check!r}"
+            f"sleep process PID {sleep_pid} not found in tasklist after 5 attempts (2.5 s);"
+            f" tasklist output: {ps_check!r}"
         )
         print(f"  [{agent_type}][spawn] confirmed PID {sleep_pid} is running on target")
 

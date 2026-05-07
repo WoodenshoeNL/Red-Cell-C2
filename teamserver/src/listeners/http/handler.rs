@@ -116,6 +116,12 @@ pub(super) async fn http_listener_handler(
                 // fake 404 here avoids a second log line per rejected packet.
                 return state.fake_404_response();
             }
+            Ok(EcdhOutcome::HandledReject) => {
+                // Packet was positively identified as an ECDH registration but
+                // rejected (replay or DB error). Must not fall through to the
+                // Archon/Demon path — short-circuit with a fake 404.
+                return state.fake_404_response();
+            }
             Err(error) => {
                 warn!(listener = %state.config.name, %error, "ECDH packet processing failed");
                 return state.fake_404_response();

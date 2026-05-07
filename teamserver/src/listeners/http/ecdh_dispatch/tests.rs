@@ -619,7 +619,9 @@ async fn duplicate_registration_does_not_leak_session_row() {
 /// Replaying an identical registration packet within the replay window must be
 /// rejected.  The ephemeral-pubkey+nonce fingerprint is recorded in the DB on
 /// the first successful delivery; the second identical call hits the
-/// `try_record_reg_fingerprint` duplicate check and returns `NotEcdh`.
+/// `try_record_reg_fingerprint` duplicate check and returns `HandledReject`
+/// (not `NotEcdh`) so the HTTP handler does not fall through to the Archon
+/// transport path.
 ///
 /// This exercises the full `process_ecdh_packet` → `classify.rs` path and
 /// catches regressions in fingerprint-slice extraction (wrong offset or length
@@ -675,8 +677,8 @@ async fn reg_replay_within_window_rejected() {
     .await
     .expect("replay call should not error");
     assert!(
-        matches!(second, EcdhOutcome::NotEcdh),
-        "replayed packet must be rejected with NotEcdh; got: {second:?}"
+        matches!(second, EcdhOutcome::HandledReject),
+        "replayed packet must be rejected with HandledReject (not NotEcdh); got: {second:?}"
     );
 
     // Verify the SOC-observable replay-rejected counter was incremented.
@@ -689,8 +691,9 @@ async fn reg_replay_within_window_rejected() {
 }
 
 /// When `try_record_reg_fingerprint` cannot reach the database (pool closed),
-/// `process_ecdh_packet` must fail closed — returning `NotEcdh` instead of
-/// proceeding without replay protection.  A sustained non-zero rate on the
+/// `process_ecdh_packet` must fail closed — returning `HandledReject` instead
+/// of falling through to the Archon path without replay protection.  A
+/// sustained non-zero rate on the
 /// `red_cell_ecdh_replay_db_errors_total` counter signals DB instability.
 ///
 /// This test also asserts that `red_cell_ecdh_replay_db_errors_total` is
@@ -732,8 +735,8 @@ async fn process_ecdh_packet_fails_closed_on_replay_db_error() {
     .await;
 
     assert!(
-        matches!(result, Ok(EcdhOutcome::NotEcdh)),
-        "DB error during replay guard must return NotEcdh (fail-closed); got: {result:?}"
+        matches!(result, Ok(EcdhOutcome::HandledReject)),
+        "DB error during replay guard must return HandledReject (fail-closed, not NotEcdh); got: {result:?}"
     );
 
     // Verify the SOC-observable counter was actually incremented.

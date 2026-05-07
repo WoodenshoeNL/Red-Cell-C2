@@ -37,4 +37,9 @@ pub(crate) enum EcdhOutcome {
     /// The helper has already emitted a structured WARN; the caller should
     /// return a fake 404 without a second log line.
     RateLimited,
+    /// Packet was positively identified as an ECDH registration but rejected
+    /// (replay detected or replay-DB error). The helper has already emitted a
+    /// structured log line; the caller must short-circuit with a fake 404 and
+    /// MUST NOT fall through to the Archon/Demon transport path.
+    HandledReject,
 }

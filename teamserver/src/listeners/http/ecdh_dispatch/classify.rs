@@ -161,7 +161,7 @@ pub(crate) async fn process_ecdh_packet(
                 "ECDH registration rejected: duplicate ephemeral pubkey/nonce (replay within window)"
             );
             crate::metrics::inc_ecdh_replays_rejected(listener_name);
-            return Ok(EcdhOutcome::NotEcdh);
+            return Ok(EcdhOutcome::HandledReject);
         }
         Err(e) => {
             // Fail closed: a DB error means we cannot determine whether this
@@ -174,7 +174,7 @@ pub(crate) async fn process_ecdh_packet(
                 "ECDH replay fingerprint DB check failed — rejecting registration (fail-closed)"
             );
             crate::metrics::inc_ecdh_replay_db_errors(listener_name);
-            return Ok(EcdhOutcome::NotEcdh);
+            return Ok(EcdhOutcome::HandledReject);
         }
     }
 

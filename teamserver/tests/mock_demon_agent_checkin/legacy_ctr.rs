@@ -361,7 +361,7 @@ async fn legacy_ctr_large_command_output_round_trip() -> Result<(), Box<dyn std:
     // ~300 TCP/UDP connections — approximately 40 KB of plain-text lines.
     let netstat_line =
         "  TCP    192.168.213.160:12345   192.168.213.157:19083  TIME_WAIT       0\r\n";
-    let output_text: String = std::iter::repeat(netstat_line).take(512).collect();
+    let output_text: String = std::iter::repeat(netstat_line).take(600).collect();
     assert!(output_text.len() > 40_000, "output must be large enough to surface size bugs");
 
     let large_output_cb = harness

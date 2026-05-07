@@ -42,11 +42,15 @@ pub(crate) fn hex_correlation_tokens_equal(a: &str, b: &str) -> bool {
     if a == b {
         return true;
     }
-    if !is_plausible_hex_task_token(a) || !is_plausible_hex_task_token(b) {
-        return false;
-    }
+    // Require at least one side to be unambiguously a hex task token so that a
+    // decimal-looking SQLite row surrogate ("172", "999") cannot match a
+    // coincidentally equal hex value.  An 8-char padded token on one side is
+    // enough to anchor the comparison; the other side may be unpadded and
+    // digit-only (e.g. "10" for 0x00000010).
     match (parse_hex_u32_trimmed(a), parse_hex_u32_trimmed(b)) {
-        (Some(na), Some(nb)) => na == nb,
+        (Some(na), Some(nb)) if na == nb => {
+            is_plausible_hex_task_token(a) || is_plausible_hex_task_token(b)
+        }
         _ => false,
     }
 }
@@ -106,6 +110,19 @@ mod tests {
         assert!(hex_correlation_tokens_equal("0000002A", "2a"));
         assert!(hex_correlation_tokens_equal("0x2A", "0000002A"));
         assert!(!hex_correlation_tokens_equal("12345678", "87654321"));
+    }
+
+    #[test]
+    fn correlation_accepts_padded_vs_digit_only_unpadded() {
+        // 8-char padded token on one side anchors the comparison; the other side
+        // may be unpadded and digit-only (regression: previously returned false).
+        assert!(hex_correlation_tokens_equal("00000010", "10"));
+        assert!(hex_correlation_tokens_equal("10", "00000010"));
+        // Two digit-only strings with different hex values must not match.
+        assert!(!hex_correlation_tokens_equal("00000010", "172"));
+        // The decimal-looking rejects still hold in isolation.
+        assert!(!is_plausible_hex_task_token("172"));
+        assert!(!is_plausible_hex_task_token("999"));
     }
 
     #[test]

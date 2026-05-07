@@ -48,6 +48,7 @@ def deploy_and_checkin(
     checkin_periodic_callback: Callable[[], None] | None = None,
     windows_prelaunch_probe: bool = False,
     amsi_etw: str | None = None,
+    defer_wfp_cleanup: bool = False,
 ) -> dict | None:
     """Build, deploy, execute, and wait for a single agent checkin.
 
@@ -97,10 +98,20 @@ def deploy_and_checkin(
         windows_prelaunch_probe: When ``True`` (Windows only), run a synchronous
             one-shot execution of the payload before the background schtask launch,
             printing captured exit code and stderr/stdout for fast-fail diagnosis.
+        defer_wfp_cleanup: When ``True``, do **not** remove the WFP per-program
+            allow rule in the outer ``finally`` on a successful checkin.  Instead,
+            a zero-argument callable is attached to the returned agent dict under
+            the key ``"_wfp_cleanup"``; the caller must pop and invoke it in their
+            own teardown path (e.g. alongside ``agent_kill``).  On failure the
+            outer ``finally`` still cleans up unconditionally.  Use this when the
+            agent needs post-checkin outbound connectivity (e.g. ``agent_exec``)
+            and the Windows target may have restrictive default outbound policy.
 
     Returns:
         The agent dict from :func:`~lib.wait.wait_for_agent`, or ``None`` when
-        *expect_checkin* is ``False`` and no agent appears (expected).
+        *expect_checkin* is ``False`` and no agent appears (expected).  When
+        *defer_wfp_cleanup* is ``True`` and checkin succeeds, the dict also
+        contains a ``"_wfp_cleanup"`` key holding a zero-argument callable.
 
     Raises:
         AssertionError: if the built payload is empty, or if *expect_checkin* is
@@ -257,11 +268,39 @@ def deploy_and_checkin(
             periodic_callback=checkin_periodic_callback,
         )
         print(f"  [{tag}][wait] agent checked in: {agent['id']}")
+        if defer_wfp_cleanup and (_wfp_program_path or _wfp_np_host):
+            # Caller needs post-checkin outbound connectivity (e.g. agent_exec).
+            # Hand the cleanup work back to the caller so WFP rules remain in
+            # place until the full agent session is torn down.
+            _prog = _wfp_program_path
+            _host = _wfp_np_host
+            _tag = tag
+
+            def _deferred_wfp_cleanup() -> None:
+                if _prog:
+                    try:
+                        print(f"  [{_tag}][cleanup] removing firewall rule for {_prog}")
+                        firewall_remove_program(target, _prog)
+                    except Exception as exc:
+                        print(f"  [{_tag}][cleanup] firewall rule removal failed (non-fatal): {exc}")
+                if _host:
+                    try:
+                        print(f"  [{_tag}][cleanup] removing NP exclusion for {_host}")
+                        defender_remove_network_protection_exclusion(target, _host)
+                    except Exception as exc:
+                        print(f"  [{_tag}][cleanup] NP exclusion removal failed (non-fatal): {exc}")
+
+            agent["_wfp_cleanup"] = _deferred_wfp_cleanup
+            # Clear the tracked paths so the outer finally skips cleanup.
+            _wfp_program_path = None
+            _wfp_np_host = None
         return agent
 
     finally:
         # Remove WFP state added during deploy so rules don't accumulate across runs.
         # Both operations are non-paged-pool consumers; leaking them causes WSAENOBUFS.
+        # When defer_wfp_cleanup=True and checkin succeeded, paths are already cleared
+        # above and the callable was handed to the caller — nothing to do here.
         if _wfp_program_path:
             try:
                 print(f"  [{tag}][cleanup] removing firewall rule for {_wfp_program_path}")

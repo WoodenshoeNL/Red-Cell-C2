@@ -149,6 +149,7 @@ def run(ctx):
     print("  [listener] started")
 
     agent_id = None
+    wfp_cleanup = None
     try:
         # ── Steps 2-5: Build, deploy, exec, wait for checkin ─────────────────
         agent = deploy_and_checkin(
@@ -158,8 +159,10 @@ def run(ctx):
             agent_type="demon",
             fmt="exe",
             listener_name=listener_name,
+            defer_wfp_cleanup=True,
         )
         agent_id = agent["id"]
+        wfp_cleanup = agent.pop("_wfp_cleanup", None)
 
         # ── Step 6: List tokens via whoami /all ──────────────────────────────
         print("  [tokens] listing token info via 'whoami /all'")
@@ -238,6 +241,9 @@ def run(ctx):
                 agent_kill(cli, agent_id)
             except Exception as exc:
                 print(f"  [cleanup] agent kill failed (non-fatal): {exc}")
+
+        if wfp_cleanup is not None:
+            wfp_cleanup()
 
         print(f"  [cleanup] stopping/deleting listener {listener_name!r}")
         try:

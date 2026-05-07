@@ -52,7 +52,7 @@ DEV_SLEEP_NO_WORK     = 600    # wait when no tasks are ready
 DEV_SLEEP_BETWEEN     = 15     # wait between tasks when --sleep not set
 DEV_SLEEP_TOKEN_LIMIT = 1200   # wait after Claude context limit hit
 DEV_CLEAN_EVERY       = 1      # run build-artifact cleanup every N dev iterations
-DEV_MAX_TURNS         = 150    # max turns per dev session; agent commits WIP and resumes next iteration
+DEV_MAX_TURNS         = 200    # max turns per dev session; agent commits WIP and resumes next iteration
 MAX_CONSECUTIVE_CAP_OUTS = 2  # escalate after this many consecutive cap-outs on the same bead
 
 # Valid zone names and their corresponding source paths
@@ -81,10 +81,6 @@ DEV_LITEQA_MAX_TURNS = 50
 # Cap-out post-mortem prompt run when a dev session hits the turn/token limit
 DEV_LITEQA_CAPOUT_PROMPT = "prompts/DEV_LITEQA_CAPOUT_PROMPT.md"
 DEV_LITEQA_CAPOUT_MAX_TURNS = 30
-
-# Pre-claim QA prompt run before claiming a bead (agent-independent)
-PRE_CLAIM_QA_PROMPT = "prompts/PRE_CLAIM_QA_PROMPT.md"
-PRE_CLAIM_QA_MAX_TURNS = 20
 
 # Review loops use a single best-of prompt per loop type (agent-independent)
 REVIEW_PROMPTS = {
@@ -1361,80 +1357,6 @@ def release_cap_out_bead(task_id: str, checkpoint: str, agent_id: str, log: Logg
     log.log(f"CAP-OUT: {task_id} reset to open, checkpoint written")
 
 
-def extract_pre_claim_verdict(output: str) -> tuple:
-    """
-    Parse the PRE-CLAIM QA RESULT block from agent output.
-
-    Returns (verdict, reason) where verdict is one of 'PASS', 'REFINED', 'BLOCKED',
-    or 'UNKNOWN' if the block is missing or malformed.
-    """
-    start = output.rfind("=== PRE-CLAIM QA RESULT ===")
-    end = output.find("=== END PRE-CLAIM QA ===", start)
-    if start == -1 or end == -1:
-        return "UNKNOWN", "pre-claim agent produced no structured result block"
-
-    block = output[start:end]
-    verdict = "UNKNOWN"
-    reason = ""
-    for line in block.splitlines():
-        if line.startswith("Verdict:"):
-            verdict = line.split(":", 1)[1].strip().upper()
-        elif line.startswith("Reason:"):
-            reason = line.split(":", 1)[1].strip()
-
-    if verdict not in ("PASS", "REFINED", "BLOCKED"):
-        verdict = "UNKNOWN"
-    return verdict, reason
-
-
-def run_pre_claim_qa(
-    task_id: str,
-    agent: str,
-    model: str,
-    agent_id: str,
-    max_turns: int,
-    log: Logger,
-) -> tuple:
-    """
-    Run the pre-claim quality gate for a candidate bead.
-
-    Returns (verdict, reason) where verdict is 'PASS', 'REFINED', 'BLOCKED',
-    or 'UNKNOWN' (treated as PASS to avoid blocking on gate failures).
-    """
-    prompt_file = SCRIPT_DIR / PRE_CLAIM_QA_PROMPT
-    if not prompt_file.exists():
-        log.log(f"WARNING: pre-claim QA prompt not found at {prompt_file} — skipping gate")
-        return "PASS", "prompt file missing"
-
-    template = prompt_file.read_text()
-    issue_details = br(["show", task_id]).stdout.strip() or f"Issue ID: {task_id}"
-    prompt = (
-        template
-        .replace("{ISSUE_ID}", task_id)
-        .replace("{AGENT_ID}", agent_id)
-        .replace("{MAX_TURNS}", str(max_turns))
-    )
-    prompt += f"\n\n---\n\n## Bead Details\n\n{issue_details}\n"
-
-    log.log(f"Running pre-claim QA on {task_id} (max {max_turns} turns)...")
-    _exit, output, _ = run_agent(
-        agent, model, prompt, log,
-        max_turns=max_turns if agent == "claude" else 0,
-    )
-
-    verdict, reason = extract_pre_claim_verdict(output)
-    log.log(f"Pre-claim QA [{task_id}]: verdict={verdict} reason={reason}")
-
-    if verdict == "UNKNOWN":
-        log.log(
-            f"WARNING: pre-claim agent returned no structured verdict for {task_id}"
-            f" — treating as PASS"
-        )
-        return "PASS", reason
-
-    return verdict, reason
-
-
 def filter_cap_out_candidates(
     candidates: list,
     cap_out_pending_skip: set,
@@ -1618,11 +1540,6 @@ def dev_loop(args, log: Logger):
     zone_desc = ", ".join(zones) if zones else "all zones"
     dev_light = getattr(args, "dev_light", False)
     lite_qa_mode = "off (--dev-light)" if dev_light else "on"
-    pre_claim_qa_turns = getattr(args, "pre_claim_qa_turns", PRE_CLAIM_QA_MAX_TURNS)
-    pre_claim_qa_mode = (
-        "off (--dev-light)" if dev_light
-        else f"on (max {pre_claim_qa_turns} turns)"
-    )
     log.banner([
         f"{agent.title()} development loop starting",
         f"Agent ID:  {agent_id}",
@@ -1632,7 +1549,6 @@ def dev_loop(args, log: Logger):
         f"Stale thr: {args.stale_threshold}m",
         f"Zones:     {zone_desc}",
         f"Lite QA:   {lite_qa_mode}",
-        f"Pre-claim: {pre_claim_qa_mode}",
     ])
 
     lock_path = SCRIPT_DIR / ".agent-claim.lock"
@@ -1641,9 +1557,6 @@ def dev_loop(args, log: Logger):
     # Cap-out tracking: consecutive cap-outs per bead and one-iteration skip list.
     cap_out_streak: dict = {}      # task_id → consecutive cap-out count
     cap_out_pending_skip: set = set()  # task_ids to skip on the next selection pass
-    # Pre-claim QA tracking: beads that failed the QA gate this session.
-    # Reset when the entire candidate pool is exhausted so reformulated beads can be re-evaluated.
-    pre_claim_blocked_skip: set = set()
 
     while True:
         if stop_requested():
@@ -1756,47 +1669,11 @@ def dev_loop(args, log: Logger):
                     f" — {len(prioritized)} other candidate(s) available"
                 )
 
-            # Skip beads that already received a BLOCKED pre-claim verdict this session.
-            # Falls back to all candidates when every candidate is blocked, then resets the
-            # skip set so reformulated beads can be re-evaluated next iteration.
-            non_blocked = [c for c in prioritized if c not in pre_claim_blocked_skip]
-            if non_blocked:
-                prioritized = non_blocked
-            else:
-                # Pool exhausted: every candidate has been BLOCKED this session.
-                # Reset so the loop can re-evaluate in case beads were reformulated.
-                blocked_consumed = set(prioritized) & pre_claim_blocked_skip
-                pre_claim_blocked_skip.difference_update(blocked_consumed)
-                log.log(
-                    f"PRE-CLAIM BLOCKED skip reset: all {len(candidates)} candidate(s)"
-                    f" were blocked — re-evaluating pool"
-                )
-                prioritized = []  # defer re-evaluation to next iteration; avoid burning QA turns on reset iteration
-
             for candidate in prioritized:
                 if issue_status_from_jsonl(candidate) == "in_progress":
                     log.log(f"Skipping candidate already in_progress in JSONL: {candidate}")
                     continue
                 log.log(f"Selected task: {candidate}")
-
-                # Pre-claim QA gate: verify bead body accuracy before claiming.
-                # Skipped when --dev-light is set or for non-claude agents (no max_turns support).
-                if not dev_light and agent == "claude":
-                    pq_verdict, pq_reason = run_pre_claim_qa(
-                        candidate, agent, args.model, agent_id,
-                        max_turns=pre_claim_qa_turns, log=log,
-                    )
-                    # Sweep up any bead updates the QA agent made before deciding.
-                    commit_beads_if_dirty(
-                        f"pre-claim-qa refine {candidate} [{agent_id}]", log
-                    )
-                    if pq_verdict == "BLOCKED":
-                        pre_claim_blocked_skip.add(candidate)
-                        log.log(
-                            f"PRE-CLAIM BLOCKED [{candidate}]: {pq_reason}"
-                            f" — skipping this candidate (added to session skip set)"
-                        )
-                        continue
 
                 if claim_task(candidate, agent_id, log, rename_prefix):
                     next_id = candidate
@@ -1901,7 +1778,7 @@ Start directly with understanding the task and implementing it.
 
         before_sha = git(["rev-parse", "HEAD"]).stdout.strip()
 
-        # Force-clean build artifacts before every session. A 150-turn session can
+        # Force-clean build artifacts before every session. A 200-turn session can
         # compile multiple crates many times and accumulate tens of GB in target/.
         # Both the main target/ and the per-zone CARGO_TARGET_DIR in /tmp must be
         # wiped — clean_build_artifacts covers target/, clean_tmp_cargo_targets(force)
@@ -3212,8 +3089,7 @@ examples:
   ./loop.py --agent codex  --loop dev  --zone teamserver
   ./loop.py --agent cursor --loop dev  --zone client-cli client
   ./loop.py --agent claude --loop dev  --sleep 0 --iterations 1
-  ./loop.py --agent claude --loop dev  --dev-light          # skip pre-claim QA + lite QA (original behaviour)
-  ./loop.py --agent claude --loop dev  --pre-claim-qa-turns 10  # faster pre-claim gate
+  ./loop.py --agent claude --loop dev  --dev-light          # skip the lite QA pass (original single-call behaviour)
   ./loop.py --agent codex  --loop qa   --sleep 20
   ./loop.py --agent claude --loop arch --zone teamserver
   ./loop.py --agent claude --loop arch --sleep 120 --jitter 15
@@ -3313,17 +3189,8 @@ examples:
         action="store_true",
         default=False,
         help=(
-            "Dev loop only: skip the lite QA pass and pre-claim QA gate after/before "
-            "each task. Use this to get the original single-agent-call behaviour."
-        ),
-    )
-    parser.add_argument(
-        "--pre-claim-qa-turns",
-        type=int, default=PRE_CLAIM_QA_MAX_TURNS, metavar="N",
-        dest="pre_claim_qa_turns",
-        help=(
-            f"Dev loop only: max turns for the pre-claim QA gate (default: {PRE_CLAIM_QA_MAX_TURNS}). "
-            "Increase for complex beads, decrease to save time. --dev-light disables the gate entirely."
+            "Dev loop only: skip the lite QA pass after each task. Use this to "
+            "get the original single-agent-call behaviour."
         ),
     )
     parser.add_argument(

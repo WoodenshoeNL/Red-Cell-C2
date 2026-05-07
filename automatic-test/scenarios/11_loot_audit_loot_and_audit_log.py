@@ -59,8 +59,14 @@ def _short_id() -> str:
 
 
 def _utc_now_iso() -> str:
-    """Return the current UTC time as an ISO 8601 string (Z suffix)."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    """Return the current UTC time as ISO 8601 with microsecond precision.
+
+    Must include fractional seconds: bare ``Z`` suffix (ASCII 90) sorts before any ``.``
+    (ASCII 46) in SQLite string comparison, causing boundary mismatches with nanosecond DB
+    timestamps in the same second.
+    """
+    dt = datetime.now(timezone.utc)
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond:06d}Z"
 
 
 def _target_and_fmt(ctx):

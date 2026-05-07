@@ -56,12 +56,12 @@ pub(crate) async fn process_ecdh_session(
                 }
             })?;
 
-        // Reject replays: seq_num must be strictly greater than the last accepted.
-        let accepted = ecdh_db.advance_seq_num(connection_id, seq_num).await.map_err(|e| {
-            let msg = format!("ECDH seq_num DB update failed: {e}");
+        // Reject replays and oversized forward gaps (aligns with legacy seq-protected policy).
+        let accepted = ecdh_db.advance_seq_num(connection_id, agent_id, seq_num).await.map_err(|e| {
+            let msg = format!("ECDH seq_num rejected: {e}");
             let text = format!("[listener={listener_name}] agent={agent_id:08X} {msg}");
             broadcast_teamserver_line(events, "teamserver", &text);
-            warn!(listener = listener_name, agent_id = format_args!("{agent_id:08X}"), %e, "ECDH seq_num DB update failed");
+            warn!(listener = listener_name, agent_id = format_args!("{agent_id:08X}"), %e, "ECDH seq_num rejected");
             ListenerManagerError::InvalidConfig {
                 message: msg,
             }

@@ -160,30 +160,67 @@ impl EcdhRepository {
 
     /// Validate and advance the sequence number for a session.
     ///
-    /// Returns `Ok(true)` if `candidate_seq` > `last_seq_num` and the DB was
-    /// updated atomically.  Returns `Ok(false)` if the packet is a replay
-    /// (candidate_seq ≤ last_seq_num).  Returns `Err` on DB failure.
+    /// Returns `Ok(true)` if `candidate_seq` is strictly greater than `last_seq_num`
+    /// and within [`red_cell_common::callback_seq::MAX_SEQ_GAP`], and the DB was updated.
+    /// Returns `Ok(false)` if the packet is a replay (`candidate_seq ≤ last_seq_num`)
+    /// or the session does not exist.
+    /// Returns `Err(TeamserverError::CallbackSeqGapTooLarge)` when the forward gap
+    /// exceeds `MAX_SEQ_GAP` (aligns ECDH path with the legacy seq-protected policy).
+    /// Returns `Err(TeamserverError::SeqNumOverflow)` when `candidate_seq` overflows i64.
     pub async fn advance_seq_num(
         &self,
         connection_id_bytes: &[u8; CONNECTION_ID_LEN],
+        agent_id: u32,
         candidate_seq: u64,
     ) -> Result<bool, TeamserverError> {
+        use red_cell_common::callback_seq::MAX_SEQ_GAP;
+
         let seq_i64 = i64::try_from(candidate_seq)
             .map_err(|_| TeamserverError::SeqNumOverflow { seq_num: candidate_seq })?;
-        let rows_affected = sqlx::query(
-            "UPDATE ts_ecdh_sessions \
-             SET last_seq_num = ? \
-             WHERE connection_id = ? AND last_seq_num < ?",
-        )
-        .bind(seq_i64)
-        .bind(connection_id_bytes.as_slice())
-        .bind(seq_i64)
-        .execute(&self.pool)
-        .await
-        .map_err(TeamserverError::Sqlx)?
-        .rows_affected();
 
-        Ok(rows_affected > 0)
+        let mut tx = self.pool.begin().await.map_err(TeamserverError::Sqlx)?;
+
+        let row: Option<(i64,)> =
+            sqlx::query_as("SELECT last_seq_num FROM ts_ecdh_sessions WHERE connection_id = ?")
+                .bind(connection_id_bytes.as_slice())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(TeamserverError::Sqlx)?;
+
+        let Some((last_i64,)) = row else {
+            tx.rollback().await.map_err(TeamserverError::Sqlx)?;
+            return Ok(false);
+        };
+
+        // last_seq_num is stored as non-negative i64 (DEFAULT 0, always written via
+        // i64::try_from which rejects negatives), so casting to u64 is safe.
+        let last_seq = last_i64 as u64;
+
+        if candidate_seq <= last_seq {
+            tx.rollback().await.map_err(TeamserverError::Sqlx)?;
+            return Ok(false);
+        }
+
+        let gap = candidate_seq - last_seq;
+        if gap > MAX_SEQ_GAP {
+            tx.rollback().await.map_err(TeamserverError::Sqlx)?;
+            return Err(TeamserverError::CallbackSeqGapTooLarge {
+                agent_id,
+                incoming_seq: candidate_seq,
+                last_seen_seq: last_seq,
+                gap,
+            });
+        }
+
+        sqlx::query("UPDATE ts_ecdh_sessions SET last_seq_num = ? WHERE connection_id = ?")
+            .bind(seq_i64)
+            .bind(connection_id_bytes.as_slice())
+            .execute(&mut *tx)
+            .await
+            .map_err(TeamserverError::Sqlx)?;
+
+        tx.commit().await.map_err(TeamserverError::Sqlx)?;
+        Ok(true)
     }
 
     /// Update the `last_seen` timestamp for a session.
@@ -420,7 +457,7 @@ mod tests {
         repo.store_session(&conn_id, 1, &[0u8; 32]).await.expect("store");
 
         // First packet with seq_num = 1 must be accepted (last_seq_num starts at 0).
-        assert!(repo.advance_seq_num(&conn_id.0, 1).await.expect("advance"), "seq 1 accepted");
+        assert!(repo.advance_seq_num(&conn_id.0, 1, 1).await.expect("advance"), "seq 1 accepted");
     }
 
     #[tokio::test]
@@ -431,9 +468,10 @@ mod tests {
         let conn_id = ConnectionId::generate().expect("conn_id");
         repo.store_session(&conn_id, 2, &[0u8; 32]).await.expect("store");
 
-        for seq in [1u64, 2, 5, 100] {
+        // Gaps: 1, 1, 3, 5 — all within MAX_SEQ_GAP=10.
+        for seq in [1u64, 2, 5, 10] {
             assert!(
-                repo.advance_seq_num(&conn_id.0, seq).await.expect("advance"),
+                repo.advance_seq_num(&conn_id.0, 2, seq).await.expect("advance"),
                 "seq {seq} must be accepted"
             );
         }
@@ -447,17 +485,18 @@ mod tests {
         let conn_id = ConnectionId::generate().expect("conn_id");
         repo.store_session(&conn_id, 3, &[0u8; 32]).await.expect("store");
 
-        assert!(repo.advance_seq_num(&conn_id.0, 10).await.expect("advance"), "seq 10 accepted");
+        // Gap from 0 to 10 equals MAX_SEQ_GAP — must be accepted.
+        assert!(repo.advance_seq_num(&conn_id.0, 3, 10).await.expect("advance"), "seq 10 accepted");
 
         // Replaying the same packet must be rejected.
         assert!(
-            !repo.advance_seq_num(&conn_id.0, 10).await.expect("advance"),
+            !repo.advance_seq_num(&conn_id.0, 3, 10).await.expect("advance"),
             "seq 10 replay rejected"
         );
 
         // Older packet must be rejected.
         assert!(
-            !repo.advance_seq_num(&conn_id.0, 5).await.expect("advance"),
+            !repo.advance_seq_num(&conn_id.0, 3, 5).await.expect("advance"),
             "seq 5 (old) rejected"
         );
     }
@@ -472,11 +511,11 @@ mod tests {
         repo.store_session(&conn_a, 4, &[0u8; 32]).await.expect("store a");
         repo.store_session(&conn_b, 5, &[0u8; 32]).await.expect("store b");
 
-        // Advance A to seq 50.
-        assert!(repo.advance_seq_num(&conn_a.0, 50).await.expect("advance a"));
+        // Advance A to seq 5 (gap from 0 = 5 ≤ MAX_SEQ_GAP).
+        assert!(repo.advance_seq_num(&conn_a.0, 4, 5).await.expect("advance a"));
 
         // B starts at 0; seq 1 must still be accepted independently.
-        assert!(repo.advance_seq_num(&conn_b.0, 1).await.expect("advance b"));
+        assert!(repo.advance_seq_num(&conn_b.0, 5, 1).await.expect("advance b"));
     }
 
     #[tokio::test]
@@ -485,7 +524,10 @@ mod tests {
         let repo = EcdhRepository::new(db.pool().clone(), master_key);
 
         // No session stored — advance_seq_num must return false (not an error).
-        assert!(!repo.advance_seq_num(&[0u8; 16], 1).await.expect("advance"), "no session → false");
+        assert!(
+            !repo.advance_seq_num(&[0u8; 16], 0, 1).await.expect("advance"),
+            "no session → false"
+        );
     }
 
     #[tokio::test]
@@ -498,17 +540,89 @@ mod tests {
 
         // seq_num values that exceed i64::MAX must return SeqNumOverflow, not silently cap.
         let overflow = (i64::MAX as u64) + 1;
-        let err = repo.advance_seq_num(&conn_id.0, overflow).await.unwrap_err();
+        let err = repo.advance_seq_num(&conn_id.0, 6, overflow).await.unwrap_err();
         assert!(
             matches!(err, TeamserverError::SeqNumOverflow { seq_num } if seq_num == overflow),
             "expected SeqNumOverflow, got {err:?}"
         );
 
-        // i64::MAX itself must be accepted (boundary: still fits).
+        // Seed last_seq_num to i64::MAX - MAX_SEQ_GAP so that i64::MAX (gap = MAX_SEQ_GAP) is accepted.
+        use red_cell_common::callback_seq::MAX_SEQ_GAP;
+        let near_max: i64 = i64::MAX - MAX_SEQ_GAP as i64;
+        sqlx::query("UPDATE ts_ecdh_sessions SET last_seq_num = ? WHERE connection_id = ?")
+            .bind(near_max)
+            .bind(conn_id.0.as_slice())
+            .execute(db.pool())
+            .await
+            .expect("seed near-max");
         let max_ok = i64::MAX as u64;
         assert!(
-            repo.advance_seq_num(&conn_id.0, max_ok).await.expect("advance at i64::MAX"),
-            "seq i64::MAX must be accepted"
+            repo.advance_seq_num(&conn_id.0, 6, max_ok).await.expect("advance at i64::MAX"),
+            "seq i64::MAX must be accepted when gap == MAX_SEQ_GAP"
+        );
+    }
+
+    #[tokio::test]
+    async fn advance_seq_num_rejects_gap_too_large() {
+        use red_cell_common::callback_seq::MAX_SEQ_GAP;
+
+        let (db, master_key) = test_db().await;
+        let repo = EcdhRepository::new(db.pool().clone(), master_key);
+
+        let conn_id = ConnectionId::generate().expect("conn_id");
+        repo.store_session(&conn_id, 7, &[0u8; 32]).await.expect("store");
+
+        // Gap exactly at MAX_SEQ_GAP must be accepted.
+        assert!(
+            repo.advance_seq_num(&conn_id.0, 7, MAX_SEQ_GAP).await.expect("advance"),
+            "gap == MAX_SEQ_GAP must be accepted"
+        );
+
+        // Gap of MAX_SEQ_GAP + 1 from the current last_seq_num must be rejected.
+        let too_far = MAX_SEQ_GAP + (MAX_SEQ_GAP + 1);
+        let err = repo.advance_seq_num(&conn_id.0, 7, too_far).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                TeamserverError::CallbackSeqGapTooLarge { agent_id: 7, incoming_seq, last_seen_seq, gap }
+                if incoming_seq == too_far && last_seen_seq == MAX_SEQ_GAP && gap == MAX_SEQ_GAP + 1
+            ),
+            "expected CallbackSeqGapTooLarge, got {err:?}"
+        );
+
+        // After a rejected gap, the stored seq_num is unchanged — a subsequent
+        // in-range packet must still be accepted.
+        let in_range = MAX_SEQ_GAP + 1;
+        assert!(
+            repo.advance_seq_num(&conn_id.0, 7, in_range)
+                .await
+                .expect("advance after gap rejection"),
+            "in-range packet after rejected gap must be accepted"
+        );
+    }
+
+    #[tokio::test]
+    async fn advance_seq_num_gap_boundary() {
+        use red_cell_common::callback_seq::MAX_SEQ_GAP;
+
+        let (db, master_key) = test_db().await;
+        let repo = EcdhRepository::new(db.pool().clone(), master_key);
+
+        let conn_id = ConnectionId::generate().expect("conn_id");
+        repo.store_session(&conn_id, 8, &[0u8; 32]).await.expect("store");
+
+        // Exact boundary: gap == MAX_SEQ_GAP from 0 → must accept.
+        assert!(
+            repo.advance_seq_num(&conn_id.0, 8, MAX_SEQ_GAP).await.expect("advance at boundary"),
+            "gap == MAX_SEQ_GAP from 0 must be accepted"
+        );
+
+        // One past boundary: gap == MAX_SEQ_GAP + 1 from MAX_SEQ_GAP → must reject.
+        let one_past = MAX_SEQ_GAP + (MAX_SEQ_GAP + 1);
+        let err = repo.advance_seq_num(&conn_id.0, 8, one_past).await.unwrap_err();
+        assert!(
+            matches!(err, TeamserverError::CallbackSeqGapTooLarge { gap, .. } if gap == MAX_SEQ_GAP + 1),
+            "gap == MAX_SEQ_GAP + 1 must be rejected, got {err:?}"
         );
     }
 

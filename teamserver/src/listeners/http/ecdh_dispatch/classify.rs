@@ -54,7 +54,11 @@ pub(crate) async fn allow_ecdh_registration_for_ip(
 /// a registration packet. Returns [`EcdhOutcome::NotEcdh`] when the body is not
 /// a valid ECDH packet (caller should fall through to the Archon handler) and
 /// [`EcdhOutcome::RateLimited`] when a registration-shaped body is dropped by
-/// the per-IP limiter (caller should return a fake 404).
+/// the per-IP limiter (caller should return a fake 404).  Returns
+/// [`EcdhOutcome::HandledReject`] when the packet is positively identified as
+/// an ECDH registration but rejected by the replay guard (duplicate
+/// fingerprint or DB error); the caller must short-circuit with a fake 404
+/// and MUST NOT fall through to the Archon path.
 ///
 /// Registration-shaped bodies are gated by a per-IP rate limiter applied before
 /// the X25519 + AES-GCM work in [`open_registration_packet`].  Both valid and

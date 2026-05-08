@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1748 | 297 | 148 |
+| Tasks closed | 1750 | 297 | 148 |
 | Bugs filed against | 286 | 50 | 19 |
 | Bug rate (bugs/task) | 0.16 | 0.17 | 0.13 |
 | Quality score | 84% | 83% | 87% |
 
-*Bug rates: Claude 286/1748=0.1636→0.16, Codex 50/297=0.1684→0.17, Cursor 19/148=0.1284→0.13*
+*Bug rates: Claude 286/1750=0.1634→0.16, Codex 50/297=0.1684→0.17, Cursor 19/148=0.1284→0.13*
 
 ## Violation Breakdown
 
@@ -7529,3 +7529,13 @@ Build: passed (`cargo check --workspace`; `cargo nextest run --workspace`; `carg
 | Cursor | 0 | 0 | No attributed activity in this review range. |
 
 Build: `cargo check --workspace` passed; `cargo clippy --workspace -- -D warnings` passed; `cargo nextest run --workspace` still running at review cutover (fresh `--no-run` rebuild under `/tmp/red-cell-target-qa` had not finished yet).
+
+### QA Review — 2026-05-08 08:33 — 19bf1635..06346e50
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 0 | Two Claude-attributed fixes landed and both closed work cleanly: `d16fe5d7` closed `red-cell-c2-wp985` by tolerating legacy 4-byte screenshot failure payloads in `teamserver/src/dispatch/screenshot.rs` with a regression test, and `06346e50` closed `red-cell-c2-pac64` / `red-cell-c2-uzl9i` by moving screenshot and WinHTTP-related fixes into `agent/archon/` while restoring `agent/demon/` to the pristine `fc045a87` state. I did not confirm any new defects in the resulting tree, so no new beads were filed. |
+| Codex | 0 | 0 | No attributed activity in this review range. |
+| Cursor | 0 | 0 | No attributed activity in this review range. |
+
+Build: passed (`cargo check --workspace --quiet` in 0.56s; `cargo nextest run --workspace` 6267/6267 passed, 1 skipped, in 14m18s; `cargo clippy --workspace -- -D warnings` clean in 35s).

@@ -509,6 +509,25 @@ fn load_config_tightens_loose_permissions() {
     );
 }
 
+// ── InsecurePermissions error ──────────────────────────────────────────
+
+#[cfg(unix)]
+#[test]
+fn insecure_permissions_error_message_contains_path_and_mode() {
+    use std::path::PathBuf;
+    let err = ConfigError::InsecurePermissions {
+        path: PathBuf::from("/home/operator/.red-cell-cli.toml"),
+        mode: 0o644,
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("/home/operator/.red-cell-cli.toml"),
+        "error message should name the file: {msg:?}"
+    );
+    assert!(msg.contains("0644"), "error message should include the mode: {msg:?}");
+    assert!(msg.contains("chmod 600"), "error message should suggest the fix: {msg:?}");
+}
+
 // ── resolve: partial override ──────────────────────────────────────────
 
 /// CLI provides `server`; file provides `token` — partial override.

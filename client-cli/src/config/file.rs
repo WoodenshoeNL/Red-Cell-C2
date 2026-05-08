@@ -19,13 +19,41 @@ pub fn load_config_file(path: &Path) -> Result<FileConfig, ConfigError> {
 
     // Tighten permissions on existing files that may have been created
     // without restrictive mode (e.g. by a text editor or manual `echo`).
+    // Capture the outcome — on failure we re-check the actual mode below.
     #[cfg(unix)]
-    super::permissions::tighten_permissions(path);
+    let chmod_err = super::permissions::tighten_permissions(path).err();
 
     let content = std::fs::read_to_string(path)
         .map_err(|e| ConfigError::ReadError { path: path.to_path_buf(), source: e })?;
-    toml::from_str(&content)
-        .map_err(|e| ConfigError::ParseError { path: path.to_path_buf(), source: e })
+    let config: FileConfig = toml::from_str(&content)
+        .map_err(|e| ConfigError::ParseError { path: path.to_path_buf(), source: e })?;
+
+    // If chmod failed, determine the actual mode and decide what to do.
+    #[cfg(unix)]
+    if let Some(err) = chmod_err {
+        use std::os::unix::fs::PermissionsExt;
+        let final_mode =
+            std::fs::metadata(path).map(|m| m.permissions().mode() & 0o777).unwrap_or(0o777); // assume worst-case if metadata unavailable
+
+        if final_mode != 0o600 && config.token.is_some() {
+            // The file contains a token and we could not make it owner-only:
+            // refuse to expose the secret rather than silently proceeding.
+            return Err(ConfigError::InsecurePermissions {
+                path: path.to_path_buf(),
+                mode: final_mode,
+            });
+        }
+
+        if final_mode != 0o600 {
+            // No token at risk — warn and continue.
+            eprintln!(
+                "warning: could not tighten permissions on {}: {err} (mode {final_mode:04o})",
+                path.display(),
+            );
+        }
+    }
+
+    Ok(config)
 }
 
 /// Write `data` to `path` with mode 0o600 on Unix (owner-only read/write).

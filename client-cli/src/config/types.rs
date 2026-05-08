@@ -114,4 +114,18 @@ pub enum ConfigError {
         #[source]
         source: std::io::Error,
     },
+
+    /// The config file has a token but its permissions could not be tightened
+    /// to owner-only (0o600), leaving the token potentially world-readable.
+    #[cfg(unix)]
+    #[error(
+        "refusing to use token from {path}: file has unsafe permissions \
+         ({mode:04o}) and chmod failed — ensure you own the file or run \
+         `chmod 600 {path}` manually"
+    )]
+    InsecurePermissions {
+        path: PathBuf,
+        /// The actual Unix mode bits (masked to 0o777) after the chmod attempt.
+        mode: u32,
+    },
 }

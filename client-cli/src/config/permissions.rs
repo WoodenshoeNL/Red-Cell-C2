@@ -17,21 +17,19 @@ If this is unexpected, your config file may have been modified by another proces
     }
 }
 
-/// Best-effort tighten file permissions to 0o600 on Unix.
+/// Tighten file permissions to 0o600 on Unix.
 ///
 /// Before tightening, prints a warning to stderr if the mode was not already
-/// `0o600`. Silently ignores errors (e.g. file owned by another user) so callers
-/// never fail due to a permission-hardening attempt.
+/// `0o600`. Returns the underlying `io::Error` if `set_permissions` fails so
+/// callers can decide whether to proceed (e.g. the file has no token) or abort
+/// (e.g. the file contains a secret that remains exposed).
 #[cfg(unix)]
-pub(crate) fn tighten_permissions(path: &Path) {
+pub(crate) fn tighten_permissions(path: &Path) -> Result<(), std::io::Error> {
     use std::os::unix::fs::PermissionsExt;
 
-    let mode = match std::fs::metadata(path) {
-        Ok(m) => m.permissions().mode(),
-        Err(_) => return,
-    };
+    let mode = std::fs::metadata(path)?.permissions().mode();
     if let Some(msg) = config_permission_tightening_warning(mode) {
         eprint!("{msg}");
     }
-    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
 }

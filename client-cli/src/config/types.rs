@@ -48,7 +48,7 @@ pub enum TlsMode {
 }
 
 /// Raw values loaded from a TOML config file.
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Default)]
 pub struct FileConfig {
     /// Teamserver base URL (e.g. `https://teamserver:40056`).
     pub server: Option<String>,

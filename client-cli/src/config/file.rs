@@ -13,6 +13,16 @@ thread_local! {
     > = std::cell::Cell::new(None);
 }
 
+// Test-only hook for Windows crash-recovery: when set, the rename inside the
+// recovery block calls this instead of `std::fs::rename`.  Set to `None` to
+// restore real behaviour.
+#[cfg(all(windows, test))]
+thread_local! {
+    pub(crate) static CRASH_RECOVERY_RENAME_FN: std::cell::Cell<
+        Option<fn(&std::path::Path, &std::path::Path) -> std::io::Result<()>>,
+    > = std::cell::Cell::new(None);
+}
+
 /// Thin wrapper so tests can inject chmod failures without root.
 #[cfg(unix)]
 fn call_tighten(path: &Path) -> std::io::Result<()> {
@@ -40,7 +50,17 @@ pub fn load_config_file(path: &Path) -> Result<FileConfig, ConfigError> {
         if let (Some(parent), Some(stem)) = (path.parent(), path.file_name()) {
             let backup = parent.join(format!(".{}.bak", stem.to_string_lossy()));
             if backup.is_file() {
-                if let Err(e) = std::fs::rename(&backup, path) {
+                #[cfg(test)]
+                let rename_result = {
+                    let hook = CRASH_RECOVERY_RENAME_FN.with(|c| c.get());
+                    match hook {
+                        Some(f) => f(&backup, path),
+                        None => std::fs::rename(&backup, path),
+                    }
+                };
+                #[cfg(not(test))]
+                let rename_result = std::fs::rename(&backup, path);
+                if let Err(e) = rename_result {
                     tracing::warn!(
                         backup = %backup.display(),
                         path = %path.display(),

@@ -540,6 +540,44 @@ fn load_config_recovers_from_backup_after_crash() {
     assert!(!backup.is_file(), "backup should be gone after recovery");
 }
 
+/// Windows crash-recovery failure path: if the rename that restores the backup fails
+/// (e.g. due to a permissions error), `load_config_file` must not panic or return an
+/// error — it falls back silently to `FileConfig::default()` and emits a `tracing::warn!`.
+#[cfg(windows)]
+#[test]
+fn load_config_crash_recovery_rename_failure_falls_back_to_default() {
+    use super::file::CRASH_RECOVERY_RENAME_FN;
+
+    fn always_fail(_src: &std::path::Path, _dst: &std::path::Path) -> std::io::Result<()> {
+        Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "injected rename failure"))
+    }
+
+    // Install the failing rename hook; always clear it on exit so other tests are not affected.
+    CRASH_RECOVERY_RENAME_FN.with(|c| c.set(Some(always_fail)));
+    let result = std::panic::catch_unwind(|| {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        let stem = path.file_name().unwrap().to_string_lossy();
+        let backup = tmp.path().join(format!(".{stem}.bak"));
+
+        // Simulate a crash: backup exists, primary config is absent.
+        fs::write(&backup, "server = \"https://should-not-load:40056\"").unwrap();
+
+        // The rename hook will fail, so the primary config stays absent.
+        // load_config_file must fall back to FileConfig::default() rather than propagating the error.
+        let cfg = load_config_file(&path).unwrap();
+        assert_eq!(cfg, FileConfig::default(), "rename failure should produce default config");
+
+        // Backup file should still be present since the rename failed.
+        assert!(backup.is_file(), "backup should remain when rename failed");
+        assert!(!path.is_file(), "primary config must not exist after failed recovery");
+    });
+    CRASH_RECOVERY_RENAME_FN.with(|c| c.set(None));
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
 /// Regression test for Windows: `std::fs::rename` fails with `AlreadyExists` when the
 /// destination already exists.  Rewriting an existing config file must succeed on all
 /// platforms.

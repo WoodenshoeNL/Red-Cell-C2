@@ -19,7 +19,7 @@ If this is unexpected, your config file may have been modified by another proces
 
 /// Tighten file permissions to 0o600 on Unix.
 ///
-/// Before tightening, prints a warning to stderr if the mode was not already
+/// Emits a [`tracing::warn`] (not raw stderr) if the mode was not already
 /// `0o600`. Returns the underlying `io::Error` if `set_permissions` fails so
 /// callers can decide whether to proceed (e.g. the file has no token) or abort
 /// (e.g. the file contains a secret that remains exposed).
@@ -29,7 +29,7 @@ pub(crate) fn tighten_permissions(path: &Path) -> Result<(), std::io::Error> {
 
     let mode = std::fs::metadata(path)?.permissions().mode();
     if let Some(msg) = config_permission_tightening_warning(mode) {
-        eprint!("{msg}");
+        tracing::warn!("{}", msg.trim_end());
     }
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
 }

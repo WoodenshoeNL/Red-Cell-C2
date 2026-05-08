@@ -45,10 +45,12 @@ pub fn load_config_file(path: &Path) -> Result<FileConfig, ConfigError> {
         }
 
         if final_mode != 0o600 {
-            // No token at risk — warn and continue.
-            eprintln!(
-                "warning: could not tighten permissions on {}: {err} (mode {final_mode:04o})",
-                path.display(),
+            // No token at risk — route through tracing, not raw stderr.
+            tracing::warn!(
+                path = %path.display(),
+                mode = format!("{final_mode:04o}"),
+                %err,
+                "could not tighten permissions on config file",
             );
         }
     }

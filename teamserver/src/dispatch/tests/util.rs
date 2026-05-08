@@ -29,6 +29,7 @@ fn non_empty_option_single_char_returns_some() {
 fn win32_error_code_name_known_codes_return_symbolic_names() {
     assert_eq!(win32_error_code_name(2), Some("ERROR_FILE_NOT_FOUND"));
     assert_eq!(win32_error_code_name(5), Some("ERROR_ACCESS_DENIED"));
+    assert_eq!(win32_error_code_name(6), Some("ERROR_INVALID_HANDLE"));
     assert_eq!(win32_error_code_name(87), Some("ERROR_INVALID_PARAMETER"));
     assert_eq!(win32_error_code_name(183), Some("ERROR_ALREADY_EXISTS"));
     assert_eq!(win32_error_code_name(997), Some("ERROR_IO_PENDING"));
@@ -42,6 +43,7 @@ fn win32_error_code_name_gdi_codes_return_symbolic_names() {
     assert_eq!(win32_error_code_name(1403), Some("ERROR_INVALID_ACCEL_HANDLE"));
     assert_eq!(win32_error_code_name(1404), Some("ERROR_INVALID_HOOK_HANDLE"));
     assert_eq!(win32_error_code_name(1406), Some("ERROR_INVALID_DWP_HANDLE"));
+    assert_eq!(win32_error_code_name(1424), Some("ERROR_DC_NOT_FOUND"));
     assert_eq!(win32_error_code_name(1436), Some("ERROR_INVALID_GW_COMMAND"));
 }
 

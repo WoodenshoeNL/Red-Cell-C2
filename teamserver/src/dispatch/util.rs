@@ -98,6 +98,7 @@ pub(in crate::dispatch) fn win32_error_code_name(code: u32) -> Option<&'static s
         // Generic system error codes
         2 => Some("ERROR_FILE_NOT_FOUND"),
         5 => Some("ERROR_ACCESS_DENIED"),
+        6 => Some("ERROR_INVALID_HANDLE"),
         87 => Some("ERROR_INVALID_PARAMETER"),
         183 => Some("ERROR_ALREADY_EXISTS"),
         997 => Some("ERROR_IO_PENDING"),
@@ -108,6 +109,7 @@ pub(in crate::dispatch) fn win32_error_code_name(code: u32) -> Option<&'static s
         1403 => Some("ERROR_INVALID_ACCEL_HANDLE"),
         1404 => Some("ERROR_INVALID_HOOK_HANDLE"),
         1406 => Some("ERROR_INVALID_DWP_HANDLE"),
+        1424 => Some("ERROR_DC_NOT_FOUND"),
         1436 => Some("ERROR_INVALID_GW_COMMAND"),
         _ => None,
     }

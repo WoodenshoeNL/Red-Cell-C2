@@ -358,15 +358,27 @@ mod tests {
     }
 
     /// Transport errors on all 3 attempts exhaust the retry budget and return Err(Transport).
+    /// The connection counter asserts that exactly INIT_HANDSHAKE_RETRIES attempts were made,
+    /// so a regression that silently reduces the retry count will fail this test.
     #[tokio::test(start_paused = true)]
     async fn retry_exhausts_all_attempts_with_transport_error()
     -> Result<(), Box<dyn Error + Send + Sync>> {
-        // Bind a port to get an ephemeral address, then drop the listener so the port
-        // is closed before the agent connects → every attempt gets "connection refused".
-        let address = {
-            let listener = TcpListener::bind(("127.0.0.1", 0))?;
-            listener.local_addr()?
-        };
+        let connection_count = Arc::new(AtomicUsize::new(0));
+        let counter_clone = Arc::clone(&connection_count);
+
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let address = listener.local_addr()?;
+
+        // Accept and immediately drop each connection → agent receives connection-reset,
+        // which maps to a Transport error. Loop 3 times = INIT_HANDSHAKE_RETRIES.
+        let server = thread::spawn(move || -> Result<(), Box<dyn Error + Send + Sync>> {
+            for _ in 0..3_u32 {
+                let _ = listener.accept()?;
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+                // Socket dropped here; agent sees connection-reset on read.
+            }
+            Ok(())
+        });
 
         let config = PhantomConfig {
             callback_url: format!("http://{address}/"),
@@ -380,6 +392,14 @@ mod tests {
             matches!(result, Err(PhantomError::Transport(_))),
             "expected Transport error after exhausting retries, got {result:?}"
         );
+        // 3 = INIT_HANDSHAKE_RETRIES: a regression reducing the retry budget fails here.
+        assert_eq!(
+            connection_count.load(Ordering::SeqCst),
+            3,
+            "expected exactly INIT_HANDSHAKE_RETRIES (3) connection attempts"
+        );
+
+        server.join().map_err(|_| "server thread panicked")??;
         Ok(())
     }
 

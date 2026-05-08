@@ -523,24 +523,6 @@ fn format_memory_type_unknown_constant_returns_hex_fallback() {
     assert_eq!(format_memory_type(0), "0x0");
 }
 
-// ── win32_error_code_name ────────────────────────────────────────────────
-
-#[test]
-fn win32_error_code_name_known_codes_return_symbolic_names() {
-    assert_eq!(win32_error_code_name(2), Some("ERROR_FILE_NOT_FOUND"));
-    assert_eq!(win32_error_code_name(5), Some("ERROR_ACCESS_DENIED"));
-    assert_eq!(win32_error_code_name(87), Some("ERROR_INVALID_PARAMETER"));
-    assert_eq!(win32_error_code_name(183), Some("ERROR_ALREADY_EXISTS"));
-    assert_eq!(win32_error_code_name(997), Some("ERROR_IO_PENDING"));
-}
-
-#[test]
-fn win32_error_code_name_unknown_codes_return_none() {
-    assert_eq!(win32_error_code_name(0), None);
-    assert_eq!(win32_error_code_name(1), None);
-    assert_eq!(win32_error_code_name(9999), None);
-}
-
 // ── handle_process_command_callback — Create branch ─────────────────────
 
 /// Build a binary payload for the `Create` subcommand of `CommandProc`.

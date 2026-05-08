@@ -89,6 +89,30 @@ pub(crate) fn windows_arch_label(value: u32) -> &'static str {
     }
 }
 
+/// Map a Win32 error code to its symbolic constant name.
+///
+/// Returns `None` for codes not in the table; callers should fall back to the
+/// numeric hex representation in that case.
+pub(in crate::dispatch) fn win32_error_code_name(code: u32) -> Option<&'static str> {
+    match code {
+        // Generic system error codes
+        2 => Some("ERROR_FILE_NOT_FOUND"),
+        5 => Some("ERROR_ACCESS_DENIED"),
+        87 => Some("ERROR_INVALID_PARAMETER"),
+        183 => Some("ERROR_ALREADY_EXISTS"),
+        997 => Some("ERROR_IO_PENDING"),
+        // GDI / windowing error codes (relevant to screenshot capture)
+        1400 => Some("ERROR_INVALID_WINDOW_HANDLE"),
+        1401 => Some("ERROR_INVALID_MENU_HANDLE"),
+        1402 => Some("ERROR_INVALID_CURSOR_HANDLE"),
+        1403 => Some("ERROR_INVALID_ACCEL_HANDLE"),
+        1404 => Some("ERROR_INVALID_HOOK_HANDLE"),
+        1406 => Some("ERROR_INVALID_DWP_HANDLE"),
+        1436 => Some("ERROR_INVALID_GW_COMMAND"),
+        _ => None,
+    }
+}
+
 /// Binary payload parser for Demon callback packets.
 ///
 /// Reads length-prefixed blobs and fixed-width integers from a byte slice,

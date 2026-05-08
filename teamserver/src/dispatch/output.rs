@@ -12,7 +12,8 @@ use crate::{
 };
 
 use super::checkin::decode_working_hours;
-use super::process::{format_memory_protect, win32_error_code_name};
+use super::process::format_memory_protect;
+use super::win32_error_code_name;
 use super::{
     AgentResponseEntry, CallbackParser, CommandDispatchError, agent_response_event, bool_string,
     broadcast_and_persist_agent_response, job_state_name, job_type_name, loot_context,

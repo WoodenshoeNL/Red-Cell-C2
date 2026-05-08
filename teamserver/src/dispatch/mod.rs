@@ -70,7 +70,7 @@ use response::{
     parse_optional_kill_date, persist_agent_response_record, persist_credentials_from_output,
 };
 #[allow(unused_imports)]
-use util::CallbackParser;
+use util::{CallbackParser, win32_error_code_name};
 
 /// Byte order used by the agent for inner callback payload fields.
 ///

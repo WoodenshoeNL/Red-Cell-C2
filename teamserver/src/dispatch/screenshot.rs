@@ -12,8 +12,7 @@ use crate::{AgentRegistry, Database, EventBus, LootRecord, PluginRuntime};
 
 use super::{
     CallbackParser, CommandDispatchError, agent_response_event, agent_response_event_with_extra,
-    insert_loot_record, loot_context, loot_new_event, metadata_with_context,
-    process::win32_error_code_name,
+    insert_loot_record, loot_context, loot_new_event, metadata_with_context, win32_error_code_name,
 };
 
 pub(super) async fn handle_screenshot_callback(

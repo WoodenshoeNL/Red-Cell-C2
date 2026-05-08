@@ -752,17 +752,6 @@ pub(super) fn format_memory_protect(protect: u32) -> String {
     }
 }
 
-pub(super) fn win32_error_code_name(code: u32) -> Option<&'static str> {
-    match code {
-        2 => Some("ERROR_FILE_NOT_FOUND"),
-        5 => Some("ERROR_ACCESS_DENIED"),
-        87 => Some("ERROR_INVALID_PARAMETER"),
-        183 => Some("ERROR_ALREADY_EXISTS"),
-        997 => Some("ERROR_IO_PENDING"),
-        _ => None,
-    }
-}
-
 pub(super) fn format_memory_state(state: u32) -> String {
     match state {
         0x1000 => "MEM_COMMIT".to_owned(),

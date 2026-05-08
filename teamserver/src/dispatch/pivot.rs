@@ -6,7 +6,7 @@ use tracing::warn;
 use crate::agent_events::{agent_mark_event, agent_new_event};
 use crate::{AgentRegistry, DemonInitSecretConfig, DemonPacketParser, EventBus};
 
-use super::process::win32_error_code_name;
+use super::win32_error_code_name;
 use super::{
     BuiltinDispatchContext, BuiltinHandlerDependencies, CallbackParser, CommandDispatchError,
     CommandDispatcher, DemonCallbackPackage, DemonProtocolError, agent_response_event,

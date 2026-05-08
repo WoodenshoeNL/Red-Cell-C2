@@ -10,7 +10,7 @@ pub(super) use super::super::process::{
     format_memory_state, format_memory_table, format_memory_type, format_module_table,
     format_process_table, handle_inject_dll_callback, handle_inject_shellcode_callback,
     handle_proc_ppid_spoof_callback, handle_process_command_callback, handle_process_list_callback,
-    handle_spawn_dll_callback, process_rows_json, win32_error_code_name,
+    handle_spawn_dll_callback, process_rows_json,
 };
 pub(super) use super::super::{CommandDispatchError, CommandDispatcher};
 pub(super) use super::common::*;

@@ -29,7 +29,7 @@ fn call_tighten(path: &Path) -> std::io::Result<()> {
 /// only files that exist but are malformed return an error.
 ///
 /// On Unix, if the file exists with permissions looser than 0o600, they are
-/// tightened to owner-only read/write and a warning is printed to stderr.
+/// tightened to owner-only read/write and a warning is emitted via `tracing::warn!` (not raw stderr).
 /// This guards against accidental exposure of API tokens on shared systems.
 pub fn load_config_file(path: &Path) -> Result<FileConfig, ConfigError> {
     if !path.is_file() {

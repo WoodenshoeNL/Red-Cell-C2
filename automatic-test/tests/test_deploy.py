@@ -28,6 +28,7 @@ from lib.deploy import (
     defender_remove_network_protection_exclusion,
     firewall_allow_program,
     firewall_remove_program,
+    wfp_preflight_cleanup,
     _is_transient_ssh_failure,
     _quote_posix,
     _quote_powershell,
@@ -1382,6 +1383,165 @@ class TestCleanupWindowsHarnessWorkDir(unittest.TestCase):
         cleanup_windows_harness_work_dir(t, timeout=100)
         decoded = _decoded_windows_launch_script(mock_ssh.call_args[0][0][-1])
         self.assertNotIn("ExclusionIpAddress", decoded)
+
+
+class TestWfpPreflightCleanup(unittest.TestCase):
+    """Unit tests for :func:`wfp_preflight_cleanup`."""
+
+    def setUp(self) -> None:
+        self.key_path = _module_key_path()
+
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_linux_target_does_not_open_ssh(self, mock_ssh: object) -> None:
+        """No SSH connection for Linux targets — function must be a no-op."""
+        t = _make_target(work_dir="/tmp/rc-test", key=self.key_path)
+        wfp_preflight_cleanup(t)
+        mock_ssh.assert_not_called()
+
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_windows_uses_encoded_command(self, mock_ssh: object) -> None:
+        """Windows target must send a PowerShell -EncodedCommand invocation."""
+        mock_ssh.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
+        wfp_preflight_cleanup(t, timeout=100)
+        mock_ssh.assert_called_once()
+        remote = mock_ssh.call_args[0][0][-1]
+        self.assertIn("-EncodedCommand", remote)
+
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_script_removes_rc_harness_rules(self, mock_ssh: object) -> None:
+        """Script must remove RC-Harness-* firewall rules."""
+        mock_ssh.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
+        wfp_preflight_cleanup(t, timeout=100)
+        decoded = _decoded_windows_launch_script(mock_ssh.call_args[0][0][-1])
+        self.assertIn("Remove-NetFirewallRule", decoded)
+        self.assertIn("RC-Harness-*", decoded)
+
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_script_removes_agent_rules(self, mock_ssh: object) -> None:
+        """Script must also remove agent-* display-name rules (Windows-auto-created)."""
+        mock_ssh.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
+        wfp_preflight_cleanup(t, timeout=100)
+        decoded = _decoded_windows_launch_script(mock_ssh.call_args[0][0][-1])
+        self.assertIn("agent-*", decoded)
+        self.assertIn("Remove-NetFirewallRule", decoded)
+
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_script_removes_exclusion_process(self, mock_ssh: object) -> None:
+        """Script must remove agent-*.exe / stress-agent-*.exe process exclusions."""
+        mock_ssh.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
+        wfp_preflight_cleanup(t, timeout=100)
+        decoded = _decoded_windows_launch_script(mock_ssh.call_args[0][0][-1])
+        self.assertIn("ExclusionProcess", decoded)
+        self.assertIn("Remove-MpPreference", decoded)
+
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_c2_hosts_adds_ip_exclusion_removal(self, mock_ssh: object) -> None:
+        """Passing c2_hosts must add a repeat-remove loop for ExclusionIpAddress."""
+        mock_ssh.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
+        wfp_preflight_cleanup(t, timeout=100, c2_hosts=["10.0.0.1"])
+        decoded = _decoded_windows_launch_script(mock_ssh.call_args[0][0][-1])
+        self.assertIn("ExclusionIpAddress", decoded)
+        self.assertIn("10.0.0.1", decoded)
+
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_no_c2_hosts_omits_ip_exclusion_removal(self, mock_ssh: object) -> None:
+        """Without c2_hosts, Remove-MpPreference -ExclusionIpAddress must not appear."""
+        mock_ssh.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
+        wfp_preflight_cleanup(t, timeout=100)
+        decoded = _decoded_windows_launch_script(mock_ssh.call_args[0][0][-1])
+        # The script reads ExclusionIpAddress for diagnostics; only the Remove-MpPreference
+        # call for ExclusionIpAddress should be absent when no c2_hosts are passed.
+        self.assertNotIn("Remove-MpPreference -ExclusionIpAddress", decoded)
+
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_script_emits_wfp_before_and_after_markers(self, mock_ssh: object) -> None:
+        """Script must emit WFP_BEFORE: and WFP_AFTER: markers for diagnostics."""
+        mock_ssh.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
+        wfp_preflight_cleanup(t, timeout=100)
+        decoded = _decoded_windows_launch_script(mock_ssh.call_args[0][0][-1])
+        self.assertIn("WFP_BEFORE:", decoded)
+        self.assertIn("WFP_AFTER:", decoded)
+
+    @patch("builtins.print")
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_wfp_after_output_is_logged(
+        self, mock_ssh: object, mock_print: object,
+    ) -> None:
+        """WFP_BEFORE:/WFP_AFTER: lines in stdout must be printed with the log prefix."""
+        mock_ssh.return_value = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="WFP_BEFORE:rc=3,agent=2,npip=1\nWFP_AFTER:rc=0,agent=0\n",
+            stderr="",
+        )
+        t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
+        wfp_preflight_cleanup(t, log_prefix="  [tag]", timeout=100)
+        printed = [str(c.args[0]) for c in mock_print.call_args_list if c.args]
+        self.assertTrue(any("[tag]" in p and "before" in p for p in printed), printed)
+        self.assertTrue(any("[tag]" in p and "after" in p for p in printed), printed)
+
+    @patch("builtins.print")
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_wfp_after_remaining_rules_emits_warning(
+        self, mock_ssh: object, mock_print: object,
+    ) -> None:
+        """If WFP_AFTER shows remaining rules, a WARNING line must be printed."""
+        mock_ssh.return_value = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="WFP_BEFORE:rc=3,agent=2,npip=0\nWFP_AFTER:rc=1,agent=0\n",
+            stderr="",
+        )
+        t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
+        wfp_preflight_cleanup(t, log_prefix="  [tag]", timeout=100)
+        printed = [str(c.args[0]) for c in mock_print.call_args_list if c.args]
+        self.assertTrue(any("WARNING" in p for p in printed), printed)
+
+    @patch("builtins.print")
+    @patch("lib.deploy._run_ssh_cli_with_retry", side_effect=Exception("connection refused"))
+    def test_ssh_failure_prints_skipped_and_does_not_raise(
+        self, mock_ssh: object, mock_print: object,
+    ) -> None:
+        """SSH failures must be swallowed — function must never raise."""
+        t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
+        wfp_preflight_cleanup(t, log_prefix="  [tag]", timeout=100)
+        printed = [str(c.args[0]) for c in mock_print.call_args_list if c.args]
+        self.assertTrue(any("skipped" in p for p in printed), printed)
+
+    @patch("builtins.print")
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_nonzero_exit_prints_error_and_does_not_raise(
+        self, mock_ssh: object, mock_print: object,
+    ) -> None:
+        """A non-zero PowerShell exit code must be logged but must not raise."""
+        mock_ssh.return_value = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="access denied"
+        )
+        t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
+        wfp_preflight_cleanup(t, log_prefix="  [tag]", timeout=100)
+        printed = [str(c.args[0]) for c in mock_print.call_args_list if c.args]
+        self.assertTrue(any("remote sweep failed" in p for p in printed), printed)
 
 
 if __name__ == "__main__":

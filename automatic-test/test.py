@@ -1012,6 +1012,17 @@ def main():
                     timeout=win_cleanup_timeout,
                     ip_exclusions_to_remove=_ip_excl_bs,
                 )
+                # Per-scenario WFP sweep: removes agent-* rules (Windows-auto-created)
+                # that cleanup_windows_harness_work_dir does not cover.  Without this,
+                # 4+ Windows scenarios in a single suite run re-accumulate WFP filter
+                # objects fast enough to re-exhaust non-paged pool (WSAENOBUFS / os
+                # error 10055) — see red-cell-c2-gdiw8.
+                wfp_preflight_cleanup(
+                    wtgt,
+                    log_prefix="  [between-scenarios][wfp]",
+                    timeout=win_cleanup_timeout,
+                    c2_hosts=_ip_excl_bs,
+                )
 
     total = passed + failed + skipped
     print(f"\n{'═' * 60}")

@@ -490,6 +490,56 @@ fn write_config_leaves_no_temp_file() {
     assert_eq!(entries.len(), 1, "expected exactly one file, got {entries:?}");
 }
 
+/// After a successful overwrite no backup (`.bak`) or temp (`.tmp`) files should remain.
+/// On Windows the backup-then-rename path creates a `.bak` sibling; this verifies it is
+/// cleaned up even when rewriting an existing file.
+#[test]
+fn write_config_leaves_no_stale_files_after_overwrite() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("cfg.toml");
+    let config = FileConfig {
+        server: Some("https://ts:1".to_owned()),
+        token: None,
+        timeout: None,
+        cert_fingerprint: None,
+    };
+    write_config_file(&path, &config).unwrap();
+    // Second write exercises the overwrite / backup code path.
+    write_config_file(&path, &config).unwrap();
+
+    let entries: Vec<_> = fs::read_dir(tmp.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(entries.iter().all(|n| !n.ends_with(".tmp")), "temp file left: {entries:?}");
+    assert!(entries.iter().all(|n| !n.ends_with(".bak")), "backup file left: {entries:?}");
+    assert_eq!(entries.len(), 1, "expected exactly one file, got {entries:?}");
+}
+
+/// Windows crash-recovery: if the process died after renaming the existing config to the
+/// `.bak` sibling but before the final rename, `load_config_file` must restore the backup
+/// so the user's config is not silently replaced by a default.
+#[cfg(windows)]
+#[test]
+fn load_config_recovers_from_backup_after_crash() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("config.toml");
+    let stem = path.file_name().unwrap().to_string_lossy();
+    let backup = tmp.path().join(format!(".{stem}.bak"));
+
+    // Simulate a crash: old config survived as the backup, final config is absent.
+    fs::write(&backup, "server = \"https://recovered:40056\"\ntoken = \"rec-tok\"").unwrap();
+
+    let cfg = load_config_file(&path).unwrap();
+    assert_eq!(cfg.server.as_deref(), Some("https://recovered:40056"));
+    assert_eq!(cfg.token.as_deref(), Some("rec-tok"));
+
+    // The backup should have been moved to the main path; no .bak sibling remains.
+    assert!(path.is_file(), "config should have been restored at main path");
+    assert!(!backup.is_file(), "backup should be gone after recovery");
+}
+
 /// Regression test for Windows: `std::fs::rename` fails with `AlreadyExists` when the
 /// destination already exists.  Rewriting an existing config file must succeed on all
 /// platforms.

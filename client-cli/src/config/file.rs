@@ -32,6 +32,19 @@ fn call_tighten(path: &Path) -> std::io::Result<()> {
 /// tightened to owner-only read/write and a warning is emitted via `tracing::warn!` (not raw stderr).
 /// This guards against accidental exposure of API tokens on shared systems.
 pub fn load_config_file(path: &Path) -> Result<FileConfig, ConfigError> {
+    // Windows crash-recovery: if the process died between the backup-rename
+    // and the final rename in `write_bytes`, restore the .bak sibling so the
+    // user's config is not silently replaced by a default.
+    #[cfg(windows)]
+    if !path.is_file() {
+        if let (Some(parent), Some(stem)) = (path.parent(), path.file_name()) {
+            let backup = parent.join(format!(".{}.bak", stem.to_string_lossy()));
+            if backup.is_file() {
+                let _ = std::fs::rename(&backup, path);
+            }
+        }
+    }
+
     if !path.is_file() {
         return Ok(FileConfig::default());
     }
@@ -97,10 +110,17 @@ pub fn write_config_file(path: &Path, config: &FileConfig) -> Result<(), ConfigE
 /// Write raw bytes to `path` with 0o600 on Unix.
 ///
 /// Uses an atomic write: data lands in a sibling temp file with mode 0o600,
-/// then [`std::fs::rename`] replaces the target in one syscall.  This means
-/// the target path is never visible with wrong permissions — even if the file
-/// previously existed with 0o644 — and a partial write never corrupts the
-/// live config.
+/// then the target is replaced in a crash-safe sequence.
+///
+/// On Unix, [`std::fs::rename`] replaces the target atomically in one syscall,
+/// so a partial write can never corrupt the live config.
+///
+/// On Windows, `std::fs::rename` fails when the destination already exists.
+/// Instead the existing config is first renamed to a `.bak` sibling, the temp
+/// file is renamed to the final path, and the backup is removed.  If the
+/// process crashes between those two renames the old config survives as the
+/// `.bak` file and [`load_config_file`] restores it automatically on the next
+/// startup.
 #[allow(dead_code)] // Called by write_config_file.
 fn write_bytes(path: &Path, data: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
@@ -131,20 +151,40 @@ fn write_bytes(path: &Path, data: &[u8]) -> std::io::Result<()> {
 
     match write_result {
         Ok(()) => {
-            // `std::fs::rename` replaces the target atomically on Unix but fails
-            // with `AlreadyExists` on Windows when the destination already exists.
-            // Remove the target first on Windows, then rename into place.
+            #[cfg(not(windows))]
+            {
+                std::fs::rename(&tmp_path, path).inspect_err(|_| {
+                    let _ = std::fs::remove_file(&tmp_path);
+                })
+            }
+
             #[cfg(windows)]
-            if let Err(e) = std::fs::remove_file(path) {
-                if e.kind() != std::io::ErrorKind::NotFound {
+            {
+                // `rename` fails on Windows when the destination exists.  Move the
+                // existing config to a .bak sibling first so the old data is
+                // preserved across the rename window.  load_config_file restores
+                // the .bak automatically if we crash before the final rename.
+                let backup_path = parent.join(format!(".{}.bak", file_stem.to_string_lossy()));
+                let had_backup = match std::fs::rename(path, &backup_path) {
+                    Ok(()) => true,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+                    Err(e) => {
+                        let _ = std::fs::remove_file(&tmp_path);
+                        return Err(e);
+                    }
+                };
+                if let Err(e) = std::fs::rename(&tmp_path, path) {
+                    if had_backup {
+                        let _ = std::fs::rename(&backup_path, path);
+                    }
                     let _ = std::fs::remove_file(&tmp_path);
                     return Err(e);
                 }
+                if had_backup {
+                    let _ = std::fs::remove_file(&backup_path);
+                }
+                Ok(())
             }
-
-            std::fs::rename(&tmp_path, path).inspect_err(|_| {
-                let _ = std::fs::remove_file(&tmp_path);
-            })
         }
         Err(e) => {
             let _ = std::fs::remove_file(&tmp_path);

@@ -33,7 +33,7 @@ row to *Resolved* and add the closing commit / fix description.
 | Signature (substring of error / stderr) | Scenario | Bead | First seen | Last seen | Status |
 |----------------------------------------|----------|------|------------|-----------|--------|
 | `Timed out after 60s waiting for agent checkin` (sc04 only, no teamserver entries) | 04 | red-cell-c2-2frr8 | 2026-05-07 | 2026-05-08 | P3, Phantom Linux checkin intermittently absent — payload launches but makes zero connections; sc06 Phantom always works in same run; flaky race/load issue |
-| `Timed out after 30s waiting for screenshot loot entry` | 08 | red-cell-c2-uzl9i | 2026-05-07 | 2026-05-08 | P2, sc08 screenshot loot absent — WinSta0+WinHTTP fix (spxyy, c5463122) applied 2026-05-08 but predates the last failing run; needs post-fix autotest verification |
+| `Timed out after 30s waiting for screenshot loot entry` | 08 | red-cell-c2-uzl9i | 2026-05-07 | 2026-05-08 | P2, sc08 screenshot loot absent — root cause: H_FUNC_OPENWINDOWSTATION had wrong hash (0x47468331 → non-exported bare name), causing NULL fn-ptr crash. Fixed: hash changed to OpenWindowStationA (0x3016e992), commit 8bf46ce2. Needs post-fix autotest verification. |
 | `[SUBPROCESS_TIMEOUT] CLI subprocess did not exit within expected timeout (55s) (exit -1)` | 05, 07 | red-cell-c2-gdiw8 | 2026-05-08 | 2026-05-08 | P2, Demon `netstat -ano` hangs; WFP preflight-cleanup fix (e8gv0, e80dd10c) applied 2026-05-08 but predates the last failing run; needs post-fix autotest verification |
 | `os error 10055` | 20 | red-cell-c2-gdiw8 | 2026-05-07 | 2026-05-08 | P2, WSAENOBUFS; WFP preflight-cleanup fix (e8gv0, e80dd10c) applied 2026-05-08 but predates the last failing run; needs post-fix autotest verification |
 

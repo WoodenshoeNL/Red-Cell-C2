@@ -13,6 +13,7 @@ use crate::{AgentRegistry, Database, EventBus, LootRecord, PluginRuntime};
 use super::{
     CallbackParser, CommandDispatchError, agent_response_event, agent_response_event_with_extra,
     insert_loot_record, loot_context, loot_new_event, metadata_with_context,
+    process::win32_error_code_name,
 };
 
 pub(super) async fn handle_screenshot_callback(
@@ -29,12 +30,28 @@ pub(super) async fn handle_screenshot_callback(
     let context = loot_context(registry, agent_id, request_id).await;
 
     if success == 0 {
+        let error_reason = parser.read_string("error reason")?;
+        let error_code = parser.read_u32("error code")?;
+        let message = if error_reason.is_empty() {
+            format!("Failed to take a screenshot [0x{error_code:08X}]")
+        } else {
+            match win32_error_code_name(error_code) {
+                Some(name) => {
+                    format!(
+                        "Failed to take a screenshot: {error_reason} [{name} 0x{error_code:08X}]"
+                    )
+                }
+                None => {
+                    format!("Failed to take a screenshot: {error_reason} [0x{error_code:08X}]")
+                }
+            }
+        };
         events.broadcast(agent_response_event(
             agent_id,
             u32::from(DemonCommand::CommandScreenshot),
             request_id,
             "Error",
-            "Failed to take a screenshot",
+            &message,
             None,
         )?);
         return Ok(None);
@@ -193,9 +210,19 @@ mod tests {
         buf
     }
 
-    /// Build a payload with `success=0`.
+    /// Build a failure payload with the given error reason and Win32 error code.
+    fn failure_payload_with(reason: &str, code: u32) -> Vec<u8> {
+        let mut buf = Vec::new();
+        push_u32(&mut buf, 0); // success = 0
+        push_u32(&mut buf, reason.len() as u32);
+        buf.extend_from_slice(reason.as_bytes());
+        push_u32(&mut buf, code);
+        buf
+    }
+
+    /// Build a payload with `success=0` and a representative error reason/code.
     fn failure_payload() -> Vec<u8> {
-        0_u32.to_le_bytes().to_vec()
+        failure_payload_with("GetDC(NULL) failed -- NULL display DC", 0x0000_0578)
     }
 
     /// Build a payload with `success=1` but zero-length bytes.
@@ -259,7 +286,7 @@ mod tests {
         assert_eq!(loot_records[0].name, misc_data2);
     }
 
-    /// Failure path (success=0): broadcasts error, stores no loot.
+    /// Failure path (success=0): broadcasts error with reason and code, stores no loot.
     #[tokio::test]
     async fn failure_broadcasts_error_and_stores_no_loot() {
         let (registry, db, events) = setup().await;
@@ -279,9 +306,55 @@ mod tests {
         let OperatorMessage::AgentResponse(resp) = &msg else {
             panic!("expected AgentResponse, got {msg:?}");
         };
-        assert_eq!(resp.info.extra.get("Type").and_then(Value::as_str), Some("Error"),);
+        assert_eq!(resp.info.extra.get("Type").and_then(Value::as_str), Some("Error"));
+
+        // The message body must include the error reason and the hex error code.
+        let msg_body = resp.info.extra.get("Message").and_then(Value::as_str).unwrap_or("");
+        assert!(
+            msg_body.contains("GetDC(NULL) failed -- NULL display DC"),
+            "expected reason in message, got: {msg_body}"
+        );
+        assert!(
+            msg_body.contains("0x00000578"),
+            "expected hex error code in message, got: {msg_body}"
+        );
 
         // No loot record should be stored.
+        let loot_records = db.loot().list_for_agent(AGENT_ID).await.expect("loot query");
+        assert!(loot_records.is_empty());
+    }
+
+    /// Failure payload with explicit reason+code: both appear in the broadcast message.
+    #[tokio::test]
+    async fn failure_with_reason_and_code_embeds_both_in_message() {
+        let (registry, db, events) = setup().await;
+        let mut rx = events.subscribe();
+
+        let reason = "BitBlt failed -- device context mismatch";
+        let code: u32 = 0x0000_0057; // ERROR_INVALID_PARAMETER
+        let payload = failure_payload_with(reason, code);
+
+        let result = handle_screenshot_callback(
+            &registry, &db, &events, None, AGENT_ID, REQUEST_ID, &payload,
+        )
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(result.expect("unwrap"), None);
+
+        let msg = rx.recv().await.expect("should receive error event");
+        let OperatorMessage::AgentResponse(resp) = &msg else {
+            panic!("expected AgentResponse, got {msg:?}");
+        };
+        assert_eq!(resp.info.extra.get("Type").and_then(Value::as_str), Some("Error"));
+
+        let msg_body = resp.info.extra.get("Message").and_then(Value::as_str).unwrap_or("");
+        assert!(msg_body.contains(reason), "expected reason in message, got: {msg_body}");
+        assert!(
+            msg_body.contains("0x00000057"),
+            "expected hex error code 0x00000057 in message, got: {msg_body}"
+        );
+
+        // No loot should be stored.
         let loot_records = db.loot().list_for_agent(AGENT_ID).await.expect("loot query");
         assert!(loot_records.is_empty());
     }

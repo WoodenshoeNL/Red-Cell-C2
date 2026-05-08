@@ -25,9 +25,20 @@ fn screenshot_success_payload(image_bytes: &[u8]) -> Vec<u8> {
     p
 }
 
-/// Build a `CommandScreenshot` callback payload with `success=0`.
+/// Build a `CommandScreenshot` callback payload with `success=0`, an error reason string,
+/// and a Win32 error code (post-cxeg5 wire format).
 fn screenshot_failure_payload() -> Vec<u8> {
-    0_u32.to_le_bytes().to_vec()
+    screenshot_failure_payload_with("GetDC(NULL) failed -- NULL display DC", 0x0000_0578)
+}
+
+/// Build a `CommandScreenshot` failure payload with an explicit reason and error code.
+fn screenshot_failure_payload_with(reason: &str, code: u32) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&0_u32.to_le_bytes()); // success = 0
+    p.extend_from_slice(&(reason.len() as u32).to_le_bytes());
+    p.extend_from_slice(reason.as_bytes());
+    p.extend_from_slice(&code.to_le_bytes());
+    p
 }
 
 /// Build a `CommandScreenshot` callback payload with `success=1` but zero-length bytes.
@@ -238,6 +249,15 @@ async fn screenshot_callback_failure_broadcasts_error_no_loot()
         msg.info.extra.get("Type").and_then(|v| v.as_str()),
         Some("Error"),
         "failed screenshot must broadcast Type=Error"
+    );
+    let msg_body = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        msg_body.contains("GetDC(NULL) failed -- NULL display DC"),
+        "error message must contain the reason from the demon payload, got: {msg_body}"
+    );
+    assert!(
+        msg_body.contains("0x00000578"),
+        "error message must contain the hex error code, got: {msg_body}"
     );
 
     // No loot record should be stored.

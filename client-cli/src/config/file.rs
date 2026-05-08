@@ -46,31 +46,47 @@ pub fn write_config_file(path: &Path, config: &FileConfig) -> Result<(), ConfigE
 }
 
 /// Write raw bytes to `path` with 0o600 on Unix.
+///
+/// Uses an atomic write: data lands in a sibling temp file with mode 0o600,
+/// then [`std::fs::rename`] replaces the target in one syscall.  This means
+/// the target path is never visible with wrong permissions — even if the file
+/// previously existed with 0o644 — and a partial write never corrupts the
+/// live config.
 #[allow(dead_code)] // Called by write_config_file.
 fn write_bytes(path: &Path, data: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
 
-    #[cfg(unix)]
-    let mut file = {
-        use std::os::unix::fs::OpenOptionsExt;
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)?
-    };
+    let parent = path.parent().unwrap_or(Path::new("."));
+    let file_stem = path.file_name().unwrap_or(std::ffi::OsStr::new("config"));
+    // Temp file lives in the same directory so rename stays on one filesystem.
+    let tmp_name = format!(".{}.{}.tmp", file_stem.to_string_lossy(), std::process::id());
+    let tmp_path = parent.join(&tmp_name);
 
-    #[cfg(not(unix))]
-    let mut file =
-        std::fs::OpenOptions::new().write(true).create(true).truncate(true).open(path)?;
+    let write_result: std::io::Result<()> = (|| {
+        #[cfg(unix)]
+        let mut file = {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true) // 0o600 applies at creation — exclusive open
+                .mode(0o600)
+                .open(&tmp_path)?
+        };
 
-    file.write_all(data)?;
+        #[cfg(not(unix))]
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp_path)?;
 
-    // On Unix, .mode() only applies at creation time. If the file already
-    // existed with looser permissions, explicitly tighten them.
-    #[cfg(unix)]
-    super::permissions::tighten_permissions(path);
+        file.write_all(data)
+        // `file` is dropped (flushed + closed) before the closure returns
+    })();
 
-    Ok(())
+    match write_result {
+        Ok(()) => std::fs::rename(&tmp_path, path).inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp_path);
+        }),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp_path);
+            Err(e)
+        }
+    }
 }

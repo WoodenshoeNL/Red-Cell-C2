@@ -445,7 +445,7 @@ fn write_config_creates_file_with_restrictive_permissions() {
 
 #[cfg(unix)]
 #[test]
-fn write_config_tightens_permissions_on_existing_file() {
+fn write_config_replaces_loose_permission_file_with_0600() {
     use std::os::unix::fs::PermissionsExt;
 
     let tmp = TempDir::new().unwrap();
@@ -464,7 +464,30 @@ fn write_config_tightens_permissions_on_existing_file() {
     write_config_file(&path, &config).unwrap();
 
     let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode, 0o600, "permissions should be tightened to 0600, got {mode:#o}");
+    assert_eq!(mode, 0o600, "atomic rename must produce 0600, got {mode:#o}");
+}
+
+#[cfg(unix)]
+#[test]
+fn write_config_leaves_no_temp_file() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("cfg.toml");
+    let config = FileConfig {
+        server: Some("https://ts:40056".to_owned()),
+        token: Some("tok".to_owned()),
+        timeout: None,
+        cert_fingerprint: None,
+    };
+    write_config_file(&path, &config).unwrap();
+
+    // After a successful write only the target file should exist; no .tmp sibling.
+    let entries: Vec<_> = fs::read_dir(tmp.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(entries.iter().all(|n| !n.ends_with(".tmp")), "temp file left behind: {entries:?}");
+    assert_eq!(entries.len(), 1, "expected exactly one file, got {entries:?}");
 }
 
 #[cfg(unix)]

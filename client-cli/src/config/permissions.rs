@@ -29,7 +29,7 @@ pub(crate) fn tighten_permissions(path: &Path) -> Result<(), std::io::Error> {
 
     let mode = std::fs::metadata(path)?.permissions().mode();
     if let Some(msg) = config_permission_tightening_warning(mode) {
-        tracing::warn!("{}", msg.trim_end());
+        tracing::warn!(path = %path.display(), "{}", msg.trim_end());
     }
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
 }

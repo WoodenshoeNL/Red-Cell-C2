@@ -192,6 +192,17 @@ fn write_bytes(path: &Path, data: &[u8]) -> std::io::Result<()> {
                 // preserved across the rename window.  load_config_file restores
                 // the .bak automatically if we crash before the final rename.
                 let backup_path = parent.join(format!(".{}.bak", file_stem.to_string_lossy()));
+                // A stale .bak from a previous interrupted cleanup (e.g. AV
+                // or an indexer holding the file) would cause the rename below
+                // to fail with AlreadyExists — Windows does not replace on
+                // rename.  Clear it explicitly before entering the swap
+                // sequence so subsequent writes do not start failing.
+                if backup_path.exists() {
+                    if let Err(e) = std::fs::remove_file(&backup_path) {
+                        let _ = std::fs::remove_file(&tmp_path);
+                        return Err(e);
+                    }
+                }
                 let had_backup = match std::fs::rename(path, &backup_path) {
                     Ok(()) => true,
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,

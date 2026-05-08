@@ -607,6 +607,47 @@ fn write_config_overwrites_existing_file() {
     assert_eq!(loaded.token.as_deref(), Some("new-token"));
 }
 
+/// Regression: a stale `.bak` left by a previous interrupted backup-cleanup
+/// (e.g. AV or an indexer holding the file after a successful overwrite) must
+/// not prevent subsequent config saves from succeeding.
+///
+/// Before the fix, `rename(config → .bak)` failed with `AlreadyExists` on the
+/// second write because Windows does not replace the destination on rename.
+#[cfg(windows)]
+#[test]
+fn write_config_tolerates_stale_backup() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("config.toml");
+    let stem = path.file_name().unwrap().to_string_lossy();
+    let backup = tmp.path().join(format!(".{stem}.bak"));
+
+    let first = FileConfig {
+        server: Some("https://first:40056".to_owned()),
+        token: Some("first-tok".to_owned()),
+        timeout: None,
+        cert_fingerprint: None,
+    };
+    write_config_file(&path, &first).unwrap();
+
+    // Simulate: backup cleanup failed silently — the .bak survives.
+    fs::write(&backup, b"stale data").unwrap();
+    assert!(backup.is_file(), "precondition: stale backup must exist");
+
+    let second = FileConfig {
+        server: Some("https://second:40056".to_owned()),
+        token: Some("second-tok".to_owned()),
+        timeout: None,
+        cert_fingerprint: None,
+    };
+    // Must succeed despite the pre-existing stale backup.
+    write_config_file(&path, &second).unwrap();
+
+    let loaded = load_config_file(&path).unwrap();
+    assert_eq!(loaded.server.as_deref(), Some("https://second:40056"), "second write must persist");
+    assert_eq!(loaded.token.as_deref(), Some("second-tok"));
+    assert!(!backup.is_file(), "stale backup must have been removed");
+}
+
 #[cfg(unix)]
 #[test]
 fn load_config_tightens_loose_permissions() {

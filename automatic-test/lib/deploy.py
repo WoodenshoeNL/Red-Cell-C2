@@ -999,7 +999,8 @@ def wfp_preflight_cleanup(
         + "$_allrules_after = @(Get-NetFirewallRule -ErrorAction SilentlyContinue)\n"
         "$_rc_after = @($_allrules_after | Where-Object { $_.DisplayName -like 'RC-Harness-*' }).Count\n"
         "$_ag_after = @($_allrules_after | Where-Object { $_.DisplayName -like 'agent-*' }).Count\n"
-        "Write-Output ('WFP_AFTER:rc=' + $_rc_after + ',agent=' + $_ag_after)\n"
+        "$_np_ips_after = @((Get-MpPreference -EA SilentlyContinue).ExclusionIpAddress)\n"
+        "Write-Output ('WFP_AFTER:rc=' + $_rc_after + ',agent=' + $_ag_after + ',npip=' + $_np_ips_after.Count)\n"
         "exit 0\n"
     )
     enc = _powershell_encoded_command(script)

@@ -1483,6 +1483,19 @@ class TestWfpPreflightCleanup(unittest.TestCase):
         self.assertIn("WFP_BEFORE:", decoded)
         self.assertIn("WFP_AFTER:", decoded)
 
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_wfp_after_includes_npip_count(self, mock_ssh: object) -> None:
+        """WFP_AFTER script output must include npip= so IP exclusion drain is verifiable."""
+        mock_ssh.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
+        wfp_preflight_cleanup(t, timeout=100)
+        decoded = _decoded_windows_launch_script(mock_ssh.call_args[0][0][-1])
+        # The after snapshot must collect ExclusionIpAddress and emit its count.
+        self.assertIn("$_np_ips_after", decoded)
+        self.assertIn(",npip=' + $_np_ips_after.Count", decoded)
+
     @patch("builtins.print")
     @patch("lib.deploy._run_ssh_cli_with_retry")
     def test_wfp_after_output_is_logged(
@@ -1492,7 +1505,7 @@ class TestWfpPreflightCleanup(unittest.TestCase):
         mock_ssh.return_value = subprocess.CompletedProcess(
             args=[],
             returncode=0,
-            stdout="WFP_BEFORE:rc=3,agent=2,npip=1\nWFP_AFTER:rc=0,agent=0\n",
+            stdout="WFP_BEFORE:rc=3,agent=2,npip=1\nWFP_AFTER:rc=0,agent=0,npip=0\n",
             stderr="",
         )
         t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
@@ -1510,7 +1523,7 @@ class TestWfpPreflightCleanup(unittest.TestCase):
         mock_ssh.return_value = subprocess.CompletedProcess(
             args=[],
             returncode=0,
-            stdout="WFP_BEFORE:rc=3,agent=2,npip=0\nWFP_AFTER:rc=1,agent=0\n",
+            stdout="WFP_BEFORE:rc=3,agent=2,npip=0\nWFP_AFTER:rc=1,agent=0,npip=0\n",
             stderr="",
         )
         t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)

@@ -1144,10 +1144,7 @@ BOOL WinScreenshot(
         if ( Instance->Win32.SetProcessWindowStation( hWinSta ) ) {
             hOldDesk = Instance->Win32.GetThreadDesktop( dwThreadId );
             hDesk    = Instance->Win32.OpenDesktopA( "Default", 0, FALSE,
-                           DESKTOP_READOBJECTS | DESKTOP_CREATEWINDOW |
-                           DESKTOP_CREATEMENU  | DESKTOP_HOOKCONTROL   |
-                           DESKTOP_ENUMERATE   | DESKTOP_WRITEOBJECTS  |
-                           GENERIC_READ );
+                           DESKTOP_READOBJECTS | GENERIC_READ );
             if ( hDesk ) {
                 if ( ! Instance->Win32.SetThreadDesktop( hDesk ) ) {
                     /* Failed to bind — undo window station change */

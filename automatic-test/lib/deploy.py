@@ -927,9 +927,10 @@ def wfp_preflight_cleanup(
     timeout: int | None = None,
     c2_hosts: list[str] | None = None,
 ) -> None:
-    """Sweep leftover WFP firewall rules and Defender NP exclusions before a test run.
+    """Sweep leftover WFP firewall rules and Defender NP exclusions.
 
-    Runs once at the start of each test session, before any scenarios execute.
+    Idempotent and safe to call multiple times (e.g. at suite start and between
+    scenarios); errors are swallowed so a failed sweep never aborts the caller.
     More diagnostic than :func:`cleanup_windows_harness_work_dir`: reports rule counts
     before and after so pool-exhaustion events can be correlated with rule accumulation.
 

@@ -44,7 +44,7 @@ empty screenshots that slip past validation.
 Skip if neither Windows nor a Linux-with-DISPLAY target is configured.
 """
 
-DESCRIPTION = "Screenshot capture (Demon + Archon + Specter + Phantom)"
+DESCRIPTION = "Screenshot capture (Archon + Specter + Phantom)"
 
 import os
 import shlex

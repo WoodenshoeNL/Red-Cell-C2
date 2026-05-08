@@ -241,7 +241,8 @@
 #define H_FUNC_GETSYSTEMMETRICS                      0x287c6401
 #define H_FUNC_GETDC                                 0xd2b106c
 #define H_FUNC_RELEASEDC                             0x6fbc050d
-#define H_FUNC_OPENWINDOWSTATION                     0x47468331
+/* OpenWindowStation is a macro → A/W; export is OpenWindowStationA */
+#define H_FUNC_OPENWINDOWSTATION                     0x3016e992
 #define H_FUNC_GETPROCESSWINDOWSTATION               0xa19df17e
 #define H_FUNC_SETPROCESSWINDOWSTATION               0x421628a
 #define H_FUNC_CLOSEWINDOWSTATION                    0x92609475

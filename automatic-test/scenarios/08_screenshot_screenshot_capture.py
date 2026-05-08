@@ -5,23 +5,24 @@ Take a screenshot via agent and verify a loot entry of type 'screenshot' is
 created, then download the bytes and validate the image header.
 
 All payloads are pre-built in parallel (when ``--no-parallel`` is not set) via
-:func:`~lib.payload.build_parallel`.  On Windows, two separate HTTP listeners
-are created: a Demon listener (legacy mode, DemonEnvelope header) and an
-Archon/Specter listener (non-legacy, ArchonEnvelope + ECDH).  On Linux, a
-single listener is used.  Each agent pass deploys + captures sequentially.
+:func:`~lib.payload.build_parallel`.  On Windows, a single HTTP listener is
+created for Archon/Specter (non-legacy, ArchonEnvelope + ECDH).  The Demon
+pass is always skipped — Demon screenshot code was reverted in 06346e50 and
+is not maintained; screenshot support lives in Archon.  On Linux, a single
+listener is used.  Each agent pass deploys + captures sequentially.
 
 Runs once per agent per target:
-  - Windows target: Demon pass (always) + Archon pass (when ``"archon"``
-    is listed in ``agents.available``) + Specter pass (when ``"specter"``
-    is listed in ``agents.available`` in env.toml).
+  - Windows target: Demon pass (SKIPPED — not maintained) + Archon pass (when
+    ``"archon"`` is listed in ``agents.available``) + Specter pass (when
+    ``"specter"`` is listed in ``agents.available`` in env.toml).
+    Raises ScenarioSkipped when neither archon nor specter is available.
   - Linux target (only used when ctx.windows is None): Phantom pass (when
     ``"phantom"`` is listed in ``agents.available`` and the target has a
     usable DISPLAY/Xvfb).
 
 Steps:
-  0. Create Demon (legacy) and Archon/Specter (non-legacy) HTTP listeners
-     (Windows) or a single listener (Linux); pre-build all needed payloads
-     in parallel
+  0. Create Archon/Specter (non-legacy) HTTP listener (Windows) or a single
+     listener (Linux); pre-build all needed payloads in parallel
   Per agent pass:
   1. Snapshot existing screenshot-loot IDs
   2. Deploy pre-built payload via SSH/SCP to the target
@@ -292,33 +293,28 @@ def run(ctx):
         listeners_cfg = ctx.env.get("listeners", {})
         listeners_to_cleanup: list[str] = []
 
-        # Demon listener (legacy_mode — DemonEnvelope header)
-        demon_listener_name = f"test-screenshot-demon-{uid}"
-        demon_port = listeners_cfg.get("windows_demon_port", 19083)
-        print(f"\n  [demon] creating HTTP listener {demon_listener_name!r} on port {demon_port}")
-        listener_create(cli, demon_listener_name, "http",
-                        **http_listener_kwargs(demon_port, ctx.env, agent_type="demon"))
-        listener_start(cli, demon_listener_name)
-        listeners_to_cleanup.append(demon_listener_name)
+        # Demon screenshot is not maintained (reverted in 06346e50).
+        # Skip the whole Windows branch if no screenshot-capable agent is available.
+        if not has_archon and not has_specter:
+            raise ScenarioSkipped(
+                "No screenshot-capable agent available for Windows target — "
+                "Demon screenshot is not maintained (reverted in 06346e50); "
+                "add 'archon' or 'specter' to agents.available in env.toml"
+            )
 
         # Archon/Specter listener (non-legacy — ArchonEnvelope + ECDH)
-        archon_listener_name: str | None = None
-        if has_archon or has_specter:
-            archon_listener_name = f"test-screenshot-archon-{uid}"
-            archon_port = listeners_cfg.get("windows_port", 19082)
-            print(f"  [archon] creating HTTP listener {archon_listener_name!r} on port {archon_port}")
-            listener_create(cli, archon_listener_name, "http",
-                            **http_listener_kwargs(archon_port, ctx.env))
-            listener_start(cli, archon_listener_name)
-            listeners_to_cleanup.append(archon_listener_name)
+        archon_listener_name = f"test-screenshot-archon-{uid}"
+        archon_port = listeners_cfg.get("windows_port", 19082)
+        print(f"\n  [archon] creating HTTP listener {archon_listener_name!r} on port {archon_port}")
+        listener_create(cli, archon_listener_name, "http",
+                        **http_listener_kwargs(archon_port, ctx.env))
+        listener_start(cli, archon_listener_name)
+        listeners_to_cleanup.append(archon_listener_name)
 
         try:
-            # ── Pre-build all payloads in parallel ───────────────────────────
-            cells: list[MatrixCell] = [
-                MatrixCell(arch="x64", fmt="exe", agent="demon",
-                           listener=demon_listener_name),
-            ]
-            cell_keys: list[str] = ["demon"]
+            # ── Pre-build payloads for screenshot-capable agents ─────────────
+            cells: list[MatrixCell] = []
+            cell_keys: list[str] = []
             if has_archon:
                 cells.append(MatrixCell(arch="x64", fmt="exe", agent="archon",
                                         listener=archon_listener_name))
@@ -333,13 +329,11 @@ def run(ctx):
             raws = build_parallel(cli, "", cells, parallel=ctx.payload_parallel)
             payloads = dict(zip(cell_keys, raws))
 
-            # ── Demon pass (primary Windows baseline) ────────────────────────
+            # ── Demon pass — SKIPPED (screenshot not maintained) ─────────────
             print("\n  === Agent pass: demon (Windows) ===")
-            _run_for_agent(
-                ctx, ctx.windows,
-                agent_type="demon", fmt="exe", is_windows=True,
-                listener_name=demon_listener_name,
-                pre_built_payload=payloads["demon"],
+            print(
+                "  [demon] SKIPPED — Demon screenshot is not maintained "
+                "(code reverted in 06346e50; screenshot support lives in Archon)"
             )
 
             # ── Archon pass ──────────────────────────────────────────────────

@@ -33,10 +33,10 @@ row to *Resolved* and add the closing commit / fix description.
 | Signature (substring of error / stderr) | Scenario | Bead | First seen | Last seen | Status |
 |----------------------------------------|----------|------|------------|-----------|--------|
 | `Timed out after 60s waiting for agent checkin` (sc04 only, no teamserver entries) | 04 | red-cell-c2-2frr8 | 2026-05-07 | 2026-05-08 | P3, Phantom Linux checkin intermittently absent — payload launches but makes zero connections; sc06 Phantom always works in same run; flaky race/load issue |
-| `Timed out after 30s waiting for screenshot loot entry` | 08 | red-cell-c2-uzl9i | 2026-05-07 | 2026-05-08 | P2, sc08 screenshot loot absent — root cause: H_FUNC_OPENWINDOWSTATION had wrong hash (0x47468331 → non-exported bare name), causing NULL fn-ptr crash. Fixed: hash changed to OpenWindowStationA (0x3016e992), commit 8bf46ce2. Needs post-fix autotest verification. |
-| `[SUBPROCESS_TIMEOUT] CLI subprocess did not exit within expected timeout (55s) (exit -1)` | 05, 07 | red-cell-c2-gdiw8 | 2026-05-08 | 2026-05-08 | P2, Demon `netstat -ano` hangs; e8gv0 preflight-cleanup fix (e80dd10c) applied but NOT sufficient — sc05/sc07 still fail in run_021528_e88b7600 (post-fix run); intra-run pool accumulation likely root cause |
-| `os error 10055` | 20 | red-cell-c2-gdiw8 | 2026-05-07 | 2026-05-08 | P2, WSAENOBUFS; e8gv0 fix NOT sufficient — sc20 still fails in run_021528_e88b7600; Specter HTTP+DoH both fail with insufficient buffer space |
-| `Timed out after 60s waiting for agent checkin` (Archon, no os error 10055 in probe, port reachable) | 06, 17 | red-cell-c2-gdiw8 | 2026-05-08 | 2026-05-08 | P2, cascade of WFP pool exhaustion — Archon agent launches via schtask, process found, but makes zero TCP connections; Test-NetConnection True; pool partially exhausted by earlier sc05/sc07 Windows deployments |
+| `Timed out after 30s waiting for screenshot loot entry` | 08 | red-cell-c2-z5rl8 | 2026-05-08 | 2026-05-08 | P2, Demon screenshot reverted by 06346e50 (fixes moved to Archon); SC08 Demon pass always fails, Archon pass never reached — scenario needs reorder or Demon skip |
+| `[SUBPROCESS_TIMEOUT] CLI subprocess did not exit within expected timeout (55s) (exit -1)` | 07 | red-cell-c2-gdiw8 | 2026-05-08 | 2026-05-08 | P2, Demon `netstat -ano` hangs; sc05 Demon pass NOW PASSES (e8gv0 partially effective) but sc07 still fails — pool exhaustion is worse by sc07 (more prior Windows deploys); sc05 now fails via Archon checkin timeout instead |
+| `os error 10055` | 20 | red-cell-c2-gdiw8 | 2026-05-07 | 2026-05-08 | P2, WSAENOBUFS; e8gv0 fix NOT sufficient — sc20 still fails in run_120713_0cb7c7b6; Specter HTTP+DoH both fail with insufficient buffer space |
+| `Timed out after 60s waiting for agent checkin` (Archon, no os error 10055 in probe, port reachable) | 05, 06, 17 | red-cell-c2-gdiw8 | 2026-05-08 | 2026-05-08 | P2, cascade of WFP pool exhaustion — Archon agent launches via schtask, process found, but makes zero TCP connections; Test-NetConnection True; sc05 Demon pass now works (e8gv0 progress) but Archon pass fails; sc07 Demon fails via SUBPROCESS_TIMEOUT (pool more depleted by sc07) |
 
 ---
 
@@ -48,6 +48,7 @@ than a new bug.
 
 | Signature (substring of error / stderr) | Scenario | Bead | Resolved at | Notes |
 |----------------------------------------|----------|------|-------------|-------|
+| `Timed out after 30s waiting for screenshot loot entry` (demon hash + WinSta0 fix) | 08 | red-cell-c2-uzl9i | 2026-05-08 | Closed: fixes (8bf46ce2, c5463122, 4023932a) moved from demon to archon (06346e50). New failure tracked as red-cell-c2-z5rl8 (Demon pass reverted; Archon pass needs verification). |
 | `[TIMEOUT] timeout: timed out waiting for output from task` (Phantom CTR/seq fix) | 04, 06, 07, 08, 11, 21 | red-cell-c2-1f7q1 | 2026-05-06 | Closed and split into lkkaq (root cause: CTR desync in get_job()) + 0xpyf (fix: advance CTR/seq unconditionally, commit 4a87b01d). Verified passing in run_073425 (sc04/sc21 pass). sc11 passes 2026-05-08. |
 | `undefined reference to '__mingw_vsnprintf'` | 05, 06, 07, 08, 17 | red-cell-c2-cgzoo | 2026-05-02 | Removed snprintf + OutputDebugStringA from TransportHttp.c; Archon builds fine. |
 | `audit operator mismatch: expected` | 11 | *(fixed inline)* | 2026-05-02 | audit_checks.py assert_operator_attribution allows agent.registered and agent.dead for teamserver. |

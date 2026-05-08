@@ -434,6 +434,14 @@ typedef struct
         WIN_FUNC( DeleteObject )
         WIN_FUNC( DeleteDC )
         WIN_FUNC( ReleaseDC )
+        WIN_FUNC( OpenWindowStation )
+        WIN_FUNC( GetProcessWindowStation )
+        WIN_FUNC( SetProcessWindowStation )
+        WIN_FUNC( CloseWindowStation )
+        WIN_FUNC( OpenDesktopA )
+        WIN_FUNC( GetThreadDesktop )
+        WIN_FUNC( SetThreadDesktop )
+        WIN_FUNC( CloseDesktop )
 
         // Netapi
         WIN_FUNC( NetWkstaUserEnum )

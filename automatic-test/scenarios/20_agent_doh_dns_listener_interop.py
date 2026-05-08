@@ -495,11 +495,11 @@ def run(ctx):
     finally:
         if agent_id is not None:
             agent_id_hex = f"{agent_id:08X}"
-            print(f"  [cleanup] killing synthetic agent {agent_id_hex}")
+            print(f"  [cleanup] deregistering synthetic agent {agent_id_hex}")
             try:
-                agent_kill(cli, agent_id_hex)
+                agent_kill(cli, agent_id_hex, deregister_only=True)
             except Exception as exc:
-                print(f"  [cleanup] agent kill failed (non-fatal): {exc}")
+                print(f"  [cleanup] agent deregister failed (non-fatal): {exc}")
 
         print(f"  [cleanup] stopping/deleting DNS listener {listener_name!r}")
         try:

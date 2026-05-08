@@ -394,7 +394,18 @@ def agent_download(cfg: CliConfig, agent_id: str, src: str, dst: str) -> dict:
     return _run(cfg, "agent", "download", agent_id, "--src", src, "--dst", dst)
 
 
-def agent_kill(cfg: CliConfig, agent_id: str) -> dict:
+def agent_kill(cfg: CliConfig, agent_id: str, *, deregister_only: bool = False) -> dict:
+    """Send a kill task to an agent.
+
+    When *deregister_only* is True, skip the kill task and immediately remove
+    the agent from the teamserver registry (``--deregister-only``).  Use this
+    for synthetic agents that have no live process and will never pick up a
+    queued kill task (e.g. protocol-compliance probes).  The default behaviour
+    queues the kill task and blocks until the agent status becomes ``"dead"``
+    (``--wait``).
+    """
+    if deregister_only:
+        return _run(cfg, "agent", "kill", agent_id, "--deregister-only")
     return _run(cfg, "agent", "kill", agent_id, "--wait")
 
 

@@ -634,11 +634,11 @@ def run(ctx):
         for aid in (agent_id, wrong_endian_agent_id):
             if aid is not None:
                 aid_hex = f"{aid:08X}"
-                print(f"  [cleanup] killing synthetic agent {aid_hex}")
+                print(f"  [cleanup] deregistering synthetic agent {aid_hex}")
                 try:
-                    agent_kill(cli, aid_hex)
+                    agent_kill(cli, aid_hex, deregister_only=True)
                 except Exception as exc:
-                    print(f"  [cleanup] agent kill failed (non-fatal): {exc}")
+                    print(f"  [cleanup] agent deregister failed (non-fatal): {exc}")
 
         print(f"  [cleanup] stopping/deleting listener {listener_name!r}")
         try:

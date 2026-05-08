@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1750 | 297 | 148 |
-| Bugs filed against | 286 | 50 | 19 |
+| Tasks closed | 1755 | 297 | 148 |
+| Bugs filed against | 287 | 50 | 19 |
 | Bug rate (bugs/task) | 0.16 | 0.17 | 0.13 |
 | Quality score | 84% | 83% | 87% |
 
-*Bug rates: Claude 286/1750=0.1634→0.16, Codex 50/297=0.1684→0.17, Cursor 19/148=0.1284→0.13*
+*Bug rates: Claude 287/1755=0.1635→0.16, Codex 50/297=0.1684→0.17, Cursor 19/148=0.1284→0.13*
 
 ## Violation Breakdown
 
@@ -31,7 +31,7 @@ Each loop run updates the running totals and appends a review entry.
 | Test infrastructure / flakiness | 68 | 6 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 6 | 5 | 1 |
-| Correctness / pagination | 72 | 9 | 2 |
+| Correctness / pagination | 73 | 9 | 2 |
 | Workflow / close-hygiene | 40 | 1 | 2 |
 | Code reuse / duplication | 14 | 0 | 0 |
 | Incomplete commits (stranded work) | 7 | 3 | 0 |
@@ -7539,3 +7539,13 @@ Build: `cargo check --workspace` passed; `cargo clippy --workspace -- -D warning
 | Cursor | 0 | 0 | No attributed activity in this review range. |
 
 Build: passed (`cargo check --workspace --quiet` in 0.56s; `cargo nextest run --workspace` 6267/6267 passed, 1 skipped, in 14m18s; `cargo clippy --workspace -- -D warnings` clean in 35s).
+
+### QA Review — 2026-05-08 23:11 — d0f2a12d..00db4990
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 5 | 1 | All substantive commits in this range were Claude-attributed. Claude cleanly closed `red-cell-c2-599ct`, `red-cell-c2-ej5r9`, `red-cell-c2-gm47d`, `red-cell-c2-y2z61`, and `red-cell-c2-csyk0` across `client-cli` Windows config persistence and autotest synthetic-agent cleanup. I filed `red-cell-c2-q5v27` against the new Windows backup-write path because a stale `.bak` left behind after ignored cleanup failure can make the next overwrite fail with `AlreadyExists`. |
+| Codex | 0 | 0 | One beads-only maintenance commit (`618e44b3`) in range; no task-closing commit and no new findings attributed. |
+| Cursor | 0 | 0 | No attributed activity in this review range. |
+
+Build: `cargo check --workspace` passed; `cargo clippy --workspace -- -D warnings` passed; `cargo nextest run --workspace` was still compiling/running at review cutover under `/tmp/red-cell-target-qa`.

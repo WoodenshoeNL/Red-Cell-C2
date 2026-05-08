@@ -189,7 +189,9 @@ BOOL ReadLocalFile(
 
 BOOL WinScreenshot(
     OUT PVOID*  ImagePointer,
-    OUT PSIZE_T ImageSize
+    OUT PSIZE_T ImageSize,
+    OUT PCHAR*  ErrorReason,
+    OUT PDWORD  ErrorCode
 );
 
 BOOL AnonPipesInit(

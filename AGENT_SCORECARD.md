@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1748 | 297 | 148 |
-| Bugs filed against | 286 | 50 | 19 |
+| Tasks closed | 1758 | 297 | 148 |
+| Bugs filed against | 288 | 50 | 19 |
 | Bug rate (bugs/task) | 0.16 | 0.17 | 0.13 |
 | Quality score | 84% | 83% | 87% |
 
-*Bug rates: Claude 286/1748=0.1636→0.16, Codex 50/297=0.1684→0.17, Cursor 19/148=0.1284→0.13*
+*Bug rates: Claude 288/1758=0.1638→0.16, Codex 50/297=0.1684→0.17, Cursor 19/148=0.1284→0.13*
 
 ## Violation Breakdown
 
@@ -25,14 +25,14 @@ Each loop run updates the running totals and appends a review entry.
 | Clippy warnings | 16 | 0 | 2 |
 | Protocol errors | 32 | 32 | 4 |
 | Security issues | 75 | 40 | 0 |
-| Architecture drift | 68 | 25 | 9 |
+| Architecture drift | 69 | 25 | 9 |
 | Memory / resource leaks | 16 | 11 | 2 |
 | Startup / lifecycle regressions | 5 | 10 | 0 |
 | Test infrastructure / flakiness | 68 | 6 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 6 | 5 | 1 |
 | Correctness / pagination | 72 | 9 | 2 |
-| Workflow / close-hygiene | 40 | 1 | 2 |
+| Workflow / close-hygiene | 41 | 1 | 2 |
 | Code reuse / duplication | 14 | 0 | 0 |
 | Incomplete commits (stranded work) | 7 | 3 | 0 |
 
@@ -7529,3 +7529,13 @@ Build: passed (`cargo check --workspace`; `cargo nextest run --workspace`; `carg
 | Cursor | 0 | 0 | No attributed activity in this review range. |
 
 Build: `cargo check --workspace` passed; `cargo clippy --workspace -- -D warnings` passed; `cargo nextest run --workspace` still running at review cutover (fresh `--no-run` rebuild under `/tmp/red-cell-target-qa` had not finished yet).
+
+### QA Review — 2026-05-08 02:14 — 7f0dbd39..c5e682f8
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 10 | 2 | Dominant activity across `common`, `teamserver`, `client`, `automatic-test`, `archon`, and `agent/demon/`. I filed `red-cell-c2-pac64` because the range lands new edits under the explicitly frozen `agent/demon/` tree (`WinScreenshot`, `TransportHttp`, loader/hash additions) despite `AGENTS.md` forbidding any edits there. I filed `red-cell-c2-rje9v` because `red-cell-c2-spxyy` and `red-cell-c2-e8gv0` were closed even though the latest `automatic-test/KNOWN_FAILURES.md` still marks their signatures active through 2026-05-08, which violates the autotest bug-closing rule. |
+| Codex | 0 | 0 | One beads-only maintenance commit (`2ab7a267`), no task-closing commits, and no new QA findings attributed. |
+| Cursor | 0 | 0 | No attributed activity in this review range. |
+
+Build: `cargo check --workspace` passed in 1m31s; `cargo clippy --workspace -- -D warnings` passed in 1m28s; `cargo nextest run --workspace` did not produce a pass/fail result and was terminated after stalling in the `cargo test --no-run` handoff so clippy could proceed.

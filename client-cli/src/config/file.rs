@@ -4,8 +4,8 @@ use std::path::Path;
 
 use super::types::{ConfigError, FileConfig};
 
-/// Test-only hook: when set, `call_tighten` calls this instead of the real
-/// `tighten_permissions`. Set to `None` to restore real behaviour.
+// Test-only hook: when set, `call_tighten` calls this instead of the real
+// `tighten_permissions`. Set to `None` to restore real behaviour.
 #[cfg(all(unix, test))]
 thread_local! {
     pub(crate) static TIGHTEN_PERMISSIONS_FN: std::cell::Cell<

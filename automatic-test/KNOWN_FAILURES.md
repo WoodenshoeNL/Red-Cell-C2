@@ -34,8 +34,9 @@ row to *Resolved* and add the closing commit / fix description.
 |----------------------------------------|----------|------|------------|-----------|--------|
 | `Timed out after 60s waiting for agent checkin` (sc04 only, no teamserver entries) | 04 | red-cell-c2-2frr8 | 2026-05-07 | 2026-05-08 | P3, Phantom Linux checkin intermittently absent — payload launches but makes zero connections; sc06 Phantom always works in same run; flaky race/load issue |
 | `Timed out after 30s waiting for screenshot loot entry` | 08 | red-cell-c2-uzl9i | 2026-05-07 | 2026-05-08 | P2, sc08 screenshot loot absent — root cause: H_FUNC_OPENWINDOWSTATION had wrong hash (0x47468331 → non-exported bare name), causing NULL fn-ptr crash. Fixed: hash changed to OpenWindowStationA (0x3016e992), commit 8bf46ce2. Needs post-fix autotest verification. |
-| `[SUBPROCESS_TIMEOUT] CLI subprocess did not exit within expected timeout (55s) (exit -1)` | 05, 07 | red-cell-c2-gdiw8 | 2026-05-08 | 2026-05-08 | P2, Demon `netstat -ano` hangs; WFP preflight-cleanup fix (e8gv0, e80dd10c) applied 2026-05-08 but predates the last failing run; needs post-fix autotest verification |
-| `os error 10055` | 20 | red-cell-c2-gdiw8 | 2026-05-07 | 2026-05-08 | P2, WSAENOBUFS; WFP preflight-cleanup fix (e8gv0, e80dd10c) applied 2026-05-08 but predates the last failing run; needs post-fix autotest verification |
+| `[SUBPROCESS_TIMEOUT] CLI subprocess did not exit within expected timeout (55s) (exit -1)` | 05, 07 | red-cell-c2-gdiw8 | 2026-05-08 | 2026-05-08 | P2, Demon `netstat -ano` hangs; e8gv0 preflight-cleanup fix (e80dd10c) applied but NOT sufficient — sc05/sc07 still fail in run_021528_e88b7600 (post-fix run); intra-run pool accumulation likely root cause |
+| `os error 10055` | 20 | red-cell-c2-gdiw8 | 2026-05-07 | 2026-05-08 | P2, WSAENOBUFS; e8gv0 fix NOT sufficient — sc20 still fails in run_021528_e88b7600; Specter HTTP+DoH both fail with insufficient buffer space |
+| `Timed out after 60s waiting for agent checkin` (Archon, no os error 10055 in probe, port reachable) | 06, 17 | red-cell-c2-gdiw8 | 2026-05-08 | 2026-05-08 | P2, cascade of WFP pool exhaustion — Archon agent launches via schtask, process found, but makes zero TCP connections; Test-NetConnection True; pool partially exhausted by earlier sc05/sc07 Windows deployments |
 
 ---
 

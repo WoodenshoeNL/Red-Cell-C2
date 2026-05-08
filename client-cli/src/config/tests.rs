@@ -509,6 +509,64 @@ fn load_config_tightens_loose_permissions() {
     );
 }
 
+// ── chmod-failure paths in load_config_file ────────────────────────────
+
+/// Helper that installs a tighten_permissions hook for the duration of the
+/// current test and restores None on drop.
+#[cfg(unix)]
+struct TightenHookGuard;
+
+#[cfg(unix)]
+impl Drop for TightenHookGuard {
+    fn drop(&mut self) {
+        super::file::TIGHTEN_PERMISSIONS_FN.with(|c| c.set(None));
+    }
+}
+
+#[cfg(unix)]
+fn inject_chmod_failure() -> TightenHookGuard {
+    fn always_fail(_: &std::path::Path) -> std::io::Result<()> {
+        Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+    }
+    super::file::TIGHTEN_PERMISSIONS_FN.with(|c| c.set(Some(always_fail)));
+    TightenHookGuard
+}
+
+/// When chmod fails and the file contains a token the secret would remain
+/// world-readable, so `load_config_file` must refuse with
+/// `ConfigError::InsecurePermissions`.
+#[cfg(unix)]
+#[test]
+fn chmod_fail_with_token_returns_insecure_permissions_error() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join(".red-cell-cli.toml");
+    fs::write(&path, "server = \"https://ts:1\"\ntoken = \"secret-tok\"").unwrap();
+
+    let _guard = inject_chmod_failure();
+
+    let err = load_config_file(&path).expect_err("should fail with InsecurePermissions");
+    assert!(
+        matches!(err, ConfigError::InsecurePermissions { .. }),
+        "expected InsecurePermissions, got {err:?}"
+    );
+}
+
+/// When chmod fails but there is no token there is no secret at risk.
+/// `load_config_file` must emit a tracing warning and return `Ok`.
+#[cfg(unix)]
+#[test]
+fn chmod_fail_without_token_returns_ok() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join(".red-cell-cli.toml");
+    fs::write(&path, "server = \"https://ts:1\"").unwrap();
+
+    let _guard = inject_chmod_failure();
+
+    let cfg = load_config_file(&path).expect("should succeed when no token is at risk");
+    assert_eq!(cfg.server.as_deref(), Some("https://ts:1"));
+    assert!(cfg.token.is_none());
+}
+
 // ── InsecurePermissions error ──────────────────────────────────────────
 
 #[cfg(unix)]

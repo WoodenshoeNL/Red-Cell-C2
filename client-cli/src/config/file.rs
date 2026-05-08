@@ -4,6 +4,25 @@ use std::path::Path;
 
 use super::types::{ConfigError, FileConfig};
 
+/// Test-only hook: when set, `call_tighten` calls this instead of the real
+/// `tighten_permissions`. Set to `None` to restore real behaviour.
+#[cfg(all(unix, test))]
+thread_local! {
+    pub(crate) static TIGHTEN_PERMISSIONS_FN: std::cell::Cell<
+        Option<fn(&std::path::Path) -> std::io::Result<()>>,
+    > = std::cell::Cell::new(None);
+}
+
+/// Thin wrapper so tests can inject chmod failures without root.
+#[cfg(unix)]
+fn call_tighten(path: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    if let Some(f) = TIGHTEN_PERMISSIONS_FN.with(|c| c.get()) {
+        return f(path);
+    }
+    super::permissions::tighten_permissions(path)
+}
+
 /// Load and parse a TOML config file from `path`.
 ///
 /// Missing files are silently treated as empty configs rather than errors;
@@ -21,7 +40,7 @@ pub fn load_config_file(path: &Path) -> Result<FileConfig, ConfigError> {
     // without restrictive mode (e.g. by a text editor or manual `echo`).
     // Capture the outcome — on failure we re-check the actual mode below.
     #[cfg(unix)]
-    let chmod_err = super::permissions::tighten_permissions(path).err();
+    let chmod_err = call_tighten(path).err();
 
     let content = std::fs::read_to_string(path)
         .map_err(|e| ConfigError::ReadError { path: path.to_path_buf(), source: e })?;

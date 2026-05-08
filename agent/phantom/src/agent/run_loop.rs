@@ -357,9 +357,9 @@ mod tests {
         Ok(())
     }
 
-    /// Transport errors on all 3 attempts exhaust the retry budget and return Err(Transport).
+    /// Transport errors on all INIT_HANDSHAKE_RETRIES attempts exhaust the retry budget and return Err(Transport).
     /// The connection counter asserts that exactly INIT_HANDSHAKE_RETRIES attempts were made,
-    /// so a regression that silently reduces the retry count will fail this test.
+    /// catching both upward and downward regressions to the retry budget.
     #[tokio::test(start_paused = true)]
     async fn retry_exhausts_all_attempts_with_transport_error()
     -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -370,9 +370,9 @@ mod tests {
         let address = listener.local_addr()?;
 
         // Accept and immediately drop each connection → agent receives connection-reset,
-        // which maps to a Transport error. Loop 3 times = INIT_HANDSHAKE_RETRIES.
+        // which maps to a Transport error. Loop INIT_HANDSHAKE_RETRIES times.
         let server = thread::spawn(move || -> Result<(), Box<dyn Error + Send + Sync>> {
-            for _ in 0..3_u32 {
+            for _ in 0..super::INIT_HANDSHAKE_RETRIES {
                 let _ = listener.accept()?;
                 counter_clone.fetch_add(1, Ordering::SeqCst);
                 // Socket dropped here; agent sees connection-reset on read.
@@ -392,11 +392,12 @@ mod tests {
             matches!(result, Err(PhantomError::Transport(_))),
             "expected Transport error after exhausting retries, got {result:?}"
         );
-        // 3 = INIT_HANDSHAKE_RETRIES: a regression reducing the retry budget fails here.
+        // Catches both upward and downward regressions to the retry budget.
         assert_eq!(
             connection_count.load(Ordering::SeqCst),
-            3,
-            "expected exactly INIT_HANDSHAKE_RETRIES (3) connection attempts"
+            super::INIT_HANDSHAKE_RETRIES as usize,
+            "expected exactly INIT_HANDSHAKE_RETRIES ({}) connection attempts",
+            super::INIT_HANDSHAKE_RETRIES
         );
 
         server.join().map_err(|_| "server thread panicked")??;

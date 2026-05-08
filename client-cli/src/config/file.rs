@@ -40,7 +40,14 @@ pub fn load_config_file(path: &Path) -> Result<FileConfig, ConfigError> {
         if let (Some(parent), Some(stem)) = (path.parent(), path.file_name()) {
             let backup = parent.join(format!(".{}.bak", stem.to_string_lossy()));
             if backup.is_file() {
-                let _ = std::fs::rename(&backup, path);
+                if let Err(e) = std::fs::rename(&backup, path) {
+                    tracing::warn!(
+                        backup = %backup.display(),
+                        path = %path.display(),
+                        error = %e,
+                        "crash-recovery restore failed; falling back to default config"
+                    );
+                }
             }
         }
     }

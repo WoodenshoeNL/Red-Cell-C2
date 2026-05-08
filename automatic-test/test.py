@@ -707,9 +707,8 @@ def _acquire_run_lock() -> None:
     on all POSIX filesystems, eliminating the TOCTOU race of exists()+write_text().
     """
     try:
-        fd = open(_RUN_LOCK_PATH, "x")  # noqa: WPS515 — atomic O_CREAT|O_EXCL
-        fd.write(str(os.getpid()))
-        fd.close()
+        with open(_RUN_LOCK_PATH, "x") as fd:  # atomic O_CREAT|O_EXCL
+            fd.write(str(os.getpid()))
     except FileExistsError:
         raw = ""
         try:
@@ -739,9 +738,8 @@ def _acquire_run_lock() -> None:
         # Stale lock — remove and retry with atomic create
         _RUN_LOCK_PATH.unlink(missing_ok=True)
         try:
-            fd = open(_RUN_LOCK_PATH, "x")
-            fd.write(str(os.getpid()))
-            fd.close()
+            with open(_RUN_LOCK_PATH, "x") as fd:  # atomic O_CREAT|O_EXCL
+                fd.write(str(os.getpid()))
         except FileExistsError:
             # Lost the race even after removing the stale lock — another process
             # just created it between our unlink and our retry.

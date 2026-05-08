@@ -29,19 +29,26 @@ pub(super) async fn handle_screenshot_callback(
     let context = loot_context(registry, agent_id, request_id).await;
 
     if success == 0 {
-        let error_reason = parser.read_string("error reason")?;
-        let error_code = parser.read_u32("error code")?;
-        let message = if error_reason.is_empty() {
-            format!("Failed to take a screenshot [0x{error_code:08X}]")
+        // Legacy Demon builds send only the 4-byte success=0 field with no
+        // error_reason/error_code.  Fall back to a generic message rather than
+        // returning an error that drops the failure event entirely.
+        let message = if parser.is_empty() {
+            "Failed to take a screenshot".to_string()
         } else {
-            match win32_error_code_name(error_code) {
-                Some(name) => {
-                    format!(
-                        "Failed to take a screenshot: {error_reason} [{name} 0x{error_code:08X}]"
-                    )
-                }
-                None => {
-                    format!("Failed to take a screenshot: {error_reason} [0x{error_code:08X}]")
+            let error_reason = parser.read_string("error reason")?;
+            let error_code = parser.read_u32("error code")?;
+            if error_reason.is_empty() {
+                format!("Failed to take a screenshot [0x{error_code:08X}]")
+            } else {
+                match win32_error_code_name(error_code) {
+                    Some(name) => {
+                        format!(
+                            "Failed to take a screenshot: {error_reason} [{name} 0x{error_code:08X}]"
+                        )
+                    }
+                    None => {
+                        format!("Failed to take a screenshot: {error_reason} [0x{error_code:08X}]")
+                    }
                 }
             }
         };
@@ -414,6 +421,41 @@ mod tests {
         )
         .await;
         assert!(result.is_err());
+
+        // No loot should be stored.
+        let loot_records = db.loot().list_for_agent(AGENT_ID).await.expect("loot query");
+        assert!(loot_records.is_empty());
+    }
+
+    /// Legacy 4-byte failure payload (success=0 with no extra fields): must
+    /// broadcast a generic error and not return `InvalidCallbackPayload`.
+    #[tokio::test]
+    async fn legacy_failure_payload_broadcasts_generic_error() {
+        let (registry, db, events) = setup().await;
+        let mut rx = events.subscribe();
+
+        // Oldest Demon builds only send the 4-byte success=0 word.
+        let payload = 0_u32.to_le_bytes().to_vec();
+
+        let result = handle_screenshot_callback(
+            &registry, &db, &events, None, AGENT_ID, REQUEST_ID, &payload,
+        )
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(result.expect("unwrap"), None);
+
+        // Must still broadcast an error event.
+        let msg = rx.recv().await.expect("should receive error event");
+        let OperatorMessage::AgentResponse(resp) = &msg else {
+            panic!("expected AgentResponse, got {msg:?}");
+        };
+        assert_eq!(resp.info.extra.get("Type").and_then(Value::as_str), Some("Error"));
+
+        let msg_body = resp.info.extra.get("Message").and_then(Value::as_str).unwrap_or("");
+        assert!(
+            msg_body.contains("Failed to take a screenshot"),
+            "expected generic failure message, got: {msg_body}"
+        );
 
         // No loot should be stored.
         let loot_records = db.loot().list_for_agent(AGENT_ID).await.expect("loot query");

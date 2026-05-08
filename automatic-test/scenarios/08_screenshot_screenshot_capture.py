@@ -383,7 +383,7 @@ def run(ctx):
             )
         if "phantom" not in available_agents:
             raise ScenarioSkipped(
-                "Linux screenshot target selected but Demon is Windows-only; "
+                "Linux screenshot requires phantom agent; "
                 "add 'phantom' to agents.available in env.toml"
             )
         try:

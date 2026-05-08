@@ -353,6 +353,10 @@ mod tests {
             msg_body.contains("0x00000057"),
             "expected hex error code 0x00000057 in message, got: {msg_body}"
         );
+        assert!(
+            msg_body.contains("ERROR_INVALID_PARAMETER"),
+            "expected Win32 constant name ERROR_INVALID_PARAMETER in message, got: {msg_body}"
+        );
 
         // No loot should be stored.
         let loot_records = db.loot().list_for_agent(AGENT_ID).await.expect("loot query");

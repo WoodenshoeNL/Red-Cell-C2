@@ -269,6 +269,86 @@ async fn screenshot_callback_failure_broadcasts_error_no_loot()
     Ok(())
 }
 
+/// A screenshot callback with `success=0` and a Win32 error code that IS in the name
+/// table must include the symbolic constant name (e.g. `ERROR_INVALID_PARAMETER`) in
+/// the broadcast message body, not just the hex code.
+#[tokio::test]
+async fn screenshot_callback_failure_includes_win32_name_when_mapped()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (raw_socket_, _) = connect_async(server.ws_url()).await?;
+    let mut socket = common::WsSession::new(raw_socket_);
+    common::login(&mut socket).await?;
+
+    server
+        .listeners
+        .create(common::http_listener_config("screenshot-fail-named-test", listener_port))
+        .await?;
+    drop(listener_guard);
+    server.listeners.start("screenshot-fail-named-test").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xFB01_0004_u32;
+    let key: [u8; AGENT_KEY_LENGTH] = [
+        0x47, 0x48, 0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x4F, 0x50, 0x51, 0x52, 0x53, 0x54, 0x55,
+        0x56, 0x57, 0x58, 0x59, 0x5A, 0x5B, 0x5C, 0x5D, 0x5E, 0x5F, 0x60, 0x61, 0x62, 0x63, 0x64,
+        0x65, 0x66,
+    ];
+    let iv: [u8; AGENT_IV_LENGTH] = [
+        0xB1, 0xC4, 0xD7, 0xEA, 0xFD, 0x10, 0x23, 0x36, 0x49, 0x5C, 0x6F, 0x82, 0x95, 0xA8, 0xBB,
+        0xCE,
+    ];
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    // error code 87 = 0x57 = ERROR_INVALID_PARAMETER, which IS in the win32 name table.
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandScreenshot),
+            0x02,
+            &screenshot_failure_payload_with("BitBlt failed -- device context mismatch", 87),
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse, got {event:?}");
+    };
+    assert_eq!(
+        msg.info.extra.get("Type").and_then(|v| v.as_str()),
+        Some("Error"),
+        "failed screenshot must broadcast Type=Error"
+    );
+    let msg_body = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        msg_body.contains("0x00000057"),
+        "error message must contain the hex error code, got: {msg_body}"
+    );
+    assert!(
+        msg_body.contains("ERROR_INVALID_PARAMETER"),
+        "error message must contain the Win32 constant name for a mapped code, got: {msg_body}"
+    );
+
+    let loot_records = server.database.loot().list_for_agent(agent_id).await?;
+    assert!(loot_records.is_empty(), "no loot must be stored for a failed screenshot");
+
+    socket.close(None).await?;
+    server.listeners.stop("screenshot-fail-named-test").await?;
+    Ok(())
+}
+
 /// A screenshot callback with `success=1` but zero-length image data must broadcast
 /// an error `AgentResponse` without panicking and must NOT create any loot record.
 #[tokio::test]

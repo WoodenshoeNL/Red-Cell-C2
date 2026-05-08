@@ -702,8 +702,15 @@ def _acquire_run_lock() -> None:
     does not permanently block new runs.  The lock is released via atexit so
     normal exits, sys.exit(), and uncaught exceptions all clean up correctly.
     SIGKILL cannot be caught; remove .autotest.lock manually in that case.
+
+    Lock acquisition uses open(path, 'x') which maps to O_CREAT|O_EXCL — atomic
+    on all POSIX filesystems, eliminating the TOCTOU race of exists()+write_text().
     """
-    if _RUN_LOCK_PATH.exists():
+    try:
+        fd = open(_RUN_LOCK_PATH, "x")  # noqa: WPS515 — atomic O_CREAT|O_EXCL
+        fd.write(str(os.getpid()))
+        fd.close()
+    except FileExistsError:
         raw = ""
         try:
             raw = _RUN_LOCK_PATH.read_text().strip()
@@ -729,9 +736,22 @@ def _acquire_run_lock() -> None:
                 )
                 sys.exit(1)
 
+        # Stale lock — remove and retry with atomic create
         _RUN_LOCK_PATH.unlink(missing_ok=True)
+        try:
+            fd = open(_RUN_LOCK_PATH, "x")
+            fd.write(str(os.getpid()))
+            fd.close()
+        except FileExistsError:
+            # Lost the race even after removing the stale lock — another process
+            # just created it between our unlink and our retry.
+            print(
+                f"[ERROR] Another test.py run started concurrently.\n"
+                f"        Lock file: {_RUN_LOCK_PATH}\n"
+                f"        Wait for it to finish, or remove the lock file manually if it is stale."
+            )
+            sys.exit(1)
 
-    _RUN_LOCK_PATH.write_text(str(os.getpid()))
     atexit.register(lambda: _RUN_LOCK_PATH.unlink(missing_ok=True))
 
 

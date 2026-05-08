@@ -130,9 +130,22 @@ fn write_bytes(path: &Path, data: &[u8]) -> std::io::Result<()> {
     })();
 
     match write_result {
-        Ok(()) => std::fs::rename(&tmp_path, path).inspect_err(|_| {
-            let _ = std::fs::remove_file(&tmp_path);
-        }),
+        Ok(()) => {
+            // `std::fs::rename` replaces the target atomically on Unix but fails
+            // with `AlreadyExists` on Windows when the destination already exists.
+            // Remove the target first on Windows, then rename into place.
+            #[cfg(windows)]
+            if let Err(e) = std::fs::remove_file(path) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    let _ = std::fs::remove_file(&tmp_path);
+                    return Err(e);
+                }
+            }
+
+            std::fs::rename(&tmp_path, path).inspect_err(|_| {
+                let _ = std::fs::remove_file(&tmp_path);
+            })
+        }
         Err(e) => {
             let _ = std::fs::remove_file(&tmp_path);
             Err(e)

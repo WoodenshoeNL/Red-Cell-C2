@@ -490,6 +490,35 @@ fn write_config_leaves_no_temp_file() {
     assert_eq!(entries.len(), 1, "expected exactly one file, got {entries:?}");
 }
 
+/// Regression test for Windows: `std::fs::rename` fails with `AlreadyExists` when the
+/// destination already exists.  Rewriting an existing config file must succeed on all
+/// platforms.
+#[test]
+fn write_config_overwrites_existing_file() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("config.toml");
+
+    let first = FileConfig {
+        server: Some("https://first:40056".to_owned()),
+        token: Some("old-token".to_owned()),
+        timeout: None,
+        cert_fingerprint: None,
+    };
+    write_config_file(&path, &first).unwrap();
+
+    let second = FileConfig {
+        server: Some("https://second:40056".to_owned()),
+        token: Some("new-token".to_owned()),
+        timeout: None,
+        cert_fingerprint: None,
+    };
+    write_config_file(&path, &second).unwrap();
+
+    let loaded = load_config_file(&path).unwrap();
+    assert_eq!(loaded.server.as_deref(), Some("https://second:40056"));
+    assert_eq!(loaded.token.as_deref(), Some("new-token"));
+}
+
 #[cfg(unix)]
 #[test]
 fn load_config_tightens_loose_permissions() {

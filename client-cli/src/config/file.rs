@@ -47,8 +47,8 @@ pub fn load_config_file(path: &Path) -> Result<FileConfig, ConfigError> {
     // user's config is not silently replaced by a default.
     #[cfg(windows)]
     if !path.is_file() {
-        if let (Some(parent), Some(stem)) = (path.parent(), path.file_name()) {
-            let backup = parent.join(format!(".{}.bak", stem.to_string_lossy()));
+        if let (Some(parent), Some(file_name)) = (path.parent(), path.file_name()) {
+            let backup = parent.join(format!(".{}.bak", file_name.to_string_lossy()));
             if backup.is_file() {
                 #[cfg(test)]
                 let rename_result = {

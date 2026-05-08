@@ -55,6 +55,7 @@ profiles/*.tls.key
 # Temporary files and runtime artifacts
 .tmp/
 Running
+automatic-test/.autotest.lock
 target-codex-x86m/
 target-pkvbc/
 target-clippy-*/

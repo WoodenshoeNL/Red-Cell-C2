@@ -19,6 +19,7 @@ Config:
 from __future__ import annotations
 
 import argparse
+import atexit
 import importlib
 import importlib.util
 import os
@@ -691,6 +692,49 @@ def _auto_derive_cert_fingerprint(cli_cfg: CliConfig) -> CliConfig:
     return cli_cfg
 
 
+_RUN_LOCK_PATH = Path(__file__).parent / ".autotest.lock"
+
+
+def _acquire_run_lock() -> None:
+    """Write a PID lock file and abort if another test.py run is already live.
+
+    Stale locks (PID no longer exists) are silently removed so a prior crash
+    does not permanently block new runs.  The lock is released via atexit so
+    normal exits, sys.exit(), and uncaught exceptions all clean up correctly.
+    SIGKILL cannot be caught; remove .autotest.lock manually in that case.
+    """
+    if _RUN_LOCK_PATH.exists():
+        raw = ""
+        try:
+            raw = _RUN_LOCK_PATH.read_text().strip()
+            running_pid = int(raw)
+        except (ValueError, OSError):
+            running_pid = None
+
+        if running_pid is not None:
+            alive = False
+            try:
+                os.kill(running_pid, 0)
+                alive = True
+            except ProcessLookupError:
+                pass  # stale lock — PID no longer exists
+            except PermissionError:
+                alive = True  # process exists, different user
+
+            if alive:
+                print(
+                    f"[ERROR] Another test.py run is already in progress (PID {running_pid}).\n"
+                    f"        Lock file: {_RUN_LOCK_PATH}\n"
+                    f"        Wait for it to finish, or remove the lock file manually if it is stale."
+                )
+                sys.exit(1)
+
+        _RUN_LOCK_PATH.unlink(missing_ok=True)
+
+    _RUN_LOCK_PATH.write_text(str(os.getpid()))
+    atexit.register(lambda: _RUN_LOCK_PATH.unlink(missing_ok=True))
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -736,6 +780,11 @@ def main():
     if args.unit:
         ok = run_unit_tests()
         sys.exit(0 if ok else 1)
+
+    # Acquire a run-lock so concurrent test.py invocations cannot interfere
+    # with each other's preflight listener cleanup or shared listener state.
+    # Unit tests above are exempt — they do not touch infrastructure.
+    _acquire_run_lock()
 
     config_dir = args.config_dir
     try:

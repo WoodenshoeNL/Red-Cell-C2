@@ -197,8 +197,10 @@ fn write_bytes(path: &Path, data: &[u8]) -> std::io::Result<()> {
                 // to fail with AlreadyExists — Windows does not replace on
                 // rename.  Clear it explicitly before entering the swap
                 // sequence so subsequent writes do not start failing.
-                if backup_path.exists() {
-                    if let Err(e) = std::fs::remove_file(&backup_path) {
+                match std::fs::remove_file(&backup_path) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => {
                         let _ = std::fs::remove_file(&tmp_path);
                         return Err(e);
                     }

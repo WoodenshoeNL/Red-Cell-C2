@@ -99,8 +99,7 @@ impl PhantomAgent {
                 Err(e) => return Err(e),
             }
         }
-        // unreachable: INIT_HANDSHAKE_RETRIES > 0 so the final iteration always returns
-        Err(PhantomError::Transport("init handshake failed after all retries".into()))
+        unreachable!("INIT_HANDSHAKE_RETRIES > 0 so the final iteration always returns")
     }
 
     /// Block until the current time falls within the configured working-hours

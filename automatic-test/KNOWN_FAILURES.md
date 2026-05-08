@@ -36,6 +36,7 @@ row to *Resolved* and add the closing commit / fix description.
 | `[SUBPROCESS_TIMEOUT] CLI subprocess did not exit within expected timeout (55s) (exit -1)` | 07 | red-cell-c2-gdiw8 | 2026-05-08 | 2026-05-08 | P2, Demon `netstat -ano` hangs; sc05 Demon pass NOW PASSES (e8gv0 partially effective) but sc07 still fails — pool exhaustion is worse by sc07 (more prior Windows deploys); sc05 now fails via Archon checkin timeout instead |
 | `os error 10055` | 20 | red-cell-c2-gdiw8 | 2026-05-07 | 2026-05-08 | P2, WSAENOBUFS; e8gv0 fix NOT sufficient — sc20 still fails in run_120713_0cb7c7b6; Specter HTTP+DoH both fail with insufficient buffer space |
 | `Timed out after 60s waiting for agent checkin` (Archon, no os error 10055 in probe, port reachable) | 05, 06, 17 | red-cell-c2-gdiw8 | 2026-05-08 | 2026-05-08 | P2, cascade of WFP pool exhaustion — Archon agent launches via schtask, process found, but makes zero TCP connections; Test-NetConnection True; sc05 Demon pass now works (e8gv0 progress) but Archon pass fails; sc07 Demon fails via SUBPROCESS_TIMEOUT (pool more depleted by sc07) |
+| `agent kill failed (non-fatal): [SUBPROCESS_TIMEOUT] CLI subprocess did not exit within expected timeout (40s) (exit -1)` | 13 | red-cell-c2-csyk0 | 2026-05-08 | 2026-05-08 | P3, CLI `agent kill` hangs 40s for synthetic protocol-compliance agents — they registered via DEMON_INIT but never send GET_JOB so the kill task is never delivered; non-fatal, sc13 passes |
 
 ---
 

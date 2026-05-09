@@ -673,6 +673,87 @@ fn platform_groups() -> Vec<NetGroup> {
     groups
 }
 
+/// Resolve the localized name of the built-in Users group (S-1-5-32-545) as a
+/// NUL-terminated UTF-16 string.
+///
+/// Using a SID lookup instead of the literal `"Users"` makes this work on
+/// non-English Windows installations where the group name is translated.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn builtin_users_name_w() -> Option<Vec<u16>> {
+    use windows_sys::Win32::Foundation::FALSE;
+    use windows_sys::Win32::Security::{
+        CreateWellKnownSid, LookupAccountSidW, SID_NAME_USE, WinBuiltinUsersSid,
+    };
+
+    let mut sid_size: u32 = 0;
+    // SAFETY: pSid is NULL intentionally; Windows fills cbSid with the required size on first call.
+    unsafe {
+        CreateWellKnownSid(
+            WinBuiltinUsersSid,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut sid_size,
+        );
+    }
+    if sid_size == 0 {
+        return None;
+    }
+
+    let mut sid_buf = vec![0u8; sid_size as usize];
+    // SAFETY: sid_buf is correctly sized per first call; pDomainSid is NULL for well-known SIDs.
+    let ok = unsafe {
+        CreateWellKnownSid(
+            WinBuiltinUsersSid,
+            std::ptr::null_mut(),
+            sid_buf.as_mut_ptr() as *mut core::ffi::c_void,
+            &mut sid_size,
+        )
+    };
+    if ok == FALSE {
+        return None;
+    }
+
+    let sid_ptr = sid_buf.as_ptr() as *mut core::ffi::c_void;
+    let mut name_len: u32 = 0;
+    let mut domain_len: u32 = 0;
+    let mut sid_type: SID_NAME_USE = 0;
+    // SAFETY: both name and domain buffers are NULL intentionally; Windows fills the length fields.
+    unsafe {
+        LookupAccountSidW(
+            std::ptr::null(),
+            sid_ptr,
+            std::ptr::null_mut(),
+            &mut name_len,
+            std::ptr::null_mut(),
+            &mut domain_len,
+            &mut sid_type,
+        );
+    }
+    if name_len == 0 {
+        return None;
+    }
+
+    let mut name_buf = vec![0u16; name_len as usize];
+    let mut domain_buf = vec![0u16; domain_len.max(1) as usize];
+    // SAFETY: name_buf and domain_buf are correctly sized; sid_ptr remains valid for the lifetime of sid_buf.
+    let ok = unsafe {
+        LookupAccountSidW(
+            std::ptr::null(),
+            sid_ptr,
+            name_buf.as_mut_ptr(),
+            &mut name_len,
+            domain_buf.as_mut_ptr(),
+            &mut domain_len,
+            &mut sid_type,
+        )
+    };
+    if ok == FALSE {
+        return None;
+    }
+    Some(name_buf)
+}
+
 /// Resolve the localized name of the built-in Administrators group (S-1-5-32-544) as a
 /// NUL-terminated UTF-16 string suitable for passing to `NetLocalGroupGetMembers`.
 ///
@@ -1175,10 +1256,18 @@ mod tests {
             assert!(!names.is_empty(), "expected at least one local group; got none");
         }
 
-        assert!(
-            names.iter().any(|n| n.eq_ignore_ascii_case("Users")),
-            "Users group must exist on any Windows machine; got: {names:?}"
-        );
+        // Resolve the localized Users name via SID lookup; fall back to a
+        // non-empty check if the SID resolution is unavailable (degraded host).
+        if let Some(users_w) = builtin_users_name_w() {
+            let users_name =
+                String::from_utf16_lossy(users_w.split(|&c| c == 0).next().unwrap_or(&[]));
+            assert!(
+                names.iter().any(|n| n.eq_ignore_ascii_case(&users_name)),
+                "built-in Users group ({users_name:?}) must exist; got: {names:?}"
+            );
+        } else {
+            assert!(!names.is_empty(), "expected at least one local group; got none");
+        }
     }
 
     /// Group name/description must be free of embedded NUL characters.

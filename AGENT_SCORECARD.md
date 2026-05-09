@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1755 | 297 | 148 |
-| Bugs filed against | 287 | 50 | 19 |
+| Tasks closed | 1756 | 297 | 148 |
+| Bugs filed against | 288 | 50 | 19 |
 | Bug rate (bugs/task) | 0.16 | 0.17 | 0.13 |
 | Quality score | 84% | 83% | 87% |
 
-*Bug rates: Claude 287/1755=0.1635→0.16, Codex 50/297=0.1684→0.17, Cursor 19/148=0.1284→0.13*
+*Bug rates: Claude 288/1756=0.1640→0.16, Codex 50/297=0.1684→0.17, Cursor 19/148=0.1284→0.13*
 
 ## Violation Breakdown
 
@@ -28,7 +28,7 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 68 | 25 | 9 |
 | Memory / resource leaks | 16 | 11 | 2 |
 | Startup / lifecycle regressions | 5 | 10 | 0 |
-| Test infrastructure / flakiness | 68 | 6 | 1 |
+| Test infrastructure / flakiness | 69 | 6 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 6 | 5 | 1 |
 | Correctness / pagination | 73 | 9 | 2 |
@@ -7549,3 +7549,13 @@ Build: passed (`cargo check --workspace --quiet` in 0.56s; `cargo nextest run --
 | Cursor | 0 | 0 | No attributed activity in this review range. |
 
 Build: `cargo check --workspace` passed; `cargo clippy --workspace -- -D warnings` passed; `cargo nextest run --workspace` was still compiling/running at review cutover under `/tmp/red-cell-target-qa`.
+
+### QA Review — 2026-05-09 10:58 — 00db4990..3244ad0d
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 1 | All substantive commits in this range were Claude-attributed across `automatic-test/`, `client-cli/`, and `loop.py`. One close commit landed: `ba141142` closed `gdiw8`, though later commits in the same range reopened it after the integration failure remained observable. I filed `red-cell-c2-lxfdz` against the new `wfp_preflight_cleanup` restart fallback because it unconditionally exits PowerShell with status 0 and never checks the restart command's `returncode`, so failed `mpssvc` restarts are reported as successful and the harness reruns with misleading diagnostics. |
+| Codex | 0 | 0 | No attributed activity in this review range. |
+| Cursor | 0 | 0 | No attributed activity in this review range. |
+
+Build: `cargo check --workspace` passed; `cargo clippy --workspace -- -D warnings` passed; `python3 -m unittest automatic-test.tests.test_deploy` passed (151 tests). `cargo nextest run --workspace` was still running at review cutover; `python3 -m pytest automatic-test/tests/test_deploy.py -q` could not run because `pytest` is not installed in this VM.

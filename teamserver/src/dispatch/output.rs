@@ -374,7 +374,17 @@ pub(super) async fn handle_job_callback(
                 None,
             )?);
         }
-        DemonJobCommand::Died => {}
+        DemonJobCommand::Died => {
+            let job_id = parser.read_u32("died job id")?;
+            events.broadcast(agent_response_event(
+                agent_id,
+                u32::from(DemonCommand::CommandJob),
+                request_id,
+                "Info",
+                &format!("Job {job_id} exited naturally"),
+                None,
+            )?);
+        }
     }
 
     Ok(None)

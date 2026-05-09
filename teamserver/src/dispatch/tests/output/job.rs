@@ -8,6 +8,14 @@ fn job_payload_subcommand(subcommand: u32) -> Vec<u8> {
     buf
 }
 
+fn job_payload_died(job_id: u32) -> Vec<u8> {
+    let mut buf = Vec::new();
+    // DemonJobCommand::Died = 5
+    push_u32(&mut buf, 5);
+    push_u32(&mut buf, job_id);
+    buf
+}
+
 fn job_payload_action(subcommand: u32, job_id: u32, success: u32) -> Vec<u8> {
     let mut buf = Vec::new();
     push_u32(&mut buf, subcommand);
@@ -17,19 +25,37 @@ fn job_payload_action(subcommand: u32, job_id: u32, success: u32) -> Vec<u8> {
 }
 
 #[tokio::test]
-async fn job_callback_died_returns_ok_none_and_broadcasts_nothing() {
+async fn job_callback_died_broadcasts_info_event() {
     let (_registry, events) = setup().await;
     let mut rx = events.subscribe();
 
-    // DemonJobCommand::Died = 5
-    let payload = job_payload_subcommand(5);
+    let payload = job_payload_died(77);
     let result = handle_job_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
     assert_eq!(result.expect("Died must succeed"), None);
 
-    // Drop the event bus so recv returns None when the queue is empty.
-    drop(events);
-    let recv_result = rx.recv().await;
-    assert!(recv_result.is_none(), "Died should not broadcast anything, but got {recv_result:?}");
+    let msg = rx.recv().await.expect("Died must broadcast an event");
+    let OperatorMessage::AgentResponse(resp) = &msg else {
+        panic!("expected AgentResponse, got {msg:?}");
+    };
+    let message = resp.info.extra.get("Message").and_then(Value::as_str).unwrap_or("");
+    assert!(message.contains("77"), "broadcast message must contain job_id 77, got {message:?}");
+    let kind = resp.info.extra.get("Type").and_then(Value::as_str);
+    assert_eq!(kind, Some("Info"));
+}
+
+#[tokio::test]
+async fn job_callback_died_truncated_payload_returns_error() {
+    let (_registry, events) = setup().await;
+    // Died subcommand with no job_id field
+    let payload = job_payload_subcommand(5);
+
+    let err = handle_job_callback(&events, AGENT_ID, REQUEST_ID, &payload)
+        .await
+        .expect_err("truncated Died payload must fail");
+    assert!(
+        matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
+        "expected InvalidCallbackPayload, got {err:?}"
+    );
 }
 
 #[tokio::test]

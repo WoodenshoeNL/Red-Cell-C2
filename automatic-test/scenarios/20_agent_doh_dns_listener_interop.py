@@ -23,6 +23,7 @@ Flow:
 from __future__ import annotations
 
 DESCRIPTION = "DoH query-name interop against the DNS listener (Specter/Archon grammar)"
+WINDOWS_REQUIRED = True
 
 import base64
 import importlib.util

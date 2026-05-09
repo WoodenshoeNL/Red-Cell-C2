@@ -42,6 +42,40 @@ Each loop run updates the running totals and appends a review entry.
 
 <!-- QA and arch loops append entries below this line -->
 
+### Autotest Run — 2026-05-09 22:16
+
+**Result: 12 passed, 1 failed (env), 10 skipped — commit 275fdf59**
+
+| Scenario | Result | Notes |
+|----------|--------|-------|
+| 01 Auth | ✓ PASS (0.5s) | |
+| 02 Listeners | ✓ PASS (0.4s) | |
+| 03 Payload build | ✓ PASS (152.3s) | |
+| 04 Linux agent (Phantom) | ✓ PASS (78.5s) | |
+| 05 Windows agent | ~ SKIP | Windows VM unreachable (100% packet loss) |
+| 06 File transfer | ~ SKIP | Windows VM unreachable |
+| 07 Process ops | ~ SKIP | Windows VM unreachable |
+| 08 Screenshot | ~ SKIP | Windows VM unreachable (red-cell-c2-desrw unverified this run) |
+| 09 Kerberos | ~ SKIP | Windows VM unreachable |
+| 10 Pivot | ~ SKIP | SMB pivot needs two Windows hosts |
+| 11 Loot + audit | ✓ PASS (41.7s) | |
+| 12 RBAC | ✓ PASS (61.6s) | |
+| 13 Protocol compliance | ✓ PASS (0.1s) | |
+| 14 Stress (Demon+Phantom) | ✗ FAIL → env | Demon pass failed: SSH to Windows VM (No route to host). Fixed inline: added preflight_ssh() to Demon pass in sc14 so future runs gracefully skip rather than fail. |
+| 15 DNS agent | ~ SKIP | No Rust agent with primary-DNS transport |
+| 17 Archon Windows | ~ SKIP | Windows VM unreachable |
+| 18 Session mode | ✓ PASS (6.6s) | |
+| 19 Cross-agent interop | ~ SKIP | Windows VM unreachable |
+| 20 DoH/DNS interop | ~ SKIP | Windows VM unreachable |
+| 21 Agent reconnect | ✓ PASS (61.0s) | |
+| 22 Kill-date | ✓ PASS (71.5s) | |
+| 23 Working hours | ✓ PASS (126.0s) | |
+| 24 Sleep interval | ✓ PASS (68.1s) | |
+
+Inline fix: `automatic-test/scenarios/14_stress_concurrent_agents.py` — added `preflight_ssh()` to Demon pass so Windows-unreachable converts to graceful skip (mirrors sc05–09 pattern). Commit `275fdf59`.
+
+Active beads from this run: `red-cell-c2-desrw` (sc08 DISPLAY issue) — could not verify, Windows VM down.
+
 ### QA Review — 2026-05-06 23:22 — d2a8d3bd..af970233
 
 | Agent | Tasks closed | Bugs filed | Notes |

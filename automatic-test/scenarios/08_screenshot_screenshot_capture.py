@@ -272,7 +272,7 @@ def run(ctx):
     Raises AssertionError with a descriptive message on any failure.
     Skips silently when no suitable target is configured.
     """
-    from lib.deploy import DeployError, preflight_ssh, wfp_preflight_cleanup
+    from lib.deploy import DeployError, WFP_RESTART_THRESHOLD, preflight_ssh, wfp_preflight_cleanup
     from lib.cli import listener_create, listener_delete, listener_start, listener_stop
     from lib.listeners import http_listener_kwargs
     from lib.payload import MatrixCell, build_parallel
@@ -357,7 +357,7 @@ def run(ctx):
                     ctx.windows,
                     log_prefix="  [between-passes][wfp]",
                     c2_hosts=_c2_hosts_sc08,
-                    restart_threshold=800,
+                    restart_threshold=WFP_RESTART_THRESHOLD,
                 )
                 if _wfp_bp and _wfp_bp.get("wfp_critical"):
                     raise ScenarioSkipped(

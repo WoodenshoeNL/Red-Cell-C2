@@ -47,7 +47,7 @@ from lib.config import (
     TimeoutsConfig,
     timeouts_to_env_dict,
 )
-from lib.deploy import TargetConfig, cleanup_windows_harness_work_dir, configure_deploy_timeouts, wfp_preflight_cleanup
+from lib.deploy import TargetConfig, WFP_RESTART_THRESHOLD, cleanup_windows_harness_work_dir, configure_deploy_timeouts, wfp_preflight_cleanup
 from lib.teamserver_monitor import configure_teamserver_ssh_connect_timeout
 from lib.wait import configure_wait_defaults
 from lib.failure_diagnostics import (
@@ -968,7 +968,7 @@ def main():
                     log_prefix="  [wfp-preflight]",
                     timeout=_wfp_timeout,
                     c2_hosts=_c2_hosts_wfp,
-                    restart_threshold=800,
+                    restart_threshold=WFP_RESTART_THRESHOLD,
                 )
                 if _wfp_pre_result and _wfp_pre_result.get("wfp_critical"):
                     _wfp_preflight_critical = True
@@ -1123,7 +1123,7 @@ def main():
                     log_prefix="  [between-scenarios][wfp]",
                     timeout=win_cleanup_timeout,
                     c2_hosts=_ip_excl_bs,
-                    restart_threshold=800,
+                    restart_threshold=WFP_RESTART_THRESHOLD,
                 )
                 if _wfp_bs and _wfp_bs.get("wfp_critical"):
                     _win_wfp_exhausted = True

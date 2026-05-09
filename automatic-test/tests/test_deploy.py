@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from lib.deploy import (
     DeployError,
     TargetConfig,
+    WFP_RESTART_THRESHOLD,
     cleanup_windows_harness_work_dir,
     defender_add_process_exclusion,
     defender_remove_process_exclusion,
@@ -1656,7 +1657,7 @@ class TestWfpPreflightCleanup(unittest.TestCase):
         mock_ssh.side_effect = [sweep_result, restart_result]
         t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
         result = wfp_preflight_cleanup(
-            t, log_prefix="  [tag]", timeout=100, restart_threshold=800
+            t, log_prefix="  [tag]", timeout=100, restart_threshold=WFP_RESTART_THRESHOLD
         )
         # Must return the original sweep's parsed_after — restart failed but sweep data is valid.
         self.assertIsNotNone(result, "should return original parsed_after, not None")
@@ -1698,7 +1699,7 @@ class TestWfpPreflightCleanup(unittest.TestCase):
         mock_ssh.side_effect = [sweep_result, Exception("connection timed out")]
         t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
         result = wfp_preflight_cleanup(
-            t, log_prefix="  [tag]", timeout=100, restart_threshold=800
+            t, log_prefix="  [tag]", timeout=100, restart_threshold=WFP_RESTART_THRESHOLD
         )
         # Must return the original sweep's parsed_after — restart raised but sweep data is valid.
         self.assertIsNotNone(result, "should return original parsed_after, not None")
@@ -1750,7 +1751,7 @@ class TestWfpPreflightCleanup(unittest.TestCase):
         mock_ssh.side_effect = [first_sweep, restart_ok, retry_sweep]
         t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
         result = wfp_preflight_cleanup(
-            t, log_prefix="  [tag]", timeout=100, restart_threshold=800
+            t, log_prefix="  [tag]", timeout=100, restart_threshold=WFP_RESTART_THRESHOLD
         )
         self.assertIsNotNone(result, "should return dict, not None")
         self.assertEqual(result.get("wfp_after"), 6393)
@@ -1796,7 +1797,7 @@ class TestWfpPreflightCleanup(unittest.TestCase):
         mock_ssh.side_effect = [first_sweep, restart_ok, retry_sweep]
         t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
         result = wfp_preflight_cleanup(
-            t, log_prefix="  [tag]", timeout=100, restart_threshold=800
+            t, log_prefix="  [tag]", timeout=100, restart_threshold=WFP_RESTART_THRESHOLD
         )
         self.assertIsNotNone(result, "should return dict, not None")
         self.assertEqual(result.get("wfp_after"), 350)

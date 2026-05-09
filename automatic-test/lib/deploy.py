@@ -29,6 +29,11 @@ _SSH_CONNECT_SECS = 10
 _SCP_TRANSFER_SECS = 60
 _DEFAULT_REMOTE_CMD_SECS = 30
 
+# WFP filter-pool headroom threshold.  Normal agent idle baseline is ~200–400 filters;
+# exhaustion (seen in autotest) starts above 6 000.  800 gives early-warning headroom
+# while avoiding false positives on lightly-loaded targets.
+WFP_RESTART_THRESHOLD = 800
+
 
 def configure_deploy_timeouts(
     *,

@@ -232,7 +232,7 @@ def run(ctx):
     """
     if ctx.windows is None:
         raise ScenarioSkipped("ctx.windows is None — no Windows target configured")
-    from lib.deploy import DeployError, preflight_ssh, wfp_preflight_cleanup
+    from lib.deploy import DeployError, WFP_RESTART_THRESHOLD, preflight_ssh, wfp_preflight_cleanup
     try:
         preflight_ssh(ctx.windows)
     except DeployError as exc:
@@ -314,7 +314,7 @@ def run(ctx):
                 ctx.windows,
                 log_prefix="  [between-passes][wfp]",
                 c2_hosts=_c2_hosts_bp,
-                restart_threshold=800,
+                restart_threshold=WFP_RESTART_THRESHOLD,
             )
             if _wfp_bp and _wfp_bp.get("wfp_critical"):
                 raise ScenarioSkipped(
@@ -339,7 +339,7 @@ def run(ctx):
                 ctx.windows,
                 log_prefix="  [between-passes][wfp]",
                 c2_hosts=_c2_hosts_bp,
-                restart_threshold=800,
+                restart_threshold=WFP_RESTART_THRESHOLD,
             )
             if _wfp_bp2 and _wfp_bp2.get("wfp_critical"):
                 raise ScenarioSkipped(

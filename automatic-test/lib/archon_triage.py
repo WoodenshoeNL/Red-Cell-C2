@@ -1,5 +1,5 @@
 """
-Archon / ECDH Windows check-in triage helpers (scenario 17).
+Archon / ECDH Windows check-in triage helpers.
 
 Call :func:`log_archon_ecdh_prelude` right after the HTTP listener is started, and
 :func:`format_archon_checkin_timeout_diagnostics` when :func:`deploy_and_checkin`
@@ -432,7 +432,7 @@ def format_archon_checkin_timeout_diagnostics(
 ) -> str:
     """Build a multi-line string to print after a check-in :class:`lib.wait.TimeoutError`."""
     lines: list[str] = [
-        "=== Archon check-in timeout — triage (scenario 17) ===",
+        "=== Archon check-in timeout — triage ===",
         f"{type(exc).__name__}: {exc}",
         f"Harness UTC now: {_dt.datetime.now(_dt.timezone.utc).isoformat()}",
     ]

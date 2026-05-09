@@ -24,6 +24,7 @@ from lib.deploy import (
     WFP_RESTART_THRESHOLD,
     cleanup_windows_harness_work_dir,
     clear_globally_unreachable_hosts,
+    configure_deploy_timeouts,
     defender_add_exclusion,
     defender_add_process_exclusion,
     defender_network_protection_exclusion,
@@ -392,6 +393,26 @@ class TestPreflightSsh(unittest.TestCase):
             preflight_ssh(self.target)
         call_args = mock_run.call_args[0][0]  # first positional arg is the command list
         self.assertIn("ConnectTimeout=10", call_args)
+
+    def test_custom_ssh_connect_secs_propagates_to_connect_timeout(self) -> None:
+        """configure_deploy_timeouts(ssh_connect_secs=5) must change ConnectTimeout in SSH commands.
+
+        Verifies the env.toml ``ssh_connect_secs`` knob actually reaches the
+        SSH ``-o ConnectTimeout=…`` flag so operators on fast networks can reduce
+        the startup check_ssh_targets() cost.
+        """
+        configure_deploy_timeouts(ssh_connect_secs=5.0, scp_transfer_secs=60.0, default_remote_cmd_secs=30.0)
+        self.addCleanup(
+            configure_deploy_timeouts,
+            ssh_connect_secs=10.0,
+            scp_transfer_secs=60.0,
+            default_remote_cmd_secs=30.0,
+        )
+        with patch("subprocess.run", return_value=self._make_completed(0)) as mock_run:
+            preflight_ssh(self.target)
+        call_args = mock_run.call_args[0][0]
+        self.assertIn("ConnectTimeout=5", call_args)
+        self.assertNotIn("ConnectTimeout=10", call_args)
 
     def test_uses_batch_mode(self) -> None:
         """preflight_ssh must always use BatchMode=yes."""

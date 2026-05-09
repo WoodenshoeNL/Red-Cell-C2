@@ -1629,6 +1629,50 @@ class TestWfpPreflightCleanup(unittest.TestCase):
         result = wfp_preflight_cleanup(t)
         self.assertIsNone(result)
 
+    @patch("builtins.print")
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_restart_nonzero_exit_reports_failure_not_success(
+        self, mock_ssh: object, mock_print: object,
+    ) -> None:
+        """Non-zero mpssvc restart exit must warn and return original parsed_after, not claim success.
+
+        Regression: the original code used ``; exit 0`` in the restart script which masked
+        PowerShell errors, and discarded the return value so a non-zero exit was never
+        checked — causing a spurious "mpssvc restarted" success message and continuing
+        the sweep against unchanged (exhausted) WFP state.
+        """
+        sweep_result = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=(
+                "WFP_BEFORE:rc=3,agent=2,npip=1,wfp=900,twait=12\n"
+                "WFP_AFTER:rc=0,agent=0,npip=0,wfp=900,twait=8\n"
+            ),
+            stderr="",
+        )
+        restart_result = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="Access is denied."
+        )
+        mock_ssh.side_effect = [sweep_result, restart_result]
+        t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
+        result = wfp_preflight_cleanup(
+            t, log_prefix="  [tag]", timeout=100, restart_threshold=800
+        )
+        # Must return the original sweep's parsed_after — restart failed but sweep data is valid.
+        self.assertIsNotNone(result, "should return original parsed_after, not None")
+        self.assertEqual(result["wfp_after"], 900)
+        printed = [str(c.args[0]) for c in mock_print.call_args_list if c.args]
+        # Must NOT print the spurious success message.
+        self.assertFalse(
+            any("restarted" in p for p in printed),
+            f"should not claim restart succeeded; got: {printed}",
+        )
+        # Must print a failure/warning message.
+        self.assertTrue(
+            any("restart failed" in p or "WARNING" in p for p in printed),
+            f"should warn about restart failure; got: {printed}",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

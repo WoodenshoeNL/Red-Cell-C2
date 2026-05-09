@@ -1086,19 +1086,30 @@ def wfp_preflight_cleanup(
             f" on {target.host} — Defender callout objects are accumulating; rule sweeps"
             " cannot remove them. Restarting mpssvc (Windows Firewall service)."
         )
-        restart_script = "Restart-Service -Name mpssvc -Force; exit 0\n"
+        restart_script = "Restart-Service -Name mpssvc -Force -ErrorAction Stop\n"
         restart_enc = _powershell_encoded_command(restart_script)
         restart_cmd = _ssh_args(target) + [
             f"powershell -NoProfile -EncodedCommand {restart_enc}"
         ]
         try:
-            _run_ssh_cli_with_retry(restart_cmd, target.host, timeout=timeout, tool="ssh")
-            print(f"{log_prefix} mpssvc restarted on {target.host}; re-running WFP sweep")
+            restart_result = _run_ssh_cli_with_retry(
+                restart_cmd, target.host, timeout=timeout, tool="ssh"
+            )
         except Exception as exc:
             print(f"{log_prefix} mpssvc restart failed ({target.host}): {exc}")
             # Restart failed — WFP state unchanged; skip the redundant sweep and
             # return the original parsed_after so the caller still has valid data.
             return parsed_after
+        if restart_result.returncode != 0:
+            err = (restart_result.stderr or "").strip()
+            tail = err[-240:] if len(err) > 240 else err
+            print(
+                f"{log_prefix} WARNING: mpssvc restart failed"
+                f" (exit {restart_result.returncode}, {target.host}): {tail!r}"
+                " — WFP state unchanged"
+            )
+            return parsed_after
+        print(f"{log_prefix} mpssvc restarted on {target.host}; re-running WFP sweep")
         # Re-run sweep once without a threshold to avoid recursion.
         retry = wfp_preflight_cleanup(
             target,

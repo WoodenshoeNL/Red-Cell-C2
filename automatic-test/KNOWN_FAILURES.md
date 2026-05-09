@@ -32,6 +32,7 @@ row to *Resolved* and add the closing commit / fix description.
 
 | Signature (substring of error / stderr) | Scenario | Bead | First seen | Last seen | Status |
 |----------------------------------------|----------|------|------------|-----------|--------|
+| `Timed out after 30s waiting for screenshot loot entry` (Phantom/Linux, DISPLAY not set in agent exec env) | 08 | red-cell-c2-desrw | 2026-05-09 | 2026-05-09 | P2 |
 
 ---
 

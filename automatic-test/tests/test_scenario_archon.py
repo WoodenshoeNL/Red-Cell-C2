@@ -25,12 +25,13 @@ _mod = _ilu.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
 
 
-def _make_ctx(windows=True, dry_run=False, env=None):
+def _make_ctx(windows=True, dry_run=False, env=None, windows_degraded=False):
     """Build a minimal RunContext-like object for testing."""
     ctx = MagicMock()
     ctx.dry_run = dry_run
     ctx.env = env or {}
     ctx.timeouts = timeouts_for_unit_tests()
+    ctx.windows_degraded = windows_degraded
     if windows:
         ctx.windows = MagicMock()
         ctx.windows.work_dir = "C:\\Temp\\rc-test"

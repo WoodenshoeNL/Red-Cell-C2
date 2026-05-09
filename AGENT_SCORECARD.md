@@ -9,19 +9,19 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1766 | 297 | 148 |
-| Bugs filed against | 293 | 50 | 19 |
+| Tasks closed | 1771 | 297 | 148 |
+| Bugs filed against | 294 | 50 | 19 |
 | Bug rate (bugs/task) | 0.17 | 0.17 | 0.13 |
 | Quality score | 83% | 83% | 87% |
 
-*Bug rates: Claude 293/1766=0.1659→0.17, Codex 50/297=0.1684→0.17, Cursor 19/148=0.1284→0.13*
+*Bug rates: Claude 294/1771=0.1660→0.17, Codex 50/297=0.1684→0.17, Cursor 19/148=0.1284→0.13*
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 17 | 0 | 0 |
-| Missing tests / stale tests | 85 | 22 | 8 |
+| Missing tests / stale tests | 86 | 22 | 8 |
 | Clippy warnings | 16 | 0 | 2 |
 | Protocol errors | 32 | 32 | 4 |
 | Security issues | 75 | 40 | 0 |
@@ -7589,3 +7589,13 @@ Build: `cargo check --workspace` passed in 1m13s; `cargo nextest run --workspace
 | Cursor | 0 | 0 | No attributed activity in this review range. |
 
 Build: `cargo check --workspace` passed in 1m16s; `cargo clippy --workspace -- -D warnings` passed in 34s; `python3 -m unittest automatic-test.tests.test_deploy automatic-test.tests.test_scenario_06_file_transfer automatic-test.tests.test_scenario_07_process_ops automatic-test.tests.test_scenario_08_screenshot automatic-test.tests.test_scenario_agent_build_failure` passed (196 tests). `cargo nextest run --workspace` was still running at review cutover after a long fresh `cargo test --no-run` rebuild and emitted one warning during the changed Specter test build: unused import `use super::*` at `agent/specter/src/dispatch/network.rs:1104`.
+
+### QA Review — 2026-05-09 21:21 — c04a216d..78c3fb2e
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 5 | 1 | All substantive commits in this range were Claude-attributed across `agent/phantom/` and `automatic-test/`. Five close commits landed: `15442de0` (`red-cell-c2-desrw`), `d54b3cb7` (`red-cell-c2-iljod`), `d3e8736a` (`red-cell-c2-exabe`), `817456b2` (`red-cell-c2-5o1cd`), and `78c3fb2e` (`red-cell-c2-il71m`). I filed `red-cell-c2-j0biv` because the new Linux `DISPLAY` propagation path added in `automatic-test/lib/deploy.py` and threaded through `deploy_and_checkin()` is not covered by unit tests; current tests only exercise the older Linux no-arguments path and the scenario-level skip behavior. |
+| Codex | 0 | 0 | No attributed activity in this review range. |
+| Cursor | 0 | 0 | No attributed activity in this review range. |
+
+Build: `cargo check --workspace` passed in 2m03s; `cargo clippy --workspace -- -D warnings` passed in 1m37s; `python3 -m unittest automatic-test.tests.test_deploy automatic-test.tests.test_resilience automatic-test.tests.test_scenario_08_screenshot` passed (171 tests). `cargo nextest run --workspace` did not complete during this review window and remained active after a long fresh rebuild, so full-workspace test status was inconclusive at cutover.

@@ -10,11 +10,11 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 1756 | 297 | 148 |
-| Bugs filed against | 288 | 50 | 19 |
+| Bugs filed against | 289 | 50 | 19 |
 | Bug rate (bugs/task) | 0.16 | 0.17 | 0.13 |
 | Quality score | 84% | 83% | 87% |
 
-*Bug rates: Claude 288/1756=0.1640→0.16, Codex 50/297=0.1684→0.17, Cursor 19/148=0.1284→0.13*
+*Bug rates: Claude 289/1756=0.1646→0.16, Codex 50/297=0.1684→0.17, Cursor 19/148=0.1284→0.13*
 
 ## Violation Breakdown
 
@@ -28,7 +28,7 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 68 | 25 | 9 |
 | Memory / resource leaks | 16 | 11 | 2 |
 | Startup / lifecycle regressions | 5 | 10 | 0 |
-| Test infrastructure / flakiness | 69 | 6 | 1 |
+| Test infrastructure / flakiness | 70 | 6 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 6 | 5 | 1 |
 | Correctness / pagination | 73 | 9 | 2 |
@@ -7559,3 +7559,13 @@ Build: `cargo check --workspace` passed; `cargo clippy --workspace -- -D warning
 | Cursor | 0 | 0 | No attributed activity in this review range. |
 
 Build: `cargo check --workspace` passed; `cargo clippy --workspace -- -D warnings` passed; `python3 -m unittest automatic-test.tests.test_deploy` passed (151 tests). `cargo nextest run --workspace` was still running at review cutover; `python3 -m pytest automatic-test/tests/test_deploy.py -q` could not run because `pytest` is not installed in this VM.
+
+### QA Review — 2026-05-09 13:31 — 3244ad0d..b19988d5
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 1 | All substantive commits in this range were Claude-attributed autotest changes, plus claim/lite-QA bookkeeping from the same agent identity. No close commit landed in this window. I filed `red-cell-c2-wqmzo` because the new suite-level WFP exhaustion skip path in `automatic-test/test.py` now depends on `WINDOWS_REQUIRED`, but scenario 20 still contains a Windows Specter deployment path and was not tagged, so the harness can continue into the same `os error 10055` failure after announcing that remaining Windows scenarios will be skipped. |
+| Codex | 0 | 0 | No attributed activity in this review range. |
+| Cursor | 0 | 0 | No attributed activity in this review range. |
+
+Build: `cargo check --workspace` passed; `python3 -m unittest automatic-test.tests.test_deploy` passed (155 tests). `cargo nextest run --workspace` was still in the fresh `cargo test --no-run` build at review cutover, and a concurrent `cargo clippy --workspace -- -D warnings` invocation remained blocked waiting on the build-directory lock.

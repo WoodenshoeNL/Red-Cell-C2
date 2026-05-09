@@ -512,14 +512,35 @@ fn platform_sessions() -> Vec<NetSession> {
     sessions
 }
 
-/// Enumerate network shares via `NetShareEnum` (level 1, works without admin).
+/// Enumerate network shares via `NetShareEnum`.
+///
+/// Attempts level 2 (`SHARE_INFO_2`, admin-only) to obtain path and permissions.
+/// Falls back to level 1 (`SHARE_INFO_1`) when `ERROR_ACCESS_DENIED` is returned,
+/// leaving `path` empty and `permissions` zero.
 #[cfg(windows)]
 #[allow(unsafe_code)]
 fn platform_shares() -> Vec<NetShare> {
-    use windows_sys::Win32::Foundation::ERROR_MORE_DATA;
-    use windows_sys::Win32::NetworkManagement::NetManagement::{
-        NetApiBufferFree, NetShareEnum, SHARE_INFO_1,
+    use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_MORE_DATA};
+    use windows_sys::Win32::NetworkManagement::NetManagement::NetApiBufferFree;
+    use windows_sys::Win32::Storage::FileSystem::{NetShareEnum, SHARE_INFO_1, SHARE_INFO_2};
+
+    // Try the richer level-2 call first (includes path + permissions).
+    let use_level2 = {
+        let mut buf: *mut u8 = std::ptr::null_mut();
+        let mut er: u32 = 0;
+        let mut te: u32 = 0;
+        let mut rh: u32 = 0;
+        // SAFETY: all pointers valid; buf freed immediately below.
+        let status =
+            unsafe { NetShareEnum(std::ptr::null(), 2, &mut buf, 0, &mut er, &mut te, &mut rh) };
+        if !buf.is_null() {
+            // SAFETY: buf was allocated by NetShareEnum.
+            unsafe { NetApiBufferFree(buf as *mut _) };
+        }
+        status != ERROR_ACCESS_DENIED
     };
+
+    let level: u32 = if use_level2 { 2 } else { 1 };
     let mut shares: Vec<NetShare> = Vec::new();
     let mut resume_handle: u32 = 0;
     loop {
@@ -530,7 +551,7 @@ fn platform_shares() -> Vec<NetShare> {
         let status = unsafe {
             NetShareEnum(
                 std::ptr::null(),
-                1,
+                level,
                 &mut buf,
                 u32::MAX,
                 &mut entries_read,
@@ -539,18 +560,34 @@ fn platform_shares() -> Vec<NetShare> {
             )
         };
         if !buf.is_null() && entries_read > 0 {
-            // SAFETY: buf points to `entries_read` SHARE_INFO_1 structs.
-            let entries = unsafe {
-                std::slice::from_raw_parts(buf as *const SHARE_INFO_1, entries_read as usize)
-            };
-            for entry in entries {
-                // SAFETY: string fields are valid null-terminated UTF-16 strings.
-                shares.push(NetShare {
-                    name: unsafe { wstr_to_string(entry.shi1_netname as *const u16) },
-                    path: String::new(),
-                    remark: unsafe { wstr_to_string(entry.shi1_remark as *const u16) },
-                    permissions: 0,
-                });
+            if use_level2 {
+                // SAFETY: buf points to `entries_read` SHARE_INFO_2 structs.
+                let entries = unsafe {
+                    std::slice::from_raw_parts(buf as *const SHARE_INFO_2, entries_read as usize)
+                };
+                for entry in entries {
+                    // SAFETY: string fields are valid null-terminated UTF-16 strings.
+                    shares.push(NetShare {
+                        name: unsafe { wstr_to_string(entry.shi2_netname as *const u16) },
+                        path: unsafe { wstr_to_string(entry.shi2_path as *const u16) },
+                        remark: unsafe { wstr_to_string(entry.shi2_remark as *const u16) },
+                        permissions: entry.shi2_permissions,
+                    });
+                }
+            } else {
+                // SAFETY: buf points to `entries_read` SHARE_INFO_1 structs.
+                let entries = unsafe {
+                    std::slice::from_raw_parts(buf as *const SHARE_INFO_1, entries_read as usize)
+                };
+                for entry in entries {
+                    // SAFETY: string fields are valid null-terminated UTF-16 strings.
+                    shares.push(NetShare {
+                        name: unsafe { wstr_to_string(entry.shi1_netname as *const u16) },
+                        path: String::new(),
+                        remark: unsafe { wstr_to_string(entry.shi1_remark as *const u16) },
+                        permissions: 0,
+                    });
+                }
             }
         }
         if !buf.is_null() {

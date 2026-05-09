@@ -1496,6 +1496,44 @@ class TestWfpPreflightCleanup(unittest.TestCase):
         self.assertIn("$_np_ips_after", decoded)
         self.assertIn(",npip=' + $_np_ips_after.Count", decoded)
 
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_script_measures_wfp_filter_count(self, mock_ssh: object) -> None:
+        """Script must invoke netsh wfp show state and include wfp= in both diagnostic lines.
+
+        This captures WFP filter objects owned by Defender and other WFP providers
+        that are not visible via Get-NetFirewallRule — the primary non-paged-pool
+        consumers that survive the firewall-rule sweep (os error 10055 root cause).
+        """
+        mock_ssh.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
+        wfp_preflight_cleanup(t, timeout=100)
+        decoded = _decoded_windows_launch_script(mock_ssh.call_args[0][0][-1])
+        self.assertIn("netsh wfp show state", decoded)
+        self.assertIn("_wfp_count", decoded)
+        self.assertIn("',wfp=' + $_wfp_count", decoded)
+        self.assertIn("',wfp=' + $_wfp_count_after", decoded)
+
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_script_measures_time_wait_connections(self, mock_ssh: object) -> None:
+        """Script must measure TCP TIME_WAIT count and include twait= in both diagnostic lines.
+
+        TIME_WAIT connections persist for up to 4 minutes after close and consume
+        non-paged pool even after firewall rules are swept.  Tracking twait= across
+        runs reveals whether zombie connections are accumulating between scenarios.
+        """
+        mock_ssh.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
+        wfp_preflight_cleanup(t, timeout=100)
+        decoded = _decoded_windows_launch_script(mock_ssh.call_args[0][0][-1])
+        self.assertIn("Get-NetTCPConnection -State TimeWait", decoded)
+        self.assertIn("_twait", decoded)
+        self.assertIn("',twait=' + $_twait", decoded)
+        self.assertIn("',twait=' + $_twait_after", decoded)
+
     @patch("builtins.print")
     @patch("lib.deploy._run_ssh_cli_with_retry")
     def test_wfp_after_output_is_logged(
@@ -1505,7 +1543,7 @@ class TestWfpPreflightCleanup(unittest.TestCase):
         mock_ssh.return_value = subprocess.CompletedProcess(
             args=[],
             returncode=0,
-            stdout="WFP_BEFORE:rc=3,agent=2,npip=1\nWFP_AFTER:rc=0,agent=0,npip=0\n",
+            stdout="WFP_BEFORE:rc=3,agent=2,npip=1,wfp=847,twait=12\nWFP_AFTER:rc=0,agent=0,npip=0,wfp=831,twait=8\n",
             stderr="",
         )
         t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
@@ -1523,7 +1561,7 @@ class TestWfpPreflightCleanup(unittest.TestCase):
         mock_ssh.return_value = subprocess.CompletedProcess(
             args=[],
             returncode=0,
-            stdout="WFP_BEFORE:rc=3,agent=2,npip=0\nWFP_AFTER:rc=1,agent=0,npip=0\n",
+            stdout="WFP_BEFORE:rc=3,agent=2,npip=0,wfp=850,twait=5\nWFP_AFTER:rc=1,agent=0,npip=0,wfp=851,twait=3\n",
             stderr="",
         )
         t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)

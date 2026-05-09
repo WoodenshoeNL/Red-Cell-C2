@@ -41,7 +41,8 @@ def _short_id() -> str:
 
 
 def _run_for_agent(ctx, agent_type: str, fmt: str,
-                   *, listener_name: str, pre_built_payload: bytes) -> None:
+                   *, listener_name: str, pre_built_payload: bytes,
+                   listener_port: int | None = None) -> None:
     """Run the full Windows checkin suite for one agent type.
 
     Args:
@@ -50,14 +51,19 @@ def _run_for_agent(ctx, agent_type: str, fmt: str,
         fmt:               Payload format (e.g. ``"exe"``).
         listener_name:     Name of the pre-created, pre-started listener.
         pre_built_payload: Raw payload bytes from :func:`~lib.payload.build_parallel`.
+        listener_port:     TCP port the listener is bound to.  When provided and
+                           agent_type is ``"archon"``, prints Archon-specific
+                           triage diagnostics on checkin timeout.
 
     Raises:
         AssertionError on test failure.
     """
     ctx.scenario_active_pass = agent_type
+    from lib.archon_triage import format_archon_checkin_timeout_diagnostics
     from lib.cli import agent_exec, agent_kill
     from lib.deploy import run_remote
     from lib.deploy_agent import deploy_and_checkin
+    from lib.wait import TimeoutError as WaitTimeoutError
 
     cli = ctx.cli
     co = int(ctx.timeouts.command_output)
@@ -67,14 +73,23 @@ def _run_for_agent(ctx, agent_type: str, fmt: str,
     wfp_cleanup = None
     try:
         # ── Deploy, exec, wait for checkin ───────────────────────────────────
-        agent = deploy_and_checkin(
-            ctx, cli, target,
-            agent_type=agent_type, fmt=fmt,
-            listener_name=listener_name,
-            label=agent_type,
-            pre_built_payload=pre_built_payload,
-            defer_wfp_cleanup=True,
-        )
+        try:
+            agent = deploy_and_checkin(
+                ctx, cli, target,
+                agent_type=agent_type, fmt=fmt,
+                listener_name=listener_name,
+                label=agent_type,
+                pre_built_payload=pre_built_payload,
+                defer_wfp_cleanup=True,
+            )
+        except WaitTimeoutError as exc:
+            if agent_type == "archon" and listener_port is not None:
+                print(
+                    format_archon_checkin_timeout_diagnostics(
+                        ctx, target, listener_port, exc,
+                    )
+                )
+            raise
         agent_id = agent["id"]
         wfp_cleanup = agent.pop("_wfp_cleanup", None)
 
@@ -290,7 +305,8 @@ def run(ctx):
         else:
             _run_for_agent(ctx, agent_type="archon", fmt="exe",
                            listener_name=archon_listener_name,
-                           pre_built_payload=payloads["archon"])
+                           pre_built_payload=payloads["archon"],
+                           listener_port=archon_port)
 
         # ── Specter pass (Rust Windows agent) ────────────────────────────────
         print("\n  === Agent pass: specter ===")

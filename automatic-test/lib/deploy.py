@@ -980,7 +980,18 @@ def wfp_preflight_cleanup(
         "$_rc_rules = @($_allrules | Where-Object { $_.DisplayName -like 'RC-Harness-*' })\n"
         "$_ag_rules = @($_allrules | Where-Object { $_.DisplayName -like 'agent-*' })\n"
         "$_np_ips = @((Get-MpPreference -EA SilentlyContinue).ExclusionIpAddress)\n"
-        "Write-Output ('WFP_BEFORE:rc=' + $_rc_rules.Count + ',agent=' + $_ag_rules.Count + ',npip=' + $_np_ips.Count)\n"
+        # Measure raw WFP filter count (covers Defender-owned filters not visible via
+        # Get-NetFirewallRule) and TCP TIME_WAIT connections (zombie sockets that consume
+        # non-paged pool for up to 4 minutes after close).  Both are leading indicators of
+        # pool exhaustion before WSAENOBUFS (os error 10055) occurs.
+        "$_wfp_count = -1; $_wfp_tmp = [System.IO.Path]::GetTempFileName()\n"
+        "try {\n"
+        "  netsh wfp show state file=$_wfp_tmp 2>$null | Out-Null\n"
+        "  $_wfp_count = @(Select-String -LiteralPath $_wfp_tmp -Pattern '<item>' -SimpleMatch -ErrorAction SilentlyContinue).Count\n"
+        "} catch {}\n"
+        "try { Remove-Item -LiteralPath $_wfp_tmp -Force -ErrorAction SilentlyContinue } catch {}\n"
+        "$_twait = @(Get-NetTCPConnection -State TimeWait -ErrorAction SilentlyContinue).Count\n"
+        "Write-Output ('WFP_BEFORE:rc=' + $_rc_rules.Count + ',agent=' + $_ag_rules.Count + ',npip=' + $_np_ips.Count + ',wfp=' + $_wfp_count + ',twait=' + $_twait)\n"
         # Remove RC-Harness-* rules (harness-created via firewall_allow_program).
         "Remove-NetFirewallRule -DisplayName 'RC-Harness-*' -ErrorAction SilentlyContinue\n"
         # Remove agent-* display-name rules (Windows-auto-created or old-harness-created).
@@ -1000,7 +1011,14 @@ def wfp_preflight_cleanup(
         "$_rc_after = @($_allrules_after | Where-Object { $_.DisplayName -like 'RC-Harness-*' }).Count\n"
         "$_ag_after = @($_allrules_after | Where-Object { $_.DisplayName -like 'agent-*' }).Count\n"
         "$_np_ips_after = @((Get-MpPreference -EA SilentlyContinue).ExclusionIpAddress)\n"
-        "Write-Output ('WFP_AFTER:rc=' + $_rc_after + ',agent=' + $_ag_after + ',npip=' + $_np_ips_after.Count)\n"
+        "$_wfp_count_after = -1; $_wfp_tmp2 = [System.IO.Path]::GetTempFileName()\n"
+        "try {\n"
+        "  netsh wfp show state file=$_wfp_tmp2 2>$null | Out-Null\n"
+        "  $_wfp_count_after = @(Select-String -LiteralPath $_wfp_tmp2 -Pattern '<item>' -SimpleMatch -ErrorAction SilentlyContinue).Count\n"
+        "} catch {}\n"
+        "try { Remove-Item -LiteralPath $_wfp_tmp2 -Force -ErrorAction SilentlyContinue } catch {}\n"
+        "$_twait_after = @(Get-NetTCPConnection -State TimeWait -ErrorAction SilentlyContinue).Count\n"
+        "Write-Output ('WFP_AFTER:rc=' + $_rc_after + ',agent=' + $_ag_after + ',npip=' + $_np_ips_after.Count + ',wfp=' + $_wfp_count_after + ',twait=' + $_twait_after)\n"
         "exit 0\n"
     )
     enc = _powershell_encoded_command(script)

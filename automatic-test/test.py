@@ -1079,13 +1079,15 @@ def main():
     run_dir = create_run_dir(automatic_test_root)
     print(f"Run dir:  {run_dir}")
 
+    _windows_required = {path: _scenario_windows_required(path) for _, path in selected}
+
     passed = failed = skipped = 0
     failure_reports: list[Path] = []
     # Set to True when WFP pool exhaustion survives mpssvc restart — requires VM reboot.
     # Seeded from pre-run preflight so exhaustion detected before the first scenario fires.
     _win_wfp_exhausted = _wfp_preflight_critical
     for sid, path in selected:
-        if _win_wfp_exhausted and _scenario_windows_required(path):
+        if _win_wfp_exhausted and _windows_required[path]:
             print(f"\n{'─' * 60}")
             print(f"  Scenario {sid}: [SKIPPED — WFP pool exhausted, Windows VM reboot required]")
             print(f"{'─' * 60}")

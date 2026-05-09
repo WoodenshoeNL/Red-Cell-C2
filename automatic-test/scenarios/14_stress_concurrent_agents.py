@@ -461,6 +461,7 @@ def run(ctx):
     """
     available_agents = set(ctx.env.get("agents", {}).get("available", ["demon"]))
     from lib.cli import listener_create, listener_delete, listener_start, listener_stop
+    from lib.deploy import DeployError, preflight_ssh
     from lib.listeners import http_listener_kwargs
     from lib.payload import MatrixCell, build_parallel
 
@@ -473,8 +474,17 @@ def run(ctx):
     run_demon = ctx.windows is not None and "demon" in available_agents
     run_phantom = ctx.linux is not None and "phantom" in available_agents
 
+    if run_demon:
+        try:
+            preflight_ssh(ctx.windows)
+        except DeployError as exc:
+            run_demon = False
+            print(f"  [demon] SKIPPED — {exc}")
+
     if not run_demon and ctx.windows is None:
         print("  [demon] SKIPPED — ctx.windows is None (Windows target required for Demon)")
+    elif not run_demon and "demon" in available_agents:
+        pass  # already printed by preflight_ssh failure above
     elif not run_demon:
         print("  [demon] SKIPPED — 'demon' not listed in agents.available")
 

@@ -44,6 +44,7 @@ than a new bug.
 
 | Signature (substring of error / stderr) | Scenario | Bead | Resolved at | Notes |
 |----------------------------------------|----------|------|-------------|-------|
+| `Remote command failed (exit 255)` + `ssh: connect to host 192.168.213.160 port 22: No route to host` (sc14 Demon pass with Windows VM unreachable) | 14 | *(fixed inline)* | 2026-05-09 | Added `preflight_ssh(ctx.windows)` check before Demon pass in sc14; DeployError now converts to a skipped Demon pass rather than a hard scenario failure. Phantom pass still runs when Linux is available. |
 | `Timed out after 60s waiting for agent checkin` / `[SUBPROCESS_TIMEOUT]` (Windows passes in sc06/07/08, WFP ~6390+) | 06, 07, 08 | red-cell-c2-5wu5u | 2026-05-09 | Closed: propagated windows_degraded into RunContext; sc06/07/08 skip Windows passes when WFP pool is exhausted, preserving Linux-agent pass coverage. |
 | `Timed out after 60s waiting for agent checkin` (sc04 only, no teamserver entries) | 04 | red-cell-c2-2frr8 | 2026-05-09 | Closed: added init_handshake_with_retry (3 attempts, 2s backoff) in run_loop.rs. sc04 passes 2026-05-09. |
 | `audit filter --agent: filtered result multiset mismatch` | 11 | red-cell-c2-d0amv | 2026-05-09 | Closed: added until=audit_window_end to all three log_list() filter calls (--operator/--action/--agent). sc11 passes 2026-05-09. |

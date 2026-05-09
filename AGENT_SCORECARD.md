@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1756 | 297 | 148 |
-| Bugs filed against | 292 | 50 | 19 |
+| Tasks closed | 1766 | 297 | 148 |
+| Bugs filed against | 293 | 50 | 19 |
 | Bug rate (bugs/task) | 0.17 | 0.17 | 0.13 |
 | Quality score | 83% | 83% | 87% |
 
-*Bug rates: Claude 292/1756=0.1663→0.17, Codex 50/297=0.1684→0.17, Cursor 19/148=0.1284→0.13*
+*Bug rates: Claude 293/1766=0.1659→0.17, Codex 50/297=0.1684→0.17, Cursor 19/148=0.1284→0.13*
 
 ## Violation Breakdown
 
@@ -28,7 +28,7 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 68 | 25 | 9 |
 | Memory / resource leaks | 16 | 11 | 2 |
 | Startup / lifecycle regressions | 5 | 10 | 0 |
-| Test infrastructure / flakiness | 70 | 6 | 1 |
+| Test infrastructure / flakiness | 71 | 6 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 6 | 5 | 1 |
 | Correctness / pagination | 74 | 9 | 2 |
@@ -7579,3 +7579,13 @@ Build: `cargo check --workspace` passed; `python3 -m unittest automatic-test.tes
 | Cursor | 0 | 0 | No attributed activity in this review range. |
 
 Build: `cargo check --workspace` passed in 1m13s; `cargo nextest run --workspace` failed after 4999/6274 tests at `dispatch::tests::process::job::handle_job_died_broadcasts_nothing`; `cargo clippy --workspace -- -D warnings` passed in 35s; `cargo check -p specter --target x86_64-pc-windows-gnu` passed in 0.43s.
+
+### QA Review — 2026-05-09 19:21 — 562e9ecf..c04a216d
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 10 | 1 | Claude authored all substantive changes in this range across `automatic-test/`, `agent/specter/`, and the small `teamserver` test update, with close commits for `red-cell-c2-kg7ly`, `5x1ib`, `555hh`, `5wu5u`, `t7c7i`, `pi5w6`, `whazv`, `opom3`, `49ils`, and `4nmbg`. I filed `red-cell-c2-5o1cd` because `sc08` now prints a `windows_degraded` skip message but still raises the generic `no suitable screenshot target configured` error when no Linux fallback exists, which loses the real WFP-exhaustion signature the recent skip work was meant to preserve. |
+| Codex | 0 | 0 | No attributed activity in this review range. |
+| Cursor | 0 | 0 | No attributed activity in this review range. |
+
+Build: `cargo check --workspace` passed in 1m16s; `cargo clippy --workspace -- -D warnings` passed in 34s; `python3 -m unittest automatic-test.tests.test_deploy automatic-test.tests.test_scenario_06_file_transfer automatic-test.tests.test_scenario_07_process_ops automatic-test.tests.test_scenario_08_screenshot automatic-test.tests.test_scenario_agent_build_failure` passed (196 tests). `cargo nextest run --workspace` was still running at review cutover after a long fresh `cargo test --no-run` rebuild and emitted one warning during the changed Specter test build: unused import `use super::*` at `agent/specter/src/dispatch/network.rs:1104`.

@@ -311,17 +311,17 @@ def run(ctx):
 
         # ── Filter coverage (CLI substring semantics + CLI date range) ──────
         exp_op = expected_subset_operator_substring(audit_entries, expected_operator)
-        got_op = log_list(cli, since=test_start, operator=expected_operator, limit=AUDIT_LIST_LIMIT)
+        got_op = log_list(cli, since=test_start, until=audit_window_end, operator=expected_operator, limit=AUDIT_LIST_LIMIT)
         assert_multiset_equal(got_op, exp_op, label="audit filter --operator")
         print("  [audit] filter --operator matches expected subset ✓")
 
         exp_task = expected_subset_action_substring(audit_entries, "agent.task")
-        got_task = log_list(cli, since=test_start, action="agent.task", limit=AUDIT_LIST_LIMIT)
+        got_task = log_list(cli, since=test_start, until=audit_window_end, action="agent.task", limit=AUDIT_LIST_LIMIT)
         assert_multiset_equal(got_task, exp_task, label="audit filter --action agent.task")
         print("  [audit] filter --action agent.task matches expected subset ✓")
 
         exp_agent = expected_subset_agent_id(audit_entries, agent_id)
-        got_agent = log_list(cli, since=test_start, agent_id=agent_id, limit=AUDIT_LIST_LIMIT)
+        got_agent = log_list(cli, since=test_start, until=audit_window_end, agent_id=agent_id, limit=AUDIT_LIST_LIMIT)
         assert_multiset_equal(got_agent, exp_agent, label="audit filter --agent")
         print("  [audit] filter --agent matches expected subset ✓")
 

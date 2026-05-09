@@ -741,6 +741,111 @@ class TestDeployErrorPaths(unittest.TestCase):
         self.assertIn("C:\\", cwd_arg)
 
 
+class TestExecuteBackgroundLinuxEnvVars(unittest.TestCase):
+    """execute_background Linux env-var prefix tests (the env_vars= argument)."""
+
+    def setUp(self) -> None:
+        self.key_path = _module_key_path()
+
+    def _completed(
+        self, returncode: int, stderr: str = "", stdout: str = ""
+    ) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(
+            args=[], returncode=returncode, stdout=stdout, stderr=stderr
+        )
+
+    def test_display_env_var_prepended_before_nohup(self) -> None:
+        """DISPLAY=':99' must appear before nohup in the remote SSH command."""
+        ok = self._completed(0)
+        t = _make_target(key=self.key_path)
+        with patch("subprocess.run", return_value=ok) as m:
+            execute_background(t, "/tmp/rc/agent", env_vars={"DISPLAY": ":99"})
+        remote_cmd = m.call_args[0][0][-1]
+        # shlex.quote(':99') == ':99' — colon is in shlex's safe-char set, no quoting
+        self.assertIn("DISPLAY=:99", remote_cmd)
+        self.assertLess(
+            remote_cmd.index("DISPLAY="),
+            remote_cmd.index("nohup"),
+            "env var prefix must come before nohup",
+        )
+        self.assertIn("/tmp/rc/agent", remote_cmd)
+        self.assertIn("</dev/null >/dev/null 2>&1 &", remote_cmd)
+
+    def test_env_var_value_with_spaces_is_single_quoted(self) -> None:
+        """Values containing spaces must be wrapped in single quotes by shlex.quote."""
+        ok = self._completed(0)
+        t = _make_target(key=self.key_path)
+        with patch("subprocess.run", return_value=ok) as m:
+            execute_background(
+                t, "/tmp/rc/agent", env_vars={"MY_VAR": "value with spaces"}
+            )
+        remote_cmd = m.call_args[0][0][-1]
+        self.assertIn("MY_VAR='value with spaces'", remote_cmd)
+        self.assertIn("nohup", remote_cmd)
+
+    def test_env_var_value_with_shell_metacharacters_is_quoted(self) -> None:
+        """Values with $ ; ! must be single-quoted so the shell does not expand them."""
+        ok = self._completed(0)
+        t = _make_target(key=self.key_path)
+        with patch("subprocess.run", return_value=ok) as m:
+            execute_background(
+                t, "/tmp/rc/agent", env_vars={"SECRET": "$TOKEN;whoami"}
+            )
+        remote_cmd = m.call_args[0][0][-1]
+        self.assertIn("SECRET='$TOKEN;whoami'", remote_cmd)
+        # The bare unquoted form must not appear
+        self.assertNotIn("SECRET=$TOKEN", remote_cmd)
+
+    def test_multiple_env_vars_all_prepend_before_nohup(self) -> None:
+        """All env var KEY=VALUE pairs must precede nohup, space-separated."""
+        ok = self._completed(0)
+        t = _make_target(key=self.key_path)
+        env = {"DISPLAY": ":99", "HOME": "/home/user"}
+        with patch("subprocess.run", return_value=ok) as m:
+            execute_background(t, "/tmp/rc/agent", env_vars=env)
+        remote_cmd = m.call_args[0][0][-1]
+        nohup_pos = remote_cmd.index("nohup")
+        self.assertLess(remote_cmd.index("DISPLAY="), nohup_pos)
+        self.assertLess(remote_cmd.index("HOME="), nohup_pos)
+
+    def test_empty_env_vars_dict_produces_bare_nohup(self) -> None:
+        """An empty dict is falsy — must produce the same bare nohup command as None."""
+        ok = self._completed(0)
+        t = _make_target(key=self.key_path)
+        with patch("subprocess.run", return_value=ok) as m:
+            execute_background(t, "/tmp/rc/agent", env_vars={})
+        remote_cmd = m.call_args[0][0][-1]
+        self.assertTrue(
+            remote_cmd.startswith("nohup"),
+            f"Expected bare nohup (no env prefix) for empty dict, got: {remote_cmd!r}",
+        )
+
+    def test_none_env_vars_produces_bare_nohup(self) -> None:
+        """env_vars=None (default) must produce a bare nohup command."""
+        ok = self._completed(0)
+        t = _make_target(key=self.key_path)
+        with patch("subprocess.run", return_value=ok) as m:
+            execute_background(t, "/tmp/rc/agent")
+        remote_cmd = m.call_args[0][0][-1]
+        self.assertTrue(
+            remote_cmd.startswith("nohup"),
+            f"Expected bare nohup command, got: {remote_cmd!r}",
+        )
+
+    def test_windows_target_ignores_env_vars(self) -> None:
+        """On Windows, env_vars must be silently ignored — schtask path is taken."""
+        ok = self._completed(0)
+        t = _make_target(platform="windows", key=self.key_path)
+        with patch("subprocess.run", return_value=ok) as m:
+            execute_background(
+                t, "C:\\Temp\\agent.exe", env_vars={"DISPLAY": ":99"}
+            )
+        remote_cmd = m.call_args[0][0][-1]
+        self.assertIn("-EncodedCommand", remote_cmd)
+        # DISPLAY must not appear anywhere in the Windows command
+        self.assertNotIn("DISPLAY", remote_cmd)
+
+
 class TestWindowsSchedTaskScript(unittest.TestCase):
     """Unit tests for _windows_schtask_script."""
 

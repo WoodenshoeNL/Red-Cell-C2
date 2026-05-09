@@ -926,6 +926,7 @@ def wfp_preflight_cleanup(
     log_prefix: str = "  [wfp-preflight]",
     timeout: int | None = None,
     c2_hosts: list[str] | None = None,
+    restart_threshold: int | None = None,
 ) -> dict[str, int] | None:
     """Sweep leftover WFP firewall rules and Defender NP exclusions.
 
@@ -957,6 +958,11 @@ def wfp_preflight_cleanup(
         timeout:   SSH wait ceiling; defaults to ``max(90, configured remote cmd timeout)``.
         c2_hosts:  C2 callback host IPs to remove from ``ExclusionIpAddress``.
                    Pass ``[callback_host]`` from env.toml.
+        restart_threshold: If ``wfp_after`` is >= this value after the sweep, restart the
+                   Windows Firewall service (``mpssvc``) and re-run the sweep once.
+                   Rule sweeps cannot remove Defender callout objects; an ``mpssvc``
+                   restart is the only reliable way to drain them.  ``None`` disables
+                   the threshold check entirely.  Suggested value: 800.
     """
     if target.platform != "windows":
         return None
@@ -1068,6 +1074,43 @@ def wfp_preflight_cleanup(
                     parsed_after = {"wfp_after": wfp_after, "twait_after": twait_after}
                 except (ValueError, KeyError):
                     pass
+
+    if (
+        restart_threshold is not None
+        and parsed_after is not None
+        and parsed_after.get("wfp_after", -1) >= restart_threshold
+    ):
+        wfp_observed = parsed_after["wfp_after"]
+        print(
+            f"{log_prefix} WARNING: wfp_after={wfp_observed} >= threshold={restart_threshold}"
+            f" on {target.host} — Defender callout objects are accumulating; rule sweeps"
+            " cannot remove them. Restarting mpssvc (Windows Firewall service)."
+        )
+        restart_script = "Restart-Service -Name mpssvc -Force; exit 0\n"
+        restart_enc = _powershell_encoded_command(restart_script)
+        restart_cmd = _ssh_args(target) + [
+            f"powershell -NoProfile -EncodedCommand {restart_enc}"
+        ]
+        try:
+            _run_ssh_cli_with_retry(restart_cmd, target.host, timeout=timeout, tool="ssh")
+            print(f"{log_prefix} mpssvc restarted on {target.host}; re-running WFP sweep")
+        except Exception as exc:
+            print(f"{log_prefix} mpssvc restart failed ({target.host}): {exc}")
+        # Re-run sweep once without a threshold to avoid recursion.
+        retry = wfp_preflight_cleanup(
+            target,
+            log_prefix=log_prefix,
+            timeout=timeout,
+            c2_hosts=c2_hosts,
+            restart_threshold=None,
+        )
+        if retry is not None:
+            print(
+                f"{log_prefix} post-mpssvc-restart wfp_after={retry.get('wfp_after', -1)}"
+                f" twait_after={retry.get('twait_after', -1)}"
+            )
+        return retry
+
     return parsed_after
 
 

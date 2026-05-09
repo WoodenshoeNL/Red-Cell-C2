@@ -357,6 +357,7 @@ def run(ctx):
                     ctx.windows,
                     log_prefix="  [between-passes][wfp]",
                     c2_hosts=_c2_hosts_sc08,
+                    restart_threshold=800,
                 )
 
             # ── Specter pass ─────────────────────────────────────────────────

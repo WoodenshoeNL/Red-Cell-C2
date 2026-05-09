@@ -494,6 +494,7 @@ def run(ctx):
                     ctx.windows,
                     log_prefix="  [between-passes][wfp]",
                     c2_hosts=_c2_hosts_bp,
+                    restart_threshold=800,
                 )
 
             print("\n  === Agent pass: archon (Windows) ===")
@@ -510,6 +511,7 @@ def run(ctx):
                     ctx.windows,
                     log_prefix="  [between-passes][wfp]",
                     c2_hosts=_c2_hosts_bp,
+                    restart_threshold=800,
                 )
 
             print("\n  === Agent pass: specter (Windows) ===")

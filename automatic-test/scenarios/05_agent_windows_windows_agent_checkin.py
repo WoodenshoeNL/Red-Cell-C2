@@ -313,6 +313,7 @@ def run(ctx):
                 ctx.windows,
                 log_prefix="  [between-passes][wfp]",
                 c2_hosts=_c2_hosts_bp,
+                restart_threshold=800,
             )
 
         # ── Archon pass (C/ASM fork of Demon, ECDH transport) ────────────────
@@ -332,6 +333,7 @@ def run(ctx):
                 ctx.windows,
                 log_prefix="  [between-passes][wfp]",
                 c2_hosts=_c2_hosts_bp,
+                restart_threshold=800,
             )
 
         # ── Specter pass (Rust Windows agent) ────────────────────────────────

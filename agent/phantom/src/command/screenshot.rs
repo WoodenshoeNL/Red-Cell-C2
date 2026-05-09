@@ -380,6 +380,7 @@ mod tests {
 
     #[test]
     fn display_candidates_env_set_returns_single_value() {
+        let _guard = crate::command::tests::DISPLAY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let saved = std::env::var("DISPLAY").ok();
         unsafe { std::env::set_var("DISPLAY", ":42") };
 
@@ -397,6 +398,7 @@ mod tests {
 
     #[test]
     fn display_candidates_env_unset_returns_fallback_list() {
+        let _guard = crate::command::tests::DISPLAY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let saved = std::env::var("DISPLAY").ok();
         unsafe { std::env::remove_var("DISPLAY") };
 

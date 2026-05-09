@@ -347,6 +347,7 @@ async fn screenshot_failure_payload_format() {
 /// display is available (CI / headless environment).  It must never panic.
 #[test]
 fn x11_native_no_display_returns_screenshot_error() {
+    let _guard = super::DISPLAY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // Temporarily unset DISPLAY and WAYLAND_DISPLAY so XOpenDisplay returns NULL.
     let saved_display = std::env::var("DISPLAY").ok();
     let saved_wayland = std::env::var("WAYLAND_DISPLAY").ok();

@@ -11,6 +11,13 @@ use std::time::Duration;
 /// stale or foreign home directory.
 static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Serialise tests that mutate the `DISPLAY` (or `WAYLAND_DISPLAY`) environment
+/// variable.  All three tests that touch DISPLAY live in different modules but
+/// compile into the same test binary and run in parallel by default.  Holding
+/// this lock for the full duration of each test prevents spurious assertion
+/// failures caused by one test observing a DISPLAY value written by a sibling.
+pub(crate) static DISPLAY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 use red_cell_common::demon::{
     DemonCallback, DemonCommand, DemonFilesystemCommand, DemonNetCommand, DemonPackage,
     DemonPivotCommand, DemonProcessCommand, DemonSocketCommand, DemonTransferCommand,

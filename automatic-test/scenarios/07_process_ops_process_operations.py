@@ -387,6 +387,7 @@ def run(ctx):
     if ctx.windows is not None:
         if ctx.windows_degraded:
             print("  [windows] SKIPPED — WFP pool critically exhausted; VM reboot required (windows_degraded)")
+            skipped_reasons.append("Windows passes skipped — WFP pool critically exhausted (windows_degraded)")
         else:
             try:
                 preflight_ssh(ctx.windows)

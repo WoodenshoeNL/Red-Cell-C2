@@ -282,7 +282,11 @@ def run(ctx):
     uid = _short_id()
 
     # Prefer Windows — it has an interactive display session by default.
-    if ctx.windows is not None:
+    # Skip the Windows branch if WFP pool is exhausted; fall through to Linux.
+    if ctx.windows is not None and ctx.windows_degraded:
+        print("  [windows] SKIPPED — WFP pool critically exhausted; VM reboot required (windows_degraded)")
+
+    if ctx.windows is not None and not ctx.windows_degraded:
         try:
             preflight_ssh(ctx.windows)
         except DeployError as exc:

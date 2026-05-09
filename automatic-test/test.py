@@ -340,6 +340,10 @@ class RunContext:
     #: Active CorpusCapture for the currently-running scenario.
     #: Created by run_scenario; available to scenarios via ctx.corpus_capture.
     corpus_capture: object | None = None
+    #: Set to True when WFP pool exhaustion survives mpssvc restart (VM reboot required).
+    #: Mixed scenarios (no WINDOWS_REQUIRED) use this to skip Windows-agent passes only,
+    #: preserving Linux-agent pass coverage.
+    windows_degraded: bool = False
 
 
 _RATE_LIMIT_EXIT_CODE = 6
@@ -1093,6 +1097,10 @@ def main():
             print(f"{'─' * 60}")
             skipped += 1
             continue
+
+        # Propagate exhaustion state into ctx so mixed scenarios (no WINDOWS_REQUIRED)
+        # can skip their Windows-agent passes while keeping Linux-agent passes running.
+        ctx.windows_degraded = _win_wfp_exhausted
 
         outcome, report_path = run_scenario(sid, path, ctx, run_dir)
         if outcome == "passed":

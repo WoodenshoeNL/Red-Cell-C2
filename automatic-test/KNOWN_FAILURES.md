@@ -32,9 +32,6 @@ row to *Resolved* and add the closing commit / fix description.
 
 | Signature (substring of error / stderr) | Scenario | Bead | First seen | Last seen | Status |
 |----------------------------------------|----------|------|------------|-----------|--------|
-| `Timed out after 60s waiting for agent checkin` (Archon, after Demon pass, WFP ~6390+) | 06 | red-cell-c2-5wu5u | 2026-05-09 | 2026-05-09 | P2, sc06/07/08 lack WINDOWS_REQUIRED — bypass wfp_critical skip; Windows passes fail but Linux passes succeed |
-| `[SUBPROCESS_TIMEOUT] CLI subprocess did not exit within expected timeout (55s) (exit -1)` (Demon netstat-ano, WFP ~6390+) | 07 | red-cell-c2-5wu5u | 2026-05-09 | 2026-05-09 | P2, Demon netstat-ano hangs on WFP-exhausted VM; sc07 not WINDOWS_REQUIRED so not skipped |
-| `Timed out after 60s waiting for agent checkin` (Archon screenshot, WFP ~6390+) | 08 | red-cell-c2-5wu5u | 2026-05-09 | 2026-05-09 | P2, Archon checkin times out on WFP-exhausted VM; sc08 not WINDOWS_REQUIRED so not skipped |
 
 ---
 
@@ -46,6 +43,7 @@ than a new bug.
 
 | Signature (substring of error / stderr) | Scenario | Bead | Resolved at | Notes |
 |----------------------------------------|----------|------|-------------|-------|
+| `Timed out after 60s waiting for agent checkin` / `[SUBPROCESS_TIMEOUT]` (Windows passes in sc06/07/08, WFP ~6390+) | 06, 07, 08 | red-cell-c2-5wu5u | 2026-05-09 | Closed: propagated windows_degraded into RunContext; sc06/07/08 skip Windows passes when WFP pool is exhausted, preserving Linux-agent pass coverage. |
 | `Timed out after 60s waiting for agent checkin` (sc04 only, no teamserver entries) | 04 | red-cell-c2-2frr8 | 2026-05-09 | Closed: added init_handshake_with_retry (3 attempts, 2s backoff) in run_loop.rs. sc04 passes 2026-05-09. |
 | `audit filter --agent: filtered result multiset mismatch` | 11 | red-cell-c2-d0amv | 2026-05-09 | Closed: added until=audit_window_end to all three log_list() filter calls (--operator/--action/--agent). sc11 passes 2026-05-09. |
 | `cargo build --release --target x86_64-pc-windows-gnu` + `error[E0432]` + `NetSessionEnum` + `SESSION_INFO_10` | 20 | red-cell-c2-ikwhx | 2026-05-09 | Closed: moved NetSessionEnum/SESSION_INFO_10 to Win32::Storage::FileSystem in windows-sys 0.59 (commit ee9597c6). sc20 build succeeds 2026-05-09; sc20 still fails for WFP/socket reasons. |

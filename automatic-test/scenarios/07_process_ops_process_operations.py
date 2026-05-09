@@ -393,6 +393,10 @@ def run(ctx):
     else:
         print("  [skip] ctx.windows is None — skipping Windows agent passes")
 
+    if windows_ok and ctx.windows_degraded:
+        print("  [windows] SKIPPED — WFP pool critically exhausted; VM reboot required (windows_degraded)")
+        windows_ok = False
+
     linux_listener_name = None
     demon_listener_name: str | None = None
     archon_listener_name: str | None = None

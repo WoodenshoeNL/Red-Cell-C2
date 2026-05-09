@@ -46,6 +46,7 @@ def _linux_ctx():
     ctx.windows = None
     ctx.dry_run = False
     ctx.payload_parallel = False
+    ctx.windows_degraded = False
     return ctx
 
 
@@ -59,6 +60,7 @@ def _windows_ctx():
     ctx.linux = None
     ctx.dry_run = False
     ctx.payload_parallel = False
+    ctx.windows_degraded = False
     return ctx
 
 

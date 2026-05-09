@@ -7,7 +7,7 @@ Run with:  python3 -m unittest discover -s automatic-test/tests
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -39,6 +39,50 @@ class TestPreflightLinuxX11Display(unittest.TestCase):
         msg = str(cm.exception)
         self.assertIn("DISPLAY :99", msg)
         self.assertIn("Xvfb :99", msg)
+
+
+class TestWindowsDegradedFallsThrough(unittest.TestCase):
+    """When windows_degraded=True, sc08 must skip the Windows block and fall through to Linux."""
+
+    def _make_ctx(self, *, windows=True, linux=False, windows_degraded=True, env=None):
+        ctx = MagicMock()
+        ctx.windows_degraded = windows_degraded
+        ctx.dry_run = False
+        ctx.payload_parallel = True
+        ctx.env = env or {}
+        ctx.timeouts = MagicMock()
+        ctx.linux = MagicMock() if linux else None
+        ctx.windows = MagicMock() if windows else None
+        return ctx
+
+    def test_windows_degraded_no_linux_raises_scenario_skipped(self) -> None:
+        """WFP-degraded Windows + no Linux → ScenarioSkipped (no suitable target)."""
+        ctx = self._make_ctx(windows=True, linux=False, windows_degraded=True)
+        with self.assertRaises(ScenarioSkipped):
+            _mod.run(ctx)
+
+    def test_windows_degraded_linux_no_display_raises_scenario_skipped(self) -> None:
+        """WFP-degraded Windows + Linux without DISPLAY → ScenarioSkipped."""
+        ctx = self._make_ctx(windows=True, linux=True, windows_degraded=True, env={})
+        ctx.linux.display = None
+        with self.assertRaises(ScenarioSkipped) as cm:
+            _mod.run(ctx)
+        self.assertIn("DISPLAY", str(cm.exception))
+
+    def test_windows_not_degraded_uses_windows_branch(self) -> None:
+        """windows_degraded=False must enter the Windows branch (preflight_ssh called)."""
+        from lib.cli import CliError
+        ctx = self._make_ctx(windows=True, linux=False, windows_degraded=False,
+                             env={"agents": {"available": ["archon"]}})
+        with patch("lib.deploy.preflight_ssh") as mock_ssh, \
+             patch("lib.cli.listener_create"), \
+             patch("lib.cli.listener_start"), \
+             patch("lib.cli.listener_stop"), \
+             patch("lib.cli.listener_delete"), \
+             patch("lib.payload.build_parallel", side_effect=CliError("BUILD_FAILED", "build failed", 1)):
+            with self.assertRaises(CliError):
+                _mod.run(ctx)
+        mock_ssh.assert_called_once()
 
 
 if __name__ == "__main__":

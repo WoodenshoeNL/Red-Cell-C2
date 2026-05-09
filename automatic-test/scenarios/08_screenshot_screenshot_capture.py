@@ -297,12 +297,22 @@ def run(ctx):
         print("  [windows] SKIPPED — WFP pool critically exhausted; VM reboot required (windows_degraded)")
         windows_degraded_skipped = True
 
+    # Try Windows SSH; catch both DeployError and ScenarioSkipped (the latter
+    # is raised when the host is globally registered as unreachable by
+    # check_ssh_targets) so we can fall through to the Linux fallback instead
+    # of aborting the scenario entirely.
+    windows_ssh_skip_reason: str | None = None
     if ctx.windows is not None and not ctx.windows_degraded:
         try:
             preflight_ssh(ctx.windows)
-        except DeployError as exc:
-            raise ScenarioSkipped(str(exc)) from exc
+        except (DeployError, ScenarioSkipped) as exc:
+            windows_ssh_skip_reason = str(exc)
+            print(
+                f"  [windows] SSH unreachable ({type(exc).__name__}) — "
+                "skipping Windows pass, falling through to Linux fallback"
+            )
 
+    if ctx.windows is not None and not ctx.windows_degraded and windows_ssh_skip_reason is None:
         has_archon = "archon" in available_agents
         has_specter = "specter" in available_agents
         listeners_cfg = ctx.env.get("listeners", {})
@@ -413,6 +423,11 @@ def run(ctx):
                 raise ScenarioSkipped(
                     "windows_degraded — WFP pool critically exhausted; VM reboot required"
                 )
+            if windows_ssh_skip_reason:
+                raise ScenarioSkipped(
+                    f"Windows SSH unreachable ({windows_ssh_skip_reason}); "
+                    "Linux target has no DISPLAY configured — cannot screenshot"
+                )
             raise ScenarioSkipped(
                 "no suitable screenshot target configured — "
                 "need Windows target or Linux with DISPLAY/Xvfb"
@@ -465,6 +480,11 @@ def run(ctx):
     if windows_degraded_skipped:
         raise ScenarioSkipped(
             "windows_degraded — WFP pool critically exhausted; VM reboot required"
+        )
+    if windows_ssh_skip_reason:
+        raise ScenarioSkipped(
+            f"Windows SSH unreachable ({windows_ssh_skip_reason}); "
+            "no Linux target configured — cannot screenshot"
         )
     raise ScenarioSkipped(
         "no suitable screenshot target configured — "

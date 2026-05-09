@@ -951,6 +951,7 @@ def main():
     # from prior test runs.  After many runs (14+ in a day) the Windows VM can
     # exhaust its non-paged pool via accumulated RC-Harness-* and agent-* rules,
     # causing WSAENOBUFS (os error 10055) on all socket operations.
+    _wfp_preflight_critical = False
     if not ctx.dry_run:
         _wfp_targets = _windows_harness_cleanup_targets(windows_target, windows2_target)
         if _wfp_targets:
@@ -962,12 +963,21 @@ def main():
             _wfp_timeout = max(120, int(tmo.command_output))
             for _wlabel, _wtgt in _wfp_targets:
                 print(f"  Target {_wlabel!r} ({_wtgt.host})")
-                wfp_preflight_cleanup(
+                _wfp_pre_result = wfp_preflight_cleanup(
                     _wtgt,
                     log_prefix="  [wfp-preflight]",
                     timeout=_wfp_timeout,
                     c2_hosts=_c2_hosts_wfp,
+                    restart_threshold=800,
                 )
+                if _wfp_pre_result and _wfp_pre_result.get("wfp_critical"):
+                    _wfp_preflight_critical = True
+                    print(
+                        f"\n  *** WFP pool exhausted on {_wlabel!r} ({_wtgt.host}) —"
+                        " mpssvc restart did not recover it.\n"
+                        "  All Windows scenarios will be skipped."
+                        " Reboot the VM to restore WFP capacity."
+                    )
 
     # Pre-flight: clean up leftover listeners from prior runs.  Listeners
     # persisted in the teamserver's SQLite DB may still be bound to ports
@@ -1072,7 +1082,8 @@ def main():
     passed = failed = skipped = 0
     failure_reports: list[Path] = []
     # Set to True when WFP pool exhaustion survives mpssvc restart — requires VM reboot.
-    _win_wfp_exhausted = False
+    # Seeded from pre-run preflight so exhaustion detected before the first scenario fires.
+    _win_wfp_exhausted = _wfp_preflight_critical
     for sid, path in selected:
         if _win_wfp_exhausted and _scenario_windows_required(path):
             print(f"\n{'─' * 60}")

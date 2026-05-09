@@ -689,6 +689,7 @@ fn builtin_administrators_name_w() -> Option<Vec<u16>> {
     // Phase 1: query the byte size required for the Administrators SID.
     // CreateWellKnownSid returns FALSE when psid is NULL but still sets cbsid.
     let mut sid_size: u32 = 0;
+    // SAFETY: pSid is NULL intentionally; Windows fills cbSid with the required size on first call.
     unsafe {
         CreateWellKnownSid(
             WinBuiltinAdministratorsSid,
@@ -703,6 +704,7 @@ fn builtin_administrators_name_w() -> Option<Vec<u16>> {
 
     // Phase 2: allocate and populate the SID buffer.
     let mut sid_buf = vec![0u8; sid_size as usize];
+    // SAFETY: sid_buf is correctly sized per Phase 1; pDomainSid is NULL because well-known SIDs need no domain.
     let ok = unsafe {
         CreateWellKnownSid(
             WinBuiltinAdministratorsSid,
@@ -720,6 +722,7 @@ fn builtin_administrators_name_w() -> Option<Vec<u16>> {
     let mut name_len: u32 = 0;
     let mut domain_len: u32 = 0;
     let mut sid_type: SID_NAME_USE = 0;
+    // SAFETY: both name and domain buffers are NULL intentionally; Windows fills the length fields with required sizes.
     unsafe {
         LookupAccountSidW(
             std::ptr::null(),
@@ -739,6 +742,7 @@ fn builtin_administrators_name_w() -> Option<Vec<u16>> {
     // name_len from the first call includes the NUL terminator.
     let mut name_buf = vec![0u16; name_len as usize];
     let mut domain_buf = vec![0u16; domain_len.max(1) as usize];
+    // SAFETY: name_buf and domain_buf are correctly sized per Phase 3; sid_ptr remains valid for the lifetime of sid_buf.
     let ok = unsafe {
         LookupAccountSidW(
             std::ptr::null(),

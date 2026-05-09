@@ -1718,6 +1718,47 @@ class TestWfpPreflightCleanup(unittest.TestCase):
 
     @patch("builtins.print")
     @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_wfp_critical_set_when_mpssvc_restart_refused_by_os(
+        self, mock_ssh: object, mock_print: object,
+    ) -> None:
+        """wfp_critical must be True when mpssvc restart itself exits non-zero.
+
+        CouldNotStopService / non-zero exit means the OS refused the restart.
+        The WFP count is still >= threshold — callers must skip Windows scenarios.
+        Previously this path returned parsed_after without wfp_critical, causing
+        Windows scenarios to run and time out with WSAENOBUFS / os error 10055.
+        """
+        first_sweep = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=(
+                "WFP_BEFORE:rc=0,agent=0,npip=1,wfp=6398,twait=10\n"
+                "WFP_AFTER:rc=0,agent=0,npip=1,wfp=6398,twait=10\n"
+            ),
+            stderr="",
+        )
+        restart_fail = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="CouldNotStopService"
+        )
+        mock_ssh.side_effect = [first_sweep, restart_fail]
+        t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
+        result = wfp_preflight_cleanup(
+            t, log_prefix="  [tag]", timeout=100, restart_threshold=WFP_RESTART_THRESHOLD
+        )
+        self.assertIsNotNone(result, "should return dict, not None")
+        self.assertEqual(result.get("wfp_after"), 6398)
+        self.assertTrue(
+            result.get("wfp_critical"),
+            f"wfp_critical must be True when mpssvc restart is refused; got: {result}",
+        )
+        printed = [str(c.args[0]) for c in mock_print.call_args_list if c.args]
+        self.assertTrue(
+            any("CRITICAL" in p and "reboot required" in p for p in printed),
+            f"must print CRITICAL reboot-required warning; got: {printed}",
+        )
+
+    @patch("builtins.print")
+    @patch("lib.deploy._run_ssh_cli_with_retry")
     def test_wfp_critical_set_when_post_restart_still_above_threshold(
         self, mock_ssh: object, mock_print: object,
     ) -> None:

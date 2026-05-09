@@ -32,12 +32,9 @@ row to *Resolved* and add the closing commit / fix description.
 
 | Signature (substring of error / stderr) | Scenario | Bead | First seen | Last seen | Status |
 |----------------------------------------|----------|------|------------|-----------|--------|
-| `Timed out after 60s waiting for agent checkin` (sc04 only, no teamserver entries) | 04 | red-cell-c2-2frr8 | 2026-05-07 | 2026-05-08 | P3, Phantom Linux checkin intermittently absent — payload launches but makes zero connections; sc06 Phantom always works in same run; flaky race/load issue |
-| `[SUBPROCESS_TIMEOUT] CLI subprocess did not exit within expected timeout (55s) (exit -1)` | 07 | red-cell-c2-gnn1n | 2026-05-09 | 2026-05-09 | P1, Demon `netstat -ano` hangs; WFP pool at ~6393 objects — mpssvc restart confirmed does NOT reduce count; Windows VM 192.168.213.160 reboot required |
-| `os error 10055` | 20 | red-cell-c2-gnn1n | 2026-05-09 | 2026-05-09 | P1, WSAENOBUFS; WFP at ~6393 — mpssvc restart confirmed ineffective; VM 192.168.213.160 reboot required |
-| `Timed out after 60s waiting for agent checkin` (Archon, no os error 10055 in probe, port reachable) | 05, 06, 08, 17 | red-cell-c2-gnn1n | 2026-05-09 | 2026-05-09 | P1, WFP pool at ~6393 — mpssvc restart confirmed does not reduce count; VM 192.168.213.160 reboot required |
-| `audit filter --agent: filtered result multiset mismatch` | 11 | red-cell-c2-d0amv | 2026-05-09 | 2026-05-09 | P2, log_list() for --agent filter has no until bound — post-cleanup checkins slip in after baseline snapshot |
-| `cargo build --release --target x86_64-pc-windows-gnu` + `error[E0432]` + `NetSessionEnum` + `SESSION_INFO_10` | 20 | red-cell-c2-ikwhx | 2026-05-09 | 2026-05-09 | P1, commit fa5132eb imported SESSION_INFO_10 from Win32::NetworkManagement::NetManagement but it lives in Win32::Storage::FileSystem in windows-sys 0.59 |
+| `Timed out after 60s waiting for agent checkin` (Archon, after Demon pass, WFP ~6390+) | 06 | red-cell-c2-5wu5u | 2026-05-09 | 2026-05-09 | P2, sc06/07/08 lack WINDOWS_REQUIRED — bypass wfp_critical skip; Windows passes fail but Linux passes succeed |
+| `[SUBPROCESS_TIMEOUT] CLI subprocess did not exit within expected timeout (55s) (exit -1)` (Demon netstat-ano, WFP ~6390+) | 07 | red-cell-c2-5wu5u | 2026-05-09 | 2026-05-09 | P2, Demon netstat-ano hangs on WFP-exhausted VM; sc07 not WINDOWS_REQUIRED so not skipped |
+| `Timed out after 60s waiting for agent checkin` (Archon screenshot, WFP ~6390+) | 08 | red-cell-c2-5wu5u | 2026-05-09 | 2026-05-09 | P2, Archon checkin times out on WFP-exhausted VM; sc08 not WINDOWS_REQUIRED so not skipped |
 
 ---
 
@@ -49,6 +46,11 @@ than a new bug.
 
 | Signature (substring of error / stderr) | Scenario | Bead | Resolved at | Notes |
 |----------------------------------------|----------|------|-------------|-------|
+| `Timed out after 60s waiting for agent checkin` (sc04 only, no teamserver entries) | 04 | red-cell-c2-2frr8 | 2026-05-09 | Closed: added init_handshake_with_retry (3 attempts, 2s backoff) in run_loop.rs. sc04 passes 2026-05-09. |
+| `audit filter --agent: filtered result multiset mismatch` | 11 | red-cell-c2-d0amv | 2026-05-09 | Closed: added until=audit_window_end to all three log_list() filter calls (--operator/--action/--agent). sc11 passes 2026-05-09. |
+| `cargo build --release --target x86_64-pc-windows-gnu` + `error[E0432]` + `NetSessionEnum` + `SESSION_INFO_10` | 20 | red-cell-c2-ikwhx | 2026-05-09 | Closed: moved NetSessionEnum/SESSION_INFO_10 to Win32::Storage::FileSystem in windows-sys 0.59 (commit ee9597c6). sc20 build succeeds 2026-05-09; sc20 still fails for WFP/socket reasons. |
+| `[SUBPROCESS_TIMEOUT]`/`os error 10055`/`Timed out after 60s waiting for agent checkin` (Archon/WFP, sc05/06/07/08/17/20) | 05, 06, 07, 08, 17, 20 | red-cell-c2-gnn1n | 2026-05-09 | Closed: added wfp_critical flag + scenario-loop skip for WINDOWS_REQUIRED scenarios. Bug in this fix (wfp_critical not returned when mpssvc refuses restart) fixed inline (red-cell-c2-06gbu). sc06/07/08 still fail — see red-cell-c2-5wu5u. |
+| `wfp_critical not set when mpssvc restart exits non-zero` | 05, 06, 07, 08, 17, 20 | red-cell-c2-06gbu | 2026-05-09 | Fixed inline: wfp_critical=True now returned when restart_result.returncode != 0 AND wfp_observed >= threshold. Unit test added (test_wfp_critical_set_when_mpssvc_restart_refused_by_os). |
 | `[SUBPROCESS_TIMEOUT]`/`os error 10055`/`Timed out after 60s waiting for agent checkin` (Archon/WFP) | 05, 06, 07, 08, 17, 20 | red-cell-c2-gdiw8 | 2026-05-09 | Closed: added between-pass WFP cleanup + wfp=/twait= diagnostics + mpssvc restart (72c10a67/74c27b43/cirdt/lxfdz). Regression confirmed same day — mpssvc restart does not reduce wfp=6393; see red-cell-c2-gnn1n. |
 | `Timed out after 30s waiting for screenshot loot entry` (demon hash + WinSta0 fix) | 08 | red-cell-c2-uzl9i | 2026-05-08 | Closed: fixes (8bf46ce2, c5463122, 4023932a) moved from demon to archon (06346e50). New failure tracked as red-cell-c2-z5rl8 (Demon pass reverted; Archon pass needs verification). |
 | `Timed out after 30s waiting for screenshot loot entry` (Demon pass skipped in SC08) | 08 | red-cell-c2-z5rl8 | 2026-05-08 | Closed: sc08 now skips Demon pass unconditionally (Demon screenshot not maintained since 06346e50 revert); Archon runs as primary. ScenarioSkipped raised when neither archon nor specter is in agents.available. |

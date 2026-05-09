@@ -1118,7 +1118,18 @@ def wfp_preflight_cleanup(
                 f" (exit {restart_result.returncode}, {target.host}): {tail!r}"
                 " — WFP state unchanged"
             )
-            return parsed_after
+            # Restart could not be executed — WFP pool is critically exhausted
+            # and cannot self-recover.  Set wfp_critical so callers skip
+            # remaining Windows scenarios rather than letting them time out.
+            print(
+                f"{log_prefix} CRITICAL: mpssvc restart refused by OS on {target.host}"
+                f" (wfp_after={wfp_observed} >= threshold={restart_threshold})"
+                " — WFP pool critically exhausted; VM reboot required."
+                " Skipping remaining Windows scenarios."
+            )
+            result = dict(parsed_after)
+            result["wfp_critical"] = True
+            return result
         print(f"{log_prefix} mpssvc restarted on {target.host}; re-running WFP sweep")
         # Re-run sweep once without a threshold to avoid recursion.
         retry = wfp_preflight_cleanup(

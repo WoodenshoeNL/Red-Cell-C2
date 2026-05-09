@@ -1715,6 +1715,101 @@ class TestWfpPreflightCleanup(unittest.TestCase):
             f"should report restart failure; got: {printed}",
         )
 
+    @patch("builtins.print")
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_wfp_critical_set_when_post_restart_still_above_threshold(
+        self, mock_ssh: object, mock_print: object,
+    ) -> None:
+        """wfp_critical must be True when post-mpssvc-restart wfp_after is still >= threshold.
+
+        Exercises the case where the WFP objects surviving mpssvc restart are OS-level
+        platform/driver filters (not Defender callout objects) — only a full VM reboot
+        can drain them.  The returned dict must have ``wfp_critical: True`` so callers can
+        skip remaining Windows scenarios rather than deploying agents that will fail with
+        WSAENOBUFS / os error 10055.
+        """
+        first_sweep = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=(
+                "WFP_BEFORE:rc=0,agent=0,npip=1,wfp=6393,twait=4\n"
+                "WFP_AFTER:rc=0,agent=0,npip=1,wfp=6393,twait=4\n"
+            ),
+            stderr="",
+        )
+        restart_ok = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        retry_sweep = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=(
+                "WFP_BEFORE:rc=0,agent=0,npip=1,wfp=6393,twait=4\n"
+                "WFP_AFTER:rc=0,agent=0,npip=1,wfp=6393,twait=4\n"
+            ),
+            stderr="",
+        )
+        mock_ssh.side_effect = [first_sweep, restart_ok, retry_sweep]
+        t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
+        result = wfp_preflight_cleanup(
+            t, log_prefix="  [tag]", timeout=100, restart_threshold=800
+        )
+        self.assertIsNotNone(result, "should return dict, not None")
+        self.assertEqual(result.get("wfp_after"), 6393)
+        self.assertTrue(
+            result.get("wfp_critical"),
+            f"wfp_critical must be True when post-restart wfp >= threshold; got: {result}",
+        )
+        printed = [str(c.args[0]) for c in mock_print.call_args_list if c.args]
+        self.assertTrue(
+            any("CRITICAL" in p and "reboot required" in p for p in printed),
+            f"must print CRITICAL reboot-required warning; got: {printed}",
+        )
+
+    @patch("builtins.print")
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_wfp_critical_not_set_when_post_restart_below_threshold(
+        self, mock_ssh: object, mock_print: object,
+    ) -> None:
+        """wfp_critical must NOT be set when mpssvc restart successfully reduces wfp_after.
+
+        Verifies the happy path: restart clears the callout objects and the retry sweep
+        shows wfp_after < threshold — no critical flag, no spurious warning.
+        """
+        first_sweep = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=(
+                "WFP_BEFORE:rc=0,agent=0,npip=1,wfp=900,twait=4\n"
+                "WFP_AFTER:rc=0,agent=0,npip=1,wfp=900,twait=4\n"
+            ),
+            stderr="",
+        )
+        restart_ok = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        retry_sweep = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=(
+                "WFP_BEFORE:rc=0,agent=0,npip=1,wfp=350,twait=2\n"
+                "WFP_AFTER:rc=0,agent=0,npip=1,wfp=350,twait=2\n"
+            ),
+            stderr="",
+        )
+        mock_ssh.side_effect = [first_sweep, restart_ok, retry_sweep]
+        t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
+        result = wfp_preflight_cleanup(
+            t, log_prefix="  [tag]", timeout=100, restart_threshold=800
+        )
+        self.assertIsNotNone(result, "should return dict, not None")
+        self.assertEqual(result.get("wfp_after"), 350)
+        self.assertFalse(
+            result.get("wfp_critical"),
+            f"wfp_critical must be absent/False when post-restart wfp < threshold; got: {result}",
+        )
+        printed = [str(c.args[0]) for c in mock_print.call_args_list if c.args]
+        self.assertFalse(
+            any("CRITICAL" in p for p in printed),
+            f"must not print CRITICAL warning when restart succeeded; got: {printed}",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

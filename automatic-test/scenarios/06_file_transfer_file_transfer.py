@@ -575,12 +575,17 @@ def run(ctx):
 
             if has_archon or has_specter:
                 print("\n  [between-passes] WFP cleanup (demon → archon/specter)")
-                wfp_preflight_cleanup(
+                _wfp_bp = wfp_preflight_cleanup(
                     ctx.windows,
                     log_prefix="  [between-passes][wfp]",
                     c2_hosts=_c2_hosts_bp,
                     restart_threshold=800,
                 )
+                if _wfp_bp and _wfp_bp.get("wfp_critical"):
+                    raise ScenarioSkipped(
+                        "WFP pool critically exhausted — VM reboot required"
+                        " (archon/specter passes skipped)"
+                    )
 
             print("\n  === Agent pass: archon (Windows) ===")
             if not has_archon:
@@ -592,12 +597,17 @@ def run(ctx):
 
             if has_specter and has_archon:
                 print("\n  [between-passes] WFP cleanup (archon → specter)")
-                wfp_preflight_cleanup(
+                _wfp_bp2 = wfp_preflight_cleanup(
                     ctx.windows,
                     log_prefix="  [between-passes][wfp]",
                     c2_hosts=_c2_hosts_bp,
                     restart_threshold=800,
                 )
+                if _wfp_bp2 and _wfp_bp2.get("wfp_critical"):
+                    raise ScenarioSkipped(
+                        "WFP pool critically exhausted — VM reboot required"
+                        " (specter pass skipped)"
+                    )
 
             print("\n  === Agent pass: specter (Windows) ===")
             if not has_specter:

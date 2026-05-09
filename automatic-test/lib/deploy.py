@@ -930,11 +930,16 @@ def wfp_preflight_cleanup(
 ) -> dict[str, int] | None:
     """Sweep leftover WFP firewall rules and Defender NP exclusions.
 
-    Returns a dict with ``wfp_after`` and ``twait_after`` parsed from the
-    ``WFP_AFTER:`` diagnostic line, or ``None`` if the sweep failed or the
-    target is not Windows.  Callers can use ``wfp_after`` to detect when
-    Defender WFP callout objects are accumulating beyond what rule sweeps can
-    remove (a precursor to WSAENOBUFS / os error 10055).
+    Returns a dict with ``wfp_after``, ``twait_after``, and optionally
+    ``wfp_critical`` parsed from the ``WFP_AFTER:`` diagnostic line, or
+    ``None`` if the sweep failed or the target is not Windows.
+
+    When ``restart_threshold`` is set and the post-mpssvc-restart WFP count
+    is still >= that threshold, the returned dict includes
+    ``wfp_critical: True``.  Callers should treat this as a signal that the
+    Windows VM requires a full reboot before further Windows scenarios will
+    succeed — mpssvc restart is insufficient to drain these OS-level WFP
+    filter objects.
 
     Idempotent and safe to call multiple times (e.g. at suite start and between
     scenarios); errors are swallowed so a failed sweep never aborts the caller.
@@ -1119,10 +1124,23 @@ def wfp_preflight_cleanup(
             restart_threshold=None,
         )
         if retry is not None:
+            retry_wfp = retry.get("wfp_after", -1)
+            retry_twait = retry.get("twait_after", -1)
             print(
-                f"{log_prefix} post-mpssvc-restart wfp_after={retry.get('wfp_after', -1)}"
-                f" twait_after={retry.get('twait_after', -1)}"
+                f"{log_prefix} post-mpssvc-restart wfp_after={retry_wfp}"
+                f" twait_after={retry_twait}"
             )
+            if retry_wfp >= restart_threshold:
+                # mpssvc restart did not reduce the WFP count — these are
+                # accumulated OS-level WFP filter objects that only clear on
+                # full VM reboot (not Defender callout objects).
+                print(
+                    f"{log_prefix} CRITICAL: post-mpssvc-restart wfp_after={retry_wfp}"
+                    f" >= threshold={restart_threshold} on {target.host}"
+                    " — WFP pool critically exhausted; VM reboot required."
+                    " Skipping remaining Windows scenarios."
+                )
+                retry["wfp_critical"] = True
         # Fall back to the pre-restart data if the retry sweep returned nothing
         # (e.g. SSH re-sweep timed out or WFP_AFTER output was missing).
         return retry if retry is not None else parsed_after

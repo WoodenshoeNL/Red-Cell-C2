@@ -1057,7 +1057,16 @@ def main():
 
     passed = failed = skipped = 0
     failure_reports: list[Path] = []
+    # Set to True when WFP pool exhaustion survives mpssvc restart — requires VM reboot.
+    _win_wfp_exhausted = False
     for sid, path in selected:
+        if _win_wfp_exhausted:
+            print(f"\n{'─' * 60}")
+            print(f"  Scenario {sid}: [SKIPPED — WFP pool exhausted, VM reboot required]")
+            print(f"{'─' * 60}")
+            skipped += 1
+            continue
+
         outcome, report_path = run_scenario(sid, path, ctx, run_dir)
         if outcome == "passed":
             passed += 1
@@ -1084,12 +1093,15 @@ def main():
                 # 4+ Windows scenarios in a single suite run re-accumulate WFP filter
                 # objects fast enough to re-exhaust non-paged pool (WSAENOBUFS / os
                 # error 10055) — see red-cell-c2-gdiw8.
-                wfp_preflight_cleanup(
+                _wfp_bs = wfp_preflight_cleanup(
                     wtgt,
                     log_prefix="  [between-scenarios][wfp]",
                     timeout=win_cleanup_timeout,
                     c2_hosts=_ip_excl_bs,
+                    restart_threshold=800,
                 )
+                if _wfp_bs and _wfp_bs.get("wfp_critical"):
+                    _win_wfp_exhausted = True
 
     total = passed + failed + skipped
     print(f"\n{'═' * 60}")

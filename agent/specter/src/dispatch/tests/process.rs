@@ -766,6 +766,7 @@ fn handle_net_localgroup_echoes_server_and_subcmd() {
 }
 
 #[test]
+#[cfg(not(windows))]
 fn handle_net_localgroup_has_groups_from_etc_group() {
     let mut config = SpecterConfig::default();
     let rest = le_utf16le_net("localhost");
@@ -836,6 +837,7 @@ fn handle_net_users_echoes_server_and_subcmd() {
 }
 
 #[test]
+#[cfg(not(windows))]
 fn handle_net_users_includes_root_as_admin() {
     let mut config = SpecterConfig::default();
     let rest = le_utf16le_net("localhost");

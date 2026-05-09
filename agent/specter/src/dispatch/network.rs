@@ -1,5 +1,6 @@
 //! Network discovery and enumeration handlers.
 
+#[cfg(not(windows))]
 use std::process::{Command as SysCommand, Stdio};
 
 use red_cell_common::demon::{DemonCommand, DemonNetCommand};
@@ -306,21 +307,56 @@ struct NetUser {
 
 // ─── Platform data collection ───────────────────────────────────────────────
 //
-// These functions gather host-native data.  On Windows the real Win32 Net*
-// APIs will be called (future work gated behind `#[cfg(windows)]`).  On
-// Linux we use /proc, /etc/passwd, /etc/group, and utmp-style parsing so
-// that the handler logic and wire format can be fully tested on CI.
+// On Windows, Win32 Net* APIs provide host-native data.  On non-Windows
+// platforms (Linux CI), /proc, /etc/passwd, /etc/group, and the `who`
+// command provide equivalent data so the handler logic and wire format can
+// be fully tested without a Windows target.
 
-/// Return the DNS domain name of this machine.
+/// Decode a null-terminated UTF-16 string from a raw pointer.
+///
+/// SAFETY: `ptr` must be null or point to a valid null-terminated UTF-16 string.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+unsafe fn wstr_to_string(ptr: *const u16) -> String {
+    if ptr.is_null() {
+        return String::new();
+    }
+    let mut len = 0usize;
+    while *ptr.add(len) != 0 {
+        len += 1;
+    }
+    String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len))
+}
+
+/// Return the DNS domain name of this machine via `GetComputerNameExW`.
+#[cfg(windows)]
+#[allow(unsafe_code)]
 fn platform_domain_name() -> String {
-    // Try /proc/sys/kernel/domainname first (Linux).
+    use windows_sys::Win32::System::SystemInformation::{
+        ComputerNameDnsDomain, GetComputerNameExW,
+    };
+    // DNS domain names are at most 255 chars; 256 is always sufficient.
+    let mut size: u32 = 256;
+    let mut buf: Vec<u16> = vec![0u16; size as usize];
+    // SAFETY: buf is valid with `size` capacity; size is updated to chars written (no null).
+    let ok = unsafe { GetComputerNameExW(ComputerNameDnsDomain, buf.as_mut_ptr(), &mut size) };
+    if ok != 0 {
+        buf.truncate(size as usize);
+        String::from_utf16_lossy(&buf)
+    } else {
+        String::new()
+    }
+}
+
+/// Return the DNS domain name of this machine (Linux fallback).
+#[cfg(not(windows))]
+fn platform_domain_name() -> String {
     if let Ok(raw) = std::fs::read_to_string("/proc/sys/kernel/domainname") {
         let trimmed = raw.trim();
         if !trimmed.is_empty() && trimmed != "(none)" {
             return trimmed.to_string();
         }
     }
-    // Fallback: try the `hostname` command's domain part.
     if let Ok(output) =
         SysCommand::new("hostname").arg("-d").stdout(Stdio::piped()).stderr(Stdio::null()).output()
     {
@@ -332,7 +368,58 @@ fn platform_domain_name() -> String {
     String::new()
 }
 
-/// Enumerate currently logged-on users.
+/// Enumerate currently logged-on users via `NetWkstaUserEnum`.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn platform_logged_on_users() -> Vec<String> {
+    use windows_sys::Win32::Foundation::ERROR_MORE_DATA;
+    use windows_sys::Win32::NetworkManagement::NetManagement::{
+        NetApiBufferFree, NetWkstaUserEnum, WKSTA_USER_INFO_1,
+    };
+    let mut users: Vec<String> = Vec::new();
+    let mut resume_handle: u32 = 0;
+    loop {
+        let mut buf: *mut u8 = std::ptr::null_mut();
+        let mut entries_read: u32 = 0;
+        let mut total_entries: u32 = 0;
+        // SAFETY: all pointers valid; buf freed with NetApiBufferFree after use.
+        let status = unsafe {
+            NetWkstaUserEnum(
+                std::ptr::null(),
+                1,
+                &mut buf,
+                u32::MAX,
+                &mut entries_read,
+                &mut total_entries,
+                &mut resume_handle,
+            )
+        };
+        if !buf.is_null() && entries_read > 0 {
+            // SAFETY: buf points to `entries_read` WKSTA_USER_INFO_1 structs.
+            let entries = unsafe {
+                std::slice::from_raw_parts(buf as *const WKSTA_USER_INFO_1, entries_read as usize)
+            };
+            for entry in entries {
+                // SAFETY: wkui1_username is a valid null-terminated UTF-16 string.
+                let name = unsafe { wstr_to_string(entry.wkui1_username as *const u16) };
+                if !name.is_empty() && !users.contains(&name) {
+                    users.push(name);
+                }
+            }
+        }
+        if !buf.is_null() {
+            // SAFETY: buf was allocated by NetWkstaUserEnum.
+            unsafe { NetApiBufferFree(buf as *mut _) };
+        }
+        if status != ERROR_MORE_DATA {
+            break;
+        }
+    }
+    users
+}
+
+/// Enumerate currently logged-on users via `who` (Linux fallback).
+#[cfg(not(windows))]
 fn platform_logged_on_users() -> Vec<String> {
     let mut users = Vec::new();
     if let Ok(output) = SysCommand::new("who").stdout(Stdio::piped()).stderr(Stdio::null()).output()
@@ -349,7 +436,62 @@ fn platform_logged_on_users() -> Vec<String> {
     users
 }
 
-/// Enumerate active login sessions with timing information.
+/// Enumerate active login sessions via `NetSessionEnum`.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn platform_sessions() -> Vec<NetSession> {
+    use windows_sys::Win32::Foundation::ERROR_MORE_DATA;
+    use windows_sys::Win32::NetworkManagement::NetManagement::{
+        NetApiBufferFree, NetSessionEnum, SESSION_INFO_10,
+    };
+    let mut sessions: Vec<NetSession> = Vec::new();
+    let mut resume_handle: u32 = 0;
+    loop {
+        let mut buf: *mut u8 = std::ptr::null_mut();
+        let mut entries_read: u32 = 0;
+        let mut total_entries: u32 = 0;
+        // SAFETY: all pointers valid; buf freed with NetApiBufferFree after use.
+        let status = unsafe {
+            NetSessionEnum(
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                10,
+                &mut buf,
+                u32::MAX,
+                &mut entries_read,
+                &mut total_entries,
+                &mut resume_handle,
+            )
+        };
+        if !buf.is_null() && entries_read > 0 {
+            // SAFETY: buf points to `entries_read` SESSION_INFO_10 structs.
+            let entries = unsafe {
+                std::slice::from_raw_parts(buf as *const SESSION_INFO_10, entries_read as usize)
+            };
+            for entry in entries {
+                // SAFETY: string fields are valid null-terminated UTF-16 strings.
+                sessions.push(NetSession {
+                    client: unsafe { wstr_to_string(entry.sesi10_cname as *const u16) },
+                    user: unsafe { wstr_to_string(entry.sesi10_username as *const u16) },
+                    active_secs: entry.sesi10_time,
+                    idle_secs: entry.sesi10_idle_time,
+                });
+            }
+        }
+        if !buf.is_null() {
+            // SAFETY: buf was allocated by NetSessionEnum.
+            unsafe { NetApiBufferFree(buf as *mut _) };
+        }
+        if status != ERROR_MORE_DATA {
+            break;
+        }
+    }
+    sessions
+}
+
+/// Enumerate active login sessions via `who` (Linux fallback).
+#[cfg(not(windows))]
 fn platform_sessions() -> Vec<NetSession> {
     let mut sessions = Vec::new();
     if let Ok(output) = SysCommand::new("who").stdout(Stdio::piped()).stderr(Stdio::null()).output()
@@ -370,14 +512,116 @@ fn platform_sessions() -> Vec<NetSession> {
     sessions
 }
 
-/// Enumerate network shares (Linux: currently returns empty).
+/// Enumerate network shares via `NetShareEnum` (level 1, works without admin).
+#[cfg(windows)]
+#[allow(unsafe_code)]
 fn platform_shares() -> Vec<NetShare> {
-    // On Windows this would call NetShareEnum.  On Linux there is no direct
-    // equivalent without Samba — return an empty list.
+    use windows_sys::Win32::Foundation::ERROR_MORE_DATA;
+    use windows_sys::Win32::NetworkManagement::NetManagement::{
+        NetApiBufferFree, NetShareEnum, SHARE_INFO_1,
+    };
+    let mut shares: Vec<NetShare> = Vec::new();
+    let mut resume_handle: u32 = 0;
+    loop {
+        let mut buf: *mut u8 = std::ptr::null_mut();
+        let mut entries_read: u32 = 0;
+        let mut total_entries: u32 = 0;
+        // SAFETY: all pointers valid; buf freed with NetApiBufferFree after use.
+        let status = unsafe {
+            NetShareEnum(
+                std::ptr::null(),
+                1,
+                &mut buf,
+                u32::MAX,
+                &mut entries_read,
+                &mut total_entries,
+                &mut resume_handle,
+            )
+        };
+        if !buf.is_null() && entries_read > 0 {
+            // SAFETY: buf points to `entries_read` SHARE_INFO_1 structs.
+            let entries = unsafe {
+                std::slice::from_raw_parts(buf as *const SHARE_INFO_1, entries_read as usize)
+            };
+            for entry in entries {
+                // SAFETY: string fields are valid null-terminated UTF-16 strings.
+                shares.push(NetShare {
+                    name: unsafe { wstr_to_string(entry.shi1_netname as *const u16) },
+                    path: String::new(),
+                    remark: unsafe { wstr_to_string(entry.shi1_remark as *const u16) },
+                    permissions: 0,
+                });
+            }
+        }
+        if !buf.is_null() {
+            // SAFETY: buf was allocated by NetShareEnum.
+            unsafe { NetApiBufferFree(buf as *mut _) };
+        }
+        if status != ERROR_MORE_DATA {
+            break;
+        }
+    }
+    shares
+}
+
+/// Enumerate network shares (Linux: no Samba equivalent, returns empty list).
+#[cfg(not(windows))]
+fn platform_shares() -> Vec<NetShare> {
     Vec::new()
 }
 
-/// Enumerate local groups from `/etc/group`.
+/// Enumerate local groups via `NetLocalGroupEnum`.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn platform_groups() -> Vec<NetGroup> {
+    use windows_sys::Win32::Foundation::ERROR_MORE_DATA;
+    use windows_sys::Win32::NetworkManagement::NetManagement::{
+        LOCALGROUP_INFO_1, NetApiBufferFree, NetLocalGroupEnum,
+    };
+    let mut groups: Vec<NetGroup> = Vec::new();
+    let mut resume_handle: u32 = 0;
+    loop {
+        let mut buf: *mut u8 = std::ptr::null_mut();
+        let mut entries_read: u32 = 0;
+        let mut total_entries: u32 = 0;
+        // SAFETY: all pointers valid; buf freed with NetApiBufferFree after use.
+        let status = unsafe {
+            NetLocalGroupEnum(
+                std::ptr::null(),
+                1,
+                &mut buf,
+                u32::MAX,
+                &mut entries_read,
+                &mut total_entries,
+                &mut resume_handle,
+            )
+        };
+        if !buf.is_null() && entries_read > 0 {
+            // SAFETY: buf points to `entries_read` LOCALGROUP_INFO_1 structs.
+            let entries = unsafe {
+                std::slice::from_raw_parts(buf as *const LOCALGROUP_INFO_1, entries_read as usize)
+            };
+            for entry in entries {
+                // SAFETY: string fields are valid null-terminated UTF-16 strings.
+                groups.push(NetGroup {
+                    name: unsafe { wstr_to_string(entry.lgrpi1_name as *const u16) },
+                    description: unsafe { wstr_to_string(entry.lgrpi1_comment as *const u16) },
+                });
+            }
+        }
+        if !buf.is_null() {
+            // SAFETY: buf was allocated by NetLocalGroupEnum.
+            unsafe { NetApiBufferFree(buf as *mut _) };
+        }
+        if status != ERROR_MORE_DATA {
+            break;
+        }
+    }
+    groups
+}
+
+/// Enumerate local groups from `/etc/group` (Linux fallback).
+#[cfg(not(windows))]
 fn platform_groups() -> Vec<NetGroup> {
     let mut groups = Vec::new();
     if let Ok(content) = std::fs::read_to_string("/etc/group") {
@@ -394,7 +638,59 @@ fn platform_groups() -> Vec<NetGroup> {
     groups
 }
 
-/// Enumerate local users from `/etc/passwd`.
+/// Enumerate local users via `NetUserEnum`.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn platform_users() -> Vec<NetUser> {
+    use windows_sys::Win32::Foundation::ERROR_MORE_DATA;
+    use windows_sys::Win32::NetworkManagement::NetManagement::{
+        FILTER_NORMAL_ACCOUNT, NetApiBufferFree, NetUserEnum, USER_INFO_1, USER_PRIV_ADMIN,
+    };
+    let mut users: Vec<NetUser> = Vec::new();
+    let mut resume_handle: u32 = 0;
+    loop {
+        let mut buf: *mut u8 = std::ptr::null_mut();
+        let mut entries_read: u32 = 0;
+        let mut total_entries: u32 = 0;
+        // SAFETY: all pointers valid; buf freed with NetApiBufferFree after use.
+        let status = unsafe {
+            NetUserEnum(
+                std::ptr::null(),
+                1,
+                FILTER_NORMAL_ACCOUNT,
+                &mut buf,
+                u32::MAX,
+                &mut entries_read,
+                &mut total_entries,
+                &mut resume_handle,
+            )
+        };
+        if !buf.is_null() && entries_read > 0 {
+            // SAFETY: buf points to `entries_read` USER_INFO_1 structs.
+            let entries = unsafe {
+                std::slice::from_raw_parts(buf as *const USER_INFO_1, entries_read as usize)
+            };
+            for entry in entries {
+                // SAFETY: usri1_name is a valid null-terminated UTF-16 string.
+                users.push(NetUser {
+                    name: unsafe { wstr_to_string(entry.usri1_name as *const u16) },
+                    is_admin: entry.usri1_priv == USER_PRIV_ADMIN,
+                });
+            }
+        }
+        if !buf.is_null() {
+            // SAFETY: buf was allocated by NetUserEnum.
+            unsafe { NetApiBufferFree(buf as *mut _) };
+        }
+        if status != ERROR_MORE_DATA {
+            break;
+        }
+    }
+    users
+}
+
+/// Enumerate local users from `/etc/passwd` (Linux fallback).
+#[cfg(not(windows))]
 fn platform_users() -> Vec<NetUser> {
     let mut users = Vec::new();
     if let Ok(content) = std::fs::read_to_string("/etc/passwd") {
@@ -404,7 +700,7 @@ fn platform_users() -> Vec<NetUser> {
             }
             let parts: Vec<&str> = line.splitn(4, ':').collect();
             if let Some(name) = parts.first() {
-                // UID 0 = root = admin equivalent
+                // UID 0 = root = admin equivalent on Linux.
                 let uid: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(u32::MAX);
                 users.push(NetUser { name: (*name).to_string(), is_admin: uid == 0 });
             }

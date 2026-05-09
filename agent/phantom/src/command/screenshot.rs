@@ -14,10 +14,11 @@ use super::types::PendingCallback;
 /// Handle `CommandScreenshot` (ID 2510): capture the Linux desktop.
 ///
 /// Tries several capture methods in order of preference:
-/// 1. `import -window root png:-` (ImageMagick)
-/// 2. `scrot -o -` (scrot)
-/// 3. `grim -` (Wayland)
-/// 4. `gnome-screenshot -f <tmpfile>` (GNOME)
+/// 1. Native X11 via `XOpenDisplay` + `XGetImage` (no subprocess, fastest)
+/// 2. `scrot -o -` (X11 subprocess)
+/// 3. `import -window root png:-` (ImageMagick, X11 subprocess)
+/// 4. `grim -` (Wayland)
+/// 5. `gnome-screenshot -f <tmpfile>` (last resort, GNOME Wayland/X11)
 ///
 /// On success, sends a [`PendingCallback::Structured`] containing
 /// `[success:u32=1][image_bytes:len-prefixed]`.  On failure, sends

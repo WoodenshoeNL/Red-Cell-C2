@@ -986,7 +986,7 @@ def wfp_preflight_cleanup(
         # pool exhaustion before WSAENOBUFS (os error 10055) occurs.
         "$_wfp_count = -1; $_wfp_tmp = [System.IO.Path]::GetTempFileName()\n"
         "try {\n"
-        "  netsh wfp show state file=$_wfp_tmp 2>$null | Out-Null\n"
+        "  netsh wfp show state \"file=$_wfp_tmp\" 2>$null | Out-Null\n"
         "  $_wfp_count = @(Select-String -LiteralPath $_wfp_tmp -Pattern '<item>' -SimpleMatch -ErrorAction SilentlyContinue).Count\n"
         "} catch {}\n"
         "try { Remove-Item -LiteralPath $_wfp_tmp -Force -ErrorAction SilentlyContinue } catch {}\n"
@@ -1013,7 +1013,7 @@ def wfp_preflight_cleanup(
         "$_np_ips_after = @((Get-MpPreference -EA SilentlyContinue).ExclusionIpAddress)\n"
         "$_wfp_count_after = -1; $_wfp_tmp2 = [System.IO.Path]::GetTempFileName()\n"
         "try {\n"
-        "  netsh wfp show state file=$_wfp_tmp2 2>$null | Out-Null\n"
+        "  netsh wfp show state \"file=$_wfp_tmp2\" 2>$null | Out-Null\n"
         "  $_wfp_count_after = @(Select-String -LiteralPath $_wfp_tmp2 -Pattern '<item>' -SimpleMatch -ErrorAction SilentlyContinue).Count\n"
         "} catch {}\n"
         "try { Remove-Item -LiteralPath $_wfp_tmp2 -Force -ErrorAction SilentlyContinue } catch {}\n"

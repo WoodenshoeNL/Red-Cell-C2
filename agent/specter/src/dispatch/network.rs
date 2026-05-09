@@ -673,10 +673,6 @@ fn platform_groups() -> Vec<NetGroup> {
 }
 
 /// Collect the lowercase usernames of every member of the local Administrators group.
-///
-/// Uses `NetLocalGroupGetMembers` at level 3, which returns `DOMAIN\username` strings
-/// without requiring the `Win32_Security` feature.  The domain prefix is stripped so
-/// the result can be compared against the plain account names returned by `NetUserEnum`.
 #[cfg(windows)]
 #[allow(unsafe_code)]
 fn administrators_group_members() -> std::collections::HashSet<String> {
@@ -733,12 +729,7 @@ fn administrators_group_members() -> std::collections::HashSet<String> {
     members
 }
 
-/// Enumerate local users via `NetUserEnum`.
-///
-/// `is_admin` is set when either:
-/// - the account has `USER_PRIV_ADMIN` (built-in Administrator, SID -500), or
-/// - the account name appears in the local Administrators group membership list
-///   (standard users elevated into the group retain `USER_PRIV_USER`).
+/// Enumerate local users via `NetUserEnum`; sets `is_admin` via privilege level or Administrators group membership.
 #[cfg(windows)]
 #[allow(unsafe_code)]
 fn platform_users() -> Vec<NetUser> {
@@ -921,21 +912,9 @@ fn platform_servers_by_type(domain: &str, server_type: u32) -> Vec<String> {
     names
 }
 
-// ─── Tests ─────────────────────────────────────────────────────────────────────
-//
-// `#[cfg(windows)]` tests exercise the Win32 API call signatures and struct
-// field access directly.  They will not run on Linux CI but will catch struct
-// layout mismatches and incorrect API levels as soon as the crate is compiled
-// for a Windows target.
-//
-// `#[cfg(not(windows))]` companions cover the Linux fallback paths that DO run
-// in CI.
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── wstr_to_string ────────────────────────────────────────────────────────
 
     /// A null pointer must return an empty String, not cause UB.
     #[cfg(windows)]
@@ -966,8 +945,6 @@ mod tests {
         assert!(result.is_empty());
     }
 
-    // ── platform_domain_name ──────────────────────────────────────────────────
-
     /// Must not panic on any Windows machine (domain-joined or workstation).
     #[cfg(windows)]
     #[test]
@@ -985,8 +962,6 @@ mod tests {
             "domain name must not contain embedded NUL characters; got: {name:?}"
         );
     }
-
-    // ── platform_logged_on_users ──────────────────────────────────────────────
 
     /// Must not panic on any Windows machine.
     #[cfg(windows)]
@@ -1018,8 +993,6 @@ mod tests {
         }
     }
 
-    // ── platform_sessions ─────────────────────────────────────────────────────
-
     /// Must not panic — may return an empty Vec on a workstation.
     #[cfg(windows)]
     #[test]
@@ -1040,8 +1013,6 @@ mod tests {
             assert!(!s.user.contains('\0'), "session.user must not contain NUL: {:?}", s.user);
         }
     }
-
-    // ── platform_shares ───────────────────────────────────────────────────────
 
     /// IPC$ and ADMIN$ are always present on Windows — the Server service
     /// creates them automatically and they cannot be removed permanently.
@@ -1070,8 +1041,6 @@ mod tests {
             assert!(!s.remark.contains('\0'), "share.remark must not contain NUL: {:?}", s.remark);
         }
     }
-
-    // ── platform_groups ───────────────────────────────────────────────────────
 
     /// `Administrators` and `Users` are built-in groups present on every
     /// Windows installation since Windows XP.
@@ -1103,8 +1072,6 @@ mod tests {
             );
         }
     }
-
-    // ── platform_users ────────────────────────────────────────────────────────
 
     /// `NetUserEnum` must return at least one local user account.
     #[cfg(windows)]

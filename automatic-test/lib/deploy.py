@@ -34,6 +34,28 @@ _DEFAULT_REMOTE_CMD_SECS = 30
 # while avoiding false positives on lightly-loaded targets.
 WFP_RESTART_THRESHOLD = 800
 
+# Hosts confirmed unreachable at startup by check_ssh_targets().  Per-scenario
+# preflight_ssh() calls short-circuit to ScenarioSkipped for these hosts so that
+# TCP-timeout retry loops (3 × ConnectTimeout s each) do not bloat the total
+# run time when a VM is firewalled rather than ICMP-rejecting.
+_globally_unreachable_hosts: set[str] = set()
+
+
+def mark_host_unreachable(host: str) -> None:
+    """Record *host* as globally unreachable so :func:`preflight_ssh` skips it immediately.
+
+    Called by ``check_ssh_targets()`` in ``test.py`` after the startup pre-flight
+    confirms a target is unreachable.  Avoids 3 × ConnectTimeout-second retry loops
+    in per-scenario preflight calls when the VM is TCP-firewalled (packet drop rather
+    than ICMP rejection).
+    """
+    _globally_unreachable_hosts.add(host)
+
+
+def clear_globally_unreachable_hosts() -> None:
+    """Clear the globally-unreachable registry (test helper — do not call in production)."""
+    _globally_unreachable_hosts.clear()
+
 
 def configure_deploy_timeouts(
     *,
@@ -188,9 +210,20 @@ def preflight_ssh(target: TargetConfig) -> None:
     centralised with the rest of the harness.
     Call this at the start of any scenario that deploys a payload via SSH.
 
+    If *target.host* was marked unreachable by :func:`mark_host_unreachable` during
+    the startup ``check_ssh_targets()`` pass, raises :class:`~lib.ScenarioSkipped`
+    immediately — no SSH attempt is made.  This avoids 3 × ConnectTimeout-second
+    retry loops per scenario when the VM is TCP-firewalled (packet drop rather than
+    ICMP rejection).
+
     Raises:
+        ScenarioSkipped: if the host is in the globally-unreachable registry.
         DeployError: if the SSH connection cannot be established.
     """
+    if target.host in _globally_unreachable_hosts:
+        raise ScenarioSkipped(
+            f"target {target.host} was unreachable at startup — skipping SSH probe"
+        )
     cmd = [
         "ssh",
         "-p", str(target.port),

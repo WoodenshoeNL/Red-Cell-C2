@@ -23,12 +23,22 @@ from lib.deploy import (
     TargetConfig,
     WFP_RESTART_THRESHOLD,
     cleanup_windows_harness_work_dir,
+    clear_globally_unreachable_hosts,
+    defender_add_exclusion,
     defender_add_process_exclusion,
-    defender_remove_process_exclusion,
     defender_network_protection_exclusion,
     defender_remove_network_protection_exclusion,
+    defender_remove_process_exclusion,
+    ensure_work_dir,
+    execute_background,
     firewall_allow_program,
     firewall_remove_program,
+    inject_hosts_entry,
+    mark_host_unreachable,
+    preflight_dns,
+    preflight_ssh,
+    run_remote,
+    upload,
     wfp_preflight_cleanup,
     _is_transient_ssh_failure,
     _quote_posix,
@@ -37,14 +47,6 @@ from lib.deploy import (
     _ssh_args,
     _windows_wmi_create_script,
     _windows_schtask_script,
-    defender_add_exclusion,
-    ensure_work_dir,
-    execute_background,
-    inject_hosts_entry,
-    preflight_dns,
-    preflight_ssh,
-    run_remote,
-    upload,
 )
 
 _MODULE_KEY_PATH: str | None = None
@@ -327,8 +329,14 @@ class TestPreflightSsh(unittest.TestCase):
     """Tests for preflight_ssh connectivity check."""
 
     def setUp(self) -> None:
+        # Clear globally-unreachable registry so tests that manipulate it cannot
+        # interfere with these direct SSH-behaviour tests.
+        clear_globally_unreachable_hosts()
         self.key_path = _module_key_path()
         self.target = _make_target(host="10.0.0.1", key=self.key_path)
+
+    def tearDown(self) -> None:
+        clear_globally_unreachable_hosts()
 
     def _make_completed(self, returncode: int, stderr: str = "") -> subprocess.CompletedProcess:
         return subprocess.CompletedProcess(
@@ -417,6 +425,72 @@ class TestPreflightSsh(unittest.TestCase):
         with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="ssh", timeout=10)):
             with self.assertRaises(subprocess.TimeoutExpired):
                 preflight_ssh(self.target)
+
+
+class TestGloballyUnreachableHosts(unittest.TestCase):
+    """Tests for mark_host_unreachable / clear_globally_unreachable_hosts / preflight_ssh short-circuit."""
+
+    def setUp(self) -> None:
+        # Always start each test with a clean registry.
+        clear_globally_unreachable_hosts()
+        self.key_path = _module_key_path()
+        self.target = _make_target(host="192.168.213.160", key=self.key_path)
+
+    def tearDown(self) -> None:
+        clear_globally_unreachable_hosts()
+
+    def test_preflight_ssh_skips_globally_unreachable_host(self) -> None:
+        """preflight_ssh must raise ScenarioSkipped (no SSH call) when host is globally unreachable."""
+        from lib import ScenarioSkipped
+        mark_host_unreachable(self.target.host)
+        with patch("subprocess.run") as mock_run:
+            with self.assertRaises(ScenarioSkipped) as ctx:
+                preflight_ssh(self.target)
+        mock_run.assert_not_called()
+        self.assertIn(self.target.host, str(ctx.exception))
+
+    def test_preflight_ssh_attempts_ssh_when_host_not_registered(self) -> None:
+        """preflight_ssh must still make an SSH call when the host is not in the unreachable set."""
+        with patch("subprocess.run", return_value=subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )) as mock_run:
+            preflight_ssh(self.target)
+        mock_run.assert_called_once()
+
+    def test_mark_host_unreachable_is_idempotent(self) -> None:
+        """Calling mark_host_unreachable twice for the same host must not raise."""
+        mark_host_unreachable(self.target.host)
+        mark_host_unreachable(self.target.host)
+        from lib import ScenarioSkipped
+        with self.assertRaises(ScenarioSkipped):
+            preflight_ssh(self.target)
+
+    def test_clear_globally_unreachable_hosts_restores_ssh_attempts(self) -> None:
+        """After clear, previously-marked hosts are no longer short-circuited."""
+        mark_host_unreachable(self.target.host)
+        clear_globally_unreachable_hosts()
+        with patch("subprocess.run", return_value=subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )) as mock_run:
+            preflight_ssh(self.target)
+        mock_run.assert_called_once()
+
+    def test_only_registered_host_is_short_circuited(self) -> None:
+        """Short-circuit must apply only to the registered host, not other hosts."""
+        from lib import ScenarioSkipped
+        mark_host_unreachable("10.10.10.10")
+        # self.target.host is 192.168.213.160 — not registered — must still attempt SSH
+        with patch("subprocess.run", return_value=subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )) as mock_run:
+            preflight_ssh(self.target)
+        mock_run.assert_called_once()
+        # The registered host must be short-circuited
+        other_target = _make_target(host="10.10.10.10", key=self.key_path)
+        mock_run.reset_mock()
+        with self.assertRaises(ScenarioSkipped):
+            preflight_ssh(other_target)
+        mock_run.assert_not_called()
 
 
 class TestPreflightDns(unittest.TestCase):

@@ -181,6 +181,12 @@ def check_ssh_targets(
     Prints a pass/fail line per target but does NOT abort — individual
     scenarios raise :class:`lib.ScenarioSkipped` when a target is unreachable.
 
+    Any target that fails the pre-flight is registered with
+    :func:`lib.deploy.mark_host_unreachable` so that per-scenario
+    ``preflight_ssh()`` calls short-circuit to ``ScenarioSkipped`` without
+    making additional SSH attempts (avoids 3 × ConnectTimeout-second retry
+    loops when the VM is TCP-firewalled / packet-dropping).
+
     *targets* is a list of ``(label, TargetConfig | None)`` pairs.
     *scenarios_dir* defaults to the ``scenarios/`` directory next to this
     file; pass an explicit path in tests to point at a temporary directory.
@@ -192,7 +198,7 @@ def check_ssh_targets(
     if not (selected_ids & deploy_scenarios):
         return
 
-    from lib.deploy import DeployError, preflight_ssh
+    from lib.deploy import DeployError, mark_host_unreachable, preflight_ssh
 
     print(f"\n{'─' * 60}")
     print("  SSH target pre-flight")
@@ -207,8 +213,10 @@ def check_ssh_targets(
             print(f"  ✓ {label} ({target.host}): reachable")
         except DeployError as exc:
             print(f"  ✗ {label} ({target.host}): {exc}")
+            mark_host_unreachable(target.host)
         except Exception as exc:
             print(f"  ✗ {label} ({target.host}): unexpected error — {exc}")
+            mark_host_unreachable(target.host)
 
 
 # ── Unit tests ───────────────────────────────────────────────────────────────

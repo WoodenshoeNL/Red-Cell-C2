@@ -177,5 +177,80 @@ class TestCheckSshTargets(unittest.TestCase):
         self.assertIn("10.0.0.2", call_hosts)
 
 
+class TestCheckSshTargetsRegistersUnreachable(unittest.TestCase):
+    """check_ssh_targets must register failed hosts with mark_host_unreachable."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.scenarios_dir = Path(self._tmpdir)
+        # Reset the globally-unreachable registry before each test.
+        from lib.deploy import clear_globally_unreachable_hosts
+        clear_globally_unreachable_hosts()
+
+    def tearDown(self):
+        shutil.rmtree(self._tmpdir)
+        from lib.deploy import clear_globally_unreachable_hosts
+        clear_globally_unreachable_hosts()
+
+    def _write_deploy_scenario(self, sid: str) -> None:
+        (self.scenarios_dir / f"{sid}_deploy.py").write_text(
+            "from lib.deploy import run_remote\n", encoding="utf-8"
+        )
+
+    def test_unreachable_host_is_registered_after_deploy_error(self):
+        """A host that raises DeployError in preflight must be added to the globally-unreachable set."""
+        self._write_deploy_scenario("05")
+        target = _make_target(host="192.168.213.160")
+        from lib.deploy import DeployError, _globally_unreachable_hosts
+
+        with patch("lib.deploy.preflight_ssh", side_effect=DeployError("Connection timed out")):
+            with patch("sys.stdout", StringIO()):
+                check_ssh_targets([("windows", target)], {"05"}, scenarios_dir=self.scenarios_dir)
+
+        self.assertIn("192.168.213.160", _globally_unreachable_hosts)
+
+    def test_reachable_host_is_not_registered(self):
+        """A host that succeeds preflight must NOT be added to the globally-unreachable set."""
+        self._write_deploy_scenario("05")
+        target = _make_target(host="192.168.213.160")
+        from lib.deploy import _globally_unreachable_hosts
+
+        with patch("lib.deploy.preflight_ssh"):
+            with patch("sys.stdout", StringIO()):
+                check_ssh_targets([("windows", target)], {"05"}, scenarios_dir=self.scenarios_dir)
+
+        self.assertNotIn("192.168.213.160", _globally_unreachable_hosts)
+
+    def test_unexpected_exception_registers_host(self):
+        """An unexpected exception (not DeployError) during preflight must also register the host."""
+        self._write_deploy_scenario("05")
+        target = _make_target(host="10.99.99.99")
+        from lib.deploy import _globally_unreachable_hosts
+
+        with patch("lib.deploy.preflight_ssh", side_effect=RuntimeError("unexpected")):
+            with patch("sys.stdout", StringIO()):
+                check_ssh_targets([("windows", target)], {"05"}, scenarios_dir=self.scenarios_dir)
+
+        self.assertIn("10.99.99.99", _globally_unreachable_hosts)
+
+    def test_subsequent_preflight_skips_ssh_after_registration(self):
+        """After check_ssh_targets marks a host unreachable, preflight_ssh must raise ScenarioSkipped."""
+        self._write_deploy_scenario("05")
+        target = _make_target(host="192.168.213.160")
+        from lib import ScenarioSkipped
+        from lib.deploy import DeployError, preflight_ssh
+
+        with patch("lib.deploy.preflight_ssh", side_effect=DeployError("Connection timed out")):
+            with patch("sys.stdout", StringIO()):
+                check_ssh_targets([("windows", target)], {"05"}, scenarios_dir=self.scenarios_dir)
+
+        # Now the real preflight_ssh must short-circuit without making an SSH call.
+        with patch("subprocess.run") as mock_run:
+            with self.assertRaises(ScenarioSkipped) as ctx:
+                preflight_ssh(target)
+        mock_run.assert_not_called()
+        self.assertIn("192.168.213.160", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

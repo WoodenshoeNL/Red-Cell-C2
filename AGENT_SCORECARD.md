@@ -10,18 +10,18 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 1756 | 297 | 148 |
-| Bugs filed against | 289 | 50 | 19 |
-| Bug rate (bugs/task) | 0.16 | 0.17 | 0.13 |
-| Quality score | 84% | 83% | 87% |
+| Bugs filed against | 292 | 50 | 19 |
+| Bug rate (bugs/task) | 0.17 | 0.17 | 0.13 |
+| Quality score | 83% | 83% | 87% |
 
-*Bug rates: Claude 289/1756=0.1646→0.16, Codex 50/297=0.1684→0.17, Cursor 19/148=0.1284→0.13*
+*Bug rates: Claude 292/1756=0.1663→0.17, Codex 50/297=0.1684→0.17, Cursor 19/148=0.1284→0.13*
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 17 | 0 | 0 |
-| Missing tests / stale tests | 83 | 22 | 8 |
+| Missing tests / stale tests | 85 | 22 | 8 |
 | Clippy warnings | 16 | 0 | 2 |
 | Protocol errors | 32 | 32 | 4 |
 | Security issues | 75 | 40 | 0 |
@@ -31,7 +31,7 @@ Each loop run updates the running totals and appends a review entry.
 | Test infrastructure / flakiness | 70 | 6 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 6 | 5 | 1 |
-| Correctness / pagination | 73 | 9 | 2 |
+| Correctness / pagination | 74 | 9 | 2 |
 | Workflow / close-hygiene | 40 | 1 | 2 |
 | Code reuse / duplication | 14 | 0 | 0 |
 | Incomplete commits (stranded work) | 7 | 3 | 0 |
@@ -7569,3 +7569,13 @@ Build: `cargo check --workspace` passed; `cargo clippy --workspace -- -D warning
 | Cursor | 0 | 0 | No attributed activity in this review range. |
 
 Build: `cargo check --workspace` passed; `python3 -m unittest automatic-test.tests.test_deploy` passed (155 tests). `cargo nextest run --workspace` was still in the fresh `cargo test --no-run` build at review cutover, and a concurrent `cargo clippy --workspace -- -D warnings` invocation remained blocked waiting on the build-directory lock.
+
+### QA Review — 2026-05-09 16:51 — b19988d5..562e9ecf
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 3 | Claude authored the substantive changes in `agent/specter/`, `teamserver/`, and `automatic-test/`, plus the claim/lite-QA bookkeeping around them. I filed `red-cell-c2-4nmbg` because `administrators_group_members()` hardcodes the English local group name `Administrators`, which breaks `is_admin` detection on localized Windows installs. I filed `red-cell-c2-opom3` because the new Windows-only Specter tests in `network.rs` assert host- and locale-specific facts (`ADMIN$`, English group names, guaranteed admin membership) that are not stable unit-test invariants. I filed `red-cell-c2-49ils` after `cargo nextest run --workspace` failed at `teamserver/src/dispatch/tests/process/job.rs::handle_job_died_broadcasts_nothing`; the `CommandJob::Died` callback contract changed to include a `job_id` and broadcast an info event, but the older process-dispatch test still sends the legacy payload and still expects silence. |
+| Codex | 0 | 0 | One beads-only maintenance commit (`9fe80f06`) in range; no task-closing commit and no new findings attributed. |
+| Cursor | 0 | 0 | No attributed activity in this review range. |
+
+Build: `cargo check --workspace` passed in 1m13s; `cargo nextest run --workspace` failed after 4999/6274 tests at `dispatch::tests::process::job::handle_job_died_broadcasts_nothing`; `cargo clippy --workspace -- -D warnings` passed in 35s; `cargo check -p specter --target x86_64-pc-windows-gnu` passed in 0.43s.

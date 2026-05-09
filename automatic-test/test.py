@@ -303,6 +303,20 @@ def discover_scenarios() -> dict[str, Path]:
     return scenarios
 
 
+def _scenario_windows_required(path: Path) -> bool:
+    """Return the scenario's ``WINDOWS_REQUIRED`` attribute (default ``False``).
+
+    Loads only the module-level attributes — does not call ``run()``.
+    """
+    spec = importlib.util.spec_from_file_location(path.stem, path)
+    mod = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(mod)
+    except Exception:
+        return False
+    return bool(getattr(mod, "WINDOWS_REQUIRED", False))
+
+
 # ── Runner ───────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -1060,9 +1074,9 @@ def main():
     # Set to True when WFP pool exhaustion survives mpssvc restart — requires VM reboot.
     _win_wfp_exhausted = False
     for sid, path in selected:
-        if _win_wfp_exhausted:
+        if _win_wfp_exhausted and _scenario_windows_required(path):
             print(f"\n{'─' * 60}")
-            print(f"  Scenario {sid}: [SKIPPED — WFP pool exhausted, VM reboot required]")
+            print(f"  Scenario {sid}: [SKIPPED — WFP pool exhausted, Windows VM reboot required]")
             print(f"{'─' * 60}")
             skipped += 1
             continue

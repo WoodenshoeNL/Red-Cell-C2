@@ -34,6 +34,7 @@ Locale: section headers are expected in English (``whoami /all``, ``klist``).
 """
 
 DESCRIPTION = "Kerberos token ops"
+WINDOWS_REQUIRED = True
 
 import uuid
 

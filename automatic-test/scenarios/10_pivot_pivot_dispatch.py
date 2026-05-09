@@ -40,6 +40,7 @@ raising an exception, so the overall test suite still passes.
 """
 
 DESCRIPTION = "Pivot chain dispatch"
+WINDOWS_REQUIRED = True
 
 import uuid
 

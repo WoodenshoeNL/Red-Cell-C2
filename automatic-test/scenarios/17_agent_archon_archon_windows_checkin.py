@@ -29,6 +29,7 @@ Steps:
 """
 
 DESCRIPTION = "Archon agent Windows checkin (Makefile build + Archon extensions)"
+WINDOWS_REQUIRED = True
 
 import uuid
 

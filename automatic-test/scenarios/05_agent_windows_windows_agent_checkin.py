@@ -29,6 +29,7 @@ Steps:
 """
 
 DESCRIPTION = "Windows agent checkin (Demon + Archon + Specter)"
+WINDOWS_REQUIRED = True
 
 import uuid
 

@@ -34,6 +34,7 @@ Why this matters:
 from __future__ import annotations
 
 DESCRIPTION = "Cross-agent interoperability: session isolation between Demon (Windows) and Phantom (Linux)"
+WINDOWS_REQUIRED = True
 
 import os
 import tempfile

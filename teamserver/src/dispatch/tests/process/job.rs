@@ -310,7 +310,7 @@ async fn handle_job_killremove_success_and_failure_broadcasts_correct_messages()
 }
 
 #[tokio::test]
-async fn handle_job_died_broadcasts_nothing() -> Result<(), Box<dyn std::error::Error>> {
+async fn handle_job_died_broadcasts_info_event() -> Result<(), Box<dyn std::error::Error>> {
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
@@ -321,10 +321,17 @@ async fn handle_job_died_broadcasts_nothing() -> Result<(), Box<dyn std::error::
 
     let mut payload = Vec::new();
     add_u32(&mut payload, u32::from(DemonJobCommand::Died));
+    add_u32(&mut payload, 42); // job_id
     dispatcher.dispatch(0xCAFE_BABE, u32::from(DemonCommand::CommandJob), 46, &payload).await?;
 
-    let result = timeout(Duration::from_millis(50), receiver.recv()).await;
-    assert!(result.is_err(), "Died subcommand should not broadcast any event");
+    let result = timeout(Duration::from_millis(200), receiver.recv()).await;
+    let event = result.expect("Died subcommand must broadcast an info event").ok_or("channel closed")?;
+    let OperatorMessage::AgentResponse(message) = event else {
+        panic!("expected AgentResponse, got {event:?}");
+    };
+    assert_eq!(message.info.extra.get("Type"), Some(&Value::String("Info".to_owned())));
+    let msg_text = message.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(msg_text.contains("42"), "broadcast message must contain job_id 42, got {msg_text:?}");
     Ok(())
 }
 

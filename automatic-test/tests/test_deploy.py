@@ -1673,6 +1673,48 @@ class TestWfpPreflightCleanup(unittest.TestCase):
             f"should warn about restart failure; got: {printed}",
         )
 
+    @patch("builtins.print")
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_restart_exception_reports_failure_not_success(
+        self, mock_ssh: object, mock_print: object,
+    ) -> None:
+        """Exception raised during mpssvc restart must print failure and return original parsed_after.
+
+        Exercises the ``except Exception`` branch (~line 1098 of deploy.py) that fires when
+        ``_run_ssh_cli_with_retry`` raises (e.g. DeployError after exhausted retries or
+        subprocess.TimeoutExpired) rather than returning a CompletedProcess.  The sweep
+        call succeeds with wfp_after above ``restart_threshold``, triggering the restart
+        path; the restart call then raises.
+        """
+        sweep_result = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=(
+                "WFP_BEFORE:rc=3,agent=2,npip=1,wfp=900,twait=12\n"
+                "WFP_AFTER:rc=0,agent=0,npip=0,wfp=900,twait=8\n"
+            ),
+            stderr="",
+        )
+        mock_ssh.side_effect = [sweep_result, Exception("connection timed out")]
+        t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
+        result = wfp_preflight_cleanup(
+            t, log_prefix="  [tag]", timeout=100, restart_threshold=800
+        )
+        # Must return the original sweep's parsed_after — restart raised but sweep data is valid.
+        self.assertIsNotNone(result, "should return original parsed_after, not None")
+        self.assertEqual(result["wfp_after"], 900)
+        printed = [str(c.args[0]) for c in mock_print.call_args_list if c.args]
+        # Must NOT print the spurious success message.
+        self.assertFalse(
+            any("restarted" in p for p in printed),
+            f"should not claim restart succeeded; got: {printed}",
+        )
+        # Must print a failure message mentioning 'restart failed'.
+        self.assertTrue(
+            any("restart failed" in p for p in printed),
+            f"should report restart failure; got: {printed}",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

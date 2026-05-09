@@ -232,6 +232,8 @@ def run(ctx):
     """
     if ctx.windows is None:
         raise ScenarioSkipped("ctx.windows is None — no Windows target configured")
+    if ctx.windows_degraded:
+        raise ScenarioSkipped("windows_degraded — WFP pool critically exhausted; VM reboot required")
     from lib.deploy import DeployError, WFP_RESTART_THRESHOLD, preflight_ssh, wfp_preflight_cleanup
     try:
         preflight_ssh(ctx.windows)

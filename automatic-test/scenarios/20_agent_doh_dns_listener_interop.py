@@ -270,6 +270,9 @@ def _maybe_specter_doh_agent_pass(
     if ctx.windows is None:
         print("  [specter] SKIPPED — ctx.windows is None (no Windows target)")
         return
+    if ctx.windows_degraded:
+        print("  [specter] SKIPPED — WFP pool critically exhausted; VM reboot required (windows_degraded)")
+        return
 
     co = int(ctx.timeouts.command_output)
 
@@ -408,7 +411,7 @@ def run(ctx):
             raise ScenarioSkipped(f"cannot inject /etc/hosts entry: {exc}") from exc
         preflight_dns(ctx.linux, dns_domain, teamserver_ip)
 
-    if ctx.windows is not None:
+    if ctx.windows is not None and not ctx.windows_degraded:
         try:
             preflight_ssh(ctx.windows)
         except DeployError as exc:
@@ -420,6 +423,8 @@ def run(ctx):
                 raise ScenarioSkipped(f"[windows] cannot inject hosts entry: {exc}") from exc
             preflight_dns(ctx.windows, dns_domain, teamserver_ip)
             print(f"  [preflight] Windows hosts entry for {dns_domain!r} → {teamserver_ip} verified")
+    elif ctx.windows is not None:
+        print("  [preflight] Windows hosts inject SKIPPED — WFP pool critically exhausted (windows_degraded)")
 
     listener_name = f"test-doh-dns-{_short_id()}"
     scenario13 = _load_protocol_probe_module()

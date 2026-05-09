@@ -106,6 +106,8 @@ def run(ctx) -> None:
     """
     if ctx.windows is None:
         raise ScenarioSkipped("ctx.windows is None — no Windows target configured")
+    if ctx.windows_degraded:
+        raise ScenarioSkipped("windows_degraded — WFP pool critically exhausted; VM reboot required")
     available_agents = set(ctx.env.get("agents", {}).get("available", ["demon"]))
     if "archon" not in available_agents:
         raise ScenarioSkipped("'archon' not listed in agents.available")

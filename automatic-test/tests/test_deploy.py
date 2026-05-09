@@ -1595,6 +1595,40 @@ class TestWfpPreflightCleanup(unittest.TestCase):
         printed = [str(c.args[0]) for c in mock_print.call_args_list if c.args]
         self.assertTrue(any("remote sweep failed" in p for p in printed), printed)
 
+    @patch("builtins.print")
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_returns_parsed_wfp_after_on_success(
+        self, mock_ssh: object, mock_print: object,
+    ) -> None:
+        """Successful sweep must return dict with wfp_after and twait_after parsed from WFP_AFTER:."""
+        mock_ssh.return_value = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="WFP_BEFORE:rc=3,agent=2,npip=1,wfp=847,twait=12\nWFP_AFTER:rc=0,agent=0,npip=0,wfp=831,twait=8\n",
+            stderr="",
+        )
+        t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
+        result = wfp_preflight_cleanup(t, log_prefix="  [tag]", timeout=100)
+        self.assertIsNotNone(result, "should return dict, not None, on success")
+        self.assertEqual(result["wfp_after"], 831)
+        self.assertEqual(result["twait_after"], 8)
+
+    @patch("builtins.print")
+    @patch("lib.deploy._run_ssh_cli_with_retry", side_effect=Exception("refused"))
+    def test_returns_none_on_ssh_failure(
+        self, mock_ssh: object, mock_print: object,
+    ) -> None:
+        """SSH failures must return None — callers can check for None rather than catching."""
+        t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
+        result = wfp_preflight_cleanup(t, log_prefix="  [tag]", timeout=100)
+        self.assertIsNone(result)
+
+    def test_returns_none_for_nonwindows_target(self) -> None:
+        """Non-Windows targets must return None immediately without doing any network I/O."""
+        t = _make_target(work_dir="/tmp/rc-test", platform="linux", key=self.key_path)
+        result = wfp_preflight_cleanup(t)
+        self.assertIsNone(result)
+
 
 if __name__ == "__main__":
     unittest.main()

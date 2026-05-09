@@ -272,7 +272,7 @@ def run(ctx):
     Raises AssertionError with a descriptive message on any failure.
     Skips silently when no suitable target is configured.
     """
-    from lib.deploy import DeployError, preflight_ssh
+    from lib.deploy import DeployError, preflight_ssh, wfp_preflight_cleanup
     from lib.cli import listener_create, listener_delete, listener_start, listener_stop
     from lib.listeners import http_listener_kwargs
     from lib.payload import MatrixCell, build_parallel
@@ -336,6 +336,9 @@ def run(ctx):
                 "(code reverted in 06346e50; screenshot support lives in Archon)"
             )
 
+            _cb_host_sc08 = ctx.env.get("server", {}).get("callback_host")
+            _c2_hosts_sc08 = [_cb_host_sc08] if _cb_host_sc08 else None
+
             # ── Archon pass ──────────────────────────────────────────────────
             print("\n  === Agent pass: archon (Windows) ===")
             if not has_archon:
@@ -346,6 +349,14 @@ def run(ctx):
                     agent_type="archon", fmt="exe", is_windows=True,
                     listener_name=archon_listener_name,
                     pre_built_payload=payloads["archon"],
+                )
+
+            if has_specter and has_archon:
+                print("\n  [between-passes] WFP cleanup (archon → specter)")
+                wfp_preflight_cleanup(
+                    ctx.windows,
+                    log_prefix="  [between-passes][wfp]",
+                    c2_hosts=_c2_hosts_sc08,
                 )
 
             # ── Specter pass ─────────────────────────────────────────────────

@@ -363,7 +363,7 @@ def run(ctx):
     ran_any = False
     skipped_reasons: list[str] = []
     available_agents = set(ctx.env.get("agents", {}).get("available", ["demon"]))
-    from lib.deploy import DeployError, preflight_ssh
+    from lib.deploy import DeployError, preflight_ssh, wfp_preflight_cleanup
     from lib.cli import listener_create, listener_delete, listener_start, listener_stop
     from lib.listeners import http_listener_kwargs
     from lib.payload import MatrixCell, build_parallel
@@ -480,10 +480,21 @@ def run(ctx):
         # ── Windows passes ───────────────────────────────────────────────────
         if windows_ok:
             ran_any = True
+            _cb_host = ctx.env.get("server", {}).get("callback_host")
+            _c2_hosts_bp = [_cb_host] if _cb_host else None
+
             print("\n  === Agent pass: demon (Windows) ===")
             _run_for_agent_windows(ctx, agent_type="demon", fmt="exe",
                                    listener_name=demon_listener_name,
                                    pre_built_payload=payloads["demon"])
+
+            if has_archon or has_specter:
+                print("\n  [between-passes] WFP cleanup (demon → archon/specter)")
+                wfp_preflight_cleanup(
+                    ctx.windows,
+                    log_prefix="  [between-passes][wfp]",
+                    c2_hosts=_c2_hosts_bp,
+                )
 
             print("\n  === Agent pass: archon (Windows) ===")
             if not has_archon:
@@ -492,6 +503,14 @@ def run(ctx):
                 _run_for_agent_windows(ctx, agent_type="archon", fmt="exe",
                                        listener_name=archon_listener_name,
                                        pre_built_payload=payloads["archon"])
+
+            if has_specter and has_archon:
+                print("\n  [between-passes] WFP cleanup (archon → specter)")
+                wfp_preflight_cleanup(
+                    ctx.windows,
+                    log_prefix="  [between-passes][wfp]",
+                    c2_hosts=_c2_hosts_bp,
+                )
 
             print("\n  === Agent pass: specter (Windows) ===")
             if not has_specter:

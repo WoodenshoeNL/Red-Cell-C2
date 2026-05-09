@@ -926,8 +926,14 @@ def wfp_preflight_cleanup(
     log_prefix: str = "  [wfp-preflight]",
     timeout: int | None = None,
     c2_hosts: list[str] | None = None,
-) -> None:
+) -> dict[str, int] | None:
     """Sweep leftover WFP firewall rules and Defender NP exclusions.
+
+    Returns a dict with ``wfp_after`` and ``twait_after`` parsed from the
+    ``WFP_AFTER:`` diagnostic line, or ``None`` if the sweep failed or the
+    target is not Windows.  Callers can use ``wfp_after`` to detect when
+    Defender WFP callout objects are accumulating beyond what rule sweeps can
+    remove (a precursor to WSAENOBUFS / os error 10055).
 
     Idempotent and safe to call multiple times (e.g. at suite start and between
     scenarios); errors are swallowed so a failed sweep never aborts the caller.
@@ -953,7 +959,7 @@ def wfp_preflight_cleanup(
                    Pass ``[callback_host]`` from env.toml.
     """
     if target.platform != "windows":
-        return
+        return None
 
     if timeout is None:
         timeout = max(90, _DEFAULT_REMOTE_CMD_SECS)
@@ -1028,7 +1034,7 @@ def wfp_preflight_cleanup(
         result = _run_ssh_cli_with_retry(cmd, target.host, timeout=timeout, tool="ssh")
     except Exception as exc:
         print(f"{log_prefix} skipped ({target.host}): {exc}")
-        return
+        return None
 
     if result.returncode != 0:
         err = (result.stderr or "").strip()
@@ -1037,8 +1043,9 @@ def wfp_preflight_cleanup(
             f"{log_prefix} remote sweep failed ({target.host}): "
             f"exit {result.returncode} stderr_tail={tail!r}"
         )
-        return
+        return None
 
+    parsed_after: dict[str, int] | None = None
     for line in (result.stdout or "").splitlines():
         stripped = line.strip()
         if not stripped:
@@ -1056,8 +1063,12 @@ def wfp_preflight_cleanup(
                             f"{log_prefix} WARNING: {remaining} leftover harness "
                             f"firewall rule(s) still present after sweep on {target.host}"
                         )
+                    wfp_after = int(parts.get("wfp", -1))
+                    twait_after = int(parts.get("twait", -1))
+                    parsed_after = {"wfp_after": wfp_after, "twait_after": twait_after}
                 except (ValueError, KeyError):
                     pass
+    return parsed_after
 
 
 def cleanup_windows_harness_work_dir(

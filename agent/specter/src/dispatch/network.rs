@@ -552,6 +552,7 @@ fn platform_shares() -> Vec<NetShare> {
                 // SAFETY: buf was allocated by NetShareEnum.
                 unsafe { NetApiBufferFree(buf as *mut _) };
             }
+            shares.clear();
             level = 1;
             resume_handle = 0;
             continue;

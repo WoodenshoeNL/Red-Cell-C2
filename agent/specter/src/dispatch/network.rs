@@ -441,9 +441,8 @@ fn platform_logged_on_users() -> Vec<String> {
 #[allow(unsafe_code)]
 fn platform_sessions() -> Vec<NetSession> {
     use windows_sys::Win32::Foundation::ERROR_MORE_DATA;
-    use windows_sys::Win32::NetworkManagement::NetManagement::{
-        NetApiBufferFree, NetSessionEnum, SESSION_INFO_10,
-    };
+    use windows_sys::Win32::NetworkManagement::NetManagement::NetApiBufferFree;
+    use windows_sys::Win32::Storage::FileSystem::{NetSessionEnum, SESSION_INFO_10};
     let mut sessions: Vec<NetSession> = Vec::new();
     let mut resume_handle: u32 = 0;
     loop {
@@ -616,7 +615,7 @@ fn platform_groups() -> Vec<NetGroup> {
         LOCALGROUP_INFO_1, NetApiBufferFree, NetLocalGroupEnum,
     };
     let mut groups: Vec<NetGroup> = Vec::new();
-    let mut resume_handle: u32 = 0;
+    let mut resume_handle: usize = 0;
     loop {
         let mut buf: *mut u8 = std::ptr::null_mut();
         let mut entries_read: u32 = 0;

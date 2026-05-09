@@ -401,13 +401,13 @@ class TestPreflightSsh(unittest.TestCase):
         SSH ``-o ConnectTimeout=…`` flag so operators on fast networks can reduce
         the startup check_ssh_targets() cost.
         """
-        configure_deploy_timeouts(ssh_connect_secs=5.0, scp_transfer_secs=60.0, default_remote_cmd_secs=30.0)
         self.addCleanup(
             configure_deploy_timeouts,
             ssh_connect_secs=10.0,
             scp_transfer_secs=60.0,
             default_remote_cmd_secs=30.0,
         )
+        configure_deploy_timeouts(ssh_connect_secs=5.0, scp_transfer_secs=60.0, default_remote_cmd_secs=30.0)
         with patch("subprocess.run", return_value=self._make_completed(0)) as mock_run:
             preflight_ssh(self.target)
         call_args = mock_run.call_args[0][0]

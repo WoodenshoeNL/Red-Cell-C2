@@ -1952,10 +1952,20 @@ Start directly with understanding the task and implementing it.
         # Determine cause before the shared cap-out block so both branches can use it.
         cap_out_cause = "token_limit" if token_limit_hit else "turn_limit"
         if final_status == "in_progress" and not cap_out:
-            log.log(
-                f"Task {next_id} still in_progress after agent ran"
-                f" — will resume on next iteration"
-            )
+            if max_iters > 0 and iteration >= max_iters:
+                # This was the last iteration — the loop is about to exit, so "resume on
+                # next iteration" will never happen.  Release the bead now so the next
+                # loop invocation can pick it up rather than skipping it as in_progress.
+                log.log(
+                    f"Task {next_id} still in_progress on final iteration"
+                    f" — releasing to open so next run can claim it"
+                )
+                release_cap_out_bead(next_id, "", agent_id, log, cause="final_iteration")
+            else:
+                log.log(
+                    f"Task {next_id} still in_progress after agent ran"
+                    f" — will resume on next iteration"
+                )
         elif final_status not in ("in_progress", "open") and not cap_out:
             # Bead was closed or moved to a terminal state — reset any cap-out streak.
             cap_out_streak.pop(next_id, None)

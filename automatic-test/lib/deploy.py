@@ -1096,6 +1096,9 @@ def wfp_preflight_cleanup(
             print(f"{log_prefix} mpssvc restarted on {target.host}; re-running WFP sweep")
         except Exception as exc:
             print(f"{log_prefix} mpssvc restart failed ({target.host}): {exc}")
+            # Restart failed — WFP state unchanged; skip the redundant sweep and
+            # return the original parsed_after so the caller still has valid data.
+            return parsed_after
         # Re-run sweep once without a threshold to avoid recursion.
         retry = wfp_preflight_cleanup(
             target,
@@ -1109,7 +1112,9 @@ def wfp_preflight_cleanup(
                 f"{log_prefix} post-mpssvc-restart wfp_after={retry.get('wfp_after', -1)}"
                 f" twait_after={retry.get('twait_after', -1)}"
             )
-        return retry
+        # Fall back to the pre-restart data if the retry sweep returned nothing
+        # (e.g. SSH re-sweep timed out or WFP_AFTER output was missing).
+        return retry if retry is not None else parsed_after
 
     return parsed_after
 

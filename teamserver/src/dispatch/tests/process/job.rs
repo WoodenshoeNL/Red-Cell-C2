@@ -325,7 +325,8 @@ async fn handle_job_died_broadcasts_info_event() -> Result<(), Box<dyn std::erro
     dispatcher.dispatch(0xCAFE_BABE, u32::from(DemonCommand::CommandJob), 46, &payload).await?;
 
     let result = timeout(Duration::from_millis(200), receiver.recv()).await;
-    let event = result.expect("Died subcommand must broadcast an info event").ok_or("channel closed")?;
+    let event =
+        result.expect("Died subcommand must broadcast an info event").ok_or("channel closed")?;
     let OperatorMessage::AgentResponse(message) = event else {
         panic!("expected AgentResponse, got {event:?}");
     };

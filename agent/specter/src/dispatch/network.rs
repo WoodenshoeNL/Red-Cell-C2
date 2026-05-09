@@ -672,7 +672,73 @@ fn platform_groups() -> Vec<NetGroup> {
     groups
 }
 
+/// Collect the lowercase usernames of every member of the local Administrators group.
+///
+/// Uses `NetLocalGroupGetMembers` at level 3, which returns `DOMAIN\username` strings
+/// without requiring the `Win32_Security` feature.  The domain prefix is stripped so
+/// the result can be compared against the plain account names returned by `NetUserEnum`.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn administrators_group_members() -> std::collections::HashSet<String> {
+    use windows_sys::Win32::Foundation::ERROR_MORE_DATA;
+    use windows_sys::Win32::NetworkManagement::NetManagement::{
+        LOCALGROUP_MEMBERS_INFO_3, NetApiBufferFree, NetLocalGroupGetMembers,
+    };
+    let group_w: Vec<u16> = "Administrators\0".encode_utf16().collect();
+    let mut members: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut resume_handle: usize = 0;
+    loop {
+        let mut buf: *mut u8 = std::ptr::null_mut();
+        let mut entries_read: u32 = 0;
+        let mut total_entries: u32 = 0;
+        // SAFETY: all pointers valid; buf freed with NetApiBufferFree after use.
+        let status = unsafe {
+            NetLocalGroupGetMembers(
+                std::ptr::null(),
+                group_w.as_ptr(),
+                3,
+                &mut buf,
+                u32::MAX,
+                &mut entries_read,
+                &mut total_entries,
+                &mut resume_handle,
+            )
+        };
+        if !buf.is_null() && entries_read > 0 {
+            // SAFETY: buf points to `entries_read` LOCALGROUP_MEMBERS_INFO_3 structs.
+            let entries = unsafe {
+                std::slice::from_raw_parts(
+                    buf as *const LOCALGROUP_MEMBERS_INFO_3,
+                    entries_read as usize,
+                )
+            };
+            for entry in entries {
+                // SAFETY: lgrmi3_domainandname is a valid null-terminated UTF-16 string.
+                let full = unsafe { wstr_to_string(entry.lgrmi3_domainandname as *const u16) };
+                // Strip the optional "DOMAIN\" prefix; keep only the account name.
+                let name = full.rsplit('\\').next().unwrap_or(&full).to_ascii_lowercase();
+                if !name.is_empty() {
+                    members.insert(name);
+                }
+            }
+        }
+        if !buf.is_null() {
+            // SAFETY: buf was allocated by NetLocalGroupGetMembers.
+            unsafe { NetApiBufferFree(buf as *mut _) };
+        }
+        if status != ERROR_MORE_DATA {
+            break;
+        }
+    }
+    members
+}
+
 /// Enumerate local users via `NetUserEnum`.
+///
+/// `is_admin` is set when either:
+/// - the account has `USER_PRIV_ADMIN` (built-in Administrator, SID -500), or
+/// - the account name appears in the local Administrators group membership list
+///   (standard users elevated into the group retain `USER_PRIV_USER`).
 #[cfg(windows)]
 #[allow(unsafe_code)]
 fn platform_users() -> Vec<NetUser> {
@@ -680,6 +746,7 @@ fn platform_users() -> Vec<NetUser> {
     use windows_sys::Win32::NetworkManagement::NetManagement::{
         FILTER_NORMAL_ACCOUNT, NetApiBufferFree, NetUserEnum, USER_INFO_1, USER_PRIV_ADMIN,
     };
+    let admin_members = administrators_group_members();
     let mut users: Vec<NetUser> = Vec::new();
     let mut resume_handle: u32 = 0;
     loop {
@@ -706,9 +773,11 @@ fn platform_users() -> Vec<NetUser> {
             };
             for entry in entries {
                 // SAFETY: usri1_name is a valid null-terminated UTF-16 string.
+                let name = unsafe { wstr_to_string(entry.usri1_name as *const u16) };
+                let in_admin_group = admin_members.contains(&name.to_ascii_lowercase());
                 users.push(NetUser {
-                    name: unsafe { wstr_to_string(entry.usri1_name as *const u16) },
-                    is_admin: entry.usri1_priv == USER_PRIV_ADMIN,
+                    is_admin: entry.usri1_priv == USER_PRIV_ADMIN || in_admin_group,
+                    name,
                 });
             }
         }
@@ -1045,17 +1114,51 @@ mod tests {
         assert!(!users.is_empty(), "expected at least one local user account from NetUserEnum");
     }
 
-    /// At least one account must be flagged as admin (e.g. the built-in
-    /// `Administrator` account, even if disabled, has `USER_PRIV_ADMIN`).
+    /// At least one account must be flagged as admin.  The Administrators group
+    /// always has at least one member (the built-in Administrator account), so
+    /// `administrators_group_members` guarantees a non-empty set and therefore
+    /// at least one user with `is_admin = true`.
     #[cfg(windows)]
     #[test]
     fn platform_users_includes_at_least_one_admin_account() {
         let users = platform_users();
         assert!(
             users.iter().any(|u| u.is_admin),
-            "at least one user with is_admin=true expected (e.g. Administrator); got: {:?}",
+            "at least one user with is_admin=true expected; got: {:?}",
             users.iter().map(|u| (&u.name, u.is_admin)).collect::<Vec<_>>()
         );
+    }
+
+    /// Every username returned by `administrators_group_members` that also
+    /// appears in `platform_users` must have `is_admin = true`.
+    #[cfg(windows)]
+    #[test]
+    fn platform_users_marks_administrators_group_members_as_admin() {
+        let admin_names = administrators_group_members();
+        assert!(
+            !admin_names.is_empty(),
+            "Administrators group must have at least one member on any Windows machine"
+        );
+        let users = platform_users();
+        for u in &users {
+            if admin_names.contains(&u.name.to_ascii_lowercase()) {
+                assert!(
+                    u.is_admin,
+                    "user {:?} is in Administrators group but is_admin=false",
+                    u.name
+                );
+            }
+        }
+    }
+
+    /// `administrators_group_members` must return non-empty, NUL-free names.
+    #[cfg(windows)]
+    #[test]
+    fn administrators_group_members_names_are_non_empty_and_nul_free() {
+        for name in administrators_group_members() {
+            assert!(!name.is_empty(), "admin member name must not be empty");
+            assert!(!name.contains('\0'), "admin member name must not contain NUL: {name:?}");
+        }
     }
 
     /// All user name fields must be non-empty and free of embedded NUL chars.

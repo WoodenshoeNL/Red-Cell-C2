@@ -283,8 +283,10 @@ def run(ctx):
 
     # Prefer Windows — it has an interactive display session by default.
     # Skip the Windows branch if WFP pool is exhausted; fall through to Linux.
+    windows_degraded_skipped = False
     if ctx.windows is not None and ctx.windows_degraded:
         print("  [windows] SKIPPED — WFP pool critically exhausted; VM reboot required (windows_degraded)")
+        windows_degraded_skipped = True
 
     if ctx.windows is not None and not ctx.windows_degraded:
         try:
@@ -398,6 +400,10 @@ def run(ctx):
     if ctx.linux is not None:
         display = getattr(ctx.linux, "display", None) or ctx.env.get("linux", {}).get("display")
         if not display:
+            if windows_degraded_skipped:
+                raise ScenarioSkipped(
+                    "windows_degraded — WFP pool critically exhausted; VM reboot required"
+                )
             raise ScenarioSkipped(
                 "no suitable screenshot target configured — "
                 "need Windows target or Linux with DISPLAY/Xvfb"
@@ -446,6 +452,10 @@ def run(ctx):
                 pass
         return
 
+    if windows_degraded_skipped:
+        raise ScenarioSkipped(
+            "windows_degraded — WFP pool critically exhausted; VM reboot required"
+        )
     raise ScenarioSkipped(
         "no suitable screenshot target configured — "
         "need Windows target or Linux with DISPLAY/Xvfb"

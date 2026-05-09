@@ -56,18 +56,23 @@ class TestWindowsDegradedFallsThrough(unittest.TestCase):
         return ctx
 
     def test_windows_degraded_no_linux_raises_scenario_skipped(self) -> None:
-        """WFP-degraded Windows + no Linux → ScenarioSkipped (no suitable target)."""
+        """WFP-degraded Windows + no Linux → ScenarioSkipped with WFP-exhaustion message."""
         ctx = self._make_ctx(windows=True, linux=False, windows_degraded=True)
-        with self.assertRaises(ScenarioSkipped):
+        with self.assertRaises(ScenarioSkipped) as cm:
             _mod.run(ctx)
+        msg = str(cm.exception)
+        self.assertIn("windows_degraded", msg)
+        self.assertIn("WFP", msg)
 
     def test_windows_degraded_linux_no_display_raises_scenario_skipped(self) -> None:
-        """WFP-degraded Windows + Linux without DISPLAY → ScenarioSkipped."""
+        """WFP-degraded Windows + Linux without DISPLAY → ScenarioSkipped with WFP-exhaustion message."""
         ctx = self._make_ctx(windows=True, linux=True, windows_degraded=True, env={})
         ctx.linux.display = None
         with self.assertRaises(ScenarioSkipped) as cm:
             _mod.run(ctx)
-        self.assertIn("DISPLAY", str(cm.exception))
+        msg = str(cm.exception)
+        self.assertIn("windows_degraded", msg)
+        self.assertIn("WFP", msg)
 
     def test_windows_not_degraded_uses_windows_branch(self) -> None:
         """windows_degraded=False must enter the Windows branch (preflight_ssh called)."""

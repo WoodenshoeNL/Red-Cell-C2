@@ -108,6 +108,7 @@ def _run_for_agent(
     *,
     listener_name: str,
     pre_built_payload: bytes,
+    display: str | None = None,
 ) -> None:
     """Run the full screenshot-capture suite for one agent type.
 
@@ -119,6 +120,12 @@ def _run_for_agent(
         is_windows:        True when running against the Windows target.
         listener_name:     Name of the pre-created, pre-started listener.
         pre_built_payload: Raw payload bytes from :func:`~lib.payload.build_parallel`.
+        display:           X11 DISPLAY value to inject into the agent launch
+                           environment on Linux targets (e.g. ``":99"``).  When
+                           set, ``DISPLAY=<value>`` is prepended to the ``nohup``
+                           exec command so the agent inherits the display even in
+                           SSH exec sessions where DISPLAY is not propagated.
+                           Ignored on Windows targets.
 
     Raises:
         AssertionError on test failure.
@@ -150,6 +157,7 @@ def _run_for_agent(
     wfp_cleanup = None
     try:
         # ── Deploy, exec, wait for checkin ───────────────────────────────────
+        exec_env = {"DISPLAY": display} if (not is_windows and display) else None
         agent = deploy_and_checkin(
             ctx, cli, target,
             agent_type=agent_type, fmt=fmt,
@@ -157,6 +165,7 @@ def _run_for_agent(
             label=agent_type,
             pre_built_payload=pre_built_payload,
             defer_wfp_cleanup=True,
+            exec_env=exec_env,
         )
         agent_id = agent["id"]
         wfp_cleanup = agent.pop("_wfp_cleanup", None)
@@ -439,6 +448,7 @@ def run(ctx):
                 agent_type="phantom", fmt="exe", is_windows=False,
                 listener_name=listener_name,
                 pre_built_payload=raws[0],
+                display=display,
             )
         finally:
             print(f"\n  [shared] stopping/deleting listener {listener_name!r}")

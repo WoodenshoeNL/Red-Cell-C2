@@ -868,7 +868,12 @@ def windows_sync_payload_probe(
     )
 
 
-def execute_background(target: TargetConfig, command: str, arguments: str = "") -> None:
+def execute_background(
+    target: TargetConfig,
+    command: str,
+    arguments: str = "",
+    env_vars: dict[str, str] | None = None,
+) -> None:
     """Run a command on the target in the background (fire-and-forget).
 
     On Windows, uses Task Scheduler (``Register-ScheduledTask`` with S4U logon)
@@ -887,6 +892,10 @@ def execute_background(target: TargetConfig, command: str, arguments: str = "") 
                    embed arguments here; use *arguments* instead.
         arguments: Optional arguments forwarded via ``-Argument`` to
                    ``New-ScheduledTaskAction`` (Windows only; ignored on Linux).
+        env_vars:  Optional environment variables to set before the command
+                   (Linux only; ignored on Windows where Task Scheduler
+                   inherits the user session environment).  Keys and values
+                   are shell-quoted before being prepended to the command.
     """
     if target.platform == "windows":
         # Pass exe and args separately so New-ScheduledTaskAction -Execute receives
@@ -896,7 +905,13 @@ def execute_background(target: TargetConfig, command: str, arguments: str = "") 
         bg_cmd = f"powershell -NoProfile -EncodedCommand {enc}"
     else:
         quoted = _quote_posix(command)
-        bg_cmd = f"nohup {quoted} </dev/null >/dev/null 2>&1 &"
+        if env_vars:
+            prefix = " ".join(
+                f"{shlex.quote(k)}={shlex.quote(v)}" for k, v in env_vars.items()
+            )
+            bg_cmd = f"{prefix} nohup {quoted} </dev/null >/dev/null 2>&1 &"
+        else:
+            bg_cmd = f"nohup {quoted} </dev/null >/dev/null 2>&1 &"
     result = _run_ssh_cli_with_retry(
         _ssh_args(target) + [bg_cmd],
         target.host,

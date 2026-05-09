@@ -16,8 +16,8 @@ use super::types::PendingCallback;
 /// Tries several capture methods in order of preference:
 /// 1. `import -window root png:-` (ImageMagick)
 /// 2. `scrot -o -` (scrot)
-/// 3. `gnome-screenshot -f <tmpfile>` (GNOME)
-/// 4. `xwd -root -silent` piped through `convert xwd:- png:-`
+/// 3. `grim -` (Wayland)
+/// 4. `gnome-screenshot -f <tmpfile>` (GNOME)
 ///
 /// On success, sends a [`PendingCallback::Structured`] containing
 /// `[success:u32=1][image_bytes:len-prefixed]`.  On failure, sends
@@ -50,6 +50,24 @@ pub(super) async fn execute_screenshot(
     Ok(())
 }
 
+/// Returns the list of X11 DISPLAY values to try, in priority order.
+///
+/// When the `DISPLAY` environment variable is set, only that value is
+/// returned.  When it is absent or empty (common in SSH exec sessions),
+/// well-known Xvfb socket values are probed instead so the agent can
+/// capture the desktop even without DISPLAY propagation in the launch
+/// environment.
+fn display_candidates() -> Vec<String> {
+    let env_display = std::env::var("DISPLAY").unwrap_or_default();
+    if !env_display.is_empty() {
+        return vec![env_display];
+    }
+    // DISPLAY not set — try well-known Xvfb sockets in priority order.
+    // :99 is the harness default (targets.toml display = ":99"); :0 is
+    // the most common interactive desktop; :1 covers secondary displays.
+    [":0", ":99", ":1"].iter().map(|s| (*s).to_owned()).collect()
+}
+
 /// Attempt to capture a screenshot using available Linux tools.
 ///
 /// Tries methods in priority order:
@@ -59,9 +77,17 @@ pub(super) async fn execute_screenshot(
 /// 4. `grim -` (Wayland)
 /// 5. `gnome-screenshot -f <tmpfile>` (last resort, GNOME Wayland/X11)
 ///
+/// When `DISPLAY` is not set in the environment, each method is tried
+/// against well-known Xvfb display values (`:0`, `:99`, `:1`) before
+/// giving up.  This allows the agent to capture the desktop even when
+/// launched via SSH without DISPLAY propagation.
+///
 /// Returns the raw PNG image bytes on success.
 async fn capture_screenshot() -> Result<Vec<u8>, PhantomError> {
-    // Method 1: native X11 (sync FFI — run in blocking thread to avoid stalling executor)
+    let displays = display_candidates();
+
+    // Method 1: native X11 (sync FFI — run in blocking thread to avoid stalling executor).
+    // capture_x11_native internally iterates the same display candidate list.
     let x11_result = tokio::task::spawn_blocking(capture_x11_native)
         .await
         .unwrap_or_else(|e| Err(PhantomError::Screenshot(format!("spawn_blocking error: {e}"))));
@@ -70,33 +96,43 @@ async fn capture_screenshot() -> Result<Vec<u8>, PhantomError> {
         return Ok(bytes);
     }
 
-    // Method 2: scrot (X11 subprocess)
-    if let Ok(output) = Command::new("scrot")
-        .args(["-o", "-"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-    {
-        if output.status.success() && !output.stdout.is_empty() {
-            tracing::debug!("screenshot captured via scrot");
-            return Ok(output.stdout);
+    // Methods 2-5: subprocess tools.  Each is tried with every candidate
+    // display so a tool that is available but would fail on the wrong
+    // display value still has a chance to succeed.
+    for disp in &displays {
+        // Method 2: scrot (X11 subprocess)
+        if let Ok(output) = Command::new("scrot")
+            .args(["-o", "-"])
+            .env("DISPLAY", disp)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+        {
+            if output.status.success() && !output.stdout.is_empty() {
+                tracing::debug!(x11_display = disp.as_str(), "screenshot captured via scrot");
+                return Ok(output.stdout);
+            }
+        }
+
+        // Method 3: import (ImageMagick, X11 subprocess)
+        if let Ok(output) = Command::new("import")
+            .args(["-window", "root", "png:-"])
+            .env("DISPLAY", disp)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+        {
+            if output.status.success() && !output.stdout.is_empty() {
+                tracing::debug!(
+                    x11_display = disp.as_str(),
+                    "screenshot captured via import (ImageMagick)"
+                );
+                return Ok(output.stdout);
+            }
         }
     }
 
-    // Method 3: import (ImageMagick, X11 subprocess)
-    if let Ok(output) = Command::new("import")
-        .args(["-window", "root", "png:-"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-    {
-        if output.status.success() && !output.stdout.is_empty() {
-            tracing::debug!("screenshot captured via import (ImageMagick)");
-            return Ok(output.stdout);
-        }
-    }
-
-    // Method 4: grim (Wayland native)
+    // Method 4: grim (Wayland native — DISPLAY is irrelevant for Wayland but harmless)
     if let Ok(output) =
         Command::new("grim").arg("-").stdout(Stdio::piped()).stderr(Stdio::null()).output()
     {
@@ -108,18 +144,24 @@ async fn capture_screenshot() -> Result<Vec<u8>, PhantomError> {
 
     // Method 5: gnome-screenshot to a temp file (GNOME, works on both X11 and Wayland)
     let tmp_path = "/tmp/.phantom_screenshot.png";
-    if let Ok(output) = Command::new("gnome-screenshot")
-        .args(["-f", tmp_path])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-    {
-        if output.status.success() {
-            if let Ok(data) = fs::read(tmp_path) {
-                let _ = fs::remove_file(tmp_path);
-                if !data.is_empty() {
-                    tracing::debug!("screenshot captured via gnome-screenshot");
-                    return Ok(data);
+    for disp in &displays {
+        if let Ok(output) = Command::new("gnome-screenshot")
+            .args(["-f", tmp_path])
+            .env("DISPLAY", disp)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+        {
+            if output.status.success() {
+                if let Ok(data) = fs::read(tmp_path) {
+                    let _ = fs::remove_file(tmp_path);
+                    if !data.is_empty() {
+                        tracing::debug!(
+                            x11_display = disp.as_str(),
+                            "screenshot captured via gnome-screenshot"
+                        );
+                        return Ok(data);
+                    }
                 }
             }
         }
@@ -162,48 +204,85 @@ unsafe extern "C" fn x11_error_handler(
 /// on systems without X11 headers or libraries installed.  Returns raw PNG bytes
 /// on success.
 ///
-/// A custom X11 error handler is installed for the duration of the call to
+/// When `DISPLAY` is not set in the environment, well-known Xvfb display sockets
+/// (`:0`, `:99`, `:1`) are probed in order via [`display_candidates`].  This
+/// allows the agent to capture the desktop even when launched via SSH without
+/// `DISPLAY` propagation (the common autotest scenario).
+///
+/// A custom X11 error handler is installed for the duration of each attempt to
 /// prevent the default handler from calling `exit(1)` on protocol errors
 /// (e.g. `BadMatch` when the root window has no backing store).
 ///
 /// # Errors
 /// Returns [`PhantomError::Screenshot`] if the X11 library cannot be loaded,
-/// `XOpenDisplay` fails (no `DISPLAY` set or Wayland-only session), or
-/// `XGetImage` fails.
+/// or if all display candidates fail (`XOpenDisplay` returns NULL or `XGetImage`
+/// fails on every attempt).
 pub(super) fn capture_x11_native() -> Result<Vec<u8>, PhantomError> {
-    use std::mem::MaybeUninit;
-    use std::ptr;
-    use std::sync::atomic::Ordering;
-    use x11_dl::xlib::{self, Xlib, ZPixmap};
+    use x11_dl::xlib::Xlib;
 
-    // Attempt to dynamically load libX11.  Fails gracefully when the library is
-    // absent (e.g. headless server or Wayland-only install without libX11).
     let xlib =
         Xlib::open().map_err(|e| PhantomError::Screenshot(format!("libX11 unavailable: {e}")))?;
 
+    let candidates = display_candidates();
+    let mut last_err =
+        PhantomError::Screenshot("XOpenDisplay failed on all display candidates".to_owned());
+
+    for candidate in &candidates {
+        match try_capture_on_display(&xlib, candidate) {
+            Ok(bytes) => return Ok(bytes),
+            Err(e) => {
+                tracing::debug!(display = candidate.as_str(), error = %e, "X11 capture failed on display");
+                last_err = e;
+            }
+        }
+    }
+
+    Err(last_err)
+}
+
+/// Attempt a single X11 desktop capture on the given display name.
+///
+/// Opens the display, captures the root window as a ZPixmap, converts to PNG,
+/// and closes the display.  The custom error handler is installed for the
+/// duration of the `XGetImage` call to prevent Xlib from calling `exit(1)` on
+/// a `BadMatch` error.
+fn try_capture_on_display(
+    xlib: &x11_dl::xlib::Xlib,
+    display: &str,
+) -> Result<Vec<u8>, PhantomError> {
+    use std::ffi::CString;
+    use std::mem::MaybeUninit;
+    use std::sync::atomic::Ordering;
+    use x11_dl::xlib::ZPixmap;
+
+    let display_cstr = CString::new(display)
+        .map_err(|_| PhantomError::Screenshot(format!("invalid display string: {display:?}")))?;
+
     // SAFETY: all X11 objects are cleaned up before returning, and no pointers
-    // escape this function.
+    // escape this function.  display_cstr lives for the entire unsafe block.
     unsafe {
-        let display = (xlib.XOpenDisplay)(ptr::null());
-        if display.is_null() {
-            return Err(PhantomError::Screenshot(
-                "XOpenDisplay failed — DISPLAY not set or no X server running".to_owned(),
-            ));
+        let disp = (xlib.XOpenDisplay)(display_cstr.as_ptr());
+        if disp.is_null() {
+            return Err(PhantomError::Screenshot(format!(
+                "XOpenDisplay failed for display {display:?} — no X server on that socket"
+            )));
         }
 
-        let screen = (xlib.XDefaultScreen)(display);
-        let root = (xlib.XRootWindow)(display, screen);
+        let screen = (xlib.XDefaultScreen)(disp);
+        let root = (xlib.XRootWindow)(disp, screen);
 
         // Query root window geometry so we know the capture dimensions.
-        let mut attrs = MaybeUninit::<xlib::XWindowAttributes>::uninit();
-        (xlib.XGetWindowAttributes)(display, root, attrs.as_mut_ptr());
+        let mut attrs = MaybeUninit::<x11_dl::xlib::XWindowAttributes>::uninit();
+        (xlib.XGetWindowAttributes)(disp, root, attrs.as_mut_ptr());
         let attrs = attrs.assume_init();
         let width = attrs.width as u32;
         let height = attrs.height as u32;
 
         if width == 0 || height == 0 {
-            (xlib.XCloseDisplay)(display);
-            return Err(PhantomError::Screenshot("root window has zero dimensions".to_owned()));
+            (xlib.XCloseDisplay)(disp);
+            return Err(PhantomError::Screenshot(format!(
+                "root window on {display:?} has zero dimensions"
+            )));
         }
 
         // Install our error handler so that protocol errors (e.g. BadMatch when
@@ -214,21 +293,21 @@ pub(super) fn capture_x11_native() -> Result<Vec<u8>, PhantomError> {
 
         // Capture the full root window as a ZPixmap (raw pixel array, no padding).
         // AllPlanes = !0 selects all bit planes.
-        let image = (xlib.XGetImage)(display, root, 0, 0, width, height, !0u64, ZPixmap);
+        let image = (xlib.XGetImage)(disp, root, 0, 0, width, height, !0u64, ZPixmap);
 
         // Flush pending requests so the server delivers any asynchronous error
         // for the XGetImage call before we read the error flag.
-        (xlib.XSync)(display, 0);
+        (xlib.XSync)(disp, 0);
 
         // Restore the previous error handler.
         let _ = (xlib.XSetErrorHandler)(prev_handler);
 
         let error_occurred = X11_ERROR_OCCURRED.load(Ordering::Acquire);
         if image.is_null() || error_occurred {
-            (xlib.XCloseDisplay)(display);
-            return Err(PhantomError::Screenshot(
-                "XGetImage failed (BadMatch or server error)".to_owned(),
-            ));
+            (xlib.XCloseDisplay)(disp);
+            return Err(PhantomError::Screenshot(format!(
+                "XGetImage failed on {display:?} (BadMatch or server error)"
+            )));
         }
 
         let img = &*image;
@@ -275,7 +354,7 @@ pub(super) fn capture_x11_native() -> Result<Vec<u8>, PhantomError> {
 
         // Free the XImage (this also frees img.data).
         (xlib.XDestroyImage)(image);
-        (xlib.XCloseDisplay)(display);
+        (xlib.XCloseDisplay)(disp);
 
         // Encode the RGB buffer to PNG.
         let mut png_bytes: Vec<u8> = Vec::new();

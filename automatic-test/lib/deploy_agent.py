@@ -49,6 +49,7 @@ def deploy_and_checkin(
     windows_prelaunch_probe: bool = False,
     amsi_etw: str | None = None,
     defer_wfp_cleanup: bool = False,
+    exec_env: dict[str, str] | None = None,
 ) -> dict | None:
     """Build, deploy, execute, and wait for a single agent checkin.
 
@@ -106,6 +107,12 @@ def deploy_and_checkin(
             outer ``finally`` still cleans up unconditionally.  Use this when the
             agent needs post-checkin outbound connectivity (e.g. ``agent_exec``)
             and the Windows target may have restrictive default outbound policy.
+        exec_env: Optional environment variables forwarded to
+            :func:`~lib.deploy.execute_background` on Linux targets.  Ignored
+            on Windows (Task Scheduler inherits the user session environment).
+            Use ``{"DISPLAY": ":99"}`` when deploying an agent that needs an
+            X11 display (e.g. screenshot capture via Phantom on a headless
+            Linux target running Xvfb).
 
     Returns:
         The agent dict from :func:`~lib.wait.wait_for_agent`, or ``None`` when
@@ -232,7 +239,7 @@ def deploy_and_checkin(
 
             # Step 4 — execute payload in background.
             print(f"  [{tag}][exec] launching payload in background on target")
-            execute_background(target, remote_payload)
+            execute_background(target, remote_payload, env_vars=exec_env)
 
         finally:
             try:

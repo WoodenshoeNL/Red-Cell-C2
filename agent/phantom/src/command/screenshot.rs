@@ -372,3 +372,41 @@ fn try_capture_on_display(
         Ok(png_bytes)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::display_candidates;
+
+    #[test]
+    fn display_candidates_env_set_returns_single_value() {
+        let saved = std::env::var("DISPLAY").ok();
+        unsafe { std::env::set_var("DISPLAY", ":42") };
+
+        let result = display_candidates();
+
+        unsafe {
+            match saved {
+                Some(v) => std::env::set_var("DISPLAY", v),
+                None => std::env::remove_var("DISPLAY"),
+            }
+        }
+
+        assert_eq!(result, vec![":42".to_owned()]);
+    }
+
+    #[test]
+    fn display_candidates_env_unset_returns_fallback_list() {
+        let saved = std::env::var("DISPLAY").ok();
+        unsafe { std::env::remove_var("DISPLAY") };
+
+        let result = display_candidates();
+
+        unsafe {
+            if let Some(v) = saved {
+                std::env::set_var("DISPLAY", v);
+            }
+        }
+
+        assert_eq!(result, vec![":0".to_owned(), ":99".to_owned(), ":1".to_owned()]);
+    }
+}

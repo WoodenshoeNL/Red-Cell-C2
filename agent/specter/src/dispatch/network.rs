@@ -1122,8 +1122,7 @@ mod tests {
 
     /// IPC$ is always present on Windows — the Server service creates it automatically.
     /// ADMIN$ requires admin privileges to enumerate and may be absent on hardened hosts,
-    /// so we only assert the shares list is non-empty and NUL-free rather than checking
-    /// for a specific share name.
+    /// so we only assert IPC$ presence (not ADMIN$) and that all names are NUL-free.
     #[cfg(windows)]
     #[test]
     fn platform_shares_includes_ipc_dollar_and_admin_dollar() {
@@ -1131,8 +1130,8 @@ mod tests {
         let names: Vec<&str> = shares.iter().map(|s| s.name.as_str()).collect();
         // IPC$ is always enumerable; ADMIN$ may be hidden from non-admin callers.
         assert!(
-            names.iter().any(|n| n.eq_ignore_ascii_case("IPC$")) || !names.is_empty(),
-            "share list must be non-empty on any Windows machine; got: {names:?}"
+            names.iter().any(|n| n.eq_ignore_ascii_case("IPC$")),
+            "IPC$ must be present on any Windows machine; got: {names:?}"
         );
         // All returned names must be NUL-free (structural check, host-independent).
         for name in &names {

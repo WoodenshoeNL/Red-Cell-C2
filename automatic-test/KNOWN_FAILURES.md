@@ -36,6 +36,8 @@ row to *Resolved* and add the closing commit / fix description.
 | `[SUBPROCESS_TIMEOUT] CLI subprocess did not exit within expected timeout (55s) (exit -1)` | 07 | red-cell-c2-gnn1n | 2026-05-09 | 2026-05-09 | P1, Demon `netstat -ano` hangs; WFP pool at ~6393 objects — mpssvc restart confirmed does NOT reduce count; Windows VM 192.168.213.160 reboot required |
 | `os error 10055` | 20 | red-cell-c2-gnn1n | 2026-05-09 | 2026-05-09 | P1, WSAENOBUFS; WFP at ~6393 — mpssvc restart confirmed ineffective; VM 192.168.213.160 reboot required |
 | `Timed out after 60s waiting for agent checkin` (Archon, no os error 10055 in probe, port reachable) | 05, 06, 08, 17 | red-cell-c2-gnn1n | 2026-05-09 | 2026-05-09 | P1, WFP pool at ~6393 — mpssvc restart confirmed does not reduce count; VM 192.168.213.160 reboot required |
+| `audit filter --agent: filtered result multiset mismatch` | 11 | red-cell-c2-d0amv | 2026-05-09 | 2026-05-09 | P2, log_list() for --agent filter has no until bound — post-cleanup checkins slip in after baseline snapshot |
+| `cargo build --release --target x86_64-pc-windows-gnu` + `error[E0432]` + `NetSessionEnum` + `SESSION_INFO_10` | 20 | red-cell-c2-ikwhx | 2026-05-09 | 2026-05-09 | P1, commit fa5132eb imported SESSION_INFO_10 from Win32::NetworkManagement::NetManagement but it lives in Win32::Storage::FileSystem in windows-sys 0.59 |
 
 ---
 

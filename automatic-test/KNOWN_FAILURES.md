@@ -33,9 +33,9 @@ row to *Resolved* and add the closing commit / fix description.
 | Signature (substring of error / stderr) | Scenario | Bead | First seen | Last seen | Status |
 |----------------------------------------|----------|------|------------|-----------|--------|
 | `Timed out after 60s waiting for agent checkin` (sc04 only, no teamserver entries) | 04 | red-cell-c2-2frr8 | 2026-05-07 | 2026-05-08 | P3, Phantom Linux checkin intermittently absent — payload launches but makes zero connections; sc06 Phantom always works in same run; flaky race/load issue |
-| `[SUBPROCESS_TIMEOUT] CLI subprocess did not exit within expected timeout (55s) (exit -1)` | 07 | red-cell-c2-gdiw8 | 2026-05-08 | 2026-05-09 | P2, Demon `netstat -ano` hangs; between-pass WFP cleanup added (74c27b43) — next run will show if within-scenario depletion is addressed; if wfp_after stays high after sweep, mpssvc restart is needed |
-| `os error 10055` | 20 | red-cell-c2-gdiw8 | 2026-05-07 | 2026-05-09 | P2, WSAENOBUFS; between-pass WFP cleanup added (74c27b43) — next run will show wfp_after to confirm if Defender callouts (not rules) are the depletion source |
-| `Timed out after 60s waiting for agent checkin` (Archon, no os error 10055 in probe, port reachable) | 05, 06, 08, 17 | red-cell-c2-gdiw8 | 2026-05-08 | 2026-05-09 | P2, WFP pool exhaustion — between-pass wfp_preflight_cleanup() added (74c27b43) before each Archon/Specter pass; next run wfp=/twait= will reveal if depletion is from sweepable rules or Defender callouts requiring mpssvc restart |
+| `[SUBPROCESS_TIMEOUT] CLI subprocess did not exit within expected timeout (55s) (exit -1)` | 07 | red-cell-c2-gnn1n | 2026-05-09 | 2026-05-09 | P1, Demon `netstat -ano` hangs; WFP pool at ~6393 objects — mpssvc restart confirmed does NOT reduce count; Windows VM 192.168.213.160 reboot required |
+| `os error 10055` | 20 | red-cell-c2-gnn1n | 2026-05-09 | 2026-05-09 | P1, WSAENOBUFS; WFP at ~6393 — mpssvc restart confirmed ineffective; VM 192.168.213.160 reboot required |
+| `Timed out after 60s waiting for agent checkin` (Archon, no os error 10055 in probe, port reachable) | 05, 06, 08, 17 | red-cell-c2-gnn1n | 2026-05-09 | 2026-05-09 | P1, WFP pool at ~6393 — mpssvc restart confirmed does not reduce count; VM 192.168.213.160 reboot required |
 
 ---
 
@@ -47,6 +47,7 @@ than a new bug.
 
 | Signature (substring of error / stderr) | Scenario | Bead | Resolved at | Notes |
 |----------------------------------------|----------|------|-------------|-------|
+| `[SUBPROCESS_TIMEOUT]`/`os error 10055`/`Timed out after 60s waiting for agent checkin` (Archon/WFP) | 05, 06, 07, 08, 17, 20 | red-cell-c2-gdiw8 | 2026-05-09 | Closed: added between-pass WFP cleanup + wfp=/twait= diagnostics + mpssvc restart (72c10a67/74c27b43/cirdt/lxfdz). Regression confirmed same day — mpssvc restart does not reduce wfp=6393; see red-cell-c2-gnn1n. |
 | `Timed out after 30s waiting for screenshot loot entry` (demon hash + WinSta0 fix) | 08 | red-cell-c2-uzl9i | 2026-05-08 | Closed: fixes (8bf46ce2, c5463122, 4023932a) moved from demon to archon (06346e50). New failure tracked as red-cell-c2-z5rl8 (Demon pass reverted; Archon pass needs verification). |
 | `Timed out after 30s waiting for screenshot loot entry` (Demon pass skipped in SC08) | 08 | red-cell-c2-z5rl8 | 2026-05-08 | Closed: sc08 now skips Demon pass unconditionally (Demon screenshot not maintained since 06346e50 revert); Archon runs as primary. ScenarioSkipped raised when neither archon nor specter is in agents.available. |
 | `[TIMEOUT] timeout: timed out waiting for output from task` (Phantom CTR/seq fix) | 04, 06, 07, 08, 11, 21 | red-cell-c2-1f7q1 | 2026-05-06 | Closed and split into lkkaq (root cause: CTR desync in get_job()) + 0xpyf (fix: advance CTR/seq unconditionally, commit 4a87b01d). Verified passing in run_073425 (sc04/sc21 pass). sc11 passes 2026-05-08. |

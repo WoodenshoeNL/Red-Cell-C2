@@ -385,17 +385,16 @@ def run(ctx):
 
     windows_ok = False
     if ctx.windows is not None:
-        try:
-            preflight_ssh(ctx.windows)
-            windows_ok = True
-        except DeployError as exc:
-            raise ScenarioSkipped(str(exc)) from exc
+        if ctx.windows_degraded:
+            print("  [windows] SKIPPED — WFP pool critically exhausted; VM reboot required (windows_degraded)")
+        else:
+            try:
+                preflight_ssh(ctx.windows)
+                windows_ok = True
+            except DeployError as exc:
+                raise ScenarioSkipped(str(exc)) from exc
     else:
         print("  [skip] ctx.windows is None — skipping Windows agent passes")
-
-    if windows_ok and ctx.windows_degraded:
-        print("  [windows] SKIPPED — WFP pool critically exhausted; VM reboot required (windows_degraded)")
-        windows_ok = False
 
     linux_listener_name = None
     demon_listener_name: str | None = None

@@ -673,7 +673,93 @@ fn platform_groups() -> Vec<NetGroup> {
     groups
 }
 
-/// Collect the lowercase usernames of every member of the local Administrators group.
+/// Resolve the localized name of the built-in Administrators group (S-1-5-32-544) as a
+/// NUL-terminated UTF-16 string suitable for passing to `NetLocalGroupGetMembers`.
+///
+/// Using a SID lookup instead of the literal `"Administrators"` makes this work on
+/// non-English Windows installations where the group name is translated.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn builtin_administrators_name_w() -> Option<Vec<u16>> {
+    use windows_sys::Win32::Foundation::FALSE;
+    use windows_sys::Win32::Security::{
+        CreateWellKnownSid, LookupAccountSidW, SID_NAME_USE, WinBuiltinAdministratorsSid,
+    };
+
+    // Phase 1: query the byte size required for the Administrators SID.
+    // CreateWellKnownSid returns FALSE when psid is NULL but still sets cbsid.
+    let mut sid_size: u32 = 0;
+    unsafe {
+        CreateWellKnownSid(
+            WinBuiltinAdministratorsSid,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut sid_size,
+        );
+    }
+    if sid_size == 0 {
+        return None;
+    }
+
+    // Phase 2: allocate and populate the SID buffer.
+    let mut sid_buf = vec![0u8; sid_size as usize];
+    let ok = unsafe {
+        CreateWellKnownSid(
+            WinBuiltinAdministratorsSid,
+            std::ptr::null_mut(),
+            sid_buf.as_mut_ptr() as *mut core::ffi::c_void,
+            &mut sid_size,
+        )
+    };
+    if ok == FALSE {
+        return None;
+    }
+
+    // Phase 3: first LookupAccountSidW call to get required buffer sizes.
+    let sid_ptr = sid_buf.as_ptr() as *mut core::ffi::c_void;
+    let mut name_len: u32 = 0;
+    let mut domain_len: u32 = 0;
+    let mut sid_type: SID_NAME_USE = 0;
+    unsafe {
+        LookupAccountSidW(
+            std::ptr::null(),
+            sid_ptr,
+            std::ptr::null_mut(),
+            &mut name_len,
+            std::ptr::null_mut(),
+            &mut domain_len,
+            &mut sid_type,
+        );
+    }
+    if name_len == 0 {
+        return None;
+    }
+
+    // Phase 4: allocate buffers and retrieve the localized group name.
+    // name_len from the first call includes the NUL terminator.
+    let mut name_buf = vec![0u16; name_len as usize];
+    let mut domain_buf = vec![0u16; domain_len.max(1) as usize];
+    let ok = unsafe {
+        LookupAccountSidW(
+            std::ptr::null(),
+            sid_ptr,
+            name_buf.as_mut_ptr(),
+            &mut name_len,
+            domain_buf.as_mut_ptr(),
+            &mut domain_len,
+            &mut sid_type,
+        )
+    };
+    if ok == FALSE {
+        return None;
+    }
+    // name_len now excludes the NUL; name_buf[name_len] is 0 (pre-initialized).
+    Some(name_buf)
+}
+
+/// Collect the lowercase usernames of every member of the built-in local Administrators group.
+/// The group is identified by its well-known SID (S-1-5-32-544) so this works on
+/// non-English Windows installations where the group display name is translated.
 #[cfg(windows)]
 #[allow(unsafe_code)]
 fn administrators_group_members() -> std::collections::HashSet<String> {
@@ -681,7 +767,15 @@ fn administrators_group_members() -> std::collections::HashSet<String> {
     use windows_sys::Win32::NetworkManagement::NetManagement::{
         LOCALGROUP_MEMBERS_INFO_3, NetApiBufferFree, NetLocalGroupGetMembers,
     };
-    let group_w: Vec<u16> = "Administrators\0".encode_utf16().collect();
+    let group_w = match builtin_administrators_name_w() {
+        Some(name) => name,
+        None => {
+            warn!(
+                "administrators_group_members: could not resolve built-in Administrators SID — is_admin may be incomplete"
+            );
+            return std::collections::HashSet::new();
+        }
+    };
     let mut members: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut resume_handle: usize = 0;
     loop {

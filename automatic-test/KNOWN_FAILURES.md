@@ -32,7 +32,8 @@ row to *Resolved* and add the closing commit / fix description.
 
 | Signature (substring of error / stderr) | Scenario | Bead | First seen | Last seen | Status |
 |----------------------------------------|----------|------|------------|-----------|--------|
-| `Timed out after 30s waiting for screenshot loot entry` (Phantom/Linux, DISPLAY not set in agent exec env) | 08 | red-cell-c2-desrw | 2026-05-09 | 2026-05-09 | P2 |
+| `SSH to 192.168.213.160 failed (attempt 1/3), retrying in 2s` (Windows VM unreachable via TCP timeout; every SSH call retries 3×10s, inflating run time 30×) | all Windows-touching | red-cell-c2-1nnzz | 2026-05-09 | 2026-05-09 | P3 |
+| `~ SKIPPED (34.1s): SSH to 192.168.213.160 failed after 3 attempts` (sc08 Linux/Phantom fallback not tried when Windows SSH unreachable — only falls through when windows_degraded=True) | 08 | red-cell-c2-a4s1b | 2026-05-09 | 2026-05-09 | P2 |
 
 ---
 
@@ -44,6 +45,8 @@ than a new bug.
 
 | Signature (substring of error / stderr) | Scenario | Bead | Resolved at | Notes |
 |----------------------------------------|----------|------|-------------|-------|
+| `Timed out after 30s waiting for screenshot loot entry` (Phantom/Linux, DISPLAY not set in agent exec env) | 08 | red-cell-c2-desrw | 2026-05-09 | Two-layer fix: execute_background propagates env_vars, sc08 injects DISPLAY=display for Phantom; Phantom also probes :0/:99/:1 fallback. Bead closed 2026-05-09; not verifiable when Windows is SSH-unreachable (sc08 skips entirely — see red-cell-c2-a4s1b). |
+| `Linux target configured but no available Linux agent (add 'phantom' to agents.available)` (unit test test_phantom_skipped_when_not_in_available missing preflight_ssh patch) | unit test | *(fixed inline)* | 2026-05-09 | Added `patch("lib.deploy.preflight_ssh")` to TestScenario14.test_phantom_skipped_when_not_in_available; preflight_ssh was added to sc14 run() in commit 275fdf59 but the unit test wasn't updated. |
 | `Remote command failed (exit 255)` + `ssh: connect to host 192.168.213.160 port 22: No route to host` (sc14 Demon pass with Windows VM unreachable) | 14 | *(fixed inline)* | 2026-05-09 | Added `preflight_ssh(ctx.windows)` check before Demon pass in sc14; DeployError now converts to a skipped Demon pass rather than a hard scenario failure. Phantom pass still runs when Linux is available. |
 | `Timed out after 60s waiting for agent checkin` / `[SUBPROCESS_TIMEOUT]` (Windows passes in sc06/07/08, WFP ~6390+) | 06, 07, 08 | red-cell-c2-5wu5u | 2026-05-09 | Closed: propagated windows_degraded into RunContext; sc06/07/08 skip Windows passes when WFP pool is exhausted, preserving Linux-agent pass coverage. |
 | `Timed out after 60s waiting for agent checkin` (sc04 only, no teamserver entries) | 04 | red-cell-c2-2frr8 | 2026-05-09 | Closed: added init_handshake_with_retry (3 attempts, 2s backoff) in run_loop.rs. sc04 passes 2026-05-09. |

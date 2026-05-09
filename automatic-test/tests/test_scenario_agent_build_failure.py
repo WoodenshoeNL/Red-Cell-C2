@@ -411,7 +411,8 @@ class TestScenario14(unittest.TestCase):
         ctx = _linux_ctx()
         ctx.windows = MagicMock()
         ctx.windows.work_dir = "C:\\Temp\\rc-test"
-        with _apply_patches(_RUN_PATCHES), \
+        with patch("lib.deploy.preflight_ssh"), \
+             _apply_patches(_RUN_PATCHES), \
              patch("lib.payload.build_parallel", return_value=[b"fake"]), \
              patch.object(self.mod, "_run_stress_for_agent") as mock_run:
             self.mod.run(ctx)

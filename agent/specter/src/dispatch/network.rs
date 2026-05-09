@@ -723,6 +723,13 @@ fn administrators_group_members() -> std::collections::HashSet<String> {
             // SAFETY: buf was allocated by NetLocalGroupGetMembers.
             unsafe { NetApiBufferFree(buf as *mut _) };
         }
+        if status != 0 && status != ERROR_MORE_DATA {
+            warn!(
+                status,
+                "administrators_group_members: NetLocalGroupGetMembers failed — is_admin may be incomplete"
+            );
+            break;
+        }
         if status != ERROR_MORE_DATA {
             break;
         }

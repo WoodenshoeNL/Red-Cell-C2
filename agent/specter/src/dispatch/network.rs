@@ -853,3 +853,220 @@ fn platform_servers_by_type(domain: &str, server_type: u32) -> Vec<String> {
 
     names
 }
+
+// ─── Tests ─────────────────────────────────────────────────────────────────────
+//
+// `#[cfg(windows)]` tests exercise the Win32 API call signatures and struct
+// field access directly.  They will not run on Linux CI but will catch struct
+// layout mismatches and incorrect API levels as soon as the crate is compiled
+// for a Windows target.
+//
+// `#[cfg(not(windows))]` companions cover the Linux fallback paths that DO run
+// in CI.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── wstr_to_string ────────────────────────────────────────────────────────
+
+    /// A null pointer must return an empty String, not cause UB.
+    #[cfg(windows)]
+    #[test]
+    fn wstr_to_string_null_pointer_returns_empty() {
+        // SAFETY: testing the explicit null-pointer guard.
+        let result = unsafe { wstr_to_string(std::ptr::null()) };
+        assert!(result.is_empty());
+    }
+
+    /// A well-formed ASCII UTF-16 string must round-trip correctly.
+    #[cfg(windows)]
+    #[test]
+    fn wstr_to_string_roundtrips_ascii() {
+        let wide: Vec<u16> = "hello\0".encode_utf16().collect();
+        // SAFETY: `wide` is a stack-allocated null-terminated UTF-16 slice.
+        let result = unsafe { wstr_to_string(wide.as_ptr()) };
+        assert_eq!(result, "hello");
+    }
+
+    /// An empty UTF-16 string (NUL only) must return an empty Rust String.
+    #[cfg(windows)]
+    #[test]
+    fn wstr_to_string_empty_wide_string_returns_empty() {
+        let wide: Vec<u16> = [0u16].to_vec();
+        // SAFETY: single-NUL slice is valid.
+        let result = unsafe { wstr_to_string(wide.as_ptr()) };
+        assert!(result.is_empty());
+    }
+
+    // ── platform_domain_name ──────────────────────────────────────────────────
+
+    /// Must not panic on any Windows machine (domain-joined or workstation).
+    #[cfg(windows)]
+    #[test]
+    fn platform_domain_name_does_not_panic() {
+        let _ = platform_domain_name();
+    }
+
+    /// Result must not contain embedded NUL characters (buffer truncation bug).
+    #[cfg(windows)]
+    #[test]
+    fn platform_domain_name_no_embedded_nuls() {
+        let name = platform_domain_name();
+        assert!(
+            !name.contains('\0'),
+            "domain name must not contain embedded NUL characters; got: {name:?}"
+        );
+    }
+
+    // ── platform_logged_on_users ──────────────────────────────────────────────
+
+    /// Must not panic on any Windows machine.
+    #[cfg(windows)]
+    #[test]
+    fn platform_logged_on_users_does_not_panic() {
+        let _ = platform_logged_on_users();
+    }
+
+    /// The currently logged-in user (from %USERNAME%) must appear in the list.
+    #[cfg(windows)]
+    #[test]
+    fn platform_logged_on_users_contains_current_user() {
+        let users = platform_logged_on_users();
+        let current = std::env::var("USERNAME").unwrap_or_default();
+        if !current.is_empty() {
+            assert!(
+                users.iter().any(|u| u.eq_ignore_ascii_case(&current)),
+                "current user {current:?} not found in logged-on users: {users:?}"
+            );
+        }
+    }
+
+    /// All returned user names must be free of embedded NUL characters.
+    #[cfg(windows)]
+    #[test]
+    fn platform_logged_on_users_entries_have_no_embedded_nuls() {
+        for u in platform_logged_on_users() {
+            assert!(!u.contains('\0'), "user name must not contain NUL: {u:?}");
+        }
+    }
+
+    // ── platform_sessions ─────────────────────────────────────────────────────
+
+    /// Must not panic — may return an empty Vec on a workstation.
+    #[cfg(windows)]
+    #[test]
+    fn platform_sessions_does_not_panic() {
+        let _ = platform_sessions();
+    }
+
+    /// All returned session entries must have NUL-free string fields.
+    #[cfg(windows)]
+    #[test]
+    fn platform_sessions_entries_have_valid_string_fields() {
+        for s in platform_sessions() {
+            assert!(
+                !s.client.contains('\0'),
+                "session.client must not contain NUL: {:?}",
+                s.client
+            );
+            assert!(!s.user.contains('\0'), "session.user must not contain NUL: {:?}", s.user);
+        }
+    }
+
+    // ── platform_shares ───────────────────────────────────────────────────────
+
+    /// IPC$ and ADMIN$ are always present on Windows — the Server service
+    /// creates them automatically and they cannot be removed permanently.
+    #[cfg(windows)]
+    #[test]
+    fn platform_shares_includes_ipc_dollar_and_admin_dollar() {
+        let shares = platform_shares();
+        let names: Vec<&str> = shares.iter().map(|s| s.name.as_str()).collect();
+        assert!(
+            names.iter().any(|n| n.eq_ignore_ascii_case("IPC$")),
+            "IPC$ must be present on any Windows machine; got: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n.eq_ignore_ascii_case("ADMIN$")),
+            "ADMIN$ must be present on any Windows machine; got: {names:?}"
+        );
+    }
+
+    /// All share name/path fields must be free of embedded NUL characters.
+    #[cfg(windows)]
+    #[test]
+    fn platform_shares_string_fields_have_no_embedded_nuls() {
+        for s in platform_shares() {
+            assert!(!s.name.contains('\0'), "share.name must not contain NUL: {:?}", s.name);
+            assert!(!s.path.contains('\0'), "share.path must not contain NUL: {:?}", s.path);
+            assert!(!s.remark.contains('\0'), "share.remark must not contain NUL: {:?}", s.remark);
+        }
+    }
+
+    // ── platform_groups ───────────────────────────────────────────────────────
+
+    /// `Administrators` and `Users` are built-in groups present on every
+    /// Windows installation since Windows XP.
+    #[cfg(windows)]
+    #[test]
+    fn platform_groups_includes_administrators_and_users() {
+        let groups = platform_groups();
+        let names: Vec<&str> = groups.iter().map(|g| g.name.as_str()).collect();
+        assert!(
+            names.iter().any(|n| n.eq_ignore_ascii_case("Administrators")),
+            "Administrators group must exist on any Windows machine; got: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n.eq_ignore_ascii_case("Users")),
+            "Users group must exist on any Windows machine; got: {names:?}"
+        );
+    }
+
+    /// Group name/description must be free of embedded NUL characters.
+    #[cfg(windows)]
+    #[test]
+    fn platform_groups_string_fields_have_no_embedded_nuls() {
+        for g in platform_groups() {
+            assert!(!g.name.contains('\0'), "group.name must not contain NUL: {:?}", g.name);
+            assert!(
+                !g.description.contains('\0'),
+                "group.description must not contain NUL: {:?}",
+                g.description
+            );
+        }
+    }
+
+    // ── platform_users ────────────────────────────────────────────────────────
+
+    /// `NetUserEnum` must return at least one local user account.
+    #[cfg(windows)]
+    #[test]
+    fn platform_users_returns_at_least_one_account() {
+        let users = platform_users();
+        assert!(!users.is_empty(), "expected at least one local user account from NetUserEnum");
+    }
+
+    /// At least one account must be flagged as admin (e.g. the built-in
+    /// `Administrator` account, even if disabled, has `USER_PRIV_ADMIN`).
+    #[cfg(windows)]
+    #[test]
+    fn platform_users_includes_at_least_one_admin_account() {
+        let users = platform_users();
+        assert!(
+            users.iter().any(|u| u.is_admin),
+            "at least one user with is_admin=true expected (e.g. Administrator); got: {:?}",
+            users.iter().map(|u| (&u.name, u.is_admin)).collect::<Vec<_>>()
+        );
+    }
+
+    /// All user name fields must be non-empty and free of embedded NUL chars.
+    #[cfg(windows)]
+    #[test]
+    fn platform_users_names_are_non_empty_and_nul_free() {
+        for u in platform_users() {
+            assert!(!u.name.is_empty(), "user.name must not be empty");
+            assert!(!u.name.contains('\0'), "user.name must not contain NUL: {:?}", u.name);
+        }
+    }
+}

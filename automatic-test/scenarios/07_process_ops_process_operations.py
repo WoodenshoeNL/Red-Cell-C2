@@ -392,8 +392,12 @@ def run(ctx):
             try:
                 preflight_ssh(ctx.windows)
                 windows_ok = True
-            except DeployError as exc:
-                raise ScenarioSkipped(str(exc)) from exc
+            except (DeployError, ScenarioSkipped) as exc:
+                print(
+                    f"  [windows] SSH unreachable ({type(exc).__name__}) — "
+                    "skipping Windows passes, falling through to Linux"
+                )
+                skipped_reasons.append(f"Windows SSH unreachable: {exc}")
     else:
         print("  [skip] ctx.windows is None — skipping Windows agent passes")
 

@@ -62,5 +62,56 @@ class TestWindowsDegradedSkipsWindowsPasses(unittest.TestCase):
                 _mod.run(ctx)
 
 
+class TestWindowsSshUnreachableFallback(unittest.TestCase):
+    """When Windows preflight_ssh raises ScenarioSkipped, sc07 must fall through to Linux."""
+
+    def _make_ctx(self, *, windows=True, linux=False, env=None):
+        ctx = MagicMock()
+        ctx.windows_degraded = False
+        ctx.dry_run = False
+        ctx.payload_parallel = True
+        ctx.env = env or {}
+        ctx.timeouts = MagicMock()
+        ctx.linux = MagicMock() if linux else None
+        ctx.windows = MagicMock() if windows else None
+        return ctx
+
+    def test_windows_ssh_unreachable_no_linux_raises_scenario_skipped(self) -> None:
+        """Windows SSH unreachable + no Linux → ScenarioSkipped (no cells to run)."""
+        ctx = self._make_ctx(windows=True, linux=False)
+
+        def _preflight(target):
+            if target is ctx.windows:
+                raise ScenarioSkipped("target 192.168.213.160 was unreachable at startup")
+
+        with patch("lib.deploy.preflight_ssh", side_effect=_preflight):
+            with self.assertRaises(ScenarioSkipped):
+                _mod.run(ctx)
+
+    def test_windows_ssh_unreachable_falls_through_to_linux_phantom(self) -> None:
+        """Windows SSH unreachable + Linux with phantom → falls through to payload build."""
+        from lib.cli import CliError
+        ctx = self._make_ctx(
+            windows=True, linux=True,
+            env={"agents": {"available": ["phantom"]}},
+        )
+
+        def _preflight(target):
+            if target is ctx.windows:
+                raise ScenarioSkipped("target 192.168.213.160 was unreachable at startup")
+            # Linux succeeds
+
+        # CliError from build_parallel proves run() reached the Linux payload step
+        # rather than aborting with ScenarioSkipped at the Windows preflight.
+        with patch("lib.deploy.preflight_ssh", side_effect=_preflight), \
+             patch("lib.cli.listener_create"), \
+             patch("lib.cli.listener_start"), \
+             patch("lib.cli.listener_stop"), \
+             patch("lib.cli.listener_delete"), \
+             patch("lib.payload.build_parallel", side_effect=CliError("BUILD_FAILED", "build failed", 1)):
+            with self.assertRaises(CliError):
+                _mod.run(ctx)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -178,8 +178,11 @@ def check_ssh_targets(
     """Run SSH pre-flight connectivity checks for all configured targets.
 
     Only checks when at least one SSH-deploy scenario is selected.
-    Prints a pass/fail line per target but does NOT abort — individual
-    scenarios raise :class:`lib.ScenarioSkipped` when a target is unreachable.
+    Prints a pass/fail line per target but does NOT abort for connectivity
+    failures (:class:`lib.deploy.DeployError`) — those are recorded and
+    individual scenarios raise :class:`lib.ScenarioSkipped` when they find the
+    target unreachable.  Unexpected harness errors (non-DeployError exceptions)
+    re-raise immediately and halt the entire run.
 
     Any target that fails the pre-flight is registered with
     :func:`lib.deploy.mark_host_unreachable` so that per-scenario
@@ -948,9 +951,10 @@ def main():
             sys.exit(1)
 
     # Pre-flight: check SSH connectivity for all configured targets upfront so
-    # unreachable hosts are reported before any scenario begins.  This does not
-    # abort the run — scenarios raise ScenarioSkipped individually when a target
-    # they need is unreachable.
+    # unreachable hosts are reported before any scenario begins.  Does not abort
+    # for connectivity failures (DeployError) — those are recorded and scenarios
+    # raise ScenarioSkipped individually when a target they need is unreachable.
+    # Unexpected harness errors (non-DeployError) re-raise and halt the run.
     if not ctx.dry_run:
         selected_ids = {sid for sid, _ in selected}
         check_ssh_targets(

@@ -2251,6 +2251,7 @@ class TestRebootWindowsVm(unittest.TestCase):
         finally:
             clear_globally_unreachable_hosts()
 
+    @patch("lib.deploy.subprocess.run")
     @patch("time.sleep")
     @patch("time.time")
     @patch("lib.deploy._run_ssh_cli_with_retry")
@@ -2259,19 +2260,21 @@ class TestRebootWindowsVm(unittest.TestCase):
         mock_ssh: object,
         mock_time: object,
         mock_sleep: object,
+        mock_run: object,
     ) -> None:
         """Must return True when SSH reconnects within the reboot_timeout window."""
-        # time.time() returns: initial, then values that simulate ~30s elapsed
+        # time.time() calls: (1) deadline, (2) while-loop check → probe succeeds
         import itertools
         start = 1000.0
-        # Return start for deadline calculation, then simulate time passing
         mock_time.side_effect = itertools.chain(
-            [start],          # time.time() for deadline = start + 180
-            [start + 25],     # first poll: within deadline
+            [start],          # (1) deadline = start + 180
+            [start + 25],     # (2) loop check: within window → probe succeeds
         )
         reboot_ok = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
         probe_ok = subprocess.CompletedProcess(args=[], returncode=0, stdout="alive\n", stderr="")
-        mock_ssh.side_effect = [reboot_ok, probe_ok]
+        # reboot uses _run_ssh_cli_with_retry; probe uses subprocess.run directly
+        mock_ssh.return_value = reboot_ok
+        mock_run.return_value = probe_ok
         t = _make_target(
             host="192.168.1.100", platform="windows", key=self.key_path, work_dir=r"C:\Temp\rc-test"
         )
@@ -2303,6 +2306,7 @@ class TestRebootWindowsVm(unittest.TestCase):
         result = reboot_windows_vm(t, reboot_timeout=10)
         self.assertFalse(result)
 
+    @patch("lib.deploy.subprocess.run")
     @patch("time.sleep")
     @patch("time.time")
     @patch("lib.deploy._run_ssh_cli_with_retry")
@@ -2311,12 +2315,13 @@ class TestRebootWindowsVm(unittest.TestCase):
         mock_ssh: object,
         mock_time: object,
         mock_sleep: object,
+        mock_run: object,
     ) -> None:
         """SSH probe exceptions during polling must not abort — keep retrying until timeout."""
         import itertools
         start = 1000.0
-        # time.time() is called: (1) deadline, (2) loop check 1, (3) remaining calc 1,
-        # (4) loop check 2 → probe succeeds
+        # time.time() calls: (1) deadline, (2) loop check 1 — probe raises,
+        # (3) remaining calc, (4) loop check 2 — probe succeeds
         mock_time.side_effect = itertools.chain(
             [start],          # (1) deadline = start + 60
             [start + 10],     # (2) loop check 1: within window, probe raises
@@ -2325,8 +2330,9 @@ class TestRebootWindowsVm(unittest.TestCase):
         )
         reboot_ok = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
         probe_ok = subprocess.CompletedProcess(args=[], returncode=0, stdout="alive\n", stderr="")
-        # reboot SSH call, probe raises, then probe succeeds
-        mock_ssh.side_effect = [reboot_ok, Exception("connection refused"), probe_ok]
+        # reboot uses _run_ssh_cli_with_retry; probe uses subprocess.run directly
+        mock_ssh.return_value = reboot_ok
+        mock_run.side_effect = [Exception("connection refused"), probe_ok]
         t = _make_target(
             host="192.168.1.100", platform="windows", key=self.key_path, work_dir=r"C:\Temp\rc-test"
         )

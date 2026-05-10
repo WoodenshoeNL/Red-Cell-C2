@@ -13,6 +13,8 @@
 //! | `agent kill --wait` | kill then poll `GET /agents/{id}` until dead | block |
 //! | `agent kill --force` | `DELETE /agents/{id}?force=true` | kill + deregister |
 //! | `agent kill --deregister-only` | `DELETE /agents/{id}?deregister_only=true` | deregister only |
+//! | `agent prune --dead` | `GET /agents` then `DELETE …?deregister_only=true` per match | remove dead agents |
+//! | `agent prune --before <ts>` | `GET /agents` then `DELETE …?deregister_only=true` per match | remove stale agents |
 //! | `agent upload <id>` | `POST /agents/{id}/upload` | queue upload task |
 //! | `agent download <id>` | `POST /agents/{id}/download` | queue download task |
 //! | `agent groups <id>` | `GET /agents/{id}/groups` | RBAC group tags on the agent |
@@ -26,6 +28,7 @@ pub(crate) mod kill;
 pub(crate) mod list;
 pub(crate) mod output_cmd;
 pub(crate) mod packet_ring;
+pub(crate) mod prune;
 pub(crate) mod show;
 pub(crate) mod task;
 pub(crate) mod task_correlation;
@@ -48,6 +51,7 @@ use self::kill::{KillMode, kill};
 use self::list::{list, watch_agents};
 use self::output_cmd::{fetch_output, take_cursor_reset_warning, watch_output};
 use self::packet_ring::fetch_packet_ring;
+use self::prune::prune;
 use self::show::show;
 use self::task::fetch_task_status;
 use self::transfer::{download, upload};
@@ -173,6 +177,22 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) 
                 KillMode::Default
             };
             match kill(client, id, mode).await {
+                Ok(data) => match print_success(fmt, &data) {
+                    Ok(()) => EXIT_SUCCESS,
+                    Err(e) => {
+                        print_error(&e).ok();
+                        e.exit_code()
+                    }
+                },
+                Err(e) => {
+                    print_error(&e).ok();
+                    e.exit_code()
+                }
+            }
+        }
+
+        AgentCommands::Prune { before, dead } => {
+            match prune(client, before.as_deref(), dead).await {
                 Ok(data) => match print_success(fmt, &data) {
                     Ok(()) => EXIT_SUCCESS,
                     Err(e) => {

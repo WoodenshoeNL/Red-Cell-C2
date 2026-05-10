@@ -192,6 +192,36 @@ impl TextRender for TransferResult {
     }
 }
 
+/// Result of `agent prune`.
+#[derive(Debug, Clone, Serialize)]
+pub struct PruneResult {
+    /// Number of agents successfully deregistered.
+    pub pruned: u32,
+    /// Number of agents that matched criteria but could not be deregistered.
+    pub failed: u32,
+    /// Total number of agents that matched the prune criteria.
+    pub total_matched: u32,
+}
+
+impl TextRender for PruneResult {
+    fn render_text(&self) -> String {
+        if self.total_matched == 0 {
+            "No agents matched the prune criteria.".to_owned()
+        } else {
+            format!(
+                "Pruned {}/{} agents.{}",
+                self.pruned,
+                self.total_matched,
+                if self.failed > 0 {
+                    format!(" ({} failed to deregister)", self.failed)
+                } else {
+                    String::new()
+                }
+            )
+        }
+    }
+}
+
 /// Wire body for `GET`/`PUT /agents/{id}/groups`.
 #[derive(Debug, Deserialize)]
 pub(crate) struct RawAgentGroupsResponse {

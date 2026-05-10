@@ -9,12 +9,13 @@ use super::list::agent_summary_from_raw;
 use super::output_cmd::{
     fetch_output, render_output_stream_line, take_cursor_reset_warning, watch_output,
 };
+use super::prune::prune;
 use super::show::agent_detail_from_raw;
 use super::transfer::{download, upload};
 use super::types::RawAgentGroupsResponse;
 use super::types::{
     AgentDetail, AgentGroupsInfo, AgentSummary, ExecResult, JobSubmitted, KillResult, OutputEntry,
-    TransferResult,
+    PruneResult, TransferResult,
 };
 use super::wire::RawAgent;
 
@@ -1098,4 +1099,280 @@ fn agent_groups_info_serialises_and_renders_text() {
 fn agent_groups_info_empty_groups_renders_text() {
     let info = AgentGroupsInfo { agent_id: "BADF00D".to_owned(), groups: vec![] };
     assert!(info.render_text().contains("no RBAC groups"));
+}
+
+// ── PruneResult ───────────────────────────────────────────────────────────
+
+#[test]
+fn prune_result_serialises_all_fields() {
+    let r = PruneResult { pruned: 5, failed: 1, total_matched: 6 };
+    let v = serde_json::to_value(&r).expect("serialise");
+    assert_eq!(v["pruned"], 5);
+    assert_eq!(v["failed"], 1);
+    assert_eq!(v["total_matched"], 6);
+}
+
+#[test]
+fn prune_result_renders_text_with_counts() {
+    use crate::output::TextRender;
+    let r = PruneResult { pruned: 3, failed: 0, total_matched: 3 };
+    let text = r.render_text();
+    assert!(text.contains('3'), "text must mention count; got: {text:?}");
+}
+
+#[test]
+fn prune_result_renders_no_match_text() {
+    use crate::output::TextRender;
+    let r = PruneResult { pruned: 0, failed: 0, total_matched: 0 };
+    let text = r.render_text();
+    assert!(
+        text.to_lowercase().contains("no agents"),
+        "zero-match result must say 'no agents'; got: {text:?}"
+    );
+}
+
+#[test]
+fn prune_result_renders_failure_count_when_nonzero() {
+    use crate::output::TextRender;
+    let r = PruneResult { pruned: 2, failed: 1, total_matched: 3 };
+    let text = r.render_text();
+    assert!(text.contains("failed") || text.contains('1'), "failure count must appear; got: {text:?}");
+}
+
+// ── prune integration (wiremock) ──────────────────────────────────────────
+
+fn agent_json(id: u32, active: bool, last_call_in: &str) -> serde_json::Value {
+    serde_json::json!({
+        "AgentID": id,
+        "Active": active,
+        "Hostname": "testhost",
+        "Username": "user",
+        "DomainName": "DOMAIN",
+        "ExternalIP": "1.2.3.4",
+        "InternalIP": "10.0.0.1",
+        "ProcessName": "svchost.exe",
+        "ProcessPID": 1234u32,
+        "ProcessArch": "x64",
+        "Elevated": false,
+        "OSVersion": "Windows 10",
+        "OSArch": "x64",
+        "SleepDelay": 5u32,
+        "SleepJitter": 10u32,
+        "FirstCallIn": "2026-01-01T00:00:00Z",
+        "LastCallIn": last_call_in,
+        "Listener": "http-test"
+    })
+}
+
+/// `prune --dead` deregisters all dead agents and leaves alive ones intact.
+#[tokio::test]
+async fn prune_dead_deregisters_dead_agents_only() {
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+
+    // Agent list: one dead, one alive.
+    Mock::given(method("GET"))
+        .and(path("/api/v1/agents"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            agent_json(0xDEAD_0001, false, "2026-01-01T00:00:00Z"), // dead
+            agent_json(0xDEAD_0002, true, "2026-05-10T12:00:00Z"),  // alive
+        ])))
+        .mount(&server)
+        .await;
+
+    // DELETE for the dead agent must be called exactly once.
+    Mock::given(method("DELETE"))
+        .and(path("/api/v1/agents/DEAD0001"))
+        .and(query_param("deregister_only", "true"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "agent_id": "DEAD0001",
+            "deregistered": true
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = crate::client::ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
+    let result = prune(&client, None, true).await.expect("prune must succeed");
+
+    assert_eq!(result.total_matched, 1, "only the dead agent matches");
+    assert_eq!(result.pruned, 1, "dead agent must be deregistered");
+    assert_eq!(result.failed, 0);
+}
+
+/// `prune --before` deregisters agents whose last_seen is before the cutoff.
+#[tokio::test]
+async fn prune_before_deregisters_stale_agents() {
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/agents"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            agent_json(0xAAAA_0001, true, "2026-05-09T23:00:00Z"), // stale: before cutoff
+            agent_json(0xAAAA_0002, true, "2026-05-10T06:00:00Z"), // fresh: after cutoff
+        ])))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("DELETE"))
+        .and(path("/api/v1/agents/AAAA0001"))
+        .and(query_param("deregister_only", "true"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "agent_id": "AAAA0001",
+            "deregistered": true
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = crate::client::ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
+    let result = prune(&client, Some("2026-05-10T00:00:00Z"), false)
+        .await
+        .expect("prune must succeed");
+
+    assert_eq!(result.total_matched, 1);
+    assert_eq!(result.pruned, 1);
+    assert_eq!(result.failed, 0);
+}
+
+/// When no agents match the criteria the result reports zero pruned.
+#[tokio::test]
+async fn prune_no_match_returns_zero_pruned() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/agents"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            agent_json(0xBBBB_0001, true, "2026-05-10T12:00:00Z"),
+        ])))
+        .mount(&server)
+        .await;
+
+    let client = crate::client::ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
+    let result = prune(&client, None, true).await.expect("prune must succeed");
+
+    assert_eq!(result.total_matched, 0);
+    assert_eq!(result.pruned, 0);
+    assert_eq!(result.failed, 0);
+}
+
+/// When the agent list is empty the result is zero pruned.
+#[tokio::test]
+async fn prune_empty_roster_returns_zero_pruned() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/agents"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&server)
+        .await;
+
+    let client = crate::client::ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
+    let result = prune(&client, Some("2026-05-10T00:00:00Z"), true)
+        .await
+        .expect("prune must succeed on empty roster");
+
+    assert_eq!(result.total_matched, 0);
+    assert_eq!(result.pruned, 0);
+}
+
+/// When both `--before` and `--dead` are given, agents matching either
+/// criterion are pruned (OR semantics).
+#[tokio::test]
+async fn prune_combines_dead_and_before_with_or_semantics() {
+    use wiremock::matchers::{method, path, path_regex, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/agents"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            // dead but recent — matches --dead
+            agent_json(0xCC00_0001, false, "2026-05-10T11:00:00Z"),
+            // alive but stale — matches --before
+            agent_json(0xCC00_0002, true, "2026-05-09T00:00:00Z"),
+            // alive and recent — matches neither
+            agent_json(0xCC00_0003, true, "2026-05-10T11:00:00Z"),
+        ])))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("DELETE"))
+        .and(path_regex(r"^/api/v1/agents/CC00000[12]$"))
+        .and(query_param("deregister_only", "true"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "agent_id": "CCCCCCCC",
+            "deregistered": true
+        })))
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let client = crate::client::ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
+    let result = prune(&client, Some("2026-05-10T00:00:00Z"), true)
+        .await
+        .expect("prune must succeed");
+
+    assert_eq!(result.total_matched, 2, "two agents match (one dead, one stale)");
+    assert_eq!(result.pruned, 2);
+    assert_eq!(result.failed, 0);
+}
+
+/// A deregister failure is counted in `failed` and does not abort the run.
+#[tokio::test]
+async fn prune_counts_failed_deregistrations() {
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/agents"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            agent_json(0xDD00_0001, false, "2026-01-01T00:00:00Z"),
+            agent_json(0xDD00_0002, false, "2026-01-01T00:00:00Z"),
+        ])))
+        .mount(&server)
+        .await;
+
+    // First DELETE succeeds.
+    Mock::given(method("DELETE"))
+        .and(path("/api/v1/agents/DD000001"))
+        .and(query_param("deregister_only", "true"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "agent_id": "DD000001",
+            "deregistered": true
+        })))
+        .mount(&server)
+        .await;
+
+    // Second DELETE returns 404 (agent already gone).
+    Mock::given(method("DELETE"))
+        .and(path("/api/v1/agents/DD000002"))
+        .and(query_param("deregister_only", "true"))
+        .respond_with(
+            ResponseTemplate::new(404)
+                .set_body_json(serde_json::json!({"error":"agent_not_found","message":"not found"})),
+        )
+        .mount(&server)
+        .await;
+
+    let client = crate::client::ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
+    let result = prune(&client, None, true).await.expect("prune must not abort on partial failure");
+
+    assert_eq!(result.total_matched, 2);
+    assert_eq!(result.pruned, 1);
+    assert_eq!(result.failed, 1, "404 on deregister must count as a failure");
 }

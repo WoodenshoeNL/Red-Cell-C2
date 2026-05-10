@@ -121,6 +121,34 @@ pub enum AgentCommands {
         deregister_only: bool,
     },
 
+    /// Bulk-deregister stale agents from the teamserver registry.
+    ///
+    /// Fetches the full agent roster, filters by the given criteria, and calls
+    /// `DELETE /agents/{id}?deregister_only=true` for each match.
+    /// At least one filter flag (--before or --dead) must be supplied.
+    /// When both are given, agents matching **either** criterion are pruned.
+    ///
+    /// `--before` accepts an RFC 3339 UTC timestamp.  Agents whose last
+    /// check-in (`last_seen`) is strictly before that instant are removed.
+    ///
+    /// `--dead` removes agents whose status is "dead" (Active=false on the
+    /// teamserver), regardless of when they last checked in.
+    ///
+    /// Examples:
+    ///   red-cell-cli agent prune --dead
+    ///   red-cell-cli agent prune --before 2026-05-10T00:00:00Z
+    ///   red-cell-cli agent prune --dead --before 2026-05-10T00:00:00Z
+    #[command(verbatim_doc_comment)]
+    Prune {
+        /// Deregister agents whose last check-in is strictly before this
+        /// RFC 3339 UTC timestamp (e.g. 2026-05-10T00:00:00Z).
+        #[arg(long)]
+        before: Option<String>,
+        /// Deregister agents with status "dead" (Active=false on the teamserver).
+        #[arg(long)]
+        dead: bool,
+    },
+
     /// Upload a local file to an agent.
     ///
     /// Examples:

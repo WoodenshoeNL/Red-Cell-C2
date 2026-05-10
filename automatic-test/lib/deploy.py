@@ -1055,11 +1055,14 @@ def reboot_windows_vm(
     deadline = time.time() + reboot_timeout
     while time.time() < deadline:
         try:
-            probe = _run_ssh_cli_with_retry(
+            # Use subprocess.run directly (no retry) — connection failures while
+            # the VM is rebooting are expected and should simply advance to the
+            # next poll iteration, not burn _SSH_MAX_ATTEMPTS retry budget.
+            probe = subprocess.run(
                 _ssh_args(target) + ["echo alive"],
-                target.host,
+                capture_output=True,
+                text=True,
                 timeout=8,
-                tool="ssh",
             )
             if probe.returncode == 0:
                 print(f"{log_prefix} SSH reconnected to {target.host} — VM is back")

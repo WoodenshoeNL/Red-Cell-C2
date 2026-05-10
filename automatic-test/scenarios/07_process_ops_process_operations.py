@@ -238,12 +238,14 @@ def _run_for_agent_windows(ctx, agent_type: str, fmt: str,
         )
         print(f"  [{agent_type}][mod] tasklist /m ok")
 
-        print(f"  [{agent_type}][net] netstat -ano")
-        ns = agent_exec(cli, agent_id, "netstat -ano", wait=True, timeout=45).get(
+        # Use -a -n -p TCP instead of -ano: skips PID lookup and UDP scan to avoid
+        # WFP non-paged pool pressure that disconnects the agent during the command.
+        print(f"  [{agent_type}][net] netstat -a -n -p TCP")
+        ns = agent_exec(cli, agent_id, "netstat -a -n -p TCP", wait=True, timeout=45).get(
             "output", ""
         ).strip()
-        assert ns and ("TCP" in ns or "UDP" in ns), (
-            f"netstat output missing protocol table: {ns[:400]!r}"
+        assert ns and "TCP" in ns, (
+            f"netstat output missing TCP table: {ns[:400]!r}"
         )
         print(f"  [{agent_type}][net] netstat ok ({len(ns)} chars)")
 

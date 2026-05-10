@@ -23,7 +23,7 @@ Steps:
   2. Execute payload in background on target
   3. Wait for agent checkin
   4. Run command suite: whoami, dir C:\\, ipconfig, PowerShell, reg query,
-     sc query, tasklist /m, netstat -ano, arp -a
+     sc query, tasklist /m, netstat -a -n -p TCP, arp -a
   5. Kill agent, clean up work_dir on target
   Final: stop + delete both listeners
 """
@@ -171,14 +171,17 @@ def _run_for_agent(ctx, agent_type: str, fmt: str,
         )
         print(f"  [{agent_type}][cmd] tasklist /m passed")
 
-        # TCP/UDP endpoints
-        print(f"  [{agent_type}][cmd] netstat -ano")
-        result = agent_exec(cli, agent_id, "netstat -ano", wait=True, timeout=45)
+        # TCP endpoints — use -a -n -p TCP (no PID lookup, no UDP scan) to avoid
+        # WFP non-paged pool pressure that causes the agent HTTP check-in to fail
+        # while netstat -ano is executing.  -a keeps LISTENING sockets so output
+        # is never empty even between agent check-ins.
+        print(f"  [{agent_type}][cmd] netstat -a -n -p TCP")
+        result = agent_exec(cli, agent_id, "netstat -a -n -p TCP", wait=True, timeout=45)
         ns_out = result.get("output", "").strip()
-        assert ns_out and ("TCP" in ns_out or "UDP" in ns_out), (
-            f"netstat output missing TCP/UDP table: {ns_out[:500]!r}"
+        assert ns_out and "TCP" in ns_out, (
+            f"netstat output missing TCP table: {ns_out[:500]!r}"
         )
-        print(f"  [{agent_type}][cmd] netstat -ano passed")
+        print(f"  [{agent_type}][cmd] netstat -a -n -p TCP passed")
 
         # ARP cache
         print(f"  [{agent_type}][cmd] arp -a")

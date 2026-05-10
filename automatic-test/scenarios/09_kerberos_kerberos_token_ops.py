@@ -27,7 +27,7 @@ Strict Kerberos mode (``enabled = true``):
      GROUP INFORMATION (expected domain group substrings)
   7. ``klist`` — assert at least one ticket for the configured principal with
      End Time in the future
-  8. Network enumeration: ``netstat -ano``, ``arp -a``
+  8. Network enumeration: ``netstat -a -n -p TCP``, ``arp -a``
   9. Kill agent, stop listener, clean up
 
 Locale: section headers are expected in English (``whoami /all``, ``klist``).
@@ -212,11 +212,12 @@ def run(ctx):
         )
         print("  [kerberos] ticket cache structure validated (principal + future expiry)")
 
-        print("  [net] netstat -ano")
-        netstat_result = agent_exec(cli, agent_id, "netstat -ano", wait=True, timeout=45)
+        # Use -a -n -p TCP to avoid PID-lookup / UDP-scan WFP pressure (same fix as sc05/sc07).
+        print("  [net] netstat -a -n -p TCP")
+        netstat_result = agent_exec(cli, agent_id, "netstat -a -n -p TCP", wait=True, timeout=45)
         netstat_out = netstat_result.get("output", "").strip()
-        assert netstat_out and ("TCP" in netstat_out or "UDP" in netstat_out), (
-            f"netstat output missing protocol table: {netstat_out[:500]!r}"
+        assert netstat_out and "TCP" in netstat_out, (
+            f"netstat output missing TCP table: {netstat_out[:500]!r}"
         )
         print(f"  [net] netstat ok ({len(netstat_out)} chars)")
 

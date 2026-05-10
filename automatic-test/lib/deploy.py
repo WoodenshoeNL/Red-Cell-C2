@@ -620,6 +620,8 @@ def defender_add_process_exclusion(target: TargetConfig, exe_path: str) -> None:
     """
     if target.platform != "windows":
         raise ValueError("defender_add_process_exclusion is only supported on Windows targets")
+    if target.host in _globally_unreachable_hosts:
+        return
     leaf = PureWindowsPath(exe_path.strip().strip('"')).name
     if not leaf:
         return
@@ -644,6 +646,8 @@ def defender_remove_process_exclusion(target: TargetConfig, exe_path: str) -> No
     """
     if target.platform != "windows":
         raise ValueError("defender_remove_process_exclusion is only supported on Windows targets")
+    if target.host in _globally_unreachable_hosts:
+        return
     leaf = PureWindowsPath(exe_path.strip().strip('"')).name
     if not leaf:
         return
@@ -670,6 +674,8 @@ def firewall_allow_program(target: TargetConfig, program_path: str) -> None:
     """
     if target.platform != "windows":
         raise ValueError("firewall_allow_program is only supported on Windows targets")
+    if target.host in _globally_unreachable_hosts:
+        return
     digest = hashlib.sha256(program_path.encode("utf-8", errors="replace")).hexdigest()[:12]
     name = f"RC-Harness-{digest}"[:96]
     name_q = _quote_powershell(name)
@@ -698,6 +704,8 @@ def firewall_remove_program(target: TargetConfig, program_path: str) -> None:
     """
     if target.platform != "windows":
         raise ValueError("firewall_remove_program is only supported on Windows targets")
+    if target.host in _globally_unreachable_hosts:
+        return
     digest = hashlib.sha256(program_path.encode("utf-8", errors="replace")).hexdigest()[:12]
     name = f"RC-Harness-{digest}"[:96]
     name_q = _quote_powershell(name)
@@ -728,6 +736,8 @@ def firewall_allow_outbound_tcp(target: TargetConfig, remote_addr: str, port: in
     """
     if target.platform != "windows":
         raise ValueError("firewall_allow_outbound_tcp is only supported on Windows targets")
+    if target.host in _globally_unreachable_hosts:
+        return
     key = f"outbound-tcp-{remote_addr}-{port}"
     digest = hashlib.sha256(key.encode()).hexdigest()[:12]
     name = f"RC-Harness-{digest}"[:96]
@@ -759,6 +769,8 @@ def firewall_remove_outbound_tcp(target: TargetConfig, remote_addr: str, port: i
     """
     if target.platform != "windows":
         raise ValueError("firewall_remove_outbound_tcp is only supported on Windows targets")
+    if target.host in _globally_unreachable_hosts:
+        return
     key = f"outbound-tcp-{remote_addr}-{port}"
     digest = hashlib.sha256(key.encode()).hexdigest()[:12]
     name = f"RC-Harness-{digest}"[:96]
@@ -834,6 +846,8 @@ def defender_add_exclusion(target: TargetConfig, path: str) -> None:
     """
     if target.platform != "windows":
         raise ValueError("defender_add_exclusion is only supported on Windows targets")
+    if target.host in _globally_unreachable_hosts:
+        return
     path_q = _quote_powershell(path)
     script = (
         f"Add-MpPreference -ExclusionPath {path_q} -ErrorAction SilentlyContinue; "
@@ -854,6 +868,8 @@ def windows_sync_payload_probe(
     """
     if target.platform != "windows":
         raise ValueError("windows_sync_payload_probe requires a Windows target")
+    if target.host in _globally_unreachable_hosts:
+        return ""
     exe_q = _quote_powershell(exe_path)
     t = int(timeout_ms)
     script = (

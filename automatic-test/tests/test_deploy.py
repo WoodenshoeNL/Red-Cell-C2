@@ -27,16 +27,21 @@ from lib.deploy import (
     configure_deploy_timeouts,
     defender_add_exclusion,
     defender_add_process_exclusion,
-    disable_windows_firewall,
     defender_remove_process_exclusion,
+    disable_windows_firewall,
     ensure_work_dir,
     execute_background,
+    firewall_allow_outbound_tcp,
+    firewall_allow_program,
+    firewall_remove_outbound_tcp,
+    firewall_remove_program,
     inject_hosts_entry,
     mark_host_unreachable,
     preflight_dns,
     preflight_ssh,
     run_remote,
     upload,
+    windows_sync_payload_probe,
     wfp_preflight_cleanup,
     _is_transient_ssh_failure,
     _quote_posix,
@@ -1950,6 +1955,80 @@ class TestWfpPreflightCleanup(unittest.TestCase):
             any("CRITICAL" in p for p in printed),
             f"must not print CRITICAL warning when restart succeeded; got: {printed}",
         )
+
+
+class TestGloballyUnreachableGuards(unittest.TestCase):
+    """Each Windows SSH helper must short-circuit when the host is in _globally_unreachable_hosts."""
+
+    def setUp(self) -> None:
+        clear_globally_unreachable_hosts()
+        self.key_path = _module_key_path()
+        self.target = _make_target(host="10.99.0.1", platform="windows", key=self.key_path)
+
+    def tearDown(self) -> None:
+        clear_globally_unreachable_hosts()
+
+    def _mark_unreachable(self) -> None:
+        mark_host_unreachable(self.target.host)
+
+    @patch("subprocess.run")
+    def test_defender_add_process_exclusion_skips_when_unreachable(self, mock_run: object) -> None:
+        self._mark_unreachable()
+        defender_add_process_exclusion(self.target, "C:\\rc\\agent.exe")
+        mock_run.assert_not_called()
+
+    @patch("subprocess.run")
+    def test_defender_remove_process_exclusion_skips_when_unreachable(self, mock_run: object) -> None:
+        self._mark_unreachable()
+        defender_remove_process_exclusion(self.target, "C:\\rc\\agent.exe")
+        mock_run.assert_not_called()
+
+    @patch("subprocess.run")
+    def test_firewall_allow_program_skips_when_unreachable(self, mock_run: object) -> None:
+        self._mark_unreachable()
+        firewall_allow_program(self.target, "C:\\rc\\agent.exe")
+        mock_run.assert_not_called()
+
+    @patch("subprocess.run")
+    def test_firewall_remove_program_skips_when_unreachable(self, mock_run: object) -> None:
+        self._mark_unreachable()
+        firewall_remove_program(self.target, "C:\\rc\\agent.exe")
+        mock_run.assert_not_called()
+
+    @patch("subprocess.run")
+    def test_firewall_allow_outbound_tcp_skips_when_unreachable(self, mock_run: object) -> None:
+        self._mark_unreachable()
+        firewall_allow_outbound_tcp(self.target, "10.0.0.2", 443)
+        mock_run.assert_not_called()
+
+    @patch("subprocess.run")
+    def test_firewall_remove_outbound_tcp_skips_when_unreachable(self, mock_run: object) -> None:
+        self._mark_unreachable()
+        firewall_remove_outbound_tcp(self.target, "10.0.0.2", 443)
+        mock_run.assert_not_called()
+
+    @patch("subprocess.run")
+    def test_defender_add_exclusion_skips_when_unreachable(self, mock_run: object) -> None:
+        self._mark_unreachable()
+        defender_add_exclusion(self.target, "C:\\rc")
+        mock_run.assert_not_called()
+
+    @patch("subprocess.run")
+    def test_windows_sync_payload_probe_returns_empty_string_when_unreachable(
+        self, mock_run: object
+    ) -> None:
+        self._mark_unreachable()
+        result = windows_sync_payload_probe(self.target, "C:\\rc\\agent.exe")
+        mock_run.assert_not_called()
+        self.assertEqual(result, "")
+
+    @patch("subprocess.run")
+    def test_guards_do_not_fire_for_reachable_host(self, mock_run: object) -> None:
+        """When the host is NOT in _globally_unreachable_hosts, subprocess.run must be called."""
+        ok_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        mock_run.return_value = ok_result
+        defender_add_exclusion(self.target, "C:\\rc")
+        mock_run.assert_called_once()
 
 
 if __name__ == "__main__":

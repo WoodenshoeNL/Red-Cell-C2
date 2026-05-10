@@ -996,7 +996,14 @@ def main():
                     timeout=_wfp_timeout,
                     restart_threshold=WFP_RESTART_THRESHOLD,
                 )
-                if _wfp_pre_result and _wfp_pre_result.get("wfp_critical"):
+                if _wfp_pre_result is None:
+                    _wfp_preflight_critical = True
+                    print(
+                        f"\n  *** WFP preflight sweep returned no result"
+                        f" for {_wlabel!r} ({_wtgt.host}) — treating as"
+                        " unrecovered, skipping all Windows scenarios."
+                    )
+                elif _wfp_pre_result.get("wfp_critical"):
                     print(
                         f"\n  *** WFP pool exhausted on {_wlabel!r} ({_wtgt.host}) —"
                         " mpssvc restart did not recover it."

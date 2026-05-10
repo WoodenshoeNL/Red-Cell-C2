@@ -128,8 +128,8 @@ pub enum AgentCommands {
     /// At least one filter flag (--before or --dead) must be supplied.
     /// When both are given, agents matching **either** criterion are pruned.
     ///
-    /// `--before` accepts an RFC 3339 UTC timestamp.  Agents whose last
-    /// check-in (`last_seen`) is strictly before that instant are removed.
+    /// `--before` accepts any RFC 3339 timestamp (UTC or any UTC offset).
+    /// Agents whose last check-in (`last_seen`) is strictly before that instant are removed.
     ///
     /// `--dead` removes agents whose status is "dead" (Active=false on the
     /// teamserver), regardless of when they last checked in.
@@ -141,7 +141,7 @@ pub enum AgentCommands {
     #[command(verbatim_doc_comment)]
     Prune {
         /// Deregister agents whose last check-in is strictly before this
-        /// RFC 3339 UTC timestamp (e.g. 2026-05-10T00:00:00Z).
+        /// RFC 3339 timestamp (e.g. 2026-05-10T00:00:00Z or 2026-05-10T02:00:00+02:00).
         #[arg(long)]
         before: Option<String>,
         /// Deregister agents with status "dead" (Active=false on the teamserver).

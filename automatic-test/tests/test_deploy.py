@@ -1052,6 +1052,53 @@ class TestWindowsSchedTaskScript(unittest.TestCase):
         self.assertIn("-Argument", script)
         self.assertIn("--config C:\\path with spaces\\cfg.toml", script)
 
+    def test_interactive_logon_tried_first(self) -> None:
+        """Interactive logon must be attempted before S4U so tasks inherit network credentials."""
+        script = _windows_schtask_script("C:\\Temp\\agent.exe")
+        interactive_idx = script.index("LogonType Interactive")
+        s4u_fallback_idx = script.index("LogonType S4U")
+        self.assertLess(interactive_idx, s4u_fallback_idx)
+
+    def test_s4u_fallback_triggered_on_queued_state(self) -> None:
+        """When State=='Queued' after 2 s the task has not run — S4U fallback must fire."""
+        script = _windows_schtask_script("C:\\Temp\\agent.exe")
+        # The no-session condition must include the Queued branch.
+        self.assertIn("$task.State -eq 'Queued'", script)
+        # Fallback must re-register with S4U and re-start.
+        self.assertIn("$lt -eq 'Interactive' -and $_no_session", script)
+        self.assertIn("LogonType S4U", script)
+
+    def test_s4u_fallback_triggered_on_ready_with_267011(self) -> None:
+        """State=='Ready' + LastTaskResult==267011 means another user holds the session.
+
+        Windows returns Ready+267011 (SCHED_S_TASK_HAS_NOT_RUN) instead of Queued
+        when a different user is logged in interactively and the SSH user has no session.
+        The S4U fallback must also fire in this case.
+        """
+        script = _windows_schtask_script("C:\\Temp\\agent.exe")
+        # Both conditions must be present in the no-session guard.
+        self.assertIn("$task.State -eq 'Ready'", script)
+        self.assertIn("267011", script)
+        # They must be ORed together — check the combined expression.
+        self.assertIn(
+            "($task.State -eq 'Queued') -or ($task.State -eq 'Ready' -and $ti_early -and [int]$ti_early.LastTaskResult -eq 267011)",
+            script,
+        )
+
+    def test_ti_early_fetched_before_fallback_check(self) -> None:
+        """$ti_early must be fetched before the $_no_session evaluation it feeds into."""
+        script = _windows_schtask_script("C:\\Temp\\agent.exe")
+        self.assertIn("$ti_early = Get-ScheduledTaskInfo", script)
+        ti_early_idx = script.index("$ti_early = Get-ScheduledTaskInfo")
+        no_session_idx = script.index("$_no_session =")
+        self.assertLess(ti_early_idx, no_session_idx)
+
+    def test_logontype_marker_set_to_s4u_fb_on_fallback(self) -> None:
+        """$lt must be updated to 'S4U-fb' when the Interactive→S4U fallback fires."""
+        script = _windows_schtask_script("C:\\Temp\\agent.exe")
+        self.assertIn("S4U-fb", script)
+        self.assertIn("$lt = 'S4U-fb'", script)
+
 
 class TestExecuteBackgroundWindowsArguments(unittest.TestCase):
     """Tests that execute_background correctly passes arguments on Windows."""

@@ -139,7 +139,7 @@ def _run_smb_pivot(ctx, parent_target, child_target):
         listener_start,
         listener_stop,
     )
-    from lib.deploy import run_remote
+    from lib.deploy import cleanup_windows_harness_work_dir
     from lib.listeners import http_listener_kwargs
     from lib.wait import TimeoutError as WaitTimeout
     from lib.wait import poll
@@ -286,13 +286,6 @@ def _run_smb_pivot(ctx, parent_target, child_target):
                 pass
 
         for target_val in [parent_target, child_target]:
-            try:
-                run_remote(
-                    target_val,
-                    f'powershell -Command "Remove-Item -Recurse -Force -Path \'{target_val.work_dir}\'"',
-                    timeout=15,
-                )
-            except Exception as exc:
-                print(f"  [cleanup] work_dir removal on {target_val.host} failed (non-fatal): {exc}")
+            cleanup_windows_harness_work_dir(target_val, log_prefix="  [cleanup]")
 
         print("  [cleanup] done")

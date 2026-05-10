@@ -126,6 +126,7 @@ def run(ctx) -> None:
         listener_stop,
     )
     from lib.deploy import (
+        cleanup_windows_harness_work_dir,
         defender_add_exclusion,
         run_remote,
     )
@@ -246,14 +247,6 @@ def run(ctx) -> None:
         except Exception:
             pass
 
-        print("  [archon][cleanup] removing work_dir on target")
-        try:
-            run_remote(
-                target,
-                f'powershell -Command "Remove-Item -Recurse -Force -Path \'{target.work_dir}\'"',
-                timeout=15,
-            )
-        except Exception as exc:
-            print(f"  [archon][cleanup] work_dir removal failed (non-fatal): {exc}")
-
+        print("  [archon][cleanup] cleaning harness artifacts in work_dir on target")
+        cleanup_windows_harness_work_dir(target, log_prefix="  [archon][cleanup]")
         print("  [archon][cleanup] done")

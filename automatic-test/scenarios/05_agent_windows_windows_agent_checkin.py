@@ -62,7 +62,7 @@ def _run_for_agent(ctx, agent_type: str, fmt: str,
     ctx.scenario_active_pass = agent_type
     from lib.archon_triage import format_archon_checkin_timeout_diagnostics
     from lib.cli import agent_exec, agent_kill
-    from lib.deploy import run_remote
+    from lib.deploy import cleanup_windows_harness_work_dir
     from lib.deploy_agent import deploy_and_checkin
     from lib.wait import TimeoutError as WaitTimeoutError
 
@@ -200,16 +200,8 @@ def _run_for_agent(ctx, agent_type: str, fmt: str,
             except Exception as exc:
                 print(f"  [{agent_type}][cleanup] agent kill failed (non-fatal): {exc}")
 
-        print(f"  [{agent_type}][cleanup] removing work_dir on target")
-        try:
-            run_remote(
-                target,
-                f'powershell -Command "Remove-Item -Recurse -Force -Path \'{target.work_dir}\'"',
-                timeout=15,
-            )
-        except Exception as exc:
-            print(f"  [{agent_type}][cleanup] work_dir removal failed (non-fatal): {exc}")
-
+        print(f"  [{agent_type}][cleanup] cleaning harness artifacts in work_dir on target")
+        cleanup_windows_harness_work_dir(target, log_prefix=f"  [{agent_type}][cleanup]")
         print(f"  [{agent_type}][cleanup] done")
 
 

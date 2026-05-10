@@ -1427,6 +1427,12 @@ def cleanup_windows_harness_work_dir(
         "    }\n"
         "  }\n"
         "}\n"
+        # Kill WerFault.exe before stopping agent processes.  When a Demon agent crashes on
+        # TerminateProcess (APPCRASH EventID 1000), WerFault.exe holds the agent binary open
+        # for crash-dump processing and consumes non-paged pool.  Subsequent agents fail with
+        # WSAENOBUFS (os error 10055) when that pool is exhausted.  On a test VM every
+        # WerFault instance is processing an agent crash — kill it unconditionally.
+        "Get-Process -Name WerFault -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue\n"
         # Work-dir file cleanup.
         + f"$wd = '{wd}'\n"
         "if (-not (Test-Path -LiteralPath $wd)) { exit 0 }\n"
@@ -1439,18 +1445,27 @@ def cleanup_windows_harness_work_dir(
         "    }\n"
         "  } catch { }\n"
         "}\n"
-        "Start-Sleep -Milliseconds 800\n"
+        "Start-Sleep -Milliseconds 1500\n"
+        # Retry loop: WER crash-dump processing holds agent-*.exe files for up to ~30 s.
+        # Kill WerFault.exe between retries to accelerate pool release.
         "$locked = New-Object System.Collections.Generic.List[string]\n"
-        "foreach ($pat in @('agent-*.exe','stress-agent-*.exe','uploaded-*.dat')) {\n"
-        "  Get-ChildItem -LiteralPath $wd -Filter $pat -ErrorAction SilentlyContinue "
+        "$maxRetries = 10\n"
+        "for ($retry = 0; $retry -lt $maxRetries; $retry++) {\n"
+        "  $locked.Clear()\n"
+        "  foreach ($pat in @('agent-*.exe','stress-agent-*.exe','uploaded-*.dat')) {\n"
+        "    Get-ChildItem -LiteralPath $wd -Filter $pat -ErrorAction SilentlyContinue "
         "| ForEach-Object {\n"
-        "    $f = $_\n"
-        "    try {\n"
-        "      Remove-Item -LiteralPath $f.FullName -Force -ErrorAction Stop\n"
-        "    } catch {\n"
-        "      $locked.Add($f.FullName) | Out-Null\n"
+        "      $f = $_\n"
+        "      try {\n"
+        "        Remove-Item -LiteralPath $f.FullName -Force -ErrorAction Stop\n"
+        "      } catch {\n"
+        "        $locked.Add($f.FullName) | Out-Null\n"
+        "      }\n"
         "    }\n"
         "  }\n"
+        "  if ($locked.Count -eq 0) { break }\n"
+        "  Get-Process -Name WerFault -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue\n"
+        "  if ($retry -lt ($maxRetries - 1)) { Start-Sleep -Seconds 3 }\n"
         "}\n"
         "if ($locked.Count -gt 0) {\n"
         "  Write-Output ('HARNESS_LOCKED_FILES:' + ($locked -join ';'))\n"

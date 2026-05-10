@@ -135,7 +135,7 @@ def run(ctx):
         listener_start,
         listener_stop,
     )
-    from lib.deploy import run_remote
+    from lib.deploy import cleanup_windows_harness_work_dir, run_remote
     from lib.listeners import http_listener_kwargs
 
     cli = ctx.cli
@@ -252,14 +252,6 @@ def run(ctx):
         except Exception:
             pass
 
-        print("  [cleanup] removing work_dir on target")
-        try:
-            run_remote(
-                target,
-                f'powershell -Command "Remove-Item -Recurse -Force -Path \'{target.work_dir}\'"',
-                timeout=15,
-            )
-        except Exception as exc:
-            print(f"  [cleanup] work_dir removal failed (non-fatal): {exc}")
-
+        print("  [cleanup] cleaning harness artifacts in work_dir on target")
+        cleanup_windows_harness_work_dir(target, log_prefix="  [cleanup]")
         print("  [cleanup] done")

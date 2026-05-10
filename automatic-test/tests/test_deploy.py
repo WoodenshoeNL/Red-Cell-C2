@@ -1591,6 +1591,33 @@ class TestCleanupWindowsHarnessWorkDir(unittest.TestCase):
         decoded = _decoded_windows_launch_script(mock_ssh.call_args[0][0][-1])
         self.assertNotIn("ExclusionIpAddress", decoded)
 
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_script_kills_werfault_before_agent_processes(self, mock_ssh: object) -> None:
+        """WerFault.exe must be killed before agent processes to release file locks promptly."""
+        mock_ssh.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
+        cleanup_windows_harness_work_dir(t, timeout=100)
+        decoded = _decoded_windows_launch_script(mock_ssh.call_args[0][0][-1])
+        self.assertIn("WerFault", decoded)
+        # WerFault kill must appear before the per-process path check that stops agent processes.
+        wer_pos = decoded.index("WerFault")
+        proc_path_pos = decoded.index("proc.Path")
+        self.assertLess(wer_pos, proc_path_pos)
+
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_script_has_retry_loop_for_locked_files(self, mock_ssh: object) -> None:
+        """File deletion must use a retry loop to wait out WER crash-dump processing."""
+        mock_ssh.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
+        cleanup_windows_harness_work_dir(t, timeout=100)
+        decoded = _decoded_windows_launch_script(mock_ssh.call_args[0][0][-1])
+        self.assertIn("maxRetries", decoded)
+        self.assertIn("retry", decoded)
+
 
 class TestWfpPreflightCleanup(unittest.TestCase):
     """Unit tests for :func:`wfp_preflight_cleanup`."""

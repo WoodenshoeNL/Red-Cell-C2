@@ -2352,15 +2352,14 @@ class TestRebootWindowsVm(unittest.TestCase):
     ) -> None:
         """Reboot SSH raising (VM shuts down mid-session) must be swallowed; polling must continue."""
         import itertools
-        import subprocess as _sp
         start = 1000.0
         mock_time.side_effect = itertools.chain(
             [start],          # deadline = start + 60
             [start + 25],     # loop check: within window → probe succeeds
         )
         # Simulate VM shutting down before PowerShell can return cleanly.
-        mock_ssh.side_effect = _sp.CalledProcessError(255, "ssh")
-        probe_ok = _sp.CompletedProcess(args=[], returncode=0, stdout="alive\n", stderr="")
+        mock_ssh.side_effect = subprocess.CalledProcessError(255, "ssh")
+        probe_ok = subprocess.CompletedProcess(args=[], returncode=0, stdout="alive\n", stderr="")
         mock_run.return_value = probe_ok
         t = _make_target(
             host="192.168.1.100", platform="windows", key=self.key_path, work_dir=r"C:\Temp\rc-test"
@@ -2381,7 +2380,6 @@ class TestRebootWindowsVm(unittest.TestCase):
     ) -> None:
         """A non-zero probe returncode (shell not yet ready) must continue polling, not return False."""
         import itertools
-        import subprocess as _sp
         start = 1000.0
         # time.time() calls: (1) deadline, (2) loop check 1 — probe returns rc=1,
         # (3) remaining calc, (4) loop check 2 — probe returns rc=0
@@ -2391,9 +2389,9 @@ class TestRebootWindowsVm(unittest.TestCase):
             [start + 10],     # (3) remaining = int(deadline - time.time())
             [start + 20],     # (4) loop check 2: within window, probe rc=0
         )
-        reboot_ok = _sp.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
-        probe_fail = _sp.CompletedProcess(args=[], returncode=1, stdout="", stderr="")
-        probe_ok = _sp.CompletedProcess(args=[], returncode=0, stdout="alive\n", stderr="")
+        reboot_ok = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        probe_fail = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="")
+        probe_ok = subprocess.CompletedProcess(args=[], returncode=0, stdout="alive\n", stderr="")
         mock_ssh.return_value = reboot_ok
         mock_run.side_effect = [probe_fail, probe_ok]
         t = _make_target(

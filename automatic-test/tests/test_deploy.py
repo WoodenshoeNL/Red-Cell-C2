@@ -2339,6 +2339,69 @@ class TestRebootWindowsVm(unittest.TestCase):
         result = reboot_windows_vm(t, reboot_timeout=60)
         self.assertTrue(result)
 
+    @patch("lib.deploy.subprocess.run")
+    @patch("time.sleep")
+    @patch("time.time")
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_returns_true_when_reboot_ssh_raises_and_probe_reconnects(
+        self,
+        mock_ssh: object,
+        mock_time: object,
+        mock_sleep: object,
+        mock_run: object,
+    ) -> None:
+        """Reboot SSH raising (VM shuts down mid-session) must be swallowed; polling must continue."""
+        import itertools
+        import subprocess as _sp
+        start = 1000.0
+        mock_time.side_effect = itertools.chain(
+            [start],          # deadline = start + 60
+            [start + 25],     # loop check: within window → probe succeeds
+        )
+        # Simulate VM shutting down before PowerShell can return cleanly.
+        mock_ssh.side_effect = _sp.CalledProcessError(255, "ssh")
+        probe_ok = _sp.CompletedProcess(args=[], returncode=0, stdout="alive\n", stderr="")
+        mock_run.return_value = probe_ok
+        t = _make_target(
+            host="192.168.1.100", platform="windows", key=self.key_path, work_dir=r"C:\Temp\rc-test"
+        )
+        result = reboot_windows_vm(t, reboot_timeout=60)
+        self.assertTrue(result)
+
+    @patch("lib.deploy.subprocess.run")
+    @patch("time.sleep")
+    @patch("time.time")
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_continues_polling_when_probe_returns_nonzero(
+        self,
+        mock_ssh: object,
+        mock_time: object,
+        mock_sleep: object,
+        mock_run: object,
+    ) -> None:
+        """A non-zero probe returncode (shell not yet ready) must continue polling, not return False."""
+        import itertools
+        import subprocess as _sp
+        start = 1000.0
+        # time.time() calls: (1) deadline, (2) loop check 1 — probe returns rc=1,
+        # (3) remaining calc, (4) loop check 2 — probe returns rc=0
+        mock_time.side_effect = itertools.chain(
+            [start],          # (1) deadline = start + 60
+            [start + 10],     # (2) loop check 1: within window, probe rc=1
+            [start + 10],     # (3) remaining = int(deadline - time.time())
+            [start + 20],     # (4) loop check 2: within window, probe rc=0
+        )
+        reboot_ok = _sp.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        probe_fail = _sp.CompletedProcess(args=[], returncode=1, stdout="", stderr="")
+        probe_ok = _sp.CompletedProcess(args=[], returncode=0, stdout="alive\n", stderr="")
+        mock_ssh.return_value = reboot_ok
+        mock_run.side_effect = [probe_fail, probe_ok]
+        t = _make_target(
+            host="192.168.1.100", platform="windows", key=self.key_path, work_dir=r"C:\Temp\rc-test"
+        )
+        result = reboot_windows_vm(t, reboot_timeout=60)
+        self.assertTrue(result)
+
 
 class TestGloballyUnreachableGuards(unittest.TestCase):
     """Each Windows SSH helper must short-circuit when the host is in _globally_unreachable_hosts."""

@@ -1099,6 +1099,31 @@ class TestWindowsSchedTaskScript(unittest.TestCase):
         self.assertIn("S4U-fb", script)
         self.assertIn("$lt = 'S4U-fb'", script)
 
+    def test_s4u_fallback_calls_start_scheduled_task_again(self) -> None:
+        """Start-ScheduledTask must be called a second time inside the S4U fallback.
+
+        If the second call is removed the task is re-registered with S4U but never
+        started, so agents would silently never connect.
+        """
+        script = _windows_schtask_script("C:\\Temp\\agent.exe")
+        # First Start-ScheduledTask is the initial launch; second is inside the fallback.
+        self.assertGreaterEqual(script.count("Start-ScheduledTask"), 2)
+
+    def test_unregister_precedes_s4u_reregistration(self) -> None:
+        """Unregister-ScheduledTask must come before the S4U re-registration in the fallback.
+
+        If the old Interactive task entry is not removed first, Register-ScheduledTask
+        still succeeds (the -Force flag overwrites) but the lingering entry can cause
+        confusing diagnostics and leaves the prior principal intact in some edge cases.
+        """
+        script = _windows_schtask_script("C:\\Temp\\agent.exe")
+        # Anchor to the fallback if-block so we check order *inside* the fallback, not
+        # relative to the initial catch-block S4U registration which comes before it.
+        fallback_idx = script.index("if ($lt -eq 'Interactive' -and $_no_session)")
+        unregister_idx = script.index("Unregister-ScheduledTask", fallback_idx)
+        s4u_rereg_idx = script.index("LogonType S4U", unregister_idx)
+        self.assertLess(unregister_idx, s4u_rereg_idx)
+
 
 class TestExecuteBackgroundWindowsArguments(unittest.TestCase):
     """Tests that execute_background correctly passes arguments on Windows."""

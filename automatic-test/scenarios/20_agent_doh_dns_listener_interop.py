@@ -364,7 +364,7 @@ def _maybe_specter_doh_agent_pass(
                 agent_kill(cli, agent_id)
             except Exception as exc:
                 print(f"  [specter][cleanup] agent kill failed (non-fatal): {exc}")
-            cleanup_windows_harness_work_dir(ctx.windows, log_prefix='  [specter][cleanup]')
+        cleanup_windows_harness_work_dir(ctx.windows, log_prefix='  [specter][cleanup]')
 
         print(f"  [specter][cleanup] stopping/deleting HTTP listener {http_name!r}")
         try:

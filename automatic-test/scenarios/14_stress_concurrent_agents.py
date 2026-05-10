@@ -475,14 +475,20 @@ def run(ctx):
     run_phantom = ctx.linux is not None and "phantom" in available_agents
 
     if run_demon:
-        try:
-            preflight_ssh(ctx.windows)
-        except (DeployError, ScenarioSkipped) as exc:
+        if ctx.windows_degraded:
             run_demon = False
-            print(f"  [demon] SKIPPED — {exc}")
+            print("  [demon] SKIPPED — WFP pool critically exhausted; VM reboot required (windows_degraded)")
+        else:
+            try:
+                preflight_ssh(ctx.windows)
+            except (DeployError, ScenarioSkipped) as exc:
+                run_demon = False
+                print(f"  [demon] SKIPPED — {exc}")
 
     if not run_demon and ctx.windows is None:
         print("  [demon] SKIPPED — ctx.windows is None (Windows target required for Demon)")
+    elif not run_demon and ctx.windows_degraded:
+        pass  # already printed by windows_degraded guard above
     elif not run_demon and "demon" in available_agents:
         pass  # already printed by preflight_ssh failure above
     elif not run_demon:

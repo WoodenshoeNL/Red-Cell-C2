@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1771 | 297 | 148 |
-| Bugs filed against | 294 | 50 | 19 |
+| Tasks closed | 1778 | 297 | 148 |
+| Bugs filed against | 296 | 50 | 19 |
 | Bug rate (bugs/task) | 0.17 | 0.17 | 0.13 |
 | Quality score | 83% | 83% | 87% |
 
-*Bug rates: Claude 294/1771=0.1660→0.17, Codex 50/297=0.1684→0.17, Cursor 19/148=0.1284→0.13*
+*Bug rates: Claude 296/1778=0.1665→0.17, Codex 50/297=0.1684→0.17, Cursor 19/148=0.1284→0.13*
 
 ## Violation Breakdown
 
@@ -25,12 +25,12 @@ Each loop run updates the running totals and appends a review entry.
 | Clippy warnings | 16 | 0 | 2 |
 | Protocol errors | 32 | 32 | 4 |
 | Security issues | 75 | 40 | 0 |
-| Architecture drift | 68 | 25 | 9 |
+| Architecture drift | 69 | 25 | 9 |
 | Memory / resource leaks | 16 | 11 | 2 |
 | Startup / lifecycle regressions | 5 | 10 | 0 |
 | Test infrastructure / flakiness | 71 | 6 | 1 |
 | Audit attribution errors | 0 | 2 | 0 |
-| Availability / timeout regressions | 6 | 5 | 1 |
+| Availability / timeout regressions | 7 | 5 | 1 |
 | Correctness / pagination | 74 | 9 | 2 |
 | Workflow / close-hygiene | 40 | 1 | 2 |
 | Code reuse / duplication | 14 | 0 | 0 |
@@ -41,6 +41,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-05-10 14:40 — b786b15c..d25496bf
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 7 | 2 | Closed seven tasks in this range (`red-cell-c2-r3csv`, `red-cell-c2-jqmy3`, `red-cell-c2-azdnq`, `red-cell-c2-aedq3`, `red-cell-c2-5a2m5`, `red-cell-c2-du7ju`, `red-cell-c2-822s3`). Filed `red-cell-c2-k5emc` for the new unreachable-host fast-path regression in `disable_windows_firewall()`, and `red-cell-c2-6vvcp` for the stale `defer_wfp_cleanup` / `_wfp_cleanup` helper contract left behind after the WFP cleanup removal. |
+| Codex | 0 | 0 | Only `de375627` (`chore(beads): post-qa sweep [codex]`) in this range; no closed-task commit and no new findings attributed. |
+| Cursor | 0 | 0 | No activity in this review range. |
+
+Build: partial — `cargo check --workspace` passed; targeted harness unit tests passed via `python3 -m unittest`; full `cargo nextest run --workspace` and `cargo clippy --workspace -- -D warnings` were started but still compiling/running at handoff.
 
 ### Autotest Run — 2026-05-09 22:16
 

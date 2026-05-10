@@ -800,6 +800,10 @@ def disable_windows_firewall(target: TargetConfig) -> None:
     """
     if target.platform != "windows":
         raise ValueError("disable_windows_firewall is only supported on Windows targets")
+
+    if target.host in _globally_unreachable_hosts:
+        return
+
     script = (
         "Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False -ErrorAction SilentlyContinue; "
         "Set-MpPreference -EnableNetworkProtection Disabled -ErrorAction SilentlyContinue; "

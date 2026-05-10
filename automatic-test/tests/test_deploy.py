@@ -1250,6 +1250,17 @@ class TestDisableWindowsFirewall(unittest.TestCase):
         with self.assertRaises(ValueError):
             disable_windows_firewall(t)
 
+    def test_globally_unreachable_host_skips_ssh(self) -> None:
+        """disable_windows_firewall must return without making an SSH call when the host is globally unreachable."""
+        t = _make_target(work_dir="C:\\Temp\\rc-test", platform="windows", key=self.key_path)
+        mark_host_unreachable(t.host)
+        try:
+            with patch("subprocess.run") as mock_run:
+                disable_windows_firewall(t)
+            mock_run.assert_not_called()
+        finally:
+            clear_globally_unreachable_hosts()
+
 
 class TestInjectHostsEntry(unittest.TestCase):
     """Tests for inject_hosts_entry — idempotent /etc/hosts injection via SSH."""

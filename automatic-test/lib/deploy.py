@@ -1266,8 +1266,10 @@ def wfp_preflight_cleanup(
         and _npb_val >= np_pool_threshold
     )
     if wfp_above or npb_above:
-        wfp_observed = parsed_after.get("wfp_after", -1) if parsed_after else -1  # type: ignore[union-attr]
-        npb_observed = parsed_after.get("npb_after", -1) if parsed_after else -1  # type: ignore[union-attr]
+        # Both conditions above require parsed_after is not None; assert to narrow the type.
+        assert parsed_after is not None
+        wfp_observed = parsed_after.get("wfp_after", -1)
+        npb_observed = parsed_after.get("npb_after", -1)
         reasons = []
         if wfp_above:
             reasons.append(f"wfp_after={wfp_observed} >= threshold={restart_threshold}")
@@ -1311,7 +1313,7 @@ def wfp_preflight_cleanup(
                 " — WFP pool critically exhausted; VM reboot required."
                 " Skipping remaining Windows scenarios."
             )
-            result_dict = dict(parsed_after)  # type: ignore[arg-type]
+            result_dict = dict(parsed_after)
             result_dict["wfp_critical"] = True
             return result_dict
         print(f"{log_prefix} mpssvc restarted on {target.host}; re-running WFP sweep")

@@ -432,6 +432,33 @@ def agent_output(
     return _run(cfg, *args)
 
 
+def agent_prune(
+    cfg: CliConfig,
+    *,
+    dead: bool = False,
+    before: str | None = None,
+) -> dict:
+    """Bulk-deregister stale agents via ``agent prune``.
+
+    At least one of *dead* or *before* must be set.
+
+    *dead*    — deregister agents whose status is ``"dead"`` (Active=false).
+    *before*  — deregister agents whose last check-in is strictly before this
+                RFC 3339 timestamp (e.g. ``"2026-05-01T00:00:00Z"``).
+
+    Returns the ``PruneResult`` dict with keys ``pruned``, ``failed``,
+    ``total_matched``.
+    """
+    if not dead and before is None:
+        raise ValueError("agent_prune: at least one of dead=True or before=<ts> is required")
+    args: list[str] = ["agent", "prune"]
+    if dead:
+        args.append("--dead")
+    if before is not None:
+        args += ["--before", before]
+    return _run(cfg, *args)
+
+
 # ── Operators ────────────────────────────────────────────────────────────────
 
 def operator_list(cfg: CliConfig) -> list[dict]:

@@ -1081,6 +1081,32 @@ def main():
         except Exception as exc:
             print(f"  ✗ unexpected error during cleanup: {exc}")
 
+    # Pre-flight: prune stale agents from prior aborted runs.  Without this,
+    # sc12 and sc18 accumulated 400+ dead agents (red-cell-c2-r3csv), causing
+    # agent-list pagination noise and skewing scenario pass/fail detection.
+    if not ctx.dry_run:
+        from lib.cli import CliError, agent_prune
+
+        print(f"\n{'─' * 60}")
+        print("  Agent prune (stale/dead agents from prior runs)")
+        print(f"{'─' * 60}")
+        try:
+            result = agent_prune(cli_cfg, dead=True)
+            pruned = result.get("pruned", 0)
+            total_matched = result.get("total_matched", 0)
+            failed = result.get("failed", 0)
+            if total_matched == 0:
+                print("  (no dead agents — OK)")
+            else:
+                status = f"  ✓ pruned {pruned}/{total_matched} dead agent(s)"
+                if failed:
+                    status += f" ({failed} failed to deregister)"
+                print(status)
+        except CliError as exc:
+            print(f"  ✗ agent prune failed (non-fatal): {exc}")
+        except Exception as exc:
+            print(f"  ✗ unexpected error during agent prune (non-fatal): {exc}")
+
     if not ctx.dry_run:
         print(f"\n{'─' * 60}")
         print("  Windows work-dir cleanup (stale harness payloads)")

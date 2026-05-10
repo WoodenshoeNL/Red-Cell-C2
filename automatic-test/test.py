@@ -1233,7 +1233,14 @@ def main():
                     timeout=win_cleanup_timeout,
                     restart_threshold=WFP_RESTART_THRESHOLD,
                 )
-                if _wfp_bs and _wfp_bs.get("wfp_critical"):
+                if _wfp_bs is None:
+                    _win_wfp_exhausted = True
+                    print(
+                        "  [between-scenarios][wfp] WFP sweep returned no result for"
+                        f" {wtgt.host} — treating as unrecovered, remaining Windows"
+                        " scenarios will be skipped."
+                    )
+                elif _wfp_bs.get("wfp_critical"):
                     # mpssvc restart didn't help — attempt VM reboot mid-run to
                     # clear accumulated WFP/kernel objects before continuing.
                     print(

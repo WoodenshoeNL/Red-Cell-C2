@@ -204,7 +204,7 @@ pub struct PruneResult {
     /// Total number of agents that matched the prune criteria.
     pub total_matched: u32,
     /// Agent IDs that matched the filter. Populated when `dry_run=true`; empty otherwise.
-    pub matched_agents: Vec<u32>,
+    pub matched_agents: Vec<AgentId>,
 }
 
 impl TextRender for PruneResult {

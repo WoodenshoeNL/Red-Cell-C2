@@ -1127,14 +1127,14 @@ fn prune_result_dry_run_serialises_matched_agents() {
         pruned: 0,
         failed: 0,
         total_matched: 2,
-        matched_agents: vec![305397761, 305397762],
+        matched_agents: vec![AgentId::new(0x1234_0001), AgentId::new(0x1234_0002)],
     };
     let v = serde_json::to_value(&r).expect("serialise");
     assert_eq!(v["dry_run"], true);
     assert_eq!(v["pruned"], 0);
     assert_eq!(v["failed"], 0);
     assert_eq!(v["total_matched"], 2);
-    assert_eq!(v["matched_agents"], serde_json::json!([305397761, 305397762]));
+    assert_eq!(v["matched_agents"], serde_json::json!(["12340001", "12340002"]));
 }
 
 #[test]
@@ -1145,12 +1145,12 @@ fn prune_result_dry_run_renders_text_with_ids() {
         pruned: 0,
         failed: 0,
         total_matched: 2,
-        matched_agents: vec![305397761, 305397762],
+        matched_agents: vec![AgentId::new(0x1234_0001), AgentId::new(0x1234_0002)],
     };
     let text = r.render_text();
     assert!(text.contains("DRY RUN"), "text must say DRY RUN; got: {text:?}");
     assert!(text.contains('2'), "text must mention count; got: {text:?}");
-    assert!(text.contains("305397761"), "text must include first agent ID; got: {text:?}");
+    assert!(text.contains("12340001"), "text must include first agent ID; got: {text:?}");
 }
 
 #[test]
@@ -1494,11 +1494,11 @@ async fn prune_dry_run_issues_no_delete_requests() {
     assert_eq!(result.failed, 0, "dry-run must report no failures");
     assert_eq!(result.matched_agents.len(), 2, "matched_agents must contain two IDs");
     assert!(
-        result.matched_agents.contains(&0x1234_0001),
+        result.matched_agents.contains(&AgentId::new(0x1234_0001)),
         "first dead agent ID must appear in matched_agents"
     );
     assert!(
-        result.matched_agents.contains(&0x1234_0002),
+        result.matched_agents.contains(&AgentId::new(0x1234_0002)),
         "second dead agent ID must appear in matched_agents"
     );
 }

@@ -7,6 +7,7 @@ use tracing::{instrument, warn};
 use super::kill::{KillMode, kill};
 use super::list::list;
 use super::types::PruneResult;
+use crate::AgentId;
 use crate::client::ApiClient;
 use crate::error::CliError;
 
@@ -64,7 +65,7 @@ pub(crate) async fn prune(
     let total_matched = to_prune.len() as u32;
 
     if dry_run {
-        let matched_agents: Vec<u32> = to_prune.iter().map(|a| a.id.as_u32()).collect();
+        let matched_agents: Vec<AgentId> = to_prune.iter().map(|a| a.id).collect();
         return Ok(PruneResult {
             dry_run: true,
             pruned: 0,

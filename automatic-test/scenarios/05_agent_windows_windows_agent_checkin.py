@@ -295,27 +295,18 @@ def run(ctx):
         raws = build_parallel(cli, "", cells, parallel=ctx.payload_parallel)
         payloads = dict(zip(cell_keys, raws))
 
-        _cb_host = ctx.env.get("server", {}).get("callback_host")
-        _c2_hosts_bp = [_cb_host] if _cb_host else None
-
         # ── Demon pass (primary baseline) ────────────────────────────────────
         print("\n  === Agent pass: demon ===")
         _run_for_agent(ctx, agent_type="demon", fmt="exe",
                        listener_name=demon_listener_name,
                        pre_built_payload=payloads["demon"])
 
-        # Sweep WFP state accumulated during Demon pass before starting Archon.
-        # Archon uses WinHTTP which fails silently when the NP pool is depleted;
-        # without this sweep, Windows auto-created agent-* rules and Defender
-        # callout objects from the Demon deploy can push the pool over the edge.
-        # The between-pass wfp= count also reveals whether depletion is from
-        # rules (fixable) or Defender callouts (requires mpssvc restart) — gdiw8.
+        # Sweep WFP firewall rules accumulated during Demon pass before starting Archon.
         if has_archon or has_specter:
             print("\n  [between-passes] WFP cleanup (demon → archon/specter)")
             _wfp_bp = wfp_preflight_cleanup(
                 ctx.windows,
                 log_prefix="  [between-passes][wfp]",
-                c2_hosts=_c2_hosts_bp,
                 restart_threshold=WFP_RESTART_THRESHOLD,
             )
             if _wfp_bp and _wfp_bp.get("wfp_critical"):
@@ -334,13 +325,12 @@ def run(ctx):
                            pre_built_payload=payloads["archon"],
                            listener_port=archon_port)
 
-        # Sweep WFP state accumulated during Archon pass before starting Specter.
+        # Sweep WFP firewall rules accumulated during Archon pass before starting Specter.
         if has_specter and has_archon:
             print("\n  [between-passes] WFP cleanup (archon → specter)")
             _wfp_bp2 = wfp_preflight_cleanup(
                 ctx.windows,
                 log_prefix="  [between-passes][wfp]",
-                c2_hosts=_c2_hosts_bp,
                 restart_threshold=WFP_RESTART_THRESHOLD,
             )
             if _wfp_bp2 and _wfp_bp2.get("wfp_critical"):

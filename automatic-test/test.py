@@ -47,7 +47,7 @@ from lib.config import (
     TimeoutsConfig,
     timeouts_to_env_dict,
 )
-from lib.deploy import TargetConfig, WFP_RESTART_THRESHOLD, cleanup_windows_harness_work_dir, configure_deploy_timeouts, wfp_preflight_cleanup
+from lib.deploy import TargetConfig, WFP_RESTART_THRESHOLD, cleanup_windows_harness_work_dir, configure_deploy_timeouts, defender_disable_network_protection, wfp_preflight_cleanup
 from lib.teamserver_monitor import configure_teamserver_ssh_connect_timeout
 from lib.wait import configure_wait_defaults
 from lib.failure_diagnostics import (
@@ -966,27 +966,31 @@ def main():
             selected_ids,
         )
 
-    # Pre-flight: sweep leftover WFP firewall rules and Defender NP exclusions
-    # from prior test runs.  After many runs (14+ in a day) the Windows VM can
-    # exhaust its non-paged pool via accumulated RC-Harness-* and agent-* rules,
-    # causing WSAENOBUFS (os error 10055) on all socket operations.
+    # Pre-flight: disable Defender Network Protection and sweep leftover WFP firewall
+    # rules from prior test runs.  NP (WdFilter.sys callout driver) creates WFP filter
+    # objects for every Add/Remove-MpPreference -ExclusionIpAddress call and for every
+    # inspected connection; objects survive mpssvc restarts and exhaust non-paged pool
+    # (WSAENOBUFS / os error 10055) after even a single run.  Disabling NP once here
+    # eliminates the accumulation root cause for the entire session.
     _wfp_preflight_critical = False
     if not ctx.dry_run:
         _wfp_targets = _windows_harness_cleanup_targets(windows_target, windows2_target)
         if _wfp_targets:
             print(f"\n{'─' * 60}")
-            print("  WFP preflight cleanup (leftover firewall rules from prior runs)")
+            print("  WFP preflight (disable Network Protection + sweep leftover firewall rules)")
             print(f"{'─' * 60}")
-            _cb_host_wfp = ctx.env.get("server", {}).get("callback_host")
-            _c2_hosts_wfp = [_cb_host_wfp] if _cb_host_wfp else None
             _wfp_timeout = max(120, int(tmo.command_output))
             for _wlabel, _wtgt in _wfp_targets:
                 print(f"  Target {_wlabel!r} ({_wtgt.host})")
+                try:
+                    defender_disable_network_protection(_wtgt)
+                    print(f"  [wfp-preflight] Network Protection disabled on {_wtgt.host}")
+                except Exception as _np_exc:
+                    print(f"  [wfp-preflight] NP disable failed (non-fatal): {_np_exc}")
                 _wfp_pre_result = wfp_preflight_cleanup(
                     _wtgt,
                     log_prefix="  [wfp-preflight]",
                     timeout=_wfp_timeout,
-                    c2_hosts=_c2_hosts_wfp,
                     restart_threshold=WFP_RESTART_THRESHOLD,
                 )
                 if _wfp_pre_result and _wfp_pre_result.get("wfp_critical"):
@@ -1083,15 +1087,12 @@ def main():
             print("  (no Windows work_dir targets — skipped)")
         else:
             win_cleanup_timeout = max(90, int(tmo.command_output))
-            _cb_host = ctx.env.get("server", {}).get("callback_host")
-            _ip_excl = [_cb_host] if _cb_host else None
             for wlabel, wtgt in w_cleanup_targets:
                 print(f"  Target {wlabel!r} ({wtgt.host}) {wtgt.work_dir!r}")
                 cleanup_windows_harness_work_dir(
                     wtgt,
                     log_prefix="  [win-workdir]",
                     timeout=win_cleanup_timeout,
-                    ip_exclusions_to_remove=_ip_excl,
                 )
 
     automatic_test_root = Path(__file__).resolve().parent
@@ -1129,25 +1130,18 @@ def main():
 
         if not ctx.dry_run:
             win_cleanup_timeout = max(90, int(tmo.command_output))
-            _cb_host_bs = ctx.env.get("server", {}).get("callback_host")
-            _ip_excl_bs = [_cb_host_bs] if _cb_host_bs else None
             for _, wtgt in _windows_harness_cleanup_targets(windows_target, windows2_target):
                 cleanup_windows_harness_work_dir(
                     wtgt,
                     log_prefix="  [between-scenarios]",
                     timeout=win_cleanup_timeout,
-                    ip_exclusions_to_remove=_ip_excl_bs,
                 )
                 # Per-scenario WFP sweep: removes agent-* rules (Windows-auto-created)
-                # that cleanup_windows_harness_work_dir does not cover.  Without this,
-                # 4+ Windows scenarios in a single suite run re-accumulate WFP filter
-                # objects fast enough to re-exhaust non-paged pool (WSAENOBUFS / os
-                # error 10055) — see red-cell-c2-gdiw8.
+                # that cleanup_windows_harness_work_dir does not cover.
                 _wfp_bs = wfp_preflight_cleanup(
                     wtgt,
                     log_prefix="  [between-scenarios][wfp]",
                     timeout=win_cleanup_timeout,
-                    c2_hosts=_ip_excl_bs,
                     restart_threshold=WFP_RESTART_THRESHOLD,
                 )
                 if _wfp_bs and _wfp_bs.get("wfp_critical"):

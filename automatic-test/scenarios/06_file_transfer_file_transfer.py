@@ -573,9 +573,6 @@ def run(ctx):
         # ── Windows passes ───────────────────────────────────────────────────
         if windows_ok:
             ran_any = True
-            _cb_host = ctx.env.get("server", {}).get("callback_host")
-            _c2_hosts_bp = [_cb_host] if _cb_host else None
-
             print("\n  === Agent pass: demon (Windows) ===")
             _run_for_agent_windows(ctx, agent_type="demon", fmt="exe",
                                    listener_name=demon_listener_name,
@@ -586,7 +583,6 @@ def run(ctx):
                 _wfp_bp = wfp_preflight_cleanup(
                     ctx.windows,
                     log_prefix="  [between-passes][wfp]",
-                    c2_hosts=_c2_hosts_bp,
                     restart_threshold=WFP_RESTART_THRESHOLD,
                 )
                 if _wfp_bp and _wfp_bp.get("wfp_critical"):
@@ -608,7 +604,6 @@ def run(ctx):
                 _wfp_bp2 = wfp_preflight_cleanup(
                     ctx.windows,
                     log_prefix="  [between-passes][wfp]",
-                    c2_hosts=_c2_hosts_bp,
                     restart_threshold=WFP_RESTART_THRESHOLD,
                 )
                 if _wfp_bp2 and _wfp_bp2.get("wfp_critical"):

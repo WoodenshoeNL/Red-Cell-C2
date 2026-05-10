@@ -27,8 +27,7 @@ from lib.deploy import (
     configure_deploy_timeouts,
     defender_add_exclusion,
     defender_add_process_exclusion,
-    defender_network_protection_exclusion,
-    defender_remove_network_protection_exclusion,
+    defender_disable_network_protection,
     defender_remove_process_exclusion,
     ensure_work_dir,
     execute_background,
@@ -1291,8 +1290,8 @@ class TestFirewallRemoveProgram(unittest.TestCase):
             firewall_remove_program(t, "/tmp/x/a.exe")
 
 
-class TestDefenderRemoveNetworkProtectionExclusion(unittest.TestCase):
-    """defender_remove_network_protection_exclusion uses Remove-MpPreference -ExclusionIpAddress."""
+class TestDefenderDisableNetworkProtection(unittest.TestCase):
+    """defender_disable_network_protection issues Set-MpPreference -EnableNetworkProtection Disabled."""
 
     def setUp(self) -> None:
         self.key_path = _module_key_path()
@@ -1304,21 +1303,21 @@ class TestDefenderRemoveNetworkProtectionExclusion(unittest.TestCase):
             args=[], returncode=returncode, stdout=stdout, stderr=stderr
         )
 
-    def test_windows_removes_ip_exclusion(self) -> None:
+    def test_windows_disables_network_protection(self) -> None:
         ok = self._completed(0)
         t = _make_target(work_dir="C:\\Temp\\rc-test", platform="windows", key=self.key_path)
         with patch("subprocess.run", return_value=ok) as m:
-            defender_remove_network_protection_exclusion(t, "10.0.0.1")
+            defender_disable_network_protection(t)
         script = _decoded_windows_launch_script(m.call_args[0][0][-1])
-        self.assertIn("Remove-MpPreference", script)
-        self.assertIn("ExclusionIpAddress", script)
-        self.assertIn("10.0.0.1", script)
-        self.assertNotIn("Add-MpPreference", script)
+        self.assertIn("Set-MpPreference", script)
+        self.assertIn("EnableNetworkProtection", script)
+        self.assertIn("Disabled", script)
+        self.assertNotIn("ExclusionIpAddress", script)
 
     def test_linux_raises(self) -> None:
         t = _make_target(work_dir="/tmp/x", key=self.key_path)
         with self.assertRaises(ValueError):
-            defender_remove_network_protection_exclusion(t, "10.0.0.1")
+            defender_disable_network_protection(t)
 
 
 class TestInjectHostsEntry(unittest.TestCase):
@@ -1560,23 +1559,8 @@ class TestCleanupWindowsHarnessWorkDir(unittest.TestCase):
         self.assertLess(fw_pos, wd_pos)
 
     @patch("lib.deploy._run_ssh_cli_with_retry")
-    def test_ip_exclusions_to_remove_adds_np_sweep(self, mock_ssh: object) -> None:
-        """Passing ip_exclusions_to_remove must add Remove-MpPreference -ExclusionIpAddress."""
-        mock_ssh.return_value = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="", stderr=""
-        )
-        t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
-        cleanup_windows_harness_work_dir(
-            t, timeout=100, ip_exclusions_to_remove=["192.168.1.10"]
-        )
-        decoded = _decoded_windows_launch_script(mock_ssh.call_args[0][0][-1])
-        self.assertIn("Remove-MpPreference", decoded)
-        self.assertIn("ExclusionIpAddress", decoded)
-        self.assertIn("192.168.1.10", decoded)
-
-    @patch("lib.deploy._run_ssh_cli_with_retry")
-    def test_no_ip_exclusions_omits_np_sweep(self, mock_ssh: object) -> None:
-        """Without ip_exclusions_to_remove, ExclusionIpAddress must not appear."""
+    def test_no_ip_exclusions_in_script(self, mock_ssh: object) -> None:
+        """Script must not contain ExclusionIpAddress — NP is disabled globally, not per-run."""
         mock_ssh.return_value = subprocess.CompletedProcess(
             args=[], returncode=0, stdout="", stderr=""
         )
@@ -1648,29 +1632,15 @@ class TestWfpPreflightCleanup(unittest.TestCase):
         self.assertIn("Remove-MpPreference", decoded)
 
     @patch("lib.deploy._run_ssh_cli_with_retry")
-    def test_c2_hosts_adds_ip_exclusion_removal(self, mock_ssh: object) -> None:
-        """Passing c2_hosts must add a repeat-remove loop for ExclusionIpAddress."""
-        mock_ssh.return_value = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="", stderr=""
-        )
-        t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
-        wfp_preflight_cleanup(t, timeout=100, c2_hosts=["10.0.0.1"])
-        decoded = _decoded_windows_launch_script(mock_ssh.call_args[0][0][-1])
-        self.assertIn("ExclusionIpAddress", decoded)
-        self.assertIn("10.0.0.1", decoded)
-
-    @patch("lib.deploy._run_ssh_cli_with_retry")
-    def test_no_c2_hosts_omits_ip_exclusion_removal(self, mock_ssh: object) -> None:
-        """Without c2_hosts, Remove-MpPreference -ExclusionIpAddress must not appear."""
+    def test_no_ip_exclusion_removal_in_script(self, mock_ssh: object) -> None:
+        """Script must not remove ExclusionIpAddress — NP is disabled globally, not per-run."""
         mock_ssh.return_value = subprocess.CompletedProcess(
             args=[], returncode=0, stdout="", stderr=""
         )
         t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
         wfp_preflight_cleanup(t, timeout=100)
         decoded = _decoded_windows_launch_script(mock_ssh.call_args[0][0][-1])
-        # The script reads ExclusionIpAddress for diagnostics; only the Remove-MpPreference
-        # call for ExclusionIpAddress should be absent when no c2_hosts are passed.
-        self.assertNotIn("Remove-MpPreference -ExclusionIpAddress", decoded)
+        self.assertNotIn("ExclusionIpAddress", decoded)
 
     @patch("lib.deploy._run_ssh_cli_with_retry")
     def test_script_emits_wfp_before_and_after_markers(self, mock_ssh: object) -> None:
@@ -1683,19 +1653,6 @@ class TestWfpPreflightCleanup(unittest.TestCase):
         decoded = _decoded_windows_launch_script(mock_ssh.call_args[0][0][-1])
         self.assertIn("WFP_BEFORE:", decoded)
         self.assertIn("WFP_AFTER:", decoded)
-
-    @patch("lib.deploy._run_ssh_cli_with_retry")
-    def test_wfp_after_includes_npip_count(self, mock_ssh: object) -> None:
-        """WFP_AFTER script output must include npip= so IP exclusion drain is verifiable."""
-        mock_ssh.return_value = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="", stderr=""
-        )
-        t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
-        wfp_preflight_cleanup(t, timeout=100)
-        decoded = _decoded_windows_launch_script(mock_ssh.call_args[0][0][-1])
-        # The after snapshot must collect ExclusionIpAddress and emit its count.
-        self.assertIn("$_np_ips_after", decoded)
-        self.assertIn(",npip=' + $_np_ips_after.Count", decoded)
 
     @patch("lib.deploy._run_ssh_cli_with_retry")
     def test_script_measures_wfp_filter_count(self, mock_ssh: object) -> None:
@@ -1745,7 +1702,7 @@ class TestWfpPreflightCleanup(unittest.TestCase):
         mock_ssh.return_value = subprocess.CompletedProcess(
             args=[],
             returncode=0,
-            stdout="WFP_BEFORE:rc=3,agent=2,npip=1,wfp=847,twait=12\nWFP_AFTER:rc=0,agent=0,npip=0,wfp=831,twait=8\n",
+            stdout="WFP_BEFORE:rc=3,agent=2,wfp=847,twait=12\nWFP_AFTER:rc=0,agent=0,wfp=831,twait=8\n",
             stderr="",
         )
         t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
@@ -1763,7 +1720,7 @@ class TestWfpPreflightCleanup(unittest.TestCase):
         mock_ssh.return_value = subprocess.CompletedProcess(
             args=[],
             returncode=0,
-            stdout="WFP_BEFORE:rc=3,agent=2,npip=0,wfp=850,twait=5\nWFP_AFTER:rc=1,agent=0,npip=0,wfp=851,twait=3\n",
+            stdout="WFP_BEFORE:rc=3,agent=2,wfp=850,twait=5\nWFP_AFTER:rc=1,agent=0,wfp=851,twait=3\n",
             stderr="",
         )
         t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
@@ -1805,7 +1762,7 @@ class TestWfpPreflightCleanup(unittest.TestCase):
         mock_ssh.return_value = subprocess.CompletedProcess(
             args=[],
             returncode=0,
-            stdout="WFP_BEFORE:rc=3,agent=2,npip=1,wfp=847,twait=12\nWFP_AFTER:rc=0,agent=0,npip=0,wfp=831,twait=8\n",
+            stdout="WFP_BEFORE:rc=3,agent=2,wfp=847,twait=12\nWFP_AFTER:rc=0,agent=0,wfp=831,twait=8\n",
             stderr="",
         )
         t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
@@ -1846,8 +1803,8 @@ class TestWfpPreflightCleanup(unittest.TestCase):
             args=[],
             returncode=0,
             stdout=(
-                "WFP_BEFORE:rc=3,agent=2,npip=1,wfp=900,twait=12\n"
-                "WFP_AFTER:rc=0,agent=0,npip=0,wfp=900,twait=8\n"
+                "WFP_BEFORE:rc=3,agent=2,wfp=900,twait=12\n"
+                "WFP_AFTER:rc=0,agent=0,wfp=900,twait=8\n"
             ),
             stderr="",
         )
@@ -1891,8 +1848,8 @@ class TestWfpPreflightCleanup(unittest.TestCase):
             args=[],
             returncode=0,
             stdout=(
-                "WFP_BEFORE:rc=3,agent=2,npip=1,wfp=900,twait=12\n"
-                "WFP_AFTER:rc=0,agent=0,npip=0,wfp=900,twait=8\n"
+                "WFP_BEFORE:rc=3,agent=2,wfp=900,twait=12\n"
+                "WFP_AFTER:rc=0,agent=0,wfp=900,twait=8\n"
             ),
             stderr="",
         )
@@ -1932,8 +1889,8 @@ class TestWfpPreflightCleanup(unittest.TestCase):
             args=[],
             returncode=0,
             stdout=(
-                "WFP_BEFORE:rc=0,agent=0,npip=1,wfp=6398,twait=10\n"
-                "WFP_AFTER:rc=0,agent=0,npip=1,wfp=6398,twait=10\n"
+                "WFP_BEFORE:rc=0,agent=0,wfp=6398,twait=10\n"
+                "WFP_AFTER:rc=0,agent=0,wfp=6398,twait=10\n"
             ),
             stderr="",
         )
@@ -1974,8 +1931,8 @@ class TestWfpPreflightCleanup(unittest.TestCase):
             args=[],
             returncode=0,
             stdout=(
-                "WFP_BEFORE:rc=0,agent=0,npip=1,wfp=6393,twait=4\n"
-                "WFP_AFTER:rc=0,agent=0,npip=1,wfp=6393,twait=4\n"
+                "WFP_BEFORE:rc=0,agent=0,wfp=6393,twait=4\n"
+                "WFP_AFTER:rc=0,agent=0,wfp=6393,twait=4\n"
             ),
             stderr="",
         )
@@ -1984,8 +1941,8 @@ class TestWfpPreflightCleanup(unittest.TestCase):
             args=[],
             returncode=0,
             stdout=(
-                "WFP_BEFORE:rc=0,agent=0,npip=1,wfp=6393,twait=4\n"
-                "WFP_AFTER:rc=0,agent=0,npip=1,wfp=6393,twait=4\n"
+                "WFP_BEFORE:rc=0,agent=0,wfp=6393,twait=4\n"
+                "WFP_AFTER:rc=0,agent=0,wfp=6393,twait=4\n"
             ),
             stderr="",
         )
@@ -2020,8 +1977,8 @@ class TestWfpPreflightCleanup(unittest.TestCase):
             args=[],
             returncode=0,
             stdout=(
-                "WFP_BEFORE:rc=0,agent=0,npip=1,wfp=900,twait=4\n"
-                "WFP_AFTER:rc=0,agent=0,npip=1,wfp=900,twait=4\n"
+                "WFP_BEFORE:rc=0,agent=0,wfp=900,twait=4\n"
+                "WFP_AFTER:rc=0,agent=0,wfp=900,twait=4\n"
             ),
             stderr="",
         )
@@ -2030,8 +1987,8 @@ class TestWfpPreflightCleanup(unittest.TestCase):
             args=[],
             returncode=0,
             stdout=(
-                "WFP_BEFORE:rc=0,agent=0,npip=1,wfp=350,twait=2\n"
-                "WFP_AFTER:rc=0,agent=0,npip=1,wfp=350,twait=2\n"
+                "WFP_BEFORE:rc=0,agent=0,wfp=350,twait=2\n"
+                "WFP_AFTER:rc=0,agent=0,wfp=350,twait=2\n"
             ),
             stderr="",
         )

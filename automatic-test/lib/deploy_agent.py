@@ -16,8 +16,6 @@ from lib.cli import CliConfig, agent_list, maybe_flush_payload_cache_for_rust_ag
 from lib.deploy import (
     TargetConfig,
     defender_add_process_exclusion,
-    defender_network_protection_exclusion,
-    defender_remove_network_protection_exclusion,
     ensure_work_dir,
     execute_background,
     firewall_allow_program,
@@ -145,9 +143,7 @@ def deploy_and_checkin(
     sep = "\\" if is_windows else "/"
     remote_payload = f"{target.work_dir}{sep}agent-{uid}.{fmt}"
 
-    # Track Windows WFP/NP state so we can clean up on every exit path.
     _wfp_program_path: str | None = None
-    _wfp_np_host: str | None = None
 
     _fd, local_payload = tempfile.mkstemp(suffix=f".{fmt}")
     os.close(_fd)
@@ -197,34 +193,6 @@ def deploy_and_checkin(
                     _wfp_program_path = remote_payload
                 except Exception as exc:
                     print(f"  [{tag}][deploy] firewall allow rule failed (non-fatal): {exc}")
-                try:
-                    cb_host = (
-                        getattr(ctx, "env", {}).get("server", {}).get("callback_host")
-                        if ctx is not None else None
-                    )
-                    if cb_host:
-                        print(f"  [{tag}][deploy] Defender Network Protection IP exclusion ({cb_host})")
-                        defender_network_protection_exclusion(target, cb_host)
-                        _wfp_np_host = cb_host
-                        # Verify exclusion took effect — ABSENT means NP will still block
-                        # WinHTTP connections from S4U processes (no TCP SYN generated).
-                        try:
-                            cb_q = cb_host.replace("'", "''")
-                            verify_script = (
-                                f"$excl = (Get-MpPreference -EA SilentlyContinue).ExclusionIpAddress; "
-                                f"if ($excl -contains '{cb_q}') {{ Write-Output 'NP_EXCL:PRESENT' }} "
-                                f"else {{ Write-Output ('NP_EXCL:ABSENT — list: ' + ($excl -join ',')) }}"
-                            )
-                            verify_out = run_remote(
-                                target,
-                                f"powershell -NoProfile -Command \"{verify_script}\"",
-                                timeout=15,
-                            )
-                            print(f"  [{tag}][deploy] NP exclusion verify: {verify_out.strip()}")
-                        except Exception as vexc:
-                            print(f"  [{tag}][deploy] NP exclusion verify failed (non-fatal): {vexc}")
-                except Exception as exc:
-                    print(f"  [{tag}][deploy] Network Protection exclusion failed (non-fatal): {exc}")
 
             if is_windows and windows_prelaunch_probe:
                 try:
@@ -275,12 +243,11 @@ def deploy_and_checkin(
             periodic_callback=checkin_periodic_callback,
         )
         print(f"  [{tag}][wait] agent checked in: {agent['id']}")
-        if defer_wfp_cleanup and (_wfp_program_path or _wfp_np_host):
+        if defer_wfp_cleanup and _wfp_program_path:
             # Caller needs post-checkin outbound connectivity (e.g. agent_exec).
             # Hand the cleanup work back to the caller so WFP rules remain in
             # place until the full agent session is torn down.
             _prog = _wfp_program_path
-            _host = _wfp_np_host
             _tag = tag
 
             def _deferred_wfp_cleanup() -> None:
@@ -290,23 +257,15 @@ def deploy_and_checkin(
                         firewall_remove_program(target, _prog)
                     except Exception as exc:
                         print(f"  [{_tag}][cleanup] firewall rule removal failed (non-fatal): {exc}")
-                if _host:
-                    try:
-                        print(f"  [{_tag}][cleanup] removing NP exclusion for {_host}")
-                        defender_remove_network_protection_exclusion(target, _host)
-                    except Exception as exc:
-                        print(f"  [{_tag}][cleanup] NP exclusion removal failed (non-fatal): {exc}")
 
             agent["_wfp_cleanup"] = _deferred_wfp_cleanup
-            # Clear the tracked paths so the outer finally skips cleanup.
+            # Clear the tracked path so the outer finally skips cleanup.
             _wfp_program_path = None
-            _wfp_np_host = None
         return agent
 
     finally:
-        # Remove WFP state added during deploy so rules don't accumulate across runs.
-        # Both operations are non-paged-pool consumers; leaking them causes WSAENOBUFS.
-        # When defer_wfp_cleanup=True and checkin succeeded, paths are already cleared
+        # Remove the firewall allow rule added during deploy so rules don't accumulate.
+        # When defer_wfp_cleanup=True and checkin succeeded, path is already cleared
         # above and the callable was handed to the caller — nothing to do here.
         if _wfp_program_path:
             try:
@@ -314,9 +273,3 @@ def deploy_and_checkin(
                 firewall_remove_program(target, _wfp_program_path)
             except Exception as exc:
                 print(f"  [{tag}][cleanup] firewall rule removal failed (non-fatal): {exc}")
-        if _wfp_np_host:
-            try:
-                print(f"  [{tag}][cleanup] removing NP exclusion for {_wfp_np_host}")
-                defender_remove_network_protection_exclusion(target, _wfp_np_host)
-            except Exception as exc:
-                print(f"  [{tag}][cleanup] NP exclusion removal failed (non-fatal): {exc}")

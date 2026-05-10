@@ -771,63 +771,32 @@ def firewall_remove_outbound_tcp(target: TargetConfig, remote_addr: str, port: i
     run_remote(target, f"powershell -NoProfile -EncodedCommand {enc}")
 
 
-def defender_network_protection_exclusion(target: TargetConfig, ip_address: str) -> None:
-    """Add a Defender Network Protection IP exclusion for *ip_address* (Windows only).
+def defender_disable_network_protection(target: TargetConfig) -> None:
+    """Disable Windows Defender Network Protection on *target* (Windows only).
 
-    Windows Defender Network Protection (SmartScreen network enforcement) can
-    silently drop WinHTTP outbound connections from untrusted executables running
-    under S4U Task Scheduler sessions, even when raw TCP to the same host succeeds
-    from PowerShell.  The symptom is: agent alive, netstat shows zero rows for the
-    C2 port (no SYN generated — WinHTTP gets an immediate internal block error).
+    Network Protection (WdFilter.sys callout driver) creates WFP filter objects in
+    kernel non-paged pool for every Add-MpPreference / Remove-MpPreference call and
+    for every network connection it inspects.  These objects accumulate across test
+    runs and survive mpssvc restarts, causing WSAENOBUFS (os error 10055) pool
+    exhaustion after even a single autotest run.
 
-    ``Add-MpPreference -ExclusionIpAddress`` tells Network Protection to allow
-    connections to/from the specified IP, bypassing reputation-based blocking.
-    Errors are silently swallowed (Defender may be absent or already disabled).
+    Disabling NP entirely with Set-MpPreference -EnableNetworkProtection Disabled
+    prevents the callout driver from registering any WFP filters, eliminating the
+    accumulation root cause.  The setting persists across reboots.
+
+    Call once per Windows target during the run preflight rather than toggling
+    per-scenario ExclusionIpAddress entries.
 
     Args:
-        target:     Windows SSH target.  Raises ``ValueError`` for Linux targets.
-        ip_address: C2 callback host IP to exclude from network inspection.
+        target: Windows SSH target.  Raises ``ValueError`` for Linux targets.
 
     Raises:
         ValueError: when *target* is not a Windows target.
         DeployError: when the SSH connection itself fails.
     """
     if target.platform != "windows":
-        raise ValueError(
-            "defender_network_protection_exclusion is only supported on Windows targets"
-        )
-    ip_q = _quote_powershell(ip_address.strip())
-    script = (
-        f"Add-MpPreference -ExclusionIpAddress {ip_q} -ErrorAction SilentlyContinue; "
-        "exit 0"
-    )
-    enc = _powershell_encoded_command(script)
-    run_remote(target, f"powershell -NoProfile -EncodedCommand {enc}")
-
-
-def defender_remove_network_protection_exclusion(target: TargetConfig, ip_address: str) -> None:
-    """Remove a Defender Network Protection IP exclusion for *ip_address* (Windows only).
-
-    Symmetric counterpart to :func:`defender_network_protection_exclusion`.  Call
-    during harness teardown to revert the IP exclusion added for the C2 callback host.
-
-    Args:
-        target:     Windows SSH target.  Raises ``ValueError`` for Linux targets.
-        ip_address: C2 callback host IP to remove from the Network Protection exclusion list.
-
-    Raises:
-        ValueError: when *target* is not a Windows target.
-        DeployError: when the SSH connection itself fails.
-    """
-    if target.platform != "windows":
-        raise ValueError(
-            "defender_remove_network_protection_exclusion is only supported on Windows targets"
-        )
-    ip_q = _quote_powershell(ip_address.strip())
-    script = (
-        f"Remove-MpPreference -ExclusionIpAddress {ip_q} -ErrorAction SilentlyContinue; "
-        "exit 0"
-    )
+        raise ValueError("defender_disable_network_protection is only supported on Windows targets")
+    script = "Set-MpPreference -EnableNetworkProtection Disabled -ErrorAction SilentlyContinue; exit 0"
     enc = _powershell_encoded_command(script)
     run_remote(target, f"powershell -NoProfile -EncodedCommand {enc}")
 
@@ -978,10 +947,9 @@ def wfp_preflight_cleanup(
     *,
     log_prefix: str = "  [wfp-preflight]",
     timeout: int | None = None,
-    c2_hosts: list[str] | None = None,
     restart_threshold: int | None = None,
 ) -> dict[str, int] | None:
-    """Sweep leftover WFP firewall rules and Defender NP exclusions.
+    """Sweep leftover WFP firewall rules and Defender process exclusions.
 
     Returns a dict with ``wfp_after``, ``twait_after``, and optionally
     ``wfp_critical`` parsed from the ``WFP_AFTER:`` diagnostic line, or
@@ -1004,9 +972,6 @@ def wfp_preflight_cleanup(
     - All ``agent-*`` display-name rules (Windows-auto-created or old-harness-created
       rules from prior agent binaries; accumulate across runs if not swept).
     - ``ExclusionProcess`` entries matching ``agent-*.exe`` / ``stress-agent-*.exe``.
-    - ``ExclusionIpAddress`` entries for every IP in *c2_hosts*, using a repeat-remove
-      loop to drain duplicates added when prior runs called
-      :func:`defender_network_protection_exclusion` more than once without cleanup.
 
     Never raises: SSH/PowerShell failures are printed and silently swallowed.
 
@@ -1014,8 +979,6 @@ def wfp_preflight_cleanup(
         target:    Windows SSH target (no-op on Linux targets).
         log_prefix: Prefix for diagnostic lines printed to the harness log.
         timeout:   SSH wait ceiling; defaults to ``max(90, configured remote cmd timeout)``.
-        c2_hosts:  C2 callback host IPs to remove from ``ExclusionIpAddress``.
-                   Pass ``[callback_host]`` from env.toml.
         restart_threshold: If ``wfp_after`` is >= this value after the sweep, restart the
                    Windows Firewall service (``mpssvc``) and re-run the sweep once.
                    Rule sweeps cannot remove Defender callout objects; an ``mpssvc``
@@ -1031,28 +994,11 @@ def wfp_preflight_cleanup(
     if timeout is None:
         timeout = max(90, _DEFAULT_REMOTE_CMD_SECS)
 
-    # Build repeat-remove NP IP block (handles duplicate ExclusionIpAddress entries).
-    ip_removal_block = ""
-    if c2_hosts:
-        safe_ips = [ip.replace("'", "''") for ip in c2_hosts if ip.strip()]
-        if safe_ips:
-            ip_array_ps = ",".join(f"'{ip}'" for ip in safe_ips)
-            ip_removal_block = (
-                f"foreach ($_ip in @({ip_array_ps})) {{\n"
-                "  for ($_i = 0; $_i -lt 30; $_i++) {\n"
-                "    $_cur = (Get-MpPreference -EA SilentlyContinue).ExclusionIpAddress\n"
-                "    if (-not ($_cur -contains $_ip)) { break }\n"
-                "    Remove-MpPreference -ExclusionIpAddress $_ip -ErrorAction SilentlyContinue\n"
-                "  }\n"
-                "}\n"
-            )
-
     script = (
         # Snapshot rule counts before sweep for diagnostics.
         "$_allrules = @(Get-NetFirewallRule -ErrorAction SilentlyContinue)\n"
         "$_rc_rules = @($_allrules | Where-Object { $_.DisplayName -like 'RC-Harness-*' })\n"
         "$_ag_rules = @($_allrules | Where-Object { $_.DisplayName -like 'agent-*' })\n"
-        "$_np_ips = @((Get-MpPreference -EA SilentlyContinue).ExclusionIpAddress)\n"
         # Measure raw WFP filter count (covers Defender-owned filters not visible via
         # Get-NetFirewallRule) and TCP TIME_WAIT connections (zombie sockets that consume
         # non-paged pool for up to 4 minutes after close).  Both are leading indicators of
@@ -1064,7 +1010,7 @@ def wfp_preflight_cleanup(
         "} catch {}\n"
         "try { Remove-Item -LiteralPath $_wfp_tmp -Force -ErrorAction SilentlyContinue } catch {}\n"
         "$_twait = @(Get-NetTCPConnection -State TimeWait -ErrorAction SilentlyContinue).Count\n"
-        "Write-Output ('WFP_BEFORE:rc=' + $_rc_rules.Count + ',agent=' + $_ag_rules.Count + ',npip=' + $_np_ips.Count + ',wfp=' + $_wfp_count + ',twait=' + $_twait)\n"
+        "Write-Output ('WFP_BEFORE:rc=' + $_rc_rules.Count + ',agent=' + $_ag_rules.Count + ',wfp=' + $_wfp_count + ',twait=' + $_twait)\n"
         # Remove RC-Harness-* rules (harness-created via firewall_allow_program).
         "Remove-NetFirewallRule -DisplayName 'RC-Harness-*' -ErrorAction SilentlyContinue\n"
         # Remove agent-* display-name rules (Windows-auto-created or old-harness-created).
@@ -1078,12 +1024,10 @@ def wfp_preflight_cleanup(
         "    }\n"
         "  }\n"
         "}\n"
-        + ip_removal_block
         # Snapshot after sweep.
-        + "$_allrules_after = @(Get-NetFirewallRule -ErrorAction SilentlyContinue)\n"
+        "$_allrules_after = @(Get-NetFirewallRule -ErrorAction SilentlyContinue)\n"
         "$_rc_after = @($_allrules_after | Where-Object { $_.DisplayName -like 'RC-Harness-*' }).Count\n"
         "$_ag_after = @($_allrules_after | Where-Object { $_.DisplayName -like 'agent-*' }).Count\n"
-        "$_np_ips_after = @((Get-MpPreference -EA SilentlyContinue).ExclusionIpAddress)\n"
         "$_wfp_count_after = -1; $_wfp_tmp2 = [System.IO.Path]::GetTempFileName()\n"
         "try {\n"
         "  netsh wfp show state \"file=$_wfp_tmp2\" 2>$null | Out-Null\n"
@@ -1091,7 +1035,7 @@ def wfp_preflight_cleanup(
         "} catch {}\n"
         "try { Remove-Item -LiteralPath $_wfp_tmp2 -Force -ErrorAction SilentlyContinue } catch {}\n"
         "$_twait_after = @(Get-NetTCPConnection -State TimeWait -ErrorAction SilentlyContinue).Count\n"
-        "Write-Output ('WFP_AFTER:rc=' + $_rc_after + ',agent=' + $_ag_after + ',npip=' + $_np_ips_after.Count + ',wfp=' + $_wfp_count_after + ',twait=' + $_twait_after)\n"
+        "Write-Output ('WFP_AFTER:rc=' + $_rc_after + ',agent=' + $_ag_after + ',wfp=' + $_wfp_count_after + ',twait=' + $_twait_after)\n"
         "exit 0\n"
     )
     enc = _powershell_encoded_command(script)
@@ -1187,7 +1131,6 @@ def wfp_preflight_cleanup(
             target,
             log_prefix=log_prefix,
             timeout=timeout,
-            c2_hosts=c2_hosts,
             restart_threshold=None,
         )
         if retry is not None:
@@ -1220,7 +1163,6 @@ def cleanup_windows_harness_work_dir(
     *,
     log_prefix: str = "  [win-workdir]",
     timeout: int | None = None,
-    ip_exclusions_to_remove: list[str] | None = None,
 ) -> None:
     """Stop processes running from *target.work_dir*, then delete harness-owned files.
 
@@ -1230,16 +1172,12 @@ def cleanup_windows_harness_work_dir(
     stale payload binaries are still loaded or scanning-locked.
 
     Also reverts per-run Defender/firewall exceptions added by
-    :func:`defender_add_process_exclusion`, :func:`firewall_allow_program`, and
-    :func:`defender_network_protection_exclusion`:
+    :func:`defender_add_process_exclusion` and :func:`firewall_allow_program`:
 
     - Removes all Windows Firewall rules whose display name starts with ``RC-Harness-``
       (the stable prefix used by :func:`firewall_allow_program`).
     - Removes all ``ExclusionProcess`` entries matching ``agent-*.exe`` or
       ``stress-agent-*.exe`` (the basename patterns used by harness payloads).
-    - Removes ``ExclusionIpAddress`` entries for IPs in *ip_exclusions_to_remove* (when
-      supplied) — these are added by :func:`defender_network_protection_exclusion` and
-      would otherwise accumulate across runs on long-lived VMs.
 
     This sweep always executes before the work-dir file removal so it runs even when
     the work directory does not yet exist (e.g. pre-run cleanup on a fresh VM).
@@ -1250,9 +1188,6 @@ def cleanup_windows_harness_work_dir(
         target: Windows SSH target (no-op when ``work_dir`` is a POSIX path).
         log_prefix: Prefix for diagnostic lines printed to the harness log.
         timeout: SSH wait ceiling; defaults to ``max(90, configured remote cmd timeout)``.
-        ip_exclusions_to_remove: Optional list of IPs to remove from
-            ``ExclusionIpAddress`` (e.g. the C2 callback host added by
-            :func:`defender_network_protection_exclusion`).
     """
 
     is_windows = target.platform == "windows"
@@ -1266,24 +1201,6 @@ def cleanup_windows_harness_work_dir(
         timeout = max(90, _DEFAULT_REMOTE_CMD_SECS)
 
     wd = target.work_dir.replace("'", "''")
-    # Build the optional ExclusionIpAddress sweep block (for harness-added NP exclusions).
-    # Uses a repeat-remove loop to handle duplicates: Add-MpPreference appends a new entry
-    # each call, so after N runs the same IP may appear N times; one Remove-MpPreference
-    # call removes only one instance.  The loop exits as soon as the IP is absent.
-    ip_sweep_block = ""
-    if ip_exclusions_to_remove:
-        safe_ips = [ip.replace("'", "''") for ip in ip_exclusions_to_remove if ip.strip()]
-        if safe_ips:
-            ip_array_ps = ",".join(f"'{ip}'" for ip in safe_ips)
-            ip_sweep_block = (
-                f"foreach ($_ip in @({ip_array_ps})) {{\n"
-                "  for ($_i = 0; $_i -lt 30; $_i++) {\n"
-                "    $_cur = (Get-MpPreference -EA SilentlyContinue).ExclusionIpAddress\n"
-                "    if (-not ($_cur -contains $_ip)) { break }\n"
-                "    Remove-MpPreference -ExclusionIpAddress $_ip -ErrorAction SilentlyContinue\n"
-                "  }\n"
-                "}\n"
-            )
     script = (
         # Revert Defender/firewall exceptions — runs unconditionally (even without work dir).
         # RC-Harness-* rules: added by firewall_allow_program / firewall_allow_outbound_tcp.
@@ -1300,7 +1217,6 @@ def cleanup_windows_harness_work_dir(
         "    }\n"
         "  }\n"
         "}\n"
-        + ip_sweep_block
         # Work-dir file cleanup.
         + f"$wd = '{wd}'\n"
         "if (-not (Test-Path -LiteralPath $wd)) { exit 0 }\n"

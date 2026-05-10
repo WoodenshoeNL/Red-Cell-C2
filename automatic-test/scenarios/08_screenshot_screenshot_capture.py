@@ -361,9 +361,6 @@ def run(ctx):
                 "(code reverted in 06346e50; screenshot support lives in Archon)"
             )
 
-            _cb_host_sc08 = ctx.env.get("server", {}).get("callback_host")
-            _c2_hosts_sc08 = [_cb_host_sc08] if _cb_host_sc08 else None
-
             # ── Archon pass ──────────────────────────────────────────────────
             print("\n  === Agent pass: archon (Windows) ===")
             if not has_archon:
@@ -381,7 +378,6 @@ def run(ctx):
                 _wfp_bp = wfp_preflight_cleanup(
                     ctx.windows,
                     log_prefix="  [between-passes][wfp]",
-                    c2_hosts=_c2_hosts_sc08,
                     restart_threshold=WFP_RESTART_THRESHOLD,
                 )
                 if _wfp_bp and _wfp_bp.get("wfp_critical"):

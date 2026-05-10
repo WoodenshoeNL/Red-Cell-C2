@@ -32,6 +32,7 @@ row to *Resolved* and add the closing commit / fix description.
 
 | Signature (substring of error / stderr) | Scenario | Bead | First seen | Last seen | Status |
 |----------------------------------------|----------|------|------------|-----------|--------|
+| `RCTEST_SCHTASK_STATE:Ready` + `RCTEST_SCHTASK_LASTTASKRESULT:267011` + `RCTEST_SCHTASK_LASTRUNTIME:1999-11-30` (schtask Interactive→S4U fallback misses State='Ready' when another user is logged in interactively on the Windows VM; task never runs) | 05, 06, 07, 08, 14, 17, 19, 20 | red-cell-c2-j3hxi | 2026-05-10 | 2026-05-10 | P1 |
 
 ---
 

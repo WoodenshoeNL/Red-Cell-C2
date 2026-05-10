@@ -581,9 +581,14 @@ def _windows_schtask_script(exe_path: str, arguments: str = "") -> str:
         "} "
         "Start-ScheduledTask -TaskName $nm -ErrorAction Stop; "
         # 2 s to settle; Interactive tasks stay Queued when no interactive session exists.
+        # When a *different* user is already logged in interactively, Windows returns State='Ready'
+        # with LastTaskResult=267011 (0x41303 = SCHED_S_TASK_HAS_NOT_RUN) instead of 'Queued'.
+        # Both states signal that the task has not run and the S4U fallback is needed.
         "Start-Sleep -Milliseconds 2000; "
         "$task = Get-ScheduledTask -TaskName $nm -ErrorAction Stop; "
-        "if ($lt -eq 'Interactive' -and $task.State -eq 'Queued') { "
+        "$ti_early = Get-ScheduledTaskInfo -TaskName $nm -ErrorAction SilentlyContinue; "
+        "$_no_session = ($task.State -eq 'Queued') -or ($task.State -eq 'Ready' -and $ti_early -and [int]$ti_early.LastTaskResult -eq 267011); "
+        "if ($lt -eq 'Interactive' -and $_no_session) { "
         "  Unregister-ScheduledTask -TaskName $nm -Confirm:$false -ErrorAction SilentlyContinue; "
         "  $pr = New-ScheduledTaskPrincipal -UserId $me -LogonType S4U -RunLevel Highest; "
         "  Register-ScheduledTask -TaskName $nm -Action $ac -Settings $st -Principal $pr -Force -ErrorAction Stop | Out-Null; "

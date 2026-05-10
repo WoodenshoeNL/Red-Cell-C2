@@ -215,8 +215,11 @@ def check_ssh_targets(
             print(f"  ✗ {label} ({target.host}): {exc}")
             mark_host_unreachable(target.host)
         except Exception as exc:
-            print(f"  ✗ {label} ({target.host}): unexpected error — {exc}")
-            mark_host_unreachable(target.host)
+            # Not a connectivity failure — re-raise so QA sees the real defect
+            # instead of silently skipping all scenarios for this host.
+            raise RuntimeError(
+                f"Unexpected harness error during preflight for {label} ({target.host})"
+            ) from exc
 
 
 # ── Unit tests ───────────────────────────────────────────────────────────────

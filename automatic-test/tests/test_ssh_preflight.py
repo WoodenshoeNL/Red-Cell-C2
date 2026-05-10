@@ -221,17 +221,22 @@ class TestCheckSshTargetsRegistersUnreachable(unittest.TestCase):
 
         self.assertNotIn("192.168.213.160", _globally_unreachable_hosts)
 
-    def test_unexpected_exception_registers_host(self):
-        """An unexpected exception (not DeployError) during preflight must also register the host."""
+    def test_unexpected_exception_is_reraised_not_swallowed(self):
+        """An unexpected exception (not DeployError) must propagate as a hard harness error.
+
+        It must NOT silently register the host as unreachable, because that would
+        mask the real defect and produce false-green scenario results.
+        """
         self._write_deploy_scenario("05")
         target = _make_target(host="10.99.99.99")
         from lib.deploy import _globally_unreachable_hosts
 
         with patch("lib.deploy.preflight_ssh", side_effect=RuntimeError("unexpected")):
             with patch("sys.stdout", StringIO()):
-                check_ssh_targets([("windows", target)], {"05"}, scenarios_dir=self.scenarios_dir)
+                with self.assertRaises(RuntimeError):
+                    check_ssh_targets([("windows", target)], {"05"}, scenarios_dir=self.scenarios_dir)
 
-        self.assertIn("10.99.99.99", _globally_unreachable_hosts)
+        self.assertNotIn("10.99.99.99", _globally_unreachable_hosts)
 
     def test_subsequent_preflight_skips_ssh_after_registration(self):
         """After check_ssh_targets marks a host unreachable, preflight_ssh must raise ScenarioSkipped."""

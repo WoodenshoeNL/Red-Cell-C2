@@ -47,7 +47,7 @@ from lib.config import (
     TimeoutsConfig,
     timeouts_to_env_dict,
 )
-from lib.deploy import TargetConfig, WFP_RESTART_THRESHOLD, cleanup_windows_harness_work_dir, configure_deploy_timeouts, defender_disable_network_protection, wfp_preflight_cleanup
+from lib.deploy import TargetConfig, WFP_RESTART_THRESHOLD, cleanup_windows_harness_work_dir, configure_deploy_timeouts, disable_windows_firewall, wfp_preflight_cleanup
 from lib.teamserver_monitor import configure_teamserver_ssh_connect_timeout
 from lib.wait import configure_wait_defaults
 from lib.failure_diagnostics import (
@@ -966,27 +966,30 @@ def main():
             selected_ids,
         )
 
-    # Pre-flight: disable Defender Network Protection and sweep leftover WFP firewall
-    # rules from prior test runs.  NP (WdFilter.sys callout driver) creates WFP filter
-    # objects for every Add/Remove-MpPreference -ExclusionIpAddress call and for every
-    # inspected connection; objects survive mpssvc restarts and exhaust non-paged pool
-    # (WSAENOBUFS / os error 10055) after even a single run.  Disabling NP once here
-    # eliminates the accumulation root cause for the entire session.
+    # Pre-flight: disable Windows Firewall (all profiles) and Defender NP, then sweep
+    # leftover WFP firewall rules from prior test runs.
+    #
+    # Root cause of WFP pool exhaustion: Windows Firewall (FWPM_PROVIDER_MPSSVC_WF)
+    # creates FWPM_GENERAL_CONTEXT objects that survive rule removal as zombie objects
+    # in non-paged pool.  Disabling the firewall stops mpssvc from creating any of
+    # these objects.  Set-MpPreference -EnableNetworkProtection Disabled is included
+    # as belt-and-suspenders to suppress the NP callout driver WFP filters.
+    # Both settings persist across reboots; calling them each run is idempotent.
     _wfp_preflight_critical = False
     if not ctx.dry_run:
         _wfp_targets = _windows_harness_cleanup_targets(windows_target, windows2_target)
         if _wfp_targets:
             print(f"\n{'─' * 60}")
-            print("  WFP preflight (disable Network Protection + sweep leftover firewall rules)")
+            print("  WFP preflight (disable Windows Firewall + NP + sweep leftover rules)")
             print(f"{'─' * 60}")
             _wfp_timeout = max(120, int(tmo.command_output))
             for _wlabel, _wtgt in _wfp_targets:
                 print(f"  Target {_wlabel!r} ({_wtgt.host})")
                 try:
-                    defender_disable_network_protection(_wtgt)
-                    print(f"  [wfp-preflight] Network Protection disabled on {_wtgt.host}")
-                except Exception as _np_exc:
-                    print(f"  [wfp-preflight] NP disable failed (non-fatal): {_np_exc}")
+                    disable_windows_firewall(_wtgt)
+                    print(f"  [wfp-preflight] Windows Firewall disabled on {_wtgt.host}")
+                except Exception as _fw_exc:
+                    print(f"  [wfp-preflight] Firewall disable failed (non-fatal): {_fw_exc}")
                 _wfp_pre_result = wfp_preflight_cleanup(
                     _wtgt,
                     log_prefix="  [wfp-preflight]",

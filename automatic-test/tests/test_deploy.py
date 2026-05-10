@@ -27,7 +27,7 @@ from lib.deploy import (
     configure_deploy_timeouts,
     defender_add_exclusion,
     defender_add_process_exclusion,
-    defender_disable_network_protection,
+    disable_windows_firewall,
     defender_remove_process_exclusion,
     ensure_work_dir,
     execute_background,
@@ -1220,8 +1220,8 @@ class TestDefenderRemoveProcessExclusion(unittest.TestCase):
 
 
 
-class TestDefenderDisableNetworkProtection(unittest.TestCase):
-    """defender_disable_network_protection issues Set-MpPreference -EnableNetworkProtection Disabled."""
+class TestDisableWindowsFirewall(unittest.TestCase):
+    """disable_windows_firewall disables all firewall profiles and Defender NP."""
 
     def setUp(self) -> None:
         self.key_path = _module_key_path()
@@ -1233,21 +1233,22 @@ class TestDefenderDisableNetworkProtection(unittest.TestCase):
             args=[], returncode=returncode, stdout=stdout, stderr=stderr
         )
 
-    def test_windows_disables_network_protection(self) -> None:
+    def test_windows_disables_firewall_and_np(self) -> None:
         ok = self._completed(0)
         t = _make_target(work_dir="C:\\Temp\\rc-test", platform="windows", key=self.key_path)
         with patch("subprocess.run", return_value=ok) as m:
-            defender_disable_network_protection(t)
+            disable_windows_firewall(t)
         script = _decoded_windows_launch_script(m.call_args[0][0][-1])
+        self.assertIn("Set-NetFirewallProfile", script)
+        self.assertIn("-Enabled False", script)
         self.assertIn("Set-MpPreference", script)
         self.assertIn("EnableNetworkProtection", script)
         self.assertIn("Disabled", script)
-        self.assertNotIn("ExclusionIpAddress", script)
 
     def test_linux_raises(self) -> None:
         t = _make_target(work_dir="/tmp/x", key=self.key_path)
         with self.assertRaises(ValueError):
-            defender_disable_network_protection(t)
+            disable_windows_firewall(t)
 
 
 class TestInjectHostsEntry(unittest.TestCase):

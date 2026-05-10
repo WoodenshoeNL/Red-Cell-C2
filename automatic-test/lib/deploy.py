@@ -771,21 +771,25 @@ def firewall_remove_outbound_tcp(target: TargetConfig, remote_addr: str, port: i
     run_remote(target, f"powershell -NoProfile -EncodedCommand {enc}")
 
 
-def defender_disable_network_protection(target: TargetConfig) -> None:
-    """Disable Windows Defender Network Protection on *target* (Windows only).
+def disable_windows_firewall(target: TargetConfig) -> None:
+    """Disable Windows Firewall on all profiles on *target* (Windows only).
 
-    Network Protection (WdFilter.sys callout driver) creates WFP filter objects in
-    kernel non-paged pool for every Add-MpPreference / Remove-MpPreference call and
-    for every network connection it inspects.  These objects accumulate across test
-    runs and survive mpssvc restarts, causing WSAENOBUFS (os error 10055) pool
-    exhaustion after even a single autotest run.
+    Windows Firewall (mpssvc / FWPM_PROVIDER_MPSSVC_WF) creates FWPM_GENERAL_CONTEXT
+    WFP provider context objects that are NOT freed when firewall rules are removed —
+    they become zombie objects in kernel non-paged pool.  With ~600 such objects per
+    autotest run (each containing ~10 nested items), the total WFP item count reaches
+    6000+ after a single run, exhausting non-paged pool and triggering WSAENOBUFS.
 
-    Disabling NP entirely with Set-MpPreference -EnableNetworkProtection Disabled
-    prevents the callout driver from registering any WFP filters, eliminating the
-    accumulation root cause.  The setting persists across reboots.
+    Disabling the firewall on all profiles stops mpssvc from registering any WFP
+    filters or creating provider contexts.  The setting persists across reboots.
+    This is safe for a dedicated test VM with no internet exposure.
 
-    Call once per Windows target during the run preflight rather than toggling
-    per-scenario ExclusionIpAddress entries.
+    Also disables Defender Network Protection (EnableNetworkProtection=Disabled) as
+    a belt-and-suspenders measure; NP is a separate WFP callout driver that can also
+    contribute to pool exhaustion.
+
+    Call once per Windows target during the run preflight.  Idempotent: disabling
+    an already-disabled firewall is a no-op in terms of WFP object creation.
 
     Args:
         target: Windows SSH target.  Raises ``ValueError`` for Linux targets.
@@ -795,8 +799,12 @@ def defender_disable_network_protection(target: TargetConfig) -> None:
         DeployError: when the SSH connection itself fails.
     """
     if target.platform != "windows":
-        raise ValueError("defender_disable_network_protection is only supported on Windows targets")
-    script = "Set-MpPreference -EnableNetworkProtection Disabled -ErrorAction SilentlyContinue; exit 0"
+        raise ValueError("disable_windows_firewall is only supported on Windows targets")
+    script = (
+        "Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False -ErrorAction SilentlyContinue; "
+        "Set-MpPreference -EnableNetworkProtection Disabled -ErrorAction SilentlyContinue; "
+        "exit 0"
+    )
     enc = _powershell_encoded_command(script)
     run_remote(target, f"powershell -NoProfile -EncodedCommand {enc}")
 

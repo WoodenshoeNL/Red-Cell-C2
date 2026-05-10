@@ -1026,7 +1026,14 @@ def main():
                             timeout=_wfp_timeout,
                             restart_threshold=WFP_RESTART_THRESHOLD,
                         )
-                        if _wfp_post_reboot and _wfp_post_reboot.get("wfp_critical"):
+                        if _wfp_post_reboot is None:
+                            _wfp_preflight_critical = True
+                            print(
+                                f"\n  *** WFP post-reboot sweep returned no result"
+                                f" for {_wlabel!r} ({_wtgt.host}) — treating as"
+                                " unrecovered, skipping all Windows scenarios."
+                            )
+                        elif _wfp_post_reboot.get("wfp_critical"):
                             _wfp_preflight_critical = True
                             print(
                                 f"\n  *** WFP pool still exhausted on {_wlabel!r}"
@@ -1034,11 +1041,7 @@ def main():
                                 " scenarios."
                             )
                         else:
-                            _npb = (
-                                _wfp_post_reboot.get("npb_after", -1)
-                                if _wfp_post_reboot
-                                else -1
-                            )
+                            _npb = _wfp_post_reboot.get("npb_after", -1)
                             print(
                                 f"  [wfp-reboot] Pool recovered after reboot on"
                                 f" {_wtgt.host}"
@@ -1246,7 +1249,14 @@ def main():
                             timeout=win_cleanup_timeout,
                             restart_threshold=WFP_RESTART_THRESHOLD,
                         )
-                        if _wfp_post_bs and _wfp_post_bs.get("wfp_critical"):
+                        if _wfp_post_bs is None:
+                            print(
+                                "  [between-scenarios][reboot] Post-reboot WFP sweep"
+                                f" returned no result for {wtgt.host} — treating as"
+                                " unrecovered, remaining Windows scenarios will be skipped."
+                            )
+                            _win_wfp_exhausted = True
+                        elif _wfp_post_bs.get("wfp_critical"):
                             print(
                                 "  [between-scenarios][reboot] Pool still exhausted"
                                 f" after reboot on {wtgt.host} — remaining Windows"

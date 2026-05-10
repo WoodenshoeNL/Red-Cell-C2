@@ -47,7 +47,7 @@ from lib.config import (
     TimeoutsConfig,
     timeouts_to_env_dict,
 )
-from lib.deploy import NP_POOL_BYTES_THRESHOLD, TargetConfig, WFP_RESTART_THRESHOLD, cleanup_windows_harness_work_dir, configure_deploy_timeouts, disable_windows_firewall, reboot_windows_vm, wfp_preflight_cleanup
+from lib.deploy import TargetConfig, WFP_RESTART_THRESHOLD, cleanup_windows_harness_work_dir, configure_deploy_timeouts, disable_windows_firewall, reboot_windows_vm, wfp_preflight_cleanup
 from lib.teamserver_monitor import configure_teamserver_ssh_connect_timeout
 from lib.wait import configure_wait_defaults
 from lib.failure_diagnostics import (

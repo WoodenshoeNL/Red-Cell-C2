@@ -284,7 +284,7 @@ def _maybe_specter_doh_agent_pass(
         listener_start,
         listener_stop,
     )
-    from lib.deploy import DeployError, preflight_dns, preflight_ssh
+    from lib.deploy import DeployError, cleanup_windows_harness_work_dir, preflight_dns, preflight_ssh
     from lib.deploy_agent import deploy_and_checkin
     from lib.listeners import normalize_callback_host_for_listener
 
@@ -364,6 +364,7 @@ def _maybe_specter_doh_agent_pass(
                 agent_kill(cli, agent_id)
             except Exception as exc:
                 print(f"  [specter][cleanup] agent kill failed (non-fatal): {exc}")
+            cleanup_windows_harness_work_dir(ctx.windows, log_prefix='  [specter][cleanup]')
 
         print(f"  [specter][cleanup] stopping/deleting HTTP listener {http_name!r}")
         try:

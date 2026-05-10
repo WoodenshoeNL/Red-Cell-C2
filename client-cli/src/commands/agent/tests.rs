@@ -1136,7 +1136,10 @@ fn prune_result_renders_failure_count_when_nonzero() {
     use crate::output::TextRender;
     let r = PruneResult { pruned: 2, failed: 1, total_matched: 3 };
     let text = r.render_text();
-    assert!(text.contains("failed") || text.contains('1'), "failure count must appear; got: {text:?}");
+    assert!(
+        text.contains("failed") || text.contains('1'),
+        "failure count must appear; got: {text:?}"
+    );
 }
 
 // ── prune integration (wiremock) ──────────────────────────────────────────
@@ -1231,9 +1234,8 @@ async fn prune_before_deregisters_stale_agents() {
         .await;
 
     let client = crate::client::ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
-    let result = prune(&client, Some("2026-05-10T00:00:00Z"), false)
-        .await
-        .expect("prune must succeed");
+    let result =
+        prune(&client, Some("2026-05-10T00:00:00Z"), false).await.expect("prune must succeed");
 
     assert_eq!(result.total_matched, 1);
     assert_eq!(result.pruned, 1);
@@ -1250,9 +1252,11 @@ async fn prune_no_match_returns_zero_pruned() {
 
     Mock::given(method("GET"))
         .and(path("/api/v1/agents"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
-            agent_json(0xBBBB_0001, true, "2026-05-10T12:00:00Z"),
-        ])))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([agent_json(
+            0xBBBB_0001,
+            true,
+            "2026-05-10T12:00:00Z"
+        ),])))
         .mount(&server)
         .await;
 
@@ -1321,9 +1325,8 @@ async fn prune_combines_dead_and_before_with_or_semantics() {
         .await;
 
     let client = crate::client::ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
-    let result = prune(&client, Some("2026-05-10T00:00:00Z"), true)
-        .await
-        .expect("prune must succeed");
+    let result =
+        prune(&client, Some("2026-05-10T00:00:00Z"), true).await.expect("prune must succeed");
 
     assert_eq!(result.total_matched, 2, "two agents match (one dead, one stale)");
     assert_eq!(result.pruned, 2);
@@ -1363,8 +1366,9 @@ async fn prune_counts_failed_deregistrations() {
         .and(path("/api/v1/agents/DD000002"))
         .and(query_param("deregister_only", "true"))
         .respond_with(
-            ResponseTemplate::new(404)
-                .set_body_json(serde_json::json!({"error":"agent_not_found","message":"not found"})),
+            ResponseTemplate::new(404).set_body_json(
+                serde_json::json!({"error":"agent_not_found","message":"not found"}),
+            ),
         )
         .mount(&server)
         .await;

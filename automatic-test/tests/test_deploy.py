@@ -37,6 +37,7 @@ from lib.deploy import (
     firewall_remove_program,
     inject_hosts_entry,
     mark_host_unreachable,
+    named_pipe_exists,
     preflight_dns,
     preflight_ssh,
     run_remote,
@@ -2021,6 +2022,19 @@ class TestGloballyUnreachableGuards(unittest.TestCase):
         result = windows_sync_payload_probe(self.target, "C:\\rc\\agent.exe")
         mock_run.assert_not_called()
         self.assertEqual(result, "")
+
+    @patch("subprocess.run")
+    def test_inject_hosts_entry_skips_when_unreachable(self, mock_run: object) -> None:
+        self._mark_unreachable()
+        inject_hosts_entry(self.target, "c2.test.local", "192.168.1.50")
+        mock_run.assert_not_called()
+
+    @patch("subprocess.run")
+    def test_named_pipe_exists_returns_false_when_unreachable(self, mock_run: object) -> None:
+        self._mark_unreachable()
+        result = named_pipe_exists(self.target, "rc_pipe")
+        mock_run.assert_not_called()
+        self.assertFalse(result)
 
     @patch("subprocess.run")
     def test_guards_do_not_fire_for_reachable_host(self, mock_run: object) -> None:

@@ -336,6 +336,8 @@ def inject_hosts_entry(target: TargetConfig, domain: str, ip: str) -> None:
     """
     entry = f"{ip}  {domain}"
     is_windows = target.platform == "windows"
+    if target.host in _globally_unreachable_hosts:
+        return
     if is_windows:
         hosts_path = r"C:\Windows\System32\drivers\etc\hosts"
         escaped_entry = entry.replace("'", "''")
@@ -383,6 +385,8 @@ def named_pipe_exists(target: TargetConfig, pipe_name: str, ssh_timeout: int = 2
         True if PowerShell reports the path exists; False on SSH failure,
         non-zero exit, or stdout other than ``True``.
     """
+    if target.host in _globally_unreachable_hosts:
+        return False
     safe = pipe_name.replace("'", "''")
     pipe_path = f"\\\\.\\pipe\\{safe}"
     remote_cmd = (

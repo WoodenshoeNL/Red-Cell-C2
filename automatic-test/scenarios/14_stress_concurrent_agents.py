@@ -477,7 +477,7 @@ def run(ctx):
     if run_demon:
         try:
             preflight_ssh(ctx.windows)
-        except DeployError as exc:
+        except (DeployError, ScenarioSkipped) as exc:
             run_demon = False
             print(f"  [demon] SKIPPED — {exc}")
 

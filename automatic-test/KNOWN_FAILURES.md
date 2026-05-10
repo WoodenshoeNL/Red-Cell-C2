@@ -32,8 +32,7 @@ row to *Resolved* and add the closing commit / fix description.
 
 | Signature (substring of error / stderr) | Scenario | Bead | First seen | Last seen | Status |
 |----------------------------------------|----------|------|------------|-----------|--------|
-| `SSH to 192.168.213.160 failed (attempt 1/3), retrying in 2s` (Windows VM unreachable via TCP timeout; every SSH call retries 3×10s, inflating run time 30×) | all Windows-touching | red-cell-c2-1nnzz | 2026-05-09 | 2026-05-09 | P3 |
-| `~ SKIPPED (34.1s): SSH to 192.168.213.160 failed after 3 attempts` (sc08 Linux/Phantom fallback not tried when Windows SSH unreachable — only falls through when windows_degraded=True) | 08 | red-cell-c2-a4s1b | 2026-05-09 | 2026-05-09 | P2 |
+| `SSH to 192.168.213.160 failed (attempt 1/3), retrying in 2s` (Windows VM unreachable via TCP timeout; every SSH call retries 3×10s, inflating run time 30×) | all Windows-touching | red-cell-c2-1nnzz | 2026-05-09 | 2026-05-10 | P3 |
 
 ---
 
@@ -45,7 +44,9 @@ than a new bug.
 
 | Signature (substring of error / stderr) | Scenario | Bead | Resolved at | Notes |
 |----------------------------------------|----------|------|-------------|-------|
-| `Timed out after 30s waiting for screenshot loot entry` (Phantom/Linux, DISPLAY not set in agent exec env) | 08 | red-cell-c2-desrw | 2026-05-09 | Two-layer fix: execute_background propagates env_vars, sc08 injects DISPLAY=display for Phantom; Phantom also probes :0/:99/:1 fallback. Bead closed 2026-05-09; not verifiable when Windows is SSH-unreachable (sc08 skips entirely — see red-cell-c2-a4s1b). |
+| `~ SKIPPED (34.1s): SSH to 192.168.213.160 failed after 3 attempts` (sc08 Linux/Phantom fallback not tried when Windows SSH unreachable — ScenarioSkipped not caught alongside DeployError) | 08 | red-cell-c2-a4s1b | 2026-05-10 | Fixed: catch `(DeployError, ScenarioSkipped)` in sc08 preflight block so the Linux/Phantom path runs when Windows is globally-unreachable. sc08 passes 2026-05-10 with Phantom screenshot verified. |
+| `~ SKIPPED (0.0s): target 192.168.213.160 was unreachable at startup — skipping SSH probe` (sc14 Phantom stress pass skipped when Windows SSH unreachable — same DeployError vs ScenarioSkipped gap as a4s1b) | 14 | *(fixed inline)* | 2026-05-10 | Catch `(DeployError, ScenarioSkipped)` in sc14 Demon preflight block so the Phantom Linux stress pass runs when Windows is globally-unreachable. |
+| `Timed out after 30s waiting for screenshot loot entry` (Phantom/Linux, DISPLAY not set in agent exec env) | 08 | red-cell-c2-desrw | 2026-05-09 | Two-layer fix: execute_background propagates env_vars, sc08 injects DISPLAY=display for Phantom; Phantom also probes :0/:99/:1 fallback. Bead closed 2026-05-09; sc08 passes 2026-05-10 via Linux Phantom fallback. |
 | `Linux target configured but no available Linux agent (add 'phantom' to agents.available)` (unit test test_phantom_skipped_when_not_in_available missing preflight_ssh patch) | unit test | *(fixed inline)* | 2026-05-09 | Added `patch("lib.deploy.preflight_ssh")` to TestScenario14.test_phantom_skipped_when_not_in_available; preflight_ssh was added to sc14 run() in commit 275fdf59 but the unit test wasn't updated. |
 | `Remote command failed (exit 255)` + `ssh: connect to host 192.168.213.160 port 22: No route to host` (sc14 Demon pass with Windows VM unreachable) | 14 | *(fixed inline)* | 2026-05-09 | Added `preflight_ssh(ctx.windows)` check before Demon pass in sc14; DeployError now converts to a skipped Demon pass rather than a hard scenario failure. Phantom pass still runs when Linux is available. |
 | `Timed out after 60s waiting for agent checkin` / `[SUBPROCESS_TIMEOUT]` (Windows passes in sc06/07/08, WFP ~6390+) | 06, 07, 08 | red-cell-c2-5wu5u | 2026-05-09 | Closed: propagated windows_degraded into RunContext; sc06/07/08 skip Windows passes when WFP pool is exhausted, preserving Linux-agent pass coverage. |
@@ -101,17 +102,13 @@ than a new bug.
 | `panic` + `TypeId` + `payload build-wait` clap collision | 03 | red-cell-c2-2edsr | 2026-04-26 | Renamed `BuildWait --output` → `--dst` to avoid TypeId collision with global `--output` (commit 71d115df) |
 | Listener create fails: `address already in use` on 19081 / 19082 | 04, 05, 06, 07, 08, 11 | *(no bead — fixed inline)* | 2026-04-26 | `test.py` now stops + deletes leftover non-default listeners before scenarios start (commit 311d6253) |
 | HTTP 429 / rate-limit cascade after scenarios 01–11 | 12–24 | *(no bead — fixed inline)* | 2026-04-26 | `profiles/autotest.yaotl` `RateLimitPerMinute` raised 120 → 600 (commit 311d6253) |
-| `[TIMEOUT] timed out waiting for output from task` (original) | 04, 07, 11, 21 | red-cell-c2-yde2a | 2026-04-25 | CommandProc(0x1010) + DemonCallbackError::Generic fix. **REGRESSED** — see red-cell-c2-3ecje |
-| `Timed out after 60s waiting for agent checkin` (original Windows Demon) | 05, 08, 14, 16, 17, 19 | red-cell-c2-2it9u | 2026-04-25 | HeapEnc packing fix for Demon transport config. **REGRESSED** — see red-cell-c2-jtsiv |
 | `[TIMEOUT] timed out waiting for output from task` (seq_num fix) | 04, 11, 14 | red-cell-c2-3ecje | 2026-04-26 | ecdh_send_packages seq_num prefix fix. **REGRESSED** — see red-cell-c2-pa1wi |
 | `Timed out after 60s waiting for agent checkin` (AllowLegacyCtr fix) | 16, 17, 19 | red-cell-c2-jtsiv | 2026-04-26 | AllowLegacyCtr + legacy_mode fix. **REGRESSED** — see red-cell-c2-dvd3p |
 | `cargo build --release --target x86_64-pc-windows-gnu` + `error[E0433]` in `common/src/tls.rs` | 05, 06, 07, 08 | red-cell-c2-f33x9 | 2026-04-26 | Gated unix imports behind cfg(unix). **NEW ERROR** — see red-cell-c2-5k8ed |
-| `agent ... still present / checked in / sleep_interval` (env var bake fix) | 22, 23, 24 | red-cell-c2-btwo0 | 2026-04-25 | rust_agent_env_vars baking fix. **REGRESSED** — see red-cell-c2-0h0et |
 | `[TIMEOUT] timed out waiting for output from task` (batch callback fix) | 04, 11, 21 | red-cell-c2-pa1wi | 2026-04-27 | Batch all callbacks into single DemonMessage+session packet. **REGRESSED** — see red-cell-c2-2g1nj |
 | `Timed out after 60s waiting for agent checkin` (callback_host normalization) | 14, 17, 19 | red-cell-c2-dvd3p | 2026-04-27 | Normalize callback_host, raise DEMON_INIT per-IP limit. **REGRESSED** — see red-cell-c2-gxabx |
 | `error: extern blocks must be unsafe` in `agent/specter/src/token/enumerate_windows.rs` | 05, 06, 07, 08 | red-cell-c2-5k8ed | 2026-04-27 | Mark ntdll FFI block as unsafe extern for Rust 2024. **NEW ERROR** — see red-cell-c2-as0gd |
 | `agent ... still present / checked in / sleep_interval` (env-var clearing fix) | 22, 23, 24 | red-cell-c2-0h0et | 2026-04-27 | Clear inherited PHANTOM_*/SPECTER_* from compiler env. **REGRESSED** — see red-cell-c2-dv5ev |
-| `Python was not found` (DoH probe on Windows VM) | 20 | red-cell-c2-2gg26 | 2026-04-25 | preflight_dns uses PowerShell on Windows targets. Scenario 20 now skips due to DNS resolution failure instead. |
 | `error[E0425]: cannot find function` + `windows_sys` in Specter cross-compile | 05, 06, 07, 08 | red-cell-c2-as0gd | 2026-04-27 | Relocated imports to windows-sys 0.59 module paths. E0425 resolved, but 138 new errors. **NEW ERROR** — see red-cell-c2-z85a3 |
 
 ---

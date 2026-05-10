@@ -1025,6 +1025,9 @@ def wfp_preflight_cleanup(
     if target.platform != "windows":
         return None
 
+    if target.host in _globally_unreachable_hosts:
+        return None
+
     if timeout is None:
         timeout = max(90, _DEFAULT_REMOTE_CMD_SECS)
 
@@ -1254,6 +1257,9 @@ def cleanup_windows_harness_work_dir(
 
     is_windows = target.platform == "windows"
     if not is_windows:
+        return
+
+    if target.host in _globally_unreachable_hosts:
         return
 
     if timeout is None:

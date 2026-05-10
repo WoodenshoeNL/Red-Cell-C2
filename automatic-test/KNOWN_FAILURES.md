@@ -32,7 +32,7 @@ row to *Resolved* and add the closing commit / fix description.
 
 | Signature (substring of error / stderr) | Scenario | Bead | First seen | Last seen | Status |
 |----------------------------------------|----------|------|------------|-----------|--------|
-| `SSH to 192.168.213.160 failed (attempt 1/3), retrying in 2s` (Windows VM unreachable via TCP timeout; every SSH call retries 3×10s, inflating run time 30×) | all Windows-touching | red-cell-c2-1nnzz | 2026-05-09 | 2026-05-10 | P3 |
+| `SSH to 192.168.213.160 failed (attempt 1/3), retrying in 2s` (Windows VM unreachable via TCP timeout; between-scenario wfp_preflight_cleanup + cleanup_windows_harness_work_dir now skip on unreachable host; check_ssh_targets still retries 3×10s once at startup) | all Windows-touching | red-cell-c2-1nnzz | 2026-05-09 | 2026-05-10 | P3 |
 
 ---
 
@@ -44,6 +44,7 @@ than a new bug.
 
 | Signature (substring of error / stderr) | Scenario | Bead | Resolved at | Notes |
 |----------------------------------------|----------|------|-------------|-------|
+| `[between-scenarios] cleanup skipped (192.168.213.160): SSH to 192.168.213.160 failed after 3 attempts` (wfp_preflight_cleanup + cleanup_windows_harness_work_dir not checking _globally_unreachable_hosts — each between-scenario call took 34s when Windows VM was down, adding ~26 min overhead for 23-scenario runs) | all | *(fixed inline)* | 2026-05-10 | Added `if target.host in _globally_unreachable_hosts: return None/early` to wfp_preflight_cleanup and cleanup_windows_harness_work_dir in lib/deploy.py; between-scenario calls now skip immediately when Windows is globally-unreachable. Run time cut from ~41 min to ~13 min when Windows is down. |
 | `~ SKIPPED (34.1s): SSH to 192.168.213.160 failed after 3 attempts` (sc08 Linux/Phantom fallback not tried when Windows SSH unreachable — ScenarioSkipped not caught alongside DeployError) | 08 | red-cell-c2-a4s1b | 2026-05-10 | Fixed: catch `(DeployError, ScenarioSkipped)` in sc08 preflight block so the Linux/Phantom path runs when Windows is globally-unreachable. sc08 passes 2026-05-10 with Phantom screenshot verified. |
 | `~ SKIPPED (0.0s): target 192.168.213.160 was unreachable at startup — skipping SSH probe` (sc14 Phantom stress pass skipped when Windows SSH unreachable — same DeployError vs ScenarioSkipped gap as a4s1b) | 14 | *(fixed inline)* | 2026-05-10 | Catch `(DeployError, ScenarioSkipped)` in sc14 Demon preflight block so the Phantom Linux stress pass runs when Windows is globally-unreachable. |
 | `Timed out after 30s waiting for screenshot loot entry` (Phantom/Linux, DISPLAY not set in agent exec env) | 08 | red-cell-c2-desrw | 2026-05-09 | Two-layer fix: execute_background propagates env_vars, sc08 injects DISPLAY=display for Phantom; Phantom also probes :0/:99/:1 fallback. Bead closed 2026-05-09; sc08 passes 2026-05-10 via Linux Phantom fallback. |

@@ -44,7 +44,6 @@ def deploy_and_checkin(
     checkin_periodic_callback: Callable[[], None] | None = None,
     windows_prelaunch_probe: bool = False,
     amsi_etw: str | None = None,
-    defer_wfp_cleanup: bool = False,
     exec_env: dict[str, str] | None = None,
 ) -> dict | None:
     """Build, deploy, execute, and wait for a single agent checkin.
@@ -95,14 +94,6 @@ def deploy_and_checkin(
         windows_prelaunch_probe: When ``True`` (Windows only), run a synchronous
             one-shot execution of the payload before the background schtask launch,
             printing captured exit code and stderr/stdout for fast-fail diagnosis.
-        defer_wfp_cleanup: When ``True``, do **not** remove the WFP per-program
-            allow rule in the outer ``finally`` on a successful checkin.  Instead,
-            a zero-argument callable is attached to the returned agent dict under
-            the key ``"_wfp_cleanup"``; the caller must pop and invoke it in their
-            own teardown path (e.g. alongside ``agent_kill``).  On failure the
-            outer ``finally`` still cleans up unconditionally.  Use this when the
-            agent needs post-checkin outbound connectivity (e.g. ``agent_exec``)
-            and the Windows target may have restrictive default outbound policy.
         exec_env: Optional environment variables forwarded to
             :func:`~lib.deploy.execute_background` on Linux targets.  Ignored
             on Windows (Task Scheduler inherits the user session environment).
@@ -112,9 +103,7 @@ def deploy_and_checkin(
 
     Returns:
         The agent dict from :func:`~lib.wait.wait_for_agent`, or ``None`` when
-        *expect_checkin* is ``False`` and no agent appears (expected).  When
-        *defer_wfp_cleanup* is ``True`` and checkin succeeds, the dict also
-        contains a ``"_wfp_cleanup"`` key holding a zero-argument callable.
+        *expect_checkin* is ``False`` and no agent appears (expected).
 
     Raises:
         AssertionError: if the built payload is empty, or if *expect_checkin* is

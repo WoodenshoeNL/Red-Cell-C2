@@ -155,8 +155,6 @@ def _run_smb_pivot(ctx, parent_target, child_target):
     parent_agent_id = None
     child_agent_id = None
     smb_listener_name = None
-    parent_wfp_cleanup = None
-    child_wfp_cleanup = None
 
     try:
         # ── Step 1: Create + start HTTP listener ────────────────────────────
@@ -172,10 +170,8 @@ def _run_smb_pivot(ctx, parent_target, child_target):
             agent_type="demon", fmt="exe",
             listener_name=listener_name,
             label="parent",
-            defer_wfp_cleanup=True,
         )
         parent_agent_id = parent["id"]
-        parent_wfp_cleanup = parent.pop("_wfp_cleanup", None)
         print(f"  [step 3] parent agent checked in: {parent_agent_id}")
 
         # ── Step 4: Open SMB pivot pipe on parent agent ──────────────────────
@@ -213,10 +209,8 @@ def _run_smb_pivot(ctx, parent_target, child_target):
             listener_name=smb_listener_name,
             pre_existing_ids={parent_agent_id},
             label="child",
-            defer_wfp_cleanup=True,
         )
         child_agent_id = child["id"]
-        child_wfp_cleanup = child.pop("_wfp_cleanup", None)
         print(f"  [step 7] child agent checked in: {child_agent_id}")
 
         # ── Step 8: Send whoami through child agent; verify output ───────────
@@ -277,10 +271,6 @@ def _run_smb_pivot(ctx, parent_target, child_target):
                     agent_kill(cli, aid)
                 except Exception as exc:
                     print(f"  [cleanup] agent kill {aid} failed (non-fatal): {exc}")
-
-        for wfp_fn in (child_wfp_cleanup, parent_wfp_cleanup):
-            if wfp_fn is not None:
-                wfp_fn()
 
         if smb_listener_name:
             for fn in (listener_stop, listener_delete):

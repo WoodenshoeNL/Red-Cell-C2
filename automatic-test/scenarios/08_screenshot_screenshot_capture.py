@@ -154,7 +154,6 @@ def _run_for_agent(
     os.close(_fd)
 
     agent_id = None
-    wfp_cleanup = None
     try:
         # ── Deploy, exec, wait for checkin ───────────────────────────────────
         exec_env = {"DISPLAY": display} if (not is_windows and display) else None
@@ -164,11 +163,9 @@ def _run_for_agent(
             listener_name=listener_name,
             label=agent_type,
             pre_built_payload=pre_built_payload,
-            defer_wfp_cleanup=True,
             exec_env=exec_env,
         )
         agent_id = agent["id"]
-        wfp_cleanup = agent.pop("_wfp_cleanup", None)
 
         # ── Send screenshot command ──────────────────────────────────────────
         print(f"  [{agent_type}][screenshot] sending screenshot command via agent exec")
@@ -245,9 +242,6 @@ def _run_for_agent(
                 agent_kill(cli, agent_id)
             except Exception as exc:
                 print(f"  [{agent_type}][cleanup] agent kill failed (non-fatal): {exc}")
-
-        if wfp_cleanup is not None:
-            wfp_cleanup()
 
         print(f"  [{agent_type}][cleanup] cleaning harness artifacts in work_dir on target")
         if is_windows:

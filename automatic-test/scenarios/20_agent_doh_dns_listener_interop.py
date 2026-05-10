@@ -335,7 +335,6 @@ def _maybe_specter_doh_agent_pass(
     listener_start(cli, http_name)
 
     agent_id = None
-    wfp_cleanup = None
     try:
         agent = deploy_and_checkin(
             ctx,
@@ -346,12 +345,8 @@ def _maybe_specter_doh_agent_pass(
             listener_name=http_name,
             label="specter-doh",
             windows_prelaunch_probe=True,
-            defer_wfp_cleanup=True,
         )
         agent_id = agent["id"]
-        # Pop the deferred WFP cleanup callable so we control when rules are
-        # removed — after whoami completes, not as soon as checkin is confirmed.
-        wfp_cleanup = agent.pop("_wfp_cleanup", None)
 
         print("  [specter][cmd] whoami")
         result = agent_exec(cli, agent_id, "whoami", wait=True, timeout=co)
@@ -369,9 +364,6 @@ def _maybe_specter_doh_agent_pass(
                 agent_kill(cli, agent_id)
             except Exception as exc:
                 print(f"  [specter][cleanup] agent kill failed (non-fatal): {exc}")
-
-        if wfp_cleanup is not None:
-            wfp_cleanup()
 
         print(f"  [specter][cleanup] stopping/deleting HTTP listener {http_name!r}")
         try:

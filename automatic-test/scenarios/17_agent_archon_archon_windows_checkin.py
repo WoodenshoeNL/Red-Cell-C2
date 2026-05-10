@@ -167,7 +167,6 @@ def run(ctx) -> None:
     log_archon_ecdh_prelude(ctx, listener_name, listener_port)
 
     agent_id = None
-    wfp_cleanup = None
     try:
         # ── Steps 2-5: Build, deploy, exec, wait for checkin ─────────────────
         try:
@@ -181,7 +180,6 @@ def run(ctx) -> None:
                 label="archon",
                 checkin_periodic_interval=15.0,
                 checkin_periodic_callback=_archon_netstat_tick,
-                defer_wfp_cleanup=True,
             )
         except WaitTimeoutError as exc:
             print(
@@ -191,7 +189,6 @@ def run(ctx) -> None:
             )
             raise
         agent_id = agent["id"]
-        wfp_cleanup = agent.pop("_wfp_cleanup", None)
 
         # ── Step 6: Baseline command suite ───────────────────────────────────
 
@@ -238,9 +235,6 @@ def run(ctx) -> None:
                 agent_kill(cli, agent_id)
             except Exception as exc:
                 print(f"  [archon][cleanup] agent kill failed (non-fatal): {exc}")
-
-        if wfp_cleanup is not None:
-            wfp_cleanup()
 
         print(f"  [archon][cleanup] stopping/deleting listener {listener_name!r}")
         try:

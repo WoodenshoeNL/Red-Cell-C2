@@ -31,8 +31,6 @@ from lib.deploy import (
     defender_remove_process_exclusion,
     ensure_work_dir,
     execute_background,
-    firewall_allow_program,
-    firewall_remove_program,
     inject_hosts_entry,
     mark_host_unreachable,
     preflight_dns,
@@ -1182,34 +1180,6 @@ class TestDefenderProcessExclusion(unittest.TestCase):
             defender_add_process_exclusion(t, "/tmp/x/a.exe")
 
 
-class TestFirewallAllowProgram(unittest.TestCase):
-    """firewall_allow_program adds outbound allow rule for a full exe path."""
-
-    def setUp(self) -> None:
-        self.key_path = _module_key_path()
-
-    def _completed(
-        self, returncode: int, stderr: str = "", stdout: str = ""
-    ) -> subprocess.CompletedProcess:
-        return subprocess.CompletedProcess(
-            args=[], returncode=returncode, stdout=stdout, stderr=stderr
-        )
-
-    def test_windows_new_net_firewall_rule(self) -> None:
-        ok = self._completed(0)
-        t = _make_target(work_dir="C:\\Temp\\rc-test", platform="windows", key=self.key_path)
-        with patch("subprocess.run", return_value=ok) as m:
-            firewall_allow_program(t, "C:\\Temp\\rc-test\\agent-abcd1234.exe")
-        script = _decoded_windows_launch_script(m.call_args[0][0][-1])
-        self.assertIn("New-NetFirewallRule", script)
-        self.assertIn("-Direction Outbound", script)
-        self.assertIn("agent-abcd1234.exe", script)
-        self.assertIn("Remove-NetFirewallRule", script)
-
-    def test_linux_raises(self) -> None:
-        t = _make_target(work_dir="/tmp/x", key=self.key_path)
-        with self.assertRaises(ValueError):
-            firewall_allow_program(t, "/tmp/x/a.exe")
 
 
 class TestDefenderRemoveProcessExclusion(unittest.TestCase):
@@ -1248,46 +1218,6 @@ class TestDefenderRemoveProcessExclusion(unittest.TestCase):
         m.assert_not_called()
 
 
-class TestFirewallRemoveProgram(unittest.TestCase):
-    """firewall_remove_program removes the RC-Harness-<digest> rule (Windows only)."""
-
-    def setUp(self) -> None:
-        self.key_path = _module_key_path()
-
-    def _completed(
-        self, returncode: int, stderr: str = "", stdout: str = ""
-    ) -> subprocess.CompletedProcess:
-        return subprocess.CompletedProcess(
-            args=[], returncode=returncode, stdout=stdout, stderr=stderr
-        )
-
-    def test_windows_removes_harness_rule(self) -> None:
-        ok = self._completed(0)
-        t = _make_target(work_dir="C:\\Temp\\rc-test", platform="windows", key=self.key_path)
-        with patch("subprocess.run", return_value=ok) as m:
-            firewall_remove_program(t, "C:\\Temp\\rc-test\\agent-abcd1234.exe")
-        script = _decoded_windows_launch_script(m.call_args[0][0][-1])
-        self.assertIn("Remove-NetFirewallRule", script)
-        self.assertIn("RC-Harness-", script)
-        self.assertNotIn("New-NetFirewallRule", script)
-
-    def test_rule_name_matches_allow_program_digest(self) -> None:
-        """firewall_remove_program uses the same digest as firewall_allow_program."""
-        import hashlib
-        path = "C:\\Temp\\rc-test\\agent-deadbeef.exe"
-        digest = hashlib.sha256(path.encode("utf-8", errors="replace")).hexdigest()[:12]
-        expected_name = f"RC-Harness-{digest}"
-        ok = self._completed(0)
-        t = _make_target(work_dir="C:\\Temp\\rc-test", platform="windows", key=self.key_path)
-        with patch("subprocess.run", return_value=ok) as m:
-            firewall_remove_program(t, path)
-        script = _decoded_windows_launch_script(m.call_args[0][0][-1])
-        self.assertIn(expected_name, script)
-
-    def test_linux_raises(self) -> None:
-        t = _make_target(work_dir="/tmp/x", key=self.key_path)
-        with self.assertRaises(ValueError):
-            firewall_remove_program(t, "/tmp/x/a.exe")
 
 
 class TestDefenderDisableNetworkProtection(unittest.TestCase):

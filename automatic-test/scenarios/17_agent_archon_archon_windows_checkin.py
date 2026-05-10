@@ -127,8 +127,6 @@ def run(ctx) -> None:
     )
     from lib.deploy import (
         defender_add_exclusion,
-        firewall_allow_outbound_tcp,
-        firewall_remove_outbound_tcp,
         run_remote,
     )
     from lib.listeners import http_listener_kwargs
@@ -160,20 +158,6 @@ def run(ctx) -> None:
         print("  [archon][setup] exclusion added (or Defender is disabled — both are fine)")
     except Exception as exc:
         print(f"  [archon][setup] Defender exclusion failed (non-fatal): {exc}")
-
-    # ── Pre-step: outbound TCP allow rule (IP+port) ──────────────────────────
-    # Belt-and-suspenders complement to the per-exe firewall rule added by
-    # deploy_and_checkin.  An IP+port rule ensures traffic is allowed even when
-    # the exe-path rule does not fire (normalisation mismatch, propagation lag).
-    # The rule is cleaned up by cleanup_windows_target (RC-Harness-* sweep) and
-    # explicitly below.
-    if callback_host:
-        try:
-            print(f"  [archon][setup] adding outbound TCP allow rule for {callback_host}:{listener_port}")
-            firewall_allow_outbound_tcp(target, callback_host, listener_port)
-            print("  [archon][setup] outbound TCP allow rule added")
-        except Exception as exc:
-            print(f"  [archon][setup] outbound TCP allow rule failed (non-fatal): {exc}")
 
     # ── Step 1: Create + start HTTP listener ────────────────────────────────
     print(f"  [archon][listener] creating HTTP listener {listener_name!r} on port {listener_port}")
@@ -267,12 +251,6 @@ def run(ctx) -> None:
             listener_delete(cli, listener_name)
         except Exception:
             pass
-
-        if callback_host:
-            try:
-                firewall_remove_outbound_tcp(target, callback_host, listener_port)
-            except Exception:
-                pass
 
         print("  [archon][cleanup] removing work_dir on target")
         try:

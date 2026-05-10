@@ -37,9 +37,24 @@ _DEFAULT_REMOTE_CMD_SECS = 30
 #   Post-reboot idle:  ~4 100–4 200 nested items (providerContexts=599, filters=187)
 #   Pool exhaustion:   ~6 800+ (seen before fixes; caused WSAENOBUFS / os error 10055)
 #
-# Threshold set to 5 500 to sit clearly above the idle baseline while giving
-# ~1 300-item headroom before real exhaustion begins.
-WFP_RESTART_THRESHOLD = 5500
+# Threshold lowered from 5 500 to 4 800 to catch gradual accumulation earlier:
+# agents fail (os error 10055) before the count reaches 5 500 because zombie
+# FWPM_GENERAL_CONTEXT objects from crashed agent processes consume non-paged pool
+# without adding WFP filter items.  4 800 catches growth of ~600 items above baseline
+# while remaining ~2 000 items below observed exhaustion.
+WFP_RESTART_THRESHOLD = 4800
+
+# Non-paged pool bytes threshold for WFP escalation.  Used as a secondary trigger
+# when the WFP item count alone does not reflect pool pressure (e.g. kernel objects
+# from crashed processes — not WFP filters — fill the pool).
+#
+# Observed baselines (Windows 11, 16 GB RAM, firewall disabled):
+#   Idle:            ~150–250 MB
+#   Stressed (crash artifacts): >350 MB, causes WSAENOBUFS before WFP count reaches 4800
+#
+# Set to 350 MB (350_000_000 bytes).  When non-paged pool bytes exceed this value,
+# mpssvc is restarted regardless of the WFP item count.
+NP_POOL_BYTES_THRESHOLD = 350_000_000
 
 # Hosts confirmed unreachable at startup by check_ssh_targets().  Per-scenario
 # preflight_ssh() calls short-circuit to ScenarioSkipped for these hosts so that
@@ -986,25 +1001,105 @@ def execute_background(
                     print(f"  [deploy][schtask] {line}")
 
 
+def reboot_windows_vm(
+    target: TargetConfig,
+    *,
+    log_prefix: str = "  [wfp-reboot]",
+    reboot_timeout: int = 180,
+) -> bool:
+    """Reboot a Windows VM and wait for SSH to reconnect.
+
+    Issues ``Restart-Computer -Force`` via SSH, waits 20 s for the shutdown to
+    begin, then polls for SSH connectivity every 10 s up to *reboot_timeout*
+    seconds.
+
+    Use this as a last resort when :func:`wfp_preflight_cleanup` returns
+    ``wfp_critical: True`` and mpssvc restart is insufficient — a full reboot
+    is the only reliable way to drain WFP zombie objects and recover
+    non-paged pool.
+
+    Returns ``True`` if SSH reconnected within the timeout.
+    Returns ``False`` if the reboot command failed or SSH did not reconnect.
+
+    Never raises: all SSH failures are printed and swallowed.
+
+    Args:
+        target:         Windows SSH target.  No-op (returns False) on Linux.
+        log_prefix:     Prefix for diagnostic lines.
+        reboot_timeout: Seconds to wait for SSH to reconnect after the reboot
+                        command is issued.  Does not include the 20 s pre-poll
+                        delay.  Default: 180 s.
+    """
+    if target.platform != "windows":
+        return False
+    if target.host in _globally_unreachable_hosts:
+        return False
+
+    print(f"{log_prefix} issuing Restart-Computer -Force on {target.host}")
+    reboot_enc = _powershell_encoded_command("Restart-Computer -Force\n")
+    reboot_cmd = _ssh_args(target) + [
+        f"powershell -NoProfile -EncodedCommand {reboot_enc}"
+    ]
+    try:
+        # Use a short timeout: the connection drops as soon as Windows begins
+        # rebooting, which may happen before PowerShell can return an exit code.
+        _run_ssh_cli_with_retry(reboot_cmd, target.host, timeout=15, tool="ssh")
+    except Exception as exc:
+        # SSH failure here is expected if the VM began shutting down before
+        # the SSH session closed cleanly.  Continue to the poll phase.
+        print(f"{log_prefix} reboot command returned error (may be expected): {exc}")
+
+    print(f"{log_prefix} waiting 20 s for VM shutdown to begin on {target.host}")
+    time.sleep(20)
+
+    deadline = time.time() + reboot_timeout
+    while time.time() < deadline:
+        try:
+            probe = _run_ssh_cli_with_retry(
+                _ssh_args(target) + ["echo alive"],
+                target.host,
+                timeout=8,
+                tool="ssh",
+            )
+            if probe.returncode == 0:
+                print(f"{log_prefix} SSH reconnected to {target.host} — VM is back")
+                return True
+        except Exception:
+            pass
+        remaining = int(deadline - time.time())
+        print(f"{log_prefix} waiting for SSH ({target.host}), ~{remaining}s remaining")
+        time.sleep(10)
+
+    print(f"{log_prefix} {target.host} did not respond within {reboot_timeout}s after reboot")
+    return False
+
+
 def wfp_preflight_cleanup(
     target: TargetConfig,
     *,
     log_prefix: str = "  [wfp-preflight]",
     timeout: int | None = None,
     restart_threshold: int | None = None,
+    np_pool_threshold: int | None = NP_POOL_BYTES_THRESHOLD,
 ) -> dict[str, int] | None:
     """Sweep leftover WFP firewall rules and Defender process exclusions.
 
-    Returns a dict with ``wfp_after``, ``twait_after``, and optionally
+    Returns a dict with ``wfp_after``, ``twait_after``, ``npb_after``, and optionally
     ``wfp_critical`` parsed from the ``WFP_AFTER:`` diagnostic line, or
     ``None`` if the sweep failed or the target is not Windows.
 
     When ``restart_threshold`` is set and the post-mpssvc-restart WFP count
-    is still >= that threshold, the returned dict includes
+    is still >= that threshold, OR when ``np_pool_threshold`` is set and
+    non-paged pool bytes are still >= that value, the returned dict includes
     ``wfp_critical: True``.  Callers should treat this as a signal that the
     Windows VM requires a full reboot before further Windows scenarios will
     succeed — mpssvc restart is insufficient to drain these OS-level WFP
     filter objects.
+
+    The mpssvc restart is also triggered when non-paged pool bytes exceed
+    ``np_pool_threshold`` even if the WFP item count is below
+    ``restart_threshold``.  This catches pool pressure from kernel objects left
+    behind by crashed agent processes that do not show up in the WFP item count.
 
     Idempotent and safe to call multiple times (e.g. at suite start and between
     scenarios); errors are swallowed so a failed sweep never aborts the caller.
@@ -1027,7 +1122,10 @@ def wfp_preflight_cleanup(
                    Windows Firewall service (``mpssvc``) and re-run the sweep once.
                    Rule sweeps cannot remove Defender callout objects; an ``mpssvc``
                    restart is the only reliable way to drain them.  ``None`` disables
-                   the threshold check entirely.  Suggested value: 800.
+                   the threshold check entirely.  Suggested value: 4800.
+        np_pool_threshold: If non-paged pool bytes >= this value after the sweep,
+                   restart mpssvc regardless of the WFP item count.  ``None`` disables
+                   this secondary check.  Default: :data:`NP_POOL_BYTES_THRESHOLD`.
     """
     if target.platform != "windows":
         return None
@@ -1054,7 +1152,15 @@ def wfp_preflight_cleanup(
         "} catch {}\n"
         "try { Remove-Item -LiteralPath $_wfp_tmp -Force -ErrorAction SilentlyContinue } catch {}\n"
         "$_twait = @(Get-NetTCPConnection -State TimeWait -ErrorAction SilentlyContinue).Count\n"
-        "Write-Output ('WFP_BEFORE:rc=' + $_rc_rules.Count + ',agent=' + $_ag_rules.Count + ',wfp=' + $_wfp_count + ',twait=' + $_twait)\n"
+        # Measure non-paged pool bytes as the primary pool-pressure indicator.
+        # Unlike the WFP item count, this captures pool usage from ALL kernel objects
+        # (crashed-process handles, WFP callout objects, etc.) that cause WSAENOBUFS.
+        "$_npb = -1\n"
+        "try {\n"
+        "  $_ctr = Get-Counter '\\Memory\\Pool Nonpaged Bytes' -ErrorAction SilentlyContinue\n"
+        "  if ($_ctr) { $_npb = [int64]$_ctr.CounterSamples[0].CookedValue }\n"
+        "} catch {}\n"
+        "Write-Output ('WFP_BEFORE:rc=' + $_rc_rules.Count + ',agent=' + $_ag_rules.Count + ',wfp=' + $_wfp_count + ',twait=' + $_twait + ',npb=' + $_npb)\n"
         # Remove RC-Harness-* rules (harness-created via firewall_allow_program).
         "Remove-NetFirewallRule -DisplayName 'RC-Harness-*' -ErrorAction SilentlyContinue\n"
         # Remove agent-* display-name rules (Windows-auto-created or old-harness-created).
@@ -1079,7 +1185,12 @@ def wfp_preflight_cleanup(
         "} catch {}\n"
         "try { Remove-Item -LiteralPath $_wfp_tmp2 -Force -ErrorAction SilentlyContinue } catch {}\n"
         "$_twait_after = @(Get-NetTCPConnection -State TimeWait -ErrorAction SilentlyContinue).Count\n"
-        "Write-Output ('WFP_AFTER:rc=' + $_rc_after + ',agent=' + $_ag_after + ',wfp=' + $_wfp_count_after + ',twait=' + $_twait_after)\n"
+        "$_npb_after = -1\n"
+        "try {\n"
+        "  $_ctr2 = Get-Counter '\\Memory\\Pool Nonpaged Bytes' -ErrorAction SilentlyContinue\n"
+        "  if ($_ctr2) { $_npb_after = [int64]$_ctr2.CounterSamples[0].CookedValue }\n"
+        "} catch {}\n"
+        "Write-Output ('WFP_AFTER:rc=' + $_rc_after + ',agent=' + $_ag_after + ',wfp=' + $_wfp_count_after + ',twait=' + $_twait_after + ',npb=' + $_npb_after)\n"
         "exit 0\n"
     )
     enc = _powershell_encoded_command(script)
@@ -1120,20 +1231,51 @@ def wfp_preflight_cleanup(
                         )
                     wfp_after = int(parts.get("wfp", -1))
                     twait_after = int(parts.get("twait", -1))
-                    parsed_after = {"wfp_after": wfp_after, "twait_after": twait_after}
+                    npb_after = int(parts.get("npb", -1))
+                    parsed_after = {
+                        "wfp_after": wfp_after,
+                        "twait_after": twait_after,
+                        "npb_after": npb_after,
+                    }
+                    if npb_after >= 0:
+                        npb_mb = npb_after // (1024 * 1024)
+                        print(
+                            f"{log_prefix} non-paged pool after sweep ({target.host}):"
+                            f" {npb_after} bytes ({npb_mb} MB)"
+                        )
                 except (ValueError, KeyError):
                     pass
 
-    if (
+    # Determine whether to trigger mpssvc restart.  Two independent conditions:
+    # (1) WFP item count >= restart_threshold — WFP filter/context object accumulation.
+    # (2) Non-paged pool bytes >= np_pool_threshold — pool pressure from any kernel
+    #     objects (crashed process handles, WFP callout objects, etc.).
+    wfp_above = (
         restart_threshold is not None
         and parsed_after is not None
         and parsed_after.get("wfp_after", -1) >= restart_threshold
-    ):
-        wfp_observed = parsed_after["wfp_after"]
+    )
+    _npb_val = parsed_after.get("npb_after", -1) if parsed_after is not None else -1
+    npb_above = (
+        np_pool_threshold is not None
+        and parsed_after is not None
+        and _npb_val >= 0
+        and _npb_val >= np_pool_threshold
+    )
+    if wfp_above or npb_above:
+        wfp_observed = parsed_after.get("wfp_after", -1) if parsed_after else -1  # type: ignore[union-attr]
+        npb_observed = parsed_after.get("npb_after", -1) if parsed_after else -1  # type: ignore[union-attr]
+        reasons = []
+        if wfp_above:
+            reasons.append(f"wfp_after={wfp_observed} >= threshold={restart_threshold}")
+        if npb_above:
+            npb_mb = npb_observed // (1024 * 1024)
+            reasons.append(
+                f"npb_after={npb_observed} ({npb_mb} MB) >= threshold={np_pool_threshold}"
+            )
         print(
-            f"{log_prefix} WARNING: wfp_after={wfp_observed} >= threshold={restart_threshold}"
-            f" on {target.host} — Defender callout objects are accumulating; rule sweeps"
-            " cannot remove them. Restarting mpssvc (Windows Firewall service)."
+            f"{log_prefix} WARNING: {'; '.join(reasons)} on {target.host}"
+            " — pool pressure detected; restarting mpssvc (Windows Firewall service)."
         )
         restart_script = "Restart-Service -Name mpssvc -Force -ErrorAction Stop\n"
         restart_enc = _powershell_encoded_command(restart_script)
@@ -1162,35 +1304,54 @@ def wfp_preflight_cleanup(
             # remaining Windows scenarios rather than letting them time out.
             print(
                 f"{log_prefix} CRITICAL: mpssvc restart refused by OS on {target.host}"
-                f" (wfp_after={wfp_observed} >= threshold={restart_threshold})"
+                f" ({'; '.join(reasons)})"
                 " — WFP pool critically exhausted; VM reboot required."
                 " Skipping remaining Windows scenarios."
             )
-            result = dict(parsed_after)
-            result["wfp_critical"] = True
-            return result
+            result_dict = dict(parsed_after)  # type: ignore[arg-type]
+            result_dict["wfp_critical"] = True
+            return result_dict
         print(f"{log_prefix} mpssvc restarted on {target.host}; re-running WFP sweep")
-        # Re-run sweep once without a threshold to avoid recursion.
+        # Re-run sweep once without thresholds to avoid recursion.
         retry = wfp_preflight_cleanup(
             target,
             log_prefix=log_prefix,
             timeout=timeout,
             restart_threshold=None,
+            np_pool_threshold=None,
         )
         if retry is not None:
             retry_wfp = retry.get("wfp_after", -1)
             retry_twait = retry.get("twait_after", -1)
+            retry_npb = retry.get("npb_after", -1)
+            retry_npb_mb = retry_npb // (1024 * 1024) if retry_npb >= 0 else -1
             print(
                 f"{log_prefix} post-mpssvc-restart wfp_after={retry_wfp}"
                 f" twait_after={retry_twait}"
+                f" npb_after={retry_npb} ({retry_npb_mb} MB)"
             )
-            if retry_wfp >= restart_threshold:
-                # mpssvc restart did not reduce the WFP count — these are
-                # accumulated OS-level WFP filter objects that only clear on
-                # full VM reboot (not Defender callout objects).
+            still_wfp = restart_threshold is not None and retry_wfp >= restart_threshold
+            still_npb = (
+                np_pool_threshold is not None
+                and retry_npb >= 0
+                and retry_npb >= np_pool_threshold
+            )
+            if still_wfp or still_npb:
+                # mpssvc restart did not reduce pool pressure — these are accumulated
+                # OS-level kernel objects that only clear on full VM reboot.
+                post_reasons = []
+                if still_wfp:
+                    post_reasons.append(
+                        f"wfp_after={retry_wfp} >= threshold={restart_threshold}"
+                    )
+                if still_npb:
+                    post_reasons.append(
+                        f"npb_after={retry_npb} ({retry_npb_mb} MB)"
+                        f" >= threshold={np_pool_threshold}"
+                    )
                 print(
-                    f"{log_prefix} CRITICAL: post-mpssvc-restart wfp_after={retry_wfp}"
-                    f" >= threshold={restart_threshold} on {target.host}"
+                    f"{log_prefix} CRITICAL: post-mpssvc-restart {'; '.join(post_reasons)}"
+                    f" on {target.host}"
                     " — WFP pool critically exhausted; VM reboot required."
                     " Skipping remaining Windows scenarios."
                 )

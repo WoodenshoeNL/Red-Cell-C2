@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from lib.deploy import (
     DeployError,
+    NP_POOL_BYTES_THRESHOLD,
     TargetConfig,
     WFP_RESTART_THRESHOLD,
     cleanup_windows_harness_work_dir,
@@ -40,6 +41,7 @@ from lib.deploy import (
     named_pipe_exists,
     preflight_dns,
     preflight_ssh,
+    reboot_windows_vm,
     run_remote,
     upload,
     windows_sync_payload_probe,
@@ -2028,6 +2030,308 @@ class TestWfpPreflightCleanup(unittest.TestCase):
             any("CRITICAL" in p for p in printed),
             f"must not print CRITICAL warning when restart succeeded; got: {printed}",
         )
+
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_script_includes_nonpaged_pool_measurement(self, mock_ssh: object) -> None:
+        """Script must query \\Memory\\Pool Nonpaged Bytes and include npb= in both diagnostic lines.
+
+        Non-paged pool bytes is the primary pool-pressure indicator for WSAENOBUFS (os error
+        10055): it captures pressure from ALL kernel objects (crashed process handles, WFP
+        callout objects, etc.), not just WFP filter counts.
+        """
+        mock_ssh.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
+        wfp_preflight_cleanup(t, timeout=100)
+        decoded = _decoded_windows_launch_script(mock_ssh.call_args[0][0][-1])
+        self.assertIn("Pool Nonpaged Bytes", decoded)
+        self.assertIn("_npb", decoded)
+        self.assertIn("',npb=' + $_npb", decoded)
+        self.assertIn("',npb=' + $_npb_after", decoded)
+
+    @patch("builtins.print")
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_npb_after_included_in_returned_dict(
+        self, mock_ssh: object, mock_print: object,
+    ) -> None:
+        """Returned dict must include npb_after parsed from the npb= field in WFP_AFTER:."""
+        mock_ssh.return_value = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=(
+                "WFP_BEFORE:rc=0,agent=0,wfp=4187,twait=6,npb=180000000\n"
+                "WFP_AFTER:rc=0,agent=0,wfp=4187,twait=5,npb=175000000\n"
+            ),
+            stderr="",
+        )
+        t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
+        result = wfp_preflight_cleanup(t, log_prefix="  [tag]", timeout=100)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["wfp_after"], 4187)
+        self.assertEqual(result["twait_after"], 5)
+        self.assertEqual(result["npb_after"], 175_000_000)
+
+    @patch("builtins.print")
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_npb_after_is_negative_one_when_absent_from_output(
+        self, mock_ssh: object, mock_print: object,
+    ) -> None:
+        """If WFP_AFTER does not include npb=, npb_after must be -1 (measurement unavailable)."""
+        mock_ssh.return_value = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=(
+                "WFP_BEFORE:rc=0,agent=0,wfp=4187,twait=6\n"
+                "WFP_AFTER:rc=0,agent=0,wfp=4187,twait=5\n"
+            ),
+            stderr="",
+        )
+        t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
+        result = wfp_preflight_cleanup(t, log_prefix="  [tag]", timeout=100)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.get("npb_after", "MISSING"), -1)
+
+    @patch("builtins.print")
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_mpssvc_restart_triggered_by_high_npb_even_when_wfp_is_normal(
+        self, mock_ssh: object, mock_print: object,
+    ) -> None:
+        """mpssvc must be restarted when npb_after >= NP_POOL_BYTES_THRESHOLD even if
+        wfp_after is below restart_threshold.
+
+        This covers the regression where agents fail with os error 10055 while the WFP
+        item count is at normal baseline (~4187): kernel objects from crashed processes
+        consume non-paged pool without adding WFP filter items.
+        """
+        high_npb = NP_POOL_BYTES_THRESHOLD + 50_000_000  # clearly above threshold
+        sweep_result = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=(
+                f"WFP_BEFORE:rc=0,agent=0,wfp=4200,twait=6,npb={high_npb + 10_000_000}\n"
+                f"WFP_AFTER:rc=0,agent=0,wfp=4187,twait=5,npb={high_npb}\n"
+            ),
+            stderr="",
+        )
+        restart_ok = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        retry_sweep = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=(
+                "WFP_BEFORE:rc=0,agent=0,wfp=4190,twait=3,npb=190000000\n"
+                "WFP_AFTER:rc=0,agent=0,wfp=4185,twait=2,npb=185000000\n"
+            ),
+            stderr="",
+        )
+        mock_ssh.side_effect = [sweep_result, restart_ok, retry_sweep]
+        t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
+        result = wfp_preflight_cleanup(
+            t,
+            log_prefix="  [tag]",
+            timeout=100,
+            restart_threshold=WFP_RESTART_THRESHOLD,
+        )
+        # mpssvc restart was triggered (3 SSH calls: sweep, restart, retry sweep)
+        self.assertEqual(mock_ssh.call_count, 3, "expected 3 SSH calls: sweep, restart, retry")
+        # Returned dict reflects the post-restart retry sweep
+        self.assertIsNotNone(result)
+        self.assertEqual(result.get("wfp_after"), 4185)
+        self.assertEqual(result.get("npb_after"), 185_000_000)
+        # No wfp_critical — post-restart npb is below threshold
+        self.assertFalse(
+            result.get("wfp_critical"),
+            f"wfp_critical must not be set when post-restart pool is healthy; got: {result}",
+        )
+        printed = [str(c.args[0]) for c in mock_print.call_args_list if c.args]
+        self.assertTrue(
+            any("WARNING" in p and "npb" in p.lower() for p in printed),
+            f"must print WARNING mentioning npb; got: {printed}",
+        )
+
+    @patch("builtins.print")
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_wfp_critical_when_post_restart_npb_still_above_threshold(
+        self, mock_ssh: object, mock_print: object,
+    ) -> None:
+        """wfp_critical must be True when post-mpssvc-restart npb_after is still >= NP_POOL_BYTES_THRESHOLD.
+
+        Exercises the case where mpssvc restart cannot drain the non-paged pool
+        (e.g. crashed process handles accumulate independently of WFP filters).
+        """
+        high_npb = NP_POOL_BYTES_THRESHOLD + 50_000_000
+        sweep_result = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=(
+                f"WFP_BEFORE:rc=0,agent=0,wfp=4200,twait=6,npb={high_npb}\n"
+                f"WFP_AFTER:rc=0,agent=0,wfp=4187,twait=5,npb={high_npb}\n"
+            ),
+            stderr="",
+        )
+        restart_ok = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        retry_sweep = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            # Still above threshold after restart
+            stdout=(
+                f"WFP_BEFORE:rc=0,agent=0,wfp=4190,twait=5,npb={high_npb}\n"
+                f"WFP_AFTER:rc=0,agent=0,wfp=4185,twait=4,npb={high_npb}\n"
+            ),
+            stderr="",
+        )
+        mock_ssh.side_effect = [sweep_result, restart_ok, retry_sweep]
+        t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
+        result = wfp_preflight_cleanup(
+            t,
+            log_prefix="  [tag]",
+            timeout=100,
+            restart_threshold=WFP_RESTART_THRESHOLD,
+        )
+        self.assertIsNotNone(result)
+        self.assertTrue(
+            result.get("wfp_critical"),
+            f"wfp_critical must be True when post-restart npb still above threshold; got: {result}",
+        )
+        printed = [str(c.args[0]) for c in mock_print.call_args_list if c.args]
+        self.assertTrue(
+            any("CRITICAL" in p and "reboot required" in p for p in printed),
+            f"must print CRITICAL reboot-required warning; got: {printed}",
+        )
+
+    @patch("builtins.print")
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_no_restart_when_npb_threshold_is_none(
+        self, mock_ssh: object, mock_print: object,
+    ) -> None:
+        """When np_pool_threshold=None, high npb must NOT trigger mpssvc restart."""
+        high_npb = NP_POOL_BYTES_THRESHOLD + 100_000_000
+        mock_ssh.return_value = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=(
+                f"WFP_BEFORE:rc=0,agent=0,wfp=4200,twait=6,npb={high_npb}\n"
+                f"WFP_AFTER:rc=0,agent=0,wfp=4187,twait=5,npb={high_npb}\n"
+            ),
+            stderr="",
+        )
+        t = _make_target(work_dir=r"C:\Temp\rc-test", platform="windows", key=self.key_path)
+        result = wfp_preflight_cleanup(
+            t,
+            log_prefix="  [tag]",
+            timeout=100,
+            restart_threshold=WFP_RESTART_THRESHOLD,
+            np_pool_threshold=None,
+        )
+        # Only 1 SSH call — no restart triggered
+        self.assertEqual(mock_ssh.call_count, 1)
+        self.assertIsNotNone(result)
+        self.assertFalse(result.get("wfp_critical"))
+
+
+class TestRebootWindowsVm(unittest.TestCase):
+    """Unit tests for :func:`reboot_windows_vm`."""
+
+    def setUp(self) -> None:
+        self.key_path = _module_key_path()
+
+    def test_linux_target_returns_false_immediately(self) -> None:
+        """Non-Windows targets must return False without doing any I/O."""
+        t = _make_target(work_dir="/tmp/rc-test", key=self.key_path)
+        result = reboot_windows_vm(t)
+        self.assertFalse(result)
+
+    def test_unreachable_host_returns_false(self) -> None:
+        """Hosts in _globally_unreachable_hosts must return False without SSH."""
+        t = _make_target(host="10.99.9.9", platform="windows", key=self.key_path)
+        mark_host_unreachable("10.99.9.9")
+        try:
+            result = reboot_windows_vm(t)
+            self.assertFalse(result)
+        finally:
+            clear_globally_unreachable_hosts()
+
+    @patch("time.sleep")
+    @patch("time.time")
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_returns_true_when_ssh_reconnects_after_reboot(
+        self,
+        mock_ssh: object,
+        mock_time: object,
+        mock_sleep: object,
+    ) -> None:
+        """Must return True when SSH reconnects within the reboot_timeout window."""
+        # time.time() returns: initial, then values that simulate ~30s elapsed
+        import itertools
+        start = 1000.0
+        # Return start for deadline calculation, then simulate time passing
+        mock_time.side_effect = itertools.chain(
+            [start],          # time.time() for deadline = start + 180
+            [start + 25],     # first poll: within deadline
+        )
+        reboot_ok = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        probe_ok = subprocess.CompletedProcess(args=[], returncode=0, stdout="alive\n", stderr="")
+        mock_ssh.side_effect = [reboot_ok, probe_ok]
+        t = _make_target(
+            host="192.168.1.100", platform="windows", key=self.key_path, work_dir=r"C:\Temp\rc-test"
+        )
+        result = reboot_windows_vm(t, reboot_timeout=180)
+        self.assertTrue(result)
+
+    @patch("time.sleep")
+    @patch("time.time")
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_returns_false_when_ssh_does_not_reconnect_within_timeout(
+        self,
+        mock_ssh: object,
+        mock_time: object,
+        mock_sleep: object,
+    ) -> None:
+        """Must return False when SSH never reconnects before the timeout expires."""
+        import itertools
+        start = 1000.0
+        # time.time() exceeds deadline on the first poll check
+        mock_time.side_effect = itertools.chain(
+            [start],           # deadline = start + 10
+            [start + 11],      # first while check: already past deadline
+        )
+        reboot_ok = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        mock_ssh.return_value = reboot_ok
+        t = _make_target(
+            host="192.168.1.100", platform="windows", key=self.key_path, work_dir=r"C:\Temp\rc-test"
+        )
+        result = reboot_windows_vm(t, reboot_timeout=10)
+        self.assertFalse(result)
+
+    @patch("time.sleep")
+    @patch("time.time")
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_continues_polling_when_probe_raises_exception(
+        self,
+        mock_ssh: object,
+        mock_time: object,
+        mock_sleep: object,
+    ) -> None:
+        """SSH probe exceptions during polling must not abort — keep retrying until timeout."""
+        import itertools
+        start = 1000.0
+        # time.time() is called: (1) deadline, (2) loop check 1, (3) remaining calc 1,
+        # (4) loop check 2 → probe succeeds
+        mock_time.side_effect = itertools.chain(
+            [start],          # (1) deadline = start + 60
+            [start + 10],     # (2) loop check 1: within window, probe raises
+            [start + 10],     # (3) remaining = int(deadline - time.time())
+            [start + 20],     # (4) loop check 2: within window, probe succeeds
+        )
+        reboot_ok = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        probe_ok = subprocess.CompletedProcess(args=[], returncode=0, stdout="alive\n", stderr="")
+        # reboot SSH call, probe raises, then probe succeeds
+        mock_ssh.side_effect = [reboot_ok, Exception("connection refused"), probe_ok]
+        t = _make_target(
+            host="192.168.1.100", platform="windows", key=self.key_path, work_dir=r"C:\Temp\rc-test"
+        )
+        result = reboot_windows_vm(t, reboot_timeout=60)
+        self.assertTrue(result)
 
 
 class TestGloballyUnreachableGuards(unittest.TestCase):

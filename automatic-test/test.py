@@ -47,7 +47,7 @@ from lib.config import (
     TimeoutsConfig,
     timeouts_to_env_dict,
 )
-from lib.deploy import TargetConfig, WFP_RESTART_THRESHOLD, cleanup_windows_harness_work_dir, configure_deploy_timeouts, disable_windows_firewall, wfp_preflight_cleanup
+from lib.deploy import NP_POOL_BYTES_THRESHOLD, TargetConfig, WFP_RESTART_THRESHOLD, cleanup_windows_harness_work_dir, configure_deploy_timeouts, disable_windows_firewall, reboot_windows_vm, wfp_preflight_cleanup
 from lib.teamserver_monitor import configure_teamserver_ssh_connect_timeout
 from lib.wait import configure_wait_defaults
 from lib.failure_diagnostics import (
@@ -997,13 +997,63 @@ def main():
                     restart_threshold=WFP_RESTART_THRESHOLD,
                 )
                 if _wfp_pre_result and _wfp_pre_result.get("wfp_critical"):
-                    _wfp_preflight_critical = True
                     print(
                         f"\n  *** WFP pool exhausted on {_wlabel!r} ({_wtgt.host}) —"
-                        " mpssvc restart did not recover it.\n"
-                        "  All Windows scenarios will be skipped."
-                        " Reboot the VM to restore WFP capacity."
+                        " mpssvc restart did not recover it."
+                        " Attempting VM reboot to drain WFP objects.\n"
                     )
+                    _rebooted = reboot_windows_vm(
+                        _wtgt,
+                        log_prefix="  [wfp-reboot]",
+                        reboot_timeout=180,
+                    )
+                    if _rebooted:
+                        # Re-disable firewall (persists across reboots, but run again
+                        # as belt-and-suspenders) and re-run the WFP sweep.
+                        try:
+                            disable_windows_firewall(_wtgt)
+                            print(
+                                f"  [wfp-reboot] Windows Firewall re-disabled on {_wtgt.host}"
+                            )
+                        except Exception as _fw2_exc:
+                            print(
+                                f"  [wfp-reboot] Firewall disable (post-reboot) failed"
+                                f" (non-fatal): {_fw2_exc}"
+                            )
+                        _wfp_post_reboot = wfp_preflight_cleanup(
+                            _wtgt,
+                            log_prefix="  [wfp-post-reboot]",
+                            timeout=_wfp_timeout,
+                            restart_threshold=WFP_RESTART_THRESHOLD,
+                        )
+                        if _wfp_post_reboot and _wfp_post_reboot.get("wfp_critical"):
+                            _wfp_preflight_critical = True
+                            print(
+                                f"\n  *** WFP pool still exhausted on {_wlabel!r}"
+                                f" ({_wtgt.host}) after VM reboot — skipping all Windows"
+                                " scenarios."
+                            )
+                        else:
+                            _npb = (
+                                _wfp_post_reboot.get("npb_after", -1)
+                                if _wfp_post_reboot
+                                else -1
+                            )
+                            print(
+                                f"  [wfp-reboot] Pool recovered after reboot on"
+                                f" {_wtgt.host}"
+                                + (
+                                    f" (npb={_npb // (1024*1024)} MB)"
+                                    if _npb >= 0
+                                    else ""
+                                )
+                            )
+                    else:
+                        _wfp_preflight_critical = True
+                        print(
+                            f"\n  *** VM reboot failed or timed out for {_wlabel!r}"
+                            f" ({_wtgt.host}) — skipping all Windows scenarios."
+                        )
 
     # Pre-flight: clean up leftover listeners from prior runs.  Listeners
     # persisted in the teamserver's SQLite DB may still be bound to ports
@@ -1174,7 +1224,47 @@ def main():
                     restart_threshold=WFP_RESTART_THRESHOLD,
                 )
                 if _wfp_bs and _wfp_bs.get("wfp_critical"):
-                    _win_wfp_exhausted = True
+                    # mpssvc restart didn't help — attempt VM reboot mid-run to
+                    # clear accumulated WFP/kernel objects before continuing.
+                    print(
+                        "  [between-scenarios][wfp] WFP pool critically exhausted"
+                        f" on {wtgt.host} — attempting VM reboot to recover."
+                    )
+                    _bs_rebooted = reboot_windows_vm(
+                        wtgt,
+                        log_prefix="  [between-scenarios][reboot]",
+                        reboot_timeout=180,
+                    )
+                    if _bs_rebooted:
+                        try:
+                            disable_windows_firewall(wtgt)
+                        except Exception:
+                            pass
+                        _wfp_post_bs = wfp_preflight_cleanup(
+                            wtgt,
+                            log_prefix="  [between-scenarios][post-reboot][wfp]",
+                            timeout=win_cleanup_timeout,
+                            restart_threshold=WFP_RESTART_THRESHOLD,
+                        )
+                        if _wfp_post_bs and _wfp_post_bs.get("wfp_critical"):
+                            print(
+                                "  [between-scenarios][reboot] Pool still exhausted"
+                                f" after reboot on {wtgt.host} — remaining Windows"
+                                " scenarios will be skipped."
+                            )
+                            _win_wfp_exhausted = True
+                        else:
+                            print(
+                                "  [between-scenarios][reboot] Pool recovered"
+                                f" after reboot on {wtgt.host} — continuing."
+                            )
+                    else:
+                        print(
+                            "  [between-scenarios][reboot] VM reboot failed"
+                            f" or timed out for {wtgt.host} — remaining Windows"
+                            " scenarios will be skipped."
+                        )
+                        _win_wfp_exhausted = True
 
     total = passed + failed + skipped
     print(f"\n{'═' * 60}")

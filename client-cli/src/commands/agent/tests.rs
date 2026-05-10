@@ -1105,17 +1105,79 @@ fn agent_groups_info_empty_groups_renders_text() {
 
 #[test]
 fn prune_result_serialises_all_fields() {
-    let r = PruneResult { pruned: 5, failed: 1, total_matched: 6 };
+    let r = PruneResult {
+        dry_run: false,
+        pruned: 5,
+        failed: 1,
+        total_matched: 6,
+        matched_agents: vec![],
+    };
     let v = serde_json::to_value(&r).expect("serialise");
+    assert_eq!(v["dry_run"], false);
     assert_eq!(v["pruned"], 5);
     assert_eq!(v["failed"], 1);
     assert_eq!(v["total_matched"], 6);
+    assert!(v["matched_agents"].as_array().expect("array").is_empty());
+}
+
+#[test]
+fn prune_result_dry_run_serialises_matched_agents() {
+    let r = PruneResult {
+        dry_run: true,
+        pruned: 0,
+        failed: 0,
+        total_matched: 2,
+        matched_agents: vec![305397761, 305397762],
+    };
+    let v = serde_json::to_value(&r).expect("serialise");
+    assert_eq!(v["dry_run"], true);
+    assert_eq!(v["pruned"], 0);
+    assert_eq!(v["failed"], 0);
+    assert_eq!(v["total_matched"], 2);
+    assert_eq!(v["matched_agents"], serde_json::json!([305397761, 305397762]));
+}
+
+#[test]
+fn prune_result_dry_run_renders_text_with_ids() {
+    use crate::output::TextRender;
+    let r = PruneResult {
+        dry_run: true,
+        pruned: 0,
+        failed: 0,
+        total_matched: 2,
+        matched_agents: vec![305397761, 305397762],
+    };
+    let text = r.render_text();
+    assert!(text.contains("DRY RUN"), "text must say DRY RUN; got: {text:?}");
+    assert!(text.contains('2'), "text must mention count; got: {text:?}");
+    assert!(text.contains("305397761"), "text must include first agent ID; got: {text:?}");
+}
+
+#[test]
+fn prune_result_dry_run_no_match_renders_text() {
+    use crate::output::TextRender;
+    let r = PruneResult {
+        dry_run: true,
+        pruned: 0,
+        failed: 0,
+        total_matched: 0,
+        matched_agents: vec![],
+    };
+    let text = r.render_text();
+    assert!(text.contains("DRY RUN"), "text must say DRY RUN; got: {text:?}");
+    assert!(text.to_lowercase().contains("no agents"), "must say no agents; got: {text:?}");
 }
 
 #[test]
 fn prune_result_renders_text_with_counts() {
     use crate::output::TextRender;
-    let r = PruneResult { pruned: 3, failed: 0, total_matched: 3 };
+    let r = PruneResult {
+        dry_run: false,
+        pruned: 3,
+        failed: 0,
+        total_matched: 3,
+        matched_agents: vec![],
+    };
     let text = r.render_text();
     assert!(text.contains('3'), "text must mention count; got: {text:?}");
 }
@@ -1123,7 +1185,13 @@ fn prune_result_renders_text_with_counts() {
 #[test]
 fn prune_result_renders_no_match_text() {
     use crate::output::TextRender;
-    let r = PruneResult { pruned: 0, failed: 0, total_matched: 0 };
+    let r = PruneResult {
+        dry_run: false,
+        pruned: 0,
+        failed: 0,
+        total_matched: 0,
+        matched_agents: vec![],
+    };
     let text = r.render_text();
     assert!(
         text.to_lowercase().contains("no agents"),
@@ -1134,7 +1202,13 @@ fn prune_result_renders_no_match_text() {
 #[test]
 fn prune_result_renders_failure_count_when_nonzero() {
     use crate::output::TextRender;
-    let r = PruneResult { pruned: 2, failed: 1, total_matched: 3 };
+    let r = PruneResult {
+        dry_run: false,
+        pruned: 2,
+        failed: 1,
+        total_matched: 3,
+        matched_agents: vec![],
+    };
     let text = r.render_text();
     assert!(
         text.contains("failed") || text.contains('1'),
@@ -1198,7 +1272,7 @@ async fn prune_dead_deregisters_dead_agents_only() {
         .await;
 
     let client = crate::client::ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
-    let result = prune(&client, None, true).await.expect("prune must succeed");
+    let result = prune(&client, None, true, false).await.expect("prune must succeed");
 
     assert_eq!(result.total_matched, 1, "only the dead agent matches");
     assert_eq!(result.pruned, 1, "dead agent must be deregistered");
@@ -1234,8 +1308,9 @@ async fn prune_before_deregisters_stale_agents() {
         .await;
 
     let client = crate::client::ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
-    let result =
-        prune(&client, Some("2026-05-10T00:00:00Z"), false).await.expect("prune must succeed");
+    let result = prune(&client, Some("2026-05-10T00:00:00Z"), false, false)
+        .await
+        .expect("prune must succeed");
 
     assert_eq!(result.total_matched, 1);
     assert_eq!(result.pruned, 1);
@@ -1261,7 +1336,7 @@ async fn prune_no_match_returns_zero_pruned() {
         .await;
 
     let client = crate::client::ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
-    let result = prune(&client, None, true).await.expect("prune must succeed");
+    let result = prune(&client, None, true, false).await.expect("prune must succeed");
 
     assert_eq!(result.total_matched, 0);
     assert_eq!(result.pruned, 0);
@@ -1283,7 +1358,7 @@ async fn prune_empty_roster_returns_zero_pruned() {
         .await;
 
     let client = crate::client::ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
-    let result = prune(&client, Some("2026-05-10T00:00:00Z"), true)
+    let result = prune(&client, Some("2026-05-10T00:00:00Z"), true, false)
         .await
         .expect("prune must succeed on empty roster");
 
@@ -1325,8 +1400,9 @@ async fn prune_combines_dead_and_before_with_or_semantics() {
         .await;
 
     let client = crate::client::ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
-    let result =
-        prune(&client, Some("2026-05-10T00:00:00Z"), true).await.expect("prune must succeed");
+    let result = prune(&client, Some("2026-05-10T00:00:00Z"), true, false)
+        .await
+        .expect("prune must succeed");
 
     assert_eq!(result.total_matched, 2, "two agents match (one dead, one stale)");
     assert_eq!(result.pruned, 2);
@@ -1374,9 +1450,55 @@ async fn prune_counts_failed_deregistrations() {
         .await;
 
     let client = crate::client::ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
-    let result = prune(&client, None, true).await.expect("prune must not abort on partial failure");
+    let result =
+        prune(&client, None, true, false).await.expect("prune must not abort on partial failure");
 
     assert_eq!(result.total_matched, 2);
     assert_eq!(result.pruned, 1);
     assert_eq!(result.failed, 1, "404 on deregister must count as a failure");
+}
+
+/// `prune --dead --dry-run` must not issue any DELETE requests; it returns the
+/// matching agent IDs in `matched_agents` and `pruned = 0`, `failed = 0`.
+#[tokio::test]
+async fn prune_dry_run_issues_no_delete_requests() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+
+    // Two dead agents and one alive agent.
+    Mock::given(method("GET"))
+        .and(path("/api/v1/agents"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            agent_json(0x1234_0001, false, "2026-01-01T00:00:00Z"), // dead
+            agent_json(0x1234_0002, false, "2026-01-01T00:00:00Z"), // dead
+            agent_json(0x1234_0003, true, "2026-05-10T12:00:00Z"),  // alive
+        ])))
+        .mount(&server)
+        .await;
+
+    // Register a DELETE catch-all that must NEVER be called.
+    Mock::given(method("DELETE"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let client = crate::client::ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
+    let result = prune(&client, None, true, true).await.expect("dry-run prune must succeed");
+
+    assert!(result.dry_run, "result must report dry_run=true");
+    assert_eq!(result.total_matched, 2, "two dead agents must match");
+    assert_eq!(result.pruned, 0, "dry-run must not prune any agents");
+    assert_eq!(result.failed, 0, "dry-run must report no failures");
+    assert_eq!(result.matched_agents.len(), 2, "matched_agents must contain two IDs");
+    assert!(
+        result.matched_agents.contains(&0x1234_0001),
+        "first dead agent ID must appear in matched_agents"
+    );
+    assert!(
+        result.matched_agents.contains(&0x1234_0002),
+        "second dead agent ID must appear in matched_agents"
+    );
 }

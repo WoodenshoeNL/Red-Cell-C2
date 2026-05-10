@@ -191,8 +191,8 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: AgentCommands) 
             }
         }
 
-        AgentCommands::Prune { before, dead } => {
-            match prune(client, before.as_deref(), dead).await {
+        AgentCommands::Prune { before, dead, dry_run } => {
+            match prune(client, before.as_deref(), dead, dry_run).await {
                 Ok(data) => match print_success(fmt, &data) {
                     Ok(()) => EXIT_SUCCESS,
                     Err(e) => {

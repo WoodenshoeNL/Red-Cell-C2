@@ -32,12 +32,16 @@ fn agent_last_seen_before(last_seen: &str, cutoff: &OffsetDateTime) -> bool {
 /// of `before` or `dead` must be specified; passing neither returns
 /// [`CliError::InvalidArgs`].
 ///
+/// When `dry_run=true`, no DELETE requests are issued; the result contains the
+/// matching agent IDs in `matched_agents` so callers can preview the operation.
+///
 /// Agents matching **any** of the supplied criteria are pruned (OR semantics).
 #[instrument(skip(client))]
 pub(crate) async fn prune(
     client: &ApiClient,
     before: Option<&str>,
     dead: bool,
+    dry_run: bool,
 ) -> Result<PruneResult, CliError> {
     if before.is_none() && !dead {
         return Err(CliError::InvalidArgs(
@@ -58,6 +62,18 @@ pub(crate) async fn prune(
         .collect();
 
     let total_matched = to_prune.len() as u32;
+
+    if dry_run {
+        let matched_agents: Vec<u32> = to_prune.iter().map(|a| a.id.as_u32()).collect();
+        return Ok(PruneResult {
+            dry_run: true,
+            pruned: 0,
+            failed: 0,
+            total_matched,
+            matched_agents,
+        });
+    }
+
     let mut pruned = 0u32;
     let mut failed = 0u32;
 
@@ -71,7 +87,7 @@ pub(crate) async fn prune(
         }
     }
 
-    Ok(PruneResult { pruned, failed, total_matched })
+    Ok(PruneResult { dry_run: false, pruned, failed, total_matched, matched_agents: vec![] })
 }
 
 #[cfg(test)]
@@ -149,7 +165,7 @@ mod tests {
             tls_mode: crate::config::TlsMode::SystemRoots,
         };
         let client = crate::client::ApiClient::new(&cfg).expect("build client");
-        let err = prune(&client, None, false).await.unwrap_err();
+        let err = prune(&client, None, false, false).await.unwrap_err();
         assert!(
             matches!(err, CliError::InvalidArgs(_)),
             "prune with no filters must return InvalidArgs; got: {err:?}"
@@ -165,7 +181,7 @@ mod tests {
             tls_mode: crate::config::TlsMode::SystemRoots,
         };
         let client = crate::client::ApiClient::new(&cfg).expect("build client");
-        let err = prune(&client, Some("not-a-timestamp"), false).await.unwrap_err();
+        let err = prune(&client, Some("not-a-timestamp"), false, false).await.unwrap_err();
         assert!(
             matches!(err, CliError::InvalidArgs(_)),
             "prune with invalid timestamp must return InvalidArgs; got: {err:?}"

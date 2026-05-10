@@ -195,17 +195,34 @@ impl TextRender for TransferResult {
 /// Result of `agent prune`.
 #[derive(Debug, Clone, Serialize)]
 pub struct PruneResult {
+    /// Whether this was a dry-run (no DELETE requests were issued).
+    pub dry_run: bool,
     /// Number of agents successfully deregistered.
     pub pruned: u32,
     /// Number of agents that matched criteria but could not be deregistered.
     pub failed: u32,
     /// Total number of agents that matched the prune criteria.
     pub total_matched: u32,
+    /// Agent IDs that matched the filter. Populated when `dry_run=true`; empty otherwise.
+    pub matched_agents: Vec<u32>,
 }
 
 impl TextRender for PruneResult {
     fn render_text(&self) -> String {
-        if self.total_matched == 0 {
+        if self.dry_run {
+            if self.total_matched == 0 {
+                "DRY RUN: no agents matched the prune criteria.".to_owned()
+            } else {
+                let ids: Vec<String> =
+                    self.matched_agents.iter().map(|id| id.to_string()).collect();
+                format!(
+                    "DRY RUN: {} agent{} would be pruned (agent IDs: {})",
+                    self.total_matched,
+                    if self.total_matched == 1 { "" } else { "s" },
+                    ids.join(", ")
+                )
+            }
+        } else if self.total_matched == 0 {
             "No agents matched the prune criteria.".to_owned()
         } else {
             format!(

@@ -147,6 +147,9 @@ pub enum AgentCommands {
         /// Deregister agents with status "dead" (Active=false on the teamserver).
         #[arg(long)]
         dead: bool,
+        /// Preview which agents would be pruned without issuing any DELETE requests.
+        #[arg(long, short = 'n')]
+        dry_run: bool,
     },
 
     /// Upload a local file to an agent.

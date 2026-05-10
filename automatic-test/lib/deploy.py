@@ -1159,10 +1159,17 @@ def wfp_preflight_cleanup(
         # Unlike the WFP item count, this captures pool usage from ALL kernel objects
         # (crashed-process handles, WFP callout objects, etc.) that cause WSAENOBUFS.
         "$_npb = -1\n"
+        # Use PerformanceCounter .NET class first (no PerfSvc dependency, no pipeline output
+        # that could interfere with Write-Output parsing). Fall back to WMI PerfRawData class
+        # which has its own WMI provider and works even when Get-Counter is unavailable.
         "try {\n"
-        "  $_ctr = Get-Counter '\\Memory\\Pool Nonpaged Bytes' -ErrorAction SilentlyContinue\n"
-        "  if ($_ctr) { $_npb = [int64]$_ctr.CounterSamples[0].CookedValue }\n"
+        "  $_pc = [System.Diagnostics.PerformanceCounter]::new('Memory','Pool Nonpaged Bytes')\n"
+        "  $_npb = [int64]$_pc.NextValue(); $_pc.Dispose()\n"
         "} catch {}\n"
+        "if ($_npb -lt 0) { try {\n"
+        "  $_wmi_mem = Get-CimInstance Win32_PerfRawData_PerfOS_Memory -ErrorAction SilentlyContinue\n"
+        "  if ($_wmi_mem) { $_npb = [int64]$_wmi_mem.PoolNonpagedBytes }\n"
+        "} catch {} }\n"
         "Write-Output ('WFP_BEFORE:rc=' + $_rc_rules.Count + ',agent=' + $_ag_rules.Count + ',wfp=' + $_wfp_count + ',twait=' + $_twait + ',npb=' + $_npb)\n"
         # Remove RC-Harness-* rules (harness-created via firewall_allow_program).
         "Remove-NetFirewallRule -DisplayName 'RC-Harness-*' -ErrorAction SilentlyContinue\n"
@@ -1190,9 +1197,13 @@ def wfp_preflight_cleanup(
         "$_twait_after = @(Get-NetTCPConnection -State TimeWait -ErrorAction SilentlyContinue).Count\n"
         "$_npb_after = -1\n"
         "try {\n"
-        "  $_ctr2 = Get-Counter '\\Memory\\Pool Nonpaged Bytes' -ErrorAction SilentlyContinue\n"
-        "  if ($_ctr2) { $_npb_after = [int64]$_ctr2.CounterSamples[0].CookedValue }\n"
+        "  $_pc2 = [System.Diagnostics.PerformanceCounter]::new('Memory','Pool Nonpaged Bytes')\n"
+        "  $_npb_after = [int64]$_pc2.NextValue(); $_pc2.Dispose()\n"
         "} catch {}\n"
+        "if ($_npb_after -lt 0) { try {\n"
+        "  $_wmi_mem2 = Get-CimInstance Win32_PerfRawData_PerfOS_Memory -ErrorAction SilentlyContinue\n"
+        "  if ($_wmi_mem2) { $_npb_after = [int64]$_wmi_mem2.PoolNonpagedBytes }\n"
+        "} catch {} }\n"
         "Write-Output ('WFP_AFTER:rc=' + $_rc_after + ',agent=' + $_ag_after + ',wfp=' + $_wfp_count_after + ',twait=' + $_twait_after + ',npb=' + $_npb_after)\n"
         "exit 0\n"
     )

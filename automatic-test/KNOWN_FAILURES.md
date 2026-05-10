@@ -32,7 +32,7 @@ row to *Resolved* and add the closing commit / fix description.
 
 | Signature (substring of error / stderr) | Scenario | Bead | First seen | Last seen | Status |
 |----------------------------------------|----------|------|------------|-----------|--------|
-| `RCTEST_SCHTASK_STATE:Ready` + `RCTEST_SCHTASK_LASTTASKRESULT:267011` + `RCTEST_SCHTASK_LASTRUNTIME:1999-11-30` (schtask Interactive→S4U fallback misses State='Ready' when another user is logged in interactively on the Windows VM; task never runs) | 05, 06, 07, 08, 14, 17, 19, 20 | red-cell-c2-j3hxi | 2026-05-10 | 2026-05-10 | P1 |
+| `RCTEST_SCHTASK_STATE:Running` + `(no log entries returned by server-tail)` + `Timed out after 60s waiting for agent checkin` OR `os error 10055` OR `[SUBPROCESS_TIMEOUT] CLI subprocess did not exit within expected timeout (55s)` (WFP non-paged pool exhausted — agents start (State=Running, process visible) but can't open TCP connections to teamserver; wfp_preflight_cleanup runs but doesn't reduce pool below critical level; progressive exhaustion across passes) | 05, 06, 07, 08, 17, 20 | red-cell-c2-lnsjt | 2026-05-10 | 2026-05-10 | P1 |
 
 ---
 
@@ -44,6 +44,7 @@ than a new bug.
 
 | Signature (substring of error / stderr) | Scenario | Bead | Resolved at | Notes |
 |----------------------------------------|----------|------|-------------|-------|
+| `RCTEST_SCHTASK_STATE:Ready` + `RCTEST_SCHTASK_LASTTASKRESULT:267011` + `RCTEST_SCHTASK_LASTRUNTIME:1999-11-30` (schtask Interactive→S4U fallback misses State='Ready'; task never runs) | 05, 06, 07, 08, 14, 17, 19, 20 | red-cell-c2-j3hxi | 2026-05-10 | Fixed inline in deploy.py: trigger S4U fallback when State=='Ready' AND LastTaskResult==267011 in addition to State=='Queued'. Closed 2026-05-10. WFP pool exhaustion (lnsjt) is now the new blocker for Windows scenarios. |
 | `SSH to 192.168.213.160 failed (attempt 1/3), retrying in 2s` (Windows VM unreachable via TCP timeout; globally-unreachable registry now short-circuits per-scenario preflight_ssh) | all Windows-touching | red-cell-c2-1nnzz | 2026-05-09 | Fixed: mark_host_unreachable() registry added in deploy.py; preflight_ssh raises ScenarioSkipped immediately for globally-unreachable hosts, eliminating 3×ConnectTimeout retry overhead. |
 | `[between-scenarios] cleanup skipped (192.168.213.160): SSH to 192.168.213.160 failed after 3 attempts` (wfp_preflight_cleanup + cleanup_windows_harness_work_dir not checking _globally_unreachable_hosts — each between-scenario call took 34s when Windows VM was down, adding ~26 min overhead for 23-scenario runs) | all | *(fixed inline)* | 2026-05-10 | Added `if target.host in _globally_unreachable_hosts: return None/early` to wfp_preflight_cleanup and cleanup_windows_harness_work_dir in lib/deploy.py; between-scenario calls now skip immediately when Windows is globally-unreachable. Run time cut from ~41 min to ~13 min when Windows is down. |
 | `~ SKIPPED (34.1s): SSH to 192.168.213.160 failed after 3 attempts` (sc08 Linux/Phantom fallback not tried when Windows SSH unreachable — ScenarioSkipped not caught alongside DeployError) | 08 | red-cell-c2-a4s1b | 2026-05-10 | Fixed: catch `(DeployError, ScenarioSkipped)` in sc08 preflight block so the Linux/Phantom path runs when Windows is globally-unreachable. sc08 passes 2026-05-10 with Phantom screenshot verified. |

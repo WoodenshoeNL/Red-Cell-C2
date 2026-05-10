@@ -29,10 +29,17 @@ _SSH_CONNECT_SECS = 10
 _SCP_TRANSFER_SECS = 60
 _DEFAULT_REMOTE_CMD_SECS = 30
 
-# WFP filter-pool headroom threshold.  Normal agent idle baseline is ~200–400 filters;
-# exhaustion (seen in autotest) starts above 6 000.  800 gives early-warning headroom
-# while avoiding false positives on lightly-loaded targets.
-WFP_RESTART_THRESHOLD = 800
+# WFP filter-pool headroom threshold.  The count is the total number of <item> tags
+# in `netsh wfp show state` output, including nested items inside provider contexts,
+# filter conditions, and flag arrays — not just top-level filter objects.
+#
+# Observed baselines on the test VM (Windows 11, firewall disabled, NP disabled):
+#   Post-reboot idle:  ~4 100–4 200 nested items (providerContexts=599, filters=187)
+#   Pool exhaustion:   ~6 800+ (seen before fixes; caused WSAENOBUFS / os error 10055)
+#
+# Threshold set to 5 500 to sit clearly above the idle baseline while giving
+# ~1 300-item headroom before real exhaustion begins.
+WFP_RESTART_THRESHOLD = 5500
 
 # Hosts confirmed unreachable at startup by check_ssh_targets().  Per-scenario
 # preflight_ssh() calls short-circuit to ScenarioSkipped for these hosts so that

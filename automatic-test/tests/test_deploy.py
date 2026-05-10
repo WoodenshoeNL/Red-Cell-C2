@@ -1751,8 +1751,8 @@ class TestWfpPreflightCleanup(unittest.TestCase):
             args=[],
             returncode=0,
             stdout=(
-                "WFP_BEFORE:rc=3,agent=2,wfp=900,twait=12\n"
-                "WFP_AFTER:rc=0,agent=0,wfp=900,twait=8\n"
+                "WFP_BEFORE:rc=3,agent=2,wfp=5600,twait=12\n"
+                "WFP_AFTER:rc=0,agent=0,wfp=5600,twait=8\n"
             ),
             stderr="",
         )
@@ -1766,7 +1766,7 @@ class TestWfpPreflightCleanup(unittest.TestCase):
         )
         # Must return the original sweep's parsed_after — restart failed but sweep data is valid.
         self.assertIsNotNone(result, "should return original parsed_after, not None")
-        self.assertEqual(result["wfp_after"], 900)
+        self.assertEqual(result["wfp_after"], 5600)
         printed = [str(c.args[0]) for c in mock_print.call_args_list if c.args]
         # Must NOT print the spurious success message.
         self.assertFalse(
@@ -1796,8 +1796,8 @@ class TestWfpPreflightCleanup(unittest.TestCase):
             args=[],
             returncode=0,
             stdout=(
-                "WFP_BEFORE:rc=3,agent=2,wfp=900,twait=12\n"
-                "WFP_AFTER:rc=0,agent=0,wfp=900,twait=8\n"
+                "WFP_BEFORE:rc=3,agent=2,wfp=5600,twait=12\n"
+                "WFP_AFTER:rc=0,agent=0,wfp=5600,twait=8\n"
             ),
             stderr="",
         )
@@ -1808,7 +1808,7 @@ class TestWfpPreflightCleanup(unittest.TestCase):
         )
         # Must return the original sweep's parsed_after — restart raised but sweep data is valid.
         self.assertIsNotNone(result, "should return original parsed_after, not None")
-        self.assertEqual(result["wfp_after"], 900)
+        self.assertEqual(result["wfp_after"], 5600)
         printed = [str(c.args[0]) for c in mock_print.call_args_list if c.args]
         # Must NOT print the spurious success message.
         self.assertFalse(
@@ -1925,8 +1925,8 @@ class TestWfpPreflightCleanup(unittest.TestCase):
             args=[],
             returncode=0,
             stdout=(
-                "WFP_BEFORE:rc=0,agent=0,wfp=900,twait=4\n"
-                "WFP_AFTER:rc=0,agent=0,wfp=900,twait=4\n"
+                "WFP_BEFORE:rc=0,agent=0,wfp=5600,twait=4\n"
+                "WFP_AFTER:rc=0,agent=0,wfp=5600,twait=4\n"
             ),
             stderr="",
         )

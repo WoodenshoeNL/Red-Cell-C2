@@ -42,6 +42,16 @@ Each loop run updates the running totals and appends a review entry.
 
 <!-- QA and arch loops append entries below this line -->
 
+### QA Review — 2026-05-10 15:21 — d25496bf..12c99b14
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | Four Claude-attributed autotest fixes landed in this range (`71ecfa06`, `f68307fa`, `9f33812d`, `12c99b14`) plus claim/lite-QA bookkeeping commits. No `chore: close` commit landed, and I did not file a new defect from this batch. |
+| Codex | 0 | 0 | No attributed activity in this review range. |
+| Cursor | 0 | 0 | No attributed activity in this review range. |
+
+Build: partial — `cargo check --workspace` passed; `python3 -m unittest automatic-test.tests.test_deploy` passed (173 tests); `cargo nextest run --workspace` was still in the fresh `cargo test --no-run` build at review cutover, and `cargo clippy --workspace -- -D warnings` remained blocked waiting on the build-directory lock.
+
 ### QA Review — 2026-05-10 14:40 — b786b15c..d25496bf
 
 | Agent | Tasks closed | Bugs filed | Notes |

@@ -34,6 +34,7 @@ row to *Resolved* and add the closing commit / fix description.
 |----------------------------------------|----------|------|------------|-----------|--------|
 | `RCTEST_SCHTASK_STATE:Running` + `(no log entries returned by server-tail)` + `Timed out after 60s waiting for agent checkin` OR `os error 10055` OR `[SUBPROCESS_TIMEOUT] CLI subprocess did not exit within expected timeout (55s)` (WFP non-paged pool exhausted — agents start (State=Running, process visible) but can't open TCP connections to teamserver; wfp_preflight_cleanup runs but doesn't reduce pool below critical level; progressive exhaustion across passes) | 05, 06, 08, 17, 20 | red-cell-c2-lnsjt | 2026-05-10 | 2026-05-11 | P1 |
 | `sleep process PID` + `not found in tasklist after 5 attempts` (SSH Start-Process returns a PID but tasklist can't find it within 5 retries / 2.5s; Demon agent checks in and runs commands fine — not a WFP issue; regression of resolved 6sjhx) | 07 | red-cell-c2-dckv2 | 2026-05-11 | 2026-05-11 | P2 |
+| `TCP-remote=(none)` + `(no candidate archon-http.txt exists)` + `Timed out after 60s waiting for agent checkin` (Archon-only, S4U session: LoadDecoyModule loaded amsi.dll during DemonInit, AMSI provider DllMain blocks indefinitely in Session 0 — agent hangs before reaching TransportInit; fix: prefer already-loaded Runtime modules as PE header decoy, commit 440300e5) | 17 | red-cell-c2-1adeu | 2026-05-11 | 2026-05-11 | P1 — fix pushed, awaiting autotest |
 
 ---
 

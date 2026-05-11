@@ -2289,19 +2289,24 @@ class TestRebootWindowsVm(unittest.TestCase):
         mock_sleep: object,
         mock_run: object,
     ) -> None:
-        """Must return True when SSH reconnects within the reboot_timeout window."""
-        # time.time() calls: (1) deadline, (2) while-loop check → probe succeeds
+        """Must return True when SSH reconnects within the reboot_timeout window.
+
+        Requires at least one failed probe (evidence the VM went down) before
+        accepting a successful probe as evidence of a completed reboot.
+        """
         import itertools
         start = 1000.0
         mock_time.side_effect = itertools.chain(
             [start],          # (1) deadline = start + 180
-            [start + 25],     # (2) loop check: within window → probe succeeds
+            [start + 25],     # (2) loop check: within window → probe fails (VM is down)
+            [start + 25],     # (3) remaining calc
+            [start + 40],     # (4) loop check: within window → probe succeeds
         )
         reboot_ok = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        probe_fail = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="")
         probe_ok = subprocess.CompletedProcess(args=[], returncode=0, stdout="alive\n", stderr="")
-        # reboot uses _run_ssh_cli_with_retry; probe uses subprocess.run directly
         mock_ssh.return_value = reboot_ok
-        mock_run.return_value = probe_ok
+        mock_run.side_effect = [probe_fail, probe_ok]
         t = _make_target(
             host="192.168.1.100", platform="windows", key=self.key_path, work_dir=r"C:\Temp\rc-test"
         )
@@ -2421,6 +2426,80 @@ class TestRebootWindowsVm(unittest.TestCase):
         probe_ok = subprocess.CompletedProcess(args=[], returncode=0, stdout="alive\n", stderr="")
         mock_ssh.return_value = reboot_ok
         mock_run.side_effect = [probe_fail, probe_ok]
+        t = _make_target(
+            host="192.168.1.100", platform="windows", key=self.key_path, work_dir=r"C:\Temp\rc-test"
+        )
+        result = reboot_windows_vm(t, reboot_timeout=60)
+        self.assertTrue(result)
+
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_returns_false_when_reboot_command_fails_nonzero(
+        self,
+        mock_ssh: object,
+    ) -> None:
+        """A non-255 non-zero reboot exit code (e.g. privilege error) must return False immediately."""
+        reboot_fail = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="Access denied\n",
+        )
+        mock_ssh.return_value = reboot_fail
+        t = _make_target(
+            host="192.168.1.100", platform="windows", key=self.key_path, work_dir=r"C:\Temp\rc-test"
+        )
+        result = reboot_windows_vm(t, reboot_timeout=60)
+        self.assertFalse(result)
+
+    @patch("lib.deploy.subprocess.run")
+    @patch("time.sleep")
+    @patch("time.time")
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_returns_false_when_ssh_never_goes_down(
+        self,
+        mock_ssh: object,
+        mock_time: object,
+        mock_sleep: object,
+        mock_run: object,
+    ) -> None:
+        """If reboot rc=0 but SSH never drops, return False — no evidence of restart."""
+        import itertools
+        start = 1000.0
+        mock_time.side_effect = itertools.chain(
+            [start],          # deadline = start + 60
+            [start + 25],     # loop check: within window → probe succeeds immediately
+        )
+        reboot_ok = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        probe_ok = subprocess.CompletedProcess(args=[], returncode=0, stdout="alive\n", stderr="")
+        mock_ssh.return_value = reboot_ok
+        mock_run.return_value = probe_ok
+        t = _make_target(
+            host="192.168.1.100", platform="windows", key=self.key_path, work_dir=r"C:\Temp\rc-test"
+        )
+        result = reboot_windows_vm(t, reboot_timeout=60)
+        self.assertFalse(result)
+
+    @patch("lib.deploy.subprocess.run")
+    @patch("time.sleep")
+    @patch("time.time")
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_returns_true_when_reboot_ssh_exits_255_and_probe_reconnects(
+        self,
+        mock_ssh: object,
+        mock_time: object,
+        mock_sleep: object,
+        mock_run: object,
+    ) -> None:
+        """SSH exit 255 (connection dropped) counts as evidence of shutdown — first probe OK returns True."""
+        import itertools
+        start = 1000.0
+        mock_time.side_effect = itertools.chain(
+            [start],          # deadline = start + 60
+            [start + 25],     # loop check: within window → probe succeeds
+        )
+        reboot_255 = subprocess.CompletedProcess(
+            args=[], returncode=255, stdout="", stderr="Connection closed by remote host\n",
+        )
+        probe_ok = subprocess.CompletedProcess(args=[], returncode=0, stdout="alive\n", stderr="")
+        mock_ssh.return_value = reboot_255
+        mock_run.return_value = probe_ok
         t = _make_target(
             host="192.168.1.100", platform="windows", key=self.key_path, work_dir=r"C:\Temp\rc-test"
         )

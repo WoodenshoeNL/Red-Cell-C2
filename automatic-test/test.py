@@ -47,7 +47,7 @@ from lib.config import (
     TimeoutsConfig,
     timeouts_to_env_dict,
 )
-from lib.deploy import TargetConfig, WFP_RESTART_THRESHOLD, cleanup_windows_harness_work_dir, configure_deploy_timeouts, disable_windows_firewall, reboot_windows_vm, wfp_preflight_cleanup
+from lib.deploy import TargetConfig, WFP_RESTART_THRESHOLD, cleanup_windows_harness_work_dir, configure_deploy_timeouts, disable_wer, disable_windows_firewall, reboot_windows_vm, wfp_preflight_cleanup
 from lib.teamserver_monitor import configure_teamserver_ssh_connect_timeout
 from lib.wait import configure_wait_defaults
 from lib.failure_diagnostics import (
@@ -990,6 +990,11 @@ def main():
                     print(f"  [wfp-preflight] Windows Firewall disabled on {_wtgt.host}")
                 except Exception as _fw_exc:
                     print(f"  [wfp-preflight] Firewall disable failed (non-fatal): {_fw_exc}")
+                try:
+                    disable_wer(_wtgt)
+                    print(f"  [wfp-preflight] WER disabled on {_wtgt.host}")
+                except Exception as _wer_exc:
+                    print(f"  [wfp-preflight] WER disable failed (non-fatal): {_wer_exc}")
                 _wfp_pre_result = wfp_preflight_cleanup(
                     _wtgt,
                     log_prefix="  [wfp-preflight]",
@@ -1015,8 +1020,8 @@ def main():
                         reboot_timeout=180,
                     )
                     if _rebooted:
-                        # Re-disable firewall (persists across reboots, but run again
-                        # as belt-and-suspenders) and re-run the WFP sweep.
+                        # Re-disable firewall and WER (persist across reboots, but run
+                        # again as belt-and-suspenders) and re-run the WFP sweep.
                         try:
                             disable_windows_firewall(_wtgt)
                             print(
@@ -1027,6 +1032,10 @@ def main():
                                 f"  [wfp-reboot] Firewall disable (post-reboot) failed"
                                 f" (non-fatal): {_fw2_exc}"
                             )
+                        try:
+                            disable_wer(_wtgt)
+                        except Exception:
+                            pass
                         _wfp_post_reboot = wfp_preflight_cleanup(
                             _wtgt,
                             log_prefix="  [wfp-post-reboot]",
@@ -1255,6 +1264,10 @@ def main():
                     if _bs_rebooted:
                         try:
                             disable_windows_firewall(wtgt)
+                        except Exception:
+                            pass
+                        try:
+                            disable_wer(wtgt)
                         except Exception:
                             pass
                         _wfp_post_bs = wfp_preflight_cleanup(

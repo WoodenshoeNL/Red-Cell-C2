@@ -50,6 +50,25 @@ def _linux_spawn_sleep_command() -> str:
     return "sh -c 'nohup sleep 9999 >/dev/null 2>&1 < /dev/null & echo $!'"
 
 
+def _windows_spawn_sleep_command() -> str:
+    """Return a WMI-based spawn command that outlives the SSH session.
+
+    Windows OpenSSH places child processes in a Job Object that is
+    terminated when the SSH channel closes.  ``Start-Process`` creates a
+    child inside that Job Object, so the spawned process is killed as soon
+    as the SSH command returns.  WMI ``Win32_Process.Create`` spawns via
+    the WMI service, outside the SSH Job Object, so the process survives.
+    """
+    return (
+        'powershell -Command "'
+        "$r = Invoke-WmiMethod -Class Win32_Process -Name Create "
+        "-ArgumentList 'powershell.exe -Command Start-Sleep 9999'; "
+        "if ($r.ReturnValue -eq 0) { $r.ProcessId } "
+        "else { throw ('WMI Create failed: ReturnValue=' + $r.ReturnValue) }"
+        '"'
+    )
+
+
 def _run_for_agent(ctx, agent_type: str, fmt: str,
                    *, listener_name: str, pre_built_payload: bytes) -> None:
     """Run the full process-operations suite for one Linux agent type.
@@ -253,12 +272,7 @@ def _run_for_agent_windows(ctx, agent_type: str, fmt: str,
         print(f"  [{agent_type}][spawn] starting sleep process on target via SSH")
         pid_str = run_remote(
             target,
-            (
-                'powershell -Command "'
-                "$p = Start-Process -PassThru -WindowStyle Hidden powershell "
-                "-ArgumentList '-Command','Start-Sleep 9999'; "
-                '$p.Id"'
-            ),
+            _windows_spawn_sleep_command(),
             timeout=15,
         ).strip()
         assert pid_str.isdigit(), (
@@ -268,10 +282,8 @@ def _run_for_agent_windows(ctx, agent_type: str, fmt: str,
         print(f"  [{agent_type}][spawn] sleep process started, PID={sleep_pid}")
 
         # Verify it's actually running (sanity check via SSH).
-        # Start-Process returns the PID before the child is fully registered in
-        # the Windows process table, so retry a few times to handle this race.
         ps_check = ""
-        for _attempt in range(5):
+        for _attempt in range(8):
             ps_check = run_remote(
                 target,
                 f'tasklist /FI "PID eq {sleep_pid}" /FO CSV /NH 2>NUL',
@@ -281,7 +293,7 @@ def _run_for_agent_windows(ctx, agent_type: str, fmt: str,
                 break
             time.sleep(0.5)
         assert str(sleep_pid) in ps_check, (
-            f"sleep process PID {sleep_pid} not found in tasklist after 5 attempts (2.5 s);"
+            f"sleep process PID {sleep_pid} not found in tasklist after 8 attempts (4 s);"
             f" tasklist output: {ps_check!r}"
         )
         print(f"  [{agent_type}][spawn] confirmed PID {sleep_pid} is running on target")

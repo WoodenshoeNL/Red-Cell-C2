@@ -29,6 +29,7 @@ from lib.deploy import (
     defender_add_exclusion,
     defender_add_process_exclusion,
     defender_remove_process_exclusion,
+    disable_wer,
     disable_windows_firewall,
     ensure_work_dir,
     execute_background,
@@ -1337,6 +1338,47 @@ class TestDisableWindowsFirewall(unittest.TestCase):
         try:
             with patch("subprocess.run") as mock_run:
                 disable_windows_firewall(t)
+            mock_run.assert_not_called()
+        finally:
+            clear_globally_unreachable_hosts()
+
+
+class TestDisableWer(unittest.TestCase):
+    """disable_wer sets registry keys and stops WerSvc on Windows."""
+
+    def setUp(self) -> None:
+        self.key_path = _module_key_path()
+
+    def _completed(
+        self, returncode: int, stderr: str = "", stdout: str = ""
+    ) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(
+            args=[], returncode=returncode, stdout=stdout, stderr=stderr
+        )
+
+    def test_script_sets_registry_disabled_and_stops_service(self) -> None:
+        ok = self._completed(0)
+        t = _make_target(work_dir="C:\\Temp\\rc-test", platform="windows", key=self.key_path)
+        with patch("subprocess.run", return_value=ok) as m:
+            disable_wer(t)
+        script = _decoded_windows_launch_script(m.call_args[0][0][-1])
+        self.assertIn("Windows Error Reporting", script)
+        self.assertIn("'Disabled'", script)
+        self.assertIn("'DontShowUI'", script)
+        self.assertIn("Stop-Service", script)
+        self.assertIn("WerSvc", script)
+
+    def test_linux_raises(self) -> None:
+        t = _make_target(work_dir="/tmp/x", key=self.key_path)
+        with self.assertRaises(ValueError):
+            disable_wer(t)
+
+    def test_globally_unreachable_host_skips_ssh(self) -> None:
+        t = _make_target(work_dir="C:\\Temp\\rc-test", platform="windows", key=self.key_path)
+        mark_host_unreachable(t.host)
+        try:
+            with patch("subprocess.run") as mock_run:
+                disable_wer(t)
             mock_run.assert_not_called()
         finally:
             clear_globally_unreachable_hosts()

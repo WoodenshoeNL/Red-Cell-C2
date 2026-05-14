@@ -32,6 +32,8 @@ row to *Resolved* and add the closing commit / fix description.
 
 | Signature (substring of error / stderr) | Scenario | Bead | First seen | Last seen | Status |
 |----------------------------------------|----------|------|------------|-----------|--------|
+| `[TIMEOUT] timeout: timed out waiting for output from task` + `Exec round 2 failures` (Phantom stress, 1/5 agents timeout under concurrent load — possible CTR desync regression of red-cell-c2-1f7q1) | 14 | red-cell-c2-n4kr4 | 2026-05-14 | 2026-05-14 | P2 |
+| `Timed out after 60s waiting for agent checkin` + sc21 (Phantom Linux, fresh deploy after sc14 stress — agent never connected to port 19181, possible VM overload cascade from sc14 lingering agents) | 21 | red-cell-c2-fmmxa | 2026-05-14 | 2026-05-14 | P3 |
 
 ---
 
@@ -88,17 +90,9 @@ than a new bug.
 | `Timed out after 60s waiting for agent checkin` (X25519 fix attempt) | 17 | red-cell-c2-al4eo | 2026-04-30 | X25519.c fix was interrupted (WIP commits). **REGRESSED** — see red-cell-c2-jv15n. |
 | `[TIMEOUT] timeout: timed out waiting for output from task` (seq_num desync fix) | 04, 06, 07, 11, 21 | red-cell-c2-5dggm | 2026-04-29 | ECDH seq_num desync: always increment callback_seq after send attempt. **REGRESSED** — see red-cell-c2-vk3xs |
 | `[TIMEOUT] timeout: timed out waiting for output from task` (mprotect SIGSEGV fix) | 04, 06, 07, 08, 11, 19, 21 | red-cell-c2-vk3xs | 2026-04-28 | reqwest connection pool kept a background Tokio task that accessed heap during mprotect_sleep PROT_NONE window → SIGSEGV. Fixed with pool_max_idle_per_host(0) in Phantom transport. Commit 20f2d6d4. **REGRESSED** — still observed 2026-05-02, new bead red-cell-c2-1f7q1. |
-| `WMI Win32_Process.Create failed: ReturnValue=21` | 05, 08, 14, 17, 19 | red-cell-c2-irxsr | 2026-04-29 | PureWindowsPath fix for WMI CurrentDirectory extraction. WMI deploys now work. Downstream issues exposed: sc17 Archon checkin (red-cell-c2-al4eo), sc14 stress checkin (red-cell-c2-8ss6q). |
-| `GET_JOB accepted (HTTP 200): got HTTP 404` | 13 | red-cell-c2-irlsn | 2026-04-29 | Fixed GET_JOB heartbeat packet: removed spurious u32be(0) length prefix. sc13 passes. |
-| `DoH uplink chunk 0/1 expected NXDOMAIN (rcode=3), got rcode=5` | 20 | red-cell-c2-qb8gw | 2026-04-29 | Fixed by commit 1de06fac (irlsn fix). sc20 now skips for DNS resolution issue, not REFUSED. |
 | `The string is missing the terminator: '.` | 06 | *(fixed inline)* | 2026-05-03 | Fixed PowerShell `certutil -hashfile` quoting in `automatic-test/scenarios/06_file_transfer_file_transfer.py`; rerun moved sc06 to the underlying Phantom upload timeout instead of the parser error. |
 | `[TIMEOUT] timeout: timed out waiting for output from task` (CommandProc persist fix) | 04, 05, 07, 19, 21, 23 | red-cell-c2-4vogq | 2026-04-28 | Persisted CommandProc/CommandProcList callbacks to ts_agent_responses, added request_id matching. **REGRESSED** — see red-cell-c2-5dggm → red-cell-c2-vk3xs |
-| `CLI subprocess did not exit within expected timeout (40s)` (CLI hang variant) | 11 | red-cell-c2-4vogq | 2026-04-28 | Same family as above; CLI subprocess hang is cascade of task output pipeline failure. **REGRESSED** — see red-cell-c2-vk3xs |
-| `Timed out after 30s waiting for remote upload /tmp/rc-test/uploaded-` | 06 | red-cell-c2-roz1h | 2026-04-28 | ECDH batch re-queue fix: upload now succeeds (SHA-256 verified in 2026-04-29 run). Download side still fails (cascade of task output). |
-| `Timed out after 30s waiting for screenshot loot entry` | 08 | red-cell-c2-dn3yy | 2026-04-28 | Raised MAX_AGENT_MESSAGE_LEN to 100 MiB. **REGRESSED** — screenshot loot still times out, now cascade of task-output (red-cell-c2-vk3xs). |
-| `Timed out after 30s waiting for 10 new agent checkins` (WMI validation) | 14 | red-cell-c2-4302s | 2026-04-28 | Added WMI ReturnValue validation. WMI now fixed (red-cell-c2-irxsr). **NEW ISSUE** — checkin itself fails under stress (red-cell-c2-8ss6q). |
 | `Timed out after 60s waiting for agent checkin` (WMI validation) | 17 | red-cell-c2-4302s | 2026-04-28 | Same fix as above. **NEW ISSUE** — Archon checkin fails despite WMI fix (red-cell-c2-al4eo). |
-| `last_seen never changed from initial '` | 24 | red-cell-c2-dz867 | 2026-04-28 | ECDH exit_requested set after successful batch send. **FIXED** — sc24 passes. |
 
 ---
 

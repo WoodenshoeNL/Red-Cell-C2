@@ -213,8 +213,7 @@ class TestMain(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("red-cell-c2-ccccc", out)
         self.assertIn("red-cell-c2-eeeee", out)
-        self.assertNotIn("red-cell-c2-aaaaa [NOT_FOUND]", out)
-        self.assertNotIn("red-cell-c2-aaaaa [CLOSED]", out)
+        self.assertNotIn("• red-cell-c2-aaaaa", out)
 
 
 class TestParseActiveBeads(unittest.TestCase):

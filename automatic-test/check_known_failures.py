@@ -9,7 +9,7 @@ actually closed and no one is working it.
 
 Exit codes:
   0 — all Active beads are open or in_progress (or Active table is empty)
-  1 — one or more Active beads are CLOSED — fix KNOWN_FAILURES.md first
+  1 — one or more Active beads are CLOSED, NOT_FOUND, or UNKNOWN — fix KNOWN_FAILURES.md first
   2 — `br` not found, KNOWN_FAILURES.md missing, or other execution error
 """
 
@@ -101,6 +101,8 @@ def main() -> int:
             if status == "NOT_FOUND":
                 print(f"  • {bead_id} [NOT_FOUND] — bead ID not in database (typo?)")
                 print(f"    Fix the bead ID in KNOWN_FAILURES.md Active table.")
+            elif status == "UNKNOWN":
+                print(f"  • {bead_id} [UNKNOWN] — br show timed out; check manually before removing")
             else:
                 print(f"  • {bead_id} is CLOSED — move its row to the Resolved section")
                 print(f"    and add a new Active row pointing to the replacement bead,")

@@ -29,6 +29,15 @@ from lib.deploy import (
 from lib.wait import TimeoutError as WaitTimeoutError, wait_for_agent
 
 
+class ProbeAbortError(DeployError):
+    """Raised when a prelaunch probe detects a fatal condition and aborts the deploy.
+
+    The background payload is never launched, so no zombie process is created.
+    Callers that want to convert this to a scenario skip should catch
+    ``ProbeAbortError`` before the generic ``DeployError`` handler.
+    """
+
+
 def deploy_and_checkin(
     ctx,
     cli: CliConfig,
@@ -47,6 +56,7 @@ def deploy_and_checkin(
     checkin_periodic_interval: float | None = None,
     checkin_periodic_callback: Callable[[], None] | None = None,
     windows_prelaunch_probe: bool = False,
+    probe_abort_patterns: list[str] | None = None,
     amsi_etw: str | None = None,
     exec_env: dict[str, str] | None = None,
 ) -> dict | None:
@@ -98,6 +108,12 @@ def deploy_and_checkin(
         windows_prelaunch_probe: When ``True`` (Windows only), run a synchronous
             one-shot execution of the payload before the background schtask launch,
             printing captured exit code and stderr/stdout for fast-fail diagnosis.
+        probe_abort_patterns: Optional list of strings.  If any string appears in
+            the prelaunch probe output, raise :class:`ProbeAbortError` instead of
+            proceeding with the background launch.  The probe process is already
+            killed by ``windows_sync_payload_probe`` (via ``$p.Kill()``), so no
+            zombie is created when the abort fires.  Ignored when
+            *windows_prelaunch_probe* is ``False``.
         exec_env: Optional environment variables forwarded to
             :func:`~lib.deploy.execute_background` on Linux targets.  Ignored
             on Windows (Task Scheduler inherits the user session environment).
@@ -113,6 +129,9 @@ def deploy_and_checkin(
         AssertionError: if the built payload is empty, or if *expect_checkin* is
                           ``False`` but an agent checks in anyway.
         lib.deploy.DeployError: if SCP upload or a remote command fails.
+        lib.deploy_agent.ProbeAbortError: if *probe_abort_patterns* is set and a
+                          matching pattern is found in the prelaunch probe output.
+                          The background process is never launched in this case.
         lib.wait.TimeoutError: if *expect_checkin* is ``True`` and no agent checks in.
     """
     tag = label if label is not None else agent_type
@@ -185,6 +204,15 @@ def deploy_and_checkin(
                     line = raw.strip()
                     if line:
                         print(f"  [{tag}][probe] {line}")
+                if probe_abort_patterns:
+                    for pat in probe_abort_patterns:
+                        if pat in probe_out:
+                            raise ProbeAbortError(
+                                f"[{tag}] probe detected fatal condition ({pat!r}) — "
+                                "aborting deploy to prevent zombie process creation"
+                            )
+            except ProbeAbortError:
+                raise
             except Exception as exc:
                 print(f"  [{tag}][probe] probe failed (non-fatal): {exc}")
 

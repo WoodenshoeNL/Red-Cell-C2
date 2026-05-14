@@ -86,8 +86,35 @@ specifying only the file you intend to keep aside:
 cat AGENTS.md
 cat automatic-test/README.md
 cat automatic-test/PROMPTS/AGENT_TEST_PROMPT.md   # canonical workflow doc
-cat automatic-test/KNOWN_FAILURES.md              # diagnostic shortcuts
 br ready                                           # what is the dev loop working on?
+```
+
+### 1a — Validate KNOWN_FAILURES.md before reading it
+
+**Run this before internalizing anything:**
+
+```bash
+python3 automatic-test/check_known_failures.py
+```
+
+**If it exits 1 (stale entries found): fix `KNOWN_FAILURES.md` first, commit,
+then continue.** Do not read the Active table until it is clean.  A stale row
+(pointing to a closed bead) causes every matching failure to be silently
+misclassified as "known / skip investigation" with no one working the fix — the
+most harmful state the table can be in.
+
+Each stale entry the script reports must be resolved before Step 5:
+- Move the row from Active to Resolved.
+- If there is a replacement bead covering the same symptom, add it to Active.
+- If the failure is genuinely gone, just move it.
+
+After fixing, re-run the script to confirm it exits 0, then commit the
+KNOWN_FAILURES.md change.
+
+### 1b — Read and internalize KNOWN_FAILURES.md
+
+```bash
+cat automatic-test/KNOWN_FAILURES.md              # diagnostic shortcuts (now validated)
 ```
 
 **Internalize `KNOWN_FAILURES.md` before classifying anything in Step 5.**

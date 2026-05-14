@@ -1227,6 +1227,13 @@ def main():
                 failure_reports.append(report_path)
 
         if not ctx.dry_run:
+            # Brief inter-scenario drain to let the Linux VM recover from stress workloads
+            # (e.g. sc14 concurrent agents) before the next scenario launches its payload.
+            # Configurable via [timeouts] inter_scenario_drain_secs in env.toml (default 5).
+            _drain = int(ctx.env.get("timeouts", {}).get("inter_scenario_drain_secs", 5))
+            if _drain > 0:
+                time.sleep(_drain)
+
             win_cleanup_timeout = max(90, int(tmo.command_output))
             for _, wtgt in _windows_harness_cleanup_targets(windows_target, windows2_target):
                 cleanup_windows_harness_work_dir(

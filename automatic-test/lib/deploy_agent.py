@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
 import uuid
 from typing import Callable
 
 from lib.cli import CliConfig, agent_list, maybe_flush_payload_cache_for_rust_agent, payload_build_and_fetch
 from lib.deploy import (
+    DeployError,
     TargetConfig,
     defender_add_process_exclusion,
     ensure_work_dir,
@@ -114,7 +116,8 @@ def deploy_and_checkin(
     tag = label if label is not None else agent_type
     t = getattr(ctx, "timeouts", None)
     if t is not None:
-        timeout = int(t.agent_checkin)
+        # Allow callers to specify a higher per-scenario floor via checkin_timeout.
+        timeout = max(int(t.agent_checkin), checkin_timeout)
     else:
         timeout = int(ctx.env.get("timeouts", {}).get("agent_checkin", checkin_timeout))
 
@@ -192,6 +195,22 @@ def deploy_and_checkin(
             os.unlink(local_payload)
         except OSError:
             pass
+
+    # Quick process-existence probe (Linux only): detect launch failures before
+    # burning the full checkin timeout on a dead process.
+    if not is_windows:
+        time.sleep(2)
+        basename = os.path.basename(remote_payload)
+        try:
+            run_remote(target, f"pgrep -f {basename}", timeout=10)
+            print(f"  [{tag}][probe] process running after 2s")
+        except DeployError:
+            print(
+                f"  [{tag}][probe] WARNING: '{basename}' not found after 2s"
+                " — VM may be overloaded or launch failed"
+            )
+        except Exception as exc:
+            print(f"  [{tag}][probe] probe error (non-fatal): {exc}")
 
     # Step 5 — wait for agent checkin.
     if not expect_checkin:

@@ -236,6 +236,7 @@ _ALLOWED_TIMEOUTS_KEYS = frozenset({
     "resilience_reconnect",
     "resilience_kill_date",
     "working_hours_probe",
+    "inter_scenario_drain_secs",
 })
 _ALLOWED_LISTENERS_KEYS = frozenset({
     "dns_port",

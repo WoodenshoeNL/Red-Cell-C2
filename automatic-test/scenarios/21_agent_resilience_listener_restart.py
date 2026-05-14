@@ -82,6 +82,7 @@ def run(ctx):
             listener_name=listener_name,
             sleep_secs=sleep_interval,
             label="21",
+            checkin_timeout=90,
         )
         agent_id = agent["id"]
         print(f"  [21][cmd] baseline whoami on {agent_id}")

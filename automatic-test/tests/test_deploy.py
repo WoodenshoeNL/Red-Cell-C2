@@ -947,6 +947,66 @@ class TestExecuteBackgroundLinuxEnvVars(unittest.TestCase):
         self.assertNotIn("DISPLAY", remote_cmd)
 
 
+class TestExecuteBackgroundLinuxPid(unittest.TestCase):
+    """execute_background must return the Linux background PID on success."""
+
+    def setUp(self) -> None:
+        self.key_path = _module_key_path()
+
+    def _completed(
+        self, returncode: int, stderr: str = "", stdout: str = ""
+    ) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(
+            args=[], returncode=returncode, stdout=stdout, stderr=stderr
+        )
+
+    def test_linux_cmd_contains_pid_echo(self) -> None:
+        """The remote SSH command must echo RCTEST_LINUX_PID:$! after the background &."""
+        ok = self._completed(0, stdout="RCTEST_LINUX_PID:12345\n")
+        t = _make_target(key=self.key_path)
+        with patch("subprocess.run", return_value=ok) as m:
+            execute_background(t, "/tmp/rc/agent")
+        remote_cmd = m.call_args[0][0][-1]
+        self.assertIn("RCTEST_LINUX_PID:$!", remote_cmd)
+        self.assertIn("echo", remote_cmd)
+
+    def test_linux_returns_parsed_pid(self) -> None:
+        """execute_background must return the integer PID from RCTEST_LINUX_PID: marker."""
+        ok = self._completed(0, stdout="RCTEST_LINUX_PID:54321\n")
+        t = _make_target(key=self.key_path)
+        with patch("subprocess.run", return_value=ok):
+            result = execute_background(t, "/tmp/rc/agent")
+        self.assertEqual(result, 54321)
+
+    def test_linux_returns_none_when_marker_absent(self) -> None:
+        """If stdout has no RCTEST_LINUX_PID marker, return None rather than crash."""
+        ok = self._completed(0, stdout="")
+        t = _make_target(key=self.key_path)
+        with patch("subprocess.run", return_value=ok):
+            result = execute_background(t, "/tmp/rc/agent")
+        self.assertIsNone(result)
+
+    def test_linux_env_vars_cmd_contains_pid_echo(self) -> None:
+        """PID echo must also be present when env_vars are used."""
+        ok = self._completed(0, stdout="RCTEST_LINUX_PID:9999\n")
+        t = _make_target(key=self.key_path)
+        with patch("subprocess.run", return_value=ok) as m:
+            result = execute_background(t, "/tmp/rc/agent", env_vars={"DISPLAY": ":99"})
+        remote_cmd = m.call_args[0][0][-1]
+        self.assertIn("RCTEST_LINUX_PID:$!", remote_cmd)
+        self.assertEqual(result, 9999)
+
+    def test_linux_ignores_extra_output_lines(self) -> None:
+        """Extra stdout lines from nohup/shell must not prevent PID parsing."""
+        ok = self._completed(
+            0, stdout="[1] 9999\nRCTEST_LINUX_PID:9999\nnohup: ignoring input\n"
+        )
+        t = _make_target(key=self.key_path)
+        with patch("subprocess.run", return_value=ok):
+            result = execute_background(t, "/tmp/rc/agent")
+        self.assertEqual(result, 9999)
+
+
 class TestWindowsSchedTaskScript(unittest.TestCase):
     """Unit tests for _windows_schtask_script."""
 

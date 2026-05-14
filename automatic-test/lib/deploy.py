@@ -1017,9 +1017,9 @@ def execute_background(
             prefix = " ".join(
                 f"{shlex.quote(k)}={shlex.quote(v)}" for k, v in env_vars.items()
             )
-            bg_cmd = f"{prefix} nohup {quoted} </dev/null >/dev/null 2>&1 &"
+            bg_cmd = f"{prefix} nohup {quoted} </dev/null >/dev/null 2>&1 & echo \"RCTEST_LINUX_PID:$!\""
         else:
-            bg_cmd = f"nohup {quoted} </dev/null >/dev/null 2>&1 &"
+            bg_cmd = f"nohup {quoted} </dev/null >/dev/null 2>&1 & echo \"RCTEST_LINUX_PID:$!\""
     result = _run_ssh_cli_with_retry(
         _ssh_args(target) + [bg_cmd],
         target.host,
@@ -1056,7 +1056,20 @@ def execute_background(
                         except ValueError:
                             pass
         return schtask_pid
-    return None
+    # Linux: parse the PID printed by `echo "RCTEST_LINUX_PID:$!"`
+    linux_out = (result.stdout or "").strip()
+    linux_pid: int | None = None
+    for raw_line in linux_out.splitlines():
+        line = raw_line.strip()
+        if line:
+            print(f"  [deploy][linux-bg] {line}")
+        if line.startswith("RCTEST_LINUX_PID:"):
+            val = line[len("RCTEST_LINUX_PID:"):]
+            try:
+                linux_pid = int(val)
+            except ValueError:
+                pass
+    return linux_pid
 
 
 def kill_windows_process_by_pid(

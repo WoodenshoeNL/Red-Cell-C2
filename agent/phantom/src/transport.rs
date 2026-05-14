@@ -261,10 +261,12 @@ mod tests {
 
         let _ = rustls::crypto::ring::default_provider().install_default();
 
-        // Generate two independent self-signed certs for localhost.
-        let server_keys = rcgen::generate_simple_self_signed(["localhost".to_string()])
+        // Generate two independent self-signed certs with an IP SAN for 127.0.0.1.
+        // Using an IP SAN (not a hostname) avoids dual-stack /etc/hosts ambiguity where
+        // `localhost` may resolve to ::1 first, causing ECONNREFUSED against a v4-only listener.
+        let server_keys = rcgen::generate_simple_self_signed(["127.0.0.1".to_string()])
             .expect("server cert generation");
-        let pinned_keys = rcgen::generate_simple_self_signed(["localhost".to_string()])
+        let pinned_keys = rcgen::generate_simple_self_signed(["127.0.0.1".to_string()])
             .expect("pinned cert generation");
 
         // Build a rustls server config using the *server* cert (not the pinned one).
@@ -299,7 +301,7 @@ mod tests {
 
         // Configure transport to pin the *other* cert (not the one the server presents).
         let config = PhantomConfig {
-            callback_url: format!("https://localhost:{}", addr.port()),
+            callback_url: format!("https://127.0.0.1:{}/", addr.port()),
             pinned_cert_pem: Some(pinned_keys.cert.pem()),
             ..Default::default()
         };
@@ -329,7 +331,7 @@ mod tests {
         let _ = rustls::crypto::ring::default_provider().install_default();
 
         let keys =
-            rcgen::generate_simple_self_signed(["localhost".to_string()]).expect("cert generation");
+            rcgen::generate_simple_self_signed(["127.0.0.1".to_string()]).expect("cert generation");
 
         let cert_pem = keys.cert.pem();
         let cert_der = rustls::pki_types::CertificateDer::from(keys.cert.der().to_vec());
@@ -357,7 +359,7 @@ mod tests {
         });
 
         let config = PhantomConfig {
-            callback_url: format!("https://localhost:{}", addr.port()),
+            callback_url: format!("https://127.0.0.1:{}/", addr.port()),
             pinned_cert_pem: Some(cert_pem),
             ..Default::default()
         };

@@ -71,10 +71,10 @@ class TestCheckBead(unittest.TestCase):
 _ACTIVE_MD = """\
 ## Active
 
-| Bead | Scenario | Symptom |
-|---|---|---|
-| red-cell-c2-aaaaa | sc01 | something |
-| red-cell-c2-bbbbb | sc02 | something else |
+| Signature | Scenario | Bead | First seen | Last seen | Status |
+|---|---|---|---|---|---|
+| something | sc01 | red-cell-c2-aaaaa | 2026-01-01 | 2026-01-02 | open |
+| something else | sc02 | red-cell-c2-bbbbb | 2026-01-01 | 2026-01-02 | open |
 
 ---
 """
@@ -82,9 +82,9 @@ _ACTIVE_MD = """\
 _ACTIVE_CLOSED_MD = """\
 ## Active
 
-| Bead | Scenario | Symptom |
-|---|---|---|
-| red-cell-c2-ccccc | sc01 | a closed one |
+| Signature | Scenario | Bead | First seen | Last seen | Status |
+|---|---|---|---|---|---|
+| a closed one | sc01 | red-cell-c2-ccccc | 2026-01-01 | 2026-01-02 | open |
 
 ---
 """
@@ -92,9 +92,9 @@ _ACTIVE_CLOSED_MD = """\
 _ACTIVE_NOT_FOUND_MD = """\
 ## Active
 
-| Bead | Scenario | Symptom |
-|---|---|---|
-| red-cell-c2-xxxxx | sc01 | typo bead |
+| Signature | Scenario | Bead | First seen | Last seen | Status |
+|---|---|---|---|---|---|
+| typo bead | sc01 | red-cell-c2-xxxxx | 2026-01-01 | 2026-01-02 | open |
 
 ---
 """
@@ -102,11 +102,11 @@ _ACTIVE_NOT_FOUND_MD = """\
 _ACTIVE_MIXED_MD = """\
 ## Active
 
-| Bead | Scenario | Symptom |
-|---|---|---|
-| red-cell-c2-aaaaa | sc01 | open one |
-| red-cell-c2-ccccc | sc02 | closed one |
-| red-cell-c2-eeeee | sc03 | unknown one |
+| Signature | Scenario | Bead | First seen | Last seen | Status |
+|---|---|---|---|---|---|
+| open one | sc01 | red-cell-c2-aaaaa | 2026-01-01 | 2026-01-02 | open |
+| closed one | sc02 | red-cell-c2-ccccc | 2026-01-01 | 2026-01-02 | open |
+| unknown one | sc03 | red-cell-c2-eeeee | 2026-01-01 | 2026-01-02 | open |
 
 ---
 """
@@ -217,7 +217,14 @@ class TestParseActiveBeads(unittest.TestCase):
         self.assertEqual(ids, ["red-cell-c2-aaaaa", "red-cell-c2-bbbbb"])
 
     def test_deduplicates(self) -> None:
-        text = "## Active\nred-cell-c2-aaaaa red-cell-c2-aaaaa\n---\n"
+        text = (
+            "## Active\n"
+            "| Signature | Scenario | Bead | First seen | Last seen | Status |\n"
+            "|---|---|---|---|---|---|\n"
+            "| sig1 | sc01 | red-cell-c2-aaaaa | 2026-01-01 | 2026-01-02 | open |\n"
+            "| sig2 | sc02 | red-cell-c2-aaaaa | 2026-01-01 | 2026-01-02 | open |\n"
+            "---\n"
+        )
         ids = ckf._parse_active_beads(text)
         self.assertEqual(ids, ["red-cell-c2-aaaaa"])
 

@@ -226,6 +226,7 @@ def run(ctx):
                 print(f"  [wait] timeout — killing zombie PID {schtask_pid} on target")
                 kill_windows_process_by_pid(target, schtask_pid, log_prefix="  [zombie-kill]")
             elif schtask_pid is not None and not is_windows:
+                print(f"  [wait] timeout — killing zombie PID {schtask_pid} on target")
                 kill_linux_process_by_pid(ctx.linux, schtask_pid, log_prefix="  [zombie-kill]")
             raise
         agent_id = agent["id"]

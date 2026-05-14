@@ -75,6 +75,8 @@ class TimeoutsConfig:
     resilience_reconnect: float | None = None
     resilience_kill_date: float | None = None
     working_hours_probe: float | None = None
+    #: Seconds to wait between scenarios for log/process drain before the next scenario starts.
+    inter_scenario_drain_secs: float = 5.0
 
 
 def timeouts_for_unit_tests() -> TimeoutsConfig:
@@ -96,6 +98,7 @@ def timeouts_for_unit_tests() -> TimeoutsConfig:
         resilience_reconnect=None,
         resilience_kill_date=None,
         working_hours_probe=None,
+        inter_scenario_drain_secs=5.0,
     )
 
 
@@ -463,6 +466,9 @@ def parse_env_config(raw: dict[str, Any]) -> EnvConfig:
                 tr[opt] = _require_positive_number(to_t[opt], f"[timeouts].{opt}", errors)
             else:
                 tr[opt] = None
+        tr["inter_scenario_drain_secs"] = _optional_timeout_default(
+            to_t, "inter_scenario_drain_secs", 5.0, "[timeouts]", errors
+        )
     else:
         pass
 
@@ -677,6 +683,7 @@ def parse_env_config(raw: dict[str, Any]) -> EnvConfig:
             resilience_reconnect=tr.get("resilience_reconnect"),
             resilience_kill_date=tr.get("resilience_kill_date"),
             working_hours_probe=tr.get("working_hours_probe"),
+            inter_scenario_drain_secs=tr.get("inter_scenario_drain_secs", 5.0),  # type: ignore[arg-type]
         ),
         listeners=ListenersConfig(
             dns_port=dns_port,
@@ -923,6 +930,7 @@ def timeouts_to_env_dict(t: TimeoutsConfig) -> dict[str, Any]:
         out["resilience_kill_date"] = t.resilience_kill_date
     if t.working_hours_probe is not None:
         out["working_hours_probe"] = t.working_hours_probe
+    out["inter_scenario_drain_secs"] = t.inter_scenario_drain_secs
     return out
 
 

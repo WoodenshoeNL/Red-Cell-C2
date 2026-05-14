@@ -1230,7 +1230,7 @@ def main():
             # Brief inter-scenario drain to let the Linux VM recover from stress workloads
             # (e.g. sc14 concurrent agents) before the next scenario launches its payload.
             # Configurable via [timeouts] inter_scenario_drain_secs in env.toml (default 5).
-            _drain = int(ctx.env.get("timeouts", {}).get("inter_scenario_drain_secs", 5))
+            _drain = int(ctx.timeouts.inter_scenario_drain_secs)
             if _drain > 0:
                 time.sleep(_drain)
 

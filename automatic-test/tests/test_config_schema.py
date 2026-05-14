@@ -115,6 +115,25 @@ class TestValidateEnvDict(unittest.TestCase):
         t = timeouts_for_unit_tests()
         self.assertEqual(t.poll_interval, 2.0)
         self.assertEqual(t.stress_concurrent_checkin, 45.0)
+        self.assertEqual(t.inter_scenario_drain_secs, 5.0)
+
+    def test_inter_scenario_drain_default(self) -> None:
+        cfg = parse_env_config(_minimal_valid_env())
+        self.assertEqual(cfg.timeouts.inter_scenario_drain_secs, 5.0)
+
+    def test_inter_scenario_drain_custom(self) -> None:
+        raw = _minimal_valid_env()
+        raw["timeouts"]["inter_scenario_drain_secs"] = 10
+        cfg = parse_env_config(raw)
+        self.assertEqual(cfg.timeouts.inter_scenario_drain_secs, 10.0)
+
+    def test_inter_scenario_drain_in_env_dict(self) -> None:
+        from lib.config import timeouts_to_env_dict
+
+        t = timeouts_for_unit_tests()
+        d = timeouts_to_env_dict(t)
+        self.assertIn("inter_scenario_drain_secs", d)
+        self.assertEqual(d["inter_scenario_drain_secs"], 5.0)
 
     def test_unknown_top_level_key(self) -> None:
         raw = _minimal_valid_env()

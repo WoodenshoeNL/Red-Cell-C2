@@ -83,7 +83,7 @@ impl PhantomAgent {
             };
             match result {
                 Ok(()) => return Ok(()),
-                Err(e @ PhantomError::Transport(_)) => {
+                Err(e @ (PhantomError::Transport(_) | PhantomError::ConnectionRefused(_))) => {
                     warn!(
                         attempt,
                         max = INIT_HANDSHAKE_RETRIES,

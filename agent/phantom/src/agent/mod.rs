@@ -389,24 +389,75 @@ mod tests {
         Ok(())
     }
 
-    /// red-cell-c2-0xpyf — even when the TCP response is lost, the teamserver already
-    /// consumed and decrypted the packet, advancing its own CTR. We must advance
-    /// unconditionally so that the next callback uses the aligned keystream offset.
+    /// red-cell-c2-1fhji — get_job with connection-refused must NOT advance CTR/seq.
+    /// The server never received the packet, so its state is unchanged.
     #[tokio::test]
-    async fn get_job_transport_failure_advances_ctr_and_seq()
+    async fn get_job_connection_refused_does_not_advance_ctr()
     -> Result<(), Box<dyn Error + Send + Sync>> {
-        use red_cell_common::agent_protocol::callback_ctr_blocks;
-        use red_cell_common::demon::DemonCommand;
         let mut config = PhantomConfig::default();
+        // Port 1 has no listener — OS returns ECONNREFUSED immediately.
         config.callback_url = "http://127.0.0.1:1/".to_string();
         let mut agent = PhantomAgent::new(config)?;
         agent.ctr_offset = 11;
         agent.callback_seq = 9;
         let err = agent.get_job().await.expect_err("closed port must fail TCP connect");
-        assert!(matches!(err, PhantomError::Transport(_)));
-        let expected_ctr = 11 + callback_ctr_blocks(u32::from(DemonCommand::CommandGetJob), 0);
-        assert_eq!(agent.ctr_offset, expected_ctr, "CTR must advance even on transport failure");
-        assert_eq!(agent.callback_seq, 10, "seq must advance even on transport failure");
+        assert!(
+            matches!(err, PhantomError::ConnectionRefused(_)),
+            "connection-refused must surface as ConnectionRefused, got {err:?}"
+        );
+        // CTR and seq must NOT advance — server never received the packet.
+        assert_eq!(agent.ctr_offset, 11, "CTR must not advance on connection-refused");
+        assert_eq!(agent.callback_seq, 9, "seq must not advance on connection-refused");
+        Ok(())
+    }
+
+    /// red-cell-c2-0xpyf — get_job with TCP-reset must advance CTR/seq unconditionally.
+    /// The teamserver consumed and decrypted the packet before resetting the connection,
+    /// so we MUST advance to stay aligned with the server's keystream.
+    #[tokio::test]
+    async fn get_job_tcp_reset_advances_ctr_and_seq()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        use red_cell_common::agent_protocol::callback_ctr_blocks;
+        use red_cell_common::crypto::encrypt_agent_data;
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let address = listener.local_addr()?;
+        let (response_tx, response_rx) = mpsc::channel::<Vec<u8>>();
+
+        // init succeeds; get_job connection is accepted then immediately dropped (TCP-reset).
+        let server = thread::spawn(move || -> Result<(), Box<dyn Error + Send + Sync>> {
+            let (mut stream, _) = listener.accept()?;
+            let _body = read_http_request(&mut stream)?;
+            write_http_response(&mut stream, &response_rx.recv()?)?;
+            // get_job — accept and immediately drop; agent sees connection-reset.
+            let _ = listener.accept()?;
+            Ok(())
+        });
+
+        let mut agent = PhantomAgent::new(PhantomConfig {
+            callback_url: format!("http://{address}/"),
+            sleep_delay_ms: 0,
+            ..PhantomConfig::default()
+        })?;
+        response_tx.send(encrypt_agent_data(
+            &agent.session_crypto.key,
+            &agent.session_crypto.iv,
+            &agent.agent_id.to_le_bytes(),
+        )?)?;
+        agent.init_handshake().await?;
+        assert_eq!(agent.ctr_offset, 1);
+        let ctr_before = agent.ctr_offset;
+        let seq_before = agent.callback_seq;
+
+        let err = agent.get_job().await.expect_err("TCP-reset must fail");
+        assert!(
+            matches!(err, PhantomError::Transport(_)),
+            "TCP-reset must surface as Transport, got {err:?}"
+        );
+        let expected_ctr = ctr_before + callback_ctr_blocks(u32::from(DemonCommand::CommandGetJob), 0);
+        assert_eq!(agent.ctr_offset, expected_ctr, "CTR must advance on TCP-reset");
+        assert_eq!(agent.callback_seq, seq_before + 1, "seq must advance on TCP-reset");
+
+        server.join().map_err(|_| "server thread panicked")??;
         Ok(())
     }
 
@@ -438,15 +489,14 @@ mod tests {
         Ok(())
     }
 
-    /// red-cell-c2-n4kr4 — non-ECDH flush_pending_callbacks must advance CTR/seq unconditionally
-    /// and requeue all callbacks (including the failed one) on transport error.
+    /// red-cell-c2-1fhji — flush_pending_callbacks must NOT advance CTR/seq when connection is
+    /// refused (ECONNREFUSED): the server never received the packet so its state is unchanged.
+    /// Advancing here would permanently desync the CTR on every retry cycle.
     #[tokio::test]
-    async fn flush_pending_callbacks_transport_failure_advances_ctr_and_requeues()
+    async fn flush_pending_callbacks_connection_refused_does_not_advance_ctr_and_requeues()
     -> Result<(), Box<dyn Error + Send + Sync>> {
         let mut config = PhantomConfig::default();
-        // Port 1 is refused immediately — the packet is never sent.
-        // We still advance CTR unconditionally; the server-received-but-lost
-        // scenario is tested by checkin_transport_failure_on_checkin_packet_advances_ctr.
+        // Port 1 has no listener — OS returns ECONNREFUSED immediately.
         config.callback_url = "http://127.0.0.1:1/".to_string();
         let mut agent = PhantomAgent::new(config)?;
         // No ECDH session — exercises the non-ECDH path.
@@ -458,17 +508,19 @@ mod tests {
             .queue_callback(PendingCallback::Output { request_id: 11, text: "lost output".into() });
 
         let ctr_before = agent.ctr_offset;
+        let seq_before = agent.callback_seq;
         let result = agent.flush_pending_callbacks().await;
-        assert!(result.is_err(), "non-ECDH flush must propagate transport error");
+        assert!(result.is_err(), "non-ECDH flush must propagate connection-refused error");
 
-        // CTR and seq must have advanced unconditionally (> before means it did advance).
-        // The exact delta depends on the payload length — just verify it moved forward.
-        assert!(
-            agent.ctr_offset > ctr_before,
-            "CTR must advance even on flush transport failure (was {ctr_before}, now {})",
-            agent.ctr_offset
+        // CTR and seq must NOT advance — the server never processed the packet.
+        assert_eq!(
+            agent.ctr_offset, ctr_before,
+            "CTR must not advance on connection-refused (server state unchanged)"
         );
-        assert_eq!(agent.callback_seq, 4, "seq must advance even on flush transport failure");
+        assert_eq!(
+            agent.callback_seq, seq_before,
+            "seq must not advance on connection-refused (server state unchanged)"
+        );
 
         // Callback must be requeued so the next cycle can retry.
         let pending = agent.state.drain_callbacks();
@@ -477,6 +529,71 @@ mod tests {
             &pending[0],
             PendingCallback::Output { request_id: 11, text } if text == "lost output"
         ));
+        Ok(())
+    }
+
+    /// red-cell-c2-n4kr4 — flush_pending_callbacks must advance CTR/seq on TCP-reset (server
+    /// received and processed the packet before the response was lost).
+    #[tokio::test]
+    async fn flush_pending_callbacks_tcp_reset_advances_ctr_and_requeues()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        use red_cell_common::crypto::encrypt_agent_data;
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let address = listener.local_addr()?;
+        let (response_tx, response_rx) = mpsc::channel::<Vec<u8>>();
+
+        // init succeeds; callback connection is accepted then immediately dropped (TCP-reset).
+        let server = thread::spawn(move || -> Result<(), Box<dyn Error + Send + Sync>> {
+            // init
+            let (mut stream, _) = listener.accept()?;
+            let _body = read_http_request(&mut stream)?;
+            write_http_response(&mut stream, &response_rx.recv()?)?;
+            // callback — accept and immediately drop; agent sees connection-reset.
+            let _ = listener.accept()?;
+            Ok(())
+        });
+
+        let config = PhantomConfig {
+            callback_url: format!("http://{address}/"),
+            sleep_delay_ms: 0,
+            ..PhantomConfig::default()
+        };
+        let mut agent = PhantomAgent::new(config)?;
+        response_tx.send(encrypt_agent_data(
+            &agent.session_crypto.key,
+            &agent.session_crypto.iv,
+            &agent.agent_id.to_le_bytes(),
+        )?)?;
+        agent.init_handshake().await?;
+        // ctr_offset = 1 after init ack.
+        assert_eq!(agent.ctr_offset, 1);
+
+        agent.state.queue_callback(PendingCallback::Output {
+            request_id: 42,
+            text: "tcp-reset output".into(),
+        });
+        let ctr_before = agent.ctr_offset;
+        let seq_before = agent.callback_seq;
+
+        let result = agent.flush_pending_callbacks().await;
+        assert!(result.is_err(), "flush must propagate TCP-reset error");
+
+        // CTR and seq MUST advance: server processed the packet before resetting.
+        assert!(
+            agent.ctr_offset > ctr_before,
+            "CTR must advance on TCP-reset (server already consumed the packet)"
+        );
+        assert_eq!(
+            agent.callback_seq,
+            seq_before + 1,
+            "seq must advance on TCP-reset (server already consumed the packet)"
+        );
+
+        // Callback must be requeued.
+        let pending = agent.state.drain_callbacks();
+        assert_eq!(pending.len(), 1, "failed callback must be requeued");
+
+        server.join().map_err(|_| "server thread panicked")??;
         Ok(())
     }
 
@@ -530,6 +647,70 @@ mod tests {
             agent.callback_seq,
             before_seq + 1,
             "seq must advance even when COMMAND_CHECKIN response is lost"
+        );
+
+        server.join().map_err(|_| "server thread panicked")??;
+        Ok(())
+    }
+
+    /// red-cell-c2-1fhji — COMMAND_CHECKIN with connection-refused must NOT advance CTR/seq.
+    /// The server never received the packet, so its state is unchanged.  Advancing here
+    /// permanently desynchs the keystream on every retry cycle.
+    #[tokio::test]
+    async fn checkin_connection_refused_does_not_advance_ctr()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        use red_cell_common::crypto::encrypt_agent_data;
+        // Bind and immediately release a port so we get a guaranteed connection-refused target.
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let refused_addr = listener.local_addr()?;
+        drop(listener);
+
+        // Use a live server for init, then redirect to the refused port before checkin.
+        let init_listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let init_addr = init_listener.local_addr()?;
+        let (response_tx, response_rx) = mpsc::channel::<Vec<u8>>();
+
+        let server = thread::spawn(move || -> Result<(), Box<dyn Error + Send + Sync>> {
+            let (mut stream, _) = init_listener.accept()?;
+            let _body = read_http_request(&mut stream)?;
+            write_http_response(&mut stream, &response_rx.recv()?)?;
+            Ok(())
+        });
+
+        let mut agent = PhantomAgent::new(PhantomConfig {
+            callback_url: format!("http://{init_addr}/"),
+            sleep_delay_ms: 0,
+            ..PhantomConfig::default()
+        })?;
+        response_tx.send(encrypt_agent_data(
+            &agent.session_crypto.key,
+            &agent.session_crypto.iv,
+            &agent.agent_id.to_le_bytes(),
+        )?)?;
+        agent.init_handshake().await?;
+        assert_eq!(agent.ctr_offset, 1);
+
+        // Redirect to the refused port — checkin will get ECONNREFUSED.
+        agent.transport =
+            crate::transport::HttpTransport::new(&PhantomConfig {
+                callback_url: format!("http://{refused_addr}/"),
+                ..PhantomConfig::default()
+            })?;
+
+        let ctr_before = agent.ctr_offset;
+        let seq_before = agent.callback_seq;
+
+        let result = agent.checkin().await;
+        assert!(result.is_err(), "checkin must propagate connection-refused error");
+
+        // CTR and seq must NOT advance on connection-refused.
+        assert_eq!(
+            agent.ctr_offset, ctr_before,
+            "CTR must not advance on connection-refused (server state unchanged)"
+        );
+        assert_eq!(
+            agent.callback_seq, seq_before,
+            "seq must not advance on connection-refused (server state unchanged)"
         );
 
         server.join().map_err(|_| "server thread panicked")??;

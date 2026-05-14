@@ -61,6 +61,12 @@ class TestCheckBead(unittest.TestCase):
             status, title = ckf._check_bead("red-cell-c2-ddddd")
         self.assertEqual(status, "UNKNOWN")
 
+    def test_br_not_on_path_exits_2(self) -> None:
+        with patch("subprocess.run", side_effect=FileNotFoundError):
+            with self.assertRaises(SystemExit) as cm:
+                ckf._check_bead("red-cell-c2-aaaaa")
+        self.assertEqual(cm.exception.code, 2)
+
 
 _ACTIVE_MD = """\
 ## Active
@@ -183,6 +189,14 @@ class TestMain(unittest.TestCase):
         rc, out = self._run_main(md, effects)
         self.assertEqual(rc, 1)
         self.assertIn("UNKNOWN", out)
+
+    def test_missing_known_failures_returns_2(self) -> None:
+        mock_path = MagicMock(spec=Path)
+        mock_path.exists.return_value = False
+        with patch.object(ckf, "KNOWN_FAILURES", mock_path), \
+             patch("sys.stderr", StringIO()):
+            rc = ckf.main()
+        self.assertEqual(rc, 2)
 
     def test_mixed_stale_reports_all(self) -> None:
         effects = [

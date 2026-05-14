@@ -21,7 +21,6 @@ import sys
 from pathlib import Path
 
 KNOWN_FAILURES = Path(__file__).resolve().parent / "KNOWN_FAILURES.md"
-BEAD_RE = re.compile(r"\bred-cell-c2-[a-z0-9]+\b")
 # Matches a cell whose entire trimmed content is a single bead ID (not "*(fixed inline)*" etc.)
 _BEAD_CELL_RE = re.compile(r"^red-cell-c2-[a-z0-9]+$")
 

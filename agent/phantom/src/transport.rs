@@ -261,9 +261,7 @@ mod tests {
 
         let _ = rustls::crypto::ring::default_provider().install_default();
 
-        // Generate two independent self-signed certs with an IP SAN for 127.0.0.1.
-        // Using an IP SAN (not a hostname) avoids dual-stack /etc/hosts ambiguity where
-        // `localhost` may resolve to ::1 first, causing ECONNREFUSED against a v4-only listener.
+        // IP SAN avoids dual-stack ::1 ambiguity; rcgen emits IP SAN for a valid IP string.
         let server_keys = rcgen::generate_simple_self_signed(["127.0.0.1".to_string()])
             .expect("server cert generation");
         let pinned_keys = rcgen::generate_simple_self_signed(["127.0.0.1".to_string()])

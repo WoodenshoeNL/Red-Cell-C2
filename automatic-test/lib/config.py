@@ -683,7 +683,7 @@ def parse_env_config(raw: dict[str, Any]) -> EnvConfig:
             resilience_reconnect=tr.get("resilience_reconnect"),
             resilience_kill_date=tr.get("resilience_kill_date"),
             working_hours_probe=tr.get("working_hours_probe"),
-            inter_scenario_drain_secs=tr.get("inter_scenario_drain_secs", 5.0),  # type: ignore[arg-type]
+            inter_scenario_drain_secs=tr["inter_scenario_drain_secs"],  # type: ignore[arg-type]
         ),
         listeners=ListenersConfig(
             dns_port=dns_port,

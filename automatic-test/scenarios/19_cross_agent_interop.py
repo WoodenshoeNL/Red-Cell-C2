@@ -57,7 +57,7 @@ def _unique_marker() -> str:
 # ── Deployment helpers ───────────────────────────────────────────────────────
 
 def _deploy_windows(target, uid, raw: bytes):
-    """Deploy pre-built Demon EXE to Windows target.  Returns remote_payload path."""
+    """Deploy pre-built Demon EXE to Windows target.  Returns (remote_payload, pid)."""
     from lib.deploy import defender_add_exclusion, ensure_work_dir, execute_background, upload
 
     remote_payload = f"{target.work_dir}\\agent-{uid}.exe"
@@ -79,7 +79,7 @@ def _deploy_windows(target, uid, raw: bytes):
             print(f"  [windows] Defender exclusion failed (non-fatal): {exc}")
         upload(target, local_payload, remote_payload)
         print(f"  [windows] uploaded → {remote_payload}")
-        execute_background(target, remote_payload)
+        pid = execute_background(target, remote_payload)
         print("  [windows] payload launched in background")
     finally:
         try:
@@ -87,11 +87,11 @@ def _deploy_windows(target, uid, raw: bytes):
         except OSError:
             pass
 
-    return remote_payload
+    return remote_payload, pid
 
 
 def _deploy_linux(target, uid, raw: bytes):
-    """Deploy pre-built Phantom payload to Linux target.  Returns remote_payload path."""
+    """Deploy pre-built Phantom payload to Linux target.  Returns (remote_payload, pid)."""
     from lib.deploy import ensure_work_dir, execute_background, run_remote, upload
 
     remote_payload = f"{target.work_dir}/agent-{uid}.bin"
@@ -108,7 +108,7 @@ def _deploy_linux(target, uid, raw: bytes):
         upload(target, local_payload, remote_payload)
         run_remote(target, f"chmod +x {remote_payload}")
         print(f"  [linux] uploaded → {remote_payload}")
-        execute_background(target, remote_payload)
+        pid = execute_background(target, remote_payload)
         print("  [linux] payload launched in background")
     finally:
         try:
@@ -116,7 +116,7 @@ def _deploy_linux(target, uid, raw: bytes):
         except OSError:
             pass
 
-    return remote_payload
+    return remote_payload, pid
 
 
 # ── Isolation checks ─────────────────────────────────────────────────────────
@@ -344,6 +344,7 @@ def run(ctx):
         print(f"  [build] Demon: {len(raw_demon)} bytes, Phantom: {len(raw_phantom)} bytes")
 
         # ── Steps 3-4: Deploy both agents concurrently ───────────────────────
+        win_schtask_pid = None
         with ThreadPoolExecutor(max_workers=2) as pool:
             win_future = pool.submit(
                 _deploy_windows,
@@ -357,18 +358,28 @@ def run(ctx):
             for future in as_completed([win_future, lin_future]):
                 if future is win_future:
                     ctx.scenario_active_pass = "demon (interop deploy)"
-                    win_remote_payload = future.result()
+                    win_remote_payload, win_schtask_pid = future.result()
                 else:
                     ctx.scenario_active_pass = "phantom (interop deploy)"
-                    lin_remote_payload = future.result()
+                    lin_remote_payload, _lin_pid = future.result()
 
         print("  [deploy] both payloads deployed (Windows: Demon, Linux: Phantom)")
 
         # ── Step 5: Wait for both agents to check in ─────────────────────────
+        from lib.deploy import kill_windows_process_by_pid
+        from lib.wait import TimeoutError as WaitTimeoutError
         checkin_timeout = int(ctx.timeouts.agent_checkin)
         ctx.scenario_active_pass = "interop: checkin wait"
         print(f"  [wait] waiting up to {checkin_timeout}s for both agents to check in")
-        new_agents = _wait_for_two_agents(cli, pre_existing_ids, timeout=checkin_timeout)
+        try:
+            new_agents = _wait_for_two_agents(cli, pre_existing_ids, timeout=checkin_timeout)
+        except WaitTimeoutError:
+            if win_schtask_pid is not None:
+                print(f"  [wait] timeout — killing zombie Windows PID {win_schtask_pid}")
+                kill_windows_process_by_pid(
+                    ctx.windows, win_schtask_pid, log_prefix="  [zombie-kill]"
+                )
+            raise
 
         # Assign IDs by listener name — not by list order — to avoid swapping
         # the Windows and Linux agents when the checkin order is non-deterministic.

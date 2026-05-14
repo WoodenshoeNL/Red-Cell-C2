@@ -250,30 +250,44 @@ def _run_stress_for_agent(
                 print(f"  [{agent_type}][deploy] Defender exclusion failed (non-fatal): {exc}")
 
         _sep = "\\" if _win else "/"
+        schtask_pids: list[int] = []
         for i in range(agent_count):
             remote_path = f"{target.work_dir}{_sep}stress-agent-{uid}-{i:02d}.{fmt}"
             remote_payloads.append(remote_path)
             upload(target, local_payload, remote_path)
             if not _win:
                 run_remote(target, f"chmod +x {remote_path}")
-            execute_background(target, remote_path)
+            pid = execute_background(target, remote_path)
+            if pid is not None:
+                schtask_pids.append(pid)
             print(f"  [{agent_type}][deploy] launched agent {i+1}/{agent_count}: {remote_path}")
             if _win and agent_count > 1 and i + 1 < agent_count:
                 time.sleep(_WINDOWS_STRESS_LAUNCH_STAGGER_SEC)
 
         # ── Step 2: Wait for all agents to check in ──────────────────────────
+        from lib.wait import TimeoutError as WaitTimeoutError
         print(
             f"  [{agent_type}][wait] waiting up to {checkin_deadline}s for "
             f"{agent_count} agents to check in"
         )
         checkin_start = time.monotonic()
-        agent_ids = _wait_for_n_agents(
-            cli,
-            listener_name,
-            agent_count,
-            timeout=checkin_deadline,
-            poll_interval=poll_iv,
-        )
+        try:
+            agent_ids = _wait_for_n_agents(
+                cli,
+                listener_name,
+                agent_count,
+                timeout=checkin_deadline,
+                poll_interval=poll_iv,
+            )
+        except WaitTimeoutError:
+            if _win and schtask_pids:
+                from lib.deploy import kill_windows_process_by_pid
+                for _pid in schtask_pids:
+                    print(f"  [{agent_type}][zombie-kill] killing zombie PID {_pid}")
+                    kill_windows_process_by_pid(
+                        target, _pid, log_prefix=f"  [{agent_type}][zombie-kill]"
+                    )
+            raise
         checkin_elapsed = time.monotonic() - checkin_start
         assert len(agent_ids) >= agent_count, (
             f"Only {len(agent_ids)}/{agent_count} agents checked in within "

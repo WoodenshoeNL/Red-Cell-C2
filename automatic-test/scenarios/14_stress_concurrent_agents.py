@@ -283,6 +283,8 @@ def _run_stress_for_agent(
             if schtask_pids:
                 from lib.deploy import kill_linux_process_by_pid, kill_windows_process_by_pid
                 for _pid in schtask_pids:
+                    platform = "Windows" if _win else "Linux"
+                    print(f"  [{agent_type}][zombie-kill] timeout — killing zombie {platform} PID {_pid}")
                     if _win:
                         kill_windows_process_by_pid(target, _pid, log_prefix=f"  [{agent_type}][zombie-kill]")
                     else:

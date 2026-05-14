@@ -444,8 +444,9 @@ mod tests {
     async fn flush_pending_callbacks_transport_failure_advances_ctr_and_requeues()
     -> Result<(), Box<dyn Error + Send + Sync>> {
         let mut config = PhantomConfig::default();
-        // Port 1 is refused immediately — simulates "server received packet but response lost"
-        // from agent's perspective (unconditional advance still applies).
+        // Port 1 is refused immediately — the packet is never sent.
+        // We still advance CTR unconditionally; the server-received-but-lost
+        // scenario is tested by checkin_transport_failure_on_checkin_packet_advances_ctr.
         config.callback_url = "http://127.0.0.1:1/".to_string();
         let mut agent = PhantomAgent::new(config)?;
         // No ECDH session — exercises the non-ECDH path.

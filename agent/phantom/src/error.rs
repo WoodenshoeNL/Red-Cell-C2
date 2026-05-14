@@ -26,12 +26,15 @@ pub enum PhantomError {
     #[error("transport error: {0}")]
     Transport(String),
 
-    /// TCP connect was rejected before the packet reached the server (ECONNREFUSED).
+    /// The packet never left the client — the TCP connection was never established.
     ///
-    /// Distinguished from [`Transport`] because the server's CTR/seq is unchanged —
-    /// callers must not advance local state when retrying after this error.
-    #[error("connection refused: {0}")]
-    ConnectionRefused(String),
+    /// Covers ECONNREFUSED, DNS resolution failures, TCP connect timeouts (blackholed
+    /// routes), and TLS handshake failures.  In all these cases the server's CTR/seq
+    /// is unchanged; callers must not advance local state when retrying.
+    /// Distinguished from [`Transport`] where the server may already have consumed
+    /// the packet and advanced its own state (red-cell-c2-1fhji, red-cell-c2-bviim).
+    #[error("pre-connect failure: {0}")]
+    PreConnectFailure(String),
 
     /// The agent received malformed task data.
     #[error("task parse error: {0}")]

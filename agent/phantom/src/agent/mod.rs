@@ -402,8 +402,8 @@ mod tests {
         agent.callback_seq = 9;
         let err = agent.get_job().await.expect_err("closed port must fail TCP connect");
         assert!(
-            matches!(err, PhantomError::ConnectionRefused(_)),
-            "connection-refused must surface as ConnectionRefused, got {err:?}"
+            matches!(err, PhantomError::PreConnectFailure(_)),
+            "connection-refused must surface as PreConnectFailure, got {err:?}"
         );
         // CTR and seq must NOT advance — server never received the packet.
         assert_eq!(agent.ctr_offset, 11, "CTR must not advance on connection-refused");
@@ -415,8 +415,7 @@ mod tests {
     /// The teamserver consumed and decrypted the packet before resetting the connection,
     /// so we MUST advance to stay aligned with the server's keystream.
     #[tokio::test]
-    async fn get_job_tcp_reset_advances_ctr_and_seq()
-    -> Result<(), Box<dyn Error + Send + Sync>> {
+    async fn get_job_tcp_reset_advances_ctr_and_seq() -> Result<(), Box<dyn Error + Send + Sync>> {
         use red_cell_common::agent_protocol::callback_ctr_blocks;
         use red_cell_common::crypto::encrypt_agent_data;
         let listener = TcpListener::bind(("127.0.0.1", 0))?;
@@ -453,7 +452,8 @@ mod tests {
             matches!(err, PhantomError::Transport(_)),
             "TCP-reset must surface as Transport, got {err:?}"
         );
-        let expected_ctr = ctr_before + callback_ctr_blocks(u32::from(DemonCommand::CommandGetJob), 0);
+        let expected_ctr =
+            ctr_before + callback_ctr_blocks(u32::from(DemonCommand::CommandGetJob), 0);
         assert_eq!(agent.ctr_offset, expected_ctr, "CTR must advance on TCP-reset");
         assert_eq!(agent.callback_seq, seq_before + 1, "seq must advance on TCP-reset");
 
@@ -691,11 +691,10 @@ mod tests {
         assert_eq!(agent.ctr_offset, 1);
 
         // Redirect to the refused port — checkin will get ECONNREFUSED.
-        agent.transport =
-            crate::transport::HttpTransport::new(&PhantomConfig {
-                callback_url: format!("http://{refused_addr}/"),
-                ..PhantomConfig::default()
-            })?;
+        agent.transport = crate::transport::HttpTransport::new(&PhantomConfig {
+            callback_url: format!("http://{refused_addr}/"),
+            ..PhantomConfig::default()
+        })?;
 
         let ctr_before = agent.ctr_offset;
         let seq_before = agent.callback_seq;

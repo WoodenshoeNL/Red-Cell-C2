@@ -5,24 +5,35 @@ use tracing::{debug, warn};
 use crate::config::PhantomConfig;
 use crate::error::PhantomError;
 
-/// Returns true if `error` is a TCP connection-refused failure (ECONNREFUSED).
+/// Returns true if `error` is a pre-connect failure — the packet never left the client.
 ///
-/// When connection is refused the server never processed the packet, so callers
-/// must not advance their CTR/seq — the remote state is unchanged.
-/// This is distinct from TCP-reset or lost responses, where the server already
-/// consumed the packet and advanced its own state (red-cell-c2-1fhji).
-fn is_connection_refused(error: &reqwest::Error) -> bool {
+/// Covers: ECONNREFUSED, DNS resolution failures, TCP connect timeouts (blackholed
+/// routes), and TLS handshake failures.  In all these cases the server's CTR/seq is
+/// unchanged, so callers must not advance local state on retry.
+///
+/// Deliberately excludes post-connect failures (read timeouts, TCP-reset after ACK,
+/// lost responses) where the server may already have consumed the packet
+/// (red-cell-c2-1fhji, red-cell-c2-bviim).
+fn is_pre_connect_failure(error: &reqwest::Error) -> bool {
     use std::error::Error as StdError;
-    // Walk the source chain looking for an io::Error with ConnectionRefused kind.
+    // reqwest::Error::is_connect() is true for all errors that prevent the HTTP
+    // request body from being transmitted: ECONNREFUSED, DNS failures, connect
+    // timeouts, and TLS handshake failures.
+    if error.is_connect() {
+        return true;
+    }
+    // Belt-and-suspenders: walk the source chain for an io::Error with
+    // ConnectionRefused in case some reqwest build doesn't propagate is_connect().
     let mut src = error.source();
     while let Some(e) = src {
         if let Some(io) = e.downcast_ref::<std::io::Error>() {
-            return io.kind() == std::io::ErrorKind::ConnectionRefused;
+            if io.kind() == std::io::ErrorKind::ConnectionRefused {
+                return true;
+            }
         }
         src = e.source();
     }
-    // Fallback: check the display string.  On POSIX systems the OS error text
-    // "Connection refused" is stable and always present for ECONNREFUSED.
+    // Final fallback: stable POSIX error text.
     error.to_string().contains("Connection refused")
 }
 
@@ -63,8 +74,8 @@ impl HttpTransport {
         let response =
             self.client.post(&self.callback_url).body(packet.to_vec()).send().await.map_err(
                 |error| {
-                    if is_connection_refused(&error) {
-                        PhantomError::ConnectionRefused(error.to_string())
+                    if is_pre_connect_failure(&error) {
+                        PhantomError::PreConnectFailure(error.to_string())
                     } else {
                         PhantomError::Transport(error.to_string())
                     }
@@ -93,6 +104,7 @@ mod tests {
 
     use super::HttpTransport;
     use crate::config::PhantomConfig;
+    use crate::error::PhantomError;
 
     /// Generate a self-signed PEM certificate for testing.
     fn test_cert_pem() -> String {
@@ -358,5 +370,49 @@ mod tests {
         );
 
         accept_handle.abort();
+    }
+
+    /// Regression: ECONNREFUSED must produce `PreConnectFailure`, not `Transport`.
+    ///
+    /// Verifies the renamed variant and that the source-chain fallback still catches
+    /// OS-level connection refused when `is_connect()` may not be set (red-cell-c2-bviim).
+    #[tokio::test]
+    async fn send_econnrefused_yields_pre_connect_failure() {
+        // Bind then immediately drop — the port is closed, so connect → ECONNREFUSED.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        drop(listener);
+
+        let transport = HttpTransport::new(&PhantomConfig {
+            callback_url: format!("http://{addr}/"),
+            ..PhantomConfig::default()
+        })
+        .expect("transport creation");
+
+        let result = transport.send(b"test").await;
+        assert!(
+            matches!(result, Err(PhantomError::PreConnectFailure(_))),
+            "expected PreConnectFailure for ECONNREFUSED, got: {result:?}"
+        );
+    }
+
+    /// Regression: DNS resolution failure must produce `PreConnectFailure`, not `Transport`.
+    ///
+    /// The `.invalid` TLD is RFC 2606 § 2 reserved and guaranteed to never resolve.
+    /// This locks in that non-ECONNREFUSED pre-connect failures (DNS NXDOMAIN) are
+    /// classified correctly and do not advance CTR/seq (red-cell-c2-bviim).
+    #[tokio::test]
+    async fn send_dns_failure_yields_pre_connect_failure() {
+        let transport = HttpTransport::new(&PhantomConfig {
+            callback_url: "http://this-host-does-not-exist.invalid/".to_string(),
+            ..PhantomConfig::default()
+        })
+        .expect("transport creation");
+
+        let result = transport.send(b"test").await;
+        assert!(
+            matches!(result, Err(PhantomError::PreConnectFailure(_))),
+            "expected PreConnectFailure for DNS failure, got: {result:?}"
+        );
     }
 }

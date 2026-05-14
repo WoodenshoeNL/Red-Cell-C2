@@ -981,7 +981,7 @@ def execute_background(
     command: str,
     arguments: str = "",
     env_vars: dict[str, str] | None = None,
-) -> None:
+) -> "int | None":
     """Run a command on the target in the background (fire-and-forget).
 
     On Windows, uses Task Scheduler (``Register-ScheduledTask`` with S4U logon)
@@ -1041,11 +1041,65 @@ def execute_background(
         )
     if target.platform == "windows":
         win_out = (result.stdout or "").strip()
+        schtask_pid: int | None = None
         if win_out:
             for raw_line in win_out.splitlines():
                 line = raw_line.strip()
                 if line:
                     print(f"  [deploy][schtask] {line}")
+                if line.startswith("RCTEST_SCHTASK_PROCESS:"):
+                    val = line[len("RCTEST_SCHTASK_PROCESS:"):]
+                    # val is either "PID|Name|Owner|Date" or "(none for <exe>)"
+                    if val and not val.startswith("("):
+                        try:
+                            schtask_pid = int(val.split("|")[0])
+                        except ValueError:
+                            pass
+        return schtask_pid
+    return None
+
+
+def kill_windows_process_by_pid(
+    target: TargetConfig,
+    pid: int,
+    *,
+    log_prefix: str = "  [kill-pid]",
+) -> None:
+    """Kill a process by PID on a Windows target and kill any WerFault.exe.
+
+    Used to reap zombie agent processes that never checked in (no agent ID
+    available for ``agent kill``).  Killing WerFault.exe prevents it from
+    holding the AMSI lock in Session 0, which would block subsequent agent
+    initialisation.
+
+    Never raises: SSH/PowerShell failures are printed and swallowed.
+
+    Args:
+        target:     Windows SSH target (no-op on non-Windows or unreachable).
+        pid:        PID of the process to terminate.
+        log_prefix: Prefix for diagnostic lines printed to the harness log.
+    """
+    if target.platform != "windows":
+        return
+    if target.host in _globally_unreachable_hosts:
+        return
+    script = (
+        f"Stop-Process -Id {pid} -Force -ErrorAction SilentlyContinue; "
+        "Get-Process -Name WerFault -ErrorAction SilentlyContinue "
+        "| Stop-Process -Force -ErrorAction SilentlyContinue; "
+        "exit 0"
+    )
+    enc = _powershell_encoded_command(script)
+    try:
+        _run_ssh_cli_with_retry(
+            _ssh_args(target) + [f"powershell -NoProfile -EncodedCommand {enc}"],
+            target.host,
+            timeout=30,
+            tool="ssh",
+        )
+        print(f"{log_prefix} killed PID {pid} + WerFault.exe on {target.host}")
+    except Exception as exc:
+        print(f"{log_prefix} kill PID {pid} failed (non-fatal): {exc}")
 
 
 def reboot_windows_vm(
@@ -1198,6 +1252,12 @@ def wfp_preflight_cleanup(
         timeout = max(90, _DEFAULT_REMOTE_CMD_SECS)
 
     script = (
+        # Kill WerFault.exe first: a crashed Demon/Archon may leave WerFault running in
+        # Session 0 holding the AMSI lock, which blocks subsequent agent DllMain init.
+        # This must happen before the WFP/pool snapshot so the measurement reflects
+        # the post-cleanup state.
+        "Get-Process -Name WerFault -ErrorAction SilentlyContinue "
+        "| Stop-Process -Force -ErrorAction SilentlyContinue\n"
         # Snapshot rule counts before sweep for diagnostics.
         "$_allrules = @(Get-NetFirewallRule -ErrorAction SilentlyContinue)\n"
         "$_rc_rules = @($_allrules | Where-Object { $_.DisplayName -like 'RC-Harness-*' })\n"

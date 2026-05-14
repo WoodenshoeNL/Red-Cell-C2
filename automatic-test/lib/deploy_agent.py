@@ -21,6 +21,7 @@ from lib.deploy import (
     defender_add_process_exclusion,
     ensure_work_dir,
     execute_background,
+    kill_windows_process_by_pid,
     run_remote,
     upload,
     windows_sync_payload_probe,
@@ -189,7 +190,7 @@ def deploy_and_checkin(
 
         # Step 4 — execute payload in background.
         print(f"  [{tag}][exec] launching payload in background on target")
-        execute_background(target, remote_payload, env_vars=exec_env)
+        schtask_pid = execute_background(target, remote_payload, env_vars=exec_env)
 
     finally:
         try:
@@ -233,12 +234,28 @@ def deploy_and_checkin(
         )
 
     print(f"  [{tag}][wait] waiting up to {timeout}s for agent checkin")
-    agent = wait_for_agent(
-        cli,
-        timeout=timeout,
-        pre_existing_ids=pre_existing_ids,
-        periodic_interval=checkin_periodic_interval,
-        periodic_callback=checkin_periodic_callback,
-    )
+    try:
+        agent = wait_for_agent(
+            cli,
+            timeout=timeout,
+            pre_existing_ids=pre_existing_ids,
+            periodic_interval=checkin_periodic_interval,
+            periodic_callback=checkin_periodic_callback,
+        )
+    except WaitTimeoutError:
+        # Kill the zombie process by the PID captured from the schtask launch.
+        # Zombie agents that never checked in have no agent ID, so ``agent kill``
+        # is unavailable.  Without explicit kill: the process stays alive in
+        # Session 0, blocking AMSI for subsequent agents and accumulating across
+        # scenarios.
+        if schtask_pid is not None and is_windows:
+            print(
+                f"  [{tag}][wait] timeout — killing zombie PID {schtask_pid}"
+                " + WerFault.exe on target"
+            )
+            kill_windows_process_by_pid(
+                target, schtask_pid, log_prefix=f"  [{tag}][zombie-kill]"
+            )
+        raise
     print(f"  [{tag}][wait] agent checked in: {agent['id']}")
     return agent

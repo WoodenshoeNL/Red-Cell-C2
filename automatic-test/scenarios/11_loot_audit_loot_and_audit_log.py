@@ -130,7 +130,7 @@ def run(ctx):
         maybe_flush_payload_cache_for_rust_agent,
         payload_build_and_fetch,
     )
-    from lib.deploy import defender_add_exclusion, ensure_work_dir, execute_background, kill_windows_process_by_pid, run_remote, upload
+    from lib.deploy import defender_add_exclusion, ensure_work_dir, execute_background, kill_linux_process_by_pid, kill_windows_process_by_pid, run_remote, upload
     from lib.listeners import http_listener_kwargs
     from lib.wait import TimeoutError as WaitTimeout
     from lib.wait import poll, wait_for_agent
@@ -225,6 +225,8 @@ def run(ctx):
             if schtask_pid is not None and is_windows:
                 print(f"  [wait] timeout — killing zombie PID {schtask_pid} on target")
                 kill_windows_process_by_pid(target, schtask_pid, log_prefix="  [zombie-kill]")
+            elif schtask_pid is not None and not is_windows:
+                kill_linux_process_by_pid(ctx.linux, schtask_pid, log_prefix="  [zombie-kill]")
             raise
         agent_id = agent["id"]
         print(f"  [wait] agent checked in: {agent_id}")

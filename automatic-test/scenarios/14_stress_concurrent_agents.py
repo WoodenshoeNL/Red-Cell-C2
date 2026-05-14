@@ -280,13 +280,13 @@ def _run_stress_for_agent(
                 poll_interval=poll_iv,
             )
         except WaitTimeoutError:
-            if _win and schtask_pids:
-                from lib.deploy import kill_windows_process_by_pid
+            if schtask_pids:
+                from lib.deploy import kill_linux_process_by_pid, kill_windows_process_by_pid
                 for _pid in schtask_pids:
-                    print(f"  [{agent_type}][zombie-kill] killing zombie PID {_pid}")
-                    kill_windows_process_by_pid(
-                        target, _pid, log_prefix=f"  [{agent_type}][zombie-kill]"
-                    )
+                    if _win:
+                        kill_windows_process_by_pid(target, _pid, log_prefix=f"  [{agent_type}][zombie-kill]")
+                    else:
+                        kill_linux_process_by_pid(target, _pid, log_prefix=f"  [{agent_type}][zombie-kill]")
             raise
         checkin_elapsed = time.monotonic() - checkin_start
         assert len(agent_ids) >= agent_count, (

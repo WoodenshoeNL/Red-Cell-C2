@@ -8,6 +8,7 @@ so individual scenarios can focus on their unique post-checkin assertions.
 from __future__ import annotations
 
 import os
+import shlex
 import tempfile
 import time
 import uuid
@@ -202,7 +203,7 @@ def deploy_and_checkin(
         time.sleep(2)
         basename = os.path.basename(remote_payload)
         try:
-            run_remote(target, f"pgrep -f {basename}", timeout=10)
+            run_remote(target, f"pgrep -f {shlex.quote(basename)}", timeout=10)
             print(f"  [{tag}][probe] process running after 2s")
         except DeployError:
             print(

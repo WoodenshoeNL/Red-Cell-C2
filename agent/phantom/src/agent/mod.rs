@@ -438,6 +438,103 @@ mod tests {
         Ok(())
     }
 
+    /// red-cell-c2-n4kr4 — non-ECDH flush_pending_callbacks must advance CTR/seq unconditionally
+    /// and requeue all callbacks (including the failed one) on transport error.
+    #[tokio::test]
+    async fn flush_pending_callbacks_transport_failure_advances_ctr_and_requeues()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let mut config = PhantomConfig::default();
+        // Port 1 is refused immediately — simulates "server received packet but response lost"
+        // from agent's perspective (unconditional advance still applies).
+        config.callback_url = "http://127.0.0.1:1/".to_string();
+        let mut agent = PhantomAgent::new(config)?;
+        // No ECDH session — exercises the non-ECDH path.
+        assert!(agent.ecdh_session.is_none());
+        agent.ctr_offset = 7;
+        agent.callback_seq = 3;
+        agent
+            .state
+            .queue_callback(PendingCallback::Output { request_id: 11, text: "lost output".into() });
+
+        let ctr_before = agent.ctr_offset;
+        let result = agent.flush_pending_callbacks().await;
+        assert!(result.is_err(), "non-ECDH flush must propagate transport error");
+
+        // CTR and seq must have advanced unconditionally (> before means it did advance).
+        // The exact delta depends on the payload length — just verify it moved forward.
+        assert!(
+            agent.ctr_offset > ctr_before,
+            "CTR must advance even on flush transport failure (was {ctr_before}, now {})",
+            agent.ctr_offset
+        );
+        assert_eq!(agent.callback_seq, 4, "seq must advance even on flush transport failure");
+
+        // Callback must be requeued so the next cycle can retry.
+        let pending = agent.state.drain_callbacks();
+        assert_eq!(pending.len(), 1, "failed callback must be requeued");
+        assert!(matches!(
+            &pending[0],
+            PendingCallback::Output { request_id: 11, text } if text == "lost output"
+        ));
+        Ok(())
+    }
+
+    /// red-cell-c2-n4kr4 — COMMAND_CHECKIN send failure in checkin() must advance CTR/seq
+    /// unconditionally so the next retry uses the aligned keystream offset.
+    #[tokio::test]
+    async fn checkin_transport_failure_on_checkin_packet_advances_ctr()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        use red_cell_common::crypto::encrypt_agent_data;
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let address = listener.local_addr()?;
+        let (response_tx, response_rx) = mpsc::channel::<Vec<u8>>();
+
+        // init handshake succeeds; COMMAND_CHECKIN connection is accepted then immediately dropped.
+        let server = thread::spawn(move || -> Result<(), Box<dyn Error + Send + Sync>> {
+            // init
+            let (mut stream, _) = listener.accept()?;
+            let _body = read_http_request(&mut stream)?;
+            write_http_response(&mut stream, &response_rx.recv()?)?;
+            // checkin — accept and immediately drop; agent sees connection-reset.
+            let _ = listener.accept()?;
+            Ok(())
+        });
+
+        let config = PhantomConfig {
+            callback_url: format!("http://{address}/"),
+            sleep_delay_ms: 0,
+            ..PhantomConfig::default()
+        };
+        let mut agent = PhantomAgent::new(config)?;
+        response_tx.send(encrypt_agent_data(
+            &agent.session_crypto.key,
+            &agent.session_crypto.iv,
+            &agent.agent_id.to_le_bytes(),
+        )?)?;
+        agent.init_handshake().await?;
+        // ctr_offset = 1 after init ack.
+        assert_eq!(agent.ctr_offset, 1);
+        let before_seq = agent.callback_seq;
+
+        let result = agent.checkin().await;
+        assert!(result.is_err(), "checkin must propagate transport error");
+
+        // CTR must have advanced by exactly the COMMAND_CHECKIN cost.
+        let expected_ctr = 1 + callback_ctr_blocks(u32::from(DemonCommand::CommandCheckin), 0);
+        assert_eq!(
+            agent.ctr_offset, expected_ctr,
+            "CTR must advance even when COMMAND_CHECKIN response is lost"
+        );
+        assert_eq!(
+            agent.callback_seq,
+            before_seq + 1,
+            "seq must advance even when COMMAND_CHECKIN response is lost"
+        );
+
+        server.join().map_err(|_| "server thread panicked")??;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn get_job_decrypts_returned_task_packages() -> Result<(), Box<dyn Error + Send + Sync>> {
         let listener = TcpListener::bind(("127.0.0.1", 0))?;

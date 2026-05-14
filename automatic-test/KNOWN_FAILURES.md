@@ -32,8 +32,7 @@ row to *Resolved* and add the closing commit / fix description.
 
 | Signature (substring of error / stderr) | Scenario | Bead | First seen | Last seen | Status |
 |----------------------------------------|----------|------|------------|-----------|--------|
-| `[TIMEOUT] timeout: timed out waiting for output from task` + `Exec round 2 failures` (Phantom stress, 1/5 agents timeout under concurrent load — possible CTR desync regression of red-cell-c2-1f7q1) | 14 | red-cell-c2-n4kr4 | 2026-05-14 | 2026-05-14 | P2 |
-| `Timed out after 60s waiting for agent checkin` + sc21 (Phantom Linux, fresh deploy after sc14 stress — agent never connected to port 19181, possible VM overload cascade from sc14 lingering agents) | 21 | red-cell-c2-fmmxa | 2026-05-14 | 2026-05-14 | P3 |
+| `[TIMEOUT] timeout: timed out waiting for output from task` + `Exec round 2 failures` (Phantom stress, sc14 concurrent load — pre-connect failure CTR/seq desync; non-ECONNREFUSED paths still advance CTR when server never received packet) | 14 | red-cell-c2-bviim | 2026-05-14 | 2026-05-14 | P2 |
 
 ---
 
@@ -68,6 +67,8 @@ than a new bug.
 | `[SUBPROCESS_TIMEOUT]`/`os error 10055`/`Timed out after 60s waiting for agent checkin` (Archon/WFP) | 05, 06, 07, 08, 17, 20 | red-cell-c2-gdiw8 | 2026-05-09 | Closed: added between-pass WFP cleanup + wfp=/twait= diagnostics + mpssvc restart (72c10a67/74c27b43/cirdt/lxfdz). Regression confirmed same day — mpssvc restart does not reduce wfp=6393; see red-cell-c2-gnn1n. |
 | `Timed out after 30s waiting for screenshot loot entry` (demon hash + WinSta0 fix) | 08 | red-cell-c2-uzl9i | 2026-05-08 | Closed: fixes (8bf46ce2, c5463122, 4023932a) moved from demon to archon (06346e50). New failure tracked as red-cell-c2-z5rl8 (Demon pass reverted; Archon pass needs verification). |
 | `Timed out after 30s waiting for screenshot loot entry` (Demon pass skipped in SC08) | 08 | red-cell-c2-z5rl8 | 2026-05-08 | Closed: sc08 now skips Demon pass unconditionally (Demon screenshot not maintained since 06346e50 revert); Archon runs as primary. ScenarioSkipped raised when neither archon nor specter is in agents.available. |
+| `[TIMEOUT] timeout: timed out waiting for output from task` + `Exec round 2 failures` (Phantom stress, 1/5 agents timeout under concurrent load — CTR desync via COMMAND_CHECKIN send / per-task callback / flush_pending_callbacks) | 14 | red-cell-c2-n4kr4 | 2026-05-14 | Fixed: advance CTR/seq unconditionally in COMMAND_CHECKIN send, per-task callback loop, and flush_pending_callbacks (2026-05-14). Remaining gap tracked as red-cell-c2-bviim (non-ECONNREFUSED pre-connect paths). |
+| `Timed out after 60s waiting for agent checkin` (Phantom Linux, fresh deploy after sc14 stress — agent never connected, VM overload cascade from sc14 lingering agents) | 21 | red-cell-c2-fmmxa | 2026-05-14 | Fixed: 90s checkin_timeout floor for sc21, inter-scenario drain (5s, configurable), SSH process-existence probe in deploy_and_checkin, inter_scenario_drain_secs to env.toml files (2026-05-14). |
 | `[TIMEOUT] timeout: timed out waiting for output from task` (Phantom CTR/seq fix) | 04, 06, 07, 08, 11, 21 | red-cell-c2-1f7q1 | 2026-05-06 | Closed and split into lkkaq (root cause: CTR desync in get_job()) + 0xpyf (fix: advance CTR/seq unconditionally, commit 4a87b01d). Verified passing in run_073425 (sc04/sc21 pass). sc11 passes 2026-05-08. |
 | `undefined reference to '__mingw_vsnprintf'` | 05, 06, 07, 08, 17 | red-cell-c2-cgzoo | 2026-05-02 | Removed snprintf + OutputDebugStringA from TransportHttp.c; Archon builds fine. |
 | `audit operator mismatch: expected` | 11 | *(fixed inline)* | 2026-05-02 | audit_checks.py assert_operator_attribution allows agent.registered and agent.dead for teamserver. |

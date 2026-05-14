@@ -22,15 +22,32 @@ from pathlib import Path
 
 KNOWN_FAILURES = Path(__file__).resolve().parent / "KNOWN_FAILURES.md"
 BEAD_RE = re.compile(r"\bred-cell-c2-[a-z0-9]+\b")
+# Matches a cell whose entire trimmed content is a single bead ID (not "*(fixed inline)*" etc.)
+_BEAD_CELL_RE = re.compile(r"^red-cell-c2-[a-z0-9]+$")
 
 
 def _parse_active_beads(text: str) -> list[str]:
-    """Return deduplicated bead IDs from the Active section."""
+    """Return deduplicated bead IDs from the Bead column of the Active table.
+
+    Only column 3 (| Signature | Scenario | Bead | …) is examined.  Bead IDs
+    that appear anywhere else in the section — e.g. in Signature text as
+    predecessor references — are intentionally ignored so they cannot
+    cause false-positive stale-bead failures.
+    """
     m = re.search(r"^## Active\s*\n(.+?)^---", text, re.MULTILINE | re.DOTALL)
     if not m:
         return []
-    # Skip *(fixed inline)* and similar non-bead markers
-    return list(dict.fromkeys(BEAD_RE.findall(m.group(1))))
+    bead_ids: list[str] = []
+    for line in m.group(1).splitlines():
+        parts = line.split("|")
+        # Pipe-delimited table rows produce at least 5 parts:
+        # ["", sig, scenario, bead, ...]
+        if len(parts) < 5:
+            continue
+        bead_cell = parts[3].strip()
+        if _BEAD_CELL_RE.match(bead_cell):
+            bead_ids.append(bead_cell)
+    return list(dict.fromkeys(bead_ids))
 
 
 def _check_bead(bead_id: str) -> tuple[str, str]:

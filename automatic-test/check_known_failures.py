@@ -36,7 +36,9 @@ def _parse_active_beads(text: str) -> list[str]:
 def _check_bead(bead_id: str) -> tuple[str, str]:
     """Return (status, title) by running `br show <id>`.
 
-    Status is one of OPEN, IN_PROGRESS, CLOSED, UNKNOWN.
+    Status is one of OPEN, IN_PROGRESS, CLOSED, NOT_FOUND, UNKNOWN.
+    NOT_FOUND means `br show` returned a non-zero exit code — the bead ID
+    does not exist in the database (likely a typo in KNOWN_FAILURES.md).
     """
     try:
         result = subprocess.run(
@@ -52,6 +54,9 @@ def _check_bead(bead_id: str) -> tuple[str, str]:
         sys.exit(2)
     except subprocess.TimeoutExpired:
         return "UNKNOWN", "(br show timed out)"
+
+    if result.returncode != 0:
+        return "NOT_FOUND", "(bead not in database)"
 
     out = result.stdout
     sm = re.search(r"\b(OPEN|IN_PROGRESS|CLOSED)\b", out)
@@ -76,14 +81,14 @@ def main() -> int:
         return 0
 
     print(f"check_known_failures: validating {len(bead_ids)} bead(s) in Active table...")
-    stale: list[tuple[str, str]] = []
+    stale: list[tuple[str, str, str]] = []  # (bead_id, status, title)
 
     for bead_id in bead_ids:
         status, title = _check_bead(bead_id)
         mark = "✓" if status in ("OPEN", "IN_PROGRESS") else "✗"
         print(f"  {mark} {bead_id} [{status}]  {title}")
         if status not in ("OPEN", "IN_PROGRESS"):
-            stale.append((bead_id, title))
+            stale.append((bead_id, status, title))
 
     if stale:
         print(
@@ -92,10 +97,14 @@ def main() -> int:
             "'known / skip investigation' even though no one is working the fix.\n"
             "\nFix KNOWN_FAILURES.md before classifying failures:\n"
         )
-        for bead_id, title in stale:
-            print(f"  • {bead_id} is CLOSED — move its row to the Resolved section")
-            print(f"    and add a new Active row pointing to the replacement bead,")
-            print(f"    or remove it if the failure is genuinely no longer occurring.")
+        for bead_id, status, title in stale:
+            if status == "NOT_FOUND":
+                print(f"  • {bead_id} [NOT_FOUND] — bead ID not in database (typo?)")
+                print(f"    Fix the bead ID in KNOWN_FAILURES.md Active table.")
+            else:
+                print(f"  • {bead_id} is CLOSED — move its row to the Resolved section")
+                print(f"    and add a new Active row pointing to the replacement bead,")
+                print(f"    or remove it if the failure is genuinely no longer occurring.")
         return 1
 
     print("check_known_failures: Active table is clean — all beads are open or in_progress.")

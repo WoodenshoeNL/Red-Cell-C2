@@ -415,4 +415,41 @@ mod tests {
             "expected PreConnectFailure for DNS failure, got: {result:?}"
         );
     }
+
+    /// Regression: TLS handshake failure must produce `PreConnectFailure`, not `Transport`.
+    ///
+    /// A raw TCP listener accepts the connection then immediately drops it — the client's
+    /// TLS ClientHello goes unanswered and rustls surfaces an EOF-during-handshake error.
+    /// reqwest marks this as `is_connect() == true`, so it must classify as
+    /// `PreConnectFailure` and not advance CTR/seq (red-cell-c2-4ppud).
+    #[tokio::test]
+    async fn send_tls_handshake_failure_yields_pre_connect_failure() {
+        use tokio::net::TcpListener;
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+
+        // Accept one TCP connection and immediately drop it — no TLS handshake bytes sent.
+        let server = tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                drop(stream);
+            }
+        });
+
+        let transport = HttpTransport::new(&PhantomConfig {
+            callback_url: format!("https://localhost:{}/", addr.port()),
+            ..PhantomConfig::default()
+        })
+        .expect("transport creation");
+
+        let result = transport.send(b"test").await;
+        assert!(
+            matches!(result, Err(PhantomError::PreConnectFailure(_))),
+            "expected PreConnectFailure for TLS handshake failure, got: {result:?}"
+        );
+
+        server.abort();
+    }
 }

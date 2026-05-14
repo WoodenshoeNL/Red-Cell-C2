@@ -439,7 +439,7 @@ mod tests {
         });
 
         let transport = HttpTransport::new(&PhantomConfig {
-            callback_url: format!("https://localhost:{}/", addr.port()),
+            callback_url: format!("https://127.0.0.1:{}/", addr.port()),
             ..PhantomConfig::default()
         })
         .expect("transport creation");

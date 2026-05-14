@@ -2417,29 +2417,69 @@ class TestRebootWindowsVm(unittest.TestCase):
     @patch("time.sleep")
     @patch("time.time")
     @patch("lib.deploy._run_ssh_cli_with_retry")
-    def test_returns_true_when_reboot_ssh_raises_and_probe_reconnects(
+    def test_returns_true_when_reboot_ssh_raises_and_probe_sees_down_then_up(
         self,
         mock_ssh: object,
         mock_time: object,
         mock_sleep: object,
         mock_run: object,
     ) -> None:
-        """Reboot SSH raising (VM shuts down mid-session) must be swallowed; polling must continue."""
+        """SSH exception on reboot + probe failure (VM went down) + probe success = True.
+
+        The exception alone is not sufficient evidence — we require at least one
+        failed probe to confirm the VM actually went down before accepting reconnect.
+        """
+        import itertools
+        start = 1000.0
+        mock_time.side_effect = itertools.chain(
+            [start],          # (1) deadline = start + 60
+            [start + 25],     # (2) loop check: within window → probe fails (VM down)
+            [start + 25],     # (3) remaining calc
+            [start + 35],     # (4) loop check: within window → probe succeeds (VM back)
+        )
+        # Simulate VM shutting down before PowerShell can return cleanly.
+        mock_ssh.side_effect = subprocess.CalledProcessError(255, "ssh")
+        probe_fail = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="")
+        probe_ok = subprocess.CompletedProcess(args=[], returncode=0, stdout="alive\n", stderr="")
+        mock_run.side_effect = [probe_fail, probe_ok]
+        t = _make_target(
+            host="192.168.1.100", platform="windows", key=self.key_path, work_dir=r"C:\Temp\rc-test"
+        )
+        result = reboot_windows_vm(t, reboot_timeout=60)
+        self.assertTrue(result)
+
+    @patch("lib.deploy.subprocess.run")
+    @patch("time.sleep")
+    @patch("time.time")
+    @patch("lib.deploy._run_ssh_cli_with_retry")
+    def test_returns_false_when_reboot_ssh_raises_but_probe_never_drops(
+        self,
+        mock_ssh: object,
+        mock_time: object,
+        mock_sleep: object,
+        mock_run: object,
+    ) -> None:
+        """SSH exception on reboot + immediate probe success = False.
+
+        Regression guard for the false-positive path: if the SSH transport error
+        occurred before Restart-Computer ran (e.g. a pre-command transport failure),
+        the VM never went down.  The first probe success with no prior failure must
+        be rejected — we have no evidence of a real reboot.
+        """
         import itertools
         start = 1000.0
         mock_time.side_effect = itertools.chain(
             [start],          # deadline = start + 60
-            [start + 25],     # loop check: within window → probe succeeds
+            [start + 25],     # loop check: within window → probe succeeds immediately
         )
-        # Simulate VM shutting down before PowerShell can return cleanly.
-        mock_ssh.side_effect = subprocess.CalledProcessError(255, "ssh")
+        mock_ssh.side_effect = Exception("SSH transport error before command ran")
         probe_ok = subprocess.CompletedProcess(args=[], returncode=0, stdout="alive\n", stderr="")
         mock_run.return_value = probe_ok
         t = _make_target(
             host="192.168.1.100", platform="windows", key=self.key_path, work_dir=r"C:\Temp\rc-test"
         )
         result = reboot_windows_vm(t, reboot_timeout=60)
-        self.assertTrue(result)
+        self.assertFalse(result)
 
     @patch("lib.deploy.subprocess.run")
     @patch("time.sleep")

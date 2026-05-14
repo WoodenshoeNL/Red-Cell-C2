@@ -1099,8 +1099,11 @@ def reboot_windows_vm(
                 print(f"{log_prefix} reboot command failed (rc={result.returncode}): {combined.strip()}")
                 return False
     except Exception as exc:
-        print(f"{log_prefix} reboot command returned error (expected during shutdown): {exc}")
-        reboot_disconnected = True
+        # Log the exception but do NOT set reboot_disconnected here. We have no
+        # evidence Restart-Computer ran — the transport could have failed before
+        # the command executed. The probe loop will set saw_down when it observes
+        # an actual SSH failure, providing real evidence the VM went down.
+        print(f"{log_prefix} reboot command raised exception (may or may not indicate shutdown): {exc}")
 
     print(f"{log_prefix} waiting 20 s for VM shutdown to begin on {target.host}")
     time.sleep(20)

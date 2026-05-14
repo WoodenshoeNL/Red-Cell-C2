@@ -172,34 +172,15 @@ class TestMain(unittest.TestCase):
 
     def test_unknown_timeout_exits_one(self) -> None:
         effects = [subprocess.TimeoutExpired(["br"], 15)]
-        # Patch at the module level so TimeoutExpired is raised from subprocess.run
-        mock_path = MagicMock(spec=Path)
-        mock_path.exists.return_value = True
-        mock_path.read_text.return_value = _ACTIVE_NOT_FOUND_MD.replace(
-            "red-cell-c2-xxxxx", "red-cell-c2-eeeee"
-        )
-        buf = StringIO()
-        with patch.object(ckf, "KNOWN_FAILURES", mock_path), \
-             patch("subprocess.run", side_effect=effects), \
-             patch("sys.stdout", buf):
-            rc = ckf.main()
-        out = buf.getvalue()
+        md = _ACTIVE_NOT_FOUND_MD.replace("red-cell-c2-xxxxx", "red-cell-c2-eeeee")
+        rc, out = self._run_main(md, effects)
         self.assertEqual(rc, 1)
         self.assertIn("UNKNOWN", out)
 
     def test_unknown_unrecognized_output_exits_one(self) -> None:
         effects = [self._ok(0, _UNKNOWN_OUTPUT)]
-        mock_path = MagicMock(spec=Path)
-        mock_path.exists.return_value = True
-        mock_path.read_text.return_value = _ACTIVE_NOT_FOUND_MD.replace(
-            "red-cell-c2-xxxxx", "red-cell-c2-ddddd"
-        )
-        buf = StringIO()
-        with patch.object(ckf, "KNOWN_FAILURES", mock_path), \
-             patch("subprocess.run", side_effect=effects), \
-             patch("sys.stdout", buf):
-            rc = ckf.main()
-        out = buf.getvalue()
+        md = _ACTIVE_NOT_FOUND_MD.replace("red-cell-c2-xxxxx", "red-cell-c2-ddddd")
+        rc, out = self._run_main(md, effects)
         self.assertEqual(rc, 1)
         self.assertIn("UNKNOWN", out)
 

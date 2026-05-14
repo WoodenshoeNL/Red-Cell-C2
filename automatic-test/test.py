@@ -1226,7 +1226,7 @@ def main():
             if report_path is not None:
                 failure_reports.append(report_path)
 
-        if not ctx.dry_run:
+        if not ctx.dry_run and sid != selected[-1][0]:
             # Brief inter-scenario drain to let the Linux VM recover from stress workloads
             # (e.g. sc14 concurrent agents) before the next scenario launches its payload.
             # Configurable via [timeouts] inter_scenario_drain_secs in env.toml (default 5).

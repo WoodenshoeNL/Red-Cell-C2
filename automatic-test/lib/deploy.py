@@ -1115,6 +1115,35 @@ def kill_windows_process_by_pid(
         print(f"{log_prefix} kill PID {pid} failed (non-fatal): {exc}")
 
 
+def kill_linux_process_by_pid(
+    target: TargetConfig,
+    pid: int,
+    *,
+    log_prefix: str = "  [kill-pid]",
+) -> None:
+    """Kill a process by PID on a Linux target via SSH.
+
+    Used to reap zombie agent processes that never checked in (no agent ID
+    available for ``agent kill``).
+
+    Never raises: SSH failures are printed and swallowed.
+
+    Args:
+        target:     Linux SSH target (no-op on non-Linux or unreachable).
+        pid:        PID of the process to terminate.
+        log_prefix: Prefix for diagnostic lines printed to the harness log.
+    """
+    if target.platform != "linux":
+        return
+    if target.host in _globally_unreachable_hosts:
+        return
+    try:
+        run_remote(target, f"kill {pid} 2>/dev/null || true", timeout=15)
+        print(f"{log_prefix} killed PID {pid} on {target.host}")
+    except Exception as exc:
+        print(f"{log_prefix} kill PID {pid} failed (non-fatal): {exc}")
+
+
 def reboot_windows_vm(
     target: TargetConfig,
     *,

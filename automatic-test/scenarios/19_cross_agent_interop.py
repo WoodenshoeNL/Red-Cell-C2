@@ -345,6 +345,7 @@ def run(ctx):
 
         # ── Steps 3-4: Deploy both agents concurrently ───────────────────────
         win_schtask_pid = None
+        lin_schtask_pid = None
         with ThreadPoolExecutor(max_workers=2) as pool:
             win_future = pool.submit(
                 _deploy_windows,
@@ -361,12 +362,12 @@ def run(ctx):
                     win_remote_payload, win_schtask_pid = future.result()
                 else:
                     ctx.scenario_active_pass = "phantom (interop deploy)"
-                    lin_remote_payload, _lin_pid = future.result()
+                    lin_remote_payload, lin_schtask_pid = future.result()
 
         print("  [deploy] both payloads deployed (Windows: Demon, Linux: Phantom)")
 
         # ── Step 5: Wait for both agents to check in ─────────────────────────
-        from lib.deploy import kill_windows_process_by_pid
+        from lib.deploy import kill_linux_process_by_pid, kill_windows_process_by_pid
         from lib.wait import TimeoutError as WaitTimeoutError
         checkin_timeout = int(ctx.timeouts.agent_checkin)
         ctx.scenario_active_pass = "interop: checkin wait"
@@ -378,6 +379,11 @@ def run(ctx):
                 print(f"  [wait] timeout — killing zombie Windows PID {win_schtask_pid}")
                 kill_windows_process_by_pid(
                     ctx.windows, win_schtask_pid, log_prefix="  [zombie-kill]"
+                )
+            if lin_schtask_pid is not None:
+                print(f"  [wait] timeout — killing zombie Linux PID {lin_schtask_pid}")
+                kill_linux_process_by_pid(
+                    ctx.linux, lin_schtask_pid, log_prefix="  [zombie-kill]"
                 )
             raise
 

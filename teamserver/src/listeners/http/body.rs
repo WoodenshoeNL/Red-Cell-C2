@@ -3,11 +3,13 @@
 use std::net::IpAddr;
 
 use axum::body::{Body, Bytes};
+use red_cell_common::crypto::ecdh::CONNECTION_ID_LEN;
 use red_cell_common::demon::{
     ArchonEnvelope, ArchonHeader, DEMON_MAGIC_VALUE, DemonCommand, DemonEnvelope, DemonHeader,
 };
 use tracing::warn;
 
+use crate::database::EcdhRepository;
 use crate::listeners::{
     DEMON_INIT_WINDOW_DURATION, DemonInitRateLimiter, MAX_DEMON_INIT_ATTEMPTS_PER_IP,
 };
@@ -59,10 +61,14 @@ pub(crate) const MAX_NONLEGACY_PREAUTH_BODY_LEN: usize = 4 * 1024 * 1024; // 4 M
 ///   [`ArchonEnvelope::from_bytes`]): further buffering is capped to that value
 ///   (and never beyond `max_len`).  If `4 + size` is below 12, or **strictly
 ///   exceeds** `max_len`, the prefix is ECDH-shaped (random key/id material)
-///   and buffering is limited to [`MAX_NONLEGACY_PREAUTH_BODY_LEN`] — well
-///   below `max_len` — to prevent a pre-auth memory-exhaustion attack.
-///   Legitimate Archon payloads and ECDH registration/session packets stay
-///   within this bound.
+///   and buffering is limited to [`MAX_NONLEGACY_PREAUTH_BODY_LEN`] — unless
+///   `ecdh_db` is provided and the first 16 bytes match a known session
+///   `connection_id`, in which case `max_len` is used (allowing large
+///   screenshot/file-transfer callbacks from authenticated sessions).
+///
+/// The `ecdh_db` parameter, when `Some`, is used to perform a lightweight
+/// session-existence check on the connection_id extracted from the first 16
+/// bytes.  Pass `None` for legacy callers or when no DB is available.
 ///
 /// Returns `None` if the body exceeds `max_len`, contains a read error, or
 /// fails the appropriate magic check.
@@ -70,6 +76,7 @@ pub(crate) async fn collect_body_with_magic_precheck(
     body: Body,
     max_len: usize,
     legacy_mode: bool,
+    ecdh_db: Option<&EcdhRepository>,
 ) -> Option<Bytes> {
     use http_body_util::BodyExt as _;
 
@@ -128,11 +135,30 @@ pub(crate) async fn collect_body_with_magic_precheck(
                 effective_max =
                     if archon_claim < NONLEGACY_PRECHECK_HEADER_LEN || archon_claim > max_len {
                         // ECDH-shaped traffic: first 4 bytes are random key/id
-                        // material, not an Archon declared-length.  Cap
-                        // pre-auth buffering to MAX_NONLEGACY_PREAUTH_BODY_LEN
-                        // to bound the DoS amplification (previously fell back
-                        // to max_len = 100 MiB).
-                        MAX_NONLEGACY_PREAUTH_BODY_LEN.min(max_len)
+                        // material, not an Archon declared-length.  For known
+                        // sessions (connection_id in DB) allow up to max_len so
+                        // large screenshots/file-transfers pass through.  For
+                        // unauthenticated traffic, cap at the pre-auth DoS limit.
+                        if let Some(db) = ecdh_db {
+                            // Extract 16-byte connection_id candidate from the
+                            // buffered header (12 bytes) plus the start of `data`.
+                            let mut cid = [0u8; CONNECTION_ID_LEN];
+                            cid[..NONLEGACY_PRECHECK_HEADER_LEN]
+                                .copy_from_slice(&hdr[..NONLEGACY_PRECHECK_HEADER_LEN]);
+                            let extra = CONNECTION_ID_LEN - NONLEGACY_PRECHECK_HEADER_LEN;
+                            if let Some(tail) = data.get(from_data..from_data + extra) {
+                                cid[NONLEGACY_PRECHECK_HEADER_LEN..].copy_from_slice(tail);
+                                if db.session_exists(&cid).await {
+                                    max_len
+                                } else {
+                                    MAX_NONLEGACY_PREAUTH_BODY_LEN.min(max_len)
+                                }
+                            } else {
+                                MAX_NONLEGACY_PREAUTH_BODY_LEN.min(max_len)
+                            }
+                        } else {
+                            MAX_NONLEGACY_PREAUTH_BODY_LEN.min(max_len)
+                        }
                     } else {
                         archon_claim
                     };
@@ -385,7 +411,8 @@ mod tests {
         let raw = envelope.to_bytes();
         assert_eq!(&raw[4..8], &0xDEAD_BEEFu32.to_be_bytes());
 
-        let result = collect_body_with_magic_precheck(make_body(raw), usize::MAX, false).await;
+        let result =
+            collect_body_with_magic_precheck(make_body(raw), usize::MAX, false, None).await;
         assert!(
             result.is_some(),
             "Archon packet with agent_id=0xDEADBEEF must pass the non-legacy precheck"
@@ -397,7 +424,7 @@ mod tests {
     async fn archon_packet_rejected_by_legacy_precheck() {
         let envelope = ArchonEnvelope::new(0x0000_0001, 0xCAFE_BABE, demon_init_payload()).unwrap();
         let raw = envelope.to_bytes();
-        let result = collect_body_with_magic_precheck(make_body(raw), usize::MAX, true).await;
+        let result = collect_body_with_magic_precheck(make_body(raw), usize::MAX, true, None).await;
         assert!(result.is_none(), "legacy precheck must reject Archon packets");
     }
 
@@ -408,7 +435,8 @@ mod tests {
         // bytes 4-7 == 0xDEADBEEF (was never caught, but verify it still passes)
         let mut raw = vec![0u8; 32];
         raw[4..8].copy_from_slice(&0xDEAD_BEEFu32.to_be_bytes());
-        let result = collect_body_with_magic_precheck(make_body(raw), usize::MAX, false).await;
+        let result =
+            collect_body_with_magic_precheck(make_body(raw), usize::MAX, false, None).await;
         assert!(
             result.is_some(),
             "ECDH packet with connection_id[4..8]=0xDEADBEEF must pass the non-legacy precheck"
@@ -417,7 +445,8 @@ mod tests {
         // bytes 8-11 == 0xDEADBEEF (the actual regression from red-cell-c2-5rd8q)
         let mut raw2 = vec![0u8; 32];
         raw2[8..12].copy_from_slice(&0xDEAD_BEEFu32.to_be_bytes());
-        let result2 = collect_body_with_magic_precheck(make_body(raw2), usize::MAX, false).await;
+        let result2 =
+            collect_body_with_magic_precheck(make_body(raw2), usize::MAX, false, None).await;
         assert!(
             result2.is_some(),
             "ECDH packet with connection_id[8..12]=0xDEADBEEF must pass the non-legacy precheck"
@@ -428,7 +457,7 @@ mod tests {
     #[tokio::test]
     async fn legacy_demon_packet_accepted_by_legacy_precheck() {
         let raw = make_legacy_init_packet();
-        let result = collect_body_with_magic_precheck(make_body(raw), usize::MAX, true).await;
+        let result = collect_body_with_magic_precheck(make_body(raw), usize::MAX, true, None).await;
         assert!(result.is_some(), "legacy Demon packet must pass the legacy precheck");
     }
 
@@ -436,9 +465,13 @@ mod tests {
     #[tokio::test]
     async fn short_body_rejected() {
         for legacy_mode in [true, false] {
-            let result =
-                collect_body_with_magic_precheck(make_body(vec![0u8; 7]), usize::MAX, legacy_mode)
-                    .await;
+            let result = collect_body_with_magic_precheck(
+                make_body(vec![0u8; 7]),
+                usize::MAX,
+                legacy_mode,
+                None,
+            )
+            .await;
             assert!(
                 result.is_none(),
                 "body < 8 bytes must be rejected (legacy_mode={legacy_mode})"
@@ -453,9 +486,13 @@ mod tests {
     #[tokio::test]
     async fn nonlegacy_body_8_to_11_bytes_rejected() {
         for len in 8..=11 {
-            let result =
-                collect_body_with_magic_precheck(make_body(vec![0u8; len]), usize::MAX, false)
-                    .await;
+            let result = collect_body_with_magic_precheck(
+                make_body(vec![0u8; len]),
+                usize::MAX,
+                false,
+                None,
+            )
+            .await;
             assert!(result.is_none(), "non-legacy body of {len} bytes must be rejected");
         }
     }
@@ -468,7 +505,8 @@ mod tests {
         let mut raw = vec![0u8; 1024];
         raw[8..12].copy_from_slice(&DEMON_MAGIC_VALUE.to_be_bytes());
 
-        let result = collect_body_with_magic_precheck(make_body(raw), usize::MAX, false).await;
+        let result =
+            collect_body_with_magic_precheck(make_body(raw), usize::MAX, false, None).await;
         assert!(
             result.is_some(),
             "non-legacy precheck must not reject on bytes 8–11; downstream handles classification"
@@ -485,12 +523,12 @@ mod tests {
 
         // Legacy precheck: bytes 4–7 = 0xDEADBEEF → passes.
         let legacy_result =
-            collect_body_with_magic_precheck(make_body(raw.clone()), usize::MAX, true).await;
+            collect_body_with_magic_precheck(make_body(raw.clone()), usize::MAX, true, None).await;
         assert!(legacy_result.is_some(), "body with DEADBEEF at bytes 4–7 must pass legacy check");
 
         // Non-legacy precheck: no magic gate → also passes.
         let nonlegacy_result =
-            collect_body_with_magic_precheck(make_body(raw), usize::MAX, false).await;
+            collect_body_with_magic_precheck(make_body(raw), usize::MAX, false, None).await;
         assert!(
             nonlegacy_result.is_some(),
             "non-legacy precheck must not gate on bytes 8–11 (ECDH/Archon magic position)"
@@ -515,7 +553,8 @@ mod tests {
 
         // max_len = 12 (exactly the first frame) — second frame pushes past it.
         let result =
-            collect_body_with_magic_precheck(body, NONLEGACY_PRECHECK_HEADER_LEN, false).await;
+            collect_body_with_magic_precheck(body, NONLEGACY_PRECHECK_HEADER_LEN, false, None)
+                .await;
         assert!(result.is_none(), "non-legacy body exceeding max_len must be rejected");
     }
 
@@ -534,7 +573,8 @@ mod tests {
             Ok::<Bytes, std::convert::Infallible>(Bytes::from(vec![0xABu8; 500])),
         ]);
         let result =
-            collect_body_with_magic_precheck(Body::from_stream(stream), usize::MAX, false).await;
+            collect_body_with_magic_precheck(Body::from_stream(stream), usize::MAX, false, None)
+                .await;
         assert!(result.is_none());
     }
 
@@ -567,6 +607,7 @@ mod tests {
             Body::from_stream(stream),
             MAX_AGENT_MESSAGE_LEN,
             false,
+            None,
         )
         .await;
         assert!(
@@ -619,10 +660,129 @@ mod tests {
         );
 
         let result =
-            collect_body_with_magic_precheck(make_body(packet), MAX_AGENT_MESSAGE_LEN, false).await;
+            collect_body_with_magic_precheck(make_body(packet), MAX_AGENT_MESSAGE_LEN, false, None)
+                .await;
         assert!(
             result.is_some(),
             "ECDH registration must not be rejected during body precheck when Archon length heuristic is ambiguous"
         );
+    }
+
+    // ── regression: red-cell-c2-srqgo — large ECDH session bodies ───────────
+
+    /// A >4 MiB body with a known session connection_id must pass the precheck
+    /// when an `EcdhRepository` is provided and the session exists in the DB.
+    #[tokio::test]
+    async fn large_ecdh_session_body_passes_precheck_when_session_exists() {
+        use crate::Database;
+        use red_cell_common::crypto::ecdh::ConnectionId;
+
+        let db = Database::connect_in_memory().await.expect("in-memory db");
+        let ecdh_repo = db.ecdh();
+
+        // Construct a connection_id whose first 4 bytes trigger the ECDH path
+        // (archon_claim > max_len).
+        let mut cid_bytes = [0xAAu8; CONNECTION_ID_LEN];
+        cid_bytes[0..4].copy_from_slice(&0xFFFF_FFFFu32.to_be_bytes());
+        let conn_id = ConnectionId(cid_bytes);
+
+        ecdh_repo.store_session(&conn_id, 0xAAAA_0001, &[0x42u8; 32]).await.expect("store session");
+
+        // Build a body > 4 MiB whose first 16 bytes are the known connection_id.
+        let body_len = MAX_NONLEGACY_PREAUTH_BODY_LEN + 1024;
+        let mut raw = vec![0xCCu8; body_len];
+        raw[..CONNECTION_ID_LEN].copy_from_slice(&conn_id.0);
+
+        let result = collect_body_with_magic_precheck(
+            make_body(raw.clone()),
+            MAX_AGENT_MESSAGE_LEN,
+            false,
+            Some(&ecdh_repo),
+        )
+        .await;
+        assert_eq!(
+            result.as_deref(),
+            Some(raw.as_slice()),
+            "body >4 MiB with known session connection_id must be accepted"
+        );
+    }
+
+    /// A >4 MiB ECDH-shaped body with an UNKNOWN connection_id must still be
+    /// rejected at the pre-auth 4 MiB cap even when an EcdhRepository is provided.
+    #[tokio::test]
+    async fn large_ecdh_body_rejected_when_session_unknown() {
+        use crate::Database;
+
+        let db = Database::connect_in_memory().await.expect("in-memory db");
+        let ecdh_repo = db.ecdh();
+
+        // Construct a connection_id whose first 4 bytes (interpreted as
+        // big-endian u32) guarantee archon_claim > MAX_AGENT_MESSAGE_LEN,
+        // ensuring the ECDH fallback path is taken.
+        let body_len = MAX_NONLEGACY_PREAUTH_BODY_LEN + 1024;
+        let mut raw = vec![0xCCu8; body_len];
+        // Set first 4 bytes to 0xFFFFFFFF → archon_claim = 4 + 0xFFFFFFFF > max_len
+        raw[0..4].copy_from_slice(&0xFFFF_FFFFu32.to_be_bytes());
+
+        let result = collect_body_with_magic_precheck(
+            make_body(raw),
+            MAX_AGENT_MESSAGE_LEN,
+            false,
+            Some(&ecdh_repo),
+        )
+        .await;
+        assert!(
+            result.is_none(),
+            "body >4 MiB with unknown connection_id must be rejected (pre-auth DoS cap)"
+        );
+    }
+
+    /// Verify the large screenshot callback path: a body carrying a full 10 MiB
+    /// screenshot with a valid session connection_id passes the precheck.
+    #[tokio::test]
+    async fn screenshot_sized_ecdh_session_body_passes_precheck() {
+        use crate::Database;
+        use red_cell_common::crypto::ecdh::ConnectionId;
+
+        let db = Database::connect_in_memory().await.expect("in-memory db");
+        let ecdh_repo = db.ecdh();
+
+        // First 4 bytes trigger the ECDH path.
+        let mut cid_bytes = [0xBBu8; CONNECTION_ID_LEN];
+        cid_bytes[0..4].copy_from_slice(&0xFFFF_FFFFu32.to_be_bytes());
+        let conn_id = ConnectionId(cid_bytes);
+
+        ecdh_repo.store_session(&conn_id, 0xBBBB_0002, &[0x55u8; 32]).await.expect("store session");
+
+        // 10 MiB body (representative large screenshot/file-transfer)
+        let body_len = 10 * 1024 * 1024;
+        let mut raw = vec![0xAAu8; body_len];
+        raw[..CONNECTION_ID_LEN].copy_from_slice(&conn_id.0);
+
+        let result = collect_body_with_magic_precheck(
+            make_body(raw.clone()),
+            MAX_AGENT_MESSAGE_LEN,
+            false,
+            Some(&ecdh_repo),
+        )
+        .await;
+        assert_eq!(
+            result.as_deref(),
+            Some(raw.as_slice()),
+            "10 MiB ECDH session body (screenshot) must pass precheck"
+        );
+    }
+
+    /// Without an EcdhRepository, ECDH-shaped traffic >4 MiB is still rejected
+    /// (preserves the DoS mitigation for callers that don't pass a DB).
+    #[tokio::test]
+    async fn large_ecdh_body_rejected_without_db() {
+        let body_len = MAX_NONLEGACY_PREAUTH_BODY_LEN + 1024;
+        let raw = vec![0xFFu8; body_len];
+
+        let result =
+            collect_body_with_magic_precheck(make_body(raw), MAX_AGENT_MESSAGE_LEN, false, None)
+                .await;
+        assert!(result.is_none(), "body >4 MiB without ecdh_db must be rejected at pre-auth cap");
     }
 }

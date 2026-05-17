@@ -9,9 +9,13 @@ use red_cell_common::demon::DEMON_MAGIC_VALUE;
 #[tokio::test]
 async fn collect_body_with_magic_precheck_accepts_valid_demon_body() {
     let body = valid_demon_request_body(0x1234_5678);
-    let result =
-        collect_body_with_magic_precheck(Body::from(body.clone()), MAX_AGENT_MESSAGE_LEN, true)
-            .await;
+    let result = collect_body_with_magic_precheck(
+        Body::from(body.clone()),
+        MAX_AGENT_MESSAGE_LEN,
+        true,
+        None,
+    )
+    .await;
     assert_eq!(result.as_deref(), Some(body.as_slice()));
 }
 
@@ -20,7 +24,7 @@ async fn collect_body_with_magic_precheck_rejects_wrong_magic() {
     let mut body = valid_demon_request_body(0x1234_5678);
     body[4..8].copy_from_slice(&0xFEED_FACE_u32.to_be_bytes());
     let result =
-        collect_body_with_magic_precheck(Body::from(body), MAX_AGENT_MESSAGE_LEN, true).await;
+        collect_body_with_magic_precheck(Body::from(body), MAX_AGENT_MESSAGE_LEN, true, None).await;
     assert!(result.is_none(), "wrong magic must be rejected before full body is buffered");
 }
 
@@ -28,7 +32,8 @@ async fn collect_body_with_magic_precheck_rejects_wrong_magic() {
 async fn collect_body_with_magic_precheck_rejects_body_shorter_than_8_bytes() {
     let short = vec![0xDE, 0xAD, 0xBE, 0xEF, 0xDE, 0xAD, 0xBE];
     let result =
-        collect_body_with_magic_precheck(Body::from(short), MAX_AGENT_MESSAGE_LEN, true).await;
+        collect_body_with_magic_precheck(Body::from(short), MAX_AGENT_MESSAGE_LEN, true, None)
+            .await;
     assert!(result.is_none(), "body shorter than 8 bytes must be rejected");
 }
 
@@ -38,13 +43,14 @@ async fn collect_body_with_magic_precheck_rejects_body_exceeding_max_len() {
     let mut body = vec![0u8; 9];
     body[4..8].copy_from_slice(&DEMON_MAGIC_VALUE.to_be_bytes());
     body.extend(vec![0u8; 10]);
-    let result = collect_body_with_magic_precheck(Body::from(body), 8, true).await;
+    let result = collect_body_with_magic_precheck(Body::from(body), 8, true, None).await;
     assert!(result.is_none(), "body exceeding max_len must be rejected");
 }
 
 #[tokio::test]
 async fn collect_body_with_magic_precheck_rejects_empty_body() {
-    let result = collect_body_with_magic_precheck(Body::empty(), MAX_AGENT_MESSAGE_LEN, true).await;
+    let result =
+        collect_body_with_magic_precheck(Body::empty(), MAX_AGENT_MESSAGE_LEN, true, None).await;
     assert!(result.is_none(), "empty body must be rejected");
 }
 
@@ -56,9 +62,13 @@ async fn non_legacy_precheck_accepts_body_with_deadbeef_at_bytes_4_7() {
     // For Archon packets bytes 4–7 are agent_id, and for ECDH packets they are part of
     // the random connection_id — neither is a magic field.  See hxg94.
     let body = valid_demon_request_body(0x1234_5678);
-    let result =
-        collect_body_with_magic_precheck(Body::from(body.clone()), MAX_AGENT_MESSAGE_LEN, false)
-            .await;
+    let result = collect_body_with_magic_precheck(
+        Body::from(body.clone()),
+        MAX_AGENT_MESSAGE_LEN,
+        false,
+        None,
+    )
+    .await;
     assert!(
         result.is_some(),
         "non-legacy precheck must not reject bodies with 0xDEADBEEF at bytes 4-7"
@@ -70,16 +80,20 @@ async fn non_legacy_precheck_accepts_body_without_demon_magic() {
     // A body without 0xDEADBEEF at bytes 4–7 is accepted by a non-legacy listener.
     let mut body = vec![0u8; 16];
     body[4..8].copy_from_slice(&0xFEED_FACE_u32.to_be_bytes());
-    let result =
-        collect_body_with_magic_precheck(Body::from(body.clone()), MAX_AGENT_MESSAGE_LEN, false)
-            .await;
+    let result = collect_body_with_magic_precheck(
+        Body::from(body.clone()),
+        MAX_AGENT_MESSAGE_LEN,
+        false,
+        None,
+    )
+    .await;
     assert_eq!(result.as_deref(), Some(body.as_slice()), "non-Demon body must pass the precheck");
 }
 
 #[tokio::test]
 async fn non_legacy_precheck_rejects_empty_body() {
     let result =
-        collect_body_with_magic_precheck(Body::empty(), MAX_AGENT_MESSAGE_LEN, false).await;
+        collect_body_with_magic_precheck(Body::empty(), MAX_AGENT_MESSAGE_LEN, false, None).await;
     assert!(result.is_none(), "empty body must be rejected regardless of legacy_mode");
 }
 
@@ -87,7 +101,8 @@ async fn non_legacy_precheck_rejects_empty_body() {
 async fn non_legacy_precheck_rejects_body_shorter_than_8_bytes() {
     let short = vec![0u8; 7];
     let result =
-        collect_body_with_magic_precheck(Body::from(short), MAX_AGENT_MESSAGE_LEN, false).await;
+        collect_body_with_magic_precheck(Body::from(short), MAX_AGENT_MESSAGE_LEN, false, None)
+            .await;
     assert!(
         result.is_none(),
         "body shorter than 8 bytes must be rejected regardless of legacy_mode"

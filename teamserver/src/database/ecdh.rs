@@ -126,6 +126,23 @@ impl EcdhRepository {
         Ok(())
     }
 
+    /// Check whether a session with the given `connection_id` exists.
+    ///
+    /// This is a lightweight existence check (no key decryption) used by the
+    /// body pre-check layer to decide whether to apply the full agent message
+    /// cap vs the pre-auth DoS cap for ECDH-shaped traffic.
+    pub async fn session_exists(&self, connection_id_bytes: &[u8; CONNECTION_ID_LEN]) -> bool {
+        sqlx::query_scalar::<_, i32>(
+            "SELECT 1 FROM ts_ecdh_sessions WHERE connection_id = ? LIMIT 1",
+        )
+        .bind(connection_id_bytes.as_slice())
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .is_some()
+    }
+
     /// Look up a session by its `connection_id`.  Returns `(agent_id, session_key)`.
     pub async fn lookup_session(
         &self,

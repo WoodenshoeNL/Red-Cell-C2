@@ -51,9 +51,14 @@ pub(super) async fn http_listener_handler(
         &request,
     );
     let (_, body) = request.into_parts();
-    let Some(body) =
-        collect_body_with_magic_precheck(body, MAX_AGENT_MESSAGE_LEN, state.config.legacy_mode)
-            .await
+    let ecdh_db = if state.config.legacy_mode { None } else { Some(state.database.ecdh()) };
+    let Some(body) = collect_body_with_magic_precheck(
+        body,
+        MAX_AGENT_MESSAGE_LEN,
+        state.config.legacy_mode,
+        ecdh_db.as_ref(),
+    )
+    .await
     else {
         return state.fake_404_response();
     };

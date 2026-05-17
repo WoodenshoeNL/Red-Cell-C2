@@ -59,6 +59,7 @@ async fn teamserver_fallback(
             request.into_body(),
             MAX_AGENT_MESSAGE_LEN,
             true, // external listeners always relay Demon (legacy) traffic
+            None, // legacy mode — no ECDH session check needed
         )
         .await
         {

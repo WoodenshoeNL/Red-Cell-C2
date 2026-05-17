@@ -615,3 +615,17 @@ pub(super) fn platform_servers_by_type(domain: &str, server_type: u32) -> Vec<St
 
     names
 }
+
+pub(super) fn platform_computers(domain: &str) -> Vec<String> {
+    platform_servers_by_type(
+        domain,
+        windows_sys::Win32::NetworkManagement::NetManagement::SV_TYPE_ALL,
+    )
+}
+
+pub(super) fn platform_dc_list(domain: &str) -> Vec<String> {
+    use windows_sys::Win32::NetworkManagement::NetManagement::{
+        SV_TYPE_DOMAIN_BAKCTRL, SV_TYPE_DOMAIN_CTRL,
+    };
+    platform_servers_by_type(domain, SV_TYPE_DOMAIN_CTRL | SV_TYPE_DOMAIN_BAKCTRL)
+}

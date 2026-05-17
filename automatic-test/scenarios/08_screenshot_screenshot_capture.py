@@ -275,7 +275,7 @@ def run(ctx):
     Raises AssertionError with a descriptive message on any failure.
     Skips silently when no suitable target is configured.
     """
-    from lib.deploy import DeployError, WFP_RESTART_THRESHOLD, preflight_ssh, wfp_preflight_cleanup
+    from lib.deploy import DeployError, WFP_RESTART_THRESHOLD, drain_werfault, preflight_ssh, wfp_preflight_cleanup
     from lib.cli import listener_create, listener_delete, listener_start, listener_stop
     from lib.listeners import http_listener_kwargs
     from lib.payload import MatrixCell, build_parallel
@@ -379,6 +379,7 @@ def run(ctx):
                         "WFP pool critically exhausted — VM reboot required"
                         " (specter pass skipped)"
                     )
+                drain_werfault(ctx.windows, log_prefix="  [between-passes][werfault-drain]")
 
             # ── Specter pass ─────────────────────────────────────────────────
             print("\n  === Agent pass: specter (Windows) ===")

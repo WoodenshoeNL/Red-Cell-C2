@@ -331,6 +331,7 @@ def run(ctx):
                     "WFP pool critically exhausted — VM reboot required"
                     " (specter pass skipped)"
                 )
+            drain_werfault(ctx.windows, log_prefix="  [between-passes][werfault-drain]")
 
         # ── Specter pass (Rust Windows agent) ────────────────────────────────
         print("\n  === Agent pass: specter ===")

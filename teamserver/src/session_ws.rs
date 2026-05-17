@@ -13,11 +13,16 @@ use axum::response::IntoResponse;
 use serde_json::Value;
 use tracing::instrument;
 
+use crate::MAX_AGENT_MESSAGE_LEN;
 use crate::api::{api_routes, extract_api_key, session_api_dispatch_line};
 use crate::app::TeamserverState;
 
-/// Maximum session WebSocket message size accepted by the teamserver (1 MiB).
-pub(crate) const SESSION_MAX_MESSAGE_SIZE: usize = 1024 * 1024;
+/// Maximum session WebSocket message size accepted by the teamserver.
+///
+/// Matches `MAX_AGENT_MESSAGE_LEN` (the REST API body limit) so that session
+/// mode can carry the same payloads as the REST surface — in particular
+/// `agent.upload` bodies that contain base64 file content.
+pub(crate) const SESSION_MAX_MESSAGE_SIZE: usize = MAX_AGENT_MESSAGE_LEN;
 
 /// WebSocket upgrade handler for `/api/v1/ws`.
 ///

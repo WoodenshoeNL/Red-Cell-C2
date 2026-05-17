@@ -58,6 +58,12 @@ pub struct TeamserverState {
     /// `None` in normal operation.  When `Some`, the `/debug/corpus-keys`
     /// endpoint is active and every HTTP listener writes packet corpus files.
     pub corpus_dir: Option<PathBuf>,
+    /// Override for the session WebSocket max message size (bytes).
+    ///
+    /// `None` uses the production default (`MAX_AGENT_MESSAGE_LEN`).
+    /// Tests set a small value to verify frame-size rejection without
+    /// allocating 100+ MiB.
+    pub session_ws_max_message_size: Option<usize>,
 }
 
 impl FromRef<TeamserverState> for AuthService {

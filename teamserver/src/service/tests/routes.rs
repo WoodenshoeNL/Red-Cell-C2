@@ -56,6 +56,7 @@ async fn test_state_with_bridge(bridge: ServiceBridge) -> crate::TeamserverState
         plugins_failed: 0,
         metrics: crate::metrics::standalone_metrics_handle(),
         corpus_dir: None,
+        session_ws_max_message_size: None,
     }
 }
 

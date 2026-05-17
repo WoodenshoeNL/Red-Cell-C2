@@ -173,6 +173,23 @@ pub async fn spawn_test_server_custom(
     profile: Profile,
     customize: impl FnOnce(ListenerManager) -> ListenerManager,
 ) -> Result<TestServer, Box<dyn std::error::Error>> {
+    spawn_test_server_inner(profile, customize, None).await
+}
+
+/// Like [`spawn_test_server`], but overrides the session WebSocket max message
+/// size.  Used to test frame-size rejection without allocating 100+ MiB.
+pub async fn spawn_test_server_with_ws_limit(
+    profile: Profile,
+    ws_max_message_size: usize,
+) -> Result<TestServer, Box<dyn std::error::Error>> {
+    spawn_test_server_inner(profile, |lm| lm, Some(ws_max_message_size)).await
+}
+
+async fn spawn_test_server_inner(
+    profile: Profile,
+    customize: impl FnOnce(ListenerManager) -> ListenerManager,
+    ws_max_message_size: Option<usize>,
+) -> Result<TestServer, Box<dyn std::error::Error>> {
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
@@ -210,6 +227,7 @@ pub async fn spawn_test_server_custom(
         plugins_failed: 0,
         metrics: red_cell::metrics::standalone_metrics_handle(),
         corpus_dir: None,
+        session_ws_max_message_size: ws_max_message_size,
     };
 
     let tcp = TcpListener::bind("127.0.0.1:0").await?;

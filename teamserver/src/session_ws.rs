@@ -48,7 +48,8 @@ pub(crate) async fn session_ws_handler(
     let client_ip = addr;
     let state_for_socket = state.clone();
 
-    ws.max_message_size(SESSION_MAX_MESSAGE_SIZE).on_upgrade(move |socket| async move {
+    let max_msg = state.session_ws_max_message_size.unwrap_or(SESSION_MAX_MESSAGE_SIZE);
+    ws.max_message_size(max_msg).on_upgrade(move |socket| async move {
         run_session_socket(socket, state_for_socket, client_ip, api_key).await;
     })
 }

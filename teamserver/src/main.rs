@@ -296,6 +296,7 @@ async fn main() -> Result<()> {
         plugins_failed,
         metrics: metrics_handle,
         corpus_dir,
+        session_ws_max_message_size: None,
     };
     let router = build_router(state.clone());
     let handle = Handle::new();

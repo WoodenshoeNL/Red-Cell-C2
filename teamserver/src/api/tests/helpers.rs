@@ -63,6 +63,7 @@ pub(super) async fn test_router_with_database(
             plugins_failed: 0,
             metrics: crate::metrics::standalone_metrics_handle(),
             corpus_dir: None,
+            session_ws_max_message_size: None,
         }),
         agent_registry,
         auth,
@@ -106,6 +107,7 @@ pub(super) async fn build_router_from_profile(profile: Profile, database: Databa
         plugins_failed: 0,
         metrics: crate::metrics::standalone_metrics_handle(),
         corpus_dir: None,
+        session_ws_max_message_size: None,
     })
 }
 
@@ -160,6 +162,7 @@ pub(super) async fn test_router_with_connections(
         plugins_failed: 0,
         metrics: crate::metrics::standalone_metrics_handle(),
         corpus_dir: None,
+        session_ws_max_message_size: None,
     });
 
     (router, agent_registry, auth, connections)

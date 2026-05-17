@@ -116,6 +116,7 @@ async fn spawn_api_server_with_options(
         plugins_failed: 0,
         metrics: red_cell::metrics::standalone_metrics_handle(),
         corpus_dir,
+        session_ws_max_message_size: None,
     };
 
     let tcp = TcpListener::bind("127.0.0.1:0").await.expect("bind");

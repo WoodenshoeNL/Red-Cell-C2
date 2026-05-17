@@ -271,6 +271,7 @@ async fn app_state_exposes_shared_services_via_from_ref() {
         plugins_failed: 0,
         metrics: red_cell::metrics::standalone_metrics_handle(),
         corpus_dir: None,
+        session_ws_max_message_size: None,
     };
 
     let _ = AuthService::from_ref(&state);
@@ -1042,6 +1043,7 @@ async fn build_shutdown_test_state() -> (TeamserverState, ShutdownController) {
         plugins_failed: 0,
         metrics: red_cell::metrics::standalone_metrics_handle(),
         corpus_dir: None,
+        session_ws_max_message_size: None,
     };
 
     (state, shutdown)
@@ -1228,6 +1230,7 @@ async fn shutdown_sequence_drains_active_listener_before_closing_database() {
         plugins_failed: 0,
         metrics: red_cell::metrics::standalone_metrics_handle(),
         corpus_dir: None,
+        session_ws_max_message_size: None,
     };
 
     run_shutdown_sequence(handle, shutdown.clone(), state, Duration::from_secs(5))

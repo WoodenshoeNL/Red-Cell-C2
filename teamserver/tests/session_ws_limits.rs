@@ -10,9 +10,8 @@ use tokio::time::{Duration, timeout};
 use tokio_tungstenite::tungstenite::Message as ClientMessage;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
-/// Must match `SESSION_MAX_MESSAGE_SIZE` in `teamserver/src/session_ws.rs`
-/// (which equals `MAX_AGENT_MESSAGE_LEN` = 100 MiB).
-const SESSION_MAX_MESSAGE_SIZE: usize = 100 * 1024 * 1024;
+/// Small frame limit used for the rejection test — avoids allocating 100+ MiB.
+const TEST_WS_MAX_MESSAGE_SIZE: usize = 64 * 1024;
 
 fn profile_with_api_key() -> Profile {
     Profile::parse(
@@ -54,18 +53,20 @@ async fn connect_session_ws(
     stream
 }
 
-/// Verifies the session WebSocket enforces a maximum frame size. With the limit
-/// at 100 MiB (matching the REST body limit), actually allocating 100+ MiB in a
-/// test is impractical — this test is gated behind `#[ignore]` and runs manually.
+/// Verifies the session WebSocket enforces a maximum frame size.
+///
+/// Uses a small configurable limit (64 KiB) so the test runs in CI without
+/// allocating 100+ MiB.
 #[tokio::test]
-#[ignore]
 async fn session_ws_rejects_oversized_frame() {
     let server =
-        common::spawn_test_server(profile_with_api_key()).await.expect("server should start");
+        common::spawn_test_server_with_ws_limit(profile_with_api_key(), TEST_WS_MAX_MESSAGE_SIZE)
+            .await
+            .expect("server should start");
 
     let mut ws = connect_session_ws(server.addr, "test-secret").await;
 
-    let oversized = "x".repeat(SESSION_MAX_MESSAGE_SIZE + 1);
+    let oversized = "x".repeat(TEST_WS_MAX_MESSAGE_SIZE + 1);
     ws.send(ClientMessage::Text(oversized.into())).await.expect("send should succeed");
 
     let frame = timeout(Duration::from_secs(5), ws.next())

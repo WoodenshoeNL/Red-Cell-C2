@@ -233,6 +233,7 @@ async fn get_loot_returns_stored_bytes_and_not_found_error() {
         plugins_failed: 0,
         metrics: crate::metrics::standalone_metrics_handle(),
         corpus_dir: None,
+        session_ws_max_message_size: None,
     });
 
     let response = app

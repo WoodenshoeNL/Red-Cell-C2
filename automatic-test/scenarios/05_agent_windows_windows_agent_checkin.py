@@ -223,7 +223,10 @@ def run(ctx):
         raise ScenarioSkipped("ctx.windows is None — no Windows target configured")
     if ctx.windows_degraded:
         raise ScenarioSkipped("windows_degraded — WFP pool critically exhausted; VM reboot required")
-    from lib.deploy import DeployError, WFP_RESTART_THRESHOLD, preflight_ssh, wfp_preflight_cleanup
+    from lib.deploy import (
+        DeployError, WFP_RESTART_THRESHOLD, drain_werfault, preflight_ssh,
+        wfp_preflight_cleanup,
+    )
     try:
         preflight_ssh(ctx.windows)
     except DeployError as exc:
@@ -303,6 +306,7 @@ def run(ctx):
                     "WFP pool critically exhausted — VM reboot required"
                     " (archon/specter passes skipped)"
                 )
+            drain_werfault(ctx.windows, log_prefix="  [between-passes][werfault-drain]")
 
         # ── Archon pass (C/ASM fork of Demon, ECDH transport) ────────────────
         print("\n  === Agent pass: archon ===")

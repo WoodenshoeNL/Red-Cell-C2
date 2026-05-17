@@ -47,7 +47,7 @@ from lib.config import (
     TimeoutsConfig,
     timeouts_to_env_dict,
 )
-from lib.deploy import TargetConfig, WFP_RESTART_THRESHOLD, cleanup_windows_harness_work_dir, configure_deploy_timeouts, disable_wer, disable_windows_firewall, reboot_windows_vm, wfp_preflight_cleanup
+from lib.deploy import TargetConfig, WFP_RESTART_THRESHOLD, cleanup_windows_harness_work_dir, configure_deploy_timeouts, disable_wer, disable_windows_firewall, drain_werfault, reboot_windows_vm, wfp_preflight_cleanup
 from lib.teamserver_monitor import configure_teamserver_ssh_connect_timeout
 from lib.wait import configure_wait_defaults
 from lib.failure_diagnostics import (
@@ -1249,6 +1249,7 @@ def main():
                     timeout=win_cleanup_timeout,
                     restart_threshold=WFP_RESTART_THRESHOLD,
                 )
+                drain_werfault(wtgt, log_prefix="  [between-scenarios][werfault-drain]")
                 if _wfp_bs is None:
                     _win_wfp_exhausted = True
                     print(

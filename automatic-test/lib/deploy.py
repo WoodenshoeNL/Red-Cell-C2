@@ -1115,6 +1115,88 @@ def kill_windows_process_by_pid(
         print(f"{log_prefix} kill PID {pid} failed (non-fatal): {exc}")
 
 
+def drain_werfault(
+    target: TargetConfig,
+    *,
+    max_wait_s: int = 15,
+    poll_s: int = 2,
+    log_prefix: str = "  [werfault-drain]",
+) -> bool:
+    """Poll-kill WerFault.exe until none remain or *max_wait_s* elapses.
+
+    When a Demon agent (no crash guard) processes a kill task, it crashes via
+    TerminateProcess and WerFault.exe spawns to collect the crash dump.  If the
+    harness kills WerFault *before* the crash (the between-passes cleanup race),
+    a new WerFault appears seconds later and blocks the next agent's Session 0
+    TransportInit.
+
+    This function closes the race: it repeatedly kills WerFault and polls until
+    no instances remain, covering the window between ``agent kill`` dispatch and
+    the actual Demon crash (up to one checkin interval, ~10 s).
+
+    Never raises: SSH/PowerShell failures are printed and swallowed so a failed
+    drain never aborts the caller.
+
+    Returns ``True`` when no WerFault processes remain, ``False`` when they
+    persist after *max_wait_s*.
+    """
+    if target.platform != "windows":
+        return True
+    if target.host in _globally_unreachable_hosts:
+        return True
+
+    script = (
+        f"$maxSec = {max_wait_s}\n"
+        f"$pollSec = {poll_s}\n"
+        "$start = [DateTime]::UtcNow\n"
+        "$kills = 0\n"
+        "do {\n"
+        "  $wf = @(Get-Process -Name WerFault -ErrorAction SilentlyContinue)\n"
+        "  if ($wf.Count -eq 0) { break }\n"
+        "  $wf | Stop-Process -Force -ErrorAction SilentlyContinue\n"
+        "  $kills += $wf.Count\n"
+        "  Start-Sleep -Seconds $pollSec\n"
+        "} while (([DateTime]::UtcNow - $start).TotalSeconds -lt $maxSec)\n"
+        "$remain = @(Get-Process -Name WerFault -ErrorAction SilentlyContinue).Count\n"
+        "Write-Output \"WF_DRAIN:kills=$kills,remain=$remain\"\n"
+        "exit 0\n"
+    )
+    enc = _powershell_encoded_command(script)
+    timeout = max_wait_s + 30
+    try:
+        result = _run_ssh_cli_with_retry(
+            _ssh_args(target) + [f"powershell -NoProfile -EncodedCommand {enc}"],
+            target.host,
+            timeout=timeout,
+            tool="ssh",
+        )
+        out = result.stdout.strip()
+        kills = 0
+        remain = 0
+        for line in out.splitlines():
+            if line.startswith("WF_DRAIN:"):
+                for part in line[len("WF_DRAIN:"):].split(","):
+                    k, _, v = part.partition("=")
+                    if k == "kills":
+                        kills = int(v)
+                    elif k == "remain":
+                        remain = int(v)
+        if kills == 0 and remain == 0:
+            print(f"{log_prefix} no WerFault processes found — clear")
+        elif remain == 0:
+            print(f"{log_prefix} killed {kills} WerFault process(es) — now clear")
+        else:
+            print(
+                f"{log_prefix} WARNING: {remain} WerFault process(es) persist"
+                f" after {max_wait_s}s (killed {kills} total)"
+            )
+            return False
+        return True
+    except Exception as exc:
+        print(f"{log_prefix} drain failed (non-fatal): {exc}")
+        return False
+
+
 def kill_linux_process_by_pid(
     target: TargetConfig,
     pid: int,

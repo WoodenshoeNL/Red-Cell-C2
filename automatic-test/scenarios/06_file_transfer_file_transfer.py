@@ -442,7 +442,10 @@ def run(ctx):
     ran_any = False
     skipped_reasons: list[str] = []
     available_agents = set(ctx.env.get("agents", {}).get("available", ["demon"]))
-    from lib.deploy import DeployError, WFP_RESTART_THRESHOLD, preflight_ssh, wfp_preflight_cleanup
+    from lib.deploy import (
+        DeployError, WFP_RESTART_THRESHOLD, drain_werfault, preflight_ssh,
+        wfp_preflight_cleanup,
+    )
     from lib.cli import listener_create, listener_delete, listener_start, listener_stop
     from lib.listeners import http_listener_kwargs
     from lib.payload import MatrixCell, build_parallel
@@ -584,6 +587,7 @@ def run(ctx):
                         "WFP pool critically exhausted — VM reboot required"
                         " (archon/specter passes skipped)"
                     )
+                drain_werfault(ctx.windows, log_prefix="  [between-passes][werfault-drain]")
 
             print("\n  === Agent pass: archon (Windows) ===")
             if not has_archon:

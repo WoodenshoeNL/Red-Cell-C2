@@ -101,6 +101,7 @@ async fn build_test_state() -> (TeamserverState, AgentRegistry) {
         plugins_loaded: 0,
         plugins_failed: 0,
         metrics: red_cell::metrics::standalone_metrics_handle(),
+        session_ws_max_message_size: None,
     };
     (state, agent_registry)
 }

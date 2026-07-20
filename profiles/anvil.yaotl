@@ -1,0 +1,56 @@
+Teamserver {
+    Host = "0.0.0.0"
+    Port = 40056
+
+    Build {
+        Compiler64 = "data/bin/x86_64-w64-mingw32-gcc"
+        Compiler86 = "data/bin/i686-w64-mingw32-gcc"
+        Nasm = "data/bin/nasm"
+    }
+}
+
+Operators {
+    user "anvil" {
+        Password = "anvil-test"
+    }
+
+    user "test-operator" {
+        Password = "changeme"
+    }
+}
+
+Api {
+    RateLimitPerMinute = 120
+
+    key "anvil" {
+        Value = "anvil-api-key"
+    }
+
+    key "test-operator" {
+        Value = "changeme-api-key"
+    }
+}
+
+Listeners {
+    Http {
+        Name         = "default"
+        Hosts        = ["192.168.213.161"]
+        HostBind     = "0.0.0.0"
+        HostRotation = "round-robin"
+        PortBind     = 19100
+        PortConn     = 19100
+        Secure       = false
+    }
+}
+
+Demon {
+    Sleep = 2
+    Jitter = 15
+    TrustXForwardedFor = false
+    AllowLegacyCtr = true
+
+    Injection {
+        Spawn64 = "C:\\Windows\\System32\\notepad.exe"
+        Spawn32 = "C:\\Windows\\SysWOW64\\notepad.exe"
+    }
+}

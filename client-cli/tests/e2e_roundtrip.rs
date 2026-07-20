@@ -354,6 +354,7 @@ async fn spawn_server() -> TestHarness {
         plugins_loaded: 0,
         plugins_failed: 0,
         metrics: red_cell::metrics::standalone_metrics_handle(),
+        session_ws_max_message_size: None,
     };
 
     let tcp = TcpListener::bind("127.0.0.1:0").await.expect("bind ephemeral port");

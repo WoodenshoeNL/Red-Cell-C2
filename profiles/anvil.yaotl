@@ -40,6 +40,7 @@ Listeners {
         PortBind     = 19100
         PortConn     = 19100
         Secure       = false
+        LegacyMode   = true
     }
 }
 

@@ -31,9 +31,11 @@ async fn main() -> anyhow::Result<()> {
     //
     // Run after [`SpecterAgent::new`] so the primary HTTP `reqwest` client is
     // constructed before any code mutates the PE header page.
-    if let Err(e) = specter::pe_stomp::stomp_pe_headers() {
-        warn!("PE header stomp failed: {e}");
-    }
+    // PE header stomping disabled for testing — it prevents thread spawning
+    // and may interfere with socket operations on low-RAM VMs.
+    // if let Err(e) = specter::pe_stomp::stomp_pe_headers() {
+    //     warn!("PE header stomp failed: {e}");
+    // }
 
     info!(agent_id = format_args!("0x{:08X}", agent.agent_id()), "agent ready");
 

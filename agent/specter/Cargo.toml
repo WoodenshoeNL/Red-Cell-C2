@@ -29,6 +29,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net"]
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-pemfile = "2"
+webpki-roots = "0.26"
 rand = "0.9"
 time = { version = "0.3", features = ["local-offset"] }
 anyhow = "1"

@@ -34,7 +34,7 @@ Api {
 Listeners {
     Http {
         Name         = "default"
-        Hosts        = ["192.168.213.161"]
+        Hosts        = ["192.168.50.48"]
         HostBind     = "0.0.0.0"
         HostRotation = "round-robin"
         PortBind     = 19100

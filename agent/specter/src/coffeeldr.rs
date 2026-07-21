@@ -22,6 +22,84 @@ pub use crate::bof_context::{
     clear_bof_context, new_bof_output_queue, set_bof_context,
 };
 
+// ─── VEH for BOF crash diagnostics (Windows) ──────────────────────────────
+//
+// Rust's catch_unwind CANNOT catch Windows hardware exceptions (access
+// violations, etc.) on the gnu target.  A Vectored Exception Handler fires
+// before the process terminates, giving us the exception code, faulting
+// address, and (for AVs) the read/write/execute flag and target address.
+//
+// The handler stores details in atomics (safe inside an exception handler —
+// no locks) and writes directly to stderr (no tracing mutex reentrancy risk).
+// It returns EXCEPTION_CONTINUE_SEARCH so the process still terminates — but
+// the diagnostic has already been emitted to stderr.
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod crash_veh {
+    use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
+
+    pub(crate) static EXCEPTION_CODE: AtomicI32 = AtomicI32::new(0);
+    pub(crate) static EXCEPTION_ADDR: AtomicU64 = AtomicU64::new(0);
+    // For access violations: ExceptionInformation[0] = op, [1] = faulting VA
+    pub(crate) static EXCEPTION_OP: AtomicU64 = AtomicU64::new(u64::MAX);
+    pub(crate) static EXCEPTION_FAULT_VA: AtomicU64 = AtomicU64::new(0);
+
+    /// Clear globals before each BOF execution.
+    pub(crate) fn reset() {
+        EXCEPTION_CODE.store(0, Ordering::SeqCst);
+        EXCEPTION_ADDR.store(0, Ordering::SeqCst);
+        EXCEPTION_OP.store(u64::MAX, Ordering::SeqCst);
+        EXCEPTION_FAULT_VA.store(0, Ordering::SeqCst);
+    }
+
+    /// True if the VEH recorded an exception during the last execution.
+    pub(crate) fn occurred() -> bool {
+        EXCEPTION_CODE.load(Ordering::SeqCst) != 0
+    }
+
+    pub(crate) unsafe extern "system" fn handler(
+        exception_info: *mut windows_sys::Win32::System::Diagnostics::Debug::EXCEPTION_POINTERS,
+    ) -> i32 {
+        if exception_info.is_null() {
+            return 0; // EXCEPTION_CONTINUE_SEARCH
+        }
+        let ep = unsafe { &*exception_info };
+        if ep.ExceptionRecord.is_null() {
+            return 0;
+        }
+        let rec = unsafe { &*ep.ExceptionRecord };
+        let code = rec.ExceptionCode;
+        let addr = rec.ExceptionAddress as u64;
+
+        EXCEPTION_CODE.store(code, Ordering::SeqCst);
+        EXCEPTION_ADDR.store(addr, Ordering::SeqCst);
+
+        let code_u = code as u32;
+        let mut detail = String::new();
+        if code_u == 0xC0000005 && rec.NumberParameters >= 2 {
+            let op = rec.ExceptionInformation[0] as u64;
+            let fa = rec.ExceptionInformation[1] as u64;
+            EXCEPTION_OP.store(op, Ordering::SeqCst);
+            EXCEPTION_FAULT_VA.store(fa, Ordering::SeqCst);
+            let op_s = match op {
+                0 => "read",
+                1 => "write",
+                8 => "execute",
+                _ => "?",
+            };
+            detail = format!(" type={} target=0x{:016X}", op_s, fa);
+        }
+
+        // Direct stderr write — safe inside exception handler (no locks/alloc
+        // beyond the format!, which uses the system allocator, not tracing's
+        // subscriber lock).
+        eprintln!("BOF_CRASH_VEH: code=0x{:08X} fault_addr=0x{:016X}{}", code_u, addr, detail);
+
+        0 // EXCEPTION_CONTINUE_SEARCH — diagnostic emitted, let it crash
+    }
+}
+
 // ─── Windows implementation ─────────────────────────────────────────────────
 
 /// Execute a BOF (COFF object file) with the given entry function and arguments.
@@ -104,6 +182,11 @@ pub fn coffee_execute(
         u32::from_le_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]])
     }
 
+    /// Read a little-endian i32 from mapped section memory (for relocation addends).
+    unsafe fn ptr_read_i32(addr: *mut u8) -> i32 {
+        unsafe { i32::from_le_bytes([*addr, *addr.add(1), *addr.add(2), *addr.add(3)]) }
+    }
+
     // ── Parse COFF header ───────────────────────────────────────────────
 
     if object_data.len() < COFF_HEADER_SIZE {
@@ -137,7 +220,12 @@ pub fn coffee_execute(
         };
     }
 
-    tracing::info!(sections = header.number_of_sections, symbols = header.number_of_symbols, obj_size = object_data.len(), "BOF: COFF header parsed");
+    tracing::info!(
+        sections = header.number_of_sections,
+        symbols = header.number_of_symbols,
+        obj_size = object_data.len(),
+        "BOF: COFF header parsed"
+    );
 
     let num_sections = header.number_of_sections as usize;
     let sec_table_offset = COFF_HEADER_SIZE + header.size_of_optional_header as usize;
@@ -315,6 +403,7 @@ pub fn coffee_execute(
     // ── Resolve external imports ────────────────────────────────────────
 
     tracing::info!(external_count = external_symbols.len(), "BOF: resolving external imports");
+    // Log resolved/missing counts after the loop below.
     // BOF output buffer — Beacon API callbacks (BeaconPrintf / BeaconOutput)
     // append to this Vec through the thread-local `BOF_OUTPUT_TLS`.
     let mut bof_output: Vec<u8> = Vec::new();
@@ -417,7 +506,11 @@ pub fn coffee_execute(
             let mut payload = Vec::new();
             let sym_bytes = sym.as_bytes();
             payload.extend_from_slice(&(sym_bytes.len() as u32).to_le_bytes());
-    tracing::info!(resolved = resolved_imports.len(), missing = missing_symbols.len(), "BOF: import resolution complete");
+            tracing::info!(
+                resolved = resolved_imports.len(),
+                missing = missing_symbols.len(),
+                "BOF: import resolution complete"
+            );
             payload.extend_from_slice(sym_bytes);
             callbacks.push(BofCallback {
                 callback_type: BOF_SYMBOL_NOT_FOUND,
@@ -449,9 +542,9 @@ pub fn coffee_execute(
 
     // ── Apply relocations ───────────────────────────────────────────────
 
+    tracing::info!("BOF: applying relocations");
     for (sec_idx, sec) in sections.iter().enumerate() {
         if sec.number_of_relocations == 0 || section_bases[sec_idx].is_null() {
-    tracing::info!("BOF: applying relocations");
             continue;
         }
 
@@ -481,9 +574,19 @@ pub fn coffee_execute(
 
             match reloc.reloc_type {
                 IMAGE_REL_AMD64_REL32 => {
-                    // RIP-relative 32-bit displacement
+                    // RIP-relative 32-bit displacement.
+                    //
+                    // IMPORTANT: the existing 4-byte value at the patch site is
+                    // an addend left by the compiler — typically the offset of a
+                    // variable within its section (e.g. `.data+0x10` to reach
+                    // the `output` global).  When the relocation references a
+                    // section symbol (value=0), this addend is the ONLY thing
+                    // identifying the specific variable.  We must ADD it to our
+                    // computed delta, not overwrite it.  For import/external
+                    // symbols the addend is 0, so this is always safe.
                     let rip = patch_addr as u64 + 4; // next instruction
-                    let delta = target_addr.wrapping_sub(rip) as i32;
+                    let addend = unsafe { ptr_read_i32(patch_addr) } as u64;
+                    let delta = target_addr.wrapping_add(addend).wrapping_sub(rip) as i32;
                     unsafe {
                         std::ptr::copy_nonoverlapping(delta.to_le_bytes().as_ptr(), patch_addr, 4);
                     }
@@ -507,7 +610,8 @@ pub fn coffee_execute(
                     if reloc.reloc_type >= 5 && reloc.reloc_type <= 9 {
                         let extra = (reloc.reloc_type - 4) as u64;
                         let rip = patch_addr as u64 + 4 + extra;
-                        let delta = target_addr.wrapping_sub(rip) as i32;
+                        let addend = unsafe { ptr_read_i32(patch_addr) } as u64;
+                        let delta = target_addr.wrapping_add(addend).wrapping_sub(rip) as i32;
                         unsafe {
                             std::ptr::copy_nonoverlapping(
                                 delta.to_le_bytes().as_ptr(),
@@ -552,7 +656,10 @@ pub fn coffee_execute(
             );
         }
     }
-    tracing::info!(entry_found = entry_point.is_some(), "BOF: memory protections set, ready to execute");
+    tracing::info!(
+        entry_found = entry_point.is_some(),
+        "BOF: memory protections set, ready to execute"
+    );
 
     // ── Execute the entry point ─────────────────────────────────────────
 
@@ -566,43 +673,107 @@ pub fn coffee_execute(
         let func: BofEntry = unsafe { std::mem::transmute(ep) };
         tracing::info!(ep = format!("{:p}", ep), "BOF: calling entry point go()");
 
-        // Use SEH-style guard (simplified: catch panics)
+        // Install VEH so we can capture the exception code/address if the
+        // BOF crashes.  catch_unwind cannot catch Windows hardware exceptions
+        // (SEH), so without VEH we lose all diagnostic info on an AV.
+        crash_veh::reset();
+        let veh_handle = unsafe {
+            windows_sys::Win32::System::Diagnostics::Debug::AddVectoredExceptionHandler(
+                1, // first handler
+                Some(crash_veh::handler),
+            )
+        };
+        if veh_handle.is_null() {
+            tracing::warn!("BOF: failed to install VEH - crash diagnostics unavailable");
+        }
+
+        // catch_unwind guards against Rust panics; hardware exceptions are
+        // captured by the VEH above (it returns CONTINUE_SEARCH, so the
+        // process will still terminate on a real AV).
         let exec_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
             func(bof_arg_data, bof_arg_len);
         }));
 
-        match exec_result {
-            Ok(()) => {
-                let mut cbs = Vec::new();
-                // If there's captured output, send it
-                if !bof_output.is_empty() {
-                    let mut payload = Vec::new();
-                    payload.extend_from_slice(&(bof_output.len() as u32).to_le_bytes());
-                    payload.extend_from_slice(&bof_output);
+        // Remove VEH now that execution is done.
+        if !veh_handle.is_null() {
+            unsafe {
+                windows_sys::Win32::System::Diagnostics::Debug::RemoveVectoredExceptionHandler(
+                    veh_handle,
+                );
+            }
+        }
+
+        // If the VEH recorded a hardware exception, report it with the actual
+        // exception code and faulting address — far more useful than the
+        // generic C++ exception code below.
+        if crash_veh::occurred() {
+            let code = crash_veh::EXCEPTION_CODE.load(std::sync::atomic::Ordering::SeqCst);
+            let addr = crash_veh::EXCEPTION_ADDR.load(std::sync::atomic::Ordering::SeqCst);
+            let op = crash_veh::EXCEPTION_OP.load(std::sync::atomic::Ordering::SeqCst);
+            let fault_va = crash_veh::EXCEPTION_FAULT_VA.load(std::sync::atomic::Ordering::SeqCst);
+            tracing::error!(
+                code = format!("0x{:08X}", code as u32),
+                addr = format!("0x{:016X}", addr),
+                op = if op == 0 {
+                    "read"
+                } else if op == 1 {
+                    "write"
+                } else if op == 8 {
+                    "execute"
+                } else {
+                    "?"
+                },
+                fault_va = format!("0x{:016X}", fault_va),
+                "BOF: VEH captured exception during execution"
+            );
+            // Return a BOF_EXCEPTION callback with the real exception code.
+            vec![BofCallback {
+                callback_type: BOF_EXCEPTION,
+                payload: {
+                    let mut p = Vec::new();
+                    p.extend_from_slice(&(code as u32).to_le_bytes());
+                    p.extend_from_slice(&addr.to_le_bytes());
+                    p.extend_from_slice(&op.to_le_bytes());
+                    p.extend_from_slice(&fault_va.to_le_bytes());
+                    p
+                },
+                request_id: 0,
+            }]
+        } else {
+            match exec_result {
+                Ok(()) => {
+                    tracing::info!(output_len = bof_output.len(), "BOF: execution completed");
+                    let mut cbs = Vec::new();
+                    // If there's captured output, send it
+                    if !bof_output.is_empty() {
+                        let mut payload = Vec::new();
+                        payload.extend_from_slice(&(bof_output.len() as u32).to_le_bytes());
+                        payload.extend_from_slice(&bof_output);
+                        cbs.push(BofCallback {
+                            callback_type: BOF_CALLBACK_OUTPUT,
+                            payload,
+                            request_id: 0,
+                        });
+                    }
                     cbs.push(BofCallback {
-                        callback_type: BOF_CALLBACK_OUTPUT,
-                        payload,
+                        callback_type: BOF_RAN_OK,
+                        payload: Vec::new(),
                         request_id: 0,
                     });
+                    cbs
                 }
-                cbs.push(BofCallback {
-                    callback_type: BOF_RAN_OK,
-                    payload: Vec::new(),
-                    request_id: 0,
-                });
-                cbs
-            }
-            Err(_) => {
-                vec![BofCallback {
-                    callback_type: BOF_EXCEPTION,
-                    payload: {
-                        let mut p = Vec::new();
-                        p.extend_from_slice(&0xE06D7363u32.to_le_bytes()); // C++ exception code
-                        p.extend_from_slice(&(ep as u64).to_le_bytes()); // address
-                        p
-                    },
-                    request_id: 0,
-                }]
+                Err(_) => {
+                    vec![BofCallback {
+                        callback_type: BOF_EXCEPTION,
+                        payload: {
+                            let mut p = Vec::new();
+                            p.extend_from_slice(&0xE06D7363u32.to_le_bytes()); // C++ exception code
+                            p.extend_from_slice(&(ep as u64).to_le_bytes()); // address
+                            p
+                        },
+                        request_id: 0,
+                    }]
+                }
             }
         }
     } else {

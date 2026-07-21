@@ -5465,6 +5465,7 @@ dependencies = [
  "red-cell-common",
  "reqwest",
  "rustls",
+ "rustls-pemfile",
  "serde_json",
  "thiserror 2.0.18",
  "time",
@@ -5473,6 +5474,7 @@ dependencies = [
  "tokio-tungstenite 0.26.2",
  "tracing",
  "tracing-subscriber",
+ "webpki-roots 0.26.11",
  "windows-sys 0.59.0",
  "zeroize",
 ]

@@ -31,8 +31,9 @@ pub use crate::bof_context::{
 //
 // The handler stores details in atomics (safe inside an exception handler —
 // no locks) and writes directly to stderr (no tracing mutex reentrancy risk).
-// It returns EXCEPTION_CONTINUE_SEARCH so the process still terminates — but
-// the diagnostic has already been emitted to stderr.
+// It returns EXCEPTION_CONTINUE_EXECUTION to suppress the exception so the
+// process survives — critical for batch BOF testing where one crashing BOF
+// must not kill the agent.
 
 #[cfg(windows)]
 #[allow(unsafe_code)]
@@ -96,7 +97,13 @@ mod crash_veh {
         // subscriber lock).
         eprintln!("BOF_CRASH_VEH: code=0x{:08X} fault_addr=0x{:016X}{}", code_u, addr, detail);
 
-        0 // EXCEPTION_CONTINUE_SEARCH — diagnostic emitted, let it crash
+        // EXCEPTION_CONTINUE_EXECUTION (-1): suppress the exception so the
+        // process survives. The faulting instruction's result is undefined
+        // (the register that triggered the AV may contain garbage), but the
+        // BOF function will eventually return and the agent stays alive.
+        // This is critical for batch BOF testing — one crashing BOF must not
+        // kill the entire agent and prevent subsequent BOFs from running.
+        -1
     }
 }
 
@@ -688,8 +695,8 @@ pub fn coffee_execute(
         }
 
         // catch_unwind guards against Rust panics; hardware exceptions are
-        // captured by the VEH above (it returns CONTINUE_SEARCH, so the
-        // process will still terminate on a real AV).
+        // captured by the VEH above (it returns CONTINUE_EXECUTION, so the
+        // process survives even if the BOF crashes).
         let exec_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
             func(bof_arg_data, bof_arg_len);
         }));

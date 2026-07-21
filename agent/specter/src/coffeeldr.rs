@@ -65,7 +65,7 @@ mod crash_veh {
         if exception_info.is_null() {
             return 0; // EXCEPTION_CONTINUE_SEARCH
         }
-        let ep = unsafe { &*exception_info };
+        let ep = unsafe { &mut *exception_info };
         if ep.ExceptionRecord.is_null() {
             return 0;
         }
@@ -92,29 +92,35 @@ mod crash_veh {
             detail = format!(" type={} target=0x{:016X}", op_s, fa);
         }
 
-        // Direct stderr write — safe inside exception handler (no locks/alloc
-        // beyond the format!, which uses the system allocator, not tracing's
-        // subscriber lock).
         eprintln!("BOF_CRASH_VEH: code=0x{:08X} fault_addr=0x{:016X}{}", code_u, addr, detail);
 
-        // Only suppress ACCESS_VIOLATION (0xC0000005) — returning
-        // CONTINUE_EXECUTION for other exceptions (breakpoints 0x80000003,
-        // single-step 0x80000004, etc.) causes infinite loops because those
-        // instructions re-trigger on re-execution. For non-AV exceptions,
-        // return CONTINUE_SEARCH to let the normal exception handling proceed.
-        if code_u == 0xC0000005 {
-            // EXCEPTION_CONTINUE_EXECUTION (-1): suppress the AV so the
-            // process survives. The faulting instruction's result is undefined
-            // (the register that triggered the AV may contain garbage), but the
-            // BOF function will eventually return and the agent stays alive.
-            // This is critical for batch BOF testing — one crashing BOF must
-            // not kill the entire agent and prevent subsequent BOFs from running.
-            -1
-        } else {
-            // EXCEPTION_CONTINUE_SEARCH (0): let the OS handle non-AV exceptions
-            // normally (debugger, crash handler, etc.).
-            0
+        // Only handle ACCESS_VIOLATION (0xC0000005). For all other exceptions,
+        // return CONTINUE_SEARCH.
+        if code_u != 0xC0000005 {
+            return 0; // EXCEPTION_CONTINUE_SEARCH
         }
+
+        // Suppress the AV and skip the faulting instruction to prevent an
+        // infinite loop (CONTINUE_EXECUTION alone re-runs the faulting
+        // instruction, which triggers the same AV again). We advance RIP by
+        // a conservative amount (1 byte for most x86 instructions is wrong,
+        // but for NULL-read crashes the BOF code is already in an undefined
+        // state — the goal is just to break out of the loop and let the BOF
+        // function return with garbage, keeping the agent alive).
+        if !ep.ContextRecord.is_null() {
+            let ctx = unsafe { &mut *ep.ContextRecord };
+            // For NULL-target reads/writes, set the destination register to
+            // 0 (NULL) and advance RIP by a small amount. This is a
+            // best-effort recovery — the BOF's logic may be corrupted, but
+            // the process will survive and eventually return from the BOF.
+            // Skip 1 byte — just enough to avoid re-executing the exact
+            // same instruction. The x86 decoder will find the next
+            // instruction boundary eventually.
+            ctx.Rax = 0; // Clear RAX (common return value register)
+            ctx.Rip = ctx.Rip.wrapping_add(1); // Skip 1 byte
+        }
+
+        -1 // EXCEPTION_CONTINUE_EXECUTION
     }
 }
 

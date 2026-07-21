@@ -1,6 +1,7 @@
 //! Unit tests for the assembly dispatch handlers (BOF, .NET inline execute,
 //! PS import, and assembly list versions).
 
+use super::common::test_db_registry;
 use super::common::*;
 
 use super::super::CommandDispatchError;
@@ -26,7 +27,10 @@ const REQUEST_ID: u32 = 42;
 #[tokio::test]
 async fn inline_execute_empty_payload_returns_error() {
     let events = EventBus::new(8);
-    let result = handle_inline_execute_callback(&events, AGENT_ID, REQUEST_ID, &[]).await;
+    let (database, registry) = test_db_registry().await;
+    let result =
+        handle_inline_execute_callback(&registry, &database, &events, AGENT_ID, REQUEST_ID, &[])
+            .await;
 
     match result {
         Err(CommandDispatchError::InvalidCallbackPayload { command_id, .. }) => {
@@ -39,21 +43,29 @@ async fn inline_execute_empty_payload_returns_error() {
 #[tokio::test]
 async fn inline_execute_unknown_callback_type_returns_ok_none() {
     let events = EventBus::new(8);
+    let (database, registry) = test_db_registry().await;
     let mut payload = Vec::new();
     add_u32(&mut payload, 0xDEAD);
 
-    let result = handle_inline_execute_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+    let result = handle_inline_execute_callback(
+        &registry, &database, &events, AGENT_ID, REQUEST_ID, &payload,
+    )
+    .await;
     assert!(matches!(result, Ok(None)));
 }
 
 #[tokio::test]
 async fn inline_execute_truncated_after_callback_type_returns_error() {
     let events = EventBus::new(8);
+    let (database, registry) = test_db_registry().await;
     // BOF_CALLBACK_OUTPUT requires a subsequent read_string; give only the type.
     let mut payload = Vec::new();
     add_u32(&mut payload, BOF_CALLBACK_OUTPUT);
 
-    let result = handle_inline_execute_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+    let result = handle_inline_execute_callback(
+        &registry, &database, &events, AGENT_ID, REQUEST_ID, &payload,
+    )
+    .await;
 
     match result {
         Err(CommandDispatchError::InvalidCallbackPayload { command_id, .. }) => {
@@ -66,12 +78,20 @@ async fn inline_execute_truncated_after_callback_type_returns_error() {
 #[tokio::test]
 async fn inline_execute_bof_callback_error_broadcasts_error_event() {
     let events = EventBus::new(8);
+    let (database, registry) = test_db_registry().await;
+    registry
+        .insert(sample_agent_info(AGENT_ID, test_key(0x23), test_iv(0x33)))
+        .await
+        .expect("insert");
     let mut receiver = events.subscribe();
     let mut payload = Vec::new();
     add_u32(&mut payload, BOF_CALLBACK_ERROR);
     add_bytes(&mut payload, b"something went wrong in BOF");
 
-    let result = handle_inline_execute_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+    let result = handle_inline_execute_callback(
+        &registry, &database, &events, AGENT_ID, REQUEST_ID, &payload,
+    )
+    .await;
     assert!(matches!(result, Ok(None)));
 
     let msg = receiver.recv().await.expect("should receive broadcast");
@@ -85,8 +105,10 @@ async fn inline_execute_bof_callback_error_broadcasts_error_event() {
             );
             assert_eq!(
                 extra.get("Message"),
-                Some(&serde_json::Value::String("something went wrong in BOF".to_owned())),
-                "BOF_CALLBACK_ERROR should forward the error string as Message"
+                Some(&serde_json::Value::String(
+                    "Received BOF Error Output [27 bytes]:".to_owned()
+                )),
+                "BOF_CALLBACK_ERROR should report byte count in Message"
             );
         }
         other => panic!("expected AgentResponse, got {other:?}"),
@@ -96,11 +118,15 @@ async fn inline_execute_bof_callback_error_broadcasts_error_event() {
 #[tokio::test]
 async fn inline_execute_bof_callback_error_truncated_returns_error() {
     let events = EventBus::new(8);
+    let (database, registry) = test_db_registry().await;
     // BOF_CALLBACK_ERROR requires a subsequent read_string; give only the type.
     let mut payload = Vec::new();
     add_u32(&mut payload, BOF_CALLBACK_ERROR);
 
-    let result = handle_inline_execute_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+    let result = handle_inline_execute_callback(
+        &registry, &database, &events, AGENT_ID, REQUEST_ID, &payload,
+    )
+    .await;
 
     match result {
         Err(CommandDispatchError::InvalidCallbackPayload { command_id, .. }) => {
@@ -113,11 +139,19 @@ async fn inline_execute_bof_callback_error_truncated_returns_error() {
 #[tokio::test]
 async fn inline_execute_bof_ran_ok_broadcasts_event() {
     let events = EventBus::new(8);
+    let (database, registry) = test_db_registry().await;
+    registry
+        .insert(sample_agent_info(AGENT_ID, test_key(0x23), test_iv(0x33)))
+        .await
+        .expect("insert");
     let mut receiver = events.subscribe();
     let mut payload = Vec::new();
     add_u32(&mut payload, BOF_RAN_OK);
 
-    let result = handle_inline_execute_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+    let result = handle_inline_execute_callback(
+        &registry, &database, &events, AGENT_ID, REQUEST_ID, &payload,
+    )
+    .await;
     assert!(matches!(result, Ok(None)));
 
     let msg = receiver.recv().await.expect("should receive broadcast");
@@ -142,13 +176,21 @@ async fn inline_execute_bof_ran_ok_broadcasts_event() {
 #[tokio::test]
 async fn inline_execute_bof_exception_broadcasts_hex_codes() {
     let events = EventBus::new(8);
+    let (database, registry) = test_db_registry().await;
+    registry
+        .insert(sample_agent_info(AGENT_ID, test_key(0x23), test_iv(0x33)))
+        .await
+        .expect("insert");
     let mut receiver = events.subscribe();
     let mut payload = Vec::new();
     add_u32(&mut payload, BOF_EXCEPTION);
     add_u32(&mut payload, 0xC000_0005); // exception code
     add_u64(&mut payload, 0x00007FFA_DEADBEEF); // exception address
 
-    let result = handle_inline_execute_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+    let result = handle_inline_execute_callback(
+        &registry, &database, &events, AGENT_ID, REQUEST_ID, &payload,
+    )
+    .await;
     assert!(matches!(result, Ok(None)));
 
     let msg = receiver.recv().await.expect("should receive broadcast");
@@ -177,12 +219,16 @@ async fn inline_execute_bof_exception_broadcasts_hex_codes() {
 #[tokio::test]
 async fn inline_execute_bof_exception_truncated_returns_error() {
     let events = EventBus::new(8);
+    let (database, registry) = test_db_registry().await;
     // BOF_EXCEPTION needs u32 + u64; give only the type + exception code (no address).
     let mut payload = Vec::new();
     add_u32(&mut payload, BOF_EXCEPTION);
     add_u32(&mut payload, 0xC000_0005);
 
-    let result = handle_inline_execute_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+    let result = handle_inline_execute_callback(
+        &registry, &database, &events, AGENT_ID, REQUEST_ID, &payload,
+    )
+    .await;
 
     match result {
         Err(CommandDispatchError::InvalidCallbackPayload { command_id, .. }) => {
@@ -195,12 +241,20 @@ async fn inline_execute_bof_exception_truncated_returns_error() {
 #[tokio::test]
 async fn inline_execute_bof_symbol_not_found_broadcasts_symbol_name() {
     let events = EventBus::new(8);
+    let (database, registry) = test_db_registry().await;
+    registry
+        .insert(sample_agent_info(AGENT_ID, test_key(0x23), test_iv(0x33)))
+        .await
+        .expect("insert");
     let mut receiver = events.subscribe();
     let mut payload = Vec::new();
     add_u32(&mut payload, BOF_SYMBOL_NOT_FOUND);
     add_bytes(&mut payload, b"kernel32.dll!SomeExport");
 
-    let result = handle_inline_execute_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+    let result = handle_inline_execute_callback(
+        &registry, &database, &events, AGENT_ID, REQUEST_ID, &payload,
+    )
+    .await;
     assert!(matches!(result, Ok(None)));
 
     let msg = receiver.recv().await.expect("should receive broadcast");
@@ -225,11 +279,15 @@ async fn inline_execute_bof_symbol_not_found_broadcasts_symbol_name() {
 #[tokio::test]
 async fn inline_execute_bof_symbol_not_found_truncated_returns_error() {
     let events = EventBus::new(8);
+    let (database, registry) = test_db_registry().await;
     // BOF_SYMBOL_NOT_FOUND needs a string; give only the type.
     let mut payload = Vec::new();
     add_u32(&mut payload, BOF_SYMBOL_NOT_FOUND);
 
-    let result = handle_inline_execute_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+    let result = handle_inline_execute_callback(
+        &registry, &database, &events, AGENT_ID, REQUEST_ID, &payload,
+    )
+    .await;
 
     match result {
         Err(CommandDispatchError::InvalidCallbackPayload { command_id, .. }) => {
@@ -242,11 +300,19 @@ async fn inline_execute_bof_symbol_not_found_truncated_returns_error() {
 #[tokio::test]
 async fn inline_execute_bof_could_not_run_broadcasts_error() {
     let events = EventBus::new(8);
+    let (database, registry) = test_db_registry().await;
+    registry
+        .insert(sample_agent_info(AGENT_ID, test_key(0x23), test_iv(0x33)))
+        .await
+        .expect("insert");
     let mut receiver = events.subscribe();
     let mut payload = Vec::new();
     add_u32(&mut payload, BOF_COULD_NOT_RUN);
 
-    let result = handle_inline_execute_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+    let result = handle_inline_execute_callback(
+        &registry, &database, &events, AGENT_ID, REQUEST_ID, &payload,
+    )
+    .await;
     assert!(matches!(result, Ok(None)));
 
     let msg = receiver.recv().await.expect("should receive broadcast");

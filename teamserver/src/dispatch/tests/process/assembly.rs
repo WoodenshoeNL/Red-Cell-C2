@@ -144,10 +144,10 @@ async fn inline_execute_bof_output_broadcasts_agent_response()
     let OperatorMessage::AgentResponse(message) = event else {
         panic!("expected agent response event");
     };
-    assert_eq!(message.info.extra.get("Type"), Some(&Value::String("Output".to_owned())));
+    assert_eq!(message.info.extra.get("Type"), Some(&Value::String("Good".to_owned())));
     assert_eq!(
         message.info.extra.get("Message"),
-        Some(&Value::String("hello from BOF".to_owned()))
+        Some(&Value::String("Received BOF Output [14 bytes]:".to_owned()))
     );
 
     // BOF_RAN_OK (3): completion confirmation

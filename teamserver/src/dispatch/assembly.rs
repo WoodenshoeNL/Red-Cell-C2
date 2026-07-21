@@ -1,12 +1,17 @@
 use red_cell_common::demon::DemonCommand;
 use tracing::warn;
 
-use crate::EventBus;
+use crate::{AgentRegistry, Database, EventBus};
 
 use super::{
     CallbackParser, CommandDispatchError, DOTNET_INFO_ENTRYPOINT_EXECUTED, DOTNET_INFO_FAILED,
-    DOTNET_INFO_FINISHED, DOTNET_INFO_NET_VERSION, DOTNET_INFO_PATCHED, agent_response_event,
+    DOTNET_INFO_FINISHED, DOTNET_INFO_NET_VERSION, DOTNET_INFO_PATCHED,
+    broadcast_and_persist_agent_response, loot_context,
 };
+
+// Re-import agent_response_event for the other handler functions that still use it.
+#[allow(unused_imports)]
+use super::agent_response_event;
 
 /// Havoc BOF/CoffeeLdr callback sub-type: standard output from the BOF.
 pub(super) const BOF_CALLBACK_OUTPUT: u32 = 0x00;
@@ -35,6 +40,8 @@ pub(super) const BOF_COULD_NOT_RUN: u32 = 4;
 /// | `3`    | BOF ran to completion (`COMMAND_INLINEEXECUTE_RAN_OK`) |
 /// | `4`    | BOF could not be started (`COMMAND_INLINEEXECUTE_COULD_NO_RUN`) |
 pub(super) async fn handle_inline_execute_callback(
+    registry: &AgentRegistry,
+    database: &Database,
     events: &EventBus,
     agent_id: u32,
     request_id: u32,
@@ -43,9 +50,23 @@ pub(super) async fn handle_inline_execute_callback(
     let mut parser = CallbackParser::new(payload, u32::from(DemonCommand::CommandInlineExecute));
     let callback_type = parser.read_u32("bof callback type")?;
 
-    let (kind, message) = match callback_type {
-        BOF_CALLBACK_OUTPUT => ("Output", parser.read_string("bof output")?),
-        BOF_CALLBACK_ERROR => ("Error", parser.read_string("bof error output")?),
+    let (kind, message, output_text) = match callback_type {
+        BOF_CALLBACK_OUTPUT => {
+            let output = parser.read_string("bof output")?;
+            (
+                "Good",
+                format!("Received BOF Output [{} bytes]:", output.len()),
+                Some(output),
+            )
+        }
+        BOF_CALLBACK_ERROR => {
+            let output = parser.read_string("bof error output")?;
+            (
+                "Error",
+                format!("Received BOF Error Output [{} bytes]:", output.len()),
+                Some(output),
+            )
+        }
         BOF_EXCEPTION => {
             let exception = parser.read_u32("bof exception code")?;
             let address = parser.read_u64("bof exception address")?;
@@ -55,14 +76,15 @@ pub(super) async fn handle_inline_execute_callback(
                     "Exception 0x{exception:08X} occurred while executing BOF at address \
                      0x{address:016X}"
                 ),
+                None,
             )
         }
         BOF_SYMBOL_NOT_FOUND => {
             let symbol = parser.read_string("bof missing symbol")?;
-            ("Error", format!("Symbol not found: {symbol}"))
+            ("Error", format!("Symbol not found: {symbol}"), None)
         }
-        BOF_RAN_OK => ("Good", "BOF execution completed".to_owned()),
-        BOF_COULD_NOT_RUN => ("Error", "Failed to execute object file".to_owned()),
+        BOF_RAN_OK => ("Good", "BOF execution completed".to_owned(), None),
+        BOF_COULD_NOT_RUN => ("Error", "Failed to execute object file".to_owned(), None),
         unknown => {
             warn!(
                 agent_id,
@@ -72,14 +94,22 @@ pub(super) async fn handle_inline_execute_callback(
         }
     };
 
-    events.broadcast(agent_response_event(
-        agent_id,
-        u32::from(DemonCommand::CommandInlineExecute),
-        request_id,
-        kind,
-        &message,
-        None,
-    )?);
+    let context = loot_context(registry, agent_id, request_id).await;
+    broadcast_and_persist_agent_response(
+        database,
+        events,
+        super::AgentResponseEntry {
+            agent_id,
+            command_id: u32::from(DemonCommand::CommandInlineExecute),
+            request_id,
+            kind: kind.to_owned(),
+            message: message.clone(),
+            extra: Default::default(),
+            output: output_text.clone().unwrap_or_default(),
+        },
+        &context,
+    )
+    .await?;
     Ok(None)
 }
 

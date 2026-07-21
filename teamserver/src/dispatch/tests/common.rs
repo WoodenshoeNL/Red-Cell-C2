@@ -6,6 +6,15 @@ use red_cell_common::demon::{
 };
 use zeroize::Zeroizing;
 
+use crate::{AgentRegistry, Database};
+
+/// Create an in-memory database + agent registry pair for unit tests.
+pub(super) async fn test_db_registry() -> (Database, AgentRegistry) {
+    let database = Database::connect_in_memory().await.expect("in-memory db");
+    let registry = AgentRegistry::new(database.clone());
+    (database, registry)
+}
+
 // ---------------------------------------------------------------------------
 // Primitive payload helpers
 // ---------------------------------------------------------------------------

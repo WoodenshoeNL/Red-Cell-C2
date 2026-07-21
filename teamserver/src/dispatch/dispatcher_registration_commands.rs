@@ -213,13 +213,17 @@ impl CommandDispatcher {
         );
 
         let inline_execute_events = events.clone();
+        let inline_execute_database = database.clone();
+        let inline_execute_registry = registry.clone();
         self.register_handler(
             u32::from(DemonCommand::CommandInlineExecute),
             move |agent_id, request_id, payload| {
                 let events = inline_execute_events.clone();
+                let database = inline_execute_database.clone();
+                let registry = inline_execute_registry.clone();
                 Box::pin(async move {
                     assembly::handle_inline_execute_callback(
-                        &events, agent_id, request_id, &payload,
+                        &registry, &database, &events, agent_id, request_id, &payload,
                     )
                     .await
                 })

@@ -97,13 +97,24 @@ mod crash_veh {
         // subscriber lock).
         eprintln!("BOF_CRASH_VEH: code=0x{:08X} fault_addr=0x{:016X}{}", code_u, addr, detail);
 
-        // EXCEPTION_CONTINUE_EXECUTION (-1): suppress the exception so the
-        // process survives. The faulting instruction's result is undefined
-        // (the register that triggered the AV may contain garbage), but the
-        // BOF function will eventually return and the agent stays alive.
-        // This is critical for batch BOF testing — one crashing BOF must not
-        // kill the entire agent and prevent subsequent BOFs from running.
-        -1
+        // Only suppress ACCESS_VIOLATION (0xC0000005) — returning
+        // CONTINUE_EXECUTION for other exceptions (breakpoints 0x80000003,
+        // single-step 0x80000004, etc.) causes infinite loops because those
+        // instructions re-trigger on re-execution. For non-AV exceptions,
+        // return CONTINUE_SEARCH to let the normal exception handling proceed.
+        if code_u == 0xC0000005 {
+            // EXCEPTION_CONTINUE_EXECUTION (-1): suppress the AV so the
+            // process survives. The faulting instruction's result is undefined
+            // (the register that triggered the AV may contain garbage), but the
+            // BOF function will eventually return and the agent stays alive.
+            // This is critical for batch BOF testing — one crashing BOF must
+            // not kill the entire agent and prevent subsequent BOFs from running.
+            -1
+        } else {
+            // EXCEPTION_CONTINUE_SEARCH (0): let the OS handle non-AV exceptions
+            // normally (debugger, crash handler, etc.).
+            0
+        }
     }
 }
 

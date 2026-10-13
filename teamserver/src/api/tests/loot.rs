@@ -713,3 +713,133 @@ async fn credentials_endpoint_excludes_non_credential_loot() {
     assert_eq!(body["items"].as_array().expect("items array").len(), 1);
     assert_eq!(body["items"][0]["name"], "cred-1");
 }
+
+#[tokio::test]
+async fn post_credentials_ingests_from_external_tooling() {
+    let (router, _, _) = test_router_with_registry(Some((
+        60,
+        "rest-admin",
+        "secret-admin",
+        OperatorRole::Admin,
+    )))
+    .await;
+
+    let payload = serde_json::json!({
+        "name": "RED-CELL-WINDOW\\smbprobe",
+        "content": "GppLiveProof!2026",
+        "kind": "password",
+        "host": "192.168.50.15",
+        "protocol": "smb",
+        "port": 445,
+        "domain": "RED-CELL-WINDOW",
+        "secret_kind": "password"
+    });
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/credentials")
+                .header(API_KEY_HEADER, "secret-admin")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(payload.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::CREATED, "ingest should succeed");
+    let body = read_json(response).await;
+    let id = body["id"].as_i64().expect("id");
+    assert_eq!(body["agent_id"], "524E5843", "synthetic import agent");
+    assert_eq!(body["name"], "RED-CELL-WINDOW\\smbprobe");
+
+    // The record must be visible through the normal credential listing and
+    // carry the source context in metadata.
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/credentials?name=smbprobe")
+                .header(API_KEY_HEADER, "secret-admin")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["total"], 1);
+    assert_eq!(body["items"][0]["id"], id);
+    assert_eq!(body["items"][0]["content"], "GppLiveProof!2026");
+    assert_eq!(body["items"][0]["metadata"]["host"], "192.168.50.15");
+    assert_eq!(body["items"][0]["metadata"]["protocol"], "smb");
+    assert_eq!(body["items"][0]["metadata"]["tool"], "rednetexec");
+
+    // Synthetic import agent row exists exactly once even after repeated ingests.
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/credentials")
+                .header(API_KEY_HEADER, "secret-admin")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"name": "CORP\\jdoe", "content": "Passw0rd!"})
+                        .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::CREATED);
+    // Second ingest reuses the same import agent row (unique agent_id primary
+    // key would reject a duplicate insert).
+
+    // Empty name/content are rejected with a structured 400.
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/credentials")
+                .header(API_KEY_HEADER, "secret-admin")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"name": "  ", "content": "x"}).to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn post_credentials_denies_read_only_keys() {
+    let (router, _, _) = test_router_with_registry(Some((
+        60,
+        "rest-analyst",
+        "secret-analyst",
+        OperatorRole::Analyst,
+    )))
+    .await;
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/credentials")
+                .header(API_KEY_HEADER, "secret-analyst")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"name": "CORP\\jdoe", "content": "Passw0rd!"})
+                        .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN, "analyst keys are read-only");
+}

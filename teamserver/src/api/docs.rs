@@ -38,6 +38,7 @@ pub(super) struct ApiInfoResponse {
         super::audit::list_audit,
         super::audit::list_session_activity,
         super::loot::list_credentials,
+        super::loot::create_credential,
         super::loot::get_credential,
         super::loot::list_jobs,
         super::loot::get_job,

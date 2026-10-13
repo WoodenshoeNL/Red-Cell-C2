@@ -72,7 +72,7 @@ pub fn api_routes(api: ApiRuntime) -> Router<TeamserverState> {
         .route("/audit", get(audit::list_audit).post(audit::create_audit))
         .route("/audit/purge", delete(audit::purge_audit))
         .route("/session-activity", get(audit::list_session_activity))
-        .route("/credentials", get(loot::list_credentials))
+        .route("/credentials", get(loot::list_credentials).post(loot::create_credential))
         .route("/credentials/{id}", get(loot::get_credential))
         .route("/jobs", get(loot::list_jobs))
         .route("/jobs/{agent_id}/{request_id}", get(loot::get_job))
